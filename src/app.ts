@@ -1,19 +1,34 @@
-import Fastify, { FastifyInstance } from 'fastify';
+import Fastify from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import { registerRoutes } from './routes/index.js';
 
-export async function buildApp(): Promise<FastifyInstance> {
+export async function buildApp() {
   const app = Fastify({
     logger: {
       level: process.env.LOG_LEVEL || 'info',
     },
+    // @ts-expect-error - Fastify v5 types don't yet properly export routerOptions interface
+    routerOptions: {
+      ignoreTrailingSlash: true,
+      caseSensitive: false,
+    },
+    disableRequestLogging: process.env.NODE_ENV === 'test',
   });
 
   // Security plugins
-  await app.register(helmet);
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'validator.swagger.io'],
+      },
+    },
+  });
   await app.register(cors);
 
   // Swagger documentation
@@ -54,6 +69,28 @@ export async function buildApp(): Promise<FastifyInstance> {
       return swaggerObject;
     },
     transformSpecificationClone: true,
+  });
+
+  // Global error handler
+  app.setErrorHandler(async (error, request, reply) => {
+    const { method, url } = request;
+
+    app.log.error({ error, method, url }, 'Request error');
+
+    // Don't leak internal errors in production
+    const isDevelopment = process.env.NODE_ENV === 'development';
+
+    if (error.statusCode && error.statusCode < 500) {
+      return reply.status(error.statusCode).send({
+        error: error.message,
+        statusCode: error.statusCode,
+      });
+    }
+
+    return reply.status(500).send({
+      error: isDevelopment ? error.message : 'Internal Server Error',
+      statusCode: 500,
+    });
   });
 
   // Register application routes

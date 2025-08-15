@@ -18,7 +18,16 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   // Security plugins
-  await app.register(helmet);
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'validator.swagger.io'],
+      },
+    },
+  });
   await app.register(cors);
 
   // Swagger documentation

@@ -21,32 +21,31 @@
     "validate": "npm run type-check && npm run lint && npm test"
   },
   "dependencies": {
-    "fastify": "^5.5.0",
-    "@fastify/swagger": "^9.5.1",
-    "@fastify/swagger-ui": "^5.2.3",
     "@fastify/cors": "^11.1.0",
     "@fastify/helmet": "^13.0.1",
-    "drizzle-orm": "^0.44.4",
-    "postgres": "^3.4.7",
+    "@fastify/swagger": "^9.5.1",
+    "@fastify/swagger-ui": "^5.2.3",
     "better-sqlite3": "^12.2.0",
-    "zod": "^4.0.17",
-    "drizzle-zod": "^0.8.3",
     "dotenv": "^17.2.1",
-    "zod-to-json-schema": "^3.24.6"
+    "drizzle-orm": "^0.44.4",
+    "drizzle-zod": "^0.8.3",
+    "fastify": "^5.5.0",
+    "postgres": "^3.4.7",
+    "zod": "^4.0.17"
   },
   "devDependencies": {
-    "typescript": "^5.9.2",
-    "@types/node": "^24.2.1",
     "@types/better-sqlite3": "^7.6.13",
-    "tsx": "^4.20.4",
-    "vitest": "^3.2.4",
+    "@types/node": "^24.2.1",
     "@vitest/coverage-v8": "^3.2.4",
     "drizzle-kit": "^0.31.4",
     "eslint": "^9.33.0",
-    "typescript-eslint": "^8.39.1",
-    "prettier": "^3.6.2",
     "husky": "^9.1.7",
-    "lint-staged": "^16.1.5"
+    "lint-staged": "^16.1.5",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.4",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.39.1",
+    "vitest": "^3.2.4"
   },
   "keywords": [
     "terrastories",

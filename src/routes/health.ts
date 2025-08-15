@@ -1,13 +1,4 @@
 import { FastifyPluginAsync } from 'fastify';
-import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
-
-const healthResponseSchema = z.object({
-  status: z.literal('ok'),
-  timestamp: z.string().datetime(),
-  version: z.string(),
-  environment: z.string(),
-});
 
 export const healthRoute: FastifyPluginAsync = async (fastify) => {
   fastify.get(
@@ -15,13 +6,23 @@ export const healthRoute: FastifyPluginAsync = async (fastify) => {
     {
       schema: {
         response: {
-          200: zodToJsonSchema(healthResponseSchema),
+          200: {
+            type: 'object',
+            properties: {
+              status: { type: 'string', enum: ['ok'] },
+              timestamp: { type: 'string', format: 'date-time' },
+              version: { type: 'string' },
+              environment: { type: 'string' },
+            },
+            required: ['status', 'timestamp', 'version', 'environment'],
+          },
         },
         tags: ['System'],
         summary: 'Health check endpoint',
       },
     },
-    async (_request, _reply) => {
+    async (_request, reply) => {
+      reply.type('application/json');
       return {
         status: 'ok' as const,
         timestamp: new Date().toISOString(),

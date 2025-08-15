@@ -1,11 +1,11 @@
-import Fastify, { FastifyInstance } from 'fastify';
+import Fastify from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import { registerRoutes } from './routes/index.js';
 
-export async function buildApp(): Promise<FastifyInstance> {
+export async function buildApp() {
   const app = Fastify({
     logger: {
       level: process.env.LOG_LEVEL || 'info',

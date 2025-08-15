@@ -10,6 +10,7 @@ export async function buildApp() {
     logger: {
       level: process.env.LOG_LEVEL || 'info',
     },
+    // @ts-expect-error - Fastify v5 types don't yet properly export routerOptions interface
     routerOptions: {
       ignoreTrailingSlash: true,
       caseSensitive: false,

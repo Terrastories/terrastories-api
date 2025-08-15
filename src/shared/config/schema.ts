@@ -51,6 +51,10 @@ export const DatabaseConfigSchema = z.object({
       );
     }, 'DATABASE_URL must be a valid database connection string')
     .default('./data.db'),
+  poolSize: z.coerce.number().int().min(1).max(20).default(10),
+  maxConnections: z.coerce.number().int().min(1).max(50).default(20),
+  ssl: z.boolean().default(false),
+  spatialSupport: z.boolean().default(true),
 });
 
 // Auth configuration schema
@@ -101,6 +105,12 @@ export const DevelopmentConfigSchema = AppConfigSchema.extend({
 
 export const ProductionConfigSchema = AppConfigSchema.extend({
   auth: ProductionAuthConfigSchema,
+  database: DatabaseConfigSchema.extend({
+    url: z
+      .string()
+      .default('postgresql://user:password@localhost:5432/terrastories'),
+    ssl: z.boolean().default(true),
+  }),
   logging: LoggingConfigSchema.extend({
     level: LogLevelSchema.default('info' as LogLevel),
   }),

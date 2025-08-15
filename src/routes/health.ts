@@ -1,4 +1,5 @@
 import { FastifyPluginAsync } from 'fastify';
+import { getConfig, validateConfig } from '../shared/config/index.js';
 
 export const healthRoute: FastifyPluginAsync = async (fastify) => {
   fastify.get(
@@ -13,21 +14,38 @@ export const healthRoute: FastifyPluginAsync = async (fastify) => {
               timestamp: { type: 'string', format: 'date-time' },
               version: { type: 'string' },
               environment: { type: 'string' },
+              config: {
+                type: 'object',
+                properties: {
+                  valid: { type: 'boolean' },
+                  errors: { type: 'array', items: { type: 'string' } },
+                },
+              },
             },
-            required: ['status', 'timestamp', 'version', 'environment'],
+            required: [
+              'status',
+              'timestamp',
+              'version',
+              'environment',
+              'config',
+            ],
           },
         },
         tags: ['System'],
-        summary: 'Health check endpoint',
+        summary: 'Health check endpoint with configuration status',
       },
     },
     async (_request, reply) => {
+      const config = getConfig();
+      const configValidation = validateConfig();
+
       reply.type('application/json');
       return {
         status: 'ok' as const,
         timestamp: new Date().toISOString(),
         version: process.env.npm_package_version || '1.0.0',
-        environment: process.env.NODE_ENV || 'development',
+        environment: config.environment,
+        config: configValidation,
       };
     }
   );

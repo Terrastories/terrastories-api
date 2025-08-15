@@ -228,8 +228,9 @@ class PostMergeActions {
     // 2. Update project boards
     await this.updateProjectBoards(mergeResult.prNumber);
 
-    // 3. Update ROADMAP.md
+    // 3. Update ROADMAP.md and ISSUES_ROADMAP.md
     await this.updateRoadmap(mergeResult.prNumber);
+    await this.updateIssuesRoadmap(mergeResult.prNumber);
 
     // 4. Generate release notes
     await this.updateReleaseNotes(mergeResult);
@@ -267,6 +268,71 @@ class PostMergeActions {
 
     await fs.writeFile('ROADMAP.md', updated);
     console.log('  ✓ Updated ROADMAP.md');
+  }
+
+  private async updateIssuesRoadmap(prNumber: number): Promise<void> {
+    const issuesRoadmap = await fs.readFile('docs/ISSUES_ROADMAP.md', 'utf-8');
+    const pr = await this.getPRDetails(prNumber);
+    const linkedIssues = await this.getLinkedIssues(prNumber);
+
+    let updated = issuesRoadmap;
+
+    // For each linked issue, mark it as completed in the roadmap
+    for (const issue of linkedIssues) {
+      const issuePattern = new RegExp(
+        `### Issue #${issue.number}:([^#]+?)(?=###|##|$)`,
+        'gs'
+      );
+
+      updated = updated.replace(issuePattern, (match, content) => {
+        // Skip if already marked as completed
+        if (match.includes('✅ **COMPLETED**')) {
+          return match;
+        }
+
+        // Add ✅ to the title line
+        const titleMatch = match.match(/### Issue #\d+: (.+)/);
+        if (!titleMatch) return match;
+
+        const title = titleMatch[1];
+        const completedStatus = `
+**Status**: ✅ **COMPLETED** in PR #${prNumber} (Issue #${issue.number})
+- ${pr.title}
+- Merged: ${new Date(pr.mergedAt).toLocaleDateString()}
+- ${this.extractKeyFeatures(pr.body).join('\n- ')}
+`;
+
+        // Insert completion status after the description, before next issue/section
+        const updatedMatch = match
+          .replace(/### Issue #(\d+): (.+)/, `### Issue #$1: $2 ✅`)
+          .replace(/(\n\n)(### Issue #|\## Phase)/, `${completedStatus}$1$2`);
+
+        return updatedMatch;
+      });
+    }
+
+    await fs.writeFile('docs/ISSUES_ROADMAP.md', updated);
+    console.log(
+      `  ✓ Updated ISSUES_ROADMAP.md for issues: ${linkedIssues.map((i) => `#${i.number}`).join(', ')}`
+    );
+  }
+
+  private extractKeyFeatures(prBody: string): string[] {
+    // Extract bullet points from PR description
+    const features = [];
+    const bulletMatches = prBody.match(/^- .+$/gm) || [];
+
+    // Take first 3 most meaningful bullet points
+    const meaningfulBullets = bulletMatches
+      .filter(
+        (bullet) =>
+          !bullet.includes('Closes #') && !bullet.includes('Generated with')
+      )
+      .slice(0, 3);
+
+    return meaningfulBullets.length > 0
+      ? meaningfulBullets
+      : ['Implementation completed successfully'];
   }
 }
 ```
@@ -410,7 +476,8 @@ class MergeSummaryGenerator {
 
 ## ✅ Completed Actions
 - Closed issue #${pr.closedIssues.join(', #')}
-- Updated ROADMAP.md
+- Updated ROADMAP.md with progress markers
+- Updated ISSUES_ROADMAP.md with completion status
 - Generated release notes
 - Archived work session
 ${pr.deployed ? `- Deployed to ${pr.deploymentEnv}` : ''}

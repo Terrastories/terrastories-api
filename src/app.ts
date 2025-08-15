@@ -10,6 +10,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     logger: {
       level: process.env.LOG_LEVEL || 'info',
     },
+    routerOptions: {
+      ignoreTrailingSlash: true,
+      caseSensitive: false,
+    },
+    disableRequestLogging: process.env.NODE_ENV === 'test',
   });
 
   // Security plugins
@@ -54,6 +59,28 @@ export async function buildApp(): Promise<FastifyInstance> {
       return swaggerObject;
     },
     transformSpecificationClone: true,
+  });
+
+  // Global error handler
+  app.setErrorHandler(async (error, request, reply) => {
+    const { method, url } = request;
+
+    app.log.error({ error, method, url }, 'Request error');
+
+    // Don't leak internal errors in production
+    const isDevelopment = process.env.NODE_ENV === 'development';
+
+    if (error.statusCode && error.statusCode < 500) {
+      return reply.status(error.statusCode).send({
+        error: error.message,
+        statusCode: error.statusCode,
+      });
+    }
+
+    return reply.status(500).send({
+      error: isDevelopment ? error.message : 'Internal Server Error',
+      statusCode: 500,
+    });
   });
 
   // Register application routes

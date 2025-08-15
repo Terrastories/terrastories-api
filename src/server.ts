@@ -1,13 +1,12 @@
-import * as dotenv from 'dotenv';
 import { buildApp } from './app.js';
-
-dotenv.config();
+import { getConfig } from './shared/config/index.js';
 
 const start = async () => {
   try {
+    const config = getConfig();
     const app = await buildApp();
-    const port = Number(process.env.PORT) || 3000;
-    const host = process.env.HOST || '0.0.0.0';
+    const port = config.server.port;
+    const host = config.server.host;
 
     // Graceful shutdown handling
     const gracefulShutdown = async (signal: string) => {

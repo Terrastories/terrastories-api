@@ -4,18 +4,21 @@ import swaggerUi from '@fastify/swagger-ui';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import { registerRoutes } from './routes/index.js';
+import { getConfig } from './shared/config/index.js';
 
 export async function buildApp() {
+  const config = getConfig();
+
   const app = Fastify({
     logger: {
-      level: process.env.LOG_LEVEL || 'info',
+      level: config.logging.level,
     },
     // @ts-expect-error - Fastify v5 types don't yet properly export routerOptions interface
     routerOptions: {
       ignoreTrailingSlash: true,
       caseSensitive: false,
     },
-    disableRequestLogging: process.env.NODE_ENV === 'test',
+    disableRequestLogging: config.environment === 'test',
   });
 
   // Security plugins
@@ -78,7 +81,7 @@ export async function buildApp() {
     app.log.error({ error, method, url }, 'Request error');
 
     // Don't leak internal errors in production
-    const isDevelopment = process.env.NODE_ENV === 'development';
+    const isDevelopment = config.environment === 'development';
 
     if (error.statusCode && error.statusCode < 500) {
       return reply.status(error.statusCode).send({

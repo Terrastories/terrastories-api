@@ -1,19 +1,15 @@
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import Database from 'better-sqlite3';
-import * as dotenv from 'dotenv';
-
-dotenv.config();
+import { getConfig } from '../shared/config/index.js';
 
 let db: ReturnType<typeof drizzle> | null = null;
 
 export async function getDb() {
   if (db) return db;
 
-  // Use test database in test environment
+  const config = getConfig();
   const dbPath =
-    process.env.NODE_ENV === 'test'
-      ? ':memory:'
-      : process.env.DATABASE_URL || 'data.db';
+    config.environment === 'test' ? ':memory:' : config.database.url;
 
   const sqlite = new Database(dbPath);
   db = drizzle(sqlite);

@@ -42,6 +42,14 @@ export interface ServerConfig {
 export interface DatabaseConfig {
   /** Database connection URL (SQLite file path or PostgreSQL connection string) */
   url: string;
+  /** Connection pool size for PostgreSQL */
+  poolSize: number;
+  /** Maximum number of connections */
+  maxConnections: number;
+  /** Enable SSL connections */
+  ssl: boolean;
+  /** Enable spatial database extensions (PostGIS/SpatiaLite) */
+  spatialSupport: boolean;
 }
 
 /**

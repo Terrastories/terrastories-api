@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { getConfig, validateConfig } from '../shared/config/index.js';
+import { testConnection } from '../db/index.js';
 
 export const healthRoute: FastifyPluginAsync = async (fastify) => {
   fastify.get(
@@ -21,6 +22,14 @@ export const healthRoute: FastifyPluginAsync = async (fastify) => {
                   errors: { type: 'array', items: { type: 'string' } },
                 },
               },
+              database: {
+                type: 'object',
+                properties: {
+                  connected: { type: 'boolean' },
+                  spatialSupport: { type: 'boolean' },
+                  version: { type: 'string', nullable: true },
+                },
+              },
             },
             required: [
               'status',
@@ -28,6 +37,7 @@ export const healthRoute: FastifyPluginAsync = async (fastify) => {
               'version',
               'environment',
               'config',
+              'database',
             ],
           },
         },
@@ -38,6 +48,7 @@ export const healthRoute: FastifyPluginAsync = async (fastify) => {
     async (_request, reply) => {
       const config = getConfig();
       const configValidation = validateConfig();
+      const databaseStatus = await testConnection();
 
       reply.type('application/json');
       return {
@@ -46,6 +57,7 @@ export const healthRoute: FastifyPluginAsync = async (fastify) => {
         version: process.env.npm_package_version || '1.0.0',
         environment: config.environment,
         config: configValidation,
+        database: databaseStatus,
       };
     }
   );

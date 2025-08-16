@@ -802,3 +802,27 @@ work:
     checkpoint_ttl_hours: 24
     archive_completed: true
 ```
+
+## Pre-Work Validation
+
+Before starting work on any issue:
+
+```bash
+# Verify issue alignment with roadmap
+/sync-github-mapping
+
+# This ensures:
+# - Issue exists in GITHUB_ROADMAP_MAPPING.md
+# - Alignment status is verified (✅ ALIGNED, ⚠️ BROADER, ❌ MISMATCH)
+# - No scope mismatches before implementation begins
+```
+
+## Integration Points
+
+This command integrates with:
+
+- `/create-next-issue` - Creates issues for this command to work on
+- `/review-pr` - Follows this command for PR review
+- `/merge-pr` - Completes the workflow after review
+- `/sync-github-mapping` - Validates issue alignment before starting work
+- `/sync-issues-roadmap` - Updates progress after work completion

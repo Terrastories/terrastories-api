@@ -763,6 +763,21 @@ merge_pr:
     github_comment: true
 ```
 
+## Post-Merge Synchronization
+
+After successful merge completion:
+
+```bash
+# Update roadmap progress and mapping alignment
+/sync-issues-roadmap
+
+# This ensures:
+# - ISSUES_ROADMAP.md completion status is updated
+# - GITHUB_ROADMAP_MAPPING.md reflects current states
+# - Phase completion percentages are accurate
+# - Roadmap timeline maintains accuracy
+```
+
 ## Integration Points
 
 This command integrates with:
@@ -770,5 +785,6 @@ This command integrates with:
 - `/create-next-issue` - Suggests as next action
 - `/work` - Recommends for high-priority issues
 - `/review-pr` - Suggests for open PRs
+- `/sync-issues-roadmap` - Updates roadmap progress after merge
 - GitHub Actions - Triggers deployments
 - Release Please - Updates changelogs

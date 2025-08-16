@@ -720,3 +720,13 @@ review_pr:
     save_report: true
     notify_on_ready: true
 ```
+
+## Integration Points
+
+This command integrates with:
+
+- `/work` - Follows this command to review generated PRs
+- `/merge-pr` - Next step after successful review and fixes
+- `/sync-github-mapping` - Can update mapping if PR scope differs from issue
+- GitHub Actions - Aggregates CI/CD results
+- External reviewers - Consolidates AI and human feedback

@@ -5,6 +5,7 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import { registerRoutes } from './routes/index.js';
 import { getConfig } from './shared/config/index.js';
+import { swaggerSchemas } from './shared/schemas/index.js';
 
 export async function buildApp() {
   const config = getConfig();
@@ -47,6 +48,22 @@ export async function buildApp() {
         {
           url: 'http://localhost:3000',
           description: 'Development server',
+        },
+      ],
+      components: {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        schemas: swaggerSchemas as any,
+        securitySchemes: {
+          bearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'JWT',
+          },
+        },
+      },
+      security: [
+        {
+          bearerAuth: [],
         },
       ],
     },

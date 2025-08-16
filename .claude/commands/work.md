@@ -369,6 +369,11 @@ class ImplementPhase {
     // Add error handling
     const safeCode = await this.addErrorHandling(typedCode);
 
+    // Add Swagger documentation if this is a schema implementation
+    if (this.isSchemaImplementation(subtask)) {
+      await this.addSwaggerDocumentation(subtask);
+    }
+
     return {
       path: this.getImplementationPath(subtask),
       content: safeCode,
@@ -471,6 +476,9 @@ class RefactorPhase {
     // 3. Add documentation
     await this.addDocumentation();
 
+    // 4. Create Swagger/OpenAPI documentation for schema implementations
+    await this.addSwaggerDocumentation();
+
     // Save checkpoint
     await this.checkpoint.save('refactor', refactorings);
 
@@ -486,6 +494,82 @@ class RefactorPhase {
       ...(await this.findPerformanceIssues()),
     ];
   }
+
+  private async addSwaggerDocumentation(): Promise<void> {
+    console.log('  Adding Swagger/OpenAPI documentation...');
+
+    // Check if current implementation involves database schemas
+    const schemaFiles = await this.findSchemaFiles();
+
+    for (const schemaFile of schemaFiles) {
+      if (await this.isNewSchema(schemaFile)) {
+        console.log(`    Creating Swagger docs for: ${schemaFile}`);
+
+        // Create comprehensive Swagger schemas
+        await this.createSwaggerSchemas(schemaFile);
+
+        // Create comprehensive tests for Swagger schemas
+        await this.createSwaggerTests(schemaFile);
+
+        // Register with Fastify Swagger
+        await this.registerWithFastify(schemaFile);
+
+        console.log(`    ✅ Swagger documentation complete for ${schemaFile}`);
+      }
+    }
+  }
+
+  private async findSchemaFiles(): Promise<string[]> {
+    // Look for new schema files in src/db/schema/
+    const schemaFiles = await glob('src/db/schema/*.ts');
+    return schemaFiles.filter((file) => !file.includes('index.ts'));
+  }
+
+  private async isNewSchema(schemaFile: string): Promise<boolean> {
+    // Check if this is a newly created schema (not communities.ts or places.ts)
+    const isExisting = ['communities.ts', 'places.ts'].some((existing) =>
+      schemaFile.includes(existing)
+    );
+    return !isExisting;
+  }
+
+  private async createSwaggerSchemas(schemaFile: string): Promise<void> {
+    const entityName = this.getEntityName(schemaFile);
+    const swaggerFile = `src/shared/schemas/${entityName}.swagger.ts`;
+
+    // Generate comprehensive Swagger schemas including:
+    // - Entity schema with all properties and validation
+    // - Create schema (without read-only fields)
+    // - Update schema (all fields optional, excluding read-only)
+    // - Response schemas (single and list with pagination)
+    // - Error schemas (ValidationError, NotFoundError, ConflictError, etc.)
+    // - Parameter definitions (path, query, pagination)
+    // - Complete examples for all schemas
+
+    await this.generateSwaggerSchemaFile(swaggerFile, entityName);
+  }
+
+  private async createSwaggerTests(schemaFile: string): Promise<void> {
+    const entityName = this.getEntityName(schemaFile);
+    const testFile = `tests/shared/schemas/${entityName}.swagger.test.ts`;
+
+    // Generate comprehensive tests covering:
+    // - Schema structure validation
+    // - Property type validation
+    // - Required field validation
+    // - Parameter validation
+    // - Example validation
+    // - Error schema validation
+
+    await this.generateSwaggerTestFile(testFile, entityName);
+  }
+
+  private async registerWithFastify(schemaFile: string): Promise<void> {
+    // Update src/shared/schemas/index.ts to export new schemas
+    // Update src/app.ts to register schemas with Fastify Swagger
+    await this.updateSchemaIndex(schemaFile);
+    await this.updateFastifyRegistration(schemaFile);
+  }
 }
 ```
 
@@ -494,23 +578,23 @@ class RefactorPhase {
 ```typescript
 class CommitPhase {
   async execute(issueNumber: number): Promise<CommitResult> {
-    console.log('\n📦 Phase 7: Committing changes');
+    console.log('\n📦 Phase 7: Creating branch and committing changes');
 
-    // 1. Stage files
-    const files = await this.getModifiedFiles();
-    await exec(`git add ${files.join(' ')}`);
-
-    // 2. Generate commit message
-    const message = await this.generateCommitMessage(issueNumber, files);
-
-    // 3. Create commit
-    await exec(`git commit -m "${message}"`);
-
-    // 4. Create feature branch if needed
+    // 1. Create feature branch FIRST
     const branchName = `feature/issue-${issueNumber}`;
     await exec(
       `git checkout -b ${branchName} 2>/dev/null || git checkout ${branchName}`
     );
+
+    // 2. Stage files
+    const files = await this.getModifiedFiles();
+    await exec(`git add ${files.join(' ')}`);
+
+    // 3. Generate commit message
+    const message = await this.generateCommitMessage(issueNumber, files);
+
+    // 4. Create commit
+    await exec(`git commit -m "${message}"`);
 
     // 5. Push to remote
     await exec(`git push -u origin ${branchName}`);

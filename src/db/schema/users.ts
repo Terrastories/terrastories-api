@@ -26,7 +26,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communities } from './communities.js';
+import { communitiesPg } from './communities.js';
 
 // Role enum validation
 export const UserRoleSchema = z.enum([
@@ -92,22 +92,22 @@ export async function getUsersTable() {
 
 // Relations - Users belong to one community
 export const usersRelations = relations(usersPg, ({ one }) => ({
-  community: one(communities, {
+  community: one(communitiesPg, {
     fields: [usersPg.communityId],
-    references: [communities.id],
+    references: [communitiesPg.id],
   }),
 }));
 
 // Communities have many users (reverse relation)
-export const communitiesRelations = relations(communities, ({ many }) => ({
+export const communitiesRelations = relations(communitiesPg, ({ many }) => ({
   users: many(usersPg),
 }));
 
 // SQLite relations (same structure)
 export const usersSqliteRelations = relations(usersSqlite, ({ one }) => ({
-  community: one(communities, {
+  community: one(communitiesPg, {
     fields: [usersSqlite.communityId],
-    references: [communities.id],
+    references: [communitiesPg.id],
   }),
 }));
 

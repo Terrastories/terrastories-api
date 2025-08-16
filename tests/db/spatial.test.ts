@@ -10,7 +10,7 @@ import {
   getPlacesTable,
   SpatialUtils,
   type NewPlace,
-} from '../../src/db/schema/places.js';
+} from '../../src/db/schema/places.ts';
 import { getConfig } from '../../src/shared/config/index.js';
 import {
   setupTestDatabase,
@@ -76,8 +76,8 @@ describe('Spatial Database Operations', () => {
       const parsed = SpatialUtils.parsePoint(pointGeometry);
 
       expect(parsed).toEqual({
-        lat: 40.7128,
-        lng: -74.006,
+        latitude: 40.7128,
+        longitude: -74.006,
       });
     });
 
@@ -112,7 +112,7 @@ describe('Spatial Database Operations', () => {
         name: 'Test Location',
         description: 'A test place for spatial operations',
         location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
-        community_id: 1,
+        communityId: 1,
       };
 
       const result = await database.insert(places).values(newPlace).returning();
@@ -121,15 +121,15 @@ describe('Spatial Database Operations', () => {
       expect(result[0]).toMatchObject({
         name: 'Test Location',
         description: 'A test place for spatial operations',
-        community_id: 1,
+        communityId: 1,
       });
       expect(result[0].location).toBeTruthy();
 
       // Verify the spatial data
       const locationData = SpatialUtils.parsePoint(result[0].location!);
       expect(locationData).toEqual({
-        lat: 40.7128,
-        lng: -74.006,
+        latitude: 40.7128,
+        longitude: -74.006,
       });
     });
 
@@ -139,12 +139,12 @@ describe('Spatial Database Operations', () => {
         {
           name: 'Place A',
           location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
-          community_id: 1,
+          communityId: 1,
         },
         {
           name: 'Place B',
           location: SpatialUtils.createPoint(34.0522, -118.2437), // LA
-          community_id: 1,
+          communityId: 1,
         },
       ];
 
@@ -163,15 +163,15 @@ describe('Spatial Database Operations', () => {
         .filter((place) => place.coords !== null);
 
       expect(placesWithCoords.length).toBeGreaterThan(0);
-      expect(placesWithCoords[0].coords).toHaveProperty('lat');
-      expect(placesWithCoords[0].coords).toHaveProperty('lng');
+      expect(placesWithCoords[0].coords).toHaveProperty('latitude');
+      expect(placesWithCoords[0].coords).toHaveProperty('longitude');
     });
 
     it('should handle places without spatial data', async () => {
       const placeWithoutLocation: NewPlace = {
         name: 'No Location Place',
         description: 'Place without spatial data',
-        community_id: 1,
+        communityId: 1,
       };
 
       const result = await database
@@ -250,7 +250,7 @@ describe('Spatial Database Operations', () => {
       const testPlace: NewPlace = {
         name: 'Compatibility Test Place',
         location: SpatialUtils.createPoint(0, 0),
-        community_id: 999,
+        communityId: 999,
       };
 
       const result = await database
@@ -262,7 +262,7 @@ describe('Spatial Database Operations', () => {
 
       // Cleanup
       const { eq } = await import('drizzle-orm');
-      await database.delete(places).where(eq(places.community_id, 999));
+      await database.delete(places).where(eq(places.communityId, 999));
     });
   });
 });

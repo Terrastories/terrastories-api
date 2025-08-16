@@ -11,7 +11,7 @@ import {
   getPlacesTable,
   SpatialUtils,
   type NewPlace,
-} from '../../src/db/schema/places.js';
+} from '../../src/db/schema/places.ts';
 import { getConfig } from '../../src/shared/config/index.js';
 import {
   setupTestDatabase,
@@ -84,7 +84,7 @@ describe('PostGIS Spatial Database Tests', () => {
             [-123.13, 49.28],
           ],
         ]),
-        community_id: 1,
+        communityId: 1,
       };
 
       const result = await database
@@ -96,7 +96,7 @@ describe('PostGIS Spatial Database Tests', () => {
       expect(result[0]).toMatchObject({
         name: 'PostGIS Test Place',
         description: 'Testing PostGIS spatial column types',
-        community_id: 1,
+        communityId: 1,
       });
 
       // Verify spatial data was stored correctly
@@ -110,8 +110,8 @@ describe('PostGIS Spatial Database Tests', () => {
         // For SQLite, verify the GeoJSON format
         const locationData = SpatialUtils.parsePoint(result[0].location!);
         expect(locationData).toEqual({
-          lat: 49.2827,
-          lng: -123.1207,
+          latitude: 49.2827,
+          longitude: -123.1207,
         });
       }
     });
@@ -124,17 +124,17 @@ describe('PostGIS Spatial Database Tests', () => {
         {
           name: 'Vancouver Place',
           location: SpatialUtils.createPoint(49.2827, -123.1207),
-          community_id: 1,
+          communityId: 1,
         },
         {
           name: 'Toronto Place',
           location: SpatialUtils.createPoint(43.6532, -79.3832),
-          community_id: 1,
+          communityId: 1,
         },
         {
           name: 'Montreal Place',
           location: SpatialUtils.createPoint(45.5017, -73.5673),
-          community_id: 1,
+          communityId: 1,
         },
       ];
 
@@ -155,10 +155,10 @@ describe('PostGIS Spatial Database Tests', () => {
         if (!isPostgres) {
           // For SQLite, verify GeoJSON format
           const locationData = SpatialUtils.parsePoint(place.location!);
-          expect(locationData).toHaveProperty('lat');
-          expect(locationData).toHaveProperty('lng');
-          expect(typeof locationData!.lat).toBe('number');
-          expect(typeof locationData!.lng).toBe('number');
+          expect(locationData).toHaveProperty('latitude');
+          expect(locationData).toHaveProperty('longitude');
+          expect(typeof locationData!.latitude).toBe('number');
+          expect(typeof locationData!.longitude).toBe('number');
         }
       });
 
@@ -200,7 +200,7 @@ describe('PostGIS Spatial Database Tests', () => {
           const testPlace: NewPlace = {
             name: test.name,
             location: test.location,
-            community_id: 1,
+            communityId: 1,
           };
 
           const result = await database
@@ -233,7 +233,7 @@ describe('PostGIS Spatial Database Tests', () => {
         name: 'Schema Compatibility Test',
         description: 'Testing cross-database schema compatibility',
         location: SpatialUtils.createPoint(45.0, -75.0), // Ottawa coordinates
-        community_id: 1,
+        communityId: 1,
       };
 
       const result = await database
@@ -278,7 +278,7 @@ describe('PostGIS Spatial Database Tests', () => {
       const testPlaces: NewPlace[] = Array.from({ length: 10 }, (_, i) => ({
         name: `Index Test Place ${i}`,
         location: SpatialUtils.createPoint(45 + i * 0.1, -75 + i * 0.1),
-        community_id: 1,
+        communityId: 1,
       }));
 
       await database.insert(places).values(testPlaces);

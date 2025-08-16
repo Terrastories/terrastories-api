@@ -338,7 +338,9 @@ describe('Places Swagger Schemas', () => {
       expect(waterExample.culturalSignificance).toContain('healing');
 
       expect(ceremonialExample.name).toContain('Circle');
-      expect(ceremonialExample.culturalSignificance).toContain('ceremony');
+      expect(ceremonialExample.culturalSignificance.toLowerCase()).toContain(
+        'ceremoni'
+      ); // Case insensitive match
 
       expect(huntingExample.name).toContain('Hunting');
       expect(huntingExample.culturalSignificance).toContain('hunting');

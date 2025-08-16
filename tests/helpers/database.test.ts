@@ -45,7 +45,7 @@ describe('Database Test Helpers', () => {
         expect(place).toMatchObject({
           id: expect.any(Number),
           name: expect.any(String),
-          community_id: expect.any(Number),
+          communityId: expect.any(Number), // Use camelCase field name
           location: expect.any(String),
         });
       });
@@ -115,7 +115,7 @@ describe('Database Test Helpers', () => {
         name: expect.any(String),
         description: expect.any(String),
         location: expect.any(String),
-        community_id: 1,
+        communityId: 1, // Use camelCase field name
       });
 
       // Verify location is valid JSON
@@ -135,7 +135,7 @@ describe('Database Test Helpers', () => {
         expect(place).toMatchObject({
           name: expect.any(String),
           location: expect.any(String),
-          community_id: 1,
+          communityId: 1, // Use camelCase field name
         });
 
         // Verify location data
@@ -159,7 +159,9 @@ describe('Database Test Helpers', () => {
   describe('Database Operations', () => {
     it('should support transactions', async () => {
       const database = await testDb.getDb();
-      const { communities } = await import('../../src/db/schema/index.js');
+      const { communitiesSqlite } = await import(
+        '../../src/db/schema/index.js'
+      );
 
       // Test successful transaction (better-sqlite3 style)
       let result: any;
@@ -167,7 +169,7 @@ describe('Database Test Helpers', () => {
       try {
         result = database.transaction((tx: any) => {
           const [community] = tx
-            .insert(communities)
+            .insert(communitiesSqlite)
             .values(
               TestDataFactory.createCommunity({ name: 'Transaction Test' })
             )
@@ -185,7 +187,7 @@ describe('Database Test Helpers', () => {
       } catch {
         // If transaction syntax doesn't work, just test a simple insert
         const [community] = await database
-          .insert(communities)
+          .insert(communitiesSqlite)
           .values(TestDataFactory.createCommunity({ name: 'Transaction Test' }))
           .returning();
 
@@ -195,23 +197,23 @@ describe('Database Test Helpers', () => {
 
     it('should handle foreign key constraints', async () => {
       const database = await testDb.getDb();
-      const { communities, places } = await import(
+      const { communitiesSqlite, placesSqlite } = await import(
         '../../src/db/schema/index.js'
       );
 
       // Create community first
       const [community] = await database
-        .insert(communities)
+        .insert(communitiesSqlite)
         .values(TestDataFactory.createCommunity())
         .returning();
 
-      // Create place with valid community_id
+      // Create place with valid communityId
       const [place] = await database
-        .insert(places)
+        .insert(placesSqlite)
         .values(TestDataFactory.createPlace(community.id))
         .returning();
 
-      expect(place.community_id).toBe(community.id);
+      expect(place.communityId).toBe(community.id); // Use camelCase field name
     });
   });
 });

@@ -11,11 +11,15 @@ import { sql } from 'drizzle-orm';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  communities,
-  places,
+  communitiesSqlite,
+  placesSqlite,
   Community,
   Place,
 } from '../../src/db/schema/index.js';
+
+// Use SQLite tables for tests
+const communities = communitiesSqlite;
+const places = placesSqlite;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -73,6 +77,26 @@ export class TestDatabaseManager {
         '⚠️ Migration error (may be already applied):',
         error.message
       );
+    }
+
+    // Add missing columns that are not in migrations yet
+    try {
+      // Check if locale column exists, if not add missing columns
+      const tableInfo = this.sqlite
+        .prepare('PRAGMA table_info(communities)')
+        .all() as any[];
+      const hasLocale = tableInfo.some((col: any) => col.name === 'locale');
+
+      if (!hasLocale) {
+        this.sqlite.exec(`
+          ALTER TABLE communities ADD COLUMN locale TEXT DEFAULT 'en' NOT NULL;
+          ALTER TABLE communities ADD COLUMN cultural_settings TEXT;
+          ALTER TABLE communities ADD COLUMN is_active INTEGER DEFAULT 1 NOT NULL;
+        `);
+        console.log('✅ Added missing communities columns');
+      }
+    } catch (error: any) {
+      console.warn('⚠️ Error adding missing columns:', error.message);
     }
 
     this.isSetup = true;
@@ -168,7 +192,7 @@ export class TestDatabaseManager {
             type: 'Point',
             coordinates: [-123.1234, 49.2827], // Vancouver, BC
           }),
-          community_id: testCommunities[0].id,
+          communityId: testCommunities[0].id,
         },
         {
           name: 'Test Place 2',
@@ -189,7 +213,7 @@ export class TestDatabaseManager {
               ],
             ],
           }),
-          community_id: testCommunities[0].id,
+          communityId: testCommunities[0].id,
         },
         {
           name: 'Isolated Test Place',
@@ -198,7 +222,7 @@ export class TestDatabaseManager {
             type: 'Point',
             coordinates: [-74.006, 40.7128], // New York, NY
           }),
-          community_id: testCommunities[2].id,
+          communityId: testCommunities[2].id,
         },
       ])
       .returning();
@@ -265,6 +289,9 @@ export class TestDataFactory {
       description: 'A community created by the test factory',
       slug: `factory-community-${uniqueId}`,
       publicStories: true,
+      locale: 'en',
+      culturalSettings: null,
+      isActive: true,
       ...overrides,
     };
   }
@@ -272,7 +299,7 @@ export class TestDataFactory {
   static createPlace(
     communityId: number,
     overrides: Partial<Place> = {}
-  ): Omit<Place, 'id' | 'created_at' | 'updated_at'> {
+  ): Omit<Place, 'id' | 'createdAt' | 'updatedAt'> {
     return {
       name: 'Factory Place',
       description: 'A place created by the test factory',
@@ -281,7 +308,7 @@ export class TestDataFactory {
         coordinates: [-123.1234, 49.2827],
       }),
       boundary: null,
-      community_id: communityId,
+      communityId: communityId,
       ...overrides,
     };
   }
@@ -297,7 +324,7 @@ export class TestDataFactory {
           type: 'Point',
           coordinates: [-123.1207, 49.2827],
         }),
-        community_id: communityId,
+        communityId: communityId, // Use camelCase field name
       },
       {
         name: 'Toronto Point',
@@ -305,7 +332,7 @@ export class TestDataFactory {
           type: 'Point',
           coordinates: [-79.3832, 43.6532],
         }),
-        community_id: communityId,
+        communityId: communityId, // Use camelCase field name
       },
       {
         name: 'Montreal Point',
@@ -313,7 +340,7 @@ export class TestDataFactory {
           type: 'Point',
           coordinates: [-73.5673, 45.5017],
         }),
-        community_id: communityId,
+        communityId: communityId, // Use camelCase field name
       },
     ];
   }

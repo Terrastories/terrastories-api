@@ -5,8 +5,12 @@
  */
 
 import { TestDatabaseManager } from './database.js';
-import { communities, places } from '../../src/db/schema/index.js';
+import { communitiesSqlite, placesSqlite } from '../../src/db/schema/index.js';
 import { sql } from 'drizzle-orm';
+
+// Use SQLite tables for performance tests
+const communities = communitiesSqlite;
+const places = placesSqlite;
 
 export interface PerformanceMetrics {
   duration: number; // milliseconds
@@ -234,7 +238,7 @@ export class PerformanceTester {
           49.2827 + (Math.random() - 0.5) * 0.1, // Random lat around Vancouver
         ],
       }),
-      community_id: community.id,
+      communityId: community.id,
     }));
 
     await database.insert(places).values(spatialData);
@@ -282,7 +286,7 @@ export class PerformanceTester {
           type: 'Point',
           coordinates: [-123 + i * 0.1, 49 + j * 0.01],
         }),
-        community_id: community.id,
+        communityId: community.id,
       }));
 
       await database.insert(places).values(placesData);
@@ -294,7 +298,7 @@ export class PerformanceTester {
         return database
           .select()
           .from(communities)
-          .leftJoin(places, sql`${communities.id} = ${places.community_id}`)
+          .leftJoin(places, sql`${communities.id} = ${places.communityId}`)
           .limit(100);
       },
       20 // Run 20 join queries

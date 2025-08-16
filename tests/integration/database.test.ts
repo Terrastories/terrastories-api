@@ -10,8 +10,12 @@ import {
   PerformanceTester,
   PerformanceTestUtils,
 } from '../helpers/performance.js';
-import { communities, places } from '../../src/db/schema/index.js';
+import { communitiesSqlite, placesSqlite } from '../../src/db/schema/index.js';
 import { eq, sql } from 'drizzle-orm';
+
+// Use SQLite tables for integration tests
+const communities = communitiesSqlite;
+const places = placesSqlite;
 
 describe('Database Integration Tests', () => {
   let fixtures: TestFixtures;
@@ -133,7 +137,7 @@ describe('Database Integration Tests', () => {
 
       expect(newPlace).toMatchObject({
         name: 'Integration Test Place',
-        community_id: testCommunity.id,
+        communityId: testCommunity.id,
       });
 
       // Verify spatial data
@@ -197,25 +201,25 @@ describe('Database Integration Tests', () => {
       const community1Places = await database
         .select()
         .from(places)
-        .where(eq(places.community_id, community1.id));
+        .where(eq(places.communityId, community1.id));
 
       const community2Places = await database
         .select()
         .from(places)
-        .where(eq(places.community_id, community2.id));
+        .where(eq(places.communityId, community2.id));
 
       // Verify isolation
       community1Places.forEach((place) => {
-        expect(place.community_id).toBe(community1.id);
+        expect(place.communityId).toBe(community1.id);
       });
 
       community2Places.forEach((place) => {
-        expect(place.community_id).toBe(community2.id);
+        expect(place.communityId).toBe(community2.id);
       });
 
       // Verify no cross-contamination
-      const allCommunity1Ids = community1Places.map((p) => p.community_id);
-      const allCommunity2Ids = community2Places.map((p) => p.community_id);
+      const allCommunity1Ids = community1Places.map((p) => p.communityId);
+      const allCommunity2Ids = community2Places.map((p) => p.communityId);
 
       expect(allCommunity1Ids.every((id) => id === community1.id)).toBe(true);
       expect(allCommunity2Ids.every((id) => id === community2.id)).toBe(true);
@@ -233,7 +237,7 @@ describe('Database Integration Tests', () => {
           communityName: communities.name,
         })
         .from(places)
-        .innerJoin(communities, eq(places.community_id, communities.id));
+        .innerJoin(communities, eq(places.communityId, communities.id));
 
       expect(placesWithCommunities.length).toBeGreaterThan(0);
 

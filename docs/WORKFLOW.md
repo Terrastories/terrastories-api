@@ -395,72 +395,18 @@ This command:
 After roadmap changes or issue completion:
 
 ```bash
-# Update issues roadmap
+# Update issues roadmap (see .claude/commands/sync-issues-roadmap.md)
 /sync-issues-roadmap
 ```
 
-This command:
-
-1. Reviews current GitHub issues and completion status
-2. Updates phase completion percentages in docs/ISSUES_ROADMAP.md
-3. Marks completed items as ✅ COMPLETED
-4. Updates status descriptions
-5. Maintains roadmap accuracy
+This command maintains both roadmap progress and mapping alignment (detailed implementation in `.claude/commands/sync-issues-roadmap.md`).
 
 ### Workflow Integration
 
-Add to .claude/commands/ directory:
+Both synchronization commands are now implemented in `.claude/commands/` directory:
 
-```markdown
-# .claude/commands/sync-github-mapping.md
-
-## Command: /sync-github-mapping
-
-### Purpose
-
-Maintain synchronization between GitHub issues/PRs and docs/GITHUB_ROADMAP_MAPPING.md
-
-### Process
-
-1. Fetch all GitHub issues and PRs with `gh` commands
-2. Load current docs/ISSUES_ROADMAP.md content
-3. Compare GitHub items to roadmap items by title/description matching
-4. Update mapping table with current status
-5. Flag any mismatches for manual review
-6. Update last sync timestamp
-
-### Triggers
-
-- After creating new GitHub issues
-- Weekly automated sync
-- Before major roadmap updates
-- When issues are closed/merged
-```
-
-```markdown
-# .claude/commands/sync-issues-roadmap.md
-
-## Command: /sync-issues-roadmap
-
-### Purpose
-
-Keep docs/ISSUES_ROADMAP.md current with actual GitHub progress
-
-### Process
-
-1. Check completion status of all referenced GitHub issues
-2. Update phase completion percentages
-3. Mark completed items with ✅ COMPLETED status
-4. Update in-progress indicators
-5. Maintain roadmap timeline accuracy
-
-### Triggers
-
-- After merging PRs that close issues
-- Weekly status reviews
-- Before stakeholder updates
-- Phase completion milestones
-```
+- `/sync-github-mapping` - Maintains GitHub ↔ roadmap mapping alignment
+- `/sync-issues-roadmap` - Updates roadmap progress and validates mapping consistency
 
 ## Configuration Files
 

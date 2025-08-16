@@ -1,57 +1,69 @@
 // Example: Service layer with error handling
-import { User, NewUser } from '../db/schema/users';
 import { UserRepository } from '../repositories/userRepository';
 
+// Custom Error classes for specific failure scenarios
+export class UserNotFoundError extends Error {
+  constructor(message = 'User not found') {
+    super(message);
+    this.name = 'UserNotFoundError';
+  }
+}
+
+export class DuplicateEmailError extends Error {
+  constructor(message = 'User with this email already exists') {
+    super(message);
+    this.name = 'DuplicateEmailError';
+  }
+}
+
 export class UserService {
+  // Inject the repository dependency
   constructor(private userRepository: UserRepository) {}
 
   async createUser(userData: NewUser): Promise<User> {
-    // Business logic validation
-    if (!userData.email || !userData.name) {
-      throw new Error('Email and name are required');
-    }
-
-    // Check if user exists
+    // Business logic validation can remain, but input format validation
+    // should be handled by Zod schemas in the route.
     const existing = await this.userRepository.findByEmail(userData.email);
     if (existing) {
-      throw new Error('User with this email already exists');
+      throw new DuplicateEmailError();
     }
 
-    // Create user
     return this.userRepository.create(userData);
   }
 
-  async getUserById(id: string): Promise<User | null> {
-    if (!id) {
-      throw new Error('User ID is required');
+  async getUserById(id: string): Promise<User> {
+    const user = await this.userRepository.findById(id);
+    if (!user) {
+      throw new UserNotFoundError();
     }
-
-    return this.userRepository.findById(id);
+    return user;
   }
 
-  async updateUser(id: string, updates: Partial<User>): Promise<User> {
-    const user = await this.getUserById(id);
-    if (!user) {
-      throw new Error('User not found');
-    }
+  async updateUser(id: string, updates: Partial<NewUser>): Promise<User> {
+    // Ensure the user exists before trying to update
+    await this.getUserById(id);
 
-    // Business rules
-    if (updates.email && updates.email !== user.email) {
+    // If email is being updated, check for duplicates
+    if (updates.email) {
       const existing = await this.userRepository.findByEmail(updates.email);
       if (existing && existing.id !== id) {
-        throw new Error('Email already in use');
+        throw new DuplicateEmailError('This email is already in use by another account.');
       }
     }
 
-    return this.userRepository.update(id, updates);
+    const updatedUser = await this.userRepository.update(id, updates);
+    if (!updatedUser) {
+        // This case might happen in a race condition if user is deleted
+        // between the check and the update.
+        throw new UserNotFoundError('Failed to update user as they could not be found.');
+    }
+    return updatedUser;
   }
 
   async deleteUser(id: string): Promise<void> {
-    const user = await this.getUserById(id);
-    if (!user) {
-      throw new Error('User not found');
+    const success = await this.userRepository.delete(id);
+    if (!success) {
+      throw new UserNotFoundError();
     }
-
-    await this.userRepository.delete(id);
   }
 }

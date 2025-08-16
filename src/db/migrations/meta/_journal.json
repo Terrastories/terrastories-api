@@ -5,15 +5,8 @@
     {
       "idx": 0,
       "version": "6",
-      "when": 1755224448420,
-      "tag": "0000_brief_sphinx",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "6",
-      "when": 1755272970604,
-      "tag": "0001_bizarre_xavin",
+      "when": 1755381567473,
+      "tag": "0000_stale_professor_monster",
       "breakpoints": true
     }
   ]

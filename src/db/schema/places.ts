@@ -17,12 +17,17 @@ import {
   serial,
   text as pgText,
   integer as pgInteger,
+  real as pgReal,
+  boolean,
+  timestamp,
+  jsonb,
   index,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
+  real,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
@@ -41,18 +46,22 @@ export const GeometryPointSchema = z.object({
   coordinates: z.tuple([z.number(), z.number()]), // [lng, lat] GeoJSON format
 });
 
-// PostgreSQL table for production with PostGIS support planned
+// PostgreSQL table for production with PostGIS support
 export const placesPg = pgTable(
   'places',
   {
     id: serial('id').primaryKey(),
     name: pgText('name').notNull(),
     description: pgText('description'),
-    location: pgText('location'), // GeoJSON Point storage
-    boundary: pgText('boundary'), // GeoJSON Polygon storage
     communityId: pgInteger('community_id').notNull(),
-    createdAt: pgText('created_at'),
-    updatedAt: pgText('updated_at'),
+    latitude: pgReal('latitude').notNull(),
+    longitude: pgReal('longitude').notNull(),
+    region: pgText('region'),
+    mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
+    culturalSignificance: pgText('cultural_significance'),
+    isRestricted: boolean('is_restricted').notNull().default(false),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
   (table) => ({
     // Standard indexes for filtering
@@ -66,11 +75,23 @@ export const placesSqlite = sqliteTable('places', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: sqliteText('name').notNull(),
   description: sqliteText('description'),
-  location: sqliteText('location'), // GeoJSON Point storage
-  boundary: sqliteText('boundary'), // GeoJSON Polygon storage
   communityId: integer('community_id').notNull(),
-  createdAt: sqliteText('created_at'),
-  updatedAt: sqliteText('updated_at'),
+  latitude: real('latitude').notNull(),
+  longitude: real('longitude').notNull(),
+  region: sqliteText('region'),
+  mediaUrls: sqliteText('media_urls', { mode: 'json' })
+    .$type<string[]>()
+    .default([]),
+  culturalSignificance: sqliteText('cultural_significance'),
+  isRestricted: integer('is_restricted', { mode: 'boolean' })
+    .notNull()
+    .default(false),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
 });
 
 // Dynamic table selection based on database type (for runtime use)
@@ -106,8 +127,12 @@ export const placesSqliteRelations = relations(placesSqlite, ({ one }) => ({
 export const insertPlaceSchema = createInsertSchema(placesPg, {
   name: z.string().min(1, 'Name is required').max(200, 'Name too long'),
   description: z.string().max(2000, 'Description too long').optional(),
-  location: z.string().optional(), // GeoJSON string
-  boundary: z.string().optional(), // GeoJSON string
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  region: z.string().max(100).optional(),
+  mediaUrls: z.array(z.string().url()).default([]),
+  culturalSignificance: z.string().max(1000).optional(),
+  isRestricted: z.boolean().default(false),
   communityId: z.number().int().positive('Community ID must be positive'),
 });
 
@@ -132,30 +157,26 @@ export const updatePlaceSchema = insertPlaceSchema.partial().omit({
 
 // PostGIS spatial utility functions (PostgreSQL only)
 export const spatialHelpers = {
-  // Create PostGIS POINT from latitude and longitude (backward compatibility)
+  // Create PostGIS POINT from latitude and longitude
   createPoint: (lat: number, lng: number) =>
     `ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)`,
 
-  // Create PostGIS POINT from GeoJSON location string
-  createPostGISPoint: (geoJsonLocation: string) =>
-    `ST_GeomFromGeoJSON('${geoJsonLocation}')`,
-
-  // Find places within radius (in meters) using location column
+  // Find places within radius (in meters) using latitude/longitude columns
   findWithinRadius: (lat: number, lng: number, radiusMeters: number) =>
-    `ST_DWithin(ST_GeomFromGeoJSON(location)::geography, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${radiusMeters})`,
+    `ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${radiusMeters})`,
 
-  // Find places within bounding box using location column
+  // Find places within bounding box using latitude/longitude columns
   findInBoundingBox: (bounds: {
     north: number;
     south: number;
     east: number;
     west: number;
   }) =>
-    `ST_Within(ST_GeomFromGeoJSON(location), ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326))`,
+    `latitude BETWEEN ${bounds.south} AND ${bounds.north} AND longitude BETWEEN ${bounds.west} AND ${bounds.east}`,
 
-  // Calculate distance between two points (in meters) using location column
+  // Calculate distance between two points (in meters) using latitude/longitude columns
   calculateDistance: (fromLat: number, fromLng: number) =>
-    `ST_Distance(ST_GeomFromGeoJSON(location)::geography, ST_SetSRID(ST_MakePoint(${fromLng}, ${fromLat}), 4326)::geography)`,
+    `ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${fromLng}, ${fromLat}), 4326)::geography)`,
 };
 
 // Export table variants for migration generation

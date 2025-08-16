@@ -197,5 +197,4 @@ export const SpatialUtils = {
   },
 };
 
-// Export types
-export type { GeoJSONPoint, GeoJSONPolygon };
+// Types are already exported above as interfaces

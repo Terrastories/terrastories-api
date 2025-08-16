@@ -1,0 +1,144 @@
+/**
+ * Stories table schema with multi-database support
+ *
+ * Supports both PostgreSQL (production) and SQLite (development/testing)
+ * Follows the same pattern as users.ts for consistency
+ *
+ * Features:
+ * - Multi-tenant data isolation via communityId
+ * - Cultural sensitivity with restriction flags
+ * - Media URL arrays for rich content
+ * - Cross-database compatibility (PostgreSQL/SQLite)
+ * - Author tracking and community scoping
+ */
+
+import {
+  pgTable,
+  serial,
+  text as pgText,
+  timestamp,
+  boolean,
+  integer as pgInteger,
+  jsonb,
+} from 'drizzle-orm/pg-core';
+import {
+  sqliteTable,
+  integer,
+  text as sqliteText,
+} from 'drizzle-orm/sqlite-core';
+import { relations } from 'drizzle-orm';
+import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
+import { z } from 'zod';
+import { communitiesPg } from './communities.js';
+import { usersPg } from './users.js';
+
+// Media URL validation schema
+export const MediaUrlSchema = z.string().url('Invalid media URL format');
+
+// PostgreSQL table for production
+export const storiesPg = pgTable('stories', {
+  id: serial('id').primaryKey(),
+  title: pgText('title').notNull(),
+  description: pgText('description'),
+  communityId: pgInteger('community_id').notNull(),
+  createdBy: pgInteger('created_by').notNull(),
+  isRestricted: boolean('is_restricted').notNull().default(false),
+  mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
+  language: pgText('language').notNull().default('en'),
+  tags: jsonb('tags').$type<string[]>().default([]),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// SQLite table for development/testing
+export const storiesSqlite = sqliteTable('stories', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  title: sqliteText('title').notNull(),
+  description: sqliteText('description'),
+  communityId: integer('community_id').notNull(),
+  createdBy: integer('created_by').notNull(),
+  isRestricted: integer('is_restricted', { mode: 'boolean' })
+    .notNull()
+    .default(false),
+  mediaUrls: sqliteText('media_urls', { mode: 'json' })
+    .$type<string[]>()
+    .default([]),
+  language: sqliteText('language').notNull().default('en'),
+  tags: sqliteText('tags', { mode: 'json' }).$type<string[]>().default([]),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// Dynamic table selection based on database type (for runtime use)
+// Note: This function imports getConfig at runtime to avoid circular dependencies during migration
+export async function getStoriesTable() {
+  // Dynamic import to avoid issues with Drizzle Kit during migration generation
+  const { getConfig } = await import('../../shared/config/index.js');
+  const config = getConfig();
+  const isPostgres =
+    config.database.url.startsWith('postgresql://') ||
+    config.database.url.startsWith('postgres://');
+
+  return isPostgres ? storiesPg : storiesSqlite;
+}
+
+// Relations - Stories belong to one community and one author
+export const storiesRelations = relations(storiesPg, ({ one }) => ({
+  community: one(communitiesPg, {
+    fields: [storiesPg.communityId],
+    references: [communitiesPg.id],
+  }),
+  author: one(usersPg, {
+    fields: [storiesPg.createdBy],
+    references: [usersPg.id],
+  }),
+}));
+
+// SQLite relations (same structure)
+export const storiesSqliteRelations = relations(storiesSqlite, ({ one }) => ({
+  community: one(communitiesPg, {
+    fields: [storiesSqlite.communityId],
+    references: [communitiesPg.id],
+  }),
+  author: one(usersPg, {
+    fields: [storiesSqlite.createdBy],
+    references: [usersPg.id],
+  }),
+}));
+
+// Zod schemas for validation - using PostgreSQL table as base for consistency
+export const insertStorySchema = createInsertSchema(storiesPg, {
+  title: z.string().min(1, 'Title is required').max(500, 'Title too long'),
+  description: z.string().max(5000, 'Description too long').optional(),
+  mediaUrls: z.array(MediaUrlSchema).default([]),
+  language: z.string().min(2).max(5).default('en'),
+  tags: z.array(z.string().min(1).max(50)).default([]),
+  isRestricted: z.boolean().default(false),
+});
+
+export const selectStorySchema = createSelectSchema(storiesPg);
+
+// TypeScript types
+export type Story = typeof storiesPg.$inferSelect;
+export type NewStory = typeof storiesPg.$inferInsert;
+
+// Additional validation schemas for specific use cases
+export const createStorySchema = insertStorySchema.omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const updateStorySchema = insertStorySchema.partial().omit({
+  id: true,
+  createdAt: true,
+  communityId: true, // Don't allow changing community
+});
+
+// Export table variants for migration generation
+// The default export uses PostgreSQL table for Drizzle Kit
+export const stories = storiesPg;

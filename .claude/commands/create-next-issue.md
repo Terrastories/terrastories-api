@@ -349,6 +349,20 @@ This command integrates with:
 - `/review-pr` - Links back to this issue
 - `/merge-pr` - Closes this issue
 
+## Post-Creation Synchronization
+
+After successfully creating a new GitHub issue:
+
+```bash
+# Update mapping to track new issue alignment
+/sync-github-mapping
+
+# This ensures the new issue is:
+# - Added to docs/GITHUB_ROADMAP_MAPPING.md
+# - Checked for roadmap alignment
+# - Flagged if misaligned with roadmap items
+```
+
 ## Performance Metrics
 
 Track command effectiveness:

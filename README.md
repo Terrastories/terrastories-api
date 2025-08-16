@@ -19,11 +19,11 @@
 
 Terrastories API provides the robust backend infrastructure for the Terrastories platform, enabling communities to:
 
-🗺️ **Map Stories to Places** - Connect oral histories and traditional knowledge to specific geographic locations  
-🏛️ **Preserve Cultural Heritage** - Archive stories, photos, audio, and video in a secure, community-controlled environment  
-🌐 **Work Offline** - Access and contribute content even in remote areas with limited internet connectivity  
-🔒 **Maintain Data Sovereignty** - Communities retain full control over their cultural data and who can access it  
-👥 **Collaborate Safely** - Role-based permissions ensure sensitive stories are shared appropriately  
+🗺️ **Map Stories to Places** - Connect oral histories and traditional knowledge to specific geographic locations
+🏛️ **Preserve Cultural Heritage** - Archive stories, photos, audio, and video in a secure, community-controlled environment
+🌐 **Work Offline** - Access and contribute content even in remote areas with limited internet connectivity
+🔒 **Maintain Data Sovereignty** - Communities retain full control over their cultural data and who can access it
+👥 **Collaborate Safely** - Role-based permissions ensure sensitive stories are shared appropriately
 📱 **Enable Multi-Platform Access** - RESTful API supports all platforms
 
 ### Built for Communities, by Communities

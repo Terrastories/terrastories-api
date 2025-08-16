@@ -367,6 +367,47 @@ project/
       Command: /review-pr 122
    ```
 
+## Automated Documentation Maintenance
+
+### Roadmap Mapping Synchronization
+
+The following commands should be used to maintain alignment between GitHub issues, roadmap items, and documentation:
+
+#### Keep GITHUB_ROADMAP_MAPPING.md Current
+
+After each new issue is created or status changed:
+
+```bash
+# Update mapping file
+/sync-github-mapping
+```
+
+This command:
+
+1. Fetches current GitHub issues and PRs
+2. Compares with docs/ISSUES_ROADMAP.md items
+3. Updates docs/GITHUB_ROADMAP_MAPPING.md with current status
+4. Flags any misalignments for review
+5. Records last sync timestamp
+
+#### Keep ISSUES_ROADMAP.md Current
+
+After roadmap changes or issue completion:
+
+```bash
+# Update issues roadmap (see .claude/commands/sync-issues-roadmap.md)
+/sync-issues-roadmap
+```
+
+This command maintains both roadmap progress and mapping alignment (detailed implementation in `.claude/commands/sync-issues-roadmap.md`).
+
+### Workflow Integration
+
+Both synchronization commands are now implemented in `.claude/commands/` directory:
+
+- `/sync-github-mapping` - Maintains GitHub ↔ roadmap mapping alignment
+- `/sync-issues-roadmap` - Updates roadmap progress and validates mapping consistency
+
 ## Configuration Files
 
 ### Master Workflow Configuration (`.claude/CLAUDE.md`)
@@ -731,7 +772,7 @@ The workflow is designed to be framework-agnostic and can be adapted to any soft
 
 ---
 
-_Version: 1.0.0_  
-_Last Updated: 2024_  
-_License: MIT_  
+_Version: 1.0.0_
+_Last Updated: 2024_
+_License: MIT_
 _Contributions: Welcome via GitHub_

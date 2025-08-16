@@ -453,6 +453,20 @@ revise_issue:
     notify_assignees: true
 ```
 
+## Post-Revision Synchronization
+
+After modifying issue scope or requirements:
+
+```bash
+# Update mapping to reflect revised scope
+/sync-github-mapping
+
+# This ensures:
+# - GITHUB_ROADMAP_MAPPING.md reflects revised issue scope
+# - Alignment status is re-evaluated after changes
+# - Any scope changes are documented in mapping table
+```
+
 ## Integration
 
 Links with other commands:
@@ -461,3 +475,4 @@ Links with other commands:
 - Precedes `/work`
 - Can be called multiple times
 - Updates tracked in PR description
+- `/sync-github-mapping` - Updates mapping after scope changes

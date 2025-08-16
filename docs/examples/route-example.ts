@@ -2,7 +2,7 @@
 import { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import { DuplicateEmailError, UserNotFoundError } from '../../services/userService';
+import { UserNotFoundError } from '../../services/userService';
 
 // Define Zod schemas for validation
 const ParamsSchema = z.object({

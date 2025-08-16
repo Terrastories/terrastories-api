@@ -12,40 +12,43 @@
 
 ## Current Mapping Status
 
-| GitHub Issue | Roadmap Item                                    | Status     | Notes                                              |
-| ------------ | ----------------------------------------------- | ---------- | -------------------------------------------------- |
-| #1           | Issue #1: Initialize TypeScript API project     | ✅ ALIGNED | Completed                                          |
-| #3           | Multiple roadmap items (core schema)            | ❌ OPEN    | Database schema (Users, Stories, Places, Speakers) |
-| #5           | Issue #3: Setup multi-environment configuration | ✅ MERGED  | Completed in PR #4, merged to main                 |
+| GitHub Issue | Roadmap Item                                    | Status     | Notes                                            |
+| ------------ | ----------------------------------------------- | ---------- | ------------------------------------------------ |
+| #1           | Issue #1: Initialize TypeScript API project     | ✅ ALIGNED | Completed                                        |
+| #3           | Issues #8, #9, #10 (Phase 2 schema definition)  | ⚠️ BROADER | GitHub #3 covers 3 roadmap items in single issue |
+| #5           | Issue #5: Setup multi-environment configuration | ✅ ALIGNED | Completed in PR #4, merged to main               |
 
-## Issue #3 Mismatch Details
+## Issue #3 Scope Analysis
 
 **GitHub Issue #3**: `feat: implement core database schema for multi-tenant geostorytelling`
 
-- **Scope**: Database schema implementation (Users, Stories, Places, Speakers, relations)
+- **Scope**: Complete database schema implementation (Users, Stories, Places, Speakers, relations)
 - **Acceptance Criteria**: 10 specific database-related criteria
 - **Effort**: 2-3 days (Medium complexity)
+- **Covers**: ISSUES_ROADMAP.md Items #8, #9, #10 from Phase 2
 
-**ROADMAP Issue #3**: `Setup multi-environment configuration system`
+**ISSUES_ROADMAP.md Phase 2**: Schema & Data Layer Definition
 
-- **Scope**: Environment configuration (development, production, field-kit, offline)
-- **Implementation**: Configuration files and validation system
-- **Effort**: Different scope entirely
+- **Issue #8**: Define User & Community Schemas
+- **Issue #9**: Define Story, Place, & Speaker Schemas
+- **Issue #10**: Define Many-to-Many Join Table Schemas
 
-**Current Status**: PR #4 implements ROADMAP #3 but claims to close GitHub #3
+**Assessment**: ⚠️ **BROADER SCOPE**
 
-## Resolution ✅ COMPLETED
+GitHub Issue #3 efficiently combines 3 roadmap items into one implementation task. This is acceptable as they are closely related and implementing them together maintains database consistency.
 
-**Action Taken**: Created new GitHub issue for configuration system, updated PR #4 to reference it
+## Recommendation ✅ PROCEED
 
-**Specific Changes**:
+**Action**: Proceed with GitHub Issue #3 as written
 
-1. ✅ **Created Issue #5** for configuration system (matches PR #4 implementation)
-2. ✅ **Updated PR #4** to reference Issue #5 instead of Issue #3
-3. ✅ **Clarified Issue #3** remains open for original database schema requirements
-4. ✅ **Closed Issue #5** as completed with PR #4
+**Rationale**:
 
-**Result**: Clean separation with correct issue/PR alignment
+1. Database schemas are interdependent and should be implemented together
+2. Single implementation ensures consistent patterns and relationships
+3. Reduces context switching between related database work
+4. Maintains clear issue-to-PR mapping
+
+**Post-Completion**: Mark roadmap items #8, #9, #10 as completed when #3 is closed
 
 ## Process Improvements
 
@@ -63,5 +66,5 @@
 
 ---
 
-**Last Updated**: 2025-08-15  
-**Status**: ✅ Issue #3/PR #4 mismatch resolved, process improvements implemented
+**Last Updated**: 2025-08-16  
+**Status**: ✅ GitHub Issue #3 scope analyzed and approved for broader implementation

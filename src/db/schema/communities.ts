@@ -19,6 +19,9 @@ export const communities = sqliteTable('communities', {
 export const insertCommunitySchema = createInsertSchema(communities);
 export const selectCommunitySchema = createSelectSchema(communities);
 
+// Relations will be defined in a separate relations file to avoid circular imports
+// For now, we'll skip relations in this file and define them in users.ts
+
 // TypeScript types
 export type Community = typeof communities.$inferSelect;
 export type NewCommunity = typeof communities.$inferInsert;

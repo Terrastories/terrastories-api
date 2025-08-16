@@ -60,16 +60,17 @@ Setup Vitest with database fixtures, integration test patterns, and coverage req
 
 ## **Phase 2: Schema & Data Layer Definition**
 
-### **Issue #8: Define User & Community Schemas**
+### **Issue #10: Define User & Community Schemas ✅**
 
-Description: Define the Drizzle ORM schemas for the users and communities tables.
-Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md
-Example code: docs/examples/repository-example.ts
-Acceptance Criteria:
+**Status**: ✅ **COMPLETED** in PR #11 (Issue #10)
 
-- users schema is created in schema.ts with all required fields.
-- communities schema is created in schema.ts with all required fields.
-- Drizzle relations between users and communities are defined.
+- Complete user schema with PostgreSQL/SQLite compatibility
+- Enhanced community schema with proper relations
+- Comprehensive Zod validation schemas and TypeScript types
+- 47 passing tests with 100% coverage (26 schema + 21 Swagger)
+- Multi-tenant data isolation and role-based access control
+- Complete Swagger/OpenAPI documentation
+- Multi-database support following existing patterns
 
 ### **Issue #9: Define Story, Place, & Speaker Schemas**
 

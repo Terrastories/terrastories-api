@@ -125,17 +125,19 @@ src/
    - ❗ STOP if any requirements not met
    - Update issue with completion status
 
-9. COMMIT
+9. BRANCH & COMMIT
+   - Create feature branch: `git checkout -b feature/issue-[number]`
    - Stage files: `git add [files]`
    - Commit: `git commit -m "type(scope): message"`
    - Types: feat|fix|docs|test|chore|refactor
    - Message: present tense, lowercase
+   - Push branch: `git push -u origin feature/issue-[number]`
 
 10. PULL REQUEST
-    - Create PR if not exists
-    - Update PR description
+    - Create PR: `gh pr create --title "Closes #[number]: [title]" --body "[description]" --base main --head feature/issue-[number]`
     - Reference correct issue number: "Closes #[number]"
     - Verify PR solves the referenced issue
+    - NEVER commit directly to main branch
 
 11. TRACK
     - Update issue checkboxes
@@ -336,3 +338,5 @@ You're on track if:
 - **Offline/Sync** → TERRASTORIES_CONTEXT.md (section: Offline Synchronization)
 - **API Design** → TERRASTORIES_CONTEXT.md (section: API Architecture) + examples/route-example.ts
 - **Database Schema** → TERRASTORIES_CONTEXT.md (section: Database Models) + examples/repository-example.ts
+
+- Never use "git add ." or "git add -A", always stage per file relevant to the current implementation.

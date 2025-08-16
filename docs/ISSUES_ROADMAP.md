@@ -1,6 +1,6 @@
 # **Terrastories TypeScript Backend API Migration Roadmap**
 
-**Scope**: This roadmap focuses exclusively on backend API migration from Rails to TypeScript, maintaining exact feature parity with the existing Rails implementation.  
+**Scope**: This roadmap focuses exclusively on backend API migration from Rails to TypeScript, maintaining exact feature parity with the existing Rails implementation.
 **Principle**: No new features beyond what exists in the current Rails API. Exact 1:1 migration only.
 
 ## **Scope & Approach**
@@ -14,10 +14,9 @@
 
 ## **Phase 1: Foundation & Infrastructure ✅ COMPLETED**
 
-### Issue #1: Initialize TypeScript API project with Docker configuration ✅
+### **Issue #1: Initialize TypeScript API project with Docker configuration ✅**
 
 Setup base TypeScript project with Fastify, Docker Compose, and development environment matching current Rails structure.
-
 **Status**: ✅ **COMPLETED** in PR #2 (Issue #1)
 
 - TypeScript 5.7+ foundation with Fastify 5.x server
@@ -28,10 +27,9 @@ Setup base TypeScript project with Fastify, Docker Compose, and development envi
 - GitHub Actions CI/CD pipeline with matrix testing
 - Complete project structure and documentation
 
-### Issue #5: Setup multi-environment configuration system ✅
+### **Issue #5: Setup multi-environment configuration system ✅**
 
 Create environment-based configuration for development, production, field-kit, and offline deployments.
-
 **Status**: ✅ **COMPLETED** in PR #4 (Issue #5)
 
 - Multi-environment configuration system with Zod validation
@@ -39,10 +37,9 @@ Create environment-based configuration for development, production, field-kit, a
 - Centralized config replacing scattered process.env usage
 - Health endpoint integration and comprehensive testing
 
-### Issue #6: Configure PostgreSQL with PostGIS and Drizzle ORM ✅
+### **Issue #6: Configure PostgreSQL with PostGIS and Drizzle ORM ✅**
 
 Implement database connection with PostGIS support, configure Drizzle ORM for spatial data types.
-
 **Status**: ✅ **COMPLETED** in PR #8 (Issue #6)
 
 - Enable PostGIS extension in PostgreSQL
@@ -51,10 +48,9 @@ Implement database connection with PostGIS support, configure Drizzle ORM for sp
 - Create spatial query helpers and type definitions
 - Implement coordinate validation and transformation utilities
 
-### Issue #7: Implement core testing infrastructure ✅
+### **Issue #7: Implement core testing infrastructure ✅**
 
 Setup Vitest with database fixtures, integration test patterns, and coverage requirements.
-
 **Status**: ✅ **COMPLETED** in PR #8 (Issue #7)
 
 - Database fixtures with PostGIS spatial data
@@ -66,8 +62,9 @@ Setup Vitest with database fixtures, integration test patterns, and coverage req
 
 ### **Issue #8: Define User & Community Schemas**
 
-Description: Define the Drizzle ORM schemas for the users and communities tables.  
-Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md  
+Description: Define the Drizzle ORM schemas for the users and communities tables.
+Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md
+Example code: docs/examples/repository-example.ts
 Acceptance Criteria:
 
 - users schema is created in schema.ts with all required fields.
@@ -76,8 +73,8 @@ Acceptance Criteria:
 
 ### **Issue #9: Define Story, Place, & Speaker Schemas**
 
-Description: Define the Drizzle ORM schemas for the core content models: stories, places, and speakers.  
-Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md  
+Description: Define the Drizzle ORM schemas for the core content models: stories, places, and speakers.
+Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md
 Acceptance Criteria:
 
 - stories schema is created with all fields, including media_urls.
@@ -86,8 +83,8 @@ Acceptance Criteria:
 
 ### **Issue #10: Define Many-to-Many Join Table Schemas**
 
-Description: Define the Drizzle ORM schemas for the join tables that manage many-to-many relationships.  
-Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md  
+Description: Define the Drizzle ORM schemas for the join tables that manage many-to-many relationships.
+Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md
 Acceptance Criteria:
 
 - story_places join table schema is created.
@@ -98,8 +95,8 @@ Acceptance Criteria:
 
 ### **Issue #11: Implement Password Hashing Service**
 
-Description: Create a service to handle password hashing and comparison.  
-Context: docs/4-AUTHENTICATION.md  
+Description: Create a service to handle password hashing and comparison.
+Context: docs/4-AUTHENTICATION.md
 Acceptance Criteria:
 
 - A password.service.ts is created.
@@ -108,8 +105,9 @@ Acceptance Criteria:
 
 ### **Issue #12: Implement User Registration Service & Endpoint**
 
-Description: Create the business logic and API endpoint for new user registration.  
-Context: docs/2-DATA_MODELS.md, docs/4-AUTHENTICATION.md  
+Description: Create the business logic and API endpoint for new user registration.
+Context: docs/2-DATA_MODELS.md, docs/4-AUTHENTICATION.md
+Example code: docs/examples/service-example.ts
 Acceptance Criteria:
 
 - A /register endpoint is created.
@@ -118,8 +116,8 @@ Acceptance Criteria:
 
 ### **Issue #13: Implement Session-Based Login Endpoint**
 
-Description: Create the /login endpoint to authenticate users and establish a session.  
-Context: docs/4-AUTHENTICATION.md  
+Description: Create the /login endpoint to authenticate users and establish a session.
+Context: docs/4-AUTHENTICATION.md
 Acceptance Criteria:
 
 - A /login endpoint accepts email and password.
@@ -129,8 +127,8 @@ Acceptance Criteria:
 
 ### **Issue #14: Implement Logout Endpoint**
 
-Description: Create the /logout endpoint to destroy the user's session.  
-Context: docs/4-AUTHENTICATION.md  
+Description: Create the /logout endpoint to destroy the user's session.
+Context: docs/4-AUTHENTICATION.md
 Acceptance Criteria:
 
 - A /logout endpoint is created.
@@ -139,8 +137,8 @@ Acceptance Criteria:
 
 ### **Issue #15: Implement Role-Based Authorization Middleware**
 
-Description: Create Fastify middleware to protect routes based on user roles.  
-Context: docs/4-AUTHENTICATION.md, docs/3-API_ENDPOINTS.md  
+Description: Create Fastify middleware to protect routes based on user roles.
+Context: docs/4-AUTHENTICATION.md, docs/3-API_ENDPOINTS.md
 Acceptance Criteria:
 
 - A middleware function checks request.session.user.role.
@@ -151,8 +149,8 @@ Acceptance Criteria:
 
 ### **Issue #16: Implement File Upload Service**
 
-Description: Create a service to handle multipart file uploads and save them to the filesystem.  
-Context: docs/5-MEDIA_HANDLING.md  
+Description: Create a service to handle multipart file uploads and save them to the filesystem.
+Context: docs/5-MEDIA_HANDLING.md
 Acceptance Criteria:
 
 - A file.service.ts is created using fastify-multipart.
@@ -161,8 +159,9 @@ Acceptance Criteria:
 
 ### **Issue #17: Implement CRUD Service for Stories**
 
-Description: Create the business logic for all CRUD operations on the Story model.  
-Context: docs/2-DATA_MODELS.md, docs/5-MEDIA_HANDLING.md  
+Description: Create the business logic for all CRUD operations on the Story model.
+Context: docs/2-DATA_MODELS.md, docs/5-MEDIA_HANDLING.md
+Example code: docs/examples/service-example.ts
 Acceptance Criteria:
 
 - A story.service.ts is created.
@@ -172,8 +171,8 @@ Acceptance Criteria:
 
 ### **Issue #18: Implement CRUD Service for Places**
 
-Description: Create the business logic for all CRUD operations on the Place model.  
-Context: docs/2-DATA_MODELS.md, docs/5-MEDIA_HANDLING.md  
+Description: Create the business logic for all CRUD operations on the Place model.
+Context: docs/2-DATA_MODELS.md, docs/5-MEDIA_HANDLING.md
 Acceptance Criteria:
 
 - A place.service.ts is created.
@@ -182,8 +181,8 @@ Acceptance Criteria:
 
 ### **Issue #19: Implement CRUD Service for Speakers & Communities**
 
-Description: Create the business logic for CRUD operations on Speaker and Community models.  
-Context: docs/2-DATA_MODELS.md  
+Description: Create the business logic for CRUD operations on Speaker and Community models.
+Context: docs/2-DATA_MODELS.md
 Acceptance Criteria:
 
 - A speaker.service.ts is created with full CRUD logic.
@@ -193,8 +192,9 @@ Acceptance Criteria:
 
 ### **Issue #20: Implement Public Read-Only API Endpoints**
 
-Description: Build all GET routes under the /api namespace.  
-Context: docs/3-API_ENDPOINTS.md  
+Description: Build all GET routes under the /api namespace.
+Context: docs/3-API_ENDPOINTS.md
+Example code: docs/examples/route-example.ts
 Acceptance Criteria:
 
 - GET /api/communities and GET /api/communities/:id are implemented.
@@ -202,10 +202,11 @@ Acceptance Criteria:
 - GET /api/communities/:community_id/places/:id is implemented.
 - Response structures exactly match the original Rails API.
 
-### \*_Issue #21: Implement Member Dashboard Endpoints (/member)_
+### **Issue #21: Implement Member Dashboard Endpoints (/member)**
 
-Description: Build all authenticated CRUD endpoints under the /member namespace.  
-Context: docs/3-API_ENDPOINTS.md, docs/4-AUTHENTICATION.md  
+Description: Build all authenticated CRUD endpoints under the /member namespace.
+Context: docs/3-API_ENDPOINTS.md, docs/4-AUTHENTICATION.md
+Example code: docs/examples/route-example.ts
 Acceptance Criteria:
 
 - Full CRUD endpoints for /member/stories are implemented and protected.
@@ -214,8 +215,8 @@ Acceptance Criteria:
 
 ### **Issue #22: Implement Super Admin Endpoints (/super_admin)**
 
-Description: Build all authenticated CRUD endpoints under the /super_admin namespace.  
-Context: docs/3-API_ENDPOINTS.md, docs/4-AUTHENTICATION.md  
+Description: Build all authenticated CRUD endpoints under the /super_admin namespace.
+Context: docs/3-API_ENDPOINTS.md, docs/4-AUTHENTICATION.md
 Acceptance Criteria:
 
 - Full CRUD endpoints for /super_admin/communities are implemented and protected by the super_admin role.
@@ -225,8 +226,8 @@ Acceptance Criteria:
 
 ### **Issue #23: Finalize Docker Configuration & Environment Variables**
 
-Description: Ensure the Docker Compose setup is production-ready and fully documented.  
-Context: docs/7-DEPLOYMENT.md  
+Description: Ensure the Docker Compose setup is production-ready and fully documented.
+Context: docs/7-DEPLOYMENT.md
 Acceptance Criteria:
 
 - docker-compose.yml is complete with all services.
@@ -235,8 +236,9 @@ Acceptance Criteria:
 
 ### **Issue #24: Create API Comparison Test Suite**
 
-Description: Create a suite of automated tests to validate that the new API responses match the old Rails API responses exactly.  
-Context: docs/3-API_ENDPOINTS.md  
+Description: Create a suite of automated tests to validate that the new API responses match the old Rails API responses exactly.
+Context: docs/3-API_ENDPOINTS.md
+Example code: docs/examples/test-example.ts
 Acceptance Criteria:
 
 - A test script is created (e.g., using Vitest or Postman).
@@ -245,14 +247,14 @@ Acceptance Criteria:
 
 ### **Issue #25: Write Data Migration Guide & Script**
 
-Description: Document the data migration process and create the script to migrate media files from ActiveStorage.  
-Context: docs/5-MEDIA_HANDLING.md, docs/7-DEPLOYMENT.md  
+Description: Document the data migration process and create the script to migrate media files from ActiveStorage.
+Context: docs/5-MEDIA_HANDLING.md, docs/7-DEPLOYMENT.md
 Acceptance Criteria:
 
 - A MIGRATION.md guide is written with step-by-step instructions.
 - A standalone script (e.g., in TypeScript/Node.js) is created to perform the ActiveStorage data migration.
 
-## Key Principles
+## **Key Principles**
 
 1. **No New Features**: Exact Rails API parity only
 2. **Preserve Behavior**: Match Rails responses exactly
@@ -260,7 +262,7 @@ Acceptance Criteria:
 4. **Test Everything**: Comprehensive comparison testing
 5. **Document Thoroughly**: Clear migration path
 
-## Success Criteria
+## **Success Criteria**
 
 - ✅ All Rails endpoints implemented
 - ✅ Response formats match exactly
@@ -269,11 +271,9 @@ Acceptance Criteria:
 - ✅ Zero data loss during migration
 - ✅ Seamless rollback capability
 
-## Usage with Workflow
+## **Usage with Workflow**
 
-```bash
 /create-next-issue
-```
 
 Each issue is:
 

@@ -772,7 +772,7 @@ The workflow is designed to be framework-agnostic and can be adapted to any soft
 
 ---
 
-_Version: 1.0.0_  
-_Last Updated: 2024_  
-_License: MIT_  
+_Version: 1.0.0_
+_Last Updated: 2024_
+_License: MIT_
 _Contributions: Welcome via GitHub_

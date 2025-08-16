@@ -25,6 +25,7 @@ data.db
 # Logs
 logs/
 *.log
+tsconfig.tsbuildinfo
 
 # Runtime data
 pids/

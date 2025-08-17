@@ -188,40 +188,33 @@ export class TestDatabaseManager {
         {
           name: 'Test Place 1',
           description: 'First test place with point location',
-          location: JSON.stringify({
-            type: 'Point',
-            coordinates: [-123.1234, 49.2827], // Vancouver, BC
-          }),
+          latitude: 49.2827, // Vancouver, BC
+          longitude: -123.1234,
+          region: 'Vancouver',
+          mediaUrls: [],
+          culturalSignificance: null,
+          isRestricted: false,
           communityId: testCommunities[0].id,
         },
         {
           name: 'Test Place 2',
-          description: 'Second test place with polygon boundary',
-          location: JSON.stringify({
-            type: 'Point',
-            coordinates: [-79.3832, 43.6532], // Toronto, ON
-          }),
-          boundary: JSON.stringify({
-            type: 'Polygon',
-            coordinates: [
-              [
-                [-79.39, 43.65],
-                [-79.38, 43.65],
-                [-79.38, 43.66],
-                [-79.39, 43.66],
-                [-79.39, 43.65],
-              ],
-            ],
-          }),
+          description: 'Second test place with coordinates',
+          latitude: 43.6532, // Toronto, ON
+          longitude: -79.3832,
+          region: 'Toronto',
+          mediaUrls: [],
+          culturalSignificance: null,
           communityId: testCommunities[0].id,
         },
         {
           name: 'Isolated Test Place',
           description: 'Place for isolated test scenarios',
-          location: JSON.stringify({
-            type: 'Point',
-            coordinates: [-74.006, 40.7128], // New York, NY
-          }),
+          latitude: 40.7128, // New York, NY
+          longitude: -74.006,
+          region: 'New York',
+          mediaUrls: [],
+          culturalSignificance: null,
+          isRestricted: false,
           communityId: testCommunities[2].id,
         },
       ])
@@ -303,11 +296,12 @@ export class TestDataFactory {
     return {
       name: 'Factory Place',
       description: 'A place created by the test factory',
-      location: JSON.stringify({
-        type: 'Point',
-        coordinates: [-123.1234, 49.2827],
-      }),
-      boundary: null,
+      latitude: 49.2827,
+      longitude: -123.1234,
+      region: 'Vancouver',
+      mediaUrls: [],
+      culturalSignificance: null,
+      isRestricted: false,
       communityId: communityId,
       ...overrides,
     };
@@ -320,27 +314,33 @@ export class TestDataFactory {
     return [
       {
         name: 'Vancouver Point',
-        location: JSON.stringify({
-          type: 'Point',
-          coordinates: [-123.1207, 49.2827],
-        }),
-        communityId: communityId, // Use camelCase field name
+        latitude: 49.2827,
+        longitude: -123.1207,
+        region: 'Vancouver',
+        mediaUrls: [],
+        culturalSignificance: null,
+        isRestricted: false,
+        communityId: communityId,
       },
       {
         name: 'Toronto Point',
-        location: JSON.stringify({
-          type: 'Point',
-          coordinates: [-79.3832, 43.6532],
-        }),
-        communityId: communityId, // Use camelCase field name
+        latitude: 43.6532,
+        longitude: -79.3832,
+        region: 'Toronto',
+        mediaUrls: [],
+        culturalSignificance: null,
+        isRestricted: false,
+        communityId: communityId,
       },
       {
         name: 'Montreal Point',
-        location: JSON.stringify({
-          type: 'Point',
-          coordinates: [-73.5673, 45.5017],
-        }),
-        communityId: communityId, // Use camelCase field name
+        latitude: 45.5017,
+        longitude: -73.5673,
+        region: 'Montreal',
+        mediaUrls: [],
+        culturalSignificance: null,
+        isRestricted: false,
+        communityId: communityId,
       },
     ];
   }

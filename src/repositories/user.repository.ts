@@ -15,7 +15,15 @@
 
 import { eq, and, like, desc, asc, count, or, sql } from 'drizzle-orm';
 import { getUsersTable, type User, type NewUser } from '../db/schema/users.js';
-import { getCommunitiesTable } from '../db/schema/communities.js';
+import {
+  getCommunitiesTable,
+  type Community,
+} from '../db/schema/communities.js';
+
+// Database type - using any temporarily to resolve union type incompatibility
+// TODO: Implement proper database abstraction layer for SQLite/PostgreSQL compatibility
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type DatabaseType = any;
 
 /**
  * Options for listing users with filtering and pagination
@@ -52,7 +60,7 @@ export interface PaginatedResult<T> {
  * Indigenous communities maintain sovereignty over their data.
  */
 export class UserRepository {
-  constructor(private database: unknown) {}
+  constructor(private database: DatabaseType) {}
 
   /**
    * Create a new user within a specific community
@@ -78,18 +86,19 @@ export class UserRepository {
 
       // Verify community exists
       const communitiesTable = await getCommunitiesTable();
-      const [community] = await this.database
+      const communities = await this.database
         .select()
         .from(communitiesTable)
         .where(eq(communitiesTable.id, userData.communityId))
         .limit(1);
+      const community = communities[0] as Community | undefined;
 
       if (!community) {
         throw new Error('Invalid community ID');
       }
 
       // Create user
-      const [createdUser] = await this.database
+      const createdUsers = await this.database
         .insert(usersTable)
         .values({
           ...userData,
@@ -97,6 +106,7 @@ export class UserRepository {
           updatedAt: new Date(),
         })
         .returning();
+      const createdUser = createdUsers[0] as User;
 
       return createdUser;
     } catch (error: unknown) {
@@ -120,13 +130,14 @@ export class UserRepository {
     try {
       const usersTable = await getUsersTable();
 
-      const [user] = await this.database
+      const users = await this.database
         .select()
         .from(usersTable)
         .where(
           and(eq(usersTable.id, id), eq(usersTable.communityId, communityId))
         )
         .limit(1);
+      const user = users[0] as User | undefined;
 
       return user || null;
     } catch (error: unknown) {
@@ -147,7 +158,7 @@ export class UserRepository {
     try {
       const usersTable = await getUsersTable();
 
-      const [user] = await this.database
+      const users = await this.database
         .select()
         .from(usersTable)
         .where(
@@ -157,6 +168,7 @@ export class UserRepository {
           )
         )
         .limit(1);
+      const user = users[0] as User | undefined;
 
       return user || null;
     } catch (error: unknown) {
@@ -192,7 +204,7 @@ export class UserRepository {
         }
       }
 
-      const [updatedUser] = await this.database
+      const updatedUsers = await this.database
         .update(usersTable)
         .set({
           ...updates,
@@ -203,6 +215,7 @@ export class UserRepository {
           and(eq(usersTable.id, id), eq(usersTable.communityId, communityId))
         )
         .returning();
+      const updatedUser = updatedUsers[0] as User | undefined;
 
       return updatedUser || null;
     } catch (error: unknown) {
@@ -226,12 +239,13 @@ export class UserRepository {
     try {
       const usersTable = await getUsersTable();
 
-      const [deletedUser] = await this.database
+      const deletedUsers = await this.database
         .delete(usersTable)
         .where(
           and(eq(usersTable.id, id), eq(usersTable.communityId, communityId))
         )
         .returning();
+      const deletedUser = deletedUsers[0] as User | undefined;
 
       return !!deletedUser;
     } catch (error: unknown) {
@@ -294,7 +308,7 @@ export class UserRepository {
       const orderFn = orderDirection === 'desc' ? desc : asc;
 
       // Get users and count in parallel
-      const [users, [countResult]] = await Promise.all([
+      const [users, countResults] = await Promise.all([
         this.database
           .select()
           .from(usersTable)
@@ -307,6 +321,7 @@ export class UserRepository {
           .from(usersTable)
           .where(and(...whereConditions)),
       ]);
+      const countResult = countResults[0] as { count: number };
 
       const total = Number(countResult.count);
       const totalPages = Math.ceil(total / limit);
@@ -364,17 +379,18 @@ export class UserRepository {
       const whereConditions = [eq(usersTable.communityId, communityId)];
 
       if (filters.role) {
-        whereConditions.push(eq(usersTable.role, filters.role));
+        whereConditions.push(eq(usersTable.role, filters.role as User['role']));
       }
 
       if (filters.isActive !== undefined) {
         whereConditions.push(eq(usersTable.isActive, filters.isActive));
       }
 
-      const [result] = await this.database
+      const results = await this.database
         .select({ count: count() })
         .from(usersTable)
         .where(and(...whereConditions));
+      const result = results[0] as { count: number };
 
       return Number(result.count);
     } catch (error: unknown) {

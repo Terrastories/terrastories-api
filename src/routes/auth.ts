@@ -76,7 +76,8 @@ const loginSchema = z.object({
 
 export async function authRoutes(
   fastify: FastifyInstance,
-  options?: { database?: unknown }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  options?: { database?: any }
 ) {
   // Initialize services - use provided database instance or default
   const database = options?.database || (await getDb());

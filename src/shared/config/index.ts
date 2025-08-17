@@ -93,6 +93,16 @@ function createConfigFromEnv(
     auth: {
       jwtSecret: process.env.JWT_SECRET,
     },
+    security: {
+      password: {
+        algorithm: process.env.PASSWORD_ALGORITHM,
+        argon2: {
+          memory: process.env.PASSWORD_ARGON2_MEMORY,
+          iterations: process.env.PASSWORD_ARGON2_ITERATIONS,
+          parallelism: process.env.PASSWORD_ARGON2_PARALLELISM,
+        },
+      },
+    },
     logging: {
       level: process.env.LOG_LEVEL,
     },

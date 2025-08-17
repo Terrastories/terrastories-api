@@ -65,6 +65,18 @@ export const AuthConfigSchema = z.object({
     .default('development-test-secret-insecure'),
 });
 
+// Security configuration schema
+export const SecurityConfigSchema = z.object({
+  password: z.object({
+    algorithm: z.enum(['argon2id']).default('argon2id'),
+    argon2: z.object({
+      memory: z.coerce.number().min(32768).default(65536), // 64MB in KB
+      iterations: z.coerce.number().min(2).default(3),
+      parallelism: z.coerce.number().min(1).default(4),
+    }),
+  }),
+});
+
 // Production-specific auth validation
 export const ProductionAuthConfigSchema = AuthConfigSchema.extend({
   jwtSecret: z
@@ -92,6 +104,7 @@ export const AppConfigSchema = z.object({
   server: ServerConfigSchema,
   database: DatabaseConfigSchema,
   auth: AuthConfigSchema,
+  security: SecurityConfigSchema,
   logging: LoggingConfigSchema,
   features: FeatureConfigSchema,
 });

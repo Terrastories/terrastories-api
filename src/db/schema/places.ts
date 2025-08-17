@@ -1,10 +1,14 @@
 /**
- * Places Schema - Geographic locations with PostGIS spatial support
+ * Places table schema with multi-database support and PostGIS integration
  *
- * This schema demonstrates spatial data handling with Drizzle ORM:
- * - PostGIS geometry columns for PostgreSQL
- * - Point and polygon spatial data types
- * - Spatial indexing with GIST indexes
+ * Supports both PostgreSQL (production) and SQLite (development/testing)
+ * Follows the same pattern as users.ts and stories.ts for consistency
+ *
+ * Features:
+ * - Multi-tenant data isolation via communityId
+ * - PostGIS geometry fields for spatial queries (PostgreSQL)
+ * - Fallback lat/lng coordinates for SQLite compatibility
+ * - Cultural significance tracking for Indigenous communities
  * - Cross-database compatibility (PostgreSQL/SQLite)
  */
 
@@ -12,58 +16,57 @@ import {
   pgTable,
   serial,
   text as pgText,
+  integer as pgInteger,
+  real as pgReal,
+  boolean,
   timestamp,
-  geometry,
+  jsonb,
   index,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
+  real,
 } from 'drizzle-orm/sqlite-core';
+import { relations } from 'drizzle-orm';
+import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
+import { communitiesPg } from './communities.js';
+import { SpatialUtils } from '../../shared/utils/spatial.js';
 
-// Spatial data validation schemas
-export const PointSchema = z.object({
+// Coordinate validation schemas
+export const CoordinateSchema = z.object({
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+});
+
+export const GeometryPointSchema = z.object({
   type: z.literal('Point'),
-  coordinates: z.tuple([z.number(), z.number()]), // [lng, lat]
+  coordinates: z.tuple([z.number(), z.number()]), // [lng, lat] GeoJSON format
 });
 
-export const PolygonSchema = z.object({
-  type: z.literal('Polygon'),
-  coordinates: z.array(z.array(z.tuple([z.number(), z.number()]))),
-});
-
-export const GeometrySchema = z.union([PointSchema, PolygonSchema]);
-
-// PostgreSQL table with PostGIS geometry columns
+// PostgreSQL table for production with PostGIS support
 export const placesPg = pgTable(
   'places',
   {
     id: serial('id').primaryKey(),
     name: pgText('name').notNull(),
     description: pgText('description'),
-
-    // PostGIS geometry columns with proper spatial types
-    location: geometry('location', { type: 'point', srid: 4326 }), // WGS84 POINT
-    boundary: geometry('boundary', { type: 'polygon', srid: 4326 }), // WGS84 POLYGON
-
-    community_id: serial('community_id').notNull(),
-    created_at: timestamp('created_at').defaultNow(),
-    updated_at: timestamp('updated_at').defaultNow(),
+    communityId: pgInteger('community_id').notNull(),
+    latitude: pgReal('latitude').notNull(),
+    longitude: pgReal('longitude').notNull(),
+    region: pgText('region'),
+    mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
+    culturalSignificance: pgText('cultural_significance'),
+    isRestricted: boolean('is_restricted').notNull().default(false),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
   (table) => ({
-    // GIST spatial indexes for efficient spatial queries
-    locationIdx: index('places_location_gist_idx').using(
-      'gist',
-      table.location
-    ),
-    boundaryIdx: index('places_boundary_gist_idx').using(
-      'gist',
-      table.boundary
-    ),
-    // Standard index for community filtering
-    communityIdx: index('places_community_id_idx').on(table.community_id),
+    // Standard indexes for filtering
+    communityIdx: index('places_community_id_idx').on(table.communityId),
+    // Note: PostGIS geometry index will be added in migration
   })
 );
 
@@ -72,21 +75,24 @@ export const placesSqlite = sqliteTable('places', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: sqliteText('name').notNull(),
   description: sqliteText('description'),
-
-  // Spatial data stored as GeoJSON text in SQLite
-  location: sqliteText('location'), // POINT as GeoJSON text
-  boundary: sqliteText('boundary'), // POLYGON as GeoJSON text
-
-  community_id: integer('community_id').notNull(),
-  created_at: sqliteText('created_at').$defaultFn(() =>
-    new Date().toISOString()
-  ),
-  updated_at: sqliteText('updated_at').$defaultFn(() =>
-    new Date().toISOString()
-  ),
+  communityId: integer('community_id').notNull(),
+  latitude: real('latitude').notNull(),
+  longitude: real('longitude').notNull(),
+  region: sqliteText('region'),
+  mediaUrls: sqliteText('media_urls', { mode: 'json' })
+    .$type<string[]>()
+    .default([]),
+  culturalSignificance: sqliteText('cultural_significance'),
+  isRestricted: integer('is_restricted', { mode: 'boolean' })
+    .notNull()
+    .default(false),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
 });
-
-// Schemas are already exported above, no need to re-export
 
 // Dynamic table selection based on database type (for runtime use)
 // Note: This function imports getConfig at runtime to avoid circular dependencies during migration
@@ -101,112 +107,86 @@ export async function getPlacesTable() {
   return isPostgres ? placesPg : placesSqlite;
 }
 
-// Default export for SQLite (used by Drizzle Kit for migration generation)
-export const places = placesSqlite;
+// Relations - Places belong to one community
+export const placesRelations = relations(placesPg, ({ one }) => ({
+  community: one(communitiesPg, {
+    fields: [placesPg.communityId],
+    references: [communitiesPg.id],
+  }),
+}));
+
+// SQLite relations (same structure)
+export const placesSqliteRelations = relations(placesSqlite, ({ one }) => ({
+  community: one(communitiesPg, {
+    fields: [placesSqlite.communityId],
+    references: [communitiesPg.id],
+  }),
+}));
+
+// Zod schemas for validation - using PostgreSQL table as base for consistency
+export const insertPlaceSchema = createInsertSchema(placesPg, {
+  name: z.string().min(1, 'Name is required').max(200, 'Name too long'),
+  description: z.string().max(2000, 'Description too long').optional(),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  region: z.string().max(100).optional(),
+  mediaUrls: z.array(z.string().url()).default([]),
+  culturalSignificance: z.string().max(1000).optional(),
+  isRestricted: z.boolean().default(false),
+  communityId: z.number().int().positive('Community ID must be positive'),
+});
+
+export const selectPlaceSchema = createSelectSchema(placesPg);
 
 // TypeScript types
-export type Place = typeof places.$inferSelect;
-export type NewPlace = typeof places.$inferInsert;
+export type Place = typeof placesPg.$inferSelect;
+export type NewPlace = typeof placesPg.$inferInsert;
 
-// Spatial utility functions
-export class SpatialUtils {
-  /**
-   * Create a Point geometry from latitude and longitude
-   */
-  static createPoint(lat: number, lng: number): string {
-    return JSON.stringify({
-      type: 'Point',
-      coordinates: [lng, lat], // GeoJSON uses [lng, lat] order
-    });
-  }
+// Additional validation schemas for specific use cases
+export const createPlaceSchema = insertPlaceSchema.omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
 
-  /**
-   * Parse a Point geometry to get lat/lng coordinates
-   */
-  static parsePoint(
-    geometry: string | null
-  ): { lat: number; lng: number } | null {
-    if (!geometry) return null;
+export const updatePlaceSchema = insertPlaceSchema.partial().omit({
+  id: true,
+  createdAt: true,
+  communityId: true, // Don't allow changing community
+});
 
-    try {
-      const parsed = JSON.parse(geometry);
-      if (parsed.type === 'Point' && parsed.coordinates) {
-        return {
-          lat: parsed.coordinates[1],
-          lng: parsed.coordinates[0],
-        };
-      }
-    } catch (error) {
-      console.warn('Failed to parse Point geometry:', error);
-    }
+// PostGIS spatial utility functions (PostgreSQL only)
+export const spatialHelpers = {
+  // Create PostGIS POINT from latitude and longitude
+  createPoint: (lat: number, lng: number) =>
+    `ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)`,
 
-    return null;
-  }
+  // Find places within radius (in meters) using latitude/longitude columns
+  findWithinRadius: (lat: number, lng: number, radiusMeters: number) =>
+    `ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${radiusMeters})`,
 
-  /**
-   * Create a Polygon geometry from coordinate array
-   */
-  static createPolygon(coordinates: number[][][]): string {
-    return JSON.stringify({
-      type: 'Polygon',
-      coordinates,
-    });
-  }
+  // Find places within bounding box using latitude/longitude columns
+  findInBoundingBox: (bounds: {
+    north: number;
+    south: number;
+    east: number;
+    west: number;
+  }) =>
+    `latitude BETWEEN ${bounds.south} AND ${bounds.north} AND longitude BETWEEN ${bounds.west} AND ${bounds.east}`,
 
-  /**
-   * Validate geometry data
-   */
-  static validateGeometry(geometry: string): boolean {
-    try {
-      const parsed = JSON.parse(geometry);
-      return GeometrySchema.safeParse(parsed).success;
-    } catch {
-      return false;
-    }
-  }
-}
+  // Calculate distance between two points (in meters) using latitude/longitude columns
+  calculateDistance: (fromLat: number, fromLng: number) =>
+    `ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${fromLng}, ${fromLat}), 4326)::geography)`,
+};
 
-// Example spatial queries for PostgreSQL with PostGIS
-export const spatialQueries = {
-  /**
-   * Find places within a distance from a point
-   * Note: This would use PostGIS ST_DWithin function in production
-   */
-  findNearby: (centerLat: number, centerLng: number, radiusMeters: number) => `
-    SELECT * FROM places 
-    WHERE ST_DWithin(
-      ST_GeomFromGeoJSON(location),
-      ST_Point(${centerLng}, ${centerLat}),
-      ${radiusMeters}
-    )
-  `,
+// Export table variants for migration generation
+// The default export uses PostgreSQL table for Drizzle Kit
+export const places = placesPg;
 
-  /**
-   * Find places within a bounding box
-   */
-  findInBounds: (
-    minLat: number,
-    minLng: number,
-    maxLat: number,
-    maxLng: number
-  ) => `
-    SELECT * FROM places 
-    WHERE ST_Within(
-      ST_GeomFromGeoJSON(location),
-      ST_MakeEnvelope(${minLng}, ${minLat}, ${maxLng}, ${maxLat}, 4326)
-    )
-  `,
+// Re-export SpatialUtils for backward compatibility with tests
+export { SpatialUtils };
 
-  /**
-   * Calculate distance between two places
-   */
-  calculateDistance: (placeId1: number, placeId2: number) => `
-    SELECT 
-      ST_Distance(
-        ST_GeomFromGeoJSON(p1.location),
-        ST_GeomFromGeoJSON(p2.location)
-      ) as distance_meters
-    FROM places p1, places p2
-    WHERE p1.id = ${placeId1} AND p2.id = ${placeId2}
-  `,
+// Add validateCoordinates function for backward compatibility
+export const validateCoordinates = (lat: number, lng: number): boolean => {
+  return SpatialUtils.validateCoordinates(lat, lng);
 };

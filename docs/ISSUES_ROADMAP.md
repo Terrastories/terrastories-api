@@ -72,17 +72,21 @@ Setup Vitest with database fixtures, integration test patterns, and coverage req
 - Complete Swagger/OpenAPI documentation
 - Multi-database support following existing patterns
 
-### **Issue #9: Define Story, Place, & Speaker Schemas**
+### **Issue #12: Define Story, Place, & Speaker Schemas**
 
-Description: Define the Drizzle ORM schemas for the core content models: stories, places, and speakers.
-Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md
-Acceptance Criteria:
+**Status**: 🔄 **IN PROGRESS** - Created as GitHub Issue #12
 
-- stories schema is created with all fields, including media_urls.
-- places schema is created with all fields, including geospatial and media URL fields.
-- speakers schema is created with all fields, including photo_url.
+- Story schema with media support and community scoping
+- Place schema with PostGIS geometry fields and spatial indexing
+- Speaker schema with cultural sensitivity and elder status
+- Comprehensive Zod validation and TypeScript types
+- Complete Swagger/OpenAPI documentation
+- Multi-database support (PostgreSQL/SQLite)
+- Spatial query helpers and media URL validation
 
-### **Issue #10: Define Many-to-Many Join Table Schemas**
+**GitHub Issue**: [#12](https://github.com/Terrastories/terrastories-api/issues/12)
+
+### **Issue #13: Define Many-to-Many Join Table Schemas** (Next)
 
 Description: Define the Drizzle ORM schemas for the join tables that manage many-to-many relationships.
 Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md

@@ -10,8 +10,12 @@ import {
   PerformanceTester,
   PerformanceTestUtils,
 } from '../helpers/performance.js';
-import { communities, places } from '../../src/db/schema/index.js';
+import { communitiesSqlite, placesSqlite } from '../../src/db/schema/index.js';
 import { eq, sql } from 'drizzle-orm';
+
+// Use SQLite tables for integration tests
+const communities = communitiesSqlite;
+const places = placesSqlite;
 
 describe('Database Integration Tests', () => {
   let fixtures: TestFixtures;
@@ -105,25 +109,12 @@ describe('Database Integration Tests', () => {
       const database = await testDb.getDb();
       const testCommunity = fixtures.communities[0];
 
-      // Create place using factory
+      // Create place using factory (SQLite schema uses latitude/longitude)
       const placeData = TestDataFactory.createPlace(testCommunity.id, {
         name: 'Integration Test Place',
-        location: JSON.stringify({
-          type: 'Point',
-          coordinates: [-74.006, 40.7128], // New York
-        }),
-        boundary: JSON.stringify({
-          type: 'Polygon',
-          coordinates: [
-            [
-              [-74.01, 40.71],
-              [-74.0, 40.71],
-              [-74.0, 40.72],
-              [-74.01, 40.72],
-              [-74.01, 40.71],
-            ],
-          ],
-        }),
+        latitude: 40.7128, // New York
+        longitude: -74.006,
+        region: 'New York',
       });
 
       const [newPlace] = await database
@@ -133,38 +124,34 @@ describe('Database Integration Tests', () => {
 
       expect(newPlace).toMatchObject({
         name: 'Integration Test Place',
-        community_id: testCommunity.id,
+        communityId: testCommunity.id,
       });
 
-      // Verify spatial data
-      const locationData = JSON.parse(newPlace.location!);
-      expect(locationData).toMatchObject({
-        type: 'Point',
-        coordinates: [-74.006, 40.7128],
-      });
-
-      const boundaryData = JSON.parse(newPlace.boundary!);
-      expect(boundaryData.type).toBe('Polygon');
+      // Verify spatial data (SQLite uses coordinate fields)
+      expect(newPlace.latitude).toBe(40.7128);
+      expect(newPlace.longitude).toBe(-74.006);
+      expect(newPlace.region).toBe('New York');
     });
 
     it('should query places by location', async () => {
       const database = await testDb.getDb();
 
-      // Query places with location data
+      // Query places with location data (SQLite uses coordinate fields)
       const placesWithLocation = await database
         .select()
         .from(places)
-        .where(sql`location IS NOT NULL`);
+        .where(sql`latitude IS NOT NULL AND longitude IS NOT NULL`);
 
       expect(placesWithLocation.length).toBeGreaterThan(0);
 
-      // Verify all returned places have valid location data
+      // Verify all returned places have valid coordinate data
       placesWithLocation.forEach((place) => {
-        expect(place.location).toBeTruthy();
-        const locationData = JSON.parse(place.location!);
-        expect(locationData.type).toBe('Point');
-        expect(Array.isArray(locationData.coordinates)).toBe(true);
-        expect(locationData.coordinates).toHaveLength(2);
+        expect(typeof place.latitude).toBe('number');
+        expect(typeof place.longitude).toBe('number');
+        expect(place.latitude).toBeGreaterThanOrEqual(-90);
+        expect(place.latitude).toBeLessThanOrEqual(90);
+        expect(place.longitude).toBeGreaterThanOrEqual(-180);
+        expect(place.longitude).toBeLessThanOrEqual(180);
       });
     });
 
@@ -172,18 +159,22 @@ describe('Database Integration Tests', () => {
       const database = await testDb.getDb();
       const testCommunity = fixtures.communities[0];
 
-      // Test with invalid spatial data
-      const invalidPlaceData = TestDataFactory.createPlace(testCommunity.id, {
-        location: 'invalid-json',
+      // Test with edge case coordinate values (SQLite schema)
+      const edgeCasePlaceData = TestDataFactory.createPlace(testCommunity.id, {
+        name: 'Edge Case Place',
+        latitude: 90, // North Pole
+        longitude: 180, // International Date Line
       });
 
-      // This should not throw an error at database level (validation happens at application level)
+      // This should work fine at database level
       const [newPlace] = await database
         .insert(places)
-        .values(invalidPlaceData)
+        .values(edgeCasePlaceData)
         .returning();
 
-      expect(newPlace.location).toBe('invalid-json');
+      expect(newPlace.latitude).toBe(90);
+      expect(newPlace.longitude).toBe(180);
+      expect(newPlace.name).toBe('Edge Case Place');
     });
   });
 
@@ -197,25 +188,25 @@ describe('Database Integration Tests', () => {
       const community1Places = await database
         .select()
         .from(places)
-        .where(eq(places.community_id, community1.id));
+        .where(eq(places.communityId, community1.id));
 
       const community2Places = await database
         .select()
         .from(places)
-        .where(eq(places.community_id, community2.id));
+        .where(eq(places.communityId, community2.id));
 
       // Verify isolation
       community1Places.forEach((place) => {
-        expect(place.community_id).toBe(community1.id);
+        expect(place.communityId).toBe(community1.id);
       });
 
       community2Places.forEach((place) => {
-        expect(place.community_id).toBe(community2.id);
+        expect(place.communityId).toBe(community2.id);
       });
 
       // Verify no cross-contamination
-      const allCommunity1Ids = community1Places.map((p) => p.community_id);
-      const allCommunity2Ids = community2Places.map((p) => p.community_id);
+      const allCommunity1Ids = community1Places.map((p) => p.communityId);
+      const allCommunity2Ids = community2Places.map((p) => p.communityId);
 
       expect(allCommunity1Ids.every((id) => id === community1.id)).toBe(true);
       expect(allCommunity2Ids.every((id) => id === community2.id)).toBe(true);
@@ -233,7 +224,7 @@ describe('Database Integration Tests', () => {
           communityName: communities.name,
         })
         .from(places)
-        .innerJoin(communities, eq(places.community_id, communities.id));
+        .innerJoin(communities, eq(places.communityId, communities.id));
 
       expect(placesWithCommunities.length).toBeGreaterThan(0);
 

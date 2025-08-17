@@ -10,7 +10,7 @@ const isPostgres = databaseUrl.startsWith('postgresql://') ||
 
 export default defineConfig({
   dialect: isPostgres ? 'postgresql' : 'sqlite',
-  schema: './src/db/schema/index.ts',
+  schema: './dist/db/schema/index.js',
   out: './src/db/migrations',
   dbCredentials: isPostgres 
     ? {

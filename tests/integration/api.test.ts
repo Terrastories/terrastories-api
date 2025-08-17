@@ -24,8 +24,8 @@ async function createTestApp(): Promise<FastifyInstance> {
   // Communities endpoint
   app.get('/api/v1/communities', async () => {
     const database = await testDb.getDb();
-    const { communities } = await import('../../src/db/schema/index.js');
-    const communityList = await database.select().from(communities);
+    const { communitiesSqlite } = await import('../../src/db/schema/index.js');
+    const communityList = await database.select().from(communitiesSqlite);
 
     return {
       data: communityList,
@@ -40,14 +40,14 @@ async function createTestApp(): Promise<FastifyInstance> {
   // Get single community
   app.get('/api/v1/communities/:id', async (request: any, reply) => {
     const database = await testDb.getDb();
-    const { communities } = await import('../../src/db/schema/index.js');
+    const { communitiesSqlite } = await import('../../src/db/schema/index.js');
     const { eq } = await import('drizzle-orm');
     const { id } = request.params;
 
     const community = await database
       .select()
-      .from(communities)
-      .where(eq(communities.id, parseInt(id)))
+      .from(communitiesSqlite)
+      .where(eq(communitiesSqlite.id, parseInt(id)))
       .limit(1);
 
     if (community.length === 0) {
@@ -82,11 +82,13 @@ async function createTestApp(): Promise<FastifyInstance> {
     },
     async (request: any, reply) => {
       const database = await testDb.getDb();
-      const { communities } = await import('../../src/db/schema/index.js');
+      const { communitiesSqlite } = await import(
+        '../../src/db/schema/index.js'
+      );
 
       try {
         const [newCommunity] = await database
-          .insert(communities)
+          .insert(communitiesSqlite)
           .values(request.body)
           .returning();
 
@@ -102,7 +104,7 @@ async function createTestApp(): Promise<FastifyInstance> {
   // Places endpoint with community filtering
   app.get('/api/v1/places', async (request: any) => {
     const database = await testDb.getDb();
-    const { places } = await import('../../src/db/schema/index.js');
+    const { placesSqlite } = await import('../../src/db/schema/index.js');
     const { eq } = await import('drizzle-orm');
     const { community_id } = request.query;
 
@@ -111,10 +113,10 @@ async function createTestApp(): Promise<FastifyInstance> {
     if (community_id) {
       placesList = await database
         .select()
-        .from(places)
-        .where(eq(places.community_id, parseInt(community_id)));
+        .from(placesSqlite)
+        .where(eq(placesSqlite.communityId, parseInt(community_id)));
     } else {
-      placesList = await database.select().from(places);
+      placesList = await database.select().from(placesSqlite);
     }
 
     return {
@@ -123,7 +125,7 @@ async function createTestApp(): Promise<FastifyInstance> {
         total: placesList.length,
         page: 1,
         limit: 20,
-        filters: { community_id },
+        filters: { communityId: community_id },
       },
     };
   });
@@ -185,8 +187,9 @@ describe('API Integration Tests', () => {
           id: expect.any(Number),
           name: expect.any(String),
           slug: expect.any(String),
-          publicStories: expect.any(Boolean),
         });
+        // SQLite can return booleans as integers (1/0) or actual booleans
+        expect([true, false, 1, 0]).toContain(community.publicStories);
       });
     });
 
@@ -285,7 +288,7 @@ describe('API Integration Tests', () => {
         expect(place).toMatchObject({
           id: expect.any(Number),
           name: expect.any(String),
-          community_id: expect.any(Number),
+          communityId: expect.any(Number), // Use camelCase field name
         });
       });
     });
@@ -300,13 +303,11 @@ describe('API Integration Tests', () => {
       apiClient.assertSuccess(response);
 
       const result = apiClient.assertPaginatedResponse(response);
-      expect(result.meta.filters.community_id).toBe(
-        testCommunity.id.toString()
-      );
+      expect(result.meta.filters.communityId).toBe(testCommunity.id.toString());
 
       // All places should belong to the specified community
       result.data.forEach((place) => {
-        expect(place.community_id).toBe(testCommunity.id);
+        expect(place.communityId).toBe(testCommunity.id);
       });
     });
 

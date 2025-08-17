@@ -45,8 +45,9 @@ describe('Database Test Helpers', () => {
         expect(place).toMatchObject({
           id: expect.any(Number),
           name: expect.any(String),
-          community_id: expect.any(Number),
-          location: expect.any(String),
+          communityId: expect.any(Number),
+          latitude: expect.any(Number),
+          longitude: expect.any(Number),
         });
       });
     });
@@ -114,16 +115,16 @@ describe('Database Test Helpers', () => {
       expect(placeData).toMatchObject({
         name: expect.any(String),
         description: expect.any(String),
-        location: expect.any(String),
-        community_id: 1,
+        latitude: expect.any(Number),
+        longitude: expect.any(Number),
+        communityId: 1,
       });
 
-      // Verify location is valid JSON
-      const location = JSON.parse(placeData.location);
-      expect(location).toMatchObject({
-        type: 'Point',
-        coordinates: expect.any(Array),
-      });
+      // Verify coordinates are valid
+      expect(placeData.latitude).toBeGreaterThanOrEqual(-90);
+      expect(placeData.latitude).toBeLessThanOrEqual(90);
+      expect(placeData.longitude).toBeGreaterThanOrEqual(-180);
+      expect(placeData.longitude).toBeLessThanOrEqual(180);
     });
 
     it('should create spatial test data', () => {
@@ -134,14 +135,16 @@ describe('Database Test Helpers', () => {
       spatialData.forEach((place) => {
         expect(place).toMatchObject({
           name: expect.any(String),
-          location: expect.any(String),
-          community_id: 1,
+          latitude: expect.any(Number),
+          longitude: expect.any(Number),
+          communityId: 1,
         });
 
-        // Verify location data
-        const location = JSON.parse(place.location);
-        expect(location.type).toBe('Point');
-        expect(location.coordinates).toHaveLength(2);
+        // Verify coordinate data
+        expect(place.latitude).toBeGreaterThanOrEqual(-90);
+        expect(place.latitude).toBeLessThanOrEqual(90);
+        expect(place.longitude).toBeGreaterThanOrEqual(-180);
+        expect(place.longitude).toBeLessThanOrEqual(180);
       });
     });
 
@@ -159,7 +162,9 @@ describe('Database Test Helpers', () => {
   describe('Database Operations', () => {
     it('should support transactions', async () => {
       const database = await testDb.getDb();
-      const { communities } = await import('../../src/db/schema/index.js');
+      const { communitiesSqlite } = await import(
+        '../../src/db/schema/index.js'
+      );
 
       // Test successful transaction (better-sqlite3 style)
       let result: any;
@@ -167,7 +172,7 @@ describe('Database Test Helpers', () => {
       try {
         result = database.transaction((tx: any) => {
           const [community] = tx
-            .insert(communities)
+            .insert(communitiesSqlite)
             .values(
               TestDataFactory.createCommunity({ name: 'Transaction Test' })
             )
@@ -185,7 +190,7 @@ describe('Database Test Helpers', () => {
       } catch {
         // If transaction syntax doesn't work, just test a simple insert
         const [community] = await database
-          .insert(communities)
+          .insert(communitiesSqlite)
           .values(TestDataFactory.createCommunity({ name: 'Transaction Test' }))
           .returning();
 
@@ -195,23 +200,23 @@ describe('Database Test Helpers', () => {
 
     it('should handle foreign key constraints', async () => {
       const database = await testDb.getDb();
-      const { communities, places } = await import(
+      const { communitiesSqlite, placesSqlite } = await import(
         '../../src/db/schema/index.js'
       );
 
       // Create community first
       const [community] = await database
-        .insert(communities)
+        .insert(communitiesSqlite)
         .values(TestDataFactory.createCommunity())
         .returning();
 
-      // Create place with valid community_id
+      // Create place with valid communityId
       const [place] = await database
-        .insert(places)
+        .insert(placesSqlite)
         .values(TestDataFactory.createPlace(community.id))
         .returning();
 
-      expect(place.community_id).toBe(community.id);
+      expect(place.communityId).toBe(community.id); // Use camelCase field name
     });
   });
 });

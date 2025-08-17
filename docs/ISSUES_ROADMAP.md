@@ -72,10 +72,12 @@ Setup Vitest with database fixtures, integration test patterns, and coverage req
 - Complete Swagger/OpenAPI documentation
 - Multi-database support following existing patterns
 
-### **Issue #12: Define Story, Place, & Speaker Schemas**
+### **Issue #12: Define Story, Place, & Speaker Schemas ✅**
 
-**Status**: 🔄 **IN PROGRESS** - Created as GitHub Issue #12
+**Status**: ✅ **COMPLETED** in PR #13 (GitHub Issue #12)
 
+- Define Story, Place, and Speaker schemas with Drizzle ORM and PostGIS
+- Merged: 2025-08-16
 - Story schema with media support and community scoping
 - Place schema with PostGIS geometry fields and spatial indexing
 - Speaker schema with cultural sensitivity and elder status
@@ -86,27 +88,44 @@ Setup Vitest with database fixtures, integration test patterns, and coverage req
 
 **GitHub Issue**: [#12](https://github.com/Terrastories/terrastories-api/issues/12)
 
-### **Issue #13: Define Many-to-Many Join Table Schemas** (Next)
+### **Issue #13: Define Many-to-Many Join Table Schemas ✅**
+
+**Status**: ✅ **COMPLETED** in PR #15 (GitHub Issue #14)
+
+- Implement many-to-many join table schemas (story_places, story_speakers)
+- Merged: 2025-08-17
+- story_places join table schema with cultural context metadata
+- story_speakers join table schema with cultural role information
+- Comprehensive Drizzle relations for all many-to-many relationships
+- Cultural protocol support and community data isolation
 
 Description: Define the Drizzle ORM schemas for the join tables that manage many-to-many relationships.
 Context: docs/2-DATA_MODELS.md, docs/6-DATABASE_SCHEMA.md
 Acceptance Criteria:
 
-- story_places join table schema is created.
-- story_speakers join table schema is created.
-- Drizzle relations are correctly defined for all many-to-many relationships.
+- ✅ story_places join table schema is created.
+- ✅ story_speakers join table schema is created.
+- ✅ Drizzle relations are correctly defined for all many-to-many relationships.
 
 ## **Phase 3: Authentication & Authorization**
 
-### **Issue #11: Implement Password Hashing Service**
+### **Issue #11: Implement Password Hashing Service ✅**
+
+**Status**: ✅ **COMPLETED** in PR #17 (GitHub Issue #16)
+
+- Implement comprehensive password hashing service with argon2id algorithm
+- Merged: 2025-08-17
+- Industry-standard security with timing attack protection and configurable parameters
+- Comprehensive input validation and password strength validation
+- 34 comprehensive security and performance tests
 
 Description: Create a service to handle password hashing and comparison.
 Context: docs/4-AUTHENTICATION.md
 Acceptance Criteria:
 
-- A password.service.ts is created.
-- It exports a hashPassword function using a strong hashing algorithm (e.g., argon2 or bcrypt).
-- It exports a comparePassword function.
+- ✅ A password.service.ts is created.
+- ✅ It exports a hashPassword function using a strong hashing algorithm (argon2id).
+- ✅ It exports a comparePassword function.
 
 ### **Issue #12: Implement User Registration Service & Endpoint**
 

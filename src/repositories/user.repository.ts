@@ -13,7 +13,7 @@
  * - Pagination and filtering support
  */
 
-import { eq, and, ilike, desc, asc, count, or } from 'drizzle-orm';
+import { eq, and, like, desc, asc, count, or, sql } from 'drizzle-orm';
 import { getUsersTable, type User, type NewUser } from '../db/schema/users.js';
 import { getCommunitiesTable } from '../db/schema/communities.js';
 
@@ -47,12 +47,12 @@ export interface PaginatedResult<T> {
 
 /**
  * Repository for user database operations with community scoping
- * 
+ *
  * All operations enforce community-level data isolation to ensure
  * Indigenous communities maintain sovereignty over their data.
  */
 export class UserRepository {
-  constructor(private database: any) {}
+  constructor(private database: unknown) {}
 
   /**
    * Create a new user within a specific community
@@ -66,9 +66,14 @@ export class UserRepository {
       const usersTable = await getUsersTable();
 
       // Check if email already exists in this community
-      const existingUser = await this.findByEmail(userData.email, userData.communityId);
+      const existingUser = await this.findByEmail(
+        userData.email,
+        userData.communityId
+      );
       if (existingUser) {
-        throw new Error('User with this email already exists in this community');
+        throw new Error(
+          'User with this email already exists in this community'
+        );
       }
 
       // Verify community exists
@@ -94,11 +99,13 @@ export class UserRepository {
         .returning();
 
       return createdUser;
-    } catch (error: any) {
-      if (error.message.includes('User with this email already exists')) {
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      if (errorMessage.includes('User with this email already exists')) {
         throw error;
       }
-      throw new Error(`Failed to create user: ${error.message}`);
+      throw new Error(`Failed to create user: ${errorMessage}`);
     }
   }
 
@@ -112,19 +119,20 @@ export class UserRepository {
   async findById(id: number, communityId: number): Promise<User | null> {
     try {
       const usersTable = await getUsersTable();
-      
+
       const [user] = await this.database
         .select()
         .from(usersTable)
-        .where(and(
-          eq(usersTable.id, id),
-          eq(usersTable.communityId, communityId)
-        ))
+        .where(
+          and(eq(usersTable.id, id), eq(usersTable.communityId, communityId))
+        )
         .limit(1);
 
       return user || null;
-    } catch (error: any) {
-      throw new Error(`Failed to find user: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to find user: ${errorMessage}`);
     }
   }
 
@@ -138,19 +146,23 @@ export class UserRepository {
   async findByEmail(email: string, communityId: number): Promise<User | null> {
     try {
       const usersTable = await getUsersTable();
-      
+
       const [user] = await this.database
         .select()
         .from(usersTable)
-        .where(and(
-          eq(usersTable.email, email.toLowerCase().trim()),
-          eq(usersTable.communityId, communityId)
-        ))
+        .where(
+          and(
+            eq(usersTable.email, email.toLowerCase().trim()),
+            eq(usersTable.communityId, communityId)
+          )
+        )
         .limit(1);
 
       return user || null;
-    } catch (error: any) {
-      throw new Error(`Failed to find user by email: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to find user by email: ${errorMessage}`);
     }
   }
 
@@ -162,7 +174,11 @@ export class UserRepository {
    * @param communityId - Community ID for scoping
    * @returns Updated user if found and updated, null otherwise
    */
-  async update(id: number, updates: Partial<NewUser>, communityId: number): Promise<User | null> {
+  async update(
+    id: number,
+    updates: Partial<NewUser>,
+    communityId: number
+  ): Promise<User | null> {
     try {
       const usersTable = await getUsersTable();
 
@@ -170,7 +186,9 @@ export class UserRepository {
       if (updates.email) {
         const existingUser = await this.findByEmail(updates.email, communityId);
         if (existingUser && existingUser.id !== id) {
-          throw new Error('User with this email already exists in this community');
+          throw new Error(
+            'User with this email already exists in this community'
+          );
         }
       }
 
@@ -181,18 +199,19 @@ export class UserRepository {
           email: updates.email?.toLowerCase().trim(),
           updatedAt: new Date(),
         })
-        .where(and(
-          eq(usersTable.id, id),
-          eq(usersTable.communityId, communityId)
-        ))
+        .where(
+          and(eq(usersTable.id, id), eq(usersTable.communityId, communityId))
+        )
         .returning();
 
       return updatedUser || null;
-    } catch (error: any) {
-      if (error.message.includes('User with this email already exists')) {
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      if (errorMessage.includes('User with this email already exists')) {
         throw error;
       }
-      throw new Error(`Failed to update user: ${error.message}`);
+      throw new Error(`Failed to update user: ${errorMessage}`);
     }
   }
 
@@ -206,18 +225,19 @@ export class UserRepository {
   async delete(id: number, communityId: number): Promise<boolean> {
     try {
       const usersTable = await getUsersTable();
-      
+
       const [deletedUser] = await this.database
         .delete(usersTable)
-        .where(and(
-          eq(usersTable.id, id),
-          eq(usersTable.communityId, communityId)
-        ))
+        .where(
+          and(eq(usersTable.id, id), eq(usersTable.communityId, communityId))
+        )
         .returning();
 
       return !!deletedUser;
-    } catch (error: any) {
-      throw new Error(`Failed to delete user: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to delete user: ${errorMessage}`);
     }
   }
 
@@ -228,7 +248,10 @@ export class UserRepository {
    * @param communityId - Community ID for scoping
    * @returns Paginated list of users
    */
-  async findMany(options: UserListOptions, communityId: number): Promise<PaginatedResult<User>> {
+  async findMany(
+    options: UserListOptions,
+    communityId: number
+  ): Promise<PaginatedResult<User>> {
     try {
       const usersTable = await getUsersTable();
       const {
@@ -238,7 +261,7 @@ export class UserRepository {
         role,
         isActive,
         orderBy = 'createdAt',
-        orderDirection = 'desc'
+        orderDirection = 'desc',
       } = options;
 
       const offset = (page - 1) * limit;
@@ -247,11 +270,13 @@ export class UserRepository {
       const whereConditions = [eq(usersTable.communityId, communityId)];
 
       if (search) {
+        // Use case-insensitive search that works with both PostgreSQL and SQLite
+        const searchTerm = search.toLowerCase();
         whereConditions.push(
           or(
-            ilike(usersTable.firstName, `%${search}%`),
-            ilike(usersTable.lastName, `%${search}%`),
-            ilike(usersTable.email, `%${search}%`)
+            like(sql`lower(${usersTable.firstName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.lastName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.email})`, `%${searchTerm}%`)
           )!
         );
       }
@@ -280,7 +305,7 @@ export class UserRepository {
         this.database
           .select({ count: count() })
           .from(usersTable)
-          .where(and(...whereConditions))
+          .where(and(...whereConditions)),
       ]);
 
       const total = Number(countResult.count);
@@ -294,11 +319,13 @@ export class UserRepository {
           total,
           totalPages,
           hasNext: page < totalPages,
-          hasPrev: page > 1
-        }
+          hasPrev: page > 1,
+        },
       };
-    } catch (error: any) {
-      throw new Error(`Failed to list users: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to list users: ${errorMessage}`);
     }
   }
 
@@ -313,8 +340,10 @@ export class UserRepository {
     try {
       const user = await this.findById(id, communityId);
       return !!user;
-    } catch (error: any) {
-      throw new Error(`Failed to check user existence: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to check user existence: ${errorMessage}`);
     }
   }
 
@@ -331,11 +360,11 @@ export class UserRepository {
   ): Promise<number> {
     try {
       const usersTable = await getUsersTable();
-      
+
       const whereConditions = [eq(usersTable.communityId, communityId)];
 
       if (filters.role) {
-        whereConditions.push(eq(usersTable.role, filters.role as any));
+        whereConditions.push(eq(usersTable.role, filters.role));
       }
 
       if (filters.isActive !== undefined) {
@@ -348,8 +377,10 @@ export class UserRepository {
         .where(and(...whereConditions));
 
       return Number(result.count);
-    } catch (error: any) {
-      throw new Error(`Failed to count users: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to count users: ${errorMessage}`);
     }
   }
 }

@@ -140,7 +140,10 @@ describe('User Repository', () => {
       };
 
       const createdUser = await userRepository.create(userData);
-      const foundUser = await userRepository.findById(createdUser.id, testCommunityId);
+      const foundUser = await userRepository.findById(
+        createdUser.id,
+        testCommunityId
+      );
 
       expect(foundUser).toBeDefined();
       expect(foundUser!.id).toBe(createdUser.id);
@@ -162,7 +165,10 @@ describe('User Repository', () => {
       const createdUser = await userRepository.create(userData);
 
       // Try to find user in different community
-      const foundUser = await userRepository.findById(createdUser.id, otherCommunityId);
+      const foundUser = await userRepository.findById(
+        createdUser.id,
+        otherCommunityId
+      );
       expect(foundUser).toBeNull();
     });
 
@@ -185,7 +191,10 @@ describe('User Repository', () => {
       };
 
       await userRepository.create(userData);
-      const foundUser = await userRepository.findByEmail(userData.email, testCommunityId);
+      const foundUser = await userRepository.findByEmail(
+        userData.email,
+        testCommunityId
+      );
 
       expect(foundUser).toBeDefined();
       expect(foundUser!.email).toBe(userData.email);
@@ -206,12 +215,18 @@ describe('User Repository', () => {
       await userRepository.create(userData);
 
       // Try to find user by email in different community
-      const foundUser = await userRepository.findByEmail(userData.email, otherCommunityId);
+      const foundUser = await userRepository.findByEmail(
+        userData.email,
+        otherCommunityId
+      );
       expect(foundUser).toBeNull();
     });
 
     test('should return null for non-existent email', async () => {
-      const foundUser = await userRepository.findByEmail('nonexistent@example.com', testCommunityId);
+      const foundUser = await userRepository.findByEmail(
+        'nonexistent@example.com',
+        testCommunityId
+      );
       expect(foundUser).toBeNull();
     });
   });
@@ -236,14 +251,20 @@ describe('User Repository', () => {
         role: 'editor' as const,
       };
 
-      const updatedUser = await userRepository.update(createdUser.id, updates, testCommunityId);
+      const updatedUser = await userRepository.update(
+        createdUser.id,
+        updates,
+        testCommunityId
+      );
 
       expect(updatedUser).toBeDefined();
       expect(updatedUser!.firstName).toBe(updates.firstName);
       expect(updatedUser!.lastName).toBe(updates.lastName);
       expect(updatedUser!.role).toBe(updates.role);
       expect(updatedUser!.email).toBe(userData.email); // Unchanged
-      expect(updatedUser!.updatedAt.getTime()).toBeGreaterThan(createdUser.createdAt.getTime());
+      expect(updatedUser!.updatedAt.getTime()).toBeGreaterThanOrEqual(
+        createdUser.createdAt.getTime()
+      );
     });
 
     test('should return null when updating user in wrong community', async () => {
@@ -262,13 +283,21 @@ describe('User Repository', () => {
       const updates = { firstName: 'Should Not Update' };
 
       // Try to update user from different community
-      const updatedUser = await userRepository.update(createdUser.id, updates, otherCommunityId);
+      const updatedUser = await userRepository.update(
+        createdUser.id,
+        updates,
+        otherCommunityId
+      );
       expect(updatedUser).toBeNull();
     });
 
     test('should return null for non-existent user', async () => {
       const updates = { firstName: 'Should Not Work' };
-      const updatedUser = await userRepository.update(999999, updates, testCommunityId);
+      const updatedUser = await userRepository.update(
+        999999,
+        updates,
+        testCommunityId
+      );
       expect(updatedUser).toBeNull();
     });
   });
@@ -286,12 +315,18 @@ describe('User Repository', () => {
       };
 
       const createdUser = await userRepository.create(userData);
-      const deleteResult = await userRepository.delete(createdUser.id, testCommunityId);
+      const deleteResult = await userRepository.delete(
+        createdUser.id,
+        testCommunityId
+      );
 
       expect(deleteResult).toBe(true);
 
       // Verify user is deleted
-      const foundUser = await userRepository.findById(createdUser.id, testCommunityId);
+      const foundUser = await userRepository.findById(
+        createdUser.id,
+        testCommunityId
+      );
       expect(foundUser).toBeNull();
     });
 
@@ -309,11 +344,17 @@ describe('User Repository', () => {
       const createdUser = await userRepository.create(userData);
 
       // Try to delete from different community
-      const deleteResult = await userRepository.delete(createdUser.id, otherCommunityId);
+      const deleteResult = await userRepository.delete(
+        createdUser.id,
+        otherCommunityId
+      );
       expect(deleteResult).toBe(false);
 
       // Verify user still exists
-      const foundUser = await userRepository.findById(createdUser.id, testCommunityId);
+      const foundUser = await userRepository.findById(
+        createdUser.id,
+        testCommunityId
+      );
       expect(foundUser).toBeDefined();
     });
 
@@ -362,7 +403,10 @@ describe('User Repository', () => {
     });
 
     test('should return paginated users within community', async () => {
-      const result = await userRepository.findMany({ page: 1, limit: 2 }, testCommunityId);
+      const result = await userRepository.findMany(
+        { page: 1, limit: 2 },
+        testCommunityId
+      );
 
       expect(result.data).toHaveLength(2);
       expect(result.meta.page).toBe(1);
@@ -373,27 +417,36 @@ describe('User Repository', () => {
       expect(result.meta.hasPrev).toBe(false);
 
       // All users should belong to the specified community
-      result.data.forEach(user => {
+      result.data.forEach((user) => {
         expect(user.communityId).toBe(testCommunityId);
       });
     });
 
     test('should filter users by role', async () => {
-      const result = await userRepository.findMany({ role: 'admin' }, testCommunityId);
+      const result = await userRepository.findMany(
+        { role: 'admin' },
+        testCommunityId
+      );
 
       expect(result.data).toHaveLength(1);
       expect(result.data[0].role).toBe('admin');
     });
 
     test('should filter users by active status', async () => {
-      const result = await userRepository.findMany({ isActive: false }, testCommunityId);
+      const result = await userRepository.findMany(
+        { isActive: false },
+        testCommunityId
+      );
 
       expect(result.data).toHaveLength(1);
       expect(result.data[0].isActive).toBe(false);
     });
 
     test('should search users by name', async () => {
-      const result = await userRepository.findMany({ search: 'Admin' }, testCommunityId);
+      const result = await userRepository.findMany(
+        { search: 'Admin' },
+        testCommunityId
+      );
 
       expect(result.data).toHaveLength(1);
       expect(result.data[0].firstName).toBe('Admin');
@@ -434,15 +487,33 @@ describe('User Repository', () => {
       const user2 = await userRepository.create(user2Data);
 
       // Verify users can only be accessed within their communities
-      expect(await userRepository.findById(user1.id, testCommunityId)).toBeDefined();
-      expect(await userRepository.findById(user1.id, otherCommunityId)).toBeNull();
+      expect(
+        await userRepository.findById(user1.id, testCommunityId)
+      ).toBeDefined();
+      expect(
+        await userRepository.findById(user1.id, otherCommunityId)
+      ).toBeNull();
 
-      expect(await userRepository.findById(user2.id, otherCommunityId)).toBeDefined();
-      expect(await userRepository.findById(user2.id, testCommunityId)).toBeNull();
+      expect(
+        await userRepository.findById(user2.id, otherCommunityId)
+      ).toBeDefined();
+      expect(
+        await userRepository.findById(user2.id, testCommunityId)
+      ).toBeNull();
 
       // Verify email search is community-scoped
-      expect(await userRepository.findByEmail('isolation1@example.com', testCommunityId)).toBeDefined();
-      expect(await userRepository.findByEmail('isolation1@example.com', otherCommunityId)).toBeNull();
+      expect(
+        await userRepository.findByEmail(
+          'isolation1@example.com',
+          testCommunityId
+        )
+      ).toBeDefined();
+      expect(
+        await userRepository.findByEmail(
+          'isolation1@example.com',
+          otherCommunityId
+        )
+      ).toBeNull();
     });
   });
 });

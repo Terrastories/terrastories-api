@@ -1,5 +1,6 @@
 // Example: Service layer with error handling
 import { UserRepository } from '../repositories/userRepository';
+import { hashPassword, comparePassword, validatePasswordStrength } from '../services/password.service';
 
 // Custom Error classes for specific failure scenarios
 export class UserNotFoundError extends Error {
@@ -16,6 +17,13 @@ export class DuplicateEmailError extends Error {
   }
 }
 
+export class WeakPasswordError extends Error {
+  constructor(message = 'Password does not meet security requirements') {
+    super(message);
+    this.name = 'WeakPasswordError';
+  }
+}
+
 export class UserService {
   // Inject the repository dependency
   constructor(private userRepository: UserRepository) {}
@@ -28,7 +36,25 @@ export class UserService {
       throw new DuplicateEmailError();
     }
 
-    return this.userRepository.create(userData);
+    // Validate password strength before hashing
+    const passwordValidation = validatePasswordStrength(userData.password);
+    if (!passwordValidation.isValid) {
+      throw new WeakPasswordError(
+        `Password requirements not met: ${passwordValidation.errors.join(', ')}`
+      );
+    }
+
+    // Hash the password securely before storing
+    const passwordHash = await hashPassword(userData.password);
+    
+    // Remove plain password and add hash
+    const { password, ...userDataWithoutPassword } = userData;
+    const userToCreate = {
+      ...userDataWithoutPassword,
+      passwordHash
+    };
+
+    return this.userRepository.create(userToCreate);
   }
 
   async getUserById(id: string): Promise<User> {
@@ -65,5 +91,50 @@ export class UserService {
     if (!success) {
       throw new UserNotFoundError();
     }
+  }
+
+  /**
+   * Authenticate user by email and password
+   * 
+   * Example usage of password comparison service
+   */
+  async authenticateUser(email: string, password: string): Promise<User> {
+    const user = await this.userRepository.findByEmail(email);
+    if (!user) {
+      throw new UserNotFoundError('Invalid email or password');
+    }
+
+    // Use secure password comparison
+    const isValidPassword = await comparePassword(password, user.passwordHash);
+    if (!isValidPassword) {
+      throw new UserNotFoundError('Invalid email or password');
+    }
+
+    return user;
+  }
+
+  /**
+   * Change user password with validation
+   */
+  async changePassword(userId: string, oldPassword: string, newPassword: string): Promise<void> {
+    const user = await this.getUserById(userId);
+
+    // Verify old password
+    const isValidOldPassword = await comparePassword(oldPassword, user.passwordHash);
+    if (!isValidOldPassword) {
+      throw new Error('Current password is incorrect');
+    }
+
+    // Validate new password strength
+    const passwordValidation = validatePasswordStrength(newPassword);
+    if (!passwordValidation.isValid) {
+      throw new WeakPasswordError(
+        `New password requirements not met: ${passwordValidation.errors.join(', ')}`
+      );
+    }
+
+    // Hash and update password
+    const newPasswordHash = await hashPassword(newPassword);
+    await this.userRepository.update(userId, { passwordHash: newPasswordHash });
   }
 }

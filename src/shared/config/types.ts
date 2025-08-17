@@ -61,6 +61,26 @@ export interface AuthConfig {
 }
 
 /**
+ * Security configuration for cryptographic operations
+ */
+export interface SecurityConfig {
+  /** Password hashing configuration */
+  password: {
+    /** Hashing algorithm (currently argon2id) */
+    algorithm: 'argon2id';
+    /** Argon2 algorithm parameters */
+    argon2: {
+      /** Memory cost in KB (default: 64MB = 65536) */
+      memory: number;
+      /** Time cost / iterations (default: 3) */
+      iterations: number;
+      /** Parallelism factor (default: 4) */
+      parallelism: number;
+    };
+  };
+}
+
+/**
  * Logging configuration
  */
 export interface LoggingConfig {
@@ -97,6 +117,8 @@ export interface AppConfig {
   database: DatabaseConfig;
   /** Authentication and security settings */
   auth: AuthConfig;
+  /** Security and cryptographic settings */
+  security: SecurityConfig;
   /** Logging configuration */
   logging: LoggingConfig;
   /** Environment-specific feature flags */

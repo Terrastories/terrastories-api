@@ -300,6 +300,43 @@ export function createApiClient(app: FastifyInstance): ApiTestClient {
 }
 
 /**
+ * Create test Fastify app with routes for testing
+ */
+export async function createTestApp(
+  testDatabase?: any
+): Promise<FastifyInstance> {
+  if (testDatabase) {
+    // Create a custom app that uses the test database
+    const Fastify = (await import('fastify')).default;
+    const app = Fastify({
+      logger: false, // Disable logging in tests
+      disableRequestLogging: true,
+      // @ts-expect-error - Fastify v5 types don't yet properly export routerOptions interface
+      routerOptions: {
+        ignoreTrailingSlash: true,
+        caseSensitive: false,
+      },
+    });
+
+    // Add essential plugins for JSON handling (mirror main app)
+    await app.register((await import('@fastify/cors')).default);
+
+    // Register auth routes with test database
+    const { authRoutes } = await import('../../src/routes/auth.js');
+    await app.register(authRoutes, {
+      prefix: '/api/v1',
+      database: testDatabase,
+    });
+
+    return app;
+  } else {
+    // Import buildApp dynamically to avoid circular dependencies
+    const { buildApp } = await import('../../src/app.js');
+    return await buildApp();
+  }
+}
+
+/**
  * Mock data generators for testing
  */
 export class MockDataGenerator {

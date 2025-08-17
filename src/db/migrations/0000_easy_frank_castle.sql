@@ -55,6 +55,24 @@ CREATE TABLE `stories` (
 	`updated_at` integer NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE `story_places` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`story_id` integer NOT NULL,
+	`place_id` integer NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `story_place_unique` ON `story_places` (`story_id`,`place_id`);--> statement-breakpoint
+CREATE TABLE `story_speakers` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`story_id` integer NOT NULL,
+	`speaker_id` integer NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `story_speaker_unique` ON `story_speakers` (`story_id`,`speaker_id`);--> statement-breakpoint
 CREATE TABLE `users` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`email` text NOT NULL,
@@ -68,4 +86,4 @@ CREATE TABLE `users` (
 	`updated_at` integer NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);
+CREATE UNIQUE INDEX `users_email_community_unique` ON `users` (`email`,`community_id`);

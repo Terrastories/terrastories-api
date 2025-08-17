@@ -13,13 +13,16 @@ import { fileURLToPath } from 'node:url';
 import {
   communitiesSqlite,
   placesSqlite,
+  usersSqlite,
   Community,
   Place,
+  User,
 } from '../../src/db/schema/index.js';
 
 // Use SQLite tables for tests
 const communities = communitiesSqlite;
 const places = placesSqlite;
+const users = usersSqlite;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,6 +31,7 @@ export type TestDatabase = ReturnType<
   typeof drizzle<{
     communities: typeof communities;
     places: typeof places;
+    users: typeof users;
   }>
 >;
 
@@ -56,7 +60,7 @@ export class TestDatabaseManager {
 
     // Create Drizzle instance
     this.db = drizzle(this.sqlite, {
-      schema: { communities, places },
+      schema: { communities, places, users },
     });
 
     // Run migrations
@@ -122,6 +126,7 @@ export class TestDatabaseManager {
     try {
       // Clear in dependency order (children first)
       await this.db.delete(places);
+      await this.db.delete(users);
       await this.db.delete(communities);
       console.log('🧹 All test data cleared');
     } catch (error: any) {
@@ -156,26 +161,27 @@ export class TestDatabaseManager {
   async seedTestData(): Promise<TestFixtures> {
     const db = await this.getDb();
 
-    // Insert test communities (without explicit IDs to avoid conflicts)
+    // Insert test communities with unique slugs per test run
+    const timestamp = Date.now();
     const testCommunities = await db
       .insert(communities)
       .values([
         {
           name: 'Test Community',
           description: 'A test community for unit tests',
-          slug: 'test-community',
+          slug: `test-community-${timestamp}`,
           publicStories: true,
         },
         {
           name: 'Demo Community',
           description: 'A demo community for integration tests',
-          slug: 'demo-community',
+          slug: `demo-community-${timestamp}`,
           publicStories: false,
         },
         {
           name: 'Isolated Test Community',
           description: 'Community for isolated test scenarios',
-          slug: 'isolated-test',
+          slug: `isolated-test-${timestamp}`,
           publicStories: true,
         },
       ])
@@ -244,6 +250,7 @@ export class TestDatabaseManager {
   async getStats(): Promise<{
     communities: number;
     places: number;
+    users: number;
     memoryUsage: string;
   }> {
     const db = await this.getDb();
@@ -252,10 +259,12 @@ export class TestDatabaseManager {
       .select({ count: sql`count(*)` })
       .from(communities);
     const placesCount = await db.select({ count: sql`count(*)` }).from(places);
+    const usersCount = await db.select({ count: sql`count(*)` }).from(users);
 
     return {
       communities: Number(communitiesCount[0]?.count || 0),
       places: Number(placesCount[0]?.count || 0),
+      users: Number(usersCount[0]?.count || 0),
       memoryUsage: this.sqlite ? `${this.sqlite.memory.used} bytes` : '0 bytes',
     };
   }
@@ -267,6 +276,7 @@ export class TestDatabaseManager {
 export interface TestFixtures {
   communities: Community[];
   places: Place[];
+  users?: User[];
 }
 
 /**
@@ -303,6 +313,23 @@ export class TestDataFactory {
       culturalSignificance: null,
       isRestricted: false,
       communityId: communityId,
+      ...overrides,
+    };
+  }
+
+  static createUser(
+    communityId: number,
+    overrides: Partial<User> = {}
+  ): Omit<User, 'id' | 'createdAt' | 'updatedAt'> {
+    const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    return {
+      email: `user-${uniqueId}@factory.test`,
+      passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+      firstName: 'Factory',
+      lastName: 'User',
+      role: 'viewer' as const,
+      communityId: communityId,
+      isActive: true,
       ...overrides,
     };
   }

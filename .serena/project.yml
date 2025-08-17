@@ -1,0 +1,3 @@
+project_name: terrastories-api
+language: typescript
+description: Terrastories geostorytelling platform migration from Rails to NestJS

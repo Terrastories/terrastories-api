@@ -17,11 +17,13 @@ import {
   timestamp,
   boolean,
   integer as pgInteger,
+  unique,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
+  unique as sqliteUnique,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
@@ -40,7 +42,7 @@ export type UserRole = z.infer<typeof UserRoleSchema>;
 // PostgreSQL table for production
 export const usersPg = pgTable('users', {
   id: serial('id').primaryKey(),
-  email: pgText('email').notNull().unique(),
+  email: pgText('email').notNull(),
   passwordHash: pgText('password_hash').notNull(),
   firstName: pgText('first_name').notNull(),
   lastName: pgText('last_name').notNull(),
@@ -53,12 +55,15 @@ export const usersPg = pgTable('users', {
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+}, (table) => ({
+  // Email must be unique within each community, but can be shared across communities
+  emailCommunityUnique: unique('users_email_community_unique').on(table.email, table.communityId),
+}));
 
 // SQLite table for development/testing
 export const usersSqlite = sqliteTable('users', {
   id: integer('id').primaryKey({ autoIncrement: true }),
-  email: sqliteText('email').notNull().unique(),
+  email: sqliteText('email').notNull(),
   passwordHash: sqliteText('password_hash').notNull(),
   firstName: sqliteText('first_name').notNull(),
   lastName: sqliteText('last_name').notNull(),
@@ -75,7 +80,10 @@ export const usersSqlite = sqliteTable('users', {
   updatedAt: integer('updated_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),
-});
+}, (table) => ({
+  // Email must be unique within each community, but can be shared across communities
+  emailCommunityUnique: sqliteUnique('users_email_community_unique').on(table.email, table.communityId),
+}));
 
 // Dynamic table selection based on database type (for runtime use)
 // Note: This function imports getConfig at runtime to avoid circular dependencies during migration
@@ -123,6 +131,8 @@ export const selectUserSchema = createSelectSchema(usersPg);
 // TypeScript types
 export type User = typeof usersPg.$inferSelect;
 export type NewUser = typeof usersPg.$inferInsert;
+export type CreateUserData = NewUser;
+export type UpdateUserData = Partial<NewUser>;
 
 // Additional validation schemas for specific use cases
 export const createUserSchema = insertUserSchema.omit({
@@ -137,5 +147,5 @@ export const updateUserSchema = insertUserSchema.partial().omit({
 });
 
 // Export table variants for migration generation
-// The default export uses PostgreSQL table for Drizzle Kit
-export const users = usersPg;
+// Use SQLite table for Drizzle Kit (config determines which is used)
+export const users = usersSqlite;

@@ -302,26 +302,25 @@ export function createApiClient(app: FastifyInstance): ApiTestClient {
 /**
  * Create test Fastify app with routes for testing
  */
-export async function createTestApp(testDatabase?: any): Promise<FastifyInstance> {
+export async function createTestApp(
+  testDatabase?: any
+): Promise<FastifyInstance> {
   if (testDatabase) {
     // Create a custom app that uses the test database
     const Fastify = (await import('fastify')).default;
     const app = Fastify({
       logger: false, // Disable logging in tests
+      disableRequestLogging: true,
     });
 
-    // Add minimal plugins needed for auth routes
+    // Add essential plugins for JSON handling
     await app.register((await import('@fastify/cors')).default);
-    
-    // Register health route (simple, no database dependency)
-    const { healthRoute } = await import('../../src/routes/health.js');
-    await app.register(healthRoute);
-    
+
     // Register auth routes with test database
     const { authRoutes } = await import('../../src/routes/auth.js');
-    await app.register(authRoutes, { 
-      prefix: '/api/v1', 
-      database: testDatabase 
+    await app.register(authRoutes, {
+      prefix: '/api/v1',
+      database: testDatabase,
     });
 
     return app;

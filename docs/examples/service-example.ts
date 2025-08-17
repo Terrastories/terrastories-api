@@ -48,6 +48,7 @@ export class UserService {
     const passwordHash = await hashPassword(userData.password);
     
     // Remove plain password and add hash
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { password, ...userDataWithoutPassword } = userData;
     const userToCreate = {
       ...userDataWithoutPassword,

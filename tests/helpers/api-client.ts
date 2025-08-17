@@ -311,9 +311,14 @@ export async function createTestApp(
     const app = Fastify({
       logger: false, // Disable logging in tests
       disableRequestLogging: true,
+      // @ts-expect-error - Fastify v5 types don't yet properly export routerOptions interface
+      routerOptions: {
+        ignoreTrailingSlash: true,
+        caseSensitive: false,
+      },
     });
 
-    // Add essential plugins for JSON handling
+    // Add essential plugins for JSON handling (mirror main app)
     await app.register((await import('@fastify/cors')).default);
 
     // Register auth routes with test database

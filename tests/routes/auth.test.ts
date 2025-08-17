@@ -58,15 +58,16 @@ describe('Authentication Routes', () => {
       expect(response.statusCode).toBe(201);
 
       const responseBody = JSON.parse(response.body);
-      expect(responseBody).toHaveProperty('id');
-      expect(responseBody.email).toBe(registrationData.email);
-      expect(responseBody.firstName).toBe(registrationData.firstName);
-      expect(responseBody.lastName).toBe(registrationData.lastName);
-      expect(responseBody.role).toBe(registrationData.role);
-      expect(responseBody.communityId).toBe(testCommunityId);
-      expect(responseBody.isActive).toBe(true);
-      expect(responseBody).toHaveProperty('createdAt');
-      expect(responseBody).toHaveProperty('updatedAt');
+      expect(responseBody).toHaveProperty('user');
+      expect(responseBody.user).toHaveProperty('id');
+      expect(responseBody.user.email).toBe(registrationData.email);
+      expect(responseBody.user.firstName).toBe(registrationData.firstName);
+      expect(responseBody.user.lastName).toBe(registrationData.lastName);
+      expect(responseBody.user.role).toBe(registrationData.role);
+      expect(responseBody.user.communityId).toBe(testCommunityId);
+      expect(responseBody.user.isActive).toBe(true);
+      expect(responseBody.user).toHaveProperty('createdAt');
+      expect(responseBody.user).toHaveProperty('updatedAt');
 
       // Should not return password hash
       expect(responseBody).not.toHaveProperty('password');
@@ -228,7 +229,7 @@ describe('Authentication Routes', () => {
 
       expect(response.statusCode).toBe(201);
       const responseBody = JSON.parse(response.body);
-      expect(responseBody.role).toBe('viewer');
+      expect(responseBody.user.role).toBe('viewer');
     });
 
     test('should handle server errors gracefully', async () => {
@@ -292,9 +293,9 @@ describe('Authentication Routes', () => {
 
       expect(response.statusCode).toBe(201);
       const responseBody = JSON.parse(response.body);
-      expect(responseBody.email).toBe('test@example.com');
-      expect(responseBody.firstName).toBe('John');
-      expect(responseBody.lastName).toBe('Doe');
+      expect(responseBody.user.email).toBe('test@example.com');
+      expect(responseBody.user.firstName).toBe('John');
+      expect(responseBody.user.lastName).toBe('Doe');
     });
 
     test('should reject requests with extra unknown fields', async () => {
@@ -422,19 +423,20 @@ describe('Authentication Routes', () => {
       const responseBody = JSON.parse(response.body);
 
       // Verify response structure
-      expect(responseBody).toHaveProperty('id');
-      expect(responseBody).toHaveProperty('email');
-      expect(responseBody).toHaveProperty('firstName');
-      expect(responseBody).toHaveProperty('lastName');
-      expect(responseBody).toHaveProperty('role');
-      expect(responseBody).toHaveProperty('communityId');
-      expect(responseBody).toHaveProperty('isActive');
-      expect(responseBody).toHaveProperty('createdAt');
-      expect(responseBody).toHaveProperty('updatedAt');
+      expect(responseBody).toHaveProperty('user');
+      expect(responseBody.user).toHaveProperty('id');
+      expect(responseBody.user).toHaveProperty('email');
+      expect(responseBody.user).toHaveProperty('firstName');
+      expect(responseBody.user).toHaveProperty('lastName');
+      expect(responseBody.user).toHaveProperty('role');
+      expect(responseBody.user).toHaveProperty('communityId');
+      expect(responseBody.user).toHaveProperty('isActive');
+      expect(responseBody.user).toHaveProperty('createdAt');
+      expect(responseBody.user).toHaveProperty('updatedAt');
 
       // Verify excluded fields
-      expect(responseBody).not.toHaveProperty('password');
-      expect(responseBody).not.toHaveProperty('passwordHash');
+      expect(responseBody.user).not.toHaveProperty('password');
+      expect(responseBody.user).not.toHaveProperty('passwordHash');
     });
 
     test('should return consistent error response format', async () => {
@@ -502,9 +504,9 @@ describe('Authentication Routes', () => {
       const user1 = JSON.parse(response1.body);
       const user2 = JSON.parse(response2.body);
 
-      expect(user1.communityId).toBe(community1Id);
-      expect(user2.communityId).toBe(community2Id);
-      expect(user1.id).not.toBe(user2.id);
+      expect(user1.user.communityId).toBe(community1Id);
+      expect(user2.user.communityId).toBe(community2Id);
+      expect(user1.user.id).not.toBe(user2.user.id);
     });
 
     test('should allow same email in different communities', async () => {
@@ -538,10 +540,10 @@ describe('Authentication Routes', () => {
       const user1 = JSON.parse(response1.body);
       const user2 = JSON.parse(response2.body);
 
-      expect(user1.email).toBe(userData.email);
-      expect(user2.email).toBe(userData.email);
-      expect(user1.communityId).toBe(community1Id);
-      expect(user2.communityId).toBe(community2Id);
+      expect(user1.user.email).toBe(userData.email);
+      expect(user2.user.email).toBe(userData.email);
+      expect(user1.user.communityId).toBe(community1Id);
+      expect(user2.user.communityId).toBe(community2Id);
     });
   });
 });

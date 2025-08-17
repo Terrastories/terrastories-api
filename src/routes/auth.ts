@@ -167,8 +167,8 @@ export async function authRoutes(
           updatedAt: user.updatedAt.toISOString(),
         };
 
-        // Return success response with flat structure to match tests
-        return reply.status(201).send(userResponse);
+        // Return success response - schema expects user property wrapper
+        return reply.status(201).send({ user: userResponse });
       } catch (error) {
         fastify.log.error({ error, url: request.url }, 'Registration error');
 
@@ -300,7 +300,7 @@ export async function authRoutes(
 
         // Store session in reply context (for future session middleware)
         // This is a placeholder for actual session implementation
-        (request as Record<string, unknown>).session = {
+        (request as unknown as Record<string, unknown>).session = {
           user: {
             id: user.id,
             email: user.email,
@@ -382,7 +382,7 @@ export async function authRoutes(
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         // Clear session (placeholder for actual session implementation)
-        (request as Record<string, unknown>).session = undefined;
+        (request as unknown as Record<string, unknown>).session = undefined;
 
         return reply.status(200).send({
           message: 'Successfully logged out',

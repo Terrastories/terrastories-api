@@ -122,6 +122,9 @@ export class TestDatabaseManager {
     try {
       // Clear in dependency order (children first)
       await this.db.delete(places);
+      // Import users table
+      const { users } = await import('../../src/db/schema/index.js');
+      await this.db.delete(users);
       await this.db.delete(communities);
       console.log('🧹 All test data cleared');
     } catch (error: any) {
@@ -156,26 +159,27 @@ export class TestDatabaseManager {
   async seedTestData(): Promise<TestFixtures> {
     const db = await this.getDb();
 
-    // Insert test communities (without explicit IDs to avoid conflicts)
+    // Insert test communities with unique slugs per test run
+    const timestamp = Date.now();
     const testCommunities = await db
       .insert(communities)
       .values([
         {
           name: 'Test Community',
           description: 'A test community for unit tests',
-          slug: 'test-community',
+          slug: `test-community-${timestamp}`,
           publicStories: true,
         },
         {
           name: 'Demo Community',
           description: 'A demo community for integration tests',
-          slug: 'demo-community',
+          slug: `demo-community-${timestamp}`,
           publicStories: false,
         },
         {
           name: 'Isolated Test Community',
           description: 'Community for isolated test scenarios',
-          slug: 'isolated-test',
+          slug: `isolated-test-${timestamp}`,
           publicStories: true,
         },
       ])

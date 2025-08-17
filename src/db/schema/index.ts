@@ -5,3 +5,4 @@ export * from './stories.js';
 export * from './story_places.js';
 export * from './story_speakers.js';
 export * from './users.js';
+export * from './attachments.js';

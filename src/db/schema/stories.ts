@@ -86,29 +86,41 @@ export async function getStoriesTable() {
   return isPostgres ? storiesPg : storiesSqlite;
 }
 
-// Relations - Stories belong to one community and one author
-export const storiesRelations = relations(storiesPg, ({ one }) => ({
-  community: one(communitiesPg, {
-    fields: [storiesPg.communityId],
-    references: [communitiesPg.id],
-  }),
-  author: one(usersPg, {
-    fields: [storiesPg.createdBy],
-    references: [usersPg.id],
-  }),
-}));
+// Relations - Stories belong to one community and one author, and have many-to-many with places and speakers
+export const storiesRelations = relations(
+  storiesPg,
+  ({ one, many: _many }) => ({
+    community: one(communitiesPg, {
+      fields: [storiesPg.communityId],
+      references: [communitiesPg.id],
+    }),
+    author: one(usersPg, {
+      fields: [storiesPg.createdBy],
+      references: [usersPg.id],
+    }),
+    // Many-to-many relations through join tables (will be available after join tables are created)
+    // storyPlaces: many(storyPlaces),
+    // storySpeakers: many(storySpeakers),
+  })
+);
 
 // SQLite relations (same structure)
-export const storiesSqliteRelations = relations(storiesSqlite, ({ one }) => ({
-  community: one(communitiesPg, {
-    fields: [storiesSqlite.communityId],
-    references: [communitiesPg.id],
-  }),
-  author: one(usersPg, {
-    fields: [storiesSqlite.createdBy],
-    references: [usersPg.id],
-  }),
-}));
+export const storiesSqliteRelations = relations(
+  storiesSqlite,
+  ({ one, many: _many }) => ({
+    community: one(communitiesPg, {
+      fields: [storiesSqlite.communityId],
+      references: [communitiesPg.id],
+    }),
+    author: one(usersPg, {
+      fields: [storiesSqlite.createdBy],
+      references: [usersPg.id],
+    }),
+    // Many-to-many relations through join tables (will be available after join tables are created)
+    // storyPlaces: many(storyPlaces),
+    // storySpeakers: many(storySpeakers),
+  })
+);
 
 // Zod schemas for validation - using PostgreSQL table as base for consistency
 export const insertStorySchema = createInsertSchema(storiesPg, {

@@ -21,10 +21,16 @@ import {
 describe('Spatial Database Operations', () => {
   let database: Awaited<ReturnType<typeof getDb>>;
   let places: Awaited<ReturnType<typeof getPlacesTable>>;
+  let isPostgres: boolean;
 
   beforeAll(async () => {
     database = await setupTestDatabase();
     places = await getPlacesTable();
+
+    const config = getConfig();
+    isPostgres =
+      config.database.url.startsWith('postgresql://') ||
+      config.database.url.startsWith('postgres://');
   });
 
   afterAll(async () => {
@@ -108,12 +114,20 @@ describe('Spatial Database Operations', () => {
 
   describe('Place CRUD Operations with Spatial Data', () => {
     it('should insert a place with point location', async () => {
-      const newPlace: NewPlace = {
-        name: 'Test Location',
-        description: 'A test place for spatial operations',
-        location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
-        communityId: 1,
-      };
+      const newPlace: NewPlace = isPostgres
+        ? {
+            name: 'Test Location',
+            description: 'A test place for spatial operations',
+            location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
+            communityId: 1,
+          }
+        : {
+            name: 'Test Location',
+            description: 'A test place for spatial operations',
+            latitude: 40.7128, // NYC
+            longitude: -74.006,
+            communityId: 1,
+          };
 
       const result = await database.insert(places).values(newPlace).returning();
 
@@ -123,30 +137,51 @@ describe('Spatial Database Operations', () => {
         description: 'A test place for spatial operations',
         communityId: 1,
       });
-      expect(result[0].location).toBeTruthy();
 
-      // Verify the spatial data
-      const locationData = SpatialUtils.parsePoint(result[0].location!);
-      expect(locationData).toEqual({
-        latitude: 40.7128,
-        longitude: -74.006,
-      });
+      if (isPostgres) {
+        expect(result[0].location).toBeTruthy();
+        // Verify the spatial data
+        const locationData = SpatialUtils.parsePoint(result[0].location!);
+        expect(locationData).toEqual({
+          latitude: 40.7128,
+          longitude: -74.006,
+        });
+      } else {
+        // For SQLite, verify coordinate fields
+        expect(result[0].latitude).toBe(40.7128);
+        expect(result[0].longitude).toBe(-74.006);
+      }
     });
 
     it('should query places by spatial criteria', async () => {
       // Insert test places
-      const testPlaces: NewPlace[] = [
-        {
-          name: 'Place A',
-          location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
-          communityId: 1,
-        },
-        {
-          name: 'Place B',
-          location: SpatialUtils.createPoint(34.0522, -118.2437), // LA
-          communityId: 1,
-        },
-      ];
+      const testPlaces: NewPlace[] = isPostgres
+        ? [
+            {
+              name: 'Place A',
+              location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
+              communityId: 1,
+            },
+            {
+              name: 'Place B',
+              location: SpatialUtils.createPoint(34.0522, -118.2437), // LA
+              communityId: 1,
+            },
+          ]
+        : [
+            {
+              name: 'Place A',
+              latitude: 40.7128, // NYC
+              longitude: -74.006,
+              communityId: 1,
+            },
+            {
+              name: 'Place B',
+              latitude: 34.0522, // LA
+              longitude: -118.2437,
+              communityId: 1,
+            },
+          ];
 
       await database.insert(places).values(testPlaces);
 
@@ -154,34 +189,68 @@ describe('Spatial Database Operations', () => {
       const allPlaces = await database.select().from(places);
       expect(allPlaces.length).toBeGreaterThanOrEqual(2);
 
-      // Verify spatial data integrity
-      const placesWithCoords = allPlaces
-        .map((place) => ({
-          ...place,
-          coords: SpatialUtils.parsePoint(place.location!),
-        }))
-        .filter((place) => place.coords !== null);
+      if (isPostgres) {
+        // Verify spatial data integrity for PostgreSQL
+        const placesWithCoords = allPlaces
+          .map((place) => ({
+            ...place,
+            coords: SpatialUtils.parsePoint(place.location!),
+          }))
+          .filter((place) => place.coords !== null);
 
-      expect(placesWithCoords.length).toBeGreaterThan(0);
-      expect(placesWithCoords[0].coords).toHaveProperty('latitude');
-      expect(placesWithCoords[0].coords).toHaveProperty('longitude');
+        expect(placesWithCoords.length).toBeGreaterThan(0);
+      } else {
+        // Verify coordinate data for SQLite
+        const placesWithCoords = allPlaces.filter(
+          (place) => place.latitude != null && place.longitude != null
+        );
+        expect(placesWithCoords.length).toBeGreaterThan(0);
+
+        // Verify coordinate values
+        placesWithCoords.forEach((place) => {
+          expect(typeof place.latitude).toBe('number');
+          expect(typeof place.longitude).toBe('number');
+        });
+      }
     });
 
     it('should handle places without spatial data', async () => {
-      const placeWithoutLocation: NewPlace = {
-        name: 'No Location Place',
-        description: 'Place without spatial data',
-        communityId: 1,
-      };
+      if (isPostgres) {
+        // PostgreSQL can handle optional location field
+        const placeWithoutLocation: NewPlace = {
+          name: 'No Location Place',
+          description: 'Place without spatial data',
+          communityId: 1,
+        };
 
-      const result = await database
-        .insert(places)
-        .values(placeWithoutLocation)
-        .returning();
+        const result = await database
+          .insert(places)
+          .values(placeWithoutLocation)
+          .returning();
 
-      expect(result).toHaveLength(1);
-      expect(result[0].name).toBe('No Location Place');
-      expect(result[0].location).toBeNull();
+        expect(result).toHaveLength(1);
+        expect(result[0].name).toBe('No Location Place');
+        expect(result[0].location).toBeNull();
+      } else {
+        // SQLite requires latitude/longitude, use default coordinates
+        const placeWithMinimalLocation: NewPlace = {
+          name: 'No Location Place',
+          description: 'Place without specific spatial data',
+          latitude: 0, // Default to null island
+          longitude: 0,
+          communityId: 1,
+        };
+
+        const result = await database
+          .insert(places)
+          .values(placeWithMinimalLocation)
+          .returning();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].name).toBe('No Location Place');
+        expect(result[0].latitude).toBe(0);
+        expect(result[0].longitude).toBe(0);
+      }
     });
   });
 
@@ -237,21 +306,23 @@ describe('Spatial Database Operations', () => {
 
   describe('Database Environment Compatibility', () => {
     it('should work with current database configuration', async () => {
-      const config = getConfig();
-      const isPostgres =
-        config.database.url.startsWith('postgresql://') ||
-        config.database.url.startsWith('postgres://');
-
       console.log(
         `📊 Testing with ${isPostgres ? 'PostgreSQL' : 'SQLite'} database`
       );
 
       // Test basic database operations
-      const testPlace: NewPlace = {
-        name: 'Compatibility Test Place',
-        location: SpatialUtils.createPoint(0, 0),
-        communityId: 999,
-      };
+      const testPlace: NewPlace = isPostgres
+        ? {
+            name: 'Compatibility Test Place',
+            location: SpatialUtils.createPoint(0, 0),
+            communityId: 999,
+          }
+        : {
+            name: 'Compatibility Test Place',
+            latitude: 0,
+            longitude: 0,
+            communityId: 999,
+          };
 
       const result = await database
         .insert(places)

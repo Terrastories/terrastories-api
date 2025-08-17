@@ -45,8 +45,9 @@ describe('Database Test Helpers', () => {
         expect(place).toMatchObject({
           id: expect.any(Number),
           name: expect.any(String),
-          communityId: expect.any(Number), // Use camelCase field name
-          location: expect.any(String),
+          communityId: expect.any(Number),
+          latitude: expect.any(Number),
+          longitude: expect.any(Number),
         });
       });
     });
@@ -114,16 +115,16 @@ describe('Database Test Helpers', () => {
       expect(placeData).toMatchObject({
         name: expect.any(String),
         description: expect.any(String),
-        location: expect.any(String),
-        communityId: 1, // Use camelCase field name
+        latitude: expect.any(Number),
+        longitude: expect.any(Number),
+        communityId: 1,
       });
 
-      // Verify location is valid JSON
-      const location = JSON.parse(placeData.location);
-      expect(location).toMatchObject({
-        type: 'Point',
-        coordinates: expect.any(Array),
-      });
+      // Verify coordinates are valid
+      expect(placeData.latitude).toBeGreaterThanOrEqual(-90);
+      expect(placeData.latitude).toBeLessThanOrEqual(90);
+      expect(placeData.longitude).toBeGreaterThanOrEqual(-180);
+      expect(placeData.longitude).toBeLessThanOrEqual(180);
     });
 
     it('should create spatial test data', () => {
@@ -134,14 +135,16 @@ describe('Database Test Helpers', () => {
       spatialData.forEach((place) => {
         expect(place).toMatchObject({
           name: expect.any(String),
-          location: expect.any(String),
-          communityId: 1, // Use camelCase field name
+          latitude: expect.any(Number),
+          longitude: expect.any(Number),
+          communityId: 1,
         });
 
-        // Verify location data
-        const location = JSON.parse(place.location);
-        expect(location.type).toBe('Point');
-        expect(location.coordinates).toHaveLength(2);
+        // Verify coordinate data
+        expect(place.latitude).toBeGreaterThanOrEqual(-90);
+        expect(place.latitude).toBeLessThanOrEqual(90);
+        expect(place.longitude).toBeGreaterThanOrEqual(-180);
+        expect(place.longitude).toBeLessThanOrEqual(180);
       });
     });
 

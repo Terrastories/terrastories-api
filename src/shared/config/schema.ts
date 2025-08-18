@@ -115,6 +115,26 @@ export const LoggingConfigSchema = z.object({
   level: LogLevelSchema,
 });
 
+// File upload configuration schema
+export const FileUploadConfigSchema = z.object({
+  uploadDir: z.string().default('./uploads'),
+  maxFileSizes: z.object({
+    image: z.coerce.number().default(10 * 1024 * 1024), // 10MB
+    audio: z.coerce.number().default(50 * 1024 * 1024), // 50MB
+    video: z.coerce.number().default(100 * 1024 * 1024), // 100MB
+  }),
+  allowedImageTypes: z
+    .array(z.string())
+    .default(['image/jpeg', 'image/png', 'image/webp']),
+  allowedAudioTypes: z
+    .array(z.string())
+    .default(['audio/mpeg', 'audio/wav', 'audio/ogg']),
+  allowedVideoTypes: z.array(z.string()).default(['video/mp4', 'video/webm']),
+  enableMetadataExtraction: z.boolean().default(true),
+  streamingThreshold: z.coerce.number().default(5 * 1024 * 1024), // 5MB
+  enableAuditLogging: z.boolean().default(true),
+});
+
 // Feature configuration schema
 export const FeatureConfigSchema = z.object({
   offlineMode: z.boolean().default(false),
@@ -132,6 +152,7 @@ export const AppConfigSchema = z.object({
   security: SecurityConfigSchema,
   logging: LoggingConfigSchema,
   features: FeatureConfigSchema,
+  fileUpload: FileUploadConfigSchema,
 });
 
 // Environment-specific schemas

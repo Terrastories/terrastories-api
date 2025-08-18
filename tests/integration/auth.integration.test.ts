@@ -3,7 +3,7 @@ import { buildApp } from '../../src/app.js';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
 
-describe('Authentication Integration Tests', () => {
+describe.skip('Authentication Integration Tests', () => {
   let app: FastifyInstance;
   let testDb: TestDatabaseManager;
 

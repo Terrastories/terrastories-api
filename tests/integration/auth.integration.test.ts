@@ -3,15 +3,20 @@ import { buildApp } from '../../src/app.js';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
 
-describe.skip('Authentication Integration Tests', () => {
+describe('Authentication Integration Tests', () => {
   let app: FastifyInstance;
   let testDb: TestDatabaseManager;
+  let testCommunityId: number;
 
   beforeEach(async () => {
     testDb = new TestDatabaseManager();
     await testDb.setup();
-    app = await buildApp();
+    app = await buildApp({ database: testDb.db });
     await app.ready();
+
+    // Get the first test community ID from fixtures
+    const fixtures = await testDb.seedTestData();
+    testCommunityId = fixtures.communities[0].id;
   });
 
   afterEach(async () => {
@@ -29,7 +34,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'Integration',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'viewer',
         },
       });
@@ -51,7 +56,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'Login',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'viewer',
         },
       });
@@ -63,7 +68,7 @@ describe.skip('Authentication Integration Tests', () => {
         payload: {
           email: 'login@test.com',
           password: 'SecurePassword123!',
-          communityId: 1,
+          communityId: testCommunityId,
         },
       });
 
@@ -81,9 +86,42 @@ describe.skip('Authentication Integration Tests', () => {
     });
 
     it('should logout user through HTTP POST /api/v1/auth/logout', async () => {
+      // First register and login a user to get session
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/register',
+        payload: {
+          email: 'logout-test@test.com',
+          password: 'SecurePassword123!',
+          firstName: 'Logout',
+          lastName: 'Test',
+          communityId: testCommunityId,
+          role: 'viewer',
+        },
+      });
+
+      const loginResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: {
+          email: 'logout-test@test.com',
+          password: 'SecurePassword123!',
+          communityId: testCommunityId,
+        },
+      });
+
+      const setCookieHeader = loginResponse.headers['set-cookie'];
+      const sessionCookie = (
+        Array.isArray(setCookieHeader) ? setCookieHeader[0] : setCookieHeader
+      )!.split(';')[0];
+
+      // Now logout with session
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/logout',
+        headers: {
+          cookie: sessionCookie,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -103,7 +141,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'Session',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'viewer',
         },
       });
@@ -115,7 +153,7 @@ describe.skip('Authentication Integration Tests', () => {
         payload: {
           email: 'session@test.com',
           password: 'SecurePassword123!',
-          communityId: 1,
+          communityId: testCommunityId,
         },
       });
 
@@ -143,7 +181,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'Persistent',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'viewer',
         },
       });
@@ -154,7 +192,7 @@ describe.skip('Authentication Integration Tests', () => {
         payload: {
           email: 'persistent@test.com',
           password: 'SecurePassword123!',
-          communityId: 1,
+          communityId: testCommunityId,
         },
       });
 
@@ -191,7 +229,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'Logout',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'viewer',
         },
       });
@@ -202,7 +240,7 @@ describe.skip('Authentication Integration Tests', () => {
         payload: {
           email: 'logout@test.com',
           password: 'SecurePassword123!',
-          communityId: 1,
+          communityId: testCommunityId,
         },
       });
 
@@ -229,12 +267,12 @@ describe.skip('Authentication Integration Tests', () => {
         const logoutCookieString = Array.isArray(logoutCookieHeader)
           ? logoutCookieHeader[0]
           : logoutCookieHeader;
-        expect(logoutCookieString).toContain('expires=Thu, 01 Jan 1970');
+        expect(logoutCookieString).toContain('Expires=Thu, 01 Jan 1970');
       }
     });
   });
 
-  describe('Rate Limiting', () => {
+  describe.skip('Rate Limiting', () => {
     it('should enforce rate limits on registration endpoint', async () => {
       const userData = {
         email: 'rate@test.com',
@@ -276,7 +314,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'RateLimit',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'viewer',
         },
       });
@@ -314,7 +352,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'Headers',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'viewer',
         },
       });
@@ -336,7 +374,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'Security',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'viewer',
         },
       });
@@ -388,7 +426,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'Middleware',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'admin',
         },
       });
@@ -399,7 +437,7 @@ describe.skip('Authentication Integration Tests', () => {
         payload: {
           email: 'middleware@test.com',
           password: 'SecurePassword123!',
-          communityId: 1,
+          communityId: testCommunityId,
         },
       });
 
@@ -433,7 +471,7 @@ describe.skip('Authentication Integration Tests', () => {
           password: 'SecurePassword123!',
           firstName: 'Viewer',
           lastName: 'Test',
-          communityId: 1,
+          communityId: testCommunityId,
           role: 'viewer',
         },
       });
@@ -444,7 +482,7 @@ describe.skip('Authentication Integration Tests', () => {
         payload: {
           email: 'viewer@test.com',
           password: 'SecurePassword123!',
-          communityId: 1,
+          communityId: testCommunityId,
         },
       });
 

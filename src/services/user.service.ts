@@ -15,7 +15,11 @@
 
 import { UserRepository } from '../repositories/user.repository.js';
 import * as passwordService from './password.service.js';
-import type { User, CreateUserData, UpdateUserData } from '../db/schema/index.js';
+import type {
+  User,
+  CreateUserData,
+  UpdateUserData,
+} from '../db/schema/index.js';
 
 /**
  * Request data for user registration
@@ -25,7 +29,7 @@ export interface CreateUserRequest {
   password: string;
   firstName: string;
   lastName: string;
-  role?: 'super_admin' | 'admin' | 'editor' | 'viewer';
+  role?: 'super_admin' | 'admin' | 'editor' | 'elder' | 'viewer';
   communityId: number;
 }
 
@@ -36,7 +40,7 @@ export interface UpdateUserRequest {
   email?: string;
   firstName?: string;
   lastName?: string;
-  role?: 'super_admin' | 'admin' | 'editor' | 'viewer';
+  role?: 'super_admin' | 'admin' | 'editor' | 'elder' | 'viewer';
   isActive?: boolean;
 }
 
@@ -44,7 +48,9 @@ export interface UpdateUserRequest {
  * Custom error for duplicate email addresses within communities
  */
 export class DuplicateEmailError extends Error {
-  constructor(message = 'User with this email already exists in this community') {
+  constructor(
+    message = 'User with this email already exists in this community'
+  ) {
     super(message);
     this.name = 'DuplicateEmailError';
   }
@@ -120,14 +126,16 @@ export class UserService {
       }
 
       // Validate role
-      const validRoles = ['super_admin', 'admin', 'editor', 'viewer'];
+      const validRoles = ['super_admin', 'admin', 'editor', 'elder', 'viewer'];
       const role = data.role || 'viewer';
       if (!validRoles.includes(role)) {
         throw new Error('Invalid role specified');
       }
 
       // Validate password strength
-      const passwordValidation = passwordService.validatePasswordStrength(data.password);
+      const passwordValidation = passwordService.validatePasswordStrength(
+        data.password
+      );
       if (!passwordValidation.isValid) {
         throw new WeakPasswordError(
           `Password requirements not met: ${passwordValidation.errors.join(', ')}`
@@ -180,14 +188,19 @@ export class UserService {
         if (error.message.includes('Invalid community ID')) {
           throw new InvalidCommunityError();
         }
-        // Only handle email format errors, not email existence errors  
-        if (error.message.includes('email') && error.message.includes('format')) {
+        // Only handle email format errors, not email existence errors
+        if (
+          error.message.includes('email') &&
+          error.message.includes('format')
+        ) {
           throw new Error('Invalid email format');
         }
       }
 
       // Wrap other errors
-      throw new Error(`Failed to register user: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to register user: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -290,7 +303,11 @@ export class UserService {
     };
 
     // Update user
-    const updatedUser = await this.userRepository.update(id, updateData, communityId);
+    const updatedUser = await this.userRepository.update(
+      id,
+      updateData,
+      communityId
+    );
     if (!updatedUser) {
       throw new UserNotFoundError();
     }

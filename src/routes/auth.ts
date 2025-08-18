@@ -48,7 +48,7 @@ const registerSchema = z
       .min(1, 'Last name is required')
       .max(100, 'Last name too long'),
     role: z
-      .enum(['super_admin', 'admin', 'editor', 'viewer'])
+      .enum(['super_admin', 'admin', 'editor', 'elder', 'viewer'])
       .default('viewer'),
     communityId: z
       .number()
@@ -96,6 +96,11 @@ export async function authRoutes(
   const userService = new UserService(userRepository);
   const config = getConfig();
 
+  // Import middleware for data sovereignty protection
+  const { requireDataSovereignty } = await import(
+    '../shared/middleware/auth.middleware.js'
+  );
+
   /**
    * User Registration Endpoint
    * POST /auth/register
@@ -127,7 +132,7 @@ export async function authRoutes(
                   lastName: { type: 'string' },
                   role: {
                     type: 'string',
-                    enum: ['super_admin', 'admin', 'editor', 'viewer'],
+                    enum: ['super_admin', 'admin', 'editor', 'elder', 'viewer'],
                   },
                   communityId: { type: 'number' },
                   isActive: { type: 'boolean' },
@@ -270,7 +275,7 @@ export async function authRoutes(
                   lastName: { type: 'string' },
                   role: {
                     type: 'string',
-                    enum: ['super_admin', 'admin', 'editor', 'viewer'],
+                    enum: ['super_admin', 'admin', 'editor', 'elder', 'viewer'],
                   },
                   communityId: { type: 'number' },
                   isActive: { type: 'boolean' },
@@ -494,7 +499,7 @@ export async function authRoutes(
                   lastName: { type: 'string' },
                   role: {
                     type: 'string',
-                    enum: ['super_admin', 'admin', 'editor', 'viewer'],
+                    enum: ['super_admin', 'admin', 'editor', 'elder', 'viewer'],
                   },
                   communityId: { type: 'number' },
                   isActive: { type: 'boolean' },
@@ -608,6 +613,87 @@ export async function authRoutes(
         });
       } catch (error) {
         fastify.log.error({ error, url: request.url }, 'Admin endpoint error');
+
+        return reply.status(500).send({
+          error: 'Internal server error',
+          statusCode: 500,
+        });
+      }
+    }
+  );
+
+  /**
+   * Test Endpoint for Data Sovereignty
+   * GET /auth/community-data
+   * Protected route that tests data sovereignty enforcement
+   */
+  fastify.get(
+    '/auth/community-data',
+    {
+      preHandler: [requireAuth, requireDataSovereignty],
+      schema: {
+        description:
+          'Test endpoint for data sovereignty - super admin should be blocked',
+        tags: ['Authentication'],
+        response: {
+          200: {
+            description: 'Community data access granted',
+            type: 'object',
+            properties: {
+              message: { type: 'string' },
+              user: {
+                type: 'object',
+                properties: {
+                  id: { type: 'number' },
+                  role: { type: 'string' },
+                  communityId: { type: 'number' },
+                },
+              },
+            },
+          },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+          403: {
+            description: 'Forbidden - super admin blocked from community data',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const currentUser = getCurrentUser(request);
+
+        if (!currentUser) {
+          return reply.status(401).send({
+            error: 'Authentication required',
+            statusCode: 401,
+          });
+        }
+
+        return reply.status(200).send({
+          message: 'Community data access granted',
+          user: {
+            id: currentUser.id,
+            role: currentUser.role,
+            communityId: currentUser.communityId,
+          },
+        });
+      } catch (error) {
+        fastify.log.error(
+          { error, url: request.url },
+          'Community data access error'
+        );
 
         return reply.status(500).send({
           error: 'Internal server error',

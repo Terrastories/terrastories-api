@@ -25,6 +25,7 @@ import {
   getCurrentUser,
   requireAuth,
   requireAdmin,
+  requireCommunityAccess,
   type UserSession,
 } from '../shared/middleware/auth.middleware.js';
 import { getConfig } from '../shared/config/index.js';
@@ -48,12 +49,12 @@ const registerSchema = z
       .min(1, 'Last name is required')
       .max(100, 'Last name too long'),
     role: z
-      .enum(['super_admin', 'admin', 'editor', 'viewer'])
+      .enum(['super_admin', 'admin', 'editor', 'elder', 'viewer'])
       .default('viewer'),
     communityId: z
       .number()
       .int()
-      .positive('Community ID must be a positive integer'),
+      .nonnegative('Community ID must be a non-negative integer'),
   })
   .strict();
 
@@ -63,7 +64,7 @@ const loginSchema = z.object({
   communityId: z
     .number()
     .int()
-    .positive('Community ID must be a positive integer'),
+    .nonnegative('Community ID must be a non-negative integer'),
 });
 
 // Response schemas for Swagger documentation (for future use)
@@ -608,6 +609,81 @@ export async function authRoutes(
         });
       } catch (error) {
         fastify.log.error({ error, url: request.url }, 'Admin endpoint error');
+
+        return reply.status(500).send({
+          error: 'Internal server error',
+          statusCode: 500,
+        });
+      }
+    }
+  );
+
+  /**
+   * Community Data Access Test Endpoint
+   * GET /auth/community-data
+   * Protected route that requires community access and tests data sovereignty
+   */
+  fastify.get(
+    '/auth/community-data',
+    {
+      preHandler: [requireAuth, requireCommunityAccess()],
+      schema: {
+        description:
+          'Test endpoint for community data access and data sovereignty',
+        tags: ['Authentication', 'Data Sovereignty'],
+        response: {
+          200: {
+            description: 'Community data access granted',
+            type: 'object',
+            properties: {
+              message: { type: 'string' },
+              user: {
+                type: 'object',
+                properties: {
+                  id: { type: 'number' },
+                  role: { type: 'string' },
+                  communityId: { type: 'number' },
+                },
+              },
+            },
+          },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+          403: {
+            description: 'Forbidden - data sovereignty protection',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              reason: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const currentUser = getCurrentUser(request);
+
+        return reply.status(200).send({
+          message: 'Community data access granted',
+          user: {
+            id: currentUser!.id,
+            role: currentUser!.role,
+            communityId: currentUser!.communityId,
+          },
+        });
+      } catch (error) {
+        fastify.log.error(
+          { error, url: request.url },
+          'Community data access error'
+        );
 
         return reply.status(500).send({
           error: 'Internal server error',

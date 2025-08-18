@@ -163,6 +163,20 @@ export class TestDatabaseManager {
 
     // Insert test communities with unique slugs per test run
     const timestamp = Date.now();
+    // Insert system-level community for super admin tests (ID will be 1, but we'll use it as system-level)
+    const systemCommunity = await db
+      .insert(communities)
+      .values([
+        {
+          name: 'System Level',
+          description: 'System-level community for super admin operations',
+          slug: `system-${timestamp}`,
+          publicStories: false,
+          locale: 'en',
+        },
+      ])
+      .returning();
+
     const testCommunities = await db
       .insert(communities)
       .values([
@@ -229,6 +243,7 @@ export class TestDatabaseManager {
     console.log('🌱 Test data seeded');
 
     return {
+      systemCommunity: systemCommunity[0],
       communities: testCommunities,
       places: testPlaces,
     };
@@ -282,6 +297,7 @@ export class TestDatabaseManager {
  * Test fixtures data structure
  */
 export interface TestFixtures {
+  systemCommunity: Community;
   communities: Community[];
   places: Place[];
   users?: User[];

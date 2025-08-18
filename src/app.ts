@@ -10,7 +10,11 @@ import { registerRoutes } from './routes/index.js';
 import { getConfig } from './shared/config/index.js';
 import { swaggerSchemas } from './shared/schemas/index.js';
 
-export async function buildApp() {
+export interface BuildAppOptions {
+  database?: unknown;
+}
+
+export async function buildApp(options?: BuildAppOptions) {
   const config = getConfig();
 
   const app = Fastify({
@@ -138,7 +142,7 @@ export async function buildApp() {
   });
 
   // Register application routes
-  await app.register(registerRoutes);
+  await app.register(registerRoutes, options || {});
 
   return app;
 }

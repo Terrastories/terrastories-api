@@ -270,6 +270,20 @@ export function requireCommunityAccess(options: CommunityAccessOptions = {}) {
 }
 
 /**
+ * Data sovereignty protection middleware
+ * Blocks super administrators from accessing community-specific data
+ * Implements Phase 3 requirement: super admins cannot access community data
+ * 
+ * Alias for enforceDataSovereignty to maintain compatibility
+ */
+export async function requireDataSovereignty(
+  request: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  return await enforceDataSovereignty(request, reply);
+}
+
+/**
  * Legacy community scope middleware (deprecated - use requireCommunityAccess)
  * Maintained for backward compatibility
  */

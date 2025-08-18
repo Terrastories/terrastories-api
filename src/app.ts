@@ -3,6 +3,9 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import cookie from '@fastify/cookie';
+import session from '@fastify/session';
+import rateLimit from '@fastify/rate-limit';
 import { registerRoutes } from './routes/index.js';
 import { getConfig } from './shared/config/index.js';
 import { swaggerSchemas } from './shared/schemas/index.js';
@@ -34,6 +37,27 @@ export async function buildApp() {
     },
   });
   await app.register(cors);
+
+  // Cookie support (required for sessions)
+  await app.register(cookie);
+
+  // Session management
+  await app.register(session, {
+    secret: config.auth.session.secret,
+    cookie: {
+      secure: config.auth.session.secure,
+      httpOnly: config.auth.session.httpOnly,
+      maxAge: config.auth.session.maxAge,
+      sameSite: config.auth.session.sameSite,
+      path: '/',
+    },
+    saveUninitialized: false,
+  });
+
+  // Rate limiting
+  await app.register(rateLimit, {
+    global: false, // Apply per route
+  });
 
   // Swagger documentation
   await app.register(swagger, {

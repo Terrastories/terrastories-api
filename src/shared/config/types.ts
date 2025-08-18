@@ -58,6 +58,26 @@ export interface DatabaseConfig {
 export interface AuthConfig {
   /** JWT signing secret (must be 32+ characters in production) */
   jwtSecret: string;
+  /** Session management configuration */
+  session: {
+    /** Session signing secret (must be 32+ characters in production) */
+    secret: string;
+    /** Session cookie max age in milliseconds (default: 24 hours) */
+    maxAge: number;
+    /** Enable secure cookies (HTTPS only) */
+    secure: boolean;
+    /** Enable HTTP-only cookies (prevent XSS access) */
+    httpOnly: boolean;
+    /** SameSite cookie policy */
+    sameSite: 'lax' | 'strict' | 'none';
+  };
+  /** Rate limiting configuration for authentication endpoints */
+  rateLimit: {
+    /** Maximum requests per time window */
+    max: number;
+    /** Time window in milliseconds */
+    timeWindow: number;
+  };
 }
 
 /**

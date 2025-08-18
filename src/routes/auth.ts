@@ -1,15 +1,17 @@
 /**
  * Authentication Routes
  *
- * Handles user registration and login endpoints with session-based authentication.
+ * Handles complete authentication system with session-based authentication.
  * Provides comprehensive input validation, error handling, and security measures.
  *
  * Features:
  * - User registration with password validation
  * - Session-based login with secure cookies
+ * - Secure logout with session destruction and cookie clearing
  * - Community-scoped authentication
  * - Rate limiting and security headers
  * - Comprehensive error handling
+ * - Authentication middleware integration
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -386,6 +388,7 @@ export async function authRoutes(
   fastify.post(
     '/auth/logout',
     {
+      preHandler: [requireAuth],
       schema: {
         description: 'Destroy user session and logout',
         tags: ['Authentication'],
@@ -397,16 +400,59 @@ export async function authRoutes(
               message: { type: 'string' },
             },
           },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+          500: {
+            description: 'Internal server error',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
         },
       },
     },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
+        // Get current user for logging
+        const currentUser = getCurrentUser(request);
+
+        if (!currentUser) {
+          return reply.status(401).send({
+            error: 'Authentication required',
+            statusCode: 401,
+          });
+        }
+
+        // Log the logout event for security monitoring
+        fastify.log.info(
+          {
+            userId: currentUser.id,
+            communityId: currentUser.communityId,
+          },
+          'User logout'
+        );
+
         // Clear user session using middleware helper
         clearUserSession(request);
 
         // Destroy the session entirely
         await request.session.destroy();
+
+        // Clear session cookie
+        reply.clearCookie('sessionId', {
+          path: '/',
+          httpOnly: true,
+          secure: config.auth.session.secure,
+          sameSite: 'lax',
+        });
 
         return reply.status(200).send({
           message: 'Successfully logged out',

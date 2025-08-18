@@ -17,6 +17,15 @@ import { z } from 'zod';
 import { UserService } from '../services/user.service.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { getDb } from '../db/index.js';
+import {
+  setUserSession,
+  clearUserSession,
+  getCurrentUser,
+  requireAuth,
+  requireAdmin,
+  type UserSession,
+} from '../shared/middleware/auth.middleware.js';
+import { getConfig } from '../shared/config/index.js';
 
 // Request validation schemas with strict validation
 const registerSchema = z
@@ -83,6 +92,7 @@ export async function authRoutes(
   const database = options?.database || (await getDb());
   const userRepository = new UserRepository(database);
   const userService = new UserService(userRepository);
+  const config = getConfig();
 
   /**
    * User Registration Endpoint
@@ -91,6 +101,12 @@ export async function authRoutes(
   fastify.post(
     '/auth/register',
     {
+      config: {
+        rateLimit: {
+          max: config.auth.rateLimit.max,
+          timeWindow: config.auth.rateLimit.timeWindow,
+        },
+      },
       schema: {
         description:
           'Register a new user with password hashing and community association',
@@ -229,6 +245,12 @@ export async function authRoutes(
   fastify.post(
     '/auth/login',
     {
+      config: {
+        rateLimit: {
+          max: config.auth.rateLimit.max,
+          timeWindow: config.auth.rateLimit.timeWindow,
+        },
+      },
       schema: {
         description: 'Authenticate user and create session',
         tags: ['Authentication'],
@@ -295,33 +317,31 @@ export async function authRoutes(
           validatedData.communityId
         );
 
-        // Create session (using a simple session ID for now)
-        // In a full implementation, this would integrate with Fastify sessions
-        const sessionId = `session_${user.id}_${Date.now()}`;
-
-        // Store session in reply context (for future session middleware)
-        // This is a placeholder for actual session implementation
-        (request as unknown as Record<string, unknown>).session = {
-          user: {
-            id: user.id,
-            email: user.email,
-            role: user.role,
-            communityId: user.communityId,
-          },
+        // Create secure session with user data
+        const userSession: UserSession = {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          communityId: user.communityId,
+          firstName: user.firstName,
+          lastName: user.lastName,
         };
+
+        // Set user session using middleware helper
+        setUserSession(request, userSession);
 
         // Remove sensitive data from response
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { passwordHash, ...userResponse } = user;
 
-        // Return success response
+        // Return success response with user data (sessionId is handled by cookie)
         return reply.status(200).send({
           user: {
             ...userResponse,
             createdAt: userResponse.createdAt.toISOString(),
             updatedAt: userResponse.updatedAt.toISOString(),
           },
-          sessionId,
+          sessionId: request.session.sessionId || 'session-created',
         });
       } catch (error) {
         fastify.log.error({ error, url: request.url }, 'Login error');
@@ -382,14 +402,166 @@ export async function authRoutes(
     },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
-        // Clear session (placeholder for actual session implementation)
-        (request as unknown as Record<string, unknown>).session = undefined;
+        // Clear user session using middleware helper
+        clearUserSession(request);
+
+        // Destroy the session entirely
+        await request.session.destroy();
 
         return reply.status(200).send({
           message: 'Successfully logged out',
         });
       } catch (error) {
         fastify.log.error({ error, url: request.url }, 'Logout error');
+
+        return reply.status(500).send({
+          error: 'Internal server error',
+          statusCode: 500,
+        });
+      }
+    }
+  );
+
+  /**
+   * Get Current User Endpoint
+   * GET /auth/me
+   * Protected route that returns current user information
+   */
+  fastify.get(
+    '/auth/me',
+    {
+      preHandler: [requireAuth],
+      schema: {
+        description: 'Get current authenticated user information',
+        tags: ['Authentication'],
+        response: {
+          200: {
+            description: 'Current user information',
+            type: 'object',
+            properties: {
+              user: {
+                type: 'object',
+                properties: {
+                  id: { type: 'number' },
+                  email: { type: 'string', format: 'email' },
+                  firstName: { type: 'string' },
+                  lastName: { type: 'string' },
+                  role: {
+                    type: 'string',
+                    enum: ['super_admin', 'admin', 'editor', 'viewer'],
+                  },
+                  communityId: { type: 'number' },
+                  isActive: { type: 'boolean' },
+                },
+              },
+            },
+          },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const currentUser = getCurrentUser(request);
+
+        if (!currentUser) {
+          return reply.status(401).send({
+            error: 'Authentication required',
+            statusCode: 401,
+          });
+        }
+
+        return reply.status(200).send({
+          user: {
+            id: currentUser.id,
+            email: currentUser.email,
+            firstName: currentUser.firstName,
+            lastName: currentUser.lastName,
+            role: currentUser.role,
+            communityId: currentUser.communityId,
+            isActive: true, // Session users are always active
+          },
+        });
+      } catch (error) {
+        fastify.log.error(
+          { error, url: request.url },
+          'Get current user error'
+        );
+
+        return reply.status(500).send({
+          error: 'Internal server error',
+          statusCode: 500,
+        });
+      }
+    }
+  );
+
+  /**
+   * Admin Only Endpoint
+   * GET /auth/admin-only
+   * Protected route that requires admin privileges
+   */
+  fastify.get(
+    '/auth/admin-only',
+    {
+      preHandler: [requireAdmin],
+      schema: {
+        description: 'Admin-only endpoint for testing role-based access',
+        tags: ['Authentication'],
+        response: {
+          200: {
+            description: 'Admin access granted',
+            type: 'object',
+            properties: {
+              message: { type: 'string' },
+              user: {
+                type: 'object',
+                properties: {
+                  id: { type: 'number' },
+                  role: { type: 'string' },
+                },
+              },
+            },
+          },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+          403: {
+            description: 'Forbidden - insufficient permissions',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const currentUser = getCurrentUser(request);
+
+        return reply.status(200).send({
+          message: 'Admin access granted',
+          user: {
+            id: currentUser!.id,
+            role: currentUser!.role,
+          },
+        });
+      } catch (error) {
+        fastify.log.error({ error, url: request.url }, 'Admin endpoint error');
 
         return reply.status(500).send({
           error: 'Internal server error',

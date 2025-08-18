@@ -63,6 +63,20 @@ export const AuthConfigSchema = z.object({
     .string()
     .min(1, 'JWT_SECRET is required')
     .default('development-test-secret-insecure'),
+  session: z.object({
+    secret: z
+      .string()
+      .min(1, 'SESSION_SECRET is required')
+      .default('development-session-secret-insecure'),
+    maxAge: z.coerce.number().default(24 * 60 * 60 * 1000), // 24 hours in milliseconds
+    secure: z.boolean().default(false), // Will be overridden based on environment
+    httpOnly: z.boolean().default(true),
+    sameSite: z.enum(['lax', 'strict', 'none']).default('strict'),
+  }),
+  rateLimit: z.object({
+    max: z.coerce.number().default(10), // requests per window
+    timeWindow: z.coerce.number().default(60 * 1000), // 1 minute in milliseconds
+  }),
 });
 
 // Security configuration schema
@@ -83,6 +97,17 @@ export const ProductionAuthConfigSchema = AuthConfigSchema.extend({
     .string()
     .min(32, 'JWT_SECRET must be at least 32 characters in production')
     .default('insecure-development-jwt-secret-for-testing-purposes-only'),
+  session: AuthConfigSchema.shape.session.extend({
+    secret: z
+      .string()
+      .min(32, 'SESSION_SECRET must be at least 32 characters in production')
+      .default('insecure-development-session-secret-for-testing-purposes-only'),
+    secure: z.boolean().default(true), // Force secure cookies in production
+  }),
+  rateLimit: z.object({
+    max: z.coerce.number().default(5), // Stricter rate limiting in production
+    timeWindow: z.coerce.number().default(60 * 1000), // 1 minute
+  }),
 });
 
 // Logging configuration schema

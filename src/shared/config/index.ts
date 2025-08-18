@@ -92,6 +92,17 @@ function createConfigFromEnv(
     },
     auth: {
       jwtSecret: process.env.JWT_SECRET,
+      session: {
+        secret: process.env.SESSION_SECRET,
+        maxAge: process.env.SESSION_MAX_AGE,
+        secure: process.env.SESSION_SECURE,
+        httpOnly: process.env.SESSION_HTTP_ONLY,
+        sameSite: process.env.SESSION_SAME_SITE,
+      },
+      rateLimit: {
+        max: process.env.RATE_LIMIT_MAX,
+        timeWindow: process.env.RATE_LIMIT_TIME_WINDOW,
+      },
     },
     security: {
       password: {

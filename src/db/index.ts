@@ -4,12 +4,14 @@ import Database from 'better-sqlite3';
 import postgres from 'postgres';
 import { getConfig } from '../shared/config/index.js';
 
-let db:
+// Database type for repositories
+export type Database =
   | ReturnType<typeof drizzleSqlite>
-  | ReturnType<typeof drizzlePostgres>
-  | null = null;
+  | ReturnType<typeof drizzlePostgres>;
 
-export async function getDb() {
+let db: Database | null = null;
+
+export async function getDb(): Promise<Database> {
   if (db) return db;
 
   const config = getConfig();

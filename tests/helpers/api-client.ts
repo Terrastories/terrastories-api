@@ -321,6 +321,25 @@ export async function createTestApp(
     // Add essential plugins for JSON handling (mirror main app)
     await app.register((await import('@fastify/cors')).default);
 
+    // Cookie support (required for sessions)
+    await app.register((await import('@fastify/cookie')).default);
+
+    // Session management - essential for authentication
+    const { getConfig } = await import('../../src/shared/config/index.js');
+    const config = getConfig();
+
+    await app.register((await import('@fastify/session')).default, {
+      secret: config.auth.session.secret,
+      cookie: {
+        secure: config.auth.session.secure,
+        httpOnly: config.auth.session.httpOnly,
+        maxAge: config.auth.session.maxAge,
+        sameSite: config.auth.session.sameSite,
+        path: '/',
+      },
+      saveUninitialized: false,
+    });
+
     // Register auth routes with test database
     const { authRoutes } = await import('../../src/routes/auth.js');
     await app.register(authRoutes, {

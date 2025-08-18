@@ -268,6 +268,14 @@ export class TestDatabaseManager {
       memoryUsage: this.sqlite ? `${this.sqlite.memory.used} bytes` : '0 bytes',
     };
   }
+
+  /**
+   * Cleanup method for test lifecycle (combines clear + teardown)
+   */
+  async cleanup(): Promise<void> {
+    await this.clearData();
+    await this.teardown();
+  }
 }
 
 /**
@@ -391,4 +399,12 @@ export async function teardownTestDatabase() {
 
 export async function clearTestData() {
   return await testDb.clearData();
+}
+
+/**
+ * Cleanup method for tests (combines clear + teardown)
+ */
+export async function cleanup() {
+  await testDb.clearData();
+  await testDb.teardown();
 }

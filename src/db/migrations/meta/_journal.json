@@ -8,6 +8,13 @@
       "when": 1755442678314,
       "tag": "0000_easy_frank_castle",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1755522763221,
+      "tag": "0001_parched_silverclaw",
+      "breakpoints": true
     }
   ]
 }

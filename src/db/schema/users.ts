@@ -30,60 +30,75 @@ import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 import { communitiesPg } from './communities.js';
 
-// Role enum validation
+// Role enum validation with cultural roles
 export const UserRoleSchema = z.enum([
   'super_admin',
   'admin',
   'editor',
+  'elder',
   'viewer',
 ]);
 export type UserRole = z.infer<typeof UserRoleSchema>;
 
 // PostgreSQL table for production
-export const usersPg = pgTable('users', {
-  id: serial('id').primaryKey(),
-  email: pgText('email').notNull(),
-  passwordHash: pgText('password_hash').notNull(),
-  firstName: pgText('first_name').notNull(),
-  lastName: pgText('last_name').notNull(),
-  role: pgText('role', {
-    enum: ['super_admin', 'admin', 'editor', 'viewer'],
+export const usersPg = pgTable(
+  'users',
+  {
+    id: serial('id').primaryKey(),
+    email: pgText('email').notNull(),
+    passwordHash: pgText('password_hash').notNull(),
+    firstName: pgText('first_name').notNull(),
+    lastName: pgText('last_name').notNull(),
+    role: pgText('role', {
+      enum: ['super_admin', 'admin', 'editor', 'elder', 'viewer'],
+    })
+      .notNull()
+      .default('viewer'),
+    communityId: pgInteger('community_id').notNull(),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    // Email must be unique within each community, but can be shared across communities
+    emailCommunityUnique: unique('users_email_community_unique').on(
+      table.email,
+      table.communityId
+    ),
   })
-    .notNull()
-    .default('viewer'),
-  communityId: pgInteger('community_id').notNull(),
-  isActive: boolean('is_active').notNull().default(true),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-}, (table) => ({
-  // Email must be unique within each community, but can be shared across communities
-  emailCommunityUnique: unique('users_email_community_unique').on(table.email, table.communityId),
-}));
+);
 
 // SQLite table for development/testing
-export const usersSqlite = sqliteTable('users', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  email: sqliteText('email').notNull(),
-  passwordHash: sqliteText('password_hash').notNull(),
-  firstName: sqliteText('first_name').notNull(),
-  lastName: sqliteText('last_name').notNull(),
-  role: sqliteText('role', {
-    enum: ['super_admin', 'admin', 'editor', 'viewer'],
+export const usersSqlite = sqliteTable(
+  'users',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    email: sqliteText('email').notNull(),
+    passwordHash: sqliteText('password_hash').notNull(),
+    firstName: sqliteText('first_name').notNull(),
+    lastName: sqliteText('last_name').notNull(),
+    role: sqliteText('role', {
+      enum: ['super_admin', 'admin', 'editor', 'elder', 'viewer'],
+    })
+      .notNull()
+      .default('viewer'),
+    communityId: integer('community_id').notNull(),
+    isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer('updated_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    // Email must be unique within each community, but can be shared across communities
+    emailCommunityUnique: sqliteUnique('users_email_community_unique').on(
+      table.email,
+      table.communityId
+    ),
   })
-    .notNull()
-    .default('viewer'),
-  communityId: integer('community_id').notNull(),
-  isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-}, (table) => ({
-  // Email must be unique within each community, but can be shared across communities
-  emailCommunityUnique: sqliteUnique('users_email_community_unique').on(table.email, table.communityId),
-}));
+);
 
 // Dynamic table selection based on database type (for runtime use)
 // Note: This function imports getConfig at runtime to avoid circular dependencies during migration

@@ -124,6 +124,20 @@ function createConfigFromEnv(
       mediaUpload: undefined,
       adminInterface: undefined,
     },
+    fileUpload: {
+      uploadDir: process.env.UPLOAD_DIR,
+      maxFileSizes: {
+        image: process.env.MAX_IMAGE_SIZE,
+        audio: process.env.MAX_AUDIO_SIZE,
+        video: process.env.MAX_VIDEO_SIZE,
+      },
+      allowedImageTypes: process.env.ALLOWED_IMAGE_TYPES?.split(','),
+      allowedAudioTypes: process.env.ALLOWED_AUDIO_TYPES?.split(','),
+      allowedVideoTypes: process.env.ALLOWED_VIDEO_TYPES?.split(','),
+      enableMetadataExtraction: process.env.ENABLE_METADATA_EXTRACTION,
+      streamingThreshold: process.env.STREAMING_THRESHOLD,
+      enableAuditLogging: process.env.ENABLE_AUDIT_LOGGING,
+    },
   };
 }
 

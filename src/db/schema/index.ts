@@ -1,4 +1,5 @@
 export * from './communities.js';
+export * from './files.js';
 export * from './places.js';
 export * from './speakers.js';
 export * from './stories.js';

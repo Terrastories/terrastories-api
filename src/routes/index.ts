@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { healthRoute } from './health.js';
 import { authRoutes } from './auth.js';
+import { fileRoutes } from './files.js';
 
 export interface RegisterRoutesOptions {
   database?: unknown;
@@ -12,4 +13,5 @@ export async function registerRoutes(
 ) {
   await app.register(healthRoute);
   await app.register(authRoutes, { prefix: '/api/v1', ...options });
+  await app.register(fileRoutes, { prefix: '/api/v1', ...options });
 }

@@ -81,21 +81,40 @@ class AnalyzePhase {
     // 1. Parse requirements from issue
     const requirements = await this.parseRequirements(issue);
 
-    // 2. Identify affected files
+    // 2. Find matching roadmap item by functionality (not number)
+    const roadmapMatch = await this.findRoadmapMatch(requirements);
+
+    // 3. Verify content alignment between GitHub issue and roadmap
+    const alignmentCheck = await this.verifyContentAlignment(
+      issue,
+      roadmapMatch
+    );
+
+    if (!alignmentCheck.aligned) {
+      throw new Error(`Content mismatch: ${alignmentCheck.reason}`);
+    }
+
+    console.log(
+      `✅ GitHub Issue #${issue.number} aligns with Roadmap "${roadmapMatch.title}"`
+    );
+
+    // 4. Identify affected files
     const affectedFiles = await this.identifyAffectedFiles(requirements);
 
-    // 3. Check existing patterns
+    // 5. Check existing patterns
     const patterns = await this.findExistingPatterns(affectedFiles);
 
-    // 4. Identify dependencies
+    // 6. Identify dependencies
     const dependencies = await this.analyzeDependencies(affectedFiles);
 
-    // 5. Risk assessment
+    // 7. Risk assessment
     const risks = await this.assessRisks(requirements, affectedFiles);
 
     // Save checkpoint
     await this.checkpoint.save('analyze', {
       requirements,
+      roadmapMatch,
+      alignmentCheck,
       affectedFiles,
       patterns,
       dependencies,
@@ -105,6 +124,8 @@ class AnalyzePhase {
     // Generate analysis report
     const report = this.generateAnalysisReport({
       requirements,
+      roadmapMatch,
+      alignmentCheck,
       affectedFiles,
       patterns,
       dependencies,
@@ -114,7 +135,34 @@ class AnalyzePhase {
     console.log('\n📋 Analysis Complete:');
     console.log(report);
 
-    return { requirements, affectedFiles, patterns, dependencies, risks };
+    return {
+      requirements,
+      roadmapMatch,
+      affectedFiles,
+      patterns,
+      dependencies,
+      risks,
+    };
+  }
+
+  private async findRoadmapMatch(
+    requirements: Requirements
+  ): Promise<RoadmapItem> {
+    // Search ISSUES_ROADMAP.md for matching functionality keywords
+    // Return the roadmap item that matches the functionality
+  }
+
+  private async verifyContentAlignment(
+    issue: Issue,
+    roadmapMatch: RoadmapItem
+  ): Promise<AlignmentResult> {
+    // Verify:
+    // - Functionality scope matches
+    // - Acceptance criteria align
+    // - Dependencies are consistent
+    // - Context is compatible
+    //
+    // Note: Issue numbers are expected to differ, this is normal
   }
 
   private async identifyAffectedFiles(
@@ -891,15 +939,35 @@ work:
 
 Before starting work on any issue:
 
-```bash
-# Verify issue alignment with roadmap
-/sync-github-mapping
+### Content Alignment Validation (Critical)
 
-# This ensures:
-# - Issue exists in GITHUB_ROADMAP_MAPPING.md
-# - Alignment status is verified (✅ ALIGNED, ⚠️ BROADER, ❌ MISMATCH)
-# - No scope mismatches before implementation begins
-```
+**Important**: GitHub issue numbers will ALWAYS differ from ISSUES_ROADMAP numbers. What matters is that the issue functionality and acceptance criteria match between GitHub and the roadmap.
+
+**Validation Steps**:
+
+1. **Read GitHub Issue**: Get complete requirements from `gh issue view [number]`
+2. **Find Matching Roadmap Item**: Search ISSUES_ROADMAP.md for matching functionality (NOT issue number)
+3. **Verify Content Alignment**: Ensure acceptance criteria, scope, and functionality match
+4. **Proceed if Aligned**: Implementation can proceed if content matches (ignore number differences)
+
+**Example**:
+
+- GitHub Issue #34: "feat: implement file upload service with multipart support"
+- ISSUES_ROADMAP Issue #16: "Implement File Upload Service"
+- ✅ **VALID**: Same functionality, different numbers is expected and OK
+
+**Stop Conditions**:
+
+- ❌ No matching functionality found in roadmap
+- ❌ Scope differs significantly between GitHub issue and roadmap item
+- ❌ Acceptance criteria don't align between GitHub and roadmap
+- ❌ Dependencies or context don't match
+
+**DON'T STOP for**:
+
+- ✅ Different issue numbers (GitHub vs roadmap) - this is expected
+- ✅ Minor wording differences if functionality is the same
+- ✅ GitHub issue having more detail than roadmap (roadmap is high-level)
 
 ## Integration Points
 

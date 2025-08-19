@@ -178,8 +178,8 @@ describe('API Integration Tests', () => {
       apiClient.assertSuccess(response);
 
       const result = apiClient.assertPaginatedResponse(response);
-      expect(result.data).toHaveLength(3); // Test fixture communities
-      expect(result.meta.total).toBe(3);
+      expect(result.data).toHaveLength(4); // System + 3 test fixture communities
+      expect(result.meta.total).toBe(4);
 
       // Verify community structure
       result.data.forEach((community) => {

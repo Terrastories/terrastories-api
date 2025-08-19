@@ -109,6 +109,35 @@ export interface LoggingConfig {
 }
 
 /**
+ * File upload configuration
+ */
+export interface FileUploadConfig {
+  /** Directory path for uploaded files */
+  uploadDir: string;
+  /** Maximum file sizes by type in bytes */
+  maxFileSizes: {
+    /** Maximum image file size (default: 10MB) */
+    image: number;
+    /** Maximum audio file size (default: 50MB) */
+    audio: number;
+    /** Maximum video file size (default: 100MB) */
+    video: number;
+  };
+  /** Allowed image MIME types */
+  allowedImageTypes: string[];
+  /** Allowed audio MIME types */
+  allowedAudioTypes: string[];
+  /** Allowed video MIME types */
+  allowedVideoTypes: string[];
+  /** Enable metadata extraction for uploaded files */
+  enableMetadataExtraction: boolean;
+  /** File size threshold for streaming uploads in bytes (default: 5MB) */
+  streamingThreshold: number;
+  /** Enable audit logging for file operations */
+  enableAuditLogging: boolean;
+}
+
+/**
  * Feature flags for environment-specific capabilities
  */
 export interface FeatureConfig {
@@ -143,4 +172,6 @@ export interface AppConfig {
   logging: LoggingConfig;
   /** Environment-specific feature flags */
   features: FeatureConfig;
+  /** File upload configuration */
+  fileUpload: FileUploadConfig;
 }

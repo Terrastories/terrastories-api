@@ -428,3 +428,142 @@ export async function cleanup() {
   await testDb.clearData();
   await testDb.teardown();
 }
+
+/**
+ * Setup test database - alias for setupTestDatabase
+ */
+export async function setupTestDb() {
+  return await testDb.setup();
+}
+
+/**
+ * Cleanup test database - alias for cleanup
+ */
+export async function cleanupTestDb() {
+  return await testDb.cleanup();
+}
+
+/**
+ * Create comprehensive test data for story service tests
+ */
+export async function createTestData() {
+  const fixtures = await testDb.seedTestData();
+  
+  // Create users for all roles needed in story tests
+  const db = await testDb.getDb();
+  
+  const testUsers = await db
+    .insert(users)
+    .values([
+      {
+        email: 'admin@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Admin',
+        lastName: 'User',
+        role: 'admin',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'editor@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Editor',
+        lastName: 'User',
+        role: 'editor',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'elder@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Elder',
+        lastName: 'User',
+        role: 'elder',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'viewer@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Viewer',
+        lastName: 'User',
+        role: 'viewer',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'superadmin@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Super',
+        lastName: 'Admin',
+        role: 'super_admin',
+        communityId: fixtures.systemCommunity.id,
+        isActive: true,
+      },
+      {
+        email: 'other@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Other',
+        lastName: 'Community',
+        role: 'editor',
+        communityId: fixtures.communities[1].id,
+        isActive: true,
+      },
+    ])
+    .returning();
+
+  // Create test speakers
+  const testSpeakers = [
+    {
+      id: 1,
+      name: 'Elder Maria Stonebear',
+      bio: 'Traditional knowledge keeper',
+      elderStatus: true,
+      communityId: fixtures.communities[0].id,
+      culturalRole: 'Knowledge Keeper',
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    {
+      id: 2,
+      name: 'John Rivercrossing',
+      bio: 'Community storyteller',
+      elderStatus: false,
+      communityId: fixtures.communities[0].id,
+      culturalRole: 'Storyteller',
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+  ];
+
+  // Create test files
+  const testFiles = [
+    {
+      id: 'file1',
+      path: '/uploads/story-image.jpg',
+      communityId: fixtures.communities[0].id,
+    },
+    {
+      id: 'file2',
+      path: '/uploads/story-audio.mp3',
+      communityId: fixtures.communities[0].id,
+    },
+  ];
+
+  return {
+    community: fixtures.communities[0],
+    users: {
+      admin: testUsers[0],
+      editor: testUsers[1],
+      elder: testUsers[2],
+      viewer: testUsers[3],
+      superAdmin: testUsers[4],
+      otherCommunityUser: testUsers[5],
+    },
+    places: fixtures.places.filter(p => p.communityId === fixtures.communities[0].id),
+    speakers: testSpeakers,
+    files: testFiles,
+  };
+}

@@ -7,3 +7,6 @@
  */
 
 export * from './password.service.js';
+export * from './file.service.js';
+export * from './user.service.js';
+export * from './story.service.js';

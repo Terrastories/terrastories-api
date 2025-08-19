@@ -294,7 +294,7 @@ describe('Database Integration Tests', () => {
 
       // Verify reset worked
       const afterReset = await database.select().from(communities);
-      expect(afterReset).toHaveLength(3); // Should have only fixture data
+      expect(afterReset).toHaveLength(4); // Should have system + 3 fixture communities
     });
   });
 
@@ -313,7 +313,7 @@ describe('Database Integration Tests', () => {
 
       // Verify no extra communities were added due to the constraint violation
       const allCommunities = await database.select().from(communities);
-      expect(allCommunities).toHaveLength(3); // Only fixture data
+      expect(allCommunities).toHaveLength(4); // System + 3 fixture communities
     });
 
     it('should handle concurrent operations', async () => {

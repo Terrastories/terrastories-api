@@ -6,6 +6,7 @@ import helmet from '@fastify/helmet';
 import cookie from '@fastify/cookie';
 import session from '@fastify/session';
 import rateLimit from '@fastify/rate-limit';
+import multipart from '@fastify/multipart';
 import { registerRoutes } from './routes/index.js';
 import { getConfig } from './shared/config/index.js';
 import { swaggerSchemas } from './shared/schemas/index.js';
@@ -62,6 +63,14 @@ export async function buildApp(options?: BuildAppOptions) {
   await app.register(rateLimit, {
     global: false, // Apply per route
   });
+
+  // Multipart form data support (for file uploads)
+  await app.register(multipart, {
+    limits: {
+      fileSize: 10 * 1024 * 1024, // 10MB default
+      files: 5, // Maximum 5 files per request
+    },
+  } as Parameters<typeof multipart>[1]); // TypeScript issue with @fastify/multipart v9 - addToBody option exists but not in types
 
   // Swagger documentation
   await app.register(swagger, {

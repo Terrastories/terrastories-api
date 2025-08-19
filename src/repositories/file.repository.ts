@@ -95,8 +95,7 @@ export class FileRepository {
 
     const newFile: NewFile = {
       ...fileData,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      // Let schema defaults handle timestamps
     };
 
     try {
@@ -213,9 +212,9 @@ export class FileRepository {
       if (culturalRestrictions) {
         if (culturalRestrictions.elderOnly !== undefined) {
           const elderOnlyCondition = culturalRestrictions.elderOnly
-            ? sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') = true`
+            ? sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') = 1`
             : or(
-                sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') = false`,
+                sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') = 0`,
                 sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') IS NULL`
               )!;
           conditions.push(elderOnlyCondition);

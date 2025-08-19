@@ -20,6 +20,7 @@ import {
   speakerParameters,
   speakerExamples,
 } from './speakers.swagger.js';
+import { fileSchemas, fileParameters, fileExamples } from './files.swagger.js';
 
 // All schema definitions for OpenAPI
 export const swaggerSchemas = {
@@ -50,6 +51,12 @@ export const swaggerSchemas = {
   UpdateSpeaker: speakerSchemas.UpdateSpeaker,
   SpeakerResponse: speakerSchemas.SpeakerResponse,
   SpeakerListResponse: speakerSchemas.SpeakerListResponse,
+
+  // File schemas
+  File: fileSchemas.File,
+  FileUploadResponse: fileSchemas.FileUploadResponse,
+  FileListResponse: fileSchemas.FileListResponse,
+  FileErrorResponse: fileSchemas.FileErrorResponse,
 
   // Error schemas
   ValidationError: userSchemas.ValidationError,
@@ -84,6 +91,14 @@ export const swaggerParameters = {
   // Speaker parameters
   speakerId: speakerParameters.speakerId,
   elderStatusFilter: speakerParameters.elderStatusFilter,
+
+  // File parameters
+  fileId: fileParameters.fileId,
+  page: fileParameters.page,
+  limit: fileParameters.limit,
+  search: fileParameters.search,
+  mimeType: fileParameters.mimeType,
+  culturalRestrictions: fileParameters.culturalRestrictions,
 };
 
 // All example definitions
@@ -114,6 +129,13 @@ export const swaggerExamples = {
   culturalSpeaker: speakerExamples.culturalSpeaker,
   speakerList: speakerExamples.speakerList,
   elderSpeaker: speakerExamples.elderSpeaker,
+
+  // File examples
+  uploadImageRequest: fileExamples.uploadImageRequest,
+  uploadAudioRequest: fileExamples.uploadAudioRequest,
+  uploadSuccessResponse: fileExamples.uploadSuccessResponse,
+  uploadErrorResponse: fileExamples.uploadErrorResponse,
+  fileListResponse: fileExamples.fileListResponse,
 };
 
 // Export individual schema modules for specific use
@@ -133,3 +155,4 @@ export {
   speakerParameters,
   speakerExamples,
 } from './speakers.swagger.js';
+export { fileSchemas, fileParameters, fileExamples } from './files.swagger.js';

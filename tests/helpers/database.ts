@@ -14,6 +14,7 @@ import {
   communitiesSqlite,
   placesSqlite,
   usersSqlite,
+  filesSqlite,
   Community,
   Place,
   User,
@@ -23,6 +24,7 @@ import {
 const communities = communitiesSqlite;
 const places = placesSqlite;
 const users = usersSqlite;
+const files = filesSqlite;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,6 +34,7 @@ export type TestDatabase = ReturnType<
     communities: typeof communities;
     places: typeof places;
     users: typeof users;
+    files: typeof files;
   }>
 >;
 
@@ -60,7 +63,7 @@ export class TestDatabaseManager {
 
     // Create Drizzle instance
     this.db = drizzle(this.sqlite, {
-      schema: { communities, places, users },
+      schema: { communities, places, users, files },
     });
 
     // Run migrations
@@ -125,6 +128,7 @@ export class TestDatabaseManager {
 
     try {
       // Clear in dependency order (children first)
+      await this.db.delete(files);
       await this.db.delete(places);
       await this.db.delete(users);
       await this.db.delete(communities);

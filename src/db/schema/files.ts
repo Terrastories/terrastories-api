@@ -46,8 +46,8 @@ export const filesPg = pgTable(
     metadata: pgJsonb('metadata'), // { width, height, duration, etc. }
     culturalRestrictions: pgJsonb('cultural_restrictions'), // { elderOnly: boolean, ... }
     isActive: pgBoolean('is_active').default(true).notNull(),
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+    createdAt: timestamp('created_at').notNull(),
+    updatedAt: timestamp('updated_at').notNull(),
   },
   (table) => ({
     // Community isolation index for data sovereignty
@@ -149,8 +149,8 @@ export const CulturalRestrictionsSchema = z
   })
   .strict();
 
-// Zod schemas for validation
-export const insertFileSchema = createInsertSchema(filesPg, {
+// Zod schemas for validation - use SQLite schema for broader compatibility
+export const insertFileSchema = createInsertSchema(filesSqlite, {
   filename: z
     .string()
     .min(1, 'Filename cannot be empty')
@@ -175,7 +175,7 @@ export const insertFileSchema = createInsertSchema(filesPg, {
   isActive: z.boolean().default(true),
 });
 
-export const selectFileSchema = createSelectSchema(filesPg);
+export const selectFileSchema = createSelectSchema(filesSqlite);
 
 // Update schema (all fields optional except ID)
 export const updateFileSchema = insertFileSchema.partial().extend({
@@ -184,8 +184,8 @@ export const updateFileSchema = insertFileSchema.partial().extend({
 });
 
 // TypeScript types
-export type File = typeof filesPg.$inferSelect;
-export type NewFile = typeof filesPg.$inferInsert;
+export type File = typeof filesSqlite.$inferSelect;
+export type NewFile = typeof filesSqlite.$inferInsert;
 export type UpdateFile = z.infer<typeof updateFileSchema>;
 export type FileMetadata = z.infer<typeof FileMetadataSchema>;
 export type CulturalRestrictions = z.infer<typeof CulturalRestrictionsSchema>;

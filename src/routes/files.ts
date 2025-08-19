@@ -56,8 +56,13 @@ const listFilesQuerySchema = z.object({
 /**
  * Register file upload routes
  */
-export async function fileRoutes(fastify: FastifyInstance) {
-  const db = await getDb();
+export async function fileRoutes(
+  fastify: FastifyInstance,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  options?: { database?: any }
+) {
+  // Initialize services - use provided database instance or default
+  const db = options?.database || (await getDb());
   const config = getConfig();
   const fileRepository = new FileRepository(db);
   const fileService = new FileService(
@@ -82,10 +87,12 @@ export async function fileRoutes(fastify: FastifyInstance) {
       preHandler: [requireAuth, requireCommunityAccess()],
       schema: {
         description:
-          'Upload a file with community scoping and cultural restrictions',
+          'Upload a file with community scoping and cultural restrictions for Indigenous storytelling',
+        summary: 'Upload file',
         tags: ['Files'],
         consumes: ['multipart/form-data'],
-        querystring: uploadQuerySchema,
+        // Note: No body schema for multipart/form-data routes
+        // The @fastify/multipart plugin handles file parsing via request.file()
         response: {
           201: {
             description: 'File uploaded successfully',
@@ -97,13 +104,20 @@ export async function fileRoutes(fastify: FastifyInstance) {
                   id: { type: 'string', format: 'uuid' },
                   filename: { type: 'string' },
                   originalName: { type: 'string' },
+                  path: { type: 'string' },
                   url: { type: 'string' },
                   size: { type: 'number' },
                   mimeType: { type: 'string' },
                   communityId: { type: 'number' },
                   uploadedBy: { type: 'number' },
-                  metadata: { type: 'object' },
-                  culturalRestrictions: { type: 'object' },
+                  metadata: {
+                    type: 'object',
+                    additionalProperties: true,
+                  },
+                  culturalRestrictions: {
+                    type: 'object',
+                    additionalProperties: true,
+                  },
                   createdAt: { type: 'string', format: 'date-time' },
                 },
               },
@@ -195,7 +209,9 @@ export async function fileRoutes(fastify: FastifyInstance) {
 
         if (
           errorMessage.includes('File type not allowed') ||
-          errorMessage.includes('Invalid file type')
+          errorMessage.includes('Invalid file type') ||
+          errorMessage.includes('not allowed') ||
+          errorMessage.includes('Could not detect file type')
         ) {
           return reply.status(415).send({
             error: errorMessage,
@@ -221,13 +237,32 @@ export async function fileRoutes(fastify: FastifyInstance) {
       preHandler: [requireAuth],
       schema: {
         description: 'Serve file with access control and community scoping',
+        summary: 'Get file content',
         tags: ['Files'],
-        params: fileParamsSchema,
+        params: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              format: 'uuid',
+              description: 'File ID',
+            },
+          },
+          required: ['id'],
+        },
         response: {
           200: {
             description: 'File content',
             type: 'string',
             format: 'binary',
+          },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
           },
           403: {
             description: 'Forbidden - access denied',
@@ -334,12 +369,24 @@ export async function fileRoutes(fastify: FastifyInstance) {
     {
       preHandler: [requireAuth],
       schema: {
-        description: 'Get file metadata with access control',
+        description:
+          'Get file metadata with access control and cultural restrictions',
+        summary: 'Get file metadata',
         tags: ['Files'],
-        params: fileParamsSchema,
+        params: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              format: 'uuid',
+              description: 'File ID',
+            },
+          },
+          required: ['id'],
+        },
         response: {
           200: {
-            description: 'File metadata',
+            description: 'File metadata with cultural context',
             type: 'object',
             properties: {
               data: {
@@ -360,8 +407,16 @@ export async function fileRoutes(fastify: FastifyInstance) {
               },
             },
           },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
           403: {
-            description: 'Forbidden - access denied',
+            description: 'Forbidden - access denied or cultural restrictions',
             type: 'object',
             properties: {
               error: { type: 'string' },
@@ -439,16 +494,36 @@ export async function fileRoutes(fastify: FastifyInstance) {
     {
       preHandler: [requireAuth],
       schema: {
-        description: 'Delete file with authorization',
+        description: 'Delete file with authorization and community scoping',
+        summary: 'Delete file',
         tags: ['Files'],
-        params: fileParamsSchema,
+        params: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              format: 'uuid',
+              description: 'File ID',
+            },
+          },
+          required: ['id'],
+        },
         response: {
           204: {
             description: 'File deleted successfully',
             type: 'null',
           },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
           403: {
-            description: 'Forbidden - insufficient permissions',
+            description:
+              'Forbidden - insufficient permissions or not file owner',
             type: 'object',
             properties: {
               error: { type: 'string' },
@@ -523,12 +598,41 @@ export async function fileRoutes(fastify: FastifyInstance) {
     {
       preHandler: [requireAuth],
       schema: {
-        description: 'List files with community scoping and pagination',
+        description:
+          'List files with community scoping, pagination, and cultural filtering',
+        summary: 'List community files',
         tags: ['Files'],
-        querystring: listFilesQuerySchema,
+        querystring: {
+          type: 'object',
+          properties: {
+            page: {
+              type: 'integer',
+              minimum: 1,
+              default: 1,
+              description: 'Page number',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 20,
+              description: 'Items per page',
+            },
+            type: {
+              type: 'string',
+              enum: ['image', 'audio', 'video'],
+              description: 'Filter by file type',
+            },
+            search: {
+              type: 'string',
+              description: 'Search in filenames',
+            },
+          },
+        },
         response: {
           200: {
-            description: 'Paginated list of files',
+            description:
+              'Paginated list of community files with cultural context',
             type: 'object',
             properties: {
               data: {
@@ -559,6 +663,14 @@ export async function fileRoutes(fastify: FastifyInstance) {
                   hasPreviousPage: { type: 'boolean' },
                 },
               },
+            },
+          },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
             },
           },
         },

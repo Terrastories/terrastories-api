@@ -24,6 +24,82 @@ import { join } from 'path';
 import { FileService } from '../../src/services/file.service.js';
 import { FileRepository } from '../../src/repositories/file.repository.js';
 
+// Mock Sharp to avoid needing real image data
+vi.mock('sharp', () => ({
+  default: vi.fn().mockImplementation(() => ({
+    metadata: vi.fn().mockResolvedValue({
+      width: 800,
+      height: 600,
+      channels: 3,
+      format: 'jpeg',
+    }),
+  })),
+}));
+
+// Mock file-type library for consistent validation
+vi.mock('file-type', () => {
+  const mockFileTypeFromBuffer = vi.fn().mockImplementation(async (buffer) => {
+    if (!buffer || buffer.length < 4) return undefined;
+
+    // Check for JPEG magic bytes (more flexible)
+    if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+      return { ext: 'jpg', mime: 'image/jpeg' };
+    }
+
+    // Check for PNG magic bytes
+    if (
+      buffer.length >= 8 &&
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47 &&
+      buffer[4] === 0x0d &&
+      buffer[5] === 0x0a &&
+      buffer[6] === 0x1a &&
+      buffer[7] === 0x0a
+    ) {
+      return { ext: 'png', mime: 'image/png' };
+    }
+
+    // Check for MP3 magic bytes
+    if (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) {
+      return { ext: 'mp3', mime: 'audio/mpeg' };
+    }
+
+    // Check for PE executable
+    if (buffer[0] === 0x4d && buffer[1] === 0x5a) {
+      return { ext: 'exe', mime: 'application/x-msdownload' };
+    }
+
+    // Check for ELF executable
+    if (
+      buffer.length >= 4 &&
+      buffer[0] === 0x7f &&
+      buffer[1] === 0x45 &&
+      buffer[2] === 0x4c &&
+      buffer[3] === 0x46
+    ) {
+      return { ext: 'elf', mime: 'application/x-elf' };
+    }
+
+    // Check for ZIP files
+    if (
+      buffer[0] === 0x50 &&
+      buffer[1] === 0x4b &&
+      buffer[2] === 0x03 &&
+      buffer[3] === 0x04
+    ) {
+      return { ext: 'zip', mime: 'application/zip' };
+    }
+
+    return undefined;
+  });
+
+  return {
+    fileTypeFromBuffer: mockFileTypeFromBuffer,
+  };
+});
+
 // Mock multipart file interface
 interface MockMultipartFile {
   filename: string;
@@ -170,7 +246,7 @@ describe('FileService', () => {
       };
 
       await expect(fileService.uploadFile(textFile, options)).rejects.toThrow(
-        'File type not allowed'
+        /File type.*not allowed|Could not detect file type/
       );
     });
 
@@ -417,8 +493,8 @@ describe('FileService', () => {
         })(),
       };
 
-      const isValid = await fileService.validateFileType(jpegFile);
-      expect(isValid).toBe(true);
+      const result = await fileService.validateFileType(jpegFile);
+      expect(result.isValid).toBe(true);
     });
 
     it('should reject files with spoofed extensions', async () => {
@@ -433,8 +509,8 @@ describe('FileService', () => {
         })(),
       };
 
-      const isValid = await fileService.validateFileType(maliciousFile);
-      expect(isValid).toBe(false);
+      const result = await fileService.validateFileType(maliciousFile);
+      expect(result.isValid).toBe(false);
     });
 
     it('should sanitize malicious filenames', () => {

@@ -191,7 +191,7 @@ describe('Authentication Routes', () => {
 
       expect(response.statusCode).toBe(400);
       const responseBody = JSON.parse(response.body);
-      expect(responseBody.error).toContain('Invalid community ID');
+      expect(responseBody.error).toContain('Community not found');
     });
 
     test('should return 400 for invalid role', async () => {

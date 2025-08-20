@@ -21,6 +21,7 @@ import {
   speakerExamples,
 } from './speakers.swagger.js';
 import { fileSchemas, fileParameters, fileExamples } from './files.swagger.js';
+// Community swagger schemas removed temporarily due to missing dependency
 
 // All schema definitions for OpenAPI
 export const swaggerSchemas = {
@@ -57,6 +58,15 @@ export const swaggerSchemas = {
   FileUploadResponse: fileSchemas.FileUploadResponse,
   FileListResponse: fileSchemas.FileListResponse,
   FileErrorResponse: fileSchemas.FileErrorResponse,
+
+  // Community schemas
+  // Community schemas temporarily disabled
+  // Community: communitySwaggerSchemas.CommunityResponse,
+  // CreateCommunity: communitySwaggerSchemas.CreateCommunityRequest,
+  // UpdateCommunity: communitySwaggerSchemas.UpdateCommunityRequest,
+  // CommunityResponse: communitySwaggerSchemas.CommunityResponse,
+  // CommunitySearchResponse: communitySwaggerSchemas.CommunitySearchResponse,
+  // CulturalProtocols: communitySwaggerSchemas.CulturalProtocols,
 
   // Error schemas
   ValidationError: userSchemas.ValidationError,
@@ -156,3 +166,4 @@ export {
   speakerExamples,
 } from './speakers.swagger.js';
 export { fileSchemas, fileParameters, fileExamples } from './files.swagger.js';
+// export { communitySwaggerSchemas } from './communities.swagger.js';

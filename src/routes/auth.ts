@@ -93,7 +93,10 @@ export async function authRoutes(
   // Initialize services - use provided database instance or default
   const database = options?.database || (await getDb());
   const userRepository = new UserRepository(database);
-  const userService = new UserService(userRepository);
+  const communityRepository = new (
+    await import('../repositories/community.repository.js')
+  ).CommunityRepository(database);
+  const userService = new UserService(userRepository, communityRepository);
   const config = getConfig();
 
   // Import middleware for data sovereignty protection

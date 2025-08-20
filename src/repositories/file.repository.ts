@@ -533,13 +533,13 @@ export class FileRepository {
    * Validate file access for multiple files
    */
   async validateFileAccess(
-    filePaths: string[], 
-    userId: number, 
+    filePaths: string[],
+    userId: number,
     communityId: number
   ): Promise<{ valid: boolean; reason?: string }> {
     try {
       const filesTable = await getFilesTable();
-      
+
       for (const filePath of filePaths) {
         const [file] = await (this.db as any)
           .select()
@@ -556,20 +556,21 @@ export class FileRepository {
         if (!file) {
           return {
             valid: false,
-            reason: `File not found or access denied: ${filePath}`
+            reason: `File not found or access denied: ${filePath}`,
           };
         }
 
         // Check cultural restrictions
         if (file.culturalRestrictions) {
-          const restrictions = typeof file.culturalRestrictions === 'string' 
-            ? JSON.parse(file.culturalRestrictions) 
-            : file.culturalRestrictions;
-          
+          const restrictions =
+            typeof file.culturalRestrictions === 'string'
+              ? JSON.parse(file.culturalRestrictions)
+              : file.culturalRestrictions;
+
           if (restrictions.elderOnly && userId !== file.uploadedBy) {
             return {
               valid: false,
-              reason: `Insufficient permissions to access elder-only media file: ${filePath}`
+              reason: `Insufficient permissions to access elder-only media file: ${filePath}`,
             };
           }
         }
@@ -579,7 +580,7 @@ export class FileRepository {
     } catch (error) {
       return {
         valid: false,
-        reason: `Error validating file access: ${error}`
+        reason: `Error validating file access: ${error}`,
       };
     }
   }
@@ -591,8 +592,6 @@ export class FileRepository {
     // This is a simplified implementation
     // In a real system, this would check for files not referenced in any stories
     try {
-      const filesTable = await getFilesTable();
-      
       // For now, return empty array - in production this would have complex logic
       // to find files not referenced in story media_urls or other places
       return [];

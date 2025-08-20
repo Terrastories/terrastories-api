@@ -468,9 +468,8 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
       } catch (error: unknown) {
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         request.log.error(
-          { error: errorMessage, storyId: (request.params as any).id },
+          { error: errorMessage, storyId: request.params.id },
           'Error fetching story'
         );
         return reply.status(500).send({ error: 'Internal server error' });
@@ -581,9 +580,10 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
 
         return reply.send({ data: story });
       } catch (error: unknown) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
-          { error: (error as any).message, slug: (request.params as any).slug },
+          { error: errorMessage, slug: request.params.slug },
           'Error fetching story by slug'
         );
         return reply.status(500).send({ error: 'Internal server error' });
@@ -782,10 +782,9 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
         const updates = updateStorySchema.parse(request.body);
         const { id: userId, role: userRole } = request.session.user!;
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const story = await storyService.updateStory(
           id,
-          updates as any,
+          updates as Partial<StoryCreateInput>,
           userId,
           userRole
         );
@@ -795,37 +794,35 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
           message: 'Story updated successfully',
         });
       } catch (error: unknown) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           {
-            error: (error as any).message,
-            storyId: (request.params as any).id,
+            error: errorMessage,
+            storyId: request.params.id,
           },
           'Error updating story'
         );
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        if ((error as any).name === 'ZodError') {
+        if (error instanceof Error && error.name === 'ZodError') {
           return reply.status(400).send({ error: 'Invalid request data' });
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        if ((error as any).name === 'StoryNotFoundError') {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return reply.status(404).send({ error: (error as any).message });
+        if (error instanceof Error && error.name === 'StoryNotFoundError') {
+          return reply.status(404).send({ error: error.message });
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         if (
-          (error as any).name === 'InsufficientPermissionsError' ||
-          (error as any).name === 'CulturalProtocolViolationError'
+          error instanceof Error &&
+          (error.name === 'InsufficientPermissionsError' ||
+            error.name === 'CulturalProtocolViolationError')
         ) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return reply.status(403).send({ error: (error as any).message });
+          return reply.status(403).send({ error: error.message });
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return reply.status(422).send({ error: (error as any).message });
+        const fallbackMessage =
+          error instanceof Error ? error.message : 'Unknown error';
+        return reply.status(422).send({ error: fallbackMessage });
       }
     }
   );
@@ -912,32 +909,31 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
 
         return reply.status(204).send();
       } catch (error: unknown) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           {
-            error: (error as any).message,
-            storyId: (request.params as any).id,
+            error: errorMessage,
+            storyId: request.params.id,
           },
           'Error deleting story'
         );
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        if ((error as any).name === 'StoryNotFoundError') {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return reply.status(404).send({ error: (error as any).message });
+        if (error instanceof Error && error.name === 'StoryNotFoundError') {
+          return reply.status(404).send({ error: error.message });
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         if (
-          (error as any).name === 'InsufficientPermissionsError' ||
-          (error as any).name === 'CulturalProtocolViolationError'
+          error instanceof Error &&
+          (error.name === 'InsufficientPermissionsError' ||
+            error.name === 'CulturalProtocolViolationError')
         ) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return reply.status(403).send({ error: (error as any).message });
+          return reply.status(403).send({ error: error.message });
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return reply.status(422).send({ error: (error as any).message });
+        const fallbackMessage =
+          error instanceof Error ? error.message : 'Unknown error';
+        return reply.status(422).send({ error: fallbackMessage });
       }
     }
   );
@@ -1119,16 +1115,18 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
           },
         });
       } catch (error: unknown) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
-          { error: (error as any).message, userId: request.session.user!.id },
+          { error: errorMessage, userId: request.session.user!.id },
           'Error listing stories'
         );
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        if ((error as any).name === 'DataSovereigntyViolationError') {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return reply.status(403).send({ error: (error as any).message });
+        if (
+          error instanceof Error &&
+          error.name === 'DataSovereigntyViolationError'
+        ) {
+          return reply.status(403).send({ error: error.message });
         }
 
         return reply.status(500).send({ error: 'Internal server error' });

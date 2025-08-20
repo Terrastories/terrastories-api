@@ -24,6 +24,7 @@ import type {
 } from '../repositories/story.repository.js';
 import type { FileRepository } from '../repositories/file.repository.js';
 import type { UserRepository } from '../repositories/user.repository.js';
+import type { User } from '../db/schema/users.js';
 import type { Logger } from '../shared/types/index.js';
 
 /**
@@ -62,14 +63,6 @@ export interface StoryCreateInput {
  */
 interface CulturalAccessResult {
   allowed: boolean;
-  reason?: string;
-}
-
-/**
- * File access validation result
- */
-interface FileAccessResult {
-  valid: boolean;
   reason?: string;
 }
 
@@ -128,54 +121,82 @@ export class StoryService {
     userRole: string,
     userCommunityId: number | null
   ): Promise<StoryWithRelations> {
-    this.logger.info('Creating story', { 
-      title: input.title, 
-      userId, 
-      userRole, 
-      communityId: input.communityId 
+    this.logger.info('Creating story', {
+      title: input.title,
+      userId,
+      userRole,
+      communityId: input.communityId,
     });
 
     // Data sovereignty check
-    await this.validateDataSovereignty(userId, userRole, userCommunityId, input.communityId);
+    await this.validateDataSovereignty(
+      userId,
+      userRole,
+      userCommunityId,
+      input.communityId
+    );
 
     // Validate user permissions for creation
     this.validateCreationPermissions(userRole);
 
     // Validate community access
     if (userCommunityId !== input.communityId) {
-      throw new InsufficientPermissionsError('Can only create stories in your own community');
+      throw new InsufficientPermissionsError(
+        'Can only create stories in your own community'
+      );
     }
 
     // Validate media file access if provided
     if (input.mediaUrls?.length) {
-      await this.validateMediaAccess(input.mediaUrls, userId, input.communityId);
+      await this.validateMediaAccess(
+        input.mediaUrls,
+        userId,
+        input.communityId
+      );
     }
 
     // Validate place and speaker associations
     if (input.placeIds?.length) {
-      const placesValid = await this.storyRepository.validatePlacesInCommunity(input.placeIds, input.communityId);
+      const placesValid = await this.storyRepository.validatePlacesInCommunity(
+        input.placeIds,
+        input.communityId
+      );
       if (!placesValid) {
-        throw new InsufficientPermissionsError('Places must belong to the same community as the story');
+        throw new InsufficientPermissionsError(
+          'Places must belong to the same community as the story'
+        );
       }
     }
 
     if (input.speakerIds?.length) {
-      const speakersValid = await this.storyRepository.validateSpeakersInCommunity(input.speakerIds, input.communityId);
+      const speakersValid =
+        await this.storyRepository.validateSpeakersInCommunity(
+          input.speakerIds,
+          input.communityId
+        );
       if (!speakersValid) {
-        throw new InsufficientPermissionsError('Speakers must belong to the same community as the story');
+        throw new InsufficientPermissionsError(
+          'Speakers must belong to the same community as the story'
+        );
       }
     }
 
     // Process cultural protocols
-    const processedProtocols = this.processCulturalProtocols(input.culturalProtocols, userRole);
-    
+    const processedProtocols = this.processCulturalProtocols(
+      input.culturalProtocols,
+      userRole
+    );
+
     // Auto-set restriction flag based on cultural protocols
     const isRestricted = this.shouldSetRestricted(processedProtocols);
 
     // Generate slug if not provided
     let slug = input.slug;
     if (!slug) {
-      slug = await this.storyRepository.generateUniqueSlug(input.title, input.communityId);
+      slug = await this.storyRepository.generateUniqueSlug(
+        input.title,
+        input.communityId
+      );
     }
 
     // Prepare data for repository
@@ -198,12 +219,17 @@ export class StoryService {
     const story = await this.storyRepository.create(storyData);
 
     // Audit log for cultural oversight
-    await this.logCulturalAccess(story, { id: userId, role: userRole } as any, 'create', true);
+    await this.logCulturalAccess(
+      story,
+      { id: userId, role: userRole } as Pick<User, 'id' | 'role'>,
+      'create',
+      true
+    );
 
-    this.logger.info('Story created successfully', { 
-      storyId: story.id, 
+    this.logger.info('Story created successfully', {
+      storyId: story.id,
       slug: story.slug,
-      userId 
+      userId,
     });
 
     return story;
@@ -218,15 +244,22 @@ export class StoryService {
     userRole: string,
     userCommunityId: number | null
   ): Promise<StoryWithRelations | null> {
-    this.logger.debug('Fetching story by ID', { storyId: id, userId, userRole });
+    this.logger.debug('Fetching story by ID', {
+      storyId: id,
+      userId,
+      userRole,
+    });
 
     // Data sovereignty check for super admins
     if (userRole === 'super_admin') {
-      this.logger.warn('Data sovereignty protection: Super admin blocked from community story access', {
-        userId,
-        storyId: id,
-        reason: 'data_sovereignty_protection'
-      });
+      this.logger.warn(
+        'Data sovereignty protection: Super admin blocked from community story access',
+        {
+          userId,
+          storyId: id,
+          reason: 'data_sovereignty_protection',
+        }
+      );
       return null;
     }
 
@@ -241,7 +274,7 @@ export class StoryService {
         userId,
         userCommunityId,
         storyCommunityId: story.communityId,
-        storyId: id
+        storyId: id,
       });
       return null;
     }
@@ -249,7 +282,10 @@ export class StoryService {
     // Cultural protocol access validation
     const accessResult = await this.validateCulturalAccess(
       story,
-      { id: userId, role: userRole, communityId: userCommunityId } as any,
+      { id: userId, role: userRole, communityId: userCommunityId } as Pick<
+        User,
+        'id' | 'role' | 'communityId'
+      >,
       'read'
     );
 
@@ -257,13 +293,18 @@ export class StoryService {
       this.logger.warn('Cultural protocol access denied', {
         userId,
         storyId: id,
-        reason: accessResult.reason
+        reason: accessResult.reason,
       });
       return null;
     }
 
     // Audit log
-    await this.logCulturalAccess(story, { id: userId, role: userRole } as any, 'read', true);
+    await this.logCulturalAccess(
+      story,
+      { id: userId, role: userRole } as Pick<User, 'id' | 'role'>,
+      'read',
+      true
+    );
 
     return story;
   }
@@ -277,20 +318,31 @@ export class StoryService {
     userId: number,
     userRole: string
   ): Promise<StoryWithRelations | null> {
-    this.logger.debug('Fetching story by slug', { slug, communityId, userId, userRole });
+    this.logger.debug('Fetching story by slug', {
+      slug,
+      communityId,
+      userId,
+      userRole,
+    });
 
     // Data sovereignty check for super admins
     if (userRole === 'super_admin') {
-      this.logger.warn('Data sovereignty protection: Super admin blocked from community story access', {
-        userId,
-        slug,
-        communityId,
-        reason: 'data_sovereignty_protection'
-      });
+      this.logger.warn(
+        'Data sovereignty protection: Super admin blocked from community story access',
+        {
+          userId,
+          slug,
+          communityId,
+          reason: 'data_sovereignty_protection',
+        }
+      );
       return null;
     }
 
-    const story = await this.storyRepository.findBySlugWithRelations(slug, communityId);
+    const story = await this.storyRepository.findBySlugWithRelations(
+      slug,
+      communityId
+    );
     if (!story) {
       return null;
     }
@@ -298,7 +350,10 @@ export class StoryService {
     // Cultural protocol access validation
     const accessResult = await this.validateCulturalAccess(
       story,
-      { id: userId, role: userRole, communityId } as any,
+      { id: userId, role: userRole, communityId } as Pick<
+        User,
+        'id' | 'role' | 'communityId'
+      >,
       'read'
     );
 
@@ -306,13 +361,18 @@ export class StoryService {
       this.logger.warn('Cultural protocol access denied', {
         userId,
         slug,
-        reason: accessResult.reason
+        reason: accessResult.reason,
       });
       return null;
     }
 
     // Audit log
-    await this.logCulturalAccess(story, { id: userId, role: userRole } as any, 'read', true);
+    await this.logCulturalAccess(
+      story,
+      { id: userId, role: userRole } as Pick<User, 'id' | 'role'>,
+      'read',
+      true
+    );
 
     return story;
   }
@@ -337,7 +397,11 @@ export class StoryService {
     // Cultural protocol validation for modification
     const accessResult = await this.validateCulturalAccess(
       existingStory,
-      { id: userId, role: userRole, communityId: existingStory.communityId } as any,
+      {
+        id: userId,
+        role: userRole,
+        communityId: existingStory.communityId,
+      } as Pick<User, 'id' | 'role' | 'communityId'>,
       'write'
     );
 
@@ -350,34 +414,52 @@ export class StoryService {
 
     // Validate media file access if being updated
     if (updates.mediaUrls?.length) {
-      await this.validateMediaAccess(updates.mediaUrls, userId, existingStory.communityId);
+      await this.validateMediaAccess(
+        updates.mediaUrls,
+        userId,
+        existingStory.communityId
+      );
     }
 
     // Validate associations if being updated
     if (updates.placeIds?.length) {
-      const placesValid = await this.storyRepository.validatePlacesInCommunity(updates.placeIds, existingStory.communityId);
+      const placesValid = await this.storyRepository.validatePlacesInCommunity(
+        updates.placeIds,
+        existingStory.communityId
+      );
       if (!placesValid) {
-        throw new InsufficientPermissionsError('Places must belong to the same community as the story');
+        throw new InsufficientPermissionsError(
+          'Places must belong to the same community as the story'
+        );
       }
     }
 
     if (updates.speakerIds?.length) {
-      const speakersValid = await this.storyRepository.validateSpeakersInCommunity(updates.speakerIds, existingStory.communityId);
+      const speakersValid =
+        await this.storyRepository.validateSpeakersInCommunity(
+          updates.speakerIds,
+          existingStory.communityId
+        );
       if (!speakersValid) {
-        throw new InsufficientPermissionsError('Speakers must belong to the same community as the story');
+        throw new InsufficientPermissionsError(
+          'Speakers must belong to the same community as the story'
+        );
       }
     }
 
     // Process cultural protocol updates
     let processedProtocols = updates.culturalProtocols;
     if (updates.culturalProtocols) {
-      processedProtocols = this.processCulturalProtocols(updates.culturalProtocols, userRole);
+      processedProtocols = this.processCulturalProtocols(
+        updates.culturalProtocols,
+        userRole
+      );
     }
 
     // Update restriction flag if cultural protocols changed
-    let isRestricted = updates.culturalProtocols ? 
-      this.shouldSetRestricted(processedProtocols) : 
-      undefined;
+    const isRestricted = updates.culturalProtocols
+      ? this.shouldSetRestricted(processedProtocols)
+      : undefined;
 
     // Prepare update data
     const updateData: Partial<StoryCreateData> = {
@@ -399,14 +481,23 @@ export class StoryService {
 
     // Add cultural protocols to result
     if (processedProtocols) {
-      (updatedStory as any).culturalProtocols = processedProtocols;
+      (
+        updatedStory as StoryWithRelations & {
+          culturalProtocols?: CulturalProtocols;
+        }
+      ).culturalProtocols = processedProtocols;
     }
 
     // Check for orphaned media files
     await this.checkOrphanedFiles();
 
     // Audit log
-    await this.logCulturalAccess(updatedStory, { id: userId, role: userRole } as any, 'update', true);
+    await this.logCulturalAccess(
+      updatedStory,
+      { id: userId, role: userRole } as Pick<User, 'id' | 'role'>,
+      'update',
+      true
+    );
 
     this.logger.info('Story updated successfully', { storyId: id, userId });
 
@@ -432,7 +523,11 @@ export class StoryService {
     // Cultural protocol validation for deletion
     const accessResult = await this.validateCulturalAccess(
       existingStory,
-      { id: userId, role: userRole, communityId: existingStory.communityId } as any,
+      {
+        id: userId,
+        role: userRole,
+        communityId: existingStory.communityId,
+      } as Pick<User, 'id' | 'role' | 'communityId'>,
       'delete'
     );
 
@@ -453,7 +548,12 @@ export class StoryService {
     await this.checkOrphanedFiles();
 
     // Audit log
-    await this.logCulturalAccess(existingStory, { id: userId, role: userRole } as any, 'delete', true);
+    await this.logCulturalAccess(
+      existingStory,
+      { id: userId, role: userRole } as Pick<User, 'id' | 'role'>,
+      'delete',
+      true
+    );
 
     this.logger.info('Story deleted successfully', { storyId: id, userId });
   }
@@ -468,21 +568,24 @@ export class StoryService {
     userRole: string,
     userCommunityId: number
   ): Promise<PaginatedResult<StoryWithRelations>> {
-    this.logger.debug('Listing stories', { 
-      filters, 
-      pagination, 
-      userId, 
-      userRole, 
-      userCommunityId 
+    this.logger.debug('Listing stories', {
+      filters,
+      pagination,
+      userId,
+      userRole,
+      userCommunityId,
     });
 
     // Data sovereignty check for super admins
     if (userRole === 'super_admin') {
-      this.logger.warn('Data sovereignty protection: Super admin blocked from community stories', {
-        userId,
-        userCommunityId,
-        reason: 'data_sovereignty_protection'
-      });
+      this.logger.warn(
+        'Data sovereignty protection: Super admin blocked from community stories',
+        {
+          userId,
+          userCommunityId,
+          reason: 'data_sovereignty_protection',
+        }
+      );
       return {
         data: [],
         total: 0,
@@ -505,13 +608,19 @@ export class StoryService {
     }
 
     // Get results
-    const result = await this.storyRepository.findMany(scopedFilters, pagination);
+    const result = await this.storyRepository.findMany(
+      scopedFilters,
+      pagination
+    );
 
     // Filter results by cultural protocols (additional filtering on top of DB query)
-    const filteredData = result.data.filter(story => {
+    const filteredData = result.data.filter((story) => {
       const accessResult = this.validateCulturalAccessSync(
         story,
-        { id: userId, role: userRole, communityId: userCommunityId } as any,
+        { id: userId, role: userRole, communityId: userCommunityId } as Pick<
+          User,
+          'id' | 'role' | 'communityId'
+        >,
         'read'
       );
       return accessResult.allowed;
@@ -519,7 +628,8 @@ export class StoryService {
 
     // For pagination purposes, we need to estimate the filtered total
     // If all items in the current page pass the filter, assume the filter ratio applies to the total
-    const filterRatio = result.data.length > 0 ? filteredData.length / result.data.length : 1;
+    const filterRatio =
+      result.data.length > 0 ? filteredData.length / result.data.length : 1;
     const estimatedFilteredTotal = Math.round(result.total * filterRatio);
 
     return {
@@ -571,7 +681,7 @@ export class StoryService {
         userId,
         userRole,
         targetCommunityId,
-        reason: 'Super administrators cannot access community stories'
+        reason: 'Super administrators cannot access community stories',
       });
       throw new DataSovereigntyViolationError(
         'Super administrators cannot access community stories - data sovereignty protection'
@@ -584,7 +694,7 @@ export class StoryService {
    */
   private async validateCulturalAccess(
     story: StoryWithRelations,
-    user: any,
+    user: Pick<User, 'id' | 'role' | 'communityId'>,
     operation: 'read' | 'write' | 'delete'
   ): Promise<CulturalAccessResult> {
     return this.validateCulturalAccessSync(story, user, operation);
@@ -595,53 +705,68 @@ export class StoryService {
    */
   private validateCulturalAccessSync(
     story: StoryWithRelations,
-    user: any,
+    user: Pick<User, 'id' | 'role' | 'communityId'>,
     operation: 'read' | 'write' | 'delete'
   ): CulturalAccessResult {
     // Community isolation enforcement
     if (story.communityId !== user.communityId) {
       return {
         allowed: false,
-        reason: 'Stories can only be accessed within the same community'
+        reason: 'Stories can only be accessed within the same community',
       };
     }
 
     // Get cultural protocols (mock implementation - in future this would be from DB)
-    const protocols = (story as any).culturalProtocols as CulturalProtocols | undefined;
-    
-    if (protocols?.permissionLevel === 'elder_only' && user.role !== 'elder' && user.role !== 'admin') {
+    const protocols = (
+      story as StoryWithRelations & { culturalProtocols?: CulturalProtocols }
+    ).culturalProtocols;
+
+    if (
+      protocols?.permissionLevel === 'elder_only' &&
+      user.role !== 'elder' &&
+      user.role !== 'admin'
+    ) {
       return {
         allowed: false,
-        reason: 'Elder-only content requires elevated cultural permissions'
+        reason: 'Elder-only content requires elevated cultural permissions',
       };
     }
 
-    if (protocols?.ceremonialContent && !['elder', 'admin'].includes(user.role)) {
+    if (
+      protocols?.ceremonialContent &&
+      !['elder', 'admin'].includes(user.role)
+    ) {
       return {
         allowed: false,
-        reason: 'Ceremonial content requires elevated cultural permissions'
+        reason: 'Ceremonial content requires elevated cultural permissions',
       };
     }
 
-    if (protocols?.elderApprovalRequired && operation === 'write' && user.role !== 'elder') {
+    if (
+      protocols?.elderApprovalRequired &&
+      operation === 'write' &&
+      user.role !== 'elder'
+    ) {
       return {
         allowed: false,
-        reason: 'Modifications to this story require elder approval'
+        reason: 'Modifications to this story require elder approval',
       };
     }
 
     // Operation-specific permission checks
     if (operation === 'write' || operation === 'delete') {
-      const canModify = user.role === 'admin' || 
-                       user.role === 'elder' ||
-                       (user.role === 'editor' && story.createdBy === user.id);
-      
+      const canModify =
+        user.role === 'admin' ||
+        user.role === 'elder' ||
+        (user.role === 'editor' && story.createdBy === user.id);
+
       if (!canModify) {
         return {
           allowed: false,
-          reason: operation === 'delete' 
-            ? 'Insufficient permissions to delete this story'
-            : 'Insufficient permissions to modify this story'
+          reason:
+            operation === 'delete'
+              ? 'Insufficient permissions to delete this story'
+              : 'Insufficient permissions to modify this story',
         };
       }
     }
@@ -655,41 +780,65 @@ export class StoryService {
   private validateCreationPermissions(userRole: string): void {
     const allowedRoles = ['admin', 'elder', 'editor'];
     if (!allowedRoles.includes(userRole)) {
-      throw new InsufficientPermissionsError('Insufficient permissions to create stories');
+      throw new InsufficientPermissionsError(
+        'Insufficient permissions to create stories'
+      );
     }
   }
 
   /**
    * Validate modification permissions
    */
-  private validateModificationPermissions(story: StoryWithRelations, userId: number, userRole: string): void {
-    const canModify = userRole === 'admin' || 
-                     userRole === 'elder' ||
-                     (userRole === 'editor' && story.createdBy === userId);
-    
+  private validateModificationPermissions(
+    story: StoryWithRelations,
+    userId: number,
+    userRole: string
+  ): void {
+    const canModify =
+      userRole === 'admin' ||
+      userRole === 'elder' ||
+      (userRole === 'editor' && story.createdBy === userId);
+
     if (!canModify) {
-      throw new InsufficientPermissionsError('Insufficient permissions to modify this story');
+      throw new InsufficientPermissionsError(
+        'Insufficient permissions to modify this story'
+      );
     }
   }
 
   /**
    * Validate deletion permissions
    */
-  private validateDeletionPermissions(story: StoryWithRelations, userId: number, userRole: string): void {
-    const canDelete = userRole === 'admin' || 
-                     userRole === 'elder' ||
-                     (userRole === 'editor' && story.createdBy === userId);
-    
+  private validateDeletionPermissions(
+    story: StoryWithRelations,
+    userId: number,
+    userRole: string
+  ): void {
+    const canDelete =
+      userRole === 'admin' ||
+      userRole === 'elder' ||
+      (userRole === 'editor' && story.createdBy === userId);
+
     if (!canDelete) {
-      throw new InsufficientPermissionsError('Insufficient permissions to delete this story');
+      throw new InsufficientPermissionsError(
+        'Insufficient permissions to delete this story'
+      );
     }
   }
 
   /**
    * Validate media file access
    */
-  private async validateMediaAccess(mediaUrls: string[], userId: number, communityId: number): Promise<void> {
-    const result = await this.fileRepository.validateFileAccess(mediaUrls, userId, communityId);
+  private async validateMediaAccess(
+    mediaUrls: string[],
+    userId: number,
+    communityId: number
+  ): Promise<void> {
+    const result = await this.fileRepository.validateFileAccess(
+      mediaUrls,
+      userId,
+      communityId
+    );
     if (!result.valid) {
       throw new InvalidFileAccessError(result.reason);
     }
@@ -702,17 +851,27 @@ export class StoryService {
   /**
    * Process cultural protocols with role-based validation
    */
-  private processCulturalProtocols(protocols: CulturalProtocols | undefined, userRole: string): CulturalProtocols | undefined {
+  private processCulturalProtocols(
+    protocols: CulturalProtocols | undefined,
+    userRole: string
+  ): CulturalProtocols | undefined {
     if (!protocols) return undefined;
 
     // Only elders and admins can set elder-only content
-    if (protocols.permissionLevel === 'elder_only' && !['elder', 'admin'].includes(userRole)) {
-      throw new CulturalProtocolViolationError('Only elders and admins can create elder-only content');
+    if (
+      protocols.permissionLevel === 'elder_only' &&
+      !['elder', 'admin'].includes(userRole)
+    ) {
+      throw new CulturalProtocolViolationError(
+        'Only elders and admins can create elder-only content'
+      );
     }
 
     // Only elders and admins can set ceremonial content
     if (protocols.ceremonialContent && !['elder', 'admin'].includes(userRole)) {
-      throw new CulturalProtocolViolationError('Only elders and admins can mark content as ceremonial');
+      throw new CulturalProtocolViolationError(
+        'Only elders and admins can mark content as ceremonial'
+      );
     }
 
     return protocols;
@@ -721,12 +880,16 @@ export class StoryService {
   /**
    * Determine if story should be marked as restricted based on cultural protocols
    */
-  private shouldSetRestricted(protocols: CulturalProtocols | undefined): boolean {
+  private shouldSetRestricted(
+    protocols: CulturalProtocols | undefined
+  ): boolean {
     if (!protocols) return false;
-    
-    return protocols.permissionLevel === 'elder_only' ||
-           protocols.permissionLevel === 'restricted' ||
-           protocols.ceremonialContent === true;
+
+    return (
+      protocols.permissionLevel === 'elder_only' ||
+      protocols.permissionLevel === 'restricted' ||
+      protocols.ceremonialContent === true
+    );
   }
 
   /**
@@ -736,8 +899,8 @@ export class StoryService {
     try {
       const orphanedFiles = await this.fileRepository.findOrphanedFiles();
       if (orphanedFiles.length > 0) {
-        this.logger.info('Found orphaned files after story operation', { 
-          count: orphanedFiles.length 
+        this.logger.info('Found orphaned files after story operation', {
+          count: orphanedFiles.length,
         });
         // Files would be cleaned up by a background job
       }
@@ -751,7 +914,7 @@ export class StoryService {
    */
   private async logCulturalAccess(
     story: StoryWithRelations,
-    user: any,
+    user: Pick<User, 'id' | 'role'>,
     operation: string,
     allowed: boolean,
     reason?: string
@@ -766,7 +929,9 @@ export class StoryService {
       operation,
       allowed,
       reason,
-      culturalProtocols: (story as any).culturalProtocols,
+      culturalProtocols: (
+        story as StoryWithRelations & { culturalProtocols?: CulturalProtocols }
+      ).culturalProtocols,
     };
 
     // Log to appropriate audit system for Indigenous community oversight

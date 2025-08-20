@@ -6,7 +6,13 @@
  */
 
 import { eq, and, like, desc, or, sql, count } from 'drizzle-orm';
-import { storiesSqlite, communitiesSqlite, usersSqlite, placesSqlite, speakersSqlite } from '../db/schema/index.js';
+import {
+  storiesSqlite,
+  communitiesSqlite,
+  usersSqlite,
+  placesSqlite,
+  speakersSqlite,
+} from '../db/schema/index.js';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 
 /**
@@ -170,14 +176,19 @@ export interface PaginatedResult<T> {
 export class StoryRepository {
   // Temporary storage for associations during tests
   // In production, this would be handled by join tables
-  private storyAssociations = new Map<number, {
-    placeIds?: number[];
-    speakerIds?: number[];
-    placeContexts?: string[];
-    speakerRoles?: string[];
-  }>();
+  private storyAssociations = new Map<
+    number,
+    {
+      placeIds?: number[];
+      speakerIds?: number[];
+      placeContexts?: string[];
+      speakerRoles?: string[];
+    }
+  >();
 
-  constructor(private readonly db: BetterSQLite3Database<any>) {}
+  constructor(
+    private readonly db: BetterSQLite3Database<Record<string, never>>
+  ) {}
 
   // Helper method to get the appropriate table based on database type
   private getStoriesTable() {
@@ -211,7 +222,9 @@ export class StoryRepository {
     }
 
     // Generate slug if not provided
-    const slug = data.slug || await this.generateUniqueSlug(data.title, data.communityId);
+    const slug =
+      data.slug ||
+      (await this.generateUniqueSlug(data.title, data.communityId));
 
     // Insert story into database
     const insertData = {
@@ -242,7 +255,7 @@ export class StoryRepository {
     }
 
     // Return with populated associations
-    return await this.findByIdWithRelations(story.id) as StoryWithRelations;
+    return (await this.findByIdWithRelations(story.id)) as StoryWithRelations;
   }
 
   /**
@@ -285,26 +298,58 @@ export class StoryRepository {
 
     // Get associations from temporary storage
     const associations = this.storyAssociations.get(id);
-    const places: any[] = [];
-    const speakers: any[] = [];
+    const places: Array<{
+      id: number;
+      name: string;
+      description?: string;
+      latitude: number;
+      longitude: number;
+      region?: string;
+      culturalSignificance?: string;
+      culturalContext?: string;
+      storyRelationship?: string;
+      sortOrder?: number;
+    }> = [];
+    const speakers: Array<{
+      id: number;
+      name: string;
+      bio?: string;
+      photoUrl?: string;
+      birthYear?: number;
+      elderStatus: boolean;
+      culturalRole?: string;
+      storyRole?: string;
+      sortOrder?: number;
+    }> = [];
 
     // Fetch places if we have associations
     if (associations?.placeIds?.length) {
       try {
         // Use proper Drizzle query with or() instead of raw SQL
         const placesTable = this.getPlacesTable();
-        const placeConditions = associations.placeIds.map(id => eq(placesTable.id, id));
+        const placeConditions = associations.placeIds.map((id) =>
+          eq(placesTable.id, id)
+        );
         const placeRecords = await this.db
           .select()
           .from(placesTable)
           .where(or(...placeConditions))
           .execute();
-        
-        places.push(...placeRecords.map((p, index) => ({
-          ...p,
-          culturalContext: associations.placeContexts?.[index],
-          storyRelationship: undefined,
-        })));
+
+        places.push(
+          ...placeRecords.map((p, index: number) => ({
+            id: p.id,
+            name: p.name,
+            description: p.description || undefined,
+            latitude: p.latitude,
+            longitude: p.longitude,
+            region: p.region || undefined,
+            culturalSignificance: p.culturalSignificance || undefined,
+            culturalContext: associations.placeContexts?.[index],
+            storyRelationship: undefined,
+            sortOrder: index,
+          }))
+        );
       } catch (error) {
         console.warn('Failed to fetch places:', error);
       }
@@ -313,36 +358,47 @@ export class StoryRepository {
     // Use actual test data for speakers based on IDs
     if (associations?.speakerIds?.length) {
       // For now, create speakers based on test data pattern
-      speakers.push(...associations.speakerIds.map((speakerId, index) => {
-        if (speakerId === 1) {
-          return {
-            id: speakerId,
-            name: 'Elder Maria Stonebear',
-            bio: 'Traditional knowledge keeper',
-            elderStatus: true,
-            culturalRole: associations.speakerRoles?.[index] || 'narrator',
-            storyRole: associations.speakerRoles?.[index] || 'narrator',
-          };
-        } else if (speakerId === 2) {
-          return {
-            id: speakerId,
-            name: 'John Rivercrossing',
-            bio: 'Community storyteller',
-            elderStatus: false,
-            culturalRole: associations.speakerRoles?.[index] || 'narrator',
-            storyRole: associations.speakerRoles?.[index] || 'narrator',
-          };
-        } else {
-          return {
-            id: speakerId,
-            name: `Speaker ${speakerId}`,
-            bio: 'Test speaker',
-            elderStatus: false,
-            culturalRole: associations.speakerRoles?.[index] || 'narrator',
-            storyRole: associations.speakerRoles?.[index] || 'narrator',
-          };
-        }
-      }));
+      speakers.push(
+        ...associations.speakerIds.map((speakerId, index) => {
+          if (speakerId === 1) {
+            return {
+              id: speakerId,
+              name: 'Elder Maria Stonebear',
+              bio: 'Traditional knowledge keeper',
+              photoUrl: undefined,
+              birthYear: undefined,
+              elderStatus: true,
+              culturalRole: associations.speakerRoles?.[index] || 'narrator',
+              storyRole: associations.speakerRoles?.[index] || 'narrator',
+              sortOrder: index,
+            };
+          } else if (speakerId === 2) {
+            return {
+              id: speakerId,
+              name: 'John Rivercrossing',
+              bio: 'Community storyteller',
+              photoUrl: undefined,
+              birthYear: undefined,
+              elderStatus: false,
+              culturalRole: associations.speakerRoles?.[index] || 'narrator',
+              storyRole: associations.speakerRoles?.[index] || 'narrator',
+              sortOrder: index,
+            };
+          } else {
+            return {
+              id: speakerId,
+              name: `Speaker ${speakerId}`,
+              bio: 'Test speaker',
+              photoUrl: undefined,
+              birthYear: undefined,
+              elderStatus: false,
+              culturalRole: associations.speakerRoles?.[index] || 'narrator',
+              storyRole: associations.speakerRoles?.[index] || 'narrator',
+              sortOrder: index,
+            };
+          }
+        })
+      );
     }
 
     return {
@@ -373,10 +429,12 @@ export class StoryRepository {
     const [story] = await this.db
       .select()
       .from(storiesTable)
-      .where(and(
-        eq(storiesTable.slug, slug),
-        eq(storiesTable.communityId, communityId)
-      ))
+      .where(
+        and(
+          eq(storiesTable.slug, slug),
+          eq(storiesTable.communityId, communityId)
+        )
+      )
       .limit(1);
 
     return story || null;
@@ -385,7 +443,10 @@ export class StoryRepository {
   /**
    * Find story by slug with relations
    */
-  async findBySlugWithRelations(slug: string, communityId: number): Promise<StoryWithRelations | null> {
+  async findBySlugWithRelations(
+    slug: string,
+    communityId: number
+  ): Promise<StoryWithRelations | null> {
     const story = await this.findBySlug(slug, communityId);
     if (!story) return null;
 
@@ -395,7 +456,10 @@ export class StoryRepository {
   /**
    * Update story
    */
-  async update(id: number, data: StoryUpdateData): Promise<StoryWithRelations | null> {
+  async update(
+    id: number,
+    data: StoryUpdateData
+  ): Promise<StoryWithRelations | null> {
     // First check if the story exists
     const existingStory = await this.findById(id);
     if (!existingStory) {
@@ -422,8 +486,12 @@ export class StoryRepository {
         ...currentAssociations,
         ...(data.placeIds !== undefined && { placeIds: data.placeIds }),
         ...(data.speakerIds !== undefined && { speakerIds: data.speakerIds }),
-        ...(data.placeContexts !== undefined && { placeContexts: data.placeContexts }),
-        ...(data.speakerRoles !== undefined && { speakerRoles: data.speakerRoles }),
+        ...(data.placeContexts !== undefined && {
+          placeContexts: data.placeContexts,
+        }),
+        ...(data.speakerRoles !== undefined && {
+          speakerRoles: data.speakerRoles,
+        }),
       });
     }
 
@@ -443,15 +511,13 @@ export class StoryRepository {
       }
 
       const storiesTable = this.getStoriesTable();
-      await this.db
-        .delete(storiesTable)
-        .where(eq(storiesTable.id, id));
+      await this.db.delete(storiesTable).where(eq(storiesTable.id, id));
 
       // Clean up associations
       this.storyAssociations.delete(id);
 
       return true;
-    } catch (error) {
+    } catch {
       return false;
     }
   }
@@ -459,10 +525,15 @@ export class StoryRepository {
   /**
    * Find many stories with filtering and pagination
    */
-  async findMany(filters: StoryFilters, pagination: PaginationOptions): Promise<PaginatedResult<StoryWithRelations>> {
+  async findMany(
+    filters: StoryFilters,
+    pagination: PaginationOptions
+  ): Promise<PaginatedResult<StoryWithRelations>> {
     const storiesTable = this.getStoriesTable();
     const baseQuery = this.db.select().from(storiesTable);
-    const baseCountQuery = this.db.select({ count: count() }).from(storiesTable);
+    const baseCountQuery = this.db
+      .select({ count: count() })
+      .from(storiesTable);
 
     // Apply filters
     const conditions = [];
@@ -494,8 +565,9 @@ export class StoryRepository {
 
     if (filters.tags?.length) {
       // For SQLite JSON arrays, check if any of the filter tags exist in the story tags
-      const tagConditions = filters.tags.map(tag => 
-        sql`EXISTS (SELECT 1 FROM json_each(${storiesTable.tags}) WHERE value = ${tag})`
+      const tagConditions = filters.tags.map(
+        (tag) =>
+          sql`EXISTS (SELECT 1 FROM json_each(${storiesTable.tags}) WHERE value = ${tag})`
       );
       conditions.push(or(...tagConditions));
     }
@@ -503,9 +575,9 @@ export class StoryRepository {
     // Build final queries with proper typing
     if (conditions.length > 0) {
       const whereClause = and(...conditions);
-      const storiesWithFilter = await baseQuery.where(whereClause).execute();
+      // const storiesWithFilter = await baseQuery.where(whereClause).execute();
       const countWithFilter = await baseCountQuery.where(whereClause).execute();
-      
+
       // Apply pagination and sorting to filtered results
       const offset = (pagination.page - 1) * pagination.limit;
       const paginatedStories = await baseQuery
@@ -520,7 +592,9 @@ export class StoryRepository {
 
       // Convert to StoryWithRelations
       const storiesWithRelations = await Promise.all(
-        paginatedStories.map((story: any) => this.findByIdWithRelations(story.id))
+        paginatedStories.map((story: { id: number }) =>
+          this.findByIdWithRelations(story.id)
+        )
       );
 
       return {
@@ -545,7 +619,9 @@ export class StoryRepository {
 
       // Convert to StoryWithRelations
       const storiesWithRelations = await Promise.all(
-        paginatedStories.map((story: any) => this.findByIdWithRelations(story.id))
+        paginatedStories.map((story: { id: number }) =>
+          this.findByIdWithRelations(story.id)
+        )
       );
 
       return {
@@ -561,7 +637,11 @@ export class StoryRepository {
   /**
    * Generate unique slug from title
    */
-  async generateUniqueSlug(title: string, communityId: number, tx?: any): Promise<string> {
+  async generateUniqueSlug(
+    title: string,
+    communityId: number,
+    _tx?: unknown
+  ): Promise<string> {
     const baseSlug = this.createSlugFromTitle(title);
     let slug = baseSlug;
     let counter = 0;
@@ -580,7 +660,10 @@ export class StoryRepository {
   /**
    * Validate that places belong to the specified community
    */
-  async validatePlacesInCommunity(placeIds: number[], communityId: number): Promise<boolean> {
+  async validatePlacesInCommunity(
+    placeIds: number[],
+    communityId: number
+  ): Promise<boolean> {
     if (!placeIds.length) return true;
 
     try {
@@ -588,14 +671,16 @@ export class StoryRepository {
       const places = await this.db
         .select()
         .from(placesTable)
-        .where(and(
-          sql`${placesTable.id} IN (${placeIds.join(',')})`,
-          eq(placesTable.communityId, communityId)
-        ));
+        .where(
+          and(
+            sql`${placesTable.id} IN (${placeIds.join(',')})`,
+            eq(placesTable.communityId, communityId)
+          )
+        );
 
       // All places must exist and belong to the community
       return places.length === placeIds.length;
-    } catch (error) {
+    } catch {
       return false;
     }
   }
@@ -603,7 +688,10 @@ export class StoryRepository {
   /**
    * Validate that speakers belong to the specified community
    */
-  async validateSpeakersInCommunity(speakerIds: number[], communityId: number): Promise<boolean> {
+  async validateSpeakersInCommunity(
+    speakerIds: number[],
+    _communityId: number
+  ): Promise<boolean> {
     if (!speakerIds.length) return true;
 
     // For now, since speakers table may not exist yet, use mock logic

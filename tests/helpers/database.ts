@@ -15,6 +15,7 @@ import {
   placesSqlite,
   usersSqlite,
   filesSqlite,
+  storiesSqlite,
   Community,
   Place,
   User,
@@ -25,6 +26,7 @@ const communities = communitiesSqlite;
 const places = placesSqlite;
 const users = usersSqlite;
 const files = filesSqlite;
+const stories = storiesSqlite;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,6 +37,7 @@ export type TestDatabase = ReturnType<
     places: typeof places;
     users: typeof users;
     files: typeof files;
+    stories: typeof stories;
   }>
 >;
 
@@ -63,7 +66,7 @@ export class TestDatabaseManager {
 
     // Create Drizzle instance
     this.db = drizzle(this.sqlite, {
-      schema: { communities, places, users, files },
+      schema: { communities, places, users, files, stories },
     });
 
     // Run migrations
@@ -88,11 +91,11 @@ export class TestDatabaseManager {
 
     // Add missing columns that are not in migrations yet
     try {
-      // Check if locale column exists, if not add missing columns
-      const tableInfo = this.sqlite
+      // Check if locale column exists in communities, if not add missing columns
+      const communitiesTableInfo = this.sqlite
         .prepare('PRAGMA table_info(communities)')
         .all() as any[];
-      const hasLocale = tableInfo.some((col: any) => col.name === 'locale');
+      const hasLocale = communitiesTableInfo.some((col: any) => col.name === 'locale');
 
       if (!hasLocale) {
         this.sqlite.exec(`
@@ -101,6 +104,19 @@ export class TestDatabaseManager {
           ALTER TABLE communities ADD COLUMN is_active INTEGER DEFAULT 1 NOT NULL;
         `);
         console.log('✅ Added missing communities columns');
+      }
+
+      // Check if slug column exists in stories, if not add missing columns
+      const storiesTableInfo = this.sqlite
+        .prepare('PRAGMA table_info(stories)')
+        .all() as any[];
+      const hasSlug = storiesTableInfo.some((col: any) => col.name === 'slug');
+
+      if (!hasSlug) {
+        this.sqlite.exec(`
+          ALTER TABLE stories ADD COLUMN slug TEXT;
+        `);
+        console.log('✅ Added missing stories columns');
       }
     } catch (error: any) {
       console.warn('⚠️ Error adding missing columns:', error.message);
@@ -128,6 +144,7 @@ export class TestDatabaseManager {
 
     try {
       // Clear in dependency order (children first)
+      await this.db.delete(stories);
       await this.db.delete(files);
       await this.db.delete(places);
       await this.db.delete(users);

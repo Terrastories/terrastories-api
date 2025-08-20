@@ -34,6 +34,8 @@ const mockStoryRepository = {
   createAssociations: vi.fn(),
   updateAssociations: vi.fn(),
   deleteAssociations: vi.fn(),
+  validatePlacesInCommunity: vi.fn(),
+  validateSpeakersInCommunity: vi.fn(),
 } as any;
 
 const mockFileRepository = {
@@ -61,6 +63,8 @@ function createMockTestData() {
     community: {
       id: 1,
       name: 'Test Indigenous Community',
+      description: 'Test community for stories',
+      slug: 'test-indigenous-community',
       locale: 'en',
     },
     users: {
@@ -227,6 +231,8 @@ describe('StoryService', () => {
       // Mock repository methods
       mockStoryRepository.generateUniqueSlug.mockResolvedValue('the-legend-of-sacred-mountain');
       mockFileRepository.validateFileAccess.mockResolvedValue({ valid: true });
+      mockStoryRepository.validatePlacesInCommunity.mockResolvedValue(true);
+      mockStoryRepository.validateSpeakersInCommunity.mockResolvedValue(true);
       mockStoryRepository.create.mockResolvedValue(expectedStory);
 
       // Act
@@ -266,7 +272,7 @@ describe('StoryService', () => {
         placeIds: [999], // Non-existent or cross-community place
       };
 
-      mockStoryRepository.validatePlacesInCommunity = vi.fn().mockResolvedValue(false);
+      mockStoryRepository.validatePlacesInCommunity.mockResolvedValue(false);
 
       // Act & Assert
       await expect(
@@ -336,7 +342,7 @@ describe('StoryService', () => {
   });
 
   describe('getStoryById - Data Sovereignty', () => {
-    const elderOnlyStory: StoryWithRelations = {
+    const createElderOnlyStory = (): StoryWithRelations => ({
       id: 1,
       title: 'Sacred Ceremony Story',
       description: 'A ceremony story for elders only',
@@ -357,10 +363,11 @@ describe('StoryService', () => {
       speakers: [],
       community: testData.community,
       author: testData.users.elder,
-    };
+    });
 
     it('should block super admin from community stories', async () => {
       // Arrange
+      const elderOnlyStory = createElderOnlyStory();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(elderOnlyStory);
 
       // Act
@@ -374,12 +381,14 @@ describe('StoryService', () => {
       // Assert
       expect(result).toBeNull();
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Data sovereignty protection')
+        expect.stringContaining('Data sovereignty protection'),
+        expect.any(Object)
       );
     });
 
     it('should allow elder access to elder-only content', async () => {
       // Arrange
+      const elderOnlyStory = createElderOnlyStory();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(elderOnlyStory);
 
       // Act
@@ -396,6 +405,7 @@ describe('StoryService', () => {
 
     it('should deny editor access to elder-only content', async () => {
       // Arrange
+      const elderOnlyStory = createElderOnlyStory();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(elderOnlyStory);
 
       // Act
@@ -409,12 +419,14 @@ describe('StoryService', () => {
       // Assert
       expect(result).toBeNull();
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Elder-only content')
+        expect.stringContaining('Cultural protocol access denied'),
+        expect.any(Object)
       );
     });
 
     it('should deny cross-community access', async () => {
       // Arrange
+      const elderOnlyStory = createElderOnlyStory();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(elderOnlyStory);
 
       // Act
@@ -428,7 +440,8 @@ describe('StoryService', () => {
       // Assert
       expect(result).toBeNull();
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Cross-community access denied')
+        expect.stringContaining('Cross-community access denied'),
+        expect.any(Object)
       );
     });
   });
@@ -480,7 +493,7 @@ describe('StoryService', () => {
   });
 
   describe('updateStory - Association Management', () => {
-    const existingStory: StoryWithRelations = {
+    const createExistingStory = (): StoryWithRelations => ({
       id: 1,
       title: 'River Crossing Story',
       slug: 'river-crossing-story',
@@ -490,10 +503,11 @@ describe('StoryService', () => {
       places: [testData.places[0]],
       speakers: [testData.speakers[0]],
       culturalProtocols: { permissionLevel: 'community' },
-    } as any;
+    } as any);
 
     it('should update place and speaker associations', async () => {
       // Arrange
+      const existingStory = createExistingStory();
       const updates = {
         title: 'Updated River Story',
         placeIds: [testData.places[1].id], // Change to different place
@@ -508,6 +522,8 @@ describe('StoryService', () => {
       };
 
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(existingStory);
+      mockStoryRepository.validatePlacesInCommunity.mockResolvedValue(true);
+      mockStoryRepository.validateSpeakersInCommunity.mockResolvedValue(true);
       mockStoryRepository.update.mockResolvedValue(updatedStory);
 
       // Act
@@ -527,6 +543,7 @@ describe('StoryService', () => {
 
     it('should handle media file cleanup during updates', async () => {
       // Arrange
+      const existingStory = createExistingStory();
       const updates = {
         mediaUrls: ['/uploads/new-image.jpg'],
       };
@@ -552,6 +569,7 @@ describe('StoryService', () => {
 
     it('should reject updates by unauthorized users', async () => {
       // Arrange
+      const existingStory = createExistingStory();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(existingStory);
 
       // Act & Assert
@@ -567,16 +585,17 @@ describe('StoryService', () => {
   });
 
   describe('deleteStory', () => {
-    const storyToDelete: StoryWithRelations = {
+    const createStoryToDelete = (): StoryWithRelations => ({
       id: 1,
       title: 'Story to Delete',
       communityId: testData.community.id,
       createdBy: testData.users.editor.id,
       mediaUrls: ['/uploads/file-to-cleanup.jpg'],
-    } as any;
+    } as any);
 
     it('should delete story and clean up media files', async () => {
       // Arrange
+      const storyToDelete = createStoryToDelete();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(storyToDelete);
       mockStoryRepository.delete.mockResolvedValue(true);
 
@@ -594,6 +613,7 @@ describe('StoryService', () => {
 
     it('should allow creators to delete their own stories', async () => {
       // Arrange
+      const storyToDelete = createStoryToDelete();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(storyToDelete);
       mockStoryRepository.delete.mockResolvedValue(true);
 
@@ -610,6 +630,7 @@ describe('StoryService', () => {
 
     it('should reject deletion by unauthorized users', async () => {
       // Arrange
+      const storyToDelete = createStoryToDelete();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(storyToDelete);
 
       // Act & Assert
@@ -629,6 +650,7 @@ describe('StoryService', () => {
         id: 1,
         title: 'Mountain Spirit Legend',
         description: 'Ancient spirits dwelling in the sacred peaks...',
+        communityId: 1, // Same as testData.community.id
         tags: ['spirits', 'mountains', 'ancient'],
         culturalProtocols: { permissionLevel: 'public' },
       } as any,
@@ -636,6 +658,7 @@ describe('StoryService', () => {
         id: 2,
         title: 'River Medicine Teachings',
         description: 'Traditional healing practices by the river...',
+        communityId: 1, // Same as testData.community.id
         tags: ['healing', 'medicine', 'river'],
         culturalProtocols: { permissionLevel: 'elder_only' },
       } as any,
@@ -643,6 +666,7 @@ describe('StoryService', () => {
         id: 3,
         title: 'Seasonal Hunting Story',
         description: 'Respectful hunting practices through the seasons...',
+        communityId: 1, // Same as testData.community.id
         tags: ['hunting', 'seasons', 'respect'],
         culturalProtocols: { permissionLevel: 'community' },
       } as any,
@@ -780,7 +804,8 @@ describe('StoryService', () => {
       const largeDataset = Array.from({ length: 1000 }, (_, i) => ({
         id: i + 1,
         title: `Story ${i + 1}`,
-        communityId: testData.community.id,
+        communityId: testData.community.id, // Should be 1
+        culturalProtocols: { permissionLevel: 'public' },
       })) as StoryWithRelations[];
 
       const expectedResult: PaginatedResult<StoryWithRelations> = {

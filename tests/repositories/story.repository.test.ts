@@ -281,9 +281,16 @@ describe('StoryRepository', () => {
       // Act
       const result = await storyRepository.update(testStory.id, updates);
 
-      // Assert
+      // Assert - only compare fields that exist in the database schema
       expect(result).toMatchObject({
-        ...testStory,
+        id: testStory.id,
+        slug: testStory.slug,
+        communityId: testStory.communityId,
+        createdBy: testStory.createdBy,
+        language: testStory.language,
+        mediaUrls: testStory.mediaUrls,
+        isRestricted: testStory.isRestricted,
+        createdAt: testStory.createdAt,
         ...updates,
       });
       expect(result.updatedAt.getTime()).toBeGreaterThan(testStory.updatedAt.getTime());

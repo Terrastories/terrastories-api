@@ -153,11 +153,17 @@ export class StoryService {
 
     // Validate place and speaker associations
     if (input.placeIds?.length) {
-      await this.validatePlacesInCommunity(input.placeIds, input.communityId);
+      const placesValid = await this.storyRepository.validatePlacesInCommunity(input.placeIds, input.communityId);
+      if (!placesValid) {
+        throw new InsufficientPermissionsError('Places must belong to the same community as the story');
+      }
     }
 
     if (input.speakerIds?.length) {
-      await this.validateSpeakersInCommunity(input.speakerIds, input.communityId);
+      const speakersValid = await this.storyRepository.validateSpeakersInCommunity(input.speakerIds, input.communityId);
+      if (!speakersValid) {
+        throw new InsufficientPermissionsError('Speakers must belong to the same community as the story');
+      }
     }
 
     // Process cultural protocols
@@ -166,26 +172,30 @@ export class StoryService {
     // Auto-set restriction flag based on cultural protocols
     const isRestricted = this.shouldSetRestricted(processedProtocols);
 
+    // Generate slug if not provided
+    let slug = input.slug;
+    if (!slug) {
+      slug = await this.storyRepository.generateUniqueSlug(input.title, input.communityId);
+    }
+
     // Prepare data for repository
     const storyData: StoryCreateData = {
       title: input.title,
       description: input.description,
-      slug: input.slug,
+      slug,
       communityId: input.communityId,
       createdBy: input.createdBy,
       mediaUrls: input.mediaUrls,
       language: input.language,
       tags: input.tags,
       isRestricted,
+      culturalProtocols: processedProtocols,
       placeIds: input.placeIds,
       speakerIds: input.speakerIds,
     };
 
     // Create story
     const story = await this.storyRepository.create(storyData);
-
-    // Add cultural protocols to result (not stored in DB yet, will be in future enhancement)
-    (story as any).culturalProtocols = processedProtocols;
 
     // Audit log for cultural oversight
     await this.logCulturalAccess(story, { id: userId, role: userRole } as any, 'create', true);
@@ -345,11 +355,17 @@ export class StoryService {
 
     // Validate associations if being updated
     if (updates.placeIds?.length) {
-      await this.validatePlacesInCommunity(updates.placeIds, existingStory.communityId);
+      const placesValid = await this.storyRepository.validatePlacesInCommunity(updates.placeIds, existingStory.communityId);
+      if (!placesValid) {
+        throw new InsufficientPermissionsError('Places must belong to the same community as the story');
+      }
     }
 
     if (updates.speakerIds?.length) {
-      await this.validateSpeakersInCommunity(updates.speakerIds, existingStory.communityId);
+      const speakersValid = await this.storyRepository.validateSpeakersInCommunity(updates.speakerIds, existingStory.communityId);
+      if (!speakersValid) {
+        throw new InsufficientPermissionsError('Speakers must belong to the same community as the story');
+      }
     }
 
     // Process cultural protocol updates
@@ -501,15 +517,17 @@ export class StoryService {
       return accessResult.allowed;
     });
 
-    // Adjust total count based on filtered results
-    const filteredTotal = filteredData.length;
+    // For pagination purposes, we need to estimate the filtered total
+    // If all items in the current page pass the filter, assume the filter ratio applies to the total
+    const filterRatio = result.data.length > 0 ? filteredData.length / result.data.length : 1;
+    const estimatedFilteredTotal = Math.round(result.total * filterRatio);
 
     return {
       data: filteredData,
-      total: filteredTotal,
+      total: estimatedFilteredTotal,
       page: result.page,
       limit: result.limit,
-      totalPages: Math.ceil(filteredTotal / result.limit),
+      totalPages: Math.ceil(estimatedFilteredTotal / result.limit),
     };
   }
 
@@ -594,7 +612,7 @@ export class StoryService {
     if (protocols?.permissionLevel === 'elder_only' && user.role !== 'elder' && user.role !== 'admin') {
       return {
         allowed: false,
-        reason: 'This story contains elder-only content requiring cultural protocols'
+        reason: 'Elder-only content requires elevated cultural permissions'
       };
     }
 
@@ -621,7 +639,9 @@ export class StoryService {
       if (!canModify) {
         return {
           allowed: false,
-          reason: 'Insufficient permissions to modify this story'
+          reason: operation === 'delete' 
+            ? 'Insufficient permissions to delete this story'
+            : 'Insufficient permissions to modify this story'
         };
       }
     }
@@ -678,20 +698,6 @@ export class StoryService {
   /**
    * Validate places belong to same community
    */
-  private async validatePlacesInCommunity(placeIds: number[], communityId: number): Promise<void> {
-    // This would be implemented by checking the places repository
-    // For now, we'll assume validation passes
-    this.logger.debug('Validating places in community', { placeIds, communityId });
-  }
-
-  /**
-   * Validate speakers belong to same community
-   */
-  private async validateSpeakersInCommunity(speakerIds: number[], communityId: number): Promise<void> {
-    // This would be implemented by checking the speakers repository
-    // For now, we'll assume validation passes
-    this.logger.debug('Validating speakers in community', { speakerIds, communityId });
-  }
 
   /**
    * Process cultural protocols with role-based validation

@@ -5,7 +5,7 @@
  * community isolation, search capabilities, and association handling.
  */
 
-import { eq, and, like, desc, or, sql, count } from 'drizzle-orm';
+import { eq, and, like, desc, or, sql, count, inArray } from 'drizzle-orm';
 import {
   storiesSqlite,
   communitiesSqlite,
@@ -422,6 +422,120 @@ export class StoryRepository {
   }
 
   /**
+   * Efficiently load multiple stories with their relations to avoid N+1 queries
+   */
+  private async loadStoriesWithRelationsBulk(
+    storyIds: number[]
+  ): Promise<StoryWithRelations[]> {
+    if (storyIds.length === 0) return [];
+
+    // Bulk load stories using proper Drizzle IN clause
+    const storiesTable = this.getStoriesTable();
+    const stories = await this.db
+      .select()
+      .from(storiesTable)
+      .where(inArray(storiesTable.id, storyIds))
+      .execute();
+
+    // Bulk load communities for all stories
+    const communityIds = [...new Set(stories.map((s) => s.communityId))];
+    const communitiesTable = this.getCommunitiesTable();
+    const communities = await this.db
+      .select()
+      .from(communitiesTable)
+      .where(inArray(communitiesTable.id, communityIds))
+      .execute();
+
+    // Bulk load authors for all stories
+    const authorIds = [...new Set(stories.map((s) => s.createdBy))];
+    const usersTable = this.getUsersTable();
+    const authors = await this.db
+      .select()
+      .from(usersTable)
+      .where(inArray(usersTable.id, authorIds))
+      .execute();
+
+    // Create lookup maps for efficient joins
+    const communityMap = new Map(communities.map((c) => [c.id, c]));
+    const authorMap = new Map(authors.map((a) => [a.id, a]));
+
+    // Build stories with relations
+    return stories.map((story) => {
+      const community = communityMap.get(story.communityId);
+      const author = authorMap.get(story.createdBy);
+      const associations = this.storyAssociations.get(story.id);
+
+      // Build places and speakers arrays (currently from mock data)
+      const places: Array<{
+        id: number;
+        name: string;
+        description?: string;
+        latitude: number;
+        longitude: number;
+        culturalContext?: string;
+        storyRelationship?: string;
+        sortOrder?: number;
+      }> = [];
+      const speakers: Array<{
+        id: number;
+        name: string;
+        bio?: string;
+        elderStatus: boolean;
+        culturalRole?: string;
+        storyRelationship?: string;
+        sortOrder?: number;
+      }> = [];
+
+      if (associations?.placeIds) {
+        associations.placeIds.forEach((placeId, index) => {
+          places.push({
+            id: placeId,
+            name: `Place ${placeId}`,
+            description: `Description for place ${placeId}`,
+            latitude: 0,
+            longitude: 0,
+            culturalContext: associations.placeContexts?.[index],
+            storyRelationship: 'mentioned',
+            sortOrder: index + 1,
+          });
+        });
+      }
+
+      if (associations?.speakerIds) {
+        associations.speakerIds.forEach((speakerId, index) => {
+          speakers.push({
+            id: speakerId,
+            name: `Speaker ${speakerId}`,
+            bio: `Bio for speaker ${speakerId}`,
+            elderStatus: false,
+            culturalRole: associations.speakerRoles?.[index],
+            storyRelationship: 'narrator',
+            sortOrder: index + 1,
+          });
+        });
+      }
+
+      return {
+        ...story,
+        community: community || null,
+        author: author || null,
+        places,
+        speakers,
+        culturalProtocols: {
+          permissionLevel: story.isRestricted ? 'restricted' : 'public',
+          culturalSignificance: 'Standard story',
+          restrictions: story.isRestricted ? ['Community members only'] : [],
+          ceremonialContent: false,
+          elderApprovalRequired: false,
+          accessNotes: story.isRestricted
+            ? 'Restricted access'
+            : 'Public access',
+        },
+      };
+    }) as StoryWithRelations[];
+  }
+
+  /**
    * Find story by slug within community
    */
   async findBySlug(slug: string, communityId: number): Promise<Story | null> {
@@ -590,11 +704,9 @@ export class StoryRepository {
       const total = Number(countWithFilter[0]?.count || 0);
       const totalPages = Math.ceil(total / pagination.limit);
 
-      // Convert to StoryWithRelations
-      const storiesWithRelations = await Promise.all(
-        paginatedStories.map((story: { id: number }) =>
-          this.findByIdWithRelations(story.id)
-        )
+      // Convert to StoryWithRelations using bulk loading (fixes N+1 queries)
+      const storiesWithRelations = await this.loadStoriesWithRelationsBulk(
+        paginatedStories.map((story) => story.id)
       );
 
       return {
@@ -617,11 +729,9 @@ export class StoryRepository {
       const total = Number(totalResult[0]?.count || 0);
       const totalPages = Math.ceil(total / pagination.limit);
 
-      // Convert to StoryWithRelations
-      const storiesWithRelations = await Promise.all(
-        paginatedStories.map((story: { id: number }) =>
-          this.findByIdWithRelations(story.id)
-        )
+      // Convert to StoryWithRelations using bulk loading (fixes N+1 queries)
+      const storiesWithRelations = await this.loadStoriesWithRelationsBulk(
+        paginatedStories.map((story) => story.id)
       );
 
       return {

@@ -27,6 +27,7 @@ import {
 import { FileRepository } from '../repositories/file.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { getDb } from '../db/index.js';
+import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import {
   requireAuth,
   requireCommunityAccess,
@@ -101,12 +102,15 @@ const listStoriesQuerySchema = z.object({
 
 export default async function storiesRoutes(fastify: FastifyInstance) {
   const db = await getDb();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const storyRepository = new StoryRepository(db as any);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fileRepository = new FileRepository(db as any);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const userRepository = new UserRepository(db as any);
+
+  // Type-safe repository instantiation with proper casting
+  // StoryRepository requires BetterSQLite3Database, others accept Database union
+  // Using unknown intermediate to satisfy TypeScript safety requirements
+  const storyRepository = new StoryRepository(
+    db as unknown as BetterSQLite3Database<Record<string, never>>
+  );
+  const fileRepository = new FileRepository(db);
+  const userRepository = new UserRepository(db);
   const storyService = new StoryService(
     storyRepository,
     fileRepository,

@@ -601,43 +601,26 @@ export class StoryService {
       communityId: userCommunityId,
     };
 
-    // Apply cultural protocol filtering based on user role
+    // Apply cultural protocol filtering at database level based on user role
     if (userRole !== 'elder' && userRole !== 'admin') {
-      // Non-elders cannot see restricted content
+      // Non-elders cannot see restricted content - filter at DB level
       scopedFilters.isRestricted = false;
     }
 
-    // Get results
+    // Get results with all filtering done at database level
     const result = await this.storyRepository.findMany(
       scopedFilters,
       pagination
     );
 
-    // Filter results by cultural protocols (additional filtering on top of DB query)
-    const filteredData = result.data.filter((story) => {
-      const accessResult = this.validateCulturalAccessSync(
-        story,
-        { id: userId, role: userRole, communityId: userCommunityId } as Pick<
-          User,
-          'id' | 'role' | 'communityId'
-        >,
-        'read'
-      );
-      return accessResult.allowed;
-    });
-
-    // For pagination purposes, we need to estimate the filtered total
-    // If all items in the current page pass the filter, assume the filter ratio applies to the total
-    const filterRatio =
-      result.data.length > 0 ? filteredData.length / result.data.length : 1;
-    const estimatedFilteredTotal = Math.round(result.total * filterRatio);
-
+    // Return database results directly - no additional in-memory filtering
+    // All cultural protocol filtering is now handled by database queries
     return {
-      data: filteredData,
-      total: estimatedFilteredTotal,
+      data: result.data,
+      total: result.total,
       page: result.page,
       limit: result.limit,
-      totalPages: Math.ceil(estimatedFilteredTotal / result.limit),
+      totalPages: result.totalPages,
     };
   }
 

@@ -86,6 +86,8 @@ describe('Story Speakers Schema', () => {
       id: 1,
       storyId: 5,
       speakerId: 2,
+      storyRole: 'Primary storyteller',
+      sortOrder: 0,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -93,6 +95,8 @@ describe('Story Speakers Schema', () => {
     const validCreateStorySpeaker = {
       storyId: 5,
       speakerId: 2,
+      storyRole: 'Primary storyteller',
+      sortOrder: 0,
     };
 
     it('should validate valid insert story speaker data', () => {
@@ -143,6 +147,8 @@ describe('Story Speakers Schema', () => {
         id: 1,
         storyId: 5,
         speakerId: 2,
+        storyRole: 'Primary storyteller',
+        sortOrder: 0,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -153,6 +159,8 @@ describe('Story Speakers Schema', () => {
       const newStorySpeaker: NewStorySpeaker = {
         storyId: 5,
         speakerId: 2,
+        storyRole: 'Primary storyteller',
+        sortOrder: 0,
       };
       expect(newStorySpeaker).toBeDefined();
     });
@@ -161,6 +169,8 @@ describe('Story Speakers Schema', () => {
       const createStorySpeaker: CreateStorySpeaker = {
         storyId: 5,
         speakerId: 2,
+        storyRole: 'Primary storyteller',
+        sortOrder: 0,
       };
       expect(createStorySpeaker).toBeDefined();
     });

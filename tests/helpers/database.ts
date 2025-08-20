@@ -16,9 +16,11 @@ import {
   usersSqlite,
   filesSqlite,
   storiesSqlite,
+  speakersSqlite,
   Community,
   Place,
   User,
+  Speaker,
 } from '../../src/db/schema/index.js';
 
 // Use SQLite tables for tests
@@ -27,6 +29,7 @@ const places = placesSqlite;
 const users = usersSqlite;
 const files = filesSqlite;
 const stories = storiesSqlite;
+const speakers = speakersSqlite;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,6 +41,7 @@ export type TestDatabase = ReturnType<
     users: typeof users;
     files: typeof files;
     stories: typeof stories;
+    speakers: typeof speakers;
   }>
 >;
 
@@ -66,7 +70,7 @@ export class TestDatabaseManager {
 
     // Create Drizzle instance
     this.db = drizzle(this.sqlite, {
-      schema: { communities, places, users, files, stories },
+      schema: { communities, places, users, files, stories, speakers },
     });
 
     // Run migrations
@@ -95,7 +99,9 @@ export class TestDatabaseManager {
       const communitiesTableInfo = this.sqlite
         .prepare('PRAGMA table_info(communities)')
         .all() as any[];
-      const hasLocale = communitiesTableInfo.some((col: any) => col.name === 'locale');
+      const hasLocale = communitiesTableInfo.some(
+        (col: any) => col.name === 'locale'
+      );
 
       if (!hasLocale) {
         this.sqlite.exec(`
@@ -117,6 +123,44 @@ export class TestDatabaseManager {
           ALTER TABLE stories ADD COLUMN slug TEXT;
         `);
         console.log('✅ Added missing stories columns');
+      }
+
+      // Add missing columns to join tables for story associations
+      try {
+        const storyPlacesInfo = this.sqlite
+          .prepare('PRAGMA table_info(story_places)')
+          .all() as any[];
+        const hasPlacesContext = storyPlacesInfo.some(
+          (col: any) => col.name === 'cultural_context'
+        );
+
+        if (!hasPlacesContext && storyPlacesInfo.length > 0) {
+          this.sqlite.exec(`
+            ALTER TABLE story_places ADD COLUMN cultural_context TEXT;
+            ALTER TABLE story_places ADD COLUMN sort_order INTEGER DEFAULT 0;
+          `);
+          console.log('✅ Added missing story_places columns');
+        }
+
+        const storySpeakersInfo = this.sqlite
+          .prepare('PRAGMA table_info(story_speakers)')
+          .all() as any[];
+        const hasSpeakersRole = storySpeakersInfo.some(
+          (col: any) => col.name === 'story_role'
+        );
+
+        if (!hasSpeakersRole && storySpeakersInfo.length > 0) {
+          this.sqlite.exec(`
+            ALTER TABLE story_speakers ADD COLUMN story_role TEXT;
+            ALTER TABLE story_speakers ADD COLUMN sort_order INTEGER DEFAULT 0;
+          `);
+          console.log('✅ Added missing story_speakers columns');
+        }
+      } catch (error: any) {
+        console.warn(
+          '⚠️ Error adding association columns (may not exist yet):',
+          error.message
+        );
       }
     } catch (error: any) {
       console.warn('⚠️ Error adding missing columns:', error.message);
@@ -146,6 +190,7 @@ export class TestDatabaseManager {
       // Clear in dependency order (children first)
       await this.db.delete(stories);
       await this.db.delete(files);
+      await this.db.delete(speakers);
       await this.db.delete(places);
       await this.db.delete(users);
       await this.db.delete(communities);
@@ -286,6 +331,7 @@ export class TestDatabaseManager {
   async getStats(): Promise<{
     communities: number;
     places: number;
+    speakers: number;
     users: number;
     memoryUsage: string;
   }> {
@@ -295,11 +341,15 @@ export class TestDatabaseManager {
       .select({ count: sql`count(*)` })
       .from(communities);
     const placesCount = await db.select({ count: sql`count(*)` }).from(places);
+    const speakersCount = await db
+      .select({ count: sql`count(*)` })
+      .from(speakers);
     const usersCount = await db.select({ count: sql`count(*)` }).from(users);
 
     return {
       communities: Number(communitiesCount[0]?.count || 0),
       places: Number(placesCount[0]?.count || 0),
+      speakers: Number(speakersCount[0]?.count || 0),
       users: Number(usersCount[0]?.count || 0),
       memoryUsage: this.sqlite ? `${this.sqlite.memory.used} bytes` : '0 bytes',
     };
@@ -321,6 +371,7 @@ export interface TestFixtures {
   systemCommunity: Community;
   communities: Community[];
   places: Place[];
+  speakers?: Speaker[];
   users?: User[];
 }
 
@@ -465,10 +516,10 @@ export async function cleanupTestDb() {
  */
 export async function createTestData() {
   const fixtures = await testDb.seedTestData();
-  
+
   // Create users for all roles needed in story tests
   const db = await testDb.getDb();
-  
+
   const testUsers = await db
     .insert(users)
     .values([
@@ -529,31 +580,28 @@ export async function createTestData() {
     ])
     .returning();
 
-  // Create test speakers
-  const testSpeakers = [
-    {
-      id: 1,
-      name: 'Elder Maria Stonebear',
-      bio: 'Traditional knowledge keeper',
-      elderStatus: true,
-      communityId: fixtures.communities[0].id,
-      culturalRole: 'Knowledge Keeper',
-      isActive: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    },
-    {
-      id: 2,
-      name: 'John Rivercrossing',
-      bio: 'Community storyteller',
-      elderStatus: false,
-      communityId: fixtures.communities[0].id,
-      culturalRole: 'Storyteller',
-      isActive: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    },
-  ];
+  // Create and insert test speakers into the database
+  const testSpeakers = await db
+    .insert(speakers)
+    .values([
+      {
+        name: 'Elder Maria Stonebear',
+        bio: 'Traditional knowledge keeper',
+        elderStatus: true,
+        communityId: fixtures.communities[0].id,
+        culturalRole: 'Knowledge Keeper',
+        isActive: true,
+      },
+      {
+        name: 'John Rivercrossing',
+        bio: 'Community storyteller',
+        elderStatus: false,
+        communityId: fixtures.communities[0].id,
+        culturalRole: 'Storyteller',
+        isActive: true,
+      },
+    ])
+    .returning();
 
   // Create test files
   const testFiles = [
@@ -579,7 +627,9 @@ export async function createTestData() {
       superAdmin: testUsers[4],
       otherCommunityUser: testUsers[5],
     },
-    places: fixtures.places.filter(p => p.communityId === fixtures.communities[0].id),
+    places: fixtures.places.filter(
+      (p) => p.communityId === fixtures.communities[0].id
+    ),
     speakers: testSpeakers,
     files: testFiles,
   };

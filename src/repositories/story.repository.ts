@@ -12,6 +12,8 @@ import {
   usersSqlite,
   placesSqlite,
   speakersSqlite,
+  storyPlacesSqlite,
+  storySpeakersSqlite,
 } from '../db/schema/index.js';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 
@@ -171,21 +173,9 @@ export interface PaginatedResult<T> {
 }
 
 /**
- * Database-driven Story Repository
+ * Database-driven Story Repository with proper join table associations
  */
 export class StoryRepository {
-  // Temporary storage for associations during tests
-  // In production, this would be handled by join tables
-  private storyAssociations = new Map<
-    number,
-    {
-      placeIds?: number[];
-      speakerIds?: number[];
-      placeContexts?: string[];
-      speakerRoles?: string[];
-    }
-  >();
-
   constructor(
     private readonly db: BetterSQLite3Database<Record<string, never>>
   ) {}
@@ -210,6 +200,14 @@ export class StoryRepository {
 
   private getSpeakersTable() {
     return speakersSqlite;
+  }
+
+  private getStoryPlacesTable() {
+    return storyPlacesSqlite;
+  }
+
+  private getStorySpeakersTable() {
+    return storySpeakersSqlite;
   }
 
   /**
@@ -244,14 +242,30 @@ export class StoryRepository {
       .values(insertData)
       .returning();
 
-    // Store associations temporarily
-    if (data.placeIds || data.speakerIds) {
-      this.storyAssociations.set(story.id, {
-        placeIds: data.placeIds,
-        speakerIds: data.speakerIds,
-        placeContexts: data.placeContexts,
-        speakerRoles: data.speakerRoles,
-      });
+    // Create place associations using proper join table
+    if (data.placeIds?.length) {
+      const storyPlacesTable = this.getStoryPlacesTable();
+      const placeAssociations = data.placeIds.map((placeId, index) => ({
+        storyId: story.id,
+        placeId,
+        culturalContext: data.placeContexts?.[index] || undefined,
+        sortOrder: index,
+      }));
+
+      await this.db.insert(storyPlacesTable).values(placeAssociations);
+    }
+
+    // Create speaker associations using proper join table
+    if (data.speakerIds?.length) {
+      const storySpeakersTable = this.getStorySpeakersTable();
+      const speakerAssociations = data.speakerIds.map((speakerId, index) => ({
+        storyId: story.id,
+        speakerId,
+        storyRole: data.speakerRoles?.[index] || undefined,
+        sortOrder: index,
+      }));
+
+      await this.db.insert(storySpeakersTable).values(speakerAssociations);
     }
 
     // Return with populated associations
@@ -296,110 +310,73 @@ export class StoryRepository {
       .where(eq(usersTable.id, story.createdBy))
       .limit(1);
 
-    // Get associations from temporary storage
-    const associations = this.storyAssociations.get(id);
-    const places: Array<{
-      id: number;
-      name: string;
-      description?: string;
-      latitude: number;
-      longitude: number;
-      region?: string;
-      culturalSignificance?: string;
-      culturalContext?: string;
-      storyRelationship?: string;
-      sortOrder?: number;
-    }> = [];
-    const speakers: Array<{
-      id: number;
-      name: string;
-      bio?: string;
-      photoUrl?: string;
-      birthYear?: number;
-      elderStatus: boolean;
-      culturalRole?: string;
-      storyRole?: string;
-      sortOrder?: number;
-    }> = [];
+    // Get places through proper database joins
+    const storyPlacesTable = this.getStoryPlacesTable();
+    const placesTable = this.getPlacesTable();
+    const placesWithAssociations = await this.db
+      .select({
+        id: placesTable.id,
+        name: placesTable.name,
+        description: placesTable.description,
+        latitude: placesTable.latitude,
+        longitude: placesTable.longitude,
+        region: placesTable.region,
+        culturalSignificance: placesTable.culturalSignificance,
+        culturalContext: storyPlacesTable.culturalContext,
+        sortOrder: storyPlacesTable.sortOrder,
+      })
+      .from(storyPlacesTable)
+      .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
+      .where(eq(storyPlacesTable.storyId, id))
+      .orderBy(storyPlacesTable.sortOrder);
 
-    // Fetch places if we have associations
-    if (associations?.placeIds?.length) {
-      try {
-        // Use proper Drizzle query with or() instead of raw SQL
-        const placesTable = this.getPlacesTable();
-        const placeConditions = associations.placeIds.map((id) =>
-          eq(placesTable.id, id)
-        );
-        const placeRecords = await this.db
-          .select()
-          .from(placesTable)
-          .where(or(...placeConditions))
-          .execute();
+    const places = placesWithAssociations.map((p) => ({
+      id: p.id,
+      name: p.name,
+      description: p.description || undefined,
+      latitude: p.latitude,
+      longitude: p.longitude,
+      region: p.region || undefined,
+      culturalSignificance: p.culturalSignificance || undefined,
+      culturalContext: p.culturalContext || undefined,
+      storyRelationship: 'mentioned',
+      sortOrder: p.sortOrder || 0,
+    }));
 
-        places.push(
-          ...placeRecords.map((p, index: number) => ({
-            id: p.id,
-            name: p.name,
-            description: p.description || undefined,
-            latitude: p.latitude,
-            longitude: p.longitude,
-            region: p.region || undefined,
-            culturalSignificance: p.culturalSignificance || undefined,
-            culturalContext: associations.placeContexts?.[index],
-            storyRelationship: undefined,
-            sortOrder: index,
-          }))
-        );
-      } catch (error) {
-        console.warn('Failed to fetch places:', error);
-      }
-    }
+    // Get speakers through proper database joins
+    const storySpeakersTable = this.getStorySpeakersTable();
+    const speakersTable = this.getSpeakersTable();
+    const speakersWithAssociations = await this.db
+      .select({
+        id: speakersTable.id,
+        name: speakersTable.name,
+        bio: speakersTable.bio,
+        photoUrl: speakersTable.photoUrl,
+        birthYear: speakersTable.birthYear,
+        elderStatus: speakersTable.elderStatus,
+        culturalRole: speakersTable.culturalRole,
+        storyRole: storySpeakersTable.storyRole,
+        sortOrder: storySpeakersTable.sortOrder,
+      })
+      .from(storySpeakersTable)
+      .innerJoin(
+        speakersTable,
+        eq(storySpeakersTable.speakerId, speakersTable.id)
+      )
+      .where(eq(storySpeakersTable.storyId, id))
+      .orderBy(storySpeakersTable.sortOrder);
 
-    // Use actual test data for speakers based on IDs
-    if (associations?.speakerIds?.length) {
-      // For now, create speakers based on test data pattern
-      speakers.push(
-        ...associations.speakerIds.map((speakerId, index) => {
-          if (speakerId === 1) {
-            return {
-              id: speakerId,
-              name: 'Elder Maria Stonebear',
-              bio: 'Traditional knowledge keeper',
-              photoUrl: undefined,
-              birthYear: undefined,
-              elderStatus: true,
-              culturalRole: associations.speakerRoles?.[index] || 'narrator',
-              storyRole: associations.speakerRoles?.[index] || 'narrator',
-              sortOrder: index,
-            };
-          } else if (speakerId === 2) {
-            return {
-              id: speakerId,
-              name: 'John Rivercrossing',
-              bio: 'Community storyteller',
-              photoUrl: undefined,
-              birthYear: undefined,
-              elderStatus: false,
-              culturalRole: associations.speakerRoles?.[index] || 'narrator',
-              storyRole: associations.speakerRoles?.[index] || 'narrator',
-              sortOrder: index,
-            };
-          } else {
-            return {
-              id: speakerId,
-              name: `Speaker ${speakerId}`,
-              bio: 'Test speaker',
-              photoUrl: undefined,
-              birthYear: undefined,
-              elderStatus: false,
-              culturalRole: associations.speakerRoles?.[index] || 'narrator',
-              storyRole: associations.speakerRoles?.[index] || 'narrator',
-              sortOrder: index,
-            };
-          }
-        })
-      );
-    }
+    const speakers = speakersWithAssociations.map((s) => ({
+      id: s.id,
+      name: s.name,
+      bio: s.bio || undefined,
+      photoUrl: s.photoUrl || undefined,
+      birthYear: s.birthYear || undefined,
+      elderStatus: s.elderStatus,
+      culturalRole: s.storyRole || s.culturalRole || undefined,
+      storyRole: s.storyRole || 'narrator',
+      sortOrder: s.sortOrder || 0,
+    }));
 
     return {
       ...story,
@@ -459,61 +436,104 @@ export class StoryRepository {
     const communityMap = new Map(communities.map((c) => [c.id, c]));
     const authorMap = new Map(authors.map((a) => [a.id, a]));
 
+    // Bulk load story associations through proper database joins
+    const storyPlacesTable = this.getStoryPlacesTable();
+    const placesTable = this.getPlacesTable();
+    const storySpeakersTable = this.getStorySpeakersTable();
+    const speakersTable = this.getSpeakersTable();
+
+    // Get all place associations for these stories
+    const allPlaceAssociations = await this.db
+      .select({
+        storyId: storyPlacesTable.storyId,
+        placeId: placesTable.id,
+        name: placesTable.name,
+        description: placesTable.description,
+        latitude: placesTable.latitude,
+        longitude: placesTable.longitude,
+        region: placesTable.region,
+        culturalSignificance: placesTable.culturalSignificance,
+        culturalContext: storyPlacesTable.culturalContext,
+        sortOrder: storyPlacesTable.sortOrder,
+      })
+      .from(storyPlacesTable)
+      .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
+      .where(inArray(storyPlacesTable.storyId, storyIds))
+      .orderBy(storyPlacesTable.storyId, storyPlacesTable.sortOrder);
+
+    // Get all speaker associations for these stories
+    const allSpeakerAssociations = await this.db
+      .select({
+        storyId: storySpeakersTable.storyId,
+        speakerId: speakersTable.id,
+        name: speakersTable.name,
+        bio: speakersTable.bio,
+        photoUrl: speakersTable.photoUrl,
+        birthYear: speakersTable.birthYear,
+        elderStatus: speakersTable.elderStatus,
+        culturalRole: speakersTable.culturalRole,
+        storyRole: storySpeakersTable.storyRole,
+        sortOrder: storySpeakersTable.sortOrder,
+      })
+      .from(storySpeakersTable)
+      .innerJoin(
+        speakersTable,
+        eq(storySpeakersTable.speakerId, speakersTable.id)
+      )
+      .where(inArray(storySpeakersTable.storyId, storyIds))
+      .orderBy(storySpeakersTable.storyId, storySpeakersTable.sortOrder);
+
+    // Create lookup maps for associations
+    const placesByStory = new Map<number, typeof allPlaceAssociations>();
+    const speakersByStory = new Map<number, typeof allSpeakerAssociations>();
+
+    allPlaceAssociations.forEach((place) => {
+      if (!placesByStory.has(place.storyId)) {
+        placesByStory.set(place.storyId, []);
+      }
+      placesByStory.get(place.storyId)!.push(place);
+    });
+
+    allSpeakerAssociations.forEach((speaker) => {
+      if (!speakersByStory.has(speaker.storyId)) {
+        speakersByStory.set(speaker.storyId, []);
+      }
+      speakersByStory.get(speaker.storyId)!.push(speaker);
+    });
+
     // Build stories with relations
     return stories.map((story) => {
       const community = communityMap.get(story.communityId);
       const author = authorMap.get(story.createdBy);
-      const associations = this.storyAssociations.get(story.id);
 
-      // Build places and speakers arrays (currently from mock data)
-      const places: Array<{
-        id: number;
-        name: string;
-        description?: string;
-        latitude: number;
-        longitude: number;
-        culturalContext?: string;
-        storyRelationship?: string;
-        sortOrder?: number;
-      }> = [];
-      const speakers: Array<{
-        id: number;
-        name: string;
-        bio?: string;
-        elderStatus: boolean;
-        culturalRole?: string;
-        storyRelationship?: string;
-        sortOrder?: number;
-      }> = [];
+      // Get places for this story
+      const storyPlaces = placesByStory.get(story.id) || [];
+      const places = storyPlaces.map((p) => ({
+        id: p.placeId,
+        name: p.name,
+        description: p.description || undefined,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        region: p.region || undefined,
+        culturalSignificance: p.culturalSignificance || undefined,
+        culturalContext: p.culturalContext || undefined,
+        storyRelationship: 'mentioned',
+        sortOrder: p.sortOrder || 0,
+      }));
 
-      if (associations?.placeIds) {
-        associations.placeIds.forEach((placeId, index) => {
-          places.push({
-            id: placeId,
-            name: `Place ${placeId}`,
-            description: `Description for place ${placeId}`,
-            latitude: 0,
-            longitude: 0,
-            culturalContext: associations.placeContexts?.[index],
-            storyRelationship: 'mentioned',
-            sortOrder: index + 1,
-          });
-        });
-      }
-
-      if (associations?.speakerIds) {
-        associations.speakerIds.forEach((speakerId, index) => {
-          speakers.push({
-            id: speakerId,
-            name: `Speaker ${speakerId}`,
-            bio: `Bio for speaker ${speakerId}`,
-            elderStatus: false,
-            culturalRole: associations.speakerRoles?.[index],
-            storyRelationship: 'narrator',
-            sortOrder: index + 1,
-          });
-        });
-      }
+      // Get speakers for this story
+      const storySpeakers = speakersByStory.get(story.id) || [];
+      const speakers = storySpeakers.map((s) => ({
+        id: s.speakerId,
+        name: s.name,
+        bio: s.bio || undefined,
+        photoUrl: s.photoUrl || undefined,
+        birthYear: s.birthYear || undefined,
+        elderStatus: s.elderStatus,
+        culturalRole: s.storyRole || s.culturalRole || undefined,
+        storyRole: s.storyRole || 'narrator',
+        sortOrder: s.sortOrder || 0,
+      }));
 
       return {
         ...story,
@@ -593,20 +613,46 @@ export class StoryRepository {
       })
       .where(eq(storiesTable.id, id));
 
-    // Update associations if provided
-    if (data.placeIds !== undefined || data.speakerIds !== undefined) {
-      const currentAssociations = this.storyAssociations.get(id) || {};
-      this.storyAssociations.set(id, {
-        ...currentAssociations,
-        ...(data.placeIds !== undefined && { placeIds: data.placeIds }),
-        ...(data.speakerIds !== undefined && { speakerIds: data.speakerIds }),
-        ...(data.placeContexts !== undefined && {
-          placeContexts: data.placeContexts,
-        }),
-        ...(data.speakerRoles !== undefined && {
-          speakerRoles: data.speakerRoles,
-        }),
-      });
+    // Update place associations if provided
+    if (data.placeIds !== undefined) {
+      const storyPlacesTable = this.getStoryPlacesTable();
+
+      // Delete existing place associations
+      await this.db
+        .delete(storyPlacesTable)
+        .where(eq(storyPlacesTable.storyId, id));
+
+      // Add new place associations
+      if (data.placeIds.length > 0) {
+        const placeAssociations = data.placeIds.map((placeId, index) => ({
+          storyId: id,
+          placeId,
+          culturalContext: data.placeContexts?.[index] || undefined,
+          sortOrder: index,
+        }));
+        await this.db.insert(storyPlacesTable).values(placeAssociations);
+      }
+    }
+
+    // Update speaker associations if provided
+    if (data.speakerIds !== undefined) {
+      const storySpeakersTable = this.getStorySpeakersTable();
+
+      // Delete existing speaker associations
+      await this.db
+        .delete(storySpeakersTable)
+        .where(eq(storySpeakersTable.storyId, id));
+
+      // Add new speaker associations
+      if (data.speakerIds.length > 0) {
+        const speakerAssociations = data.speakerIds.map((speakerId, index) => ({
+          storyId: id,
+          speakerId,
+          storyRole: data.speakerRoles?.[index] || undefined,
+          sortOrder: index,
+        }));
+        await this.db.insert(storySpeakersTable).values(speakerAssociations);
+      }
     }
 
     // Return updated story with relations
@@ -624,11 +670,21 @@ export class StoryRepository {
         return false;
       }
 
+      // Delete story associations first (foreign key constraints will prevent deletion otherwise)
+      const storyPlacesTable = this.getStoryPlacesTable();
+      const storySpeakersTable = this.getStorySpeakersTable();
+
+      await this.db
+        .delete(storyPlacesTable)
+        .where(eq(storyPlacesTable.storyId, id));
+
+      await this.db
+        .delete(storySpeakersTable)
+        .where(eq(storySpeakersTable.storyId, id));
+
+      // Now delete the story itself
       const storiesTable = this.getStoriesTable();
       await this.db.delete(storiesTable).where(eq(storiesTable.id, id));
-
-      // Clean up associations
-      this.storyAssociations.delete(id);
 
       return true;
     } catch {

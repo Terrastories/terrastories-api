@@ -16,10 +16,16 @@ import {
   pgTable,
   serial,
   integer as pgInteger,
+  text,
   timestamp,
   unique,
 } from 'drizzle-orm/pg-core';
-import { sqliteTable, integer, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import {
+  sqliteTable,
+  integer,
+  text as sqliteText,
+  uniqueIndex,
+} from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { storiesPg, storiesSqlite } from './stories.js';
@@ -32,6 +38,8 @@ export const storySpeakersPg = pgTable(
     id: serial('id').primaryKey(),
     storyId: pgInteger('story_id').notNull(),
     speakerId: pgInteger('speaker_id').notNull(),
+    storyRole: text('story_role'),
+    sortOrder: pgInteger('sort_order').default(0),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
@@ -51,6 +59,8 @@ export const storySpeakersSqlite = sqliteTable(
     id: integer('id').primaryKey({ autoIncrement: true }),
     storyId: integer('story_id').notNull(),
     speakerId: integer('speaker_id').notNull(),
+    storyRole: sqliteText('story_role'),
+    sortOrder: integer('sort_order').default(0),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),

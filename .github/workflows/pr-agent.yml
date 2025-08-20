@@ -1,0 +1,94 @@
+name: PR Reviewer
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+jobs:
+  pr_agent_job:
+    # Skip if the event was triggered by a bot to avoid infinite loops
+    if: ${{ github.event.sender.type != 'Bot' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: write
+    name: AI-powered PR review
+    steps:
+      - name: PR Agent action step
+        id: pragent
+        uses: qodo-ai/pr-agent@main
+        env:
+          # OpenAI configuration for Terrastories API
+          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+          # Model configuration - using GPT-4o with GPT-4 fallback for stability
+          config.model: "gpt-4o"
+          config.fallback_models: '["gpt-4-turbo-preview", "gpt-4"]'
+          config.ai_timeout: "300"
+          
+          # GitHub Action automation settings
+          github_action_config.auto_review: "true"
+          github_action_config.auto_describe: "true" 
+          github_action_config.auto_improve: "true"
+          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review"]'
+          
+          # Terrastories-specific review instructions aligned with CLAUDE.md
+          pr_reviewer.extra_instructions: |
+            Focus on the following areas for Terrastories API (Rails→TypeScript migration for Indigenous storytelling):
+            
+            🔴 CRITICAL REQUIREMENTS:
+            1. Indigenous data sovereignty - ensure community data isolation and cultural protocols
+            2. TypeScript best practices and type safety (no 'any' types)
+            3. Database query performance and N+1 query prevention
+            4. Security vulnerabilities, especially authentication and authorization
+            5. PostGIS spatial data handling and geographic query optimization
+            
+            🟡 IMPORTANT PATTERNS:
+            6. Repository Pattern compliance (Route → Service → Repository → Database)
+            7. Zod validation schemas with cultural protocol validation
+            8. Multi-tenancy community-scoped data isolation
+            9. Test coverage >80% with edge cases and cultural protocol tests
+            10. Error handling with proper status codes (never log sensitive cultural info)
+            
+            🟢 QUALITY CHECKS:
+            11. File upload security and media handling
+            12. API endpoint consistency (/api/v1/[resource] pattern)
+            13. Cultural sensitivity and elder content restrictions
+            14. Offline-first design considerations and sync metadata
+            15. Field Kit deployment compatibility
+            
+            Pay special attention to data sovereignty requirements and ensure 
+            community data cannot be accessed across boundaries.
+          
+          # Code suggestions configuration
+          pr_code_suggestions.num_code_suggestions: "6"
+          pr_code_suggestions.suggestions_score_threshold: "7"
+          pr_code_suggestions.extra_instructions: |
+            Prioritize suggestions aligned with CLAUDE.md patterns:
+            - Repository Pattern compliance and proper service layer separation
+            - Performance improvements (especially database queries and PostGIS optimization)
+            - Type safety improvements (eliminate 'any' types, enhance Zod schemas)
+            - Security enhancements (auth, data sovereignty, cultural protocol validation)
+            - Multi-tenancy and community data isolation improvements
+            - Test coverage improvements (unit, integration, edge cases)
+            - Cultural protocol compliance and Indigenous data sensitivity
+            - Offline-first design patterns and sync metadata
+          
+          # Review configuration for TypeScript/Node.js project
+          pr_reviewer.require_tests_review: "true"
+          pr_reviewer.require_security_review: "true" 
+          pr_reviewer.enable_review_labels_effort: "true"
+          pr_reviewer.enable_review_labels_security: "true"
+          
+          # Performance optimization for large patches
+          # config.large_patch_policy: "clip"
+          # config.max_model_tokens: "32000"
+          # config.patch_extra_lines_before: "3"
+          # config.patch_extra_lines_after: "1"
+          
+          # Verbosity for debugging (set to "1" for production)
+          config.verbosity_level: "1"

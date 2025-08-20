@@ -86,6 +86,8 @@ describe('Story Places Schema', () => {
       id: 1,
       storyId: 5,
       placeId: 3,
+      culturalContext: 'A sacred site for ceremony',
+      sortOrder: 0,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -93,6 +95,8 @@ describe('Story Places Schema', () => {
     const validCreateStoryPlace = {
       storyId: 5,
       placeId: 3,
+      culturalContext: 'A sacred site for ceremony',
+      sortOrder: 0,
     };
 
     it('should validate valid insert story place data', () => {
@@ -141,6 +145,8 @@ describe('Story Places Schema', () => {
         id: 1,
         storyId: 5,
         placeId: 3,
+        culturalContext: 'A sacred site for ceremony',
+        sortOrder: 0,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -151,6 +157,8 @@ describe('Story Places Schema', () => {
       const newStoryPlace: NewStoryPlace = {
         storyId: 5,
         placeId: 3,
+        culturalContext: 'A sacred site for ceremony',
+        sortOrder: 0,
       };
       expect(newStoryPlace).toBeDefined();
     });
@@ -159,6 +167,8 @@ describe('Story Places Schema', () => {
       const createStoryPlace: CreateStoryPlace = {
         storyId: 5,
         placeId: 3,
+        culturalContext: 'A sacred site for ceremony',
+        sortOrder: 0,
       };
       expect(createStoryPlace).toBeDefined();
     });

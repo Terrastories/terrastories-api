@@ -15,9 +15,12 @@ import {
   placesSqlite,
   usersSqlite,
   filesSqlite,
+  storiesSqlite,
+  speakersSqlite,
   Community,
   Place,
   User,
+  Speaker,
 } from '../../src/db/schema/index.js';
 
 // Use SQLite tables for tests
@@ -25,6 +28,8 @@ const communities = communitiesSqlite;
 const places = placesSqlite;
 const users = usersSqlite;
 const files = filesSqlite;
+const stories = storiesSqlite;
+const speakers = speakersSqlite;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,6 +40,8 @@ export type TestDatabase = ReturnType<
     places: typeof places;
     users: typeof users;
     files: typeof files;
+    stories: typeof stories;
+    speakers: typeof speakers;
   }>
 >;
 
@@ -63,7 +70,7 @@ export class TestDatabaseManager {
 
     // Create Drizzle instance
     this.db = drizzle(this.sqlite, {
-      schema: { communities, places, users, files },
+      schema: { communities, places, users, files, stories, speakers },
     });
 
     // Run migrations
@@ -88,11 +95,13 @@ export class TestDatabaseManager {
 
     // Add missing columns that are not in migrations yet
     try {
-      // Check if locale column exists, if not add missing columns
-      const tableInfo = this.sqlite
+      // Check if locale column exists in communities, if not add missing columns
+      const communitiesTableInfo = this.sqlite
         .prepare('PRAGMA table_info(communities)')
         .all() as any[];
-      const hasLocale = tableInfo.some((col: any) => col.name === 'locale');
+      const hasLocale = communitiesTableInfo.some(
+        (col: any) => col.name === 'locale'
+      );
 
       if (!hasLocale) {
         this.sqlite.exec(`
@@ -101,6 +110,57 @@ export class TestDatabaseManager {
           ALTER TABLE communities ADD COLUMN is_active INTEGER DEFAULT 1 NOT NULL;
         `);
         console.log('✅ Added missing communities columns');
+      }
+
+      // Check if slug column exists in stories, if not add missing columns
+      const storiesTableInfo = this.sqlite
+        .prepare('PRAGMA table_info(stories)')
+        .all() as any[];
+      const hasSlug = storiesTableInfo.some((col: any) => col.name === 'slug');
+
+      if (!hasSlug) {
+        this.sqlite.exec(`
+          ALTER TABLE stories ADD COLUMN slug TEXT;
+        `);
+        console.log('✅ Added missing stories columns');
+      }
+
+      // Add missing columns to join tables for story associations
+      try {
+        const storyPlacesInfo = this.sqlite
+          .prepare('PRAGMA table_info(story_places)')
+          .all() as any[];
+        const hasPlacesContext = storyPlacesInfo.some(
+          (col: any) => col.name === 'cultural_context'
+        );
+
+        if (!hasPlacesContext && storyPlacesInfo.length > 0) {
+          this.sqlite.exec(`
+            ALTER TABLE story_places ADD COLUMN cultural_context TEXT;
+            ALTER TABLE story_places ADD COLUMN sort_order INTEGER DEFAULT 0;
+          `);
+          console.log('✅ Added missing story_places columns');
+        }
+
+        const storySpeakersInfo = this.sqlite
+          .prepare('PRAGMA table_info(story_speakers)')
+          .all() as any[];
+        const hasSpeakersRole = storySpeakersInfo.some(
+          (col: any) => col.name === 'story_role'
+        );
+
+        if (!hasSpeakersRole && storySpeakersInfo.length > 0) {
+          this.sqlite.exec(`
+            ALTER TABLE story_speakers ADD COLUMN story_role TEXT;
+            ALTER TABLE story_speakers ADD COLUMN sort_order INTEGER DEFAULT 0;
+          `);
+          console.log('✅ Added missing story_speakers columns');
+        }
+      } catch (error: any) {
+        console.warn(
+          '⚠️ Error adding association columns (may not exist yet):',
+          error.message
+        );
       }
     } catch (error: any) {
       console.warn('⚠️ Error adding missing columns:', error.message);
@@ -128,7 +188,9 @@ export class TestDatabaseManager {
 
     try {
       // Clear in dependency order (children first)
+      await this.db.delete(stories);
       await this.db.delete(files);
+      await this.db.delete(speakers);
       await this.db.delete(places);
       await this.db.delete(users);
       await this.db.delete(communities);
@@ -269,6 +331,7 @@ export class TestDatabaseManager {
   async getStats(): Promise<{
     communities: number;
     places: number;
+    speakers: number;
     users: number;
     memoryUsage: string;
   }> {
@@ -278,11 +341,15 @@ export class TestDatabaseManager {
       .select({ count: sql`count(*)` })
       .from(communities);
     const placesCount = await db.select({ count: sql`count(*)` }).from(places);
+    const speakersCount = await db
+      .select({ count: sql`count(*)` })
+      .from(speakers);
     const usersCount = await db.select({ count: sql`count(*)` }).from(users);
 
     return {
       communities: Number(communitiesCount[0]?.count || 0),
       places: Number(placesCount[0]?.count || 0),
+      speakers: Number(speakersCount[0]?.count || 0),
       users: Number(usersCount[0]?.count || 0),
       memoryUsage: this.sqlite ? `${this.sqlite.memory.used} bytes` : '0 bytes',
     };
@@ -304,6 +371,7 @@ export interface TestFixtures {
   systemCommunity: Community;
   communities: Community[];
   places: Place[];
+  speakers?: Speaker[];
   users?: User[];
 }
 
@@ -427,4 +495,142 @@ export async function clearTestData() {
 export async function cleanup() {
   await testDb.clearData();
   await testDb.teardown();
+}
+
+/**
+ * Setup test database - alias for setupTestDatabase
+ */
+export async function setupTestDb() {
+  return await testDb.setup();
+}
+
+/**
+ * Cleanup test database - alias for cleanup
+ */
+export async function cleanupTestDb() {
+  return await testDb.cleanup();
+}
+
+/**
+ * Create comprehensive test data for story service tests
+ */
+export async function createTestData() {
+  const fixtures = await testDb.seedTestData();
+
+  // Create users for all roles needed in story tests
+  const db = await testDb.getDb();
+
+  const testUsers = await db
+    .insert(users)
+    .values([
+      {
+        email: 'admin@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Admin',
+        lastName: 'User',
+        role: 'admin',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'editor@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Editor',
+        lastName: 'User',
+        role: 'editor',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'elder@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Elder',
+        lastName: 'User',
+        role: 'elder',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'viewer@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Viewer',
+        lastName: 'User',
+        role: 'viewer',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'superadmin@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Super',
+        lastName: 'Admin',
+        role: 'super_admin',
+        communityId: fixtures.systemCommunity.id,
+        isActive: true,
+      },
+      {
+        email: 'other@test.com',
+        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        firstName: 'Other',
+        lastName: 'Community',
+        role: 'editor',
+        communityId: fixtures.communities[1].id,
+        isActive: true,
+      },
+    ])
+    .returning();
+
+  // Create and insert test speakers into the database
+  const testSpeakers = await db
+    .insert(speakers)
+    .values([
+      {
+        name: 'Elder Maria Stonebear',
+        bio: 'Traditional knowledge keeper',
+        elderStatus: true,
+        communityId: fixtures.communities[0].id,
+        culturalRole: 'Knowledge Keeper',
+        isActive: true,
+      },
+      {
+        name: 'John Rivercrossing',
+        bio: 'Community storyteller',
+        elderStatus: false,
+        communityId: fixtures.communities[0].id,
+        culturalRole: 'Storyteller',
+        isActive: true,
+      },
+    ])
+    .returning();
+
+  // Create test files
+  const testFiles = [
+    {
+      id: 'file1',
+      path: '/uploads/story-image.jpg',
+      communityId: fixtures.communities[0].id,
+    },
+    {
+      id: 'file2',
+      path: '/uploads/story-audio.mp3',
+      communityId: fixtures.communities[0].id,
+    },
+  ];
+
+  return {
+    community: fixtures.communities[0],
+    users: {
+      admin: testUsers[0],
+      editor: testUsers[1],
+      elder: testUsers[2],
+      viewer: testUsers[3],
+      superAdmin: testUsers[4],
+      otherCommunityUser: testUsers[5],
+    },
+    places: fixtures.places.filter(
+      (p) => p.communityId === fixtures.communities[0].id
+    ),
+    speakers: testSpeakers,
+    files: testFiles,
+  };
 }

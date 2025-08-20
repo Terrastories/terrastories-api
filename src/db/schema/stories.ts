@@ -40,6 +40,7 @@ export const storiesPg = pgTable('stories', {
   id: serial('id').primaryKey(),
   title: pgText('title').notNull(),
   description: pgText('description'),
+  slug: pgText('slug').notNull(),
   communityId: pgInteger('community_id').notNull(),
   createdBy: pgInteger('created_by').notNull(),
   isRestricted: boolean('is_restricted').notNull().default(false),
@@ -55,6 +56,7 @@ export const storiesSqlite = sqliteTable('stories', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   title: sqliteText('title').notNull(),
   description: sqliteText('description'),
+  slug: sqliteText('slug').notNull(),
   communityId: integer('community_id').notNull(),
   createdBy: integer('created_by').notNull(),
   isRestricted: integer('is_restricted', { mode: 'boolean' })
@@ -126,6 +128,7 @@ export const storiesSqliteRelations = relations(
 export const insertStorySchema = createInsertSchema(storiesPg, {
   title: z.string().min(1, 'Title is required').max(500, 'Title too long'),
   description: z.string().max(5000, 'Description too long').optional(),
+  slug: z.string().min(1, 'Slug is required').max(100, 'Slug too long').regex(/^[a-z0-9-]+$/, 'Slug must be lowercase alphanumeric with hyphens'),
   mediaUrls: z.array(MediaUrlSchema).default([]),
   language: z.string().min(2).max(5).default('en'),
   tags: z.array(z.string().min(1).max(50)).default([]),
@@ -143,6 +146,8 @@ export const createStorySchema = insertStorySchema.omit({
   id: true,
   createdAt: true,
   updatedAt: true,
+}).extend({
+  slug: z.string().min(1).max(100).regex(/^[a-z0-9-]+$/).optional(), // Optional for create, auto-generated from title
 });
 
 export const updateStorySchema = insertStorySchema.partial().omit({

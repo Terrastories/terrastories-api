@@ -16,10 +16,16 @@ import {
   pgTable,
   serial,
   integer as pgInteger,
+  text,
   timestamp,
   unique,
 } from 'drizzle-orm/pg-core';
-import { sqliteTable, integer, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import {
+  sqliteTable,
+  integer,
+  text as sqliteText,
+  uniqueIndex,
+} from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { storiesPg, storiesSqlite } from './stories.js';
@@ -32,6 +38,8 @@ export const storyPlacesPg = pgTable(
     id: serial('id').primaryKey(),
     storyId: pgInteger('story_id').notNull(),
     placeId: pgInteger('place_id').notNull(),
+    culturalContext: text('cultural_context'),
+    sortOrder: pgInteger('sort_order').default(0),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
@@ -51,6 +59,8 @@ export const storyPlacesSqlite = sqliteTable(
     id: integer('id').primaryKey({ autoIncrement: true }),
     storyId: integer('story_id').notNull(),
     placeId: integer('place_id').notNull(),
+    culturalContext: sqliteText('cultural_context'),
+    sortOrder: integer('sort_order').default(0),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),

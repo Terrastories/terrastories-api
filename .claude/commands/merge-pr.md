@@ -1,8 +1,20 @@
 # Command: /merge-pr
 
+# Command: /merge-pr
+
+## 🚀 Command Summary
+
+- **Purpose**: To safely merge a pull request after final validation, perform all post-merge updates, and suggest the next development steps.
+- **Key Phases**: Pre-Merge Validation -> Merge Execution -> Post-Merge Actions -> Next Step Analysis.
+- **Primary Outcome**: A merged pull request, updated documentation (roadmaps, issues), and a summary report with recommended next actions.
+
+## 🤖 Prompt to Agent
+
+## As the merge agent, your task is to execute the safe merging of the specified pull request. Follow the phases outlined in this document. First, perform all pre-merge validation checks. If they pass, execute the merge using the best strategy. After merging, perform all post-merge actions like closing issues and updating roadmaps. Finally, analyze the project state and generate a summary report that includes recommended next steps.
+
 ## Purpose
 
-Safely merge a pull request after final validation, update project tracking, and intelligently suggest next development steps based on project context.
+Safely merge a pull request after final validation, update project tracking, intelligently suggest next development steps based on project context, and trigger workflow improvements when needed.
 
 ## Usage
 
@@ -11,6 +23,7 @@ Safely merge a pull request after final validation, update project tracking, and
 /merge-pr [pr-number] --strategy [merge|squash|rebase]
 /merge-pr [pr-number] --deploy [staging|production]
 /merge-pr [pr-number] --no-delete-branch
+/merge-pr [pr-number] --skip-workflow-improvement
 ```
 
 ## Pre-Merge Validation
@@ -243,6 +256,86 @@ class PostMergeActions {
 
     // 7. Clean up work session
     await this.archiveWorkSession(mergeResult.prNumber);
+
+    // 8. Check if workflow improvement should be triggered
+    await this.checkWorkflowImprovement(mergeResult);
+  }
+
+  private async checkWorkflowImprovement(
+    mergeResult: MergeResult
+  ): Promise<void> {
+    const mergeCount = await this.getMergeCount();
+    const improvementConfig = await this.getWorkflowImprovementConfig();
+
+    // Skip if disabled or flag set
+    if (!improvementConfig.enabled || process.env.SKIP_WORKFLOW_IMPROVEMENT) {
+      return;
+    }
+
+    // Check trigger conditions
+    const shouldTrigger =
+      mergeCount % improvementConfig.trigger_after_merges === 0 ||
+      (await this.hasRepeatedIssues()) ||
+      (await this.hasPerformanceDegradation());
+
+    if (shouldTrigger) {
+      console.log('\n🔧 Triggering workflow improvement analysis...');
+      await this.triggerWorkflowImprovement(mergeResult);
+    }
+  }
+
+  private async triggerWorkflowImprovement(
+    mergeResult: MergeResult
+  ): Promise<void> {
+    try {
+      // Record the merge that triggered improvement
+      await this.recordImprovementTrigger(mergeResult);
+
+      // Execute improvement analysis
+      await exec('/improve-workflow --auto --trigger-source merge-pr');
+
+      console.log('  ✅ Workflow improvement analysis completed');
+    } catch (error) {
+      console.log(`  ⚠️ Workflow improvement failed: ${error.message}`);
+      // Don't fail the merge for workflow improvement issues
+    }
+  }
+
+  private async hasRepeatedIssues(): Promise<boolean> {
+    // Check last 5 merge sessions for repeated issues
+    const recentSessions = await this.getRecentWorkSessions(5);
+    const issuePatterns = [];
+
+    for (const session of recentSessions) {
+      if (session.issues && session.issues.length > 0) {
+        issuePatterns.push(...session.issues);
+      }
+    }
+
+    // Look for patterns that appear in 3+ sessions
+    const issueCounts = {};
+    issuePatterns.forEach((issue) => {
+      const key = this.normalizeIssueKey(issue);
+      issueCounts[key] = (issueCounts[key] || 0) + 1;
+    });
+
+    return Object.values(issueCounts).some((count) => count >= 3);
+  }
+
+  private async hasPerformanceDegradation(): Promise<boolean> {
+    const recentMetrics = await this.getRecentPerformanceMetrics(10);
+    if (recentMetrics.length < 5) return false;
+
+    // Check if average session time increased by >20%
+    const recent = recentMetrics.slice(0, 5);
+    const older = recentMetrics.slice(5, 10);
+
+    const recentAvg =
+      recent.reduce((sum, m) => sum + m.totalTime, 0) / recent.length;
+    const olderAvg =
+      older.reduce((sum, m) => sum + m.totalTime, 0) / older.length;
+
+    return (recentAvg - olderAvg) / olderAvg > 0.2;
   }
 
   private async closeLinkedIssues(prNumber: number): Promise<void> {
@@ -352,6 +445,7 @@ class NextStepsAnalyzer {
       recentMerges: await this.getRecentMerges(),
       teamVelocity: await this.calculateVelocity(),
       blockers: await this.identifyBlockers(),
+      workflowHealth: await this.assessWorkflowHealth(),
     };
 
     // Analyze dependencies
@@ -363,15 +457,90 @@ class NextStepsAnalyzer {
     // Generate recommendations
     const recommendations = this.generateRecommendations(priorities, context);
 
+    // Check if workflow improvement is needed
+    const workflowRecommendation = this.checkWorkflowRecommendation(context);
+    if (workflowRecommendation) {
+      recommendations.unshift(workflowRecommendation);
+    }
+
     return {
       immediate: recommendations.slice(0, 3),
       upcoming: recommendations.slice(3, 10),
       blocked: context.blockers,
+      workflowHealth: context.workflowHealth,
       metrics: {
         velocity: context.teamVelocity,
         issuesOpen: context.openIssues.length,
         prsOpen: context.openPRs.length,
       },
+    };
+  }
+
+  private checkWorkflowRecommendation(context: Context): Recommendation | null {
+    const health = context.workflowHealth;
+
+    // Recommend workflow improvement if health is degrading
+    if (health.score < 0.7 || health.hasRepeatedIssues) {
+      return {
+        action: 'Improve Workflow',
+        target: {
+          type: 'workflow',
+          title: 'Optimize development workflow',
+          priority: 'high',
+        },
+        reasoning: `Workflow health score is ${Math.round(health.score * 100)}%. ${health.issues.join(', ')}`,
+        effort: 0.5, // 30 minutes
+        impact: 8, // High impact on future productivity
+        command: '/improve-workflow',
+      };
+    }
+
+    return null;
+  }
+
+  private async assessWorkflowHealth(): Promise<WorkflowHealth> {
+    const recentSessions = await this.getRecentWorkSessions(10);
+    const issues = [];
+    let score = 1.0;
+
+    // Check for repeated checkpoint recoveries
+    const recoveryCount = recentSessions.filter((s) => s.hadRecovery).length;
+    if (recoveryCount > 3) {
+      issues.push('Frequent checkpoint recoveries');
+      score -= 0.2;
+    }
+
+    // Check for slow session times
+    const avgTime =
+      recentSessions.reduce((sum, s) => sum + s.duration, 0) /
+      recentSessions.length;
+    const expectedTime = await this.getExpectedSessionTime();
+    if (avgTime > expectedTime * 1.5) {
+      issues.push('Sessions taking longer than expected');
+      score -= 0.15;
+    }
+
+    // Check for repeated manual interventions
+    const manualInterventions = recentSessions.filter(
+      (s) => s.requiredManualIntervention
+    ).length;
+    if (manualInterventions > 5) {
+      issues.push('Frequent manual interventions required');
+      score -= 0.2;
+    }
+
+    // Check for test failures
+    const testFailures = recentSessions.filter((s) => s.hadTestFailures).length;
+    if (testFailures > 4) {
+      issues.push('Recurring test failures');
+      score -= 0.15;
+    }
+
+    return {
+      score: Math.max(0, score),
+      issues,
+      hasRepeatedIssues: issues.length > 2,
+      lastImprovement: await this.getLastImprovementDate(),
     };
   }
 
@@ -439,6 +608,8 @@ class NextStepsAnalyzer {
         return `/review-pr ${item.number}`;
       case 'roadmap':
         return `/create-next-issue`;
+      case 'workflow':
+        return '/improve-workflow';
       default:
         return '/create-next-issue';
     }
@@ -456,6 +627,16 @@ class MergeSummaryGenerator {
   ): Promise<MergeSummary> {
     const pr = await this.getPRDetails(mergeResult.prNumber);
     const stats = await this.gatherStatistics(mergeResult);
+
+    const workflowHealthSection = nextSteps.workflowHealth
+      ? `
+## 🔧 Workflow Health
+- **Health Score**: ${Math.round(nextSteps.workflowHealth.score * 100)}%
+- **Issues**: ${nextSteps.workflowHealth.issues.length > 0 ? nextSteps.workflowHealth.issues.join(', ') : 'None detected'}
+- **Last Improvement**: ${nextSteps.workflowHealth.lastImprovement || 'Never'}
+${nextSteps.workflowHealth.score < 0.7 ? '- **⚠️ Recommendation**: Run `/improve-workflow` to optimize performance' : ''}
+`
+      : '';
 
     const summary = `
 # 🎉 PR #${mergeResult.prNumber} Successfully Merged!
@@ -481,6 +662,9 @@ class MergeSummaryGenerator {
 - Generated release notes
 - Archived work session
 ${pr.deployed ? `- Deployed to ${pr.deploymentEnv}` : ''}
+${stats.triggeredWorkflowImprovement ? '- Triggered workflow improvement analysis' : ''}
+
+${workflowHealthSection}
 
 ## 🎯 Recommended Next Steps
 
@@ -508,6 +692,7 @@ ${nextSteps.upcoming
 - **Open PRs**: ${nextSteps.metrics.prsOpen}
 - **Team Velocity**: ${nextSteps.metrics.velocity} points/sprint
 - **Roadmap Progress**: ${await this.calculateRoadmapProgress()}%
+- **Workflow Health**: ${Math.round((nextSteps.workflowHealth?.score || 1) * 100)}%
 
 ## 🚀 Quick Actions
 \`\`\`bash
@@ -519,6 +704,9 @@ ${nextSteps.metrics.prsOpen > 0 ? `/review-pr ${await this.getOldestPR()}` : '# 
 
 # Create next issue from roadmap
 /create-next-issue
+
+# Improve workflow (if health < 70%)
+${(nextSteps.workflowHealth?.score || 1) < 0.7 ? '/improve-workflow' : '# Workflow health good'}
 \`\`\`
 
 ---
@@ -543,8 +731,13 @@ ${nextSteps.metrics.prsOpen > 0 ? `/review-pr ${await this.getOldestPR()}` : '# 
     mergeResult: MergeResult,
     nextSteps: NextSteps
   ): string {
-    return `✅ **Successfully merged!**
+    const workflowWarning =
+      nextSteps.workflowHealth && nextSteps.workflowHealth.score < 0.7
+        ? '\n⚠️ **Workflow optimization recommended** - Run `/improve-workflow`\n'
+        : '';
 
+    return `✅ **Successfully merged!**
+${workflowWarning}
 **Next recommended actions:**
 ${nextSteps.immediate
   .slice(0, 3)
@@ -626,7 +819,7 @@ class DeploymentManager {
 🎉 PR #123 Successfully Merged!
 
 📊 Merge Summary:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┌──────────────────────────────────────┐
 Strategy: squash
 Commit: abc123def
 Closed Issues: #45, #46
@@ -645,146 +838,7 @@ Closed Issues: #45, #46
 - ✓ Release notes generated
 - ✓ Deployed to staging
 - ✓ Metrics updated
+- ✓ Workflow improvement triggered
 
-🎯 RECOMMENDED NEXT STEPS:
-
-1. 🔥 HIGH PRIORITY: Fix critical bug #48
-   Unblocked by this merge
-   Estimated: 2 hours
-   Command: /work 48
-
-2. 📝 Continue feature #49
-   Next roadmap item
-   Estimated: 1 day
-   Command: /work 49
-
-3. 👀 Review PR #122
-   Waiting for review (2 days)
-   Command: /review-pr 122
-
-📊 Project Status:
-
-- Roadmap Progress: 65% ████████░░░░
-- Sprint Velocity: 34 points
-- Open Issues: 12
-- Open PRs: 3
-
-🚀 Quick Start Next Task:
-/work 48
+🔧 Workflow Health: 85
 ```
-
-## Error Handling
-
-```typescript
-class MergeErrorHandler {
-  async handle(error: Error, context: MergeContext): Promise<void> {
-    if (error.message.includes('not mergeable')) {
-      console.log('❌ PR is not mergeable. Checking issues...');
-      const issues = await this.diagnnoseMergeIssues(context.prNumber);
-
-      console.log('\n🔧 Attempting automatic resolution...');
-      for (const issue of issues) {
-        await this.attemptResolution(issue, context);
-      }
-
-      // Retry merge
-      return this.retryMerge(context);
-    }
-
-    if (error.message.includes('checks failing')) {
-      console.log('❌ Required checks are failing');
-      await this.displayFailingChecks(context.prNumber);
-      throw new Error(
-        'Cannot merge with failing checks. Fix issues and try again.'
-      );
-    }
-
-    if (error.message.includes('deployment failed')) {
-      console.log('⚠️ Merge succeeded but deployment failed');
-      await this.handleDeploymentRollback(context);
-    }
-
-    console.error('❌ Unexpected error during merge:', error.message);
-    await this.saveErrorContext(context, error);
-  }
-}
-```
-
-## Configuration
-
-```yaml
-# .claude/config/merge-pr.yaml
-merge_pr:
-  validation:
-    require_approval: true
-    min_approvals: 1
-    require_ci_pass: true
-    require_up_to_date: true
-
-  merge_strategy:
-    default: squash
-    preserve_commits_for:
-      - feature
-      - release
-    squash_for:
-      - fix
-      - chore
-      - docs
-
-  post_merge:
-    close_issues: true
-    delete_branch: true
-    update_roadmap: true
-    generate_release_notes: true
-
-  deployment:
-    auto_deploy: true
-    environments:
-      staging:
-        branch: main
-        auto: true
-      production:
-        branch: main
-        auto: false
-        require_approval: true
-
-  next_steps:
-    analyze_dependencies: true
-    suggest_count: 5
-    prioritize_by:
-      - unblocked_work
-      - roadmap_order
-      - issue_age
-      - impact_effort_ratio
-
-  notifications:
-    slack: true
-    email: false
-    github_comment: true
-```
-
-## Post-Merge Synchronization
-
-After successful merge completion:
-
-```bash
-# Update roadmap progress and mapping alignment
-/sync-issues-roadmap
-
-# This ensures:
-# - ISSUES_ROADMAP.md completion status is updated
-# - GITHUB_ROADMAP_MAPPING.md reflects current states
-# - Phase completion percentages are accurate
-# - Roadmap timeline maintains accuracy
-```
-
-## Integration Points
-
-This command integrates with:
-
-- `/create-next-issue` - Suggests as next action
-- `/work` - Recommends for high-priority issues
-- `/review-pr` - Suggests for open PRs
-- `/sync-issues-roadmap` - Updates roadmap progress after merge
-- GitHub Actions - Triggers deployments
-- Release Please - Updates changelogs

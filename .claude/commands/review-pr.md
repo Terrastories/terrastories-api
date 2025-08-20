@@ -730,3 +730,25 @@ This command integrates with:
 - `/sync-github-mapping` - Can update mapping if PR scope differs from issue
 - GitHub Actions - Aggregates CI/CD results
 - External reviewers - Consolidates AI and human feedback
+
+## Phase 8: Get Second Opinion from Gemini
+
+After completing the review and generating the report, get a second opinion from the Gemini CLI to ensure comprehensive coverage.
+
+```bash
+# Call Gemini CLI for a second review
+/review-pr [pr-number]
+```
+
+This provides an additional layer of validation and may catch issues missed in the initial review. The results from both reviews should be considered before merging.
+
+## Phase 8: Get Second Opinion from Gemini
+
+After completing the review and generating the report, get a second opinion from the Gemini CLI to ensure comprehensive coverage.
+
+```bash
+# Call Gemini CLI for a second review
+/review-pr [pr-number]
+```
+
+This provides an additional layer of validation and may catch issues missed in the initial review. The results from both reviews should be considered before merging.

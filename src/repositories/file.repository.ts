@@ -528,4 +528,125 @@ export class FileRepository {
       throw new Error(`Failed to get files for cleanup: ${error}`);
     }
   }
+
+  /**
+   * Validate file access for multiple files
+   */
+  async validateFileAccess(
+    filePaths: string[],
+    userId: number,
+    communityId: number
+  ): Promise<{ valid: boolean; reason?: string }> {
+    try {
+      const filesTable = await getFilesTable();
+
+      for (const filePath of filePaths) {
+        const [file] = await (this.db as any)
+          .select()
+          .from(filesTable)
+          .where(
+            and(
+              eq(filesTable.path, filePath),
+              eq(filesTable.communityId, communityId),
+              eq(filesTable.isActive, true)
+            )
+          )
+          .limit(1);
+
+        if (!file) {
+          return {
+            valid: false,
+            reason: `File not found or access denied: ${filePath}`,
+          };
+        }
+
+        // Check cultural restrictions
+        if (file.culturalRestrictions) {
+          const restrictions =
+            typeof file.culturalRestrictions === 'string'
+              ? JSON.parse(file.culturalRestrictions)
+              : file.culturalRestrictions;
+
+          if (restrictions.elderOnly && userId !== file.uploadedBy) {
+            return {
+              valid: false,
+              reason: `Insufficient permissions to access elder-only media file: ${filePath}`,
+            };
+          }
+        }
+      }
+
+      return { valid: true };
+    } catch (error) {
+      return {
+        valid: false,
+        reason: `Error validating file access: ${error}`,
+      };
+    }
+  }
+
+  /**
+   * Find orphaned files that are no longer referenced
+   */
+  async findOrphanedFiles(): Promise<File[]> {
+    // This is a simplified implementation
+    // In a real system, this would check for files not referenced in any stories
+    try {
+      // For now, return empty array - in production this would have complex logic
+      // to find files not referenced in story media_urls or other places
+      return [];
+    } catch (error) {
+      throw new Error(`Failed to find orphaned files: ${error}`);
+    }
+  }
+
+  /**
+   * Find files by IDs
+   */
+  async findByIds(ids: string[], communityId?: number): Promise<File[]> {
+    const filesTable = await getFilesTable();
+
+    try {
+      const conditions = [inArray(filesTable.id, ids)];
+
+      if (communityId !== undefined) {
+        conditions.push(eq(filesTable.communityId, communityId));
+      }
+
+      const result = await (this.db as any)
+        .select()
+        .from(filesTable)
+        .where(and(...conditions));
+
+      return result as File[];
+    } catch (error) {
+      throw new Error(`Failed to find files by IDs: ${error}`);
+    }
+  }
+
+  /**
+   * Find file by path
+   */
+  async findByPath(path: string, communityId?: number): Promise<File | null> {
+    const filesTable = await getFilesTable();
+
+    try {
+      const conditions = [eq(filesTable.path, path)];
+
+      if (communityId !== undefined) {
+        conditions.push(eq(filesTable.communityId, communityId));
+      }
+
+      const result = await (this.db as any)
+        .select()
+        .from(filesTable)
+        .where(and(...conditions))
+        .limit(1);
+
+      const [file] = result;
+      return (file as File) || null;
+    } catch (error) {
+      throw new Error(`Failed to find file by path: ${error}`);
+    }
+  }
 }

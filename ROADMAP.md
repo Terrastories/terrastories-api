@@ -25,8 +25,8 @@ Once the backend migration is complete, we'll proceed with frontend modernizatio
 ### Phase A: Backend API (Current) 🚧
 
 **Goal**: Replace Rails backend with TypeScript API
-**Approach**: Follow [docs/ISSUES_ROADMAP.md](./docs/ISSUES_ROADMAP.md)
-**Status**: Phase 1 COMPLETED ✅ (Issues #1, #5, #6, #7), Phase 2 COMPLETED ✅ (Issue #3 completed in PR #25), Phase 3 IN PROGRESS 🚧 (Issue #22 ✅ completed in PR #27)
+**Approach**: Follow the detailed roadmap for issue-by-issue progress.
+**Status**: ✅ **IN PROGRESS** - See our detailed progress tracker: **[Active Backend Roadmap](./docs/ISSUES_ROADMAP.md)**
 
 **Critical Priority Changes**:
 
@@ -62,18 +62,9 @@ Once the backend migration is complete, we'll proceed with frontend modernizatio
 4. **ActiveStorage Complexity**: Polymorphic associations need careful migration strategy
 5. **Cultural Sensitivity**: Missing from original roadmap, essential for Indigenous communities
 
-### ⚠️ Current Issue Status
-
-- **Issue #3**: Database schema implementation ✅ COMPLETED in PR #25 - All core schemas implemented
-
 ### 📈 Updated Velocity Targets
 
-- **Phase 1**: Foundation & Infrastructure ✅ COMPLETED (3 weeks actual)
-- **Phase 2**: Schema & Data Layer Definition ✅ COMPLETED (2 weeks actual)
-- **Phase 3**: Authentication & Authorization 🚧 IN PROGRESS (Issue #22 ✅ completed)
-- **Phase 4-5**: Core Services & API Implementation (4 weeks estimated)
-- **Phase 6**: Finalization & Deployment (2 weeks estimated)
-- **Total**: ~13 weeks (3 months) for Rails API parity
+Velocity and timeline are actively tracked within our detailed roadmap document. Please refer to **[Active Backend Roadmap](./docs/ISSUES_ROADMAP.md)** for the most current estimates.
 
 ---
 
@@ -95,5 +86,5 @@ Once the backend migration is complete, we'll proceed with frontend modernizatio
 - **Indigenous Community Validation**: Successful testing with actual community partners
 - **Internationalization**: Support for 6 languages including Indigenous languages
 
-**Last Updated**: 2025-08-16
+**Last Updated**: 2025-08-20
 **Next Review**: After Phase 2 Schema & Data Layer completion

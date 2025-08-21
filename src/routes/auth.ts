@@ -63,7 +63,8 @@ const loginSchema = z.object({
   communityId: z
     .number()
     .int()
-    .positive('Community ID must be a positive integer'),
+    .positive('Community ID must be a positive integer')
+    .optional(),
 });
 
 // Response schemas for Swagger documentation (for future use)
@@ -321,11 +322,16 @@ export async function authRoutes(
         const validatedData = loginSchema.parse(request.body);
 
         // Authenticate user
-        const user = await userService.authenticateUser(
-          validatedData.email,
-          validatedData.password,
-          validatedData.communityId
-        );
+        const user = validatedData.communityId
+          ? await userService.authenticateUser(
+              validatedData.email,
+              validatedData.password,
+              validatedData.communityId
+            )
+          : await userService.authenticateUserGlobal(
+              validatedData.email,
+              validatedData.password
+            );
 
         // Create secure session with user data
         const userSession: UserSession = {

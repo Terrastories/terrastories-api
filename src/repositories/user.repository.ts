@@ -179,6 +179,32 @@ export class UserRepository {
   }
 
   /**
+   * Find user by email globally (across all communities)
+   * Used for simplified login where community scope is not required
+   *
+   * @param email - User email
+   * @returns User if found, null otherwise
+   */
+  async findByEmailGlobal(email: string): Promise<User | null> {
+    try {
+      const usersTable = await getUsersTable();
+
+      const users = await this.database
+        .select()
+        .from(usersTable)
+        .where(eq(usersTable.email, email.toLowerCase().trim()))
+        .limit(1);
+      const user = users[0] as User | undefined;
+
+      return user || null;
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to find user by email globally: ${errorMessage}`);
+    }
+  }
+
+  /**
    * Update user within a specific community
    *
    * @param id - User ID

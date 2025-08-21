@@ -286,6 +286,46 @@ export class UserService {
   }
 
   /**
+   * Authenticate user with email and password (without community scope)
+   * Finds the user across all communities - useful for simplified login
+   *
+   * @param email - User email
+   * @param password - Plain text password
+   * @returns Promise<User> - Authenticated user (without password hash)
+   * @throws AuthenticationError - If credentials are invalid
+   */
+  async authenticateUserGlobal(email: string, password: string): Promise<User> {
+    try {
+      // Find user by email globally (across all communities)
+      const user = await this.userRepository.findByEmailGlobal(email);
+      if (!user) {
+        throw new AuthenticationError();
+      }
+
+      // Verify password using timing-safe comparison
+      const isValidPassword = await passwordService.comparePassword(
+        password,
+        user.passwordHash
+      );
+      if (!isValidPassword) {
+        throw new AuthenticationError();
+      }
+
+      // Check if user is active
+      if (!user.isActive) {
+        throw new AuthenticationError('Account is deactivated');
+      }
+
+      return user;
+    } catch (error) {
+      if (error instanceof AuthenticationError) {
+        throw error;
+      }
+      throw new AuthenticationError();
+    }
+  }
+
+  /**
    * Get user by ID within community scope
    *
    * @param id - User ID

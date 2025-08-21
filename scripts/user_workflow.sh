@@ -55,10 +55,19 @@ echo "Community created with ID: $COMMUNITY_ID"
 echo "--- 2b. User Registration ---"
 # Generate a random user email to ensure the test is repeatable
 RANDOM_EMAIL="testuser_$(date +%s)_$RANDOM@example.com"
+# Generate a secure random password meeting requirements (uppercase, lowercase, numbers, special chars)
+# Format: Test + 4 random chars + 4 random numbers + !
+if command -v openssl >/dev/null 2>&1 && command -v shuf >/dev/null 2>&1; then
+  RANDOM_PASSWORD="Test$(openssl rand -base64 6 | tr -d "=+/" | cut -c1-4)$(shuf -i 1000-9999 -n 1)!"
+else
+  # Fallback for systems without openssl or shuf
+  RANDOM_PASSWORD="Test$(date +%s | tail -c 5)$(echo $RANDOM | tail -c 5)!"
+fi
+echo "Generated secure password for testing"
 echo "Registering user: $RANDOM_EMAIL"
 REGISTRATION_RESPONSE=$(curl --fail -sS -X POST \
   -H "Content-Type: application/json" \
-  -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"Password123!\", \"firstName\": \"Test\", \"lastName\": \"User\", \"role\": \"admin\", \"communityId\": $COMMUNITY_ID}" \
+  -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"$RANDOM_PASSWORD\", \"firstName\": \"Test\", \"lastName\": \"User\", \"role\": \"admin\", \"communityId\": $COMMUNITY_ID}" \
   "$BASE_URL/auth/register")
 
 # Extract user ID using jq
@@ -75,7 +84,7 @@ echo "--- 3. User Login ---"
 LOGIN_RESPONSE=$(curl --fail -sS -X POST \
   -c "$COOKIE_JAR" \
   -H "Content-Type: application/json" \
-  -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"Password123!\"}" \
+  -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"$RANDOM_PASSWORD\"}" \
   "$BASE_URL/auth/login")
 echo "User logged in."
 

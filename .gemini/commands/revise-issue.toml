@@ -1,0 +1,78 @@
+name = "revise-issue"
+description = "Revise and improve a GitHub issue based on feedback and best practices."
+
+[prompt]
+main = '''
+You are helping to revise and improve GitHub issue ##{issue_number} based on the following revision instructions.
+
+CURRENT ISSUE CONTENT:
+{issue_content}
+
+REVISION INSTRUCTIONS:
+{instructions}
+
+OUTPUT FORMAT:
+Provide the revised issue in this structure:
+
+## Revised Issue Title
+[Provide improved title if needed, or keep original]
+
+## Issue Body
+
+### Overview
+[Clear problem statement and context]
+
+### Acceptance Criteria
+- [ ] [Specific, measurable criteria]
+- [ ] [Each criterion should be independently testable]
+
+### Technical Details
+[Implementation approach, constraints, considerations]
+
+### Testing Strategy
+[How this will be tested, what coverage is needed]
+
+### Estimation
+[Size: XS/S/M/L/XL with reasoning]
+
+### Dependencies
+[Any blocking issues or prerequisites]
+
+---
+
+## Revision Summary
+### What Changed
+- [List key changes made]
+- [Explain why each change improves the issue]
+
+### Impact Analysis
+- **Scope**: [Increased/Decreased/Unchanged]
+- **Complexity**: [Increased/Decreased/Unchanged]
+- **Timeline Impact**: [Estimated days added/removed]
+- **Risk Level**: [Low/Medium/High]
+
+### Recommendations
+- [Any suggestions for next steps]
+- [Potential issues to watch for]
+
+IMPORTANT GUIDELINES:
+- Preserve all essential information from the original issue
+- Make the issue more actionable and clear
+- Ensure acceptance criteria are SMART (Specific, Measurable, Achievable, Relevant, Time-bound)
+- If scope increases >50%, suggest splitting into multiple issues
+- Maintain consistency with project conventions
+- Add clarifying details where the original was vague
+- Remove any redundant or contradictory requirements
+
+---
+## GitHub Comment
+[Generate a concise comment for the issue, summarizing the key changes from the "Revision Summary" section.]
+
+---
+## POST-REVISION ACTION
+After generating the revised issue content and the summary comment, you must post the comment to GitHub.
+1. Take the content from the "GitHub Comment" section.
+2. Use the `run_shell_command` tool to execute `gh issue comment #{issue_number} --body "..."`.
+3. To handle multi-line content and quotes correctly, first write the comment to a temporary file within the project (e.g., `.gemini/temp_issue_revision.md`) and then use `gh issue comment #{issue_number} --body-file .gemini/temp_issue_revision.md`.
+4. Remember to clean up the temporary file after posting the comment.
+'''

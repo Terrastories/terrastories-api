@@ -1,0 +1,203 @@
+name = "review-pr"
+description = "Perform a comprehensive pull request review, analyzing changes, aggregating feedback, and identifying fixes."
+
+[prompt]
+main = '''
+You are performing a comprehensive pull request review for PR #{pr_number}.
+
+PULL REQUEST INFORMATION:
+{pr_info}
+
+CURRENT DIFF:
+{pr_diff}
+
+EXISTING REVIEWS AND COMMENTS:
+{pr_comments}
+
+CI/CD STATUS:
+{pr_checks}
+
+TASK: Perform a comprehensive PR review with the following phases:
+
+## PHASE 1: COLLECT & ANALYZE REVIEWS
+Aggregate feedback from all available sources:
+- GitHub native reviews and comments
+- AI reviewer comments (CodeRabbit, Qodo, etc.)
+- CI/CD check results
+- Any automated tool outputs
+
+## PHASE 2: CATEGORIZE ISSUES
+Organize all feedback into categories:
+
+### Must Fix (Blocking)
+- Security vulnerabilities
+- Breaking changes
+- Failed tests
+- Type errors
+- Critical bugs
+
+### Should Fix (Important)
+- Performance issues
+- Missing error handling
+- Incomplete implementations
+- Documentation gaps
+
+### Consider (Suggestions)
+- Code style improvements
+- Refactoring opportunities
+- Alternative approaches
+- Minor optimizations
+
+### Nitpicks
+- Formatting issues
+- Naming conventions
+- Comment clarity
+
+## PHASE 3: IDENTIFY FIXES
+For each issue, determine if it can be automatically fixed:
+
+### Auto-Fixable Issues
+List issues that can be fixed programmatically with the exact fix to apply
+
+### Manual Review Required
+List issues that need human intervention with clear explanations
+
+## PHASE 4: RESOLVE CONFLICTS
+If there are conflicting suggestions from different reviewers:
+- Identify the conflicts
+- Apply resolution priority (security > performance > style)
+- Provide reasoning for chosen resolution
+
+## PHASE 5: GENERATE OUTPUT
+
+### Review Summary Report
+```markdown
+# 📊 PR Review Report - #{pr_number}
+
+## Review Statistics
+- Total feedback items: [count]
+- Blocking issues: [count]
+- Important issues: [count]
+- Suggestions: [count]
+- Style issues: [count]
+
+## 🔴 Must Fix (Blocking)
+[List each blocking issue with file:line and description]
+
+## 🟡 Should Fix (Important)
+[List each important issue with file:line and description]
+
+## 🔵 Consider (Suggestions)
+[List top suggestions worth considering]
+
+## ✅ Positive Feedback
+[Highlight what's done well]
+
+## 🔧 Automatic Fix Commands
+[Provide exact commands to fix auto-fixable issues]
+```bash
+# Type fixes
+[commands]
+
+# Lint fixes
+[commands]
+
+# Format fixes
+[commands]
+```
+
+## 📝 Manual Changes Needed
+[Clear instructions for manual fixes]
+
+## 🎯 Validation Checklist
+- [ ] All blocking issues addressed
+- [ ] Tests passing
+- [ ] CI/CD checks green
+- [ ] Type checking passes
+- [ ] Lint rules satisfied
+- [ ] Security scan clean
+- [ ] Documentation updated
+
+## 📈 Code Quality Metrics
+- Code coverage: [current]% (target: 80%)
+- Complexity: [assessment]
+- Duplication: [assessment]
+
+## ⚠️ Risk Assessment
+- Breaking changes: [Yes/No - details]
+- Performance impact: [assessment]
+- Security considerations: [assessment]
+
+## 💡 Recommendations
+[Strategic suggestions for improvement]
+
+## 🚀 PR Status
+[READY TO MERGE | NEEDS WORK | REQUIRES DISCUSSION]
+```
+
+### GitHub Comment
+Generate a concise comment to post on the PR:
+```
+[emoji] **Gemini Code Review**
+
+Status: [Ready to merge / Needs attention]
+
+Summary:
+- [X] blocking issues found ([Y] auto-fixable)
+- [Z] suggestions for improvement
+- All tests: [passing/failing]
+- CI checks: [green/red]
+
+[If blocking issues exist, list top 3]
+
+[View full review details above]
+```
+
+### Fix Implementation Script
+If auto-fixes are available, provide a shell script:
+```bash
+#!/bin/bash
+# Auto-fix script for PR #{pr_number}
+
+echo "Applying automatic fixes..."
+
+# Fix 1: [description]
+[exact commands]
+
+# Fix 2: [description]
+[exact commands]
+
+# Run validation
+npm test
+npm run lint
+npm run type-check
+
+# Commit fixes
+git add [changed files]
+git commit -m "fix: address PR review feedback
+
+- [list key fixes]
+"
+
+echo "Fixes applied! Run 'git push' to update PR"
+```
+
+## IMPORTANT GUIDELINES:
+1. Be specific with file names and line numbers
+2. Provide actionable feedback, not just criticism
+3. Acknowledge good practices and improvements
+4. Prioritize security and breaking changes
+5. Consolidate duplicate feedback from different sources
+6. For each issue, explain WHY it matters
+7. Suggest concrete fixes, not just problems
+8. Consider the PR's context and goals
+9. Be constructive and professional
+10. Focus on objective issues over style preferences
+
+## PHASE 6: POST REVIEW TO GITHUB
+After generating the "GitHub Comment", you are responsible for posting it to the pull request.
+1. Take the content generated in the "GitHub Comment" section.
+2. Use the `run_shell_command` tool to execute `gh pr comment {pr_number} --body "..."`.
+3. To handle multi-line content and quotes correctly, first write the comment to a temporary file within the project (e.g., `.gemini/temp_pr_review.md`) and then use `gh pr comment {pr_number} --body-file .gemini/temp_pr_review.md`.
+4. Remember to clean up the temporary file after posting the comment.
+'''

@@ -84,12 +84,13 @@ export interface PermissionOptions {
 }
 
 /**
- * Extended request interface with session
+ * Extended request interface with session and direct user access
  */
 export interface AuthenticatedRequest extends FastifyRequest {
   session: {
     user?: UserSession;
   } & FastifyRequest['session'];
+  user: UserSession; // Direct access to user for convenience
 }
 
 /**
@@ -108,6 +109,9 @@ export async function requireAuth(
       statusCode: 401,
     });
   }
+
+  // Set user directly on request for convenience
+  authRequest.user = authRequest.session.user;
 }
 
 /**
@@ -134,6 +138,9 @@ export function requireRole(roles: string[]) {
         statusCode: 403,
       });
     }
+
+    // Set user directly on request for convenience
+    authRequest.user = authRequest.session.user;
   };
 }
 

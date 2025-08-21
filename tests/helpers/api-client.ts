@@ -320,6 +320,23 @@ export async function createTestApp(
 
     // Add essential plugins for JSON handling (mirror main app)
     await app.register((await import('@fastify/cors')).default);
+    
+    // Add Swagger support for schema validation
+    const swagger = (await import('@fastify/swagger')).default;
+    const { swaggerSchemas } = await import('../../src/shared/schemas/index.js');
+    
+    await app.register(swagger, {
+      openapi: {
+        info: {
+          title: 'Terrastories API Test',
+          version: '1.0.0',
+        },
+        components: {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          schemas: swaggerSchemas as any,
+        },
+      },
+    });
 
     // Cookie support (required for sessions)
     await app.register((await import('@fastify/cookie')).default);
@@ -340,10 +357,9 @@ export async function createTestApp(
       saveUninitialized: false,
     });
 
-    // Register auth routes with test database
-    const { authRoutes } = await import('../../src/routes/auth.js');
-    await app.register(authRoutes, {
-      prefix: '/api/v1',
+    // Register all routes with test database
+    const { registerRoutes } = await import('../../src/routes/index.js');
+    await app.register(registerRoutes, {
       database: testDatabase,
     });
 

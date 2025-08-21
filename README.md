@@ -320,6 +320,8 @@ docker run -p 3000:3000 -e DATABASE_URL=your-db-url terrastories-api
 
 ## Contributing
 
+See CONTRIBUTING.md for setup, common scripts, commit/PR checklist, and expectations.
+
 🚀 **We welcome contributions from developers, Indigenous community members, and anyone passionate about preserving cultural heritage through technology!**
 
 ### Ways to Contribute
@@ -349,10 +351,9 @@ docker run -p 3000:3000 -e DATABASE_URL=your-db-url terrastories-api
 ### Getting Started
 
 1. **Fork the repository** and create a feature branch
-2. **Read the docs** - Check `docs/` for detailed guides, especially `SETUP.md` and `MIGRATION.md`
-3. **Join discussions** - Connect with maintainers and community
-4. **Start small** - Look for "good first issue" labels
-5. **Ask questions** - We're here to help!
+1. **Join discussions** - Connect with maintainers and community
+1. **Start small** - Look for "good first issue" labels
+1. **Ask questions** - We're here to help!
 
 ### Code of Conduct
 

@@ -288,15 +288,26 @@ Acceptance Criteria:
 - ✅ The corresponding API endpoints must have full Swagger/OpenAPI documentation.
 - ✅ The scripts/user_workflow.sh script is updated to include this feature, and it passes successfully (depending on #18).
 
-### **Issue #18: Implement CRUD Service for Communities** 🚧 CURRENT FOCUS 🚧
+### **Issue #18: Implement CRUD Service for Communities** ✅
+
+**Status**: ✅ **COMPLETED** in PR #40 (GitHub Issue #38)
+
+- Complete Community CRUD implementation with user registration integration
+- Merged: 2025-08-21
+- Community service with comprehensive CRUD operations and business logic
+- Indigenous data sovereignty enforcement with community isolation
+- Cultural protocol validation with elder content support
+- Enhanced authentication with optional communityId for simplified login
+- End-to-end user workflow testing script (scripts/user_workflow.sh)
+- Multi-database compatibility (PostgreSQL/SQLite)
 
 Description: Create the business logic for CRUD operations on the Community model. This is a prerequisite for fixing the user registration flow.
 Context: docs/2-DATA_MODELS.md
 Acceptance Criteria:
 
-- A community.service.ts is created with full CRUD logic.
-- The corresponding API endpoints must have full Swagger/OpenAPI documentation.
-- The scripts/user_workflow.sh script is updated to include community creation, and it passes successfully.
+- ✅ A community.service.ts is created with full CRUD logic.
+- ✅ The corresponding API endpoints must have full Swagger/OpenAPI documentation.
+- ✅ The scripts/user_workflow.sh script is updated to include community creation, and it passes successfully.
 
 ### **Issue #19: Implement CRUD Service for Places**
 

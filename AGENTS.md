@@ -60,6 +60,17 @@ npm test tests/routes/health.test.ts
 - Pre-commit runs lint-staged (ESLint + Prettier). Ensure `npm run validate` passes.
 - PRs: include description, linked issues, test coverage (new/changed code), and any API examples (e.g., cURL) when relevant. Screenshots optional for docs.
 
+## GitHub Workflow (gh CLI)
+
+- Auth: `gh auth status` (login if needed: `gh auth login`).
+- Find work: `gh issue list -L 20 --state open --label "good first issue"`.
+- Inspect: `gh issue view <num> -w` and `gh pr view <num> -w`.
+- Branch: `git checkout -b feat/<topic>`.
+- Create PR: `gh pr create -f -t "feat: <title>" -b "<summary>\nCloses #<issue>" -B main`.
+- Review PRs: `gh pr list -L 20`, checkout with `gh pr checkout <num>`.
+- Leave feedback: `gh pr review <num> -c "<comment>"` | approve: `-a` | request changes: `-r`.
+- Status and CI: `gh pr status` and `gh run watch`.
+
 ## Security & Configuration Tips
 
 - Never commit secrets; start from `.env.example`.

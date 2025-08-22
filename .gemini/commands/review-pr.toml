@@ -8,6 +8,8 @@ You are a senior software engineer tasked with reviewing pull request {{args}}.
 
 Your goal is to provide a thorough, constructive, and actionable review.
 
+🚨 **MANDATORY REQUIREMENT**: You MUST post a comment to the GitHub PR with your review. The review is only complete when you have successfully posted a comment using the gh CLI commands provided below.
+
 **Step 1: Information Gathering**
 First, use the available tools to gather all context about PR {{args}}:
 1. Fetch the PR title, description, and author using: `!{gh pr view {{args}} --json title,body,author}`
@@ -50,9 +52,37 @@ A brief, one-sentence summary of the review.
 
 ---
 
-**Step 4: Post the Review to GitHub**
-Take the Markdown summary you generated and post it as a comment on the pull request.
-1. Write the summary to a temporary file: `!{mkdir -p .gemini/temp && echo "[REVIEW_CONTENT]" > .gemini/temp/review-{{args}}.md}`
-2. Post the comment: `!{gh pr comment {{args}} --body-file .gemini/temp/review-{{args}}.md}`
-3. Clean up: `!{rm .gemini/temp/review-{{args}}.md}`
+**Step 4: Post the Review to GitHub (MANDATORY)**
+🚨 **CRITICAL: YOU MUST POST A COMMENT TO THE PR** 🚨
+
+You are REQUIRED to post your review as a comment on the GitHub pull request. This is not optional.
+
+1. Create your complete review summary using the template above
+2. Post the review comment using: `!{gh pr comment {{args}} --body "$(cat <<'EOF'
+## 📊 PR Review for #{{args}}
+
+**Status:** [Your assessment]
+
+### Summary
+[Your summary here]
+
+### 🔴 Blocking Issues
+[List any blocking issues with file:line references]
+
+### 🟡 Important Issues
+[List important issues that should be addressed]
+
+### 🔵 Suggestions
+[List suggestions for improvement]
+
+### ✅ Positive Feedback
+[Highlight what was done well]
+
+---
+*Review completed by Gemini CLI*
+EOF
+)"}`
+3. Verify the comment was posted: `!{gh pr view {{args}} --json comments --jq '.comments[-1].body' | head -20}`
+
+**Failure to post a comment means the review is incomplete and unsuccessful.**
 """

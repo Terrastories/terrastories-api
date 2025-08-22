@@ -7,6 +7,8 @@ You are a technical writer tasked with improving GitHub issue {{args}}.
 
 **Your Goal:** Revise the issue to make it clearer, more actionable, and aligned with project standards.
 
+🚨 **MANDATORY REQUIREMENT**: You MUST post a comment to the GitHub issue summarizing your revision. The revision is only complete when you have successfully posted a comment using the gh CLI commands provided below.
+
 **Step 1: Information Gathering**
 - Fetch the current issue details: `!{gh issue view {{args}} --json title,body,labels,assignees}`
 
@@ -38,12 +40,36 @@ You are a technical writer tasked with improving GitHub issue {{args}}.
 
 ---
 
-**Step 4: Create a Summary Comment**
-- Write a brief comment for the GitHub issue that summarizes the changes you made. Explain *why* you made them.
+**Step 4: Post Revision Summary to GitHub (MANDATORY)**
+🚨 **CRITICAL: YOU MUST POST A COMMENT TO THE ISSUE** 🚨
 
-**Example Comment:**
-> I've revised this issue to clarify the acceptance criteria and add a proposed technical plan, based on our recent discussion. This should make it easier for a developer to pick up.
+You are REQUIRED to post a revision summary as a comment on the GitHub issue. This is not optional.
 
-**Step 5: Post the Comment to GitHub**
-- Post the summary comment: `!{gh issue comment {{args}} --body "[SUMMARY_COMMENT]"}`
+1. Create a comprehensive revision summary explaining what you changed and why
+2. Post the revision comment using: `!{gh issue comment {{args}} --body "$(cat <<'EOF'
+📝 **Issue Revision Complete**
+
+I've revised this issue to improve its clarity and actionability:
+
+**Changes Made:**
+- [Specific change 1 with reasoning]
+- [Specific change 2 with reasoning] 
+- [Additional changes as needed]
+
+**Improvements:**
+- ✅ Clarified acceptance criteria to be SMART (Specific, Measurable, Achievable, Relevant, Time-bound)
+- ✅ Enhanced technical plan with implementation approach
+- ✅ Added comprehensive testing strategy
+- ✅ Updated estimation with reasoning
+
+**Ready for Development:**
+This issue now meets project standards and should be easier for developers to understand and implement.
+
+---
+*Revision completed by Gemini CLI*
+EOF
+)"}`
+3. Verify the comment was posted: `!{gh issue view {{args}} --json comments --jq '.comments[-1].body' | head -20}`
+
+**Failure to post a comment means the revision is incomplete and unsuccessful.**
 '''

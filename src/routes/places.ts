@@ -13,9 +13,12 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { PlaceService } from '../services/place.service.js';
 import { PlaceRepository } from '../repositories/place.repository.js';
-import type { UserRole } from '../services/place.service.js';
 import { getDb } from '../db/index.js';
-import { requireAuth, requireRole, type AuthenticatedRequest } from '../shared/middleware/auth.middleware.js';
+import {
+  requireAuth,
+  requireRole,
+  type AuthenticatedRequest,
+} from '../shared/middleware/auth.middleware.js';
 
 /**
  * Zod validation schemas
@@ -34,33 +37,69 @@ const CreatePlaceSchema = z.object({
   latitude: z.number().min(-90).max(90).describe('Latitude coordinate'),
   longitude: z.number().min(-180).max(180).describe('Longitude coordinate'),
   region: z.string().max(100).optional().describe('Regional classification'),
-  mediaUrls: z.array(z.string().url()).max(10).optional().describe('Media URLs (max 10)'),
-  culturalSignificance: z.string().max(1000).optional().describe('Cultural significance description'),
-  isRestricted: z.boolean().optional().default(false).describe('Restricted access (elders only)'),
+  mediaUrls: z
+    .array(z.string().url())
+    .max(10)
+    .optional()
+    .describe('Media URLs (max 10)'),
+  culturalSignificance: z
+    .string()
+    .max(1000)
+    .optional()
+    .describe('Cultural significance description'),
+  isRestricted: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe('Restricted access (elders only)'),
 });
 
 // Update place request schema
-const UpdatePlaceSchema = CreatePlaceSchema.partial().omit({ latitude: true, longitude: true }).extend({
-  latitude: z.number().min(-90).max(90).optional().describe('New latitude coordinate'),
-  longitude: z.number().min(-180).max(180).optional().describe('New longitude coordinate'),
-});
+const UpdatePlaceSchema = CreatePlaceSchema.partial()
+  .omit({ latitude: true, longitude: true })
+  .extend({
+    latitude: z
+      .number()
+      .min(-90)
+      .max(90)
+      .optional()
+      .describe('New latitude coordinate'),
+    longitude: z
+      .number()
+      .min(-180)
+      .max(180)
+      .optional()
+      .describe('New longitude coordinate'),
+  });
 
 // Query parameters schemas
 const PaginationSchema = z.object({
   page: z.coerce.number().int().min(1).default(1).describe('Page number'),
-  limit: z.coerce.number().int().min(1).max(100).default(20).describe('Items per page'),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(20)
+    .describe('Items per page'),
 });
 
 const NearbySearchSchema = CoordinateSchema.extend({
-  radius: z.coerce.number().min(0.1).max(1000).describe('Search radius in kilometers'),
+  radius: z.coerce
+    .number()
+    .min(0.1)
+    .max(1000)
+    .describe('Search radius in kilometers'),
 }).merge(PaginationSchema);
 
-const BoundsSearchSchema = z.object({
-  north: z.coerce.number().min(-90).max(90).describe('Northern boundary'),
-  south: z.coerce.number().min(-90).max(90).describe('Southern boundary'),
-  east: z.coerce.number().min(-180).max(180).describe('Eastern boundary'),
-  west: z.coerce.number().min(-180).max(180).describe('Western boundary'),
-}).merge(PaginationSchema);
+const BoundsSearchSchema = z
+  .object({
+    north: z.coerce.number().min(-90).max(90).describe('Northern boundary'),
+    south: z.coerce.number().min(-90).max(90).describe('Southern boundary'),
+    east: z.coerce.number().min(-180).max(180).describe('Eastern boundary'),
+    west: z.coerce.number().min(-180).max(180).describe('Western boundary'),
+  })
+  .merge(PaginationSchema);
 
 // Path parameters schema
 const PlaceIdSchema = z.object({
@@ -109,13 +148,19 @@ export async function placesRoutes(fastify: FastifyInstance) {
         }
 
         if (error instanceof Error) {
-          if (error.message.includes('coordinate') || error.message.includes('URL')) {
+          if (
+            error.message.includes('coordinate') ||
+            error.message.includes('URL')
+          ) {
             return reply.status(400).send({
               error: { message: error.message },
             });
           }
 
-          if (error.message.includes('permission') || error.message.includes('Only')) {
+          if (
+            error.message.includes('permission') ||
+            error.message.includes('Only')
+          ) {
             return reply.status(403).send({
               error: { message: error.message },
             });
@@ -138,7 +183,11 @@ export async function placesRoutes(fastify: FastifyInstance) {
         const { id } = PlaceIdSchema.parse(request.params);
         const { user } = request as AuthenticatedRequest;
 
-        const place = await placeService.getPlaceById(id, user.communityId, user.role);
+        const place = await placeService.getPlaceById(
+          id,
+          user.communityId,
+          user.role
+        );
 
         return reply.send({
           data: place,
@@ -151,7 +200,10 @@ export async function placesRoutes(fastify: FastifyInstance) {
             });
           }
 
-          if (error.message.includes('restricted') || error.message.includes('Cultural')) {
+          if (
+            error.message.includes('restricted') ||
+            error.message.includes('Cultural')
+          ) {
             return reply.status(403).send({
               error: { message: error.message },
             });
@@ -232,13 +284,19 @@ export async function placesRoutes(fastify: FastifyInstance) {
             });
           }
 
-          if (error.message.includes('coordinate') || error.message.includes('URL')) {
+          if (
+            error.message.includes('coordinate') ||
+            error.message.includes('URL')
+          ) {
             return reply.status(400).send({
               error: { message: error.message },
             });
           }
 
-          if (error.message.includes('protocol') || error.message.includes('Only')) {
+          if (
+            error.message.includes('protocol') ||
+            error.message.includes('Only')
+          ) {
             return reply.status(403).send({
               error: { message: error.message },
             });
@@ -261,7 +319,12 @@ export async function placesRoutes(fastify: FastifyInstance) {
         const { id } = PlaceIdSchema.parse(request.params);
         const { user } = request as AuthenticatedRequest;
 
-        await placeService.deletePlace(id, user.communityId, user.id, user.role);
+        await placeService.deletePlace(
+          id,
+          user.communityId,
+          user.id,
+          user.role
+        );
 
         return reply.status(204).send();
       } catch (error) {
@@ -272,7 +335,10 @@ export async function placesRoutes(fastify: FastifyInstance) {
             });
           }
 
-          if (error.message.includes('permission') || error.message.includes('Only')) {
+          if (
+            error.message.includes('permission') ||
+            error.message.includes('Only')
+          ) {
             return reply.status(403).send({
               error: { message: error.message },
             });
@@ -393,10 +459,11 @@ export async function placesRoutes(fastify: FastifyInstance) {
           });
         }
 
-        if (error instanceof Error && (
-          error.message.includes('bounding box') || 
-          error.message.includes('coordinate')
-        )) {
+        if (
+          error instanceof Error &&
+          (error.message.includes('bounding box') ||
+            error.message.includes('coordinate'))
+        ) {
           return reply.status(400).send({
             error: { message: error.message },
           });

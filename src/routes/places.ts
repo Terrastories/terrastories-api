@@ -19,6 +19,7 @@ import {
   requireRole,
   type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
+import { handleRouteError } from '../shared/middleware/error.middleware.js';
 
 /**
  * Zod validation schemas
@@ -152,36 +153,7 @@ export async function placesRoutes(
           meta: { message: 'Place created successfully' },
         });
       } catch (error) {
-        if (error instanceof z.ZodError) {
-          return reply.status(400).send({
-            error: {
-              message: 'Validation error',
-              details: error.issues,
-            },
-          });
-        }
-
-        if (error instanceof Error) {
-          if (
-            error.message.includes('coordinate') ||
-            error.message.includes('URL')
-          ) {
-            return reply.status(400).send({
-              error: { message: error.message },
-            });
-          }
-
-          if (
-            error.message.includes('permission') ||
-            error.message.includes('Only')
-          ) {
-            return reply.status(403).send({
-              error: { message: error.message },
-            });
-          }
-        }
-
-        throw error;
+        return handleRouteError(error, reply, request);
       }
     },
   });
@@ -207,24 +179,7 @@ export async function placesRoutes(
           data: place,
         });
       } catch (error) {
-        if (error instanceof Error) {
-          if (error.message.includes('not found')) {
-            return reply.status(404).send({
-              error: { message: 'Place not found' },
-            });
-          }
-
-          if (
-            error.message.includes('restricted') ||
-            error.message.includes('Cultural')
-          ) {
-            return reply.status(403).send({
-              error: { message: error.message },
-            });
-          }
-        }
-
-        throw error;
+        return handleRouteError(error, reply, request);
       }
     },
   });
@@ -282,42 +237,7 @@ export async function placesRoutes(
           meta: { message: 'Place updated successfully' },
         });
       } catch (error) {
-        if (error instanceof z.ZodError) {
-          return reply.status(400).send({
-            error: {
-              message: 'Validation error',
-              details: error.issues,
-            },
-          });
-        }
-
-        if (error instanceof Error) {
-          if (error.message.includes('not found')) {
-            return reply.status(404).send({
-              error: { message: 'Place not found' },
-            });
-          }
-
-          if (
-            error.message.includes('coordinate') ||
-            error.message.includes('URL')
-          ) {
-            return reply.status(400).send({
-              error: { message: error.message },
-            });
-          }
-
-          if (
-            error.message.includes('protocol') ||
-            error.message.includes('Only')
-          ) {
-            return reply.status(403).send({
-              error: { message: error.message },
-            });
-          }
-        }
-
-        throw error;
+        return handleRouteError(error, reply, request);
       }
     },
   });
@@ -342,24 +262,7 @@ export async function placesRoutes(
 
         return reply.status(204).send();
       } catch (error) {
-        if (error instanceof Error) {
-          if (error.message.includes('not found')) {
-            return reply.status(404).send({
-              error: { message: 'Place not found' },
-            });
-          }
-
-          if (
-            error.message.includes('permission') ||
-            error.message.includes('Only')
-          ) {
-            return reply.status(403).send({
-              error: { message: error.message },
-            });
-          }
-        }
-
-        throw error;
+        return handleRouteError(error, reply, request);
       }
     },
   });
@@ -402,22 +305,7 @@ export async function placesRoutes(
           },
         });
       } catch (error) {
-        if (error instanceof z.ZodError) {
-          return reply.status(400).send({
-            error: {
-              message: 'Invalid search parameters',
-              details: error.issues,
-            },
-          });
-        }
-
-        if (error instanceof Error && error.message.includes('coordinate')) {
-          return reply.status(400).send({
-            error: { message: error.message },
-          });
-        }
-
-        throw error;
+        return handleRouteError(error, reply, request);
       }
     },
   });
@@ -464,26 +352,7 @@ export async function placesRoutes(
           },
         });
       } catch (error) {
-        if (error instanceof z.ZodError) {
-          return reply.status(400).send({
-            error: {
-              message: 'Invalid bounding box parameters',
-              details: error.issues,
-            },
-          });
-        }
-
-        if (
-          error instanceof Error &&
-          (error.message.includes('bounding box') ||
-            error.message.includes('coordinate'))
-        ) {
-          return reply.status(400).send({
-            error: { message: error.message },
-          });
-        }
-
-        throw error;
+        return handleRouteError(error, reply, request);
       }
     },
   });

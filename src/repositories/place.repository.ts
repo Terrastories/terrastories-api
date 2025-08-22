@@ -29,6 +29,11 @@ import { stories } from '../db/schema/stories.js';
 import { getCommunitiesTable } from '../db/schema/communities.js';
 import { getConfig } from '../shared/config/index.js';
 import type { Database } from '../db/index.js';
+import {
+  InvalidCoordinatesError,
+  InvalidBoundsError,
+  CommunityNotFoundError,
+} from '../shared/errors/index.js';
 
 // Re-export Place type for other modules
 export type { Place } from '../db/schema/places.js';
@@ -115,30 +120,6 @@ export interface PaginatedResponse<T> {
 }
 
 /**
- * Custom error classes
- */
-export class PlaceNotFoundError extends Error {
-  constructor(message = 'Place not found') {
-    super(message);
-    this.name = 'PlaceNotFoundError';
-  }
-}
-
-export class InvalidCoordinatesError extends Error {
-  constructor(message = 'Invalid geographic coordinates') {
-    super(message);
-    this.name = 'InvalidCoordinatesError';
-  }
-}
-
-export class InvalidBoundsError extends Error {
-  constructor(message = 'Invalid bounding box coordinates') {
-    super(message);
-    this.name = 'InvalidBoundsError';
-  }
-}
-
-/**
  * Place Repository Class
  *
  * Provides complete database operations for places with PostGIS spatial support
@@ -164,7 +145,7 @@ export class PlaceRepository {
   ): Promise<Place> {
     // Validate coordinates
     if (!validateCoordinates(data.latitude, data.longitude)) {
-      throw new InvalidCoordinatesError('Invalid latitude or longitude values');
+      throw new InvalidCoordinatesError(data.latitude, data.longitude);
     }
 
     const placesTable = await getPlacesTable();
@@ -192,7 +173,7 @@ export class PlaceRepository {
         .limit(1);
 
       if (!existingCommunity) {
-        throw new Error('Invalid community ID');
+        throw new CommunityNotFoundError(data.communityId);
       }
 
       const [place] = await (this.db as any)
@@ -207,7 +188,7 @@ export class PlaceRepository {
         (error.message.includes('foreign key') ||
           error.message.includes('Invalid community ID'))
       ) {
-        throw new Error('Invalid community ID');
+        throw new CommunityNotFoundError();
       }
       throw error;
     }
@@ -312,9 +293,7 @@ export class PlaceRepository {
     // Validate coordinates if provided
     if (data.latitude !== undefined && data.longitude !== undefined) {
       if (!validateCoordinates(data.latitude, data.longitude)) {
-        throw new InvalidCoordinatesError(
-          'Invalid latitude or longitude values'
-        );
+        throw new InvalidCoordinatesError(data.latitude, data.longitude);
       }
     }
 
@@ -383,7 +362,7 @@ export class PlaceRepository {
 
     // Validate search coordinates
     if (!validateCoordinates(latitude, longitude)) {
-      throw new InvalidCoordinatesError('Invalid search coordinates');
+      throw new InvalidCoordinatesError(latitude, longitude);
     }
 
     const placesTable = await getPlacesTable();
@@ -512,7 +491,7 @@ export class PlaceRepository {
       !validateCoordinates(north, west) ||
       !validateCoordinates(south, east)
     ) {
-      throw new InvalidCoordinatesError('Invalid bounding box coordinates');
+      throw new InvalidCoordinatesError();
     }
 
     const placesTable = await getPlacesTable();

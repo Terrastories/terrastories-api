@@ -23,9 +23,19 @@ import type {
   BoundsSearchParams,
   CommunityPlaceParams,
   PaginatedResponse,
-  InvalidBoundsError,
 } from '../repositories/place.repository.js';
 import { validateCoordinates } from '../db/schema/places.js';
+import {
+  CulturalProtocolViolationError,
+  InsufficientPermissionsError,
+  PlaceNotFoundError,
+  InvalidCoordinatesError,
+  InvalidMediaUrlError,
+  InvalidBoundsError,
+  InvalidRadiusError,
+  InvalidFieldLengthError,
+  RequiredFieldError,
+} from '../shared/errors/index.js';
 
 /**
  * Request data for place creation
@@ -84,41 +94,8 @@ export interface BoundsSearchRequest {
 export type UserRole = 'super_admin' | 'admin' | 'editor' | 'viewer' | 'elder';
 
 /**
- * Custom error classes
- */
-export class CulturalProtocolViolationError extends Error {
-  constructor(message = 'Cultural protocol access violation') {
-    super(message);
-    this.name = 'CulturalProtocolViolationError';
-  }
-}
-
-export class InsufficientPermissionsError extends Error {
-  constructor(message = 'Insufficient permissions for this operation') {
-    super(message);
-    this.name = 'InsufficientPermissionsError';
-  }
-}
-
-export class PlaceNotFoundError extends Error {
-  constructor(message = 'Place not found') {
-    super(message);
-    this.name = 'PlaceNotFoundError';
-  }
-}
-
-export class InvalidCoordinatesError extends Error {
-  constructor(message = 'Invalid coordinates') {
-    super(message);
-    this.name = 'InvalidCoordinatesError';
-  }
-}
-
-export { InvalidBoundsError };
-
-/**
  * Place Service Class
- * 
+ *
  * Provides complete business logic for places with cultural protocol enforcement
  */
 export class PlaceService {
@@ -142,7 +119,7 @@ export class PlaceService {
 
     // Validate coordinates
     if (!validateCoordinates(data.latitude, data.longitude)) {
-      throw new Error('Invalid geographic coordinates provided');
+      throw new InvalidCoordinatesError(data.latitude, data.longitude);
     }
 
     // Validate media URLs if provided
@@ -154,7 +131,9 @@ export class PlaceService {
     if (data.isRestricted && data.culturalSignificance) {
       // Only admin/elder can create restricted places
       if (userRole && !['admin', 'elder'].includes(userRole)) {
-        throw new InsufficientPermissionsError('Only administrators and elders can create restricted places');
+        throw new InsufficientPermissionsError(
+          'Only administrators and elders can create restricted places'
+        );
       }
     }
 
@@ -181,15 +160,20 @@ export class PlaceService {
     communityId: number,
     userRole?: UserRole
   ): Promise<Place> {
-    const place = await this.repository.getByIdWithCommunityCheck(id, communityId);
-    
+    const place = await this.repository.getByIdWithCommunityCheck(
+      id,
+      communityId
+    );
+
     if (!place) {
-      throw new Error('Place not found');
+      throw new PlaceNotFoundError(id);
     }
 
     // Check cultural protocol access
     if (place.isRestricted && userRole !== 'elder') {
-      throw new CulturalProtocolViolationError('Access to this sacred place is restricted to elders');
+      throw new CulturalProtocolViolationError(
+        'Access to this sacred place is restricted to elders'
+      );
     }
 
     return place;
@@ -225,15 +209,24 @@ export class PlaceService {
     userRole?: UserRole
   ): Promise<Place> {
     // Get existing place to check permissions
-    const existingPlace = await this.repository.getByIdWithCommunityCheck(id, communityId);
-    
+    const existingPlace = await this.repository.getByIdWithCommunityCheck(
+      id,
+      communityId
+    );
+
     if (!existingPlace) {
       throw new PlaceNotFoundError('Place not found');
     }
 
     // Check cultural protocol permissions
-    if (existingPlace.isRestricted && userRole !== 'elder' && userRole !== 'admin') {
-      throw new CulturalProtocolViolationError('Only elders and administrators can modify restricted places');
+    if (
+      existingPlace.isRestricted &&
+      userRole !== 'elder' &&
+      userRole !== 'admin'
+    ) {
+      throw new CulturalProtocolViolationError(
+        'Only elders and administrators can modify restricted places'
+      );
     }
 
     // Validate update data
@@ -243,7 +236,7 @@ export class PlaceService {
 
     if (data.latitude !== undefined && data.longitude !== undefined) {
       if (!validateCoordinates(data.latitude, data.longitude)) {
-        throw new InvalidCoordinatesError('Invalid geographic coordinates provided');
+        throw new InvalidCoordinatesError(data.latitude, data.longitude);
       }
     }
 
@@ -254,24 +247,32 @@ export class PlaceService {
     // Check permissions for creating restricted places
     if (data.isRestricted && !existingPlace.isRestricted) {
       if (userRole && !['admin', 'elder'].includes(userRole)) {
-        throw new InsufficientPermissionsError('Only administrators and elders can mark places as restricted');
+        throw new InsufficientPermissionsError(
+          'Only administrators and elders can mark places as restricted'
+        );
       }
     }
 
     // Prepare update data
     const updateData: UpdatePlaceData = {
       ...(data.name !== undefined && { name: data.name.trim() }),
-      ...(data.description !== undefined && { description: data.description?.trim() }),
+      ...(data.description !== undefined && {
+        description: data.description?.trim(),
+      }),
       ...(data.latitude !== undefined && { latitude: data.latitude }),
       ...(data.longitude !== undefined && { longitude: data.longitude }),
       ...(data.region !== undefined && { region: data.region?.trim() }),
       ...(data.mediaUrls !== undefined && { mediaUrls: data.mediaUrls }),
-      ...(data.culturalSignificance !== undefined && { culturalSignificance: data.culturalSignificance?.trim() }),
-      ...(data.isRestricted !== undefined && { isRestricted: data.isRestricted }),
+      ...(data.culturalSignificance !== undefined && {
+        culturalSignificance: data.culturalSignificance?.trim(),
+      }),
+      ...(data.isRestricted !== undefined && {
+        isRestricted: data.isRestricted,
+      }),
     };
 
     const updated = await this.repository.update(id, updateData);
-    
+
     if (!updated) {
       throw new PlaceNotFoundError('Place not found or update failed');
     }
@@ -290,12 +291,17 @@ export class PlaceService {
   ): Promise<boolean> {
     // Only admin/elder can delete places
     if (userRole && !['admin', 'elder'].includes(userRole)) {
-      throw new InsufficientPermissionsError('Only administrators and elders can delete places');
+      throw new InsufficientPermissionsError(
+        'Only administrators and elders can delete places'
+      );
     }
 
     // Check if place exists in the community
-    const existingPlace = await this.repository.getByIdWithCommunityCheck(id, communityId);
-    
+    const existingPlace = await this.repository.getByIdWithCommunityCheck(
+      id,
+      communityId
+    );
+
     if (!existingPlace) {
       throw new PlaceNotFoundError('Place not found');
     }
@@ -315,12 +321,12 @@ export class PlaceService {
   ): Promise<PaginatedResponse<Place>> {
     // Validate search coordinates
     if (!validateCoordinates(params.latitude, params.longitude)) {
-      throw new Error('Invalid search coordinates provided');
+      throw new InvalidCoordinatesError(params.latitude, params.longitude);
     }
 
     // Validate radius
     if (params.radiusKm <= 0 || params.radiusKm > 1000) {
-      throw new Error('Search radius must be between 0 and 1000 kilometers');
+      throw new InvalidRadiusError(params.radiusKm, 0, 1000);
     }
 
     // Determine if user can see restricted places
@@ -348,11 +354,16 @@ export class PlaceService {
   ): Promise<PaginatedResponse<Place>> {
     // Validate bounding box
     if (params.north <= params.south || params.east <= params.west) {
-      throw new Error('Invalid bounding box: north must be > south, east must be > west');
+      throw new InvalidBoundsError(
+        'Invalid bounding box: north must be > south, east must be > west'
+      );
     }
 
-    if (!validateCoordinates(params.north, params.west) || !validateCoordinates(params.south, params.east)) {
-      throw new Error('Invalid bounding box coordinates');
+    if (
+      !validateCoordinates(params.north, params.west) ||
+      !validateCoordinates(params.south, params.east)
+    ) {
+      throw new InvalidCoordinatesError();
     }
 
     // Determine if user can see restricted places
@@ -398,15 +409,23 @@ export class PlaceService {
     this.validatePlaceName(data.name);
 
     if (data.description && data.description.length > 2000) {
-      throw new Error('Description cannot exceed 2000 characters');
+      throw new InvalidFieldLengthError(
+        'Description',
+        2000,
+        data.description.length
+      );
     }
 
     if (data.region && data.region.length > 100) {
-      throw new Error('Region name cannot exceed 100 characters');
+      throw new InvalidFieldLengthError('Region name', 100, data.region.length);
     }
 
     if (data.culturalSignificance && data.culturalSignificance.length > 1000) {
-      throw new Error('Cultural significance description cannot exceed 1000 characters');
+      throw new InvalidFieldLengthError(
+        'Cultural significance description',
+        1000,
+        data.culturalSignificance.length
+      );
     }
   }
 
@@ -415,11 +434,11 @@ export class PlaceService {
    */
   private validatePlaceName(name: string): void {
     if (!name || name.trim().length === 0) {
-      throw new Error('Place name is required');
+      throw new RequiredFieldError('Place name');
     }
 
     if (name.length > 200) {
-      throw new Error('Place name cannot exceed 200 characters');
+      throw new InvalidFieldLengthError('Place name', 200, name.length);
     }
   }
 
@@ -428,20 +447,22 @@ export class PlaceService {
    */
   private validateMediaUrls(urls: string[]): void {
     if (urls.length > 10) {
-      throw new Error('Cannot have more than 10 media URLs per place');
+      throw new InvalidFieldLengthError('Media URLs', 10, urls.length);
     }
 
     for (const url of urls) {
       try {
         new URL(url);
       } catch {
-        throw new Error(`Invalid URL format: ${url}`);
+        throw new InvalidMediaUrlError(url);
       }
 
       // Basic security check for URL schemes
       const parsedUrl = new URL(url);
       if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-        throw new Error(`Unsupported URL scheme: ${parsedUrl.protocol}`);
+        throw new InvalidMediaUrlError(
+          `Unsupported URL scheme: ${parsedUrl.protocol} for ${url}`
+        );
       }
     }
   }

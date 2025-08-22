@@ -47,7 +47,10 @@ describe('PlaceRepository', () => {
         isRestricted: false,
       };
 
-      const place = await repository.create({ ...placeData, communityId: testCommunityId });
+      const place = await repository.create({
+        ...placeData,
+        communityId: testCommunityId,
+      });
 
       expect(place).toBeDefined();
       expect(place.id).toBeTypeOf('number');
@@ -63,12 +66,21 @@ describe('PlaceRepository', () => {
         name: 'Photo Place',
         latitude: 37.7749,
         longitude: -122.4194,
-        mediaUrls: ['http://example.com/photo1.jpg', 'http://example.com/photo2.jpg'],
+        mediaUrls: [
+          'http://example.com/photo1.jpg',
+          'http://example.com/photo2.jpg',
+        ],
       };
 
-      const place = await repository.create({ ...placeData, communityId: testCommunityId });
+      const place = await repository.create({
+        ...placeData,
+        communityId: testCommunityId,
+      });
 
-      expect(place.mediaUrls).toEqual(['http://example.com/photo1.jpg', 'http://example.com/photo2.jpg']);
+      expect(place.mediaUrls).toEqual([
+        'http://example.com/photo1.jpg',
+        'http://example.com/photo2.jpg',
+      ]);
     });
 
     test('should reject invalid coordinates', async () => {
@@ -78,8 +90,11 @@ describe('PlaceRepository', () => {
         longitude: -122.4194,
       };
 
-      await expect(repository.create({ ...invalidData, communityId: testCommunityId }))
-        .rejects.toThrow('Invalid latitude or longitude');
+      await expect(
+        repository.create({ ...invalidData, communityId: testCommunityId })
+      ).rejects.toThrow(
+        'Invalid coordinates (91, -122.4194). Latitude must be between -90 and 90, longitude between -180 and 180.'
+      );
     });
 
     test('should reject place with non-existent community', async () => {
@@ -89,8 +104,9 @@ describe('PlaceRepository', () => {
         longitude: -122.4194,
       };
 
-      await expect(repository.create({ ...placeData, communityId: 99999 }))
-        .rejects.toThrow('Invalid community ID');
+      await expect(
+        repository.create({ ...placeData, communityId: 99999 })
+      ).rejects.toThrow('Community with ID 99999 not found');
     });
   });
 
@@ -102,7 +118,10 @@ describe('PlaceRepository', () => {
         longitude: -122.4194,
       };
 
-      const created = await repository.create({ ...placeData, communityId: testCommunityId });
+      const created = await repository.create({
+        ...placeData,
+        communityId: testCommunityId,
+      });
       const retrieved = await repository.getById(created.id);
 
       expect(retrieved).toBeDefined();
@@ -124,8 +143,14 @@ describe('PlaceRepository', () => {
         longitude: -122.4194,
       };
 
-      const created = await repository.create({ ...placeData, communityId: testCommunityId });
-      const retrieved = await repository.getByIdWithCommunityCheck(created.id, testCommunityId);
+      const created = await repository.create({
+        ...placeData,
+        communityId: testCommunityId,
+      });
+      const retrieved = await repository.getByIdWithCommunityCheck(
+        created.id,
+        testCommunityId
+      );
 
       expect(retrieved).toBeDefined();
       expect(retrieved!.id).toBe(created.id);
@@ -138,8 +163,14 @@ describe('PlaceRepository', () => {
         longitude: -122.4194,
       };
 
-      const created = await repository.create({ ...placeData, communityId: otherCommunityId });
-      const retrieved = await repository.getByIdWithCommunityCheck(created.id, testCommunityId);
+      const created = await repository.create({
+        ...placeData,
+        communityId: otherCommunityId,
+      });
+      const retrieved = await repository.getByIdWithCommunityCheck(
+        created.id,
+        testCommunityId
+      );
 
       expect(retrieved).toBeNull();
     });
@@ -169,7 +200,10 @@ describe('PlaceRepository', () => {
         }),
       ]);
 
-      const result = await repository.getByCommunity(testCommunityId, { page: 1, limit: 2 });
+      const result = await repository.getByCommunity(testCommunityId, {
+        page: 1,
+        limit: 2,
+      });
 
       expect(result.data).toHaveLength(2);
       expect(result.total).toBe(3);
@@ -195,10 +229,10 @@ describe('PlaceRepository', () => {
         }),
       ]);
 
-      const result = await repository.getByCommunity(testCommunityId, { 
-        page: 1, 
+      const result = await repository.getByCommunity(testCommunityId, {
+        page: 1,
         limit: 10,
-        includeRestricted: false 
+        includeRestricted: false,
       });
 
       expect(result.data).toHaveLength(1);
@@ -214,7 +248,10 @@ describe('PlaceRepository', () => {
         longitude: -122.4194,
       };
 
-      const created = await repository.create({ ...placeData, communityId: testCommunityId });
+      const created = await repository.create({
+        ...placeData,
+        communityId: testCommunityId,
+      });
       const updated = await repository.update(created.id, {
         name: 'Updated Name',
         description: 'New description',
@@ -240,7 +277,10 @@ describe('PlaceRepository', () => {
         longitude: -122.4194,
       };
 
-      const created = await repository.create({ ...placeData, communityId: testCommunityId });
+      const created = await repository.create({
+        ...placeData,
+        communityId: testCommunityId,
+      });
       const deleted = await repository.delete(created.id);
 
       expect(deleted).toBe(true);
@@ -267,7 +307,7 @@ describe('PlaceRepository', () => {
           communityId: testCommunityId,
         }),
         repository.create({
-          name: 'Medium Place', 
+          name: 'Medium Place',
           latitude: 37.7849, // ~1km north
           longitude: -122.4194,
           communityId: testCommunityId,
@@ -290,7 +330,7 @@ describe('PlaceRepository', () => {
       });
 
       expect(results.data.length).toBeGreaterThanOrEqual(2);
-      const names = results.data.map(p => p.name);
+      const names = results.data.map((p) => p.name);
       expect(names).toContain('Close Place');
       expect(names).toContain('Medium Place');
       // Far place should be excluded (unless we're using the SQLite fallback which is less precise)
@@ -326,14 +366,18 @@ describe('PlaceRepository', () => {
     });
 
     test('should validate search coordinates', async () => {
-      await expect(repository.searchNear({
-        communityId: testCommunityId,
-        latitude: 91, // Invalid
-        longitude: -122.4194,
-        radiusKm: 5,
-        page: 1,
-        limit: 10,
-      })).rejects.toThrow('Invalid search coordinates');
+      await expect(
+        repository.searchNear({
+          communityId: testCommunityId,
+          latitude: 91, // Invalid
+          longitude: -122.4194,
+          radiusKm: 5,
+          page: 1,
+          limit: 10,
+        })
+      ).rejects.toThrow(
+        'Invalid coordinates (91, -122.4194). Latitude must be between -90 and 90, longitude between -180 and 180.'
+      );
     });
   });
 
@@ -348,18 +392,18 @@ describe('PlaceRepository', () => {
         }),
         repository.create({
           name: 'Outside Place',
-          latitude: 38.0000, // Outside bounds
-          longitude: -121.0000,
+          latitude: 38.0, // Outside bounds
+          longitude: -121.0,
           communityId: testCommunityId,
         }),
       ]);
 
       const results = await repository.searchInBounds({
         communityId: testCommunityId,
-        north: 37.8000,
-        south: 37.7000,
-        east: -122.4000,
-        west: -122.5000,
+        north: 37.8,
+        south: 37.7,
+        east: -122.4,
+        west: -122.5,
         page: 1,
         limit: 10,
       });
@@ -369,15 +413,19 @@ describe('PlaceRepository', () => {
     });
 
     test('should validate bounding box', async () => {
-      await expect(repository.searchInBounds({
-        communityId: testCommunityId,
-        north: 37.7000, // North should be > South
-        south: 37.8000,
-        east: -122.4000,
-        west: -122.5000,
-        page: 1,
-        limit: 10,
-      })).rejects.toThrow('Invalid bounding box');
+      await expect(
+        repository.searchInBounds({
+          communityId: testCommunityId,
+          north: 37.7, // North should be > South
+          south: 37.8,
+          east: -122.4,
+          west: -122.5,
+          page: 1,
+          limit: 10,
+        })
+      ).rejects.toThrow(
+        'Invalid bounding box: north must be > south, east must be > west'
+      );
     });
   });
 });

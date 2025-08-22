@@ -322,7 +322,7 @@ describe('Places API Routes - Integration Tests', () => {
 
       expect(response.statusCode).toBe(404);
       const body = JSON.parse(response.body);
-      expect(body.error.message).toBe('Place not found');
+      expect(body.error.message).toBe('Place with ID 99999 not found');
     });
 
     test('should require authentication', async () => {
@@ -662,7 +662,7 @@ describe('Places API Routes - Integration Tests', () => {
 
       expect(response.statusCode).toBe(400);
       const body = JSON.parse(response.body);
-      expect(body.error.message).toBe('Invalid search parameters');
+      expect(body.error.message).toBe('Validation error');
     });
 
     test('should require search parameters', async () => {

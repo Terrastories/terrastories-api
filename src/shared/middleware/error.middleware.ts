@@ -15,7 +15,8 @@ import {
 export async function errorHandler(
   error: FastifyError,
   request: FastifyRequest,
-  reply: FastifyReply
+  reply: FastifyReply,
+  originalError?: unknown
 ): Promise<void> {
   // Log error details for debugging (avoid logging sensitive data)
   const logContext = {
@@ -29,14 +30,14 @@ export async function errorHandler(
   };
 
   // Log operational errors as warnings, programming errors as errors
-  if (isOperationalError(error)) {
+  if (isOperationalError(originalError || error)) {
     request.log.warn(logContext, 'Operational error occurred');
   } else {
     request.log.error(logContext, 'Programming error occurred');
   }
 
-  // Map error to HTTP response
-  const { statusCode, body } = mapErrorToHttpResponse(error);
+  // Map error to HTTP response - use original error if available to preserve type information
+  const { statusCode, body } = mapErrorToHttpResponse(originalError || error);
 
   // Send response
   return reply.status(statusCode).send(body);
@@ -91,5 +92,5 @@ export async function handleRouteError(
     } as FastifyError;
   }
 
-  return errorHandler(fastifyError, request, reply);
+  return errorHandler(fastifyError, request, reply, error);
 }

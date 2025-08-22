@@ -153,12 +153,16 @@ export class TokenExpiredError extends AuthenticationError {
 
 // Authorization Errors (403)
 export class InsufficientPermissionsError extends AuthorizationError {
-  constructor(requiredRole?: string, userRole?: string) {
-    const roleInfo =
-      requiredRole && userRole
-        ? ` Required: ${requiredRole}, User: ${userRole}`
-        : '';
-    super(`Insufficient permissions to perform this action.${roleInfo}`);
+  constructor(message?: string, requiredRole?: string, userRole?: string) {
+    if (message) {
+      super(message);
+    } else {
+      const roleInfo =
+        requiredRole && userRole
+          ? ` Required: ${requiredRole}, User: ${userRole}`
+          : '';
+      super(`Insufficient permissions to perform this action.${roleInfo}`);
+    }
   }
 }
 
@@ -293,7 +297,10 @@ export class ExternalServiceError extends InternalError {
  */
 export function mapErrorToHttpResponse(error: unknown): {
   statusCode: number;
-  body: { error: { message: string }; statusCode?: number };
+  body: {
+    error: { message: string; details?: unknown[] };
+    statusCode?: number;
+  };
 } {
   // Handle our custom AppErrors
   if (error instanceof AppError) {
@@ -312,10 +319,14 @@ export function mapErrorToHttpResponse(error: unknown): {
     'name' in error &&
     error.name === 'ZodError'
   ) {
+    const zodError = error as { issues?: unknown[] };
     return {
       statusCode: 400,
       body: {
-        error: { message: 'Validation error' },
+        error: {
+          message: 'Validation error',
+          details: zodError.issues || [],
+        },
       },
     };
   }

@@ -14,7 +14,7 @@
  * - Comprehensive error handling and audit logging
  */
 
-import { FastifyInstance, FastifyReply } from 'fastify';
+import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import {
   StoryService,
@@ -313,9 +313,9 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
       },
     },
     async (
-      request: AuthenticatedRequest & {
-        body: z.infer<typeof createStorySchema>;
-      },
+      request: FastifyRequest<{
+        Body: z.infer<typeof createStorySchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
@@ -324,7 +324,7 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
           id: userId,
           role: userRole,
           communityId,
-        } = request.session.user!;
+        } = (request as AuthenticatedRequest).session.user!;
 
         const story = await storyService.createStory(
           { ...input, createdBy: userId } as StoryCreateInput,
@@ -341,7 +341,10 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
-          { error: errorMessage, userId: request.session.user!.id },
+          {
+            error: errorMessage,
+            userId: (request as AuthenticatedRequest).session.user!.id,
+          },
           'Error creating story'
         );
 
@@ -444,9 +447,9 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
       },
     },
     async (
-      request: AuthenticatedRequest & {
-        params: z.infer<typeof storyParamsSchema>;
-      },
+      request: FastifyRequest<{
+        Params: z.infer<typeof storyParamsSchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
@@ -455,7 +458,7 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
           id: userId,
           role: userRole,
           communityId,
-        } = request.session.user!;
+        } = (request as AuthenticatedRequest).session.user!;
 
         const story = await storyService.getStoryById(
           id,
@@ -562,14 +565,15 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
       },
     },
     async (
-      request: AuthenticatedRequest & {
-        params: z.infer<typeof slugParamsSchema>;
-      },
+      request: FastifyRequest<{
+        Params: z.infer<typeof slugParamsSchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
         const { slug, communityId } = slugParamsSchema.parse(request.params);
-        const { id: userId, role: userRole } = request.session.user!;
+        const { id: userId, role: userRole } = (request as AuthenticatedRequest)
+          .session.user!;
 
         const story = await storyService.getStoryBySlug(
           slug,
@@ -775,16 +779,17 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
       },
     },
     async (
-      request: AuthenticatedRequest & {
-        params: z.infer<typeof storyParamsSchema>;
-        body: z.infer<typeof updateStorySchema>;
-      },
+      request: FastifyRequest<{
+        Params: z.infer<typeof storyParamsSchema>;
+        Body: z.infer<typeof updateStorySchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
         const { id } = storyParamsSchema.parse(request.params);
         const updates = updateStorySchema.parse(request.body);
-        const { id: userId, role: userRole } = request.session.user!;
+        const { id: userId, role: userRole } = (request as AuthenticatedRequest)
+          .session.user!;
 
         const story = await storyService.updateStory(
           id,
@@ -900,14 +905,15 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
       },
     },
     async (
-      request: AuthenticatedRequest & {
-        params: z.infer<typeof storyParamsSchema>;
-      },
+      request: FastifyRequest<{
+        Params: z.infer<typeof storyParamsSchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
         const { id } = storyParamsSchema.parse(request.params);
-        const { id: userId, role: userRole } = request.session.user!;
+        const { id: userId, role: userRole } = (request as AuthenticatedRequest)
+          .session.user!;
 
         await storyService.deleteStory(id, userId, userRole);
 
@@ -1079,9 +1085,9 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
       },
     },
     async (
-      request: AuthenticatedRequest & {
-        query: z.infer<typeof listStoriesQuerySchema>;
-      },
+      request: FastifyRequest<{
+        Querystring: z.infer<typeof listStoriesQuerySchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
@@ -1090,7 +1096,7 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
           id: userId,
           role: userRole,
           communityId,
-        } = request.session.user!;
+        } = (request as AuthenticatedRequest).session.user!;
 
         const { tags, sortBy, sortOrder, ...otherFilters } = filters;
 
@@ -1122,7 +1128,10 @@ export default async function storiesRoutes(fastify: FastifyInstance) {
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
-          { error: errorMessage, userId: request.session.user!.id },
+          {
+            error: errorMessage,
+            userId: (request as AuthenticatedRequest).session.user!.id,
+          },
           'Error listing stories'
         );
 

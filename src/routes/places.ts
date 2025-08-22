@@ -327,7 +327,7 @@ export async function placesRoutes(
    * DELETE /api/v1/places/:id
    */
   fastify.delete('/places/:id', {
-    preHandler: [requireAuth, requireRole(['admin'])],
+    preHandler: [requireAuth, requireRole(['admin', 'elder'])],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { id } = PlaceIdSchema.parse(request.params);

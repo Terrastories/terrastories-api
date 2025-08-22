@@ -26,6 +26,7 @@ import {
 } from '../db/schema/places.js';
 import { storyPlaces } from '../db/schema/story_places.js';
 import { stories } from '../db/schema/stories.js';
+import { getCommunitiesTable } from '../db/schema/communities.js';
 import { getConfig } from '../shared/config/index.js';
 import type { Database } from '../db/index.js';
 
@@ -182,8 +183,7 @@ export class PlaceRepository {
 
     try {
       // Check if community exists first (SQLite doesn't enforce foreign keys in tests)
-      const communities = await import('../db/schema/communities.js');
-      const communityTable = communities.communitiesSqlite; // For tests
+      const communityTable = await getCommunitiesTable();
 
       const [existingCommunity] = await (this.db as any)
         .select({ id: communityTable.id })
@@ -320,8 +320,19 @@ export class PlaceRepository {
 
     const placesTable = await getPlacesTable();
 
-    const updateData = {
-      ...data,
+    const updateData: Partial<UpdatePlaceData> = {
+      ...(data.name !== undefined && { name: data.name }),
+      ...(data.description !== undefined && { description: data.description }),
+      ...(data.latitude !== undefined && { latitude: data.latitude }),
+      ...(data.longitude !== undefined && { longitude: data.longitude }),
+      ...(data.region !== undefined && { region: data.region }),
+      ...(data.mediaUrls !== undefined && { mediaUrls: data.mediaUrls }),
+      ...(data.culturalSignificance !== undefined && {
+        culturalSignificance: data.culturalSignificance,
+      }),
+      ...(data.isRestricted !== undefined && {
+        isRestricted: data.isRestricted,
+      }),
       updatedAt: new Date(),
     };
 
@@ -443,33 +454,21 @@ export class PlaceRepository {
         .from(placesTable)
         .where(and(...whereConditions));
 
-      // Filter by distance using Haversine formula
-      const nearbyPlaces = places.filter((place: any) => {
-        const distance = this.calculateHaversineDistance(
+      // Compute distance once per place and cache it
+      const placesWithDistance = places.map((place: any) => ({
+        ...place,
+        distance: this.calculateHaversineDistance(
           latitude,
           longitude,
           place.latitude,
           place.longitude
-        );
-        return distance <= radiusKm;
-      });
+        ),
+      }));
 
-      // Sort by distance
-      nearbyPlaces.sort((a: any, b: any) => {
-        const distA = this.calculateHaversineDistance(
-          latitude,
-          longitude,
-          a.latitude,
-          a.longitude
-        );
-        const distB = this.calculateHaversineDistance(
-          latitude,
-          longitude,
-          b.latitude,
-          b.longitude
-        );
-        return distA - distB;
-      });
+      // Filter by distance and sort by distance
+      const nearbyPlaces = placesWithDistance
+        .filter((place: any) => place.distance <= radiusKm)
+        .sort((a: any, b: any) => a.distance - b.distance);
 
       // Apply pagination
       const total = nearbyPlaces.length;

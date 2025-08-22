@@ -1,78 +1,49 @@
-name = "revise-issue"
+# Revise and Improve GitHub Issue Command
+
 description = "Revise and improve a GitHub issue based on feedback and best practices."
 
-[prompt]
-main = '''
-You are helping to revise and improve GitHub issue ##{issue_number} based on the following revision instructions.
+prompt = '''
+You are a technical writer tasked with improving GitHub issue {{args}}.
 
-CURRENT ISSUE CONTENT:
-{issue_content}
+**Your Goal:** Revise the issue to make it clearer, more actionable, and aligned with project standards.
 
-REVISION INSTRUCTIONS:
-{instructions}
+**Step 1: Information Gathering**
+- Fetch the current issue details: `!{gh issue view {{args}} --json title,body,labels,assignees}`
 
-OUTPUT FORMAT:
-Provide the revised issue in this structure:
+**Step 2: Apply Revisions**
+- Analyze the current issue structure and identify areas for improvement
+- Apply best practices for issue writing and project standards
 
-## Revised Issue Title
-[Provide improved title if needed, or keep original]
+**Step 3: Format the Revised Issue**
+- Present the entire revised issue using the following Markdown template:
 
-## Issue Body
+---
+### **[New Issue Title]**
 
-### Overview
-[Clear problem statement and context]
+**Overview:**
+[Clear, concise problem statement and context.]
 
-### Acceptance Criteria
-- [ ] [Specific, measurable criteria]
-- [ ] [Each criterion should be independently testable]
+**Acceptance Criteria:**
+- [ ] A specific, measurable, and testable criterion.
+- [ ] Another specific criterion.
 
-### Technical Details
-[Implementation approach, constraints, considerations]
+**Technical Plan:**
+[Suggested implementation approach, technical constraints, or important considerations.]
 
-### Testing Strategy
-[How this will be tested, what coverage is needed]
+**Testing Strategy:**
+[Guidance on how the implemented feature should be tested.]
 
-### Estimation
-[Size: XS/S/M/L/XL with reasoning]
-
-### Dependencies
-[Any blocking issues or prerequisites]
+**Estimation:**
+[Size/complexity estimate and reasoning.]
 
 ---
 
-## Revision Summary
-### What Changed
-- [List key changes made]
-- [Explain why each change improves the issue]
+**Step 4: Create a Summary Comment**
+- Write a brief comment for the GitHub issue that summarizes the changes you made. Explain *why* you made them.
 
-### Impact Analysis
-- **Scope**: [Increased/Decreased/Unchanged]
-- **Complexity**: [Increased/Decreased/Unchanged]
-- **Timeline Impact**: [Estimated days added/removed]
-- **Risk Level**: [Low/Medium/High]
+**Example Comment:**
+> I've revised this issue to clarify the acceptance criteria and add a proposed technical plan, based on our recent discussion. This should make it easier for a developer to pick up.
 
-### Recommendations
-- [Any suggestions for next steps]
-- [Potential issues to watch for]
-
-IMPORTANT GUIDELINES:
-- Preserve all essential information from the original issue
-- Make the issue more actionable and clear
-- Ensure acceptance criteria are SMART (Specific, Measurable, Achievable, Relevant, Time-bound)
-- If scope increases >50%, suggest splitting into multiple issues
-- Maintain consistency with project conventions
-- Add clarifying details where the original was vague
-- Remove any redundant or contradictory requirements
-
----
-## GitHub Comment
-[Generate a concise comment for the issue, summarizing the key changes from the "Revision Summary" section.]
-
----
-## POST-REVISION ACTION
-After generating the revised issue content and the summary comment, you must post the comment to GitHub.
-1. Take the content from the "GitHub Comment" section.
-2. Use the `run_shell_command` tool to execute `gh issue comment #{issue_number} --body "..."`.
-3. To handle multi-line content and quotes correctly, first write the comment to a temporary file within the project (e.g., `.gemini/temp_issue_revision.md`) and then use `gh issue comment #{issue_number} --body-file .gemini/temp_issue_revision.md`.
-4. Remember to clean up the temporary file after posting the comment.
+**Step 5: Post the Comment to GitHub**
+- Post the summary comment: `!{gh issue comment {{args}} --body "[SUMMARY_COMMENT]"}`
 '''

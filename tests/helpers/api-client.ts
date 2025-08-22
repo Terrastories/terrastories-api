@@ -320,11 +320,13 @@ export async function createTestApp(
 
     // Add essential plugins for JSON handling (mirror main app)
     await app.register((await import('@fastify/cors')).default);
-    
+
     // Add Swagger support for schema validation
     const swagger = (await import('@fastify/swagger')).default;
-    const { swaggerSchemas } = await import('../../src/shared/schemas/index.js');
-    
+    const { swaggerSchemas } = await import(
+      '../../src/shared/schemas/index.js'
+    );
+
     await app.register(swagger, {
       openapi: {
         info: {
@@ -332,7 +334,6 @@ export async function createTestApp(
           version: '1.0.0',
         },
         components: {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           schemas: swaggerSchemas as any,
         },
       },

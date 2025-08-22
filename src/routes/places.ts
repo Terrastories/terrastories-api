@@ -24,18 +24,16 @@ import {
  * Zod validation schemas
  */
 
-// Base coordinate validation
+// Base coordinate validation (reusable for body validation)
 const CoordinateSchema = z.object({
   latitude: z.number().min(-90).max(90).describe('Latitude (-90 to 90)'),
   longitude: z.number().min(-180).max(180).describe('Longitude (-180 to 180)'),
 });
 
 // Create place request schema
-const CreatePlaceSchema = z.object({
+const CreatePlaceSchema = CoordinateSchema.extend({
   name: z.string().min(1).max(200).describe('Place name'),
   description: z.string().max(2000).optional().describe('Place description'),
-  latitude: z.number().min(-90).max(90).describe('Latitude coordinate'),
-  longitude: z.number().min(-180).max(180).describe('Longitude coordinate'),
   region: z.string().max(100).optional().describe('Regional classification'),
   mediaUrls: z
     .array(z.string().url())
@@ -84,13 +82,25 @@ const PaginationSchema = z.object({
     .describe('Items per page'),
 });
 
-const NearbySearchSchema = CoordinateSchema.extend({
-  radius: z.coerce
-    .number()
-    .min(0.1)
-    .max(1000)
-    .describe('Search radius in kilometers'),
-}).merge(PaginationSchema);
+const NearbySearchSchema = z
+  .object({
+    latitude: z.coerce
+      .number()
+      .min(-90)
+      .max(90)
+      .describe('Latitude (-90 to 90)'),
+    longitude: z.coerce
+      .number()
+      .min(-180)
+      .max(180)
+      .describe('Longitude (-180 to 180)'),
+    radius: z.coerce
+      .number()
+      .min(0.1)
+      .max(1000)
+      .describe('Search radius in kilometers'),
+  })
+  .merge(PaginationSchema);
 
 const BoundsSearchSchema = z
   .object({
@@ -109,10 +119,14 @@ const PlaceIdSchema = z.object({
 /**
  * Register place routes with Fastify
  */
-export async function placesRoutes(fastify: FastifyInstance) {
-  // Initialize service
-  const db = await getDb();
-  const placeRepository = new PlaceRepository(db);
+export async function placesRoutes(
+  fastify: FastifyInstance,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  options?: { database?: any }
+) {
+  // Initialize service - use provided database instance or default
+  const database = options?.database || (await getDb());
+  const placeRepository = new PlaceRepository(database);
   const placeService = new PlaceService(placeRepository);
 
   /**

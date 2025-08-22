@@ -84,12 +84,13 @@ export interface PermissionOptions {
 }
 
 /**
- * Extended request interface with session
+ * Extended request interface with session and direct user access
  */
 export interface AuthenticatedRequest extends FastifyRequest {
   session: {
     user?: UserSession;
   } & FastifyRequest['session'];
+  user: UserSession; // Direct access to user for convenience
 }
 
 /**
@@ -108,6 +109,9 @@ export async function requireAuth(
       statusCode: 401,
     });
   }
+
+  // Set user directly on request for convenience
+  authRequest.user = authRequest.session.user;
 }
 
 /**
@@ -115,25 +119,26 @@ export async function requireAuth(
  * Creates middleware that ensures user has one of the specified roles
  */
 export function requireRole(roles: string[]) {
-  return async (
+  return async function (
     request: FastifyRequest,
     reply: FastifyReply
-  ): Promise<void> => {
+  ): Promise<void> {
     const authRequest = request as AuthenticatedRequest;
-
-    if (!authRequest.session?.user) {
+    const sessionUser = authRequest.session?.user;
+    if (!sessionUser) {
       return reply.status(401).send({
         error: 'Authentication required',
         statusCode: 401,
       });
     }
-
-    if (!roles.includes(authRequest.session.user.role)) {
+    const hasRole = roles.includes(sessionUser.role);
+    if (!hasRole) {
       return reply.status(403).send({
         error: 'Insufficient permissions',
         statusCode: 403,
       });
     }
+    authRequest.user = sessionUser;
   };
 }
 
@@ -273,7 +278,7 @@ export function requireCommunityAccess(options: CommunityAccessOptions = {}) {
  * Data sovereignty protection middleware
  * Blocks super administrators from accessing community-specific data
  * Implements Phase 3 requirement: super admins cannot access community data
- * 
+ *
  * Alias for enforceDataSovereignty to maintain compatibility
  */
 export async function requireDataSovereignty(

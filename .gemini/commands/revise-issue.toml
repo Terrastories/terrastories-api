@@ -1,78 +1,75 @@
-name = "revise-issue"
+# Revise and Improve GitHub Issue Command
+
 description = "Revise and improve a GitHub issue based on feedback and best practices."
 
-[prompt]
-main = '''
-You are helping to revise and improve GitHub issue ##{issue_number} based on the following revision instructions.
+prompt = '''
+You are a technical writer tasked with improving GitHub issue {{args}}.
 
-CURRENT ISSUE CONTENT:
-{issue_content}
+**Your Goal:** Revise the issue to make it clearer, more actionable, and aligned with project standards.
 
-REVISION INSTRUCTIONS:
-{instructions}
+🚨 **MANDATORY REQUIREMENT**: You MUST post a comment to the GitHub issue summarizing your revision. The revision is only complete when you have successfully posted a comment using the gh CLI commands provided below.
 
-OUTPUT FORMAT:
-Provide the revised issue in this structure:
+**Step 1: Information Gathering**
+- Fetch the current issue details: `!{gh issue view {{args}} --json title,body,labels,assignees}`
 
-## Revised Issue Title
-[Provide improved title if needed, or keep original]
+**Step 2: Apply Revisions**
+- Analyze the current issue structure and identify areas for improvement
+- Apply best practices for issue writing and project standards
 
-## Issue Body
+**Step 3: Format the Revised Issue**
+- Present the entire revised issue using the following Markdown template:
 
-### Overview
-[Clear problem statement and context]
+---
+### **[New Issue Title]**
 
-### Acceptance Criteria
-- [ ] [Specific, measurable criteria]
-- [ ] [Each criterion should be independently testable]
+**Overview:**
+[Clear, concise problem statement and context.]
 
-### Technical Details
-[Implementation approach, constraints, considerations]
+**Acceptance Criteria:**
+- [ ] A specific, measurable, and testable criterion.
+- [ ] Another specific criterion.
 
-### Testing Strategy
-[How this will be tested, what coverage is needed]
+**Technical Plan:**
+[Suggested implementation approach, technical constraints, or important considerations.]
 
-### Estimation
-[Size: XS/S/M/L/XL with reasoning]
+**Testing Strategy:**
+[Guidance on how the implemented feature should be tested.]
 
-### Dependencies
-[Any blocking issues or prerequisites]
+**Estimation:**
+[Size/complexity estimate and reasoning.]
 
 ---
 
-## Revision Summary
-### What Changed
-- [List key changes made]
-- [Explain why each change improves the issue]
+**Step 4: Post Revision Summary to GitHub (MANDATORY)**
+🚨 **CRITICAL: YOU MUST POST A COMMENT TO THE ISSUE** 🚨
 
-### Impact Analysis
-- **Scope**: [Increased/Decreased/Unchanged]
-- **Complexity**: [Increased/Decreased/Unchanged]
-- **Timeline Impact**: [Estimated days added/removed]
-- **Risk Level**: [Low/Medium/High]
+You are REQUIRED to post a revision summary as a comment on the GitHub issue. This is not optional.
 
-### Recommendations
-- [Any suggestions for next steps]
-- [Potential issues to watch for]
+1. Create a comprehensive revision summary explaining what you changed and why
+2. Post the revision comment using: `!{gh issue comment {{args}} --body "$(cat <<'EOF'
+📝 **Issue Revision Complete**
 
-IMPORTANT GUIDELINES:
-- Preserve all essential information from the original issue
-- Make the issue more actionable and clear
-- Ensure acceptance criteria are SMART (Specific, Measurable, Achievable, Relevant, Time-bound)
-- If scope increases >50%, suggest splitting into multiple issues
-- Maintain consistency with project conventions
-- Add clarifying details where the original was vague
-- Remove any redundant or contradictory requirements
+I've revised this issue to improve its clarity and actionability:
 
----
-## GitHub Comment
-[Generate a concise comment for the issue, summarizing the key changes from the "Revision Summary" section.]
+**Changes Made:**
+- [Specific change 1 with reasoning]
+- [Specific change 2 with reasoning] 
+- [Additional changes as needed]
+
+**Improvements:**
+- ✅ Clarified acceptance criteria to be SMART (Specific, Measurable, Achievable, Relevant, Time-bound)
+- ✅ Enhanced technical plan with implementation approach
+- ✅ Added comprehensive testing strategy
+- ✅ Updated estimation with reasoning
+
+**Ready for Development:**
+This issue now meets project standards and should be easier for developers to understand and implement.
 
 ---
-## POST-REVISION ACTION
-After generating the revised issue content and the summary comment, you must post the comment to GitHub.
-1. Take the content from the "GitHub Comment" section.
-2. Use the `run_shell_command` tool to execute `gh issue comment #{issue_number} --body "..."`.
-3. To handle multi-line content and quotes correctly, first write the comment to a temporary file within the project (e.g., `.gemini/temp_issue_revision.md`) and then use `gh issue comment #{issue_number} --body-file .gemini/temp_issue_revision.md`.
-4. Remember to clean up the temporary file after posting the comment.
+*Revision completed by Gemini CLI*
+EOF
+)"}`
+3. Verify the comment was posted: `!{gh issue view {{args}} --json comments --jq '.comments[-1].body' | head -20}`
+
+**Failure to post a comment means the revision is incomplete and unsuccessful.**
 '''

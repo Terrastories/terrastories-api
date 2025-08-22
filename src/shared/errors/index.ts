@@ -220,6 +220,13 @@ export class FileNotFoundError extends NotFoundError {
   }
 }
 
+export class SpeakerNotFoundError extends NotFoundError {
+  constructor(identifier?: string | number) {
+    const id = identifier ? ` with ID ${identifier}` : '';
+    super(`Speaker${id} not found`);
+  }
+}
+
 // Conflict Errors (409)
 export class DuplicateSlugError extends ConflictError {
   constructor(slug?: string) {

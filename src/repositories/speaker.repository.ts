@@ -17,7 +17,7 @@
 // NOTE: Many 'any' types in this file are unavoidable due to Drizzle ORM's
 // complex typing with multi-database compatibility.
 
-import { eq, and, desc, count, like } from 'drizzle-orm';
+import { eq, and, desc, count, like, ilike } from 'drizzle-orm';
 import type { Speaker, NewSpeaker } from '../db/schema/speakers.js';
 import { getSpeakersTable } from '../db/schema/speakers.js';
 import { getCommunitiesTable } from '../db/schema/communities.js';
@@ -430,9 +430,14 @@ export class SpeakerRepository {
     const { page, limit } = params;
     const offset = (page - 1) * limit;
 
+    // Use case-insensitive search for Postgres, case-sensitive for SQLite
+    const searchCondition = this.isPostgres
+      ? ilike(speakersTable.name, `%${query}%`)
+      : like(speakersTable.name, `%${query.toLowerCase()}%`);
+
     const whereCondition = and(
       eq(speakersTable.communityId, communityId),
-      like(speakersTable.name, `%${query}%`)
+      searchCondition
     );
 
     // Get total count

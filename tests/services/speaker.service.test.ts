@@ -119,7 +119,7 @@ describe('SpeakerService', () => {
           testUserId,
           'admin'
         )
-      ).rejects.toThrow('Invalid photo URL');
+      ).rejects.toThrow('Invalid media URL: not-a-url');
     });
 
     it('should validate birth year range', async () => {
@@ -324,7 +324,7 @@ describe('SpeakerService', () => {
           testUserId,
           'viewer'
         )
-      ).rejects.toThrow('Invalid pagination parameters');
+      ).rejects.toThrow('Page must be >= 1 and limit must be between 1-100');
 
       await expect(
         service.getSpeakersByCommunity(
@@ -333,7 +333,7 @@ describe('SpeakerService', () => {
           testUserId,
           'viewer'
         )
-      ).rejects.toThrow('Invalid pagination parameters');
+      ).rejects.toThrow('Page must be >= 1 and limit must be between 1-100');
 
       await expect(
         service.getSpeakersByCommunity(
@@ -342,7 +342,7 @@ describe('SpeakerService', () => {
           testUserId,
           'viewer'
         )
-      ).rejects.toThrow('Invalid pagination parameters');
+      ).rejects.toThrow('Page must be >= 1 and limit must be between 1-100');
     });
   });
 
@@ -457,7 +457,7 @@ describe('SpeakerService', () => {
           testUserId,
           'admin'
         )
-      ).rejects.toThrow('Invalid photo URL');
+      ).rejects.toThrow('Invalid media URL: not-a-url');
     });
 
     it('should log elder speaker updates for audit', async () => {
@@ -605,7 +605,7 @@ describe('SpeakerService', () => {
           testUserId,
           'viewer'
         )
-      ).rejects.toThrow('Search query too short');
+      ).rejects.toThrow('Search query must be at least 2 characters long');
     });
   });
 

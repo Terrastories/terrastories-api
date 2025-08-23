@@ -124,6 +124,35 @@ export class InvalidRadiusError extends ValidationError {
   }
 }
 
+export class InvalidPaginationError extends ValidationError {
+  constructor(message = 'Invalid pagination parameters') {
+    super(message);
+  }
+}
+
+export class InvalidSearchQueryError extends ValidationError {
+  constructor(minLength = 2) {
+    super(`Search query must be at least ${minLength} characters long`);
+  }
+}
+
+export class InvalidBirthYearError extends ValidationError {
+  constructor(year: number, minYear = 1900, maxYear?: number) {
+    const currentYear = maxYear || new Date().getFullYear();
+    if (year < minYear) {
+      super(
+        `Birth year too early. Minimum allowed: ${minYear}, provided: ${year}`
+      );
+    } else if (year > currentYear) {
+      super(
+        `Birth year cannot be in the future. Maximum allowed: ${currentYear}, provided: ${year}`
+      );
+    } else {
+      super(`Invalid birth year: ${year}`);
+    }
+  }
+}
+
 export class InvalidFieldLengthError extends ValidationError {
   constructor(fieldName: string, maxLength: number, actualLength: number) {
     super(

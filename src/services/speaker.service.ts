@@ -28,6 +28,9 @@ import {
   InvalidFieldLengthError,
   InvalidMediaUrlError,
   CulturalProtocolViolationError,
+  InvalidPaginationError,
+  InvalidSearchQueryError,
+  InvalidBirthYearError,
 } from '../shared/errors/index.js';
 
 /**
@@ -164,7 +167,9 @@ export class SpeakerService {
     const limit = params.limit !== undefined ? params.limit : 20;
 
     if (page < 1 || limit < 1 || limit > 100) {
-      throw new Error('Invalid pagination parameters');
+      throw new InvalidPaginationError(
+        'Page must be >= 1 and limit must be between 1-100'
+      );
     }
 
     // Build repository parameters
@@ -304,7 +309,7 @@ export class SpeakerService {
     }
 
     if (query.trim().length < 2) {
-      throw new Error('Search query too short');
+      throw new InvalidSearchQueryError(2);
     }
 
     // Validate pagination
@@ -361,18 +366,15 @@ export class SpeakerService {
       try {
         new URL(data.photoUrl);
       } catch {
-        throw new InvalidMediaUrlError('Invalid photo URL');
+        throw new InvalidMediaUrlError(data.photoUrl);
       }
     }
 
     // Birth year validation
     if (data.birthYear !== undefined) {
       const currentYear = new Date().getFullYear();
-      if (data.birthYear < 1900) {
-        throw new Error('Birth year too early');
-      }
-      if (data.birthYear > currentYear) {
-        throw new Error('Birth year cannot be in the future');
+      if (data.birthYear < 1900 || data.birthYear > currentYear) {
+        throw new InvalidBirthYearError(data.birthYear, 1900, currentYear);
       }
     }
 

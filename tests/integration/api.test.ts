@@ -155,11 +155,6 @@ describe('API Integration Tests', () => {
     const testPasswordHash =
       '$argon2id$v=19$m=65536,t=3,p=4$lqO13Fqx46nTW2lUiZJWLw$VIpjVVTVn3OVLoLgN+ZcGBmGqCeHZjK2FwayYOWm3OQ';
 
-    console.log('DEBUG: Creating users with community IDs:', {
-      regularCommunity: fixtures.communities[0].id,
-      systemCommunity: fixtures.systemCommunity.id,
-    });
-
     await db.insert(usersSqlite).values([
       {
         email: 'admin@test.com',

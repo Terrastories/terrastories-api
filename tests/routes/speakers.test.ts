@@ -198,8 +198,6 @@ describe('Speakers API Routes - Integration Tests', () => {
     };
 
     test('should create speaker with valid data as admin', async () => {
-      console.log('DEBUG: adminSessionId:', adminSessionId);
-
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/speakers',
@@ -208,9 +206,6 @@ describe('Speakers API Routes - Integration Tests', () => {
           cookie: `sessionId=${adminSessionId}`,
         },
       });
-
-      console.log('DEBUG: Response status:', response.statusCode);
-      console.log('DEBUG: Response body:', response.body);
 
       expect(response.statusCode).toBe(201);
       const body = JSON.parse(response.body);

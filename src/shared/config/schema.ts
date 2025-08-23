@@ -15,6 +15,14 @@
 import { z } from 'zod';
 import type { Environment, LogLevel } from './types.js';
 
+// Helper for parsing boolean environment variables
+const booleanFromEnv = (defaultValue: boolean) =>
+  z
+    .string()
+    .transform((val) => val === 'true' || val === '1')
+    .or(z.boolean())
+    .default(defaultValue);
+
 // Environment validation
 export const EnvironmentSchema = z
   .enum(['development', 'production', 'field-kit', 'offline', 'test'])
@@ -69,8 +77,8 @@ export const AuthConfigSchema = z.object({
       .min(1, 'SESSION_SECRET is required')
       .default('development-session-secret-insecure'),
     maxAge: z.coerce.number().default(24 * 60 * 60 * 1000), // 24 hours in milliseconds
-    secure: z.boolean().default(false), // Will be overridden based on environment
-    httpOnly: z.boolean().default(true),
+    secure: booleanFromEnv(false), // Will be overridden based on environment
+    httpOnly: booleanFromEnv(true),
     sameSite: z.enum(['lax', 'strict', 'none']).default('strict'),
   }),
   rateLimit: z.object({
@@ -102,7 +110,7 @@ export const ProductionAuthConfigSchema = AuthConfigSchema.extend({
       .string()
       .min(32, 'SESSION_SECRET must be at least 32 characters in production')
       .default('insecure-development-session-secret-for-testing-purposes-only'),
-    secure: z.boolean().default(true), // Force secure cookies in production
+    secure: booleanFromEnv(true), // Force secure cookies in production
   }),
   rateLimit: z.object({
     max: z.coerce.number().default(5), // Stricter rate limiting in production
@@ -130,9 +138,9 @@ export const FileUploadConfigSchema = z.object({
     .array(z.string())
     .default(['audio/mpeg', 'audio/wav', 'audio/ogg']),
   allowedVideoTypes: z.array(z.string()).default(['video/mp4', 'video/webm']),
-  enableMetadataExtraction: z.boolean().default(true),
+  enableMetadataExtraction: booleanFromEnv(true),
   streamingThreshold: z.coerce.number().default(5 * 1024 * 1024), // 5MB
-  enableAuditLogging: z.boolean().default(true),
+  enableAuditLogging: booleanFromEnv(true),
 });
 
 // Feature configuration schema

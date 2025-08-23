@@ -46,8 +46,26 @@ const CreateSpeakerSchema = z.object({
   isActive: z.boolean().optional().default(true).describe('Active status'),
 });
 
-// Update speaker request schema
-const UpdateSpeakerSchema = CreateSpeakerSchema.partial();
+// Update speaker request schema - Remove defaults to avoid triggering permission checks
+const UpdateSpeakerSchema = z.object({
+  name: z.string().min(1).max(200).optional().describe('Speaker name'),
+  bio: z.string().max(2000).optional().describe('Speaker biography'),
+  photoUrl: z.string().url().optional().describe('Speaker photo URL'),
+  birthYear: z
+    .number()
+    .int()
+    .min(1900)
+    .max(new Date().getFullYear())
+    .optional()
+    .describe('Birth year'),
+  elderStatus: z.boolean().optional().describe('Elder status'),
+  culturalRole: z
+    .string()
+    .max(100)
+    .optional()
+    .describe('Cultural role in community'),
+  isActive: z.boolean().optional().describe('Active status'),
+});
 
 // Query parameter schemas
 const PaginationSchema = z.object({
@@ -92,9 +110,13 @@ const SpeakerIdSchema = z.object({
 /**
  * Register Speaker routes with Fastify
  */
-export async function speakerRoutes(fastify: FastifyInstance) {
+export async function speakerRoutes(
+  fastify: FastifyInstance,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  options?: { database?: any }
+) {
   // Initialize service
-  const database = await getDb();
+  const database = options?.database || (await getDb());
   const repository = new SpeakerRepository(database);
   const service = new SpeakerService(repository);
 

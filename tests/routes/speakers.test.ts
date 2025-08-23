@@ -70,30 +70,108 @@ describe('Speakers API Routes - Integration Tests', () => {
       communityId: testCommunityId,
     };
 
-    // Register users and get session cookies
+    // Register admin user
     const adminRegisterRes = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
       payload: adminUser,
     });
     expect(adminRegisterRes.statusCode).toBe(201);
-    adminSessionId = adminRegisterRes.cookies[0]?.value || '';
 
+    // Login admin user to get session cookie
+    const adminLoginRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        email: adminUser.email,
+        password: adminUser.password,
+        communityId: adminUser.communityId,
+      },
+    });
+    expect(adminLoginRes.statusCode).toBe(200);
+
+    // Extract session cookie from Set-Cookie header
+    const setCookieHeader = adminLoginRes.headers['set-cookie'];
+    if (Array.isArray(setCookieHeader)) {
+      const sessionCookie = setCookieHeader.find((cookie) =>
+        cookie.includes('sessionId=')
+      );
+      adminSessionId = sessionCookie
+        ? sessionCookie.split('sessionId=')[1].split(';')[0]
+        : '';
+    } else if (setCookieHeader) {
+      adminSessionId = setCookieHeader.includes('sessionId=')
+        ? setCookieHeader.split('sessionId=')[1].split(';')[0]
+        : '';
+    }
+
+    // Register editor user
     const editorRegisterRes = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
       payload: editorUser,
     });
     expect(editorRegisterRes.statusCode).toBe(201);
-    editorSessionId = editorRegisterRes.cookies[0]?.value || '';
 
+    // Login editor user to get session cookie
+    const editorLoginRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        email: editorUser.email,
+        password: editorUser.password,
+        communityId: editorUser.communityId,
+      },
+    });
+    expect(editorLoginRes.statusCode).toBe(200);
+
+    const editorSetCookieHeader = editorLoginRes.headers['set-cookie'];
+    if (Array.isArray(editorSetCookieHeader)) {
+      const sessionCookie = editorSetCookieHeader.find((cookie) =>
+        cookie.includes('sessionId=')
+      );
+      editorSessionId = sessionCookie
+        ? sessionCookie.split('sessionId=')[1].split(';')[0]
+        : '';
+    } else if (editorSetCookieHeader) {
+      editorSessionId = editorSetCookieHeader.includes('sessionId=')
+        ? editorSetCookieHeader.split('sessionId=')[1].split(';')[0]
+        : '';
+    }
+
+    // Register viewer user
     const viewerRegisterRes = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
       payload: viewerUser,
     });
     expect(viewerRegisterRes.statusCode).toBe(201);
-    viewerSessionId = viewerRegisterRes.cookies[0]?.value || '';
+
+    // Login viewer user to get session cookie
+    const viewerLoginRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        email: viewerUser.email,
+        password: viewerUser.password,
+        communityId: viewerUser.communityId,
+      },
+    });
+    expect(viewerLoginRes.statusCode).toBe(200);
+
+    const viewerSetCookieHeader = viewerLoginRes.headers['set-cookie'];
+    if (Array.isArray(viewerSetCookieHeader)) {
+      const sessionCookie = viewerSetCookieHeader.find((cookie) =>
+        cookie.includes('sessionId=')
+      );
+      viewerSessionId = sessionCookie
+        ? sessionCookie.split('sessionId=')[1].split(';')[0]
+        : '';
+    } else if (viewerSetCookieHeader) {
+      viewerSessionId = viewerSetCookieHeader.includes('sessionId=')
+        ? viewerSetCookieHeader.split('sessionId=')[1].split(';')[0]
+        : '';
+    }
 
     const elderRegisterRes = await app.inject({
       method: 'POST',
@@ -120,12 +198,19 @@ describe('Speakers API Routes - Integration Tests', () => {
     };
 
     test('should create speaker with valid data as admin', async () => {
+      console.log('DEBUG: adminSessionId:', adminSessionId);
+
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/speakers',
         payload: validSpeakerData,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
+
+      console.log('DEBUG: Response status:', response.statusCode);
+      console.log('DEBUG: Response body:', response.body);
 
       expect(response.statusCode).toBe(201);
       const body = JSON.parse(response.body);
@@ -146,7 +231,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/speakers',
         payload: minimalData,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(201);
@@ -162,7 +249,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/speakers',
         payload: validSpeakerData,
-        cookies: { sessionId: editorSessionId },
+        headers: {
+          cookie: `sessionId=${editorSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(201);
@@ -180,18 +269,24 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/speakers',
         payload: elderData,
-        cookies: { sessionId: editorSessionId },
+        headers: {
+          cookie: `sessionId=${editorSessionId}`,
+        },
       });
 
       expect(editorResponse.statusCode).toBe(403);
       const editorBody = JSON.parse(editorResponse.body);
-      expect(editorBody.error).toBe('Insufficient permissions');
+      expect(editorBody.error.message).toBe(
+        'Only admins can create elder speakers'
+      );
 
       const viewerResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/speakers',
         payload: elderData,
-        cookies: { sessionId: viewerSessionId },
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(viewerResponse.statusCode).toBe(403);
@@ -208,7 +303,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/speakers',
         payload: elderData,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(201);
@@ -232,7 +329,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/speakers',
         payload: validSpeakerData,
-        cookies: { sessionId: viewerSessionId },
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(403);
@@ -247,12 +346,15 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/speakers',
         payload: invalidData,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(400);
       const body = JSON.parse(response.body);
-      expect(body.error).toBe('Validation error');
+      expect(body.error.message).toBe('Validation error');
+      expect(body.error.details).toBeDefined();
     });
 
     test('should validate field lengths', async () => {
@@ -264,7 +366,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/speakers',
         payload: longNameData,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(400);
@@ -280,7 +384,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/speakers',
         payload: invalidUrlData,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(400);
@@ -296,7 +402,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/speakers',
         payload: invalidYearData,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(400);
@@ -316,7 +424,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           bio: 'Test bio',
           elderStatus: false,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       const body = JSON.parse(createResponse.body);
@@ -327,7 +437,9 @@ describe('Speakers API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/speakers/${createdSpeakerId}`,
-        cookies: { sessionId: viewerSessionId },
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -340,7 +452,9 @@ describe('Speakers API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/speakers/99999`,
-        cookies: { sessionId: viewerSessionId },
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(404);
@@ -361,7 +475,9 @@ describe('Speakers API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/speakers/${createdSpeakerId}`,
-        cookies: { sessionId: viewerSessionId },
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -381,7 +497,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: false,
           isActive: true,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       await app.inject({
@@ -393,7 +511,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           culturalRole: 'Elder',
           isActive: true,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       await app.inject({
@@ -404,15 +524,19 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: false,
           isActive: false,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
     });
 
     test('should list community speakers with pagination', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers?page=1&limit=10',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers?page=1&limit=10',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -432,8 +556,10 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should filter by elder status', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers?elderOnly=true&page=1&limit=10',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers?elderOnly=true&page=1&limit=10',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -447,8 +573,10 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should filter active speakers by default for non-admins', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers?page=1&limit=10',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers?page=1&limit=10',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -459,10 +587,13 @@ describe('Speakers API Routes - Integration Tests', () => {
     });
 
     test('should allow admins to see inactive speakers', async () => {
+      // Query without activeOnly parameter - admins should see all speakers by default
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers?activeOnly=false&page=1&limit=10',
-        cookies: { sessionId: adminSessionId },
+        url: '/api/v1/speakers?page=1&limit=10',
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -474,8 +605,10 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should support sorting', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers?sortBy=name&sortOrder=asc&page=1&limit=10',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers?sortBy=name&sortOrder=asc&page=1&limit=10',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -491,8 +624,10 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should validate pagination parameters', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers?page=0&limit=10',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers?page=0&limit=10',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(400);
@@ -501,7 +636,7 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should require authentication', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers?page=1&limit=10',
+        url: '/api/v1/speakers?page=1&limit=10',
       });
 
       expect(response.statusCode).toBe(401);
@@ -522,7 +657,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           bio: 'Original bio',
           elderStatus: false,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
       const body = JSON.parse(createResponse.body);
       createdSpeakerId = body.data.id;
@@ -536,7 +673,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: true,
           culturalRole: 'Elder Council',
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
       const elderBody = JSON.parse(elderResponse.body);
       elderSpeakerId = elderBody.data.id;
@@ -553,7 +692,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         payload: updateData,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -572,7 +713,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         payload: updateData,
-        cookies: { sessionId: editorSessionId },
+        headers: {
+          cookie: `sessionId=${editorSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -589,7 +732,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/speakers/${elderSpeakerId}`,
         payload: updateData,
-        cookies: { sessionId: editorSessionId },
+        headers: {
+          cookie: `sessionId=${editorSessionId}`,
+        },
       });
 
       expect(editorResponse.statusCode).toBe(403);
@@ -598,7 +743,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/speakers/${elderSpeakerId}`,
         payload: updateData,
-        cookies: { sessionId: viewerSessionId },
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(viewerResponse.statusCode).toBe(403);
@@ -613,12 +760,14 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         payload: updateData,
-        cookies: { sessionId: editorSessionId },
+        headers: {
+          cookie: `sessionId=${editorSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(403);
       const body = JSON.parse(response.body);
-      expect(body.error).toContain('elder status');
+      expect(body.error.message).toContain('elder status');
     });
 
     test('should return 404 for non-existent speaker', async () => {
@@ -626,7 +775,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/speakers/99999`,
         payload: { name: 'Updated' },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(404);
@@ -641,7 +792,9 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         payload: invalidData,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(400);
@@ -671,7 +824,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           name: 'To Be Deleted',
           elderStatus: false,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
       const body = JSON.parse(createResponse.body);
       createdSpeakerId = body.data.id;
@@ -684,7 +839,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           name: 'Elder To Delete',
           elderStatus: true,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
       const elderBody = JSON.parse(elderResponse.body);
       elderSpeakerId = elderBody.data.id;
@@ -694,7 +851,9 @@ describe('Speakers API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: `/api/v1/speakers/${createdSpeakerId}`,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(204);
@@ -703,7 +862,9 @@ describe('Speakers API Routes - Integration Tests', () => {
       const getResponse = await app.inject({
         method: 'GET',
         url: `/api/v1/speakers/${createdSpeakerId}`,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(getResponse.statusCode).toBe(404);
@@ -713,12 +874,14 @@ describe('Speakers API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: `/api/v1/speakers/${elderSpeakerId}`,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(403);
       const body = JSON.parse(response.body);
-      expect(body.error).toContain(
+      expect(body.error.message).toContain(
         'Elder speakers require special authorization'
       );
     });
@@ -727,7 +890,9 @@ describe('Speakers API Routes - Integration Tests', () => {
       const editorResponse = await app.inject({
         method: 'DELETE',
         url: `/api/v1/speakers/${createdSpeakerId}`,
-        cookies: { sessionId: editorSessionId },
+        headers: {
+          cookie: `sessionId=${editorSessionId}`,
+        },
       });
 
       expect(editorResponse.statusCode).toBe(403);
@@ -735,7 +900,9 @@ describe('Speakers API Routes - Integration Tests', () => {
       const viewerResponse = await app.inject({
         method: 'DELETE',
         url: `/api/v1/speakers/${createdSpeakerId}`,
-        cookies: { sessionId: viewerSessionId },
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(viewerResponse.statusCode).toBe(403);
@@ -745,7 +912,9 @@ describe('Speakers API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: `/api/v1/speakers/99999`,
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(404);
@@ -771,7 +940,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           name: 'Maria Santos',
           culturalRole: 'Elder',
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       await app.inject({
@@ -781,7 +952,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           name: 'Maria Rodriguez',
           culturalRole: 'Storyteller',
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       await app.inject({
@@ -791,15 +964,19 @@ describe('Speakers API Routes - Integration Tests', () => {
           name: 'John Smith',
           culturalRole: 'Knowledge Keeper',
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
     });
 
     test('should search speakers by name', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers/search?q=Maria&page=1&limit=10',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers/search?q=Maria&page=1&limit=10',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -813,8 +990,10 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should return empty result for non-matching search', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers/search?q=NonExistent&page=1&limit=10',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers/search?q=NonExistent&page=1&limit=10',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -826,8 +1005,10 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should require search query', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers/search?page=1&limit=10',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers/search?page=1&limit=10',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(400);
@@ -836,8 +1017,10 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should validate minimum search query length', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers/search?q=a&page=1&limit=10',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers/search?q=a&page=1&limit=10',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(400);
@@ -846,7 +1029,7 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should require authentication', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers/search?q=Maria&page=1&limit=10',
+        url: '/api/v1/speakers/search?q=Maria&page=1&limit=10',
       });
 
       expect(response.statusCode).toBe(401);
@@ -864,7 +1047,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: true,
           isActive: true,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       await app.inject({
@@ -875,7 +1060,9 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: false,
           isActive: true,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
 
       await app.inject({
@@ -886,15 +1073,19 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: false,
           isActive: false,
         },
-        cookies: { sessionId: adminSessionId },
+        headers: {
+          cookie: `sessionId=${adminSessionId}`,
+        },
       });
     });
 
     test('should return community speaker statistics', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers/stats',
-        cookies: { sessionId: viewerSessionId },
+        url: '/api/v1/speakers/stats',
+        headers: {
+          cookie: `sessionId=${viewerSessionId}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -910,7 +1101,7 @@ describe('Speakers API Routes - Integration Tests', () => {
     test('should require authentication', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/speakers/stats',
+        url: '/api/v1/speakers/stats',
       });
 
       expect(response.statusCode).toBe(401);

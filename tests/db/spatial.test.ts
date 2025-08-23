@@ -62,7 +62,9 @@ describe('Spatial Database Operations', () => {
           expect(result.version).toBeTruthy();
           console.log(`✅ Spatial extension version: ${result.version}`);
         } else {
-          console.warn('⚠️ Spatial support not available in test environment');
+          console.log(
+            'ℹ️ Spatial support not detected (test environment uses in-memory SQLite)'
+          );
         }
       }
     });

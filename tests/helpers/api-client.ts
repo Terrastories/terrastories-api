@@ -29,22 +29,22 @@ export class ApiTestClient {
   constructor(private app: FastifyInstance) {}
 
   /**
-   * Make authenticated request with Bearer token
+   * Make authenticated request using real session cookies
    */
   async authenticatedRequest(
     method: string,
     url: string,
     data?: any,
-    token?: string
+    sessionId?: string
   ): Promise<LightMyRequestResponse> {
-    const authToken = token || (await this.getTestToken());
+    const session = sessionId || (await this.getTestSessionId());
 
     const options: InjectOptions = {
       method: method.toUpperCase(),
       url,
       headers: {
-        Authorization: `Bearer ${authToken}`,
         'Content-Type': 'application/json',
+        cookie: `sessionId=${session}`,
       },
     };
 
@@ -143,35 +143,102 @@ export class ApiTestClient {
   }
 
   /**
-   * Get test authentication token
-   * This is a mock implementation - replace with actual auth logic when implemented
+   * Get test session ID by performing actual login using pre-existing test users
    */
-  async getTestToken(userId = 1, communityId = 1): Promise<string> {
-    // Mock JWT token for testing
-    // In real implementation, this would call the auth endpoint or create a valid JWT
-    const mockPayload = {
-      sub: userId,
-      communityId,
-      role: 'admin',
-      iat: Math.floor(Date.now() / 1000),
-      exp: Math.floor(Date.now() / 1000) + 60 * 60, // 1 hour
+  async getTestSessionId(
+    _userId = 1,
+    communityId = 1,
+    role = 'admin'
+  ): Promise<string> {
+    // Use predefined test users created by createTestData()
+    const testUserCredentials = {
+      admin: { email: 'admin@test.com', password: 'testPassword123' },
+      admin2: { email: 'admin2@test.com', password: 'testPassword123' },
+      editor: { email: 'editor@test.com', password: 'testPassword123' },
+      elder: { email: 'elder@test.com', password: 'testPassword123' },
+      viewer: { email: 'viewer@test.com', password: 'testPassword123' },
+      super_admin: {
+        email: 'superadmin@test.com',
+        password: 'testPassword123',
+      },
     };
 
-    // Simple base64 encoding for mock token (not secure, only for testing)
-    return `mock.${Buffer.from(JSON.stringify(mockPayload)).toString('base64')}.signature`;
+    const credentials =
+      testUserCredentials[role as keyof typeof testUserCredentials];
+    if (!credentials) {
+      throw new Error(`Unknown role: ${role}`);
+    }
+
+    // Login with existing test user
+    console.log(
+      `DEBUG: Attempting login for ${credentials.email} with community ID ${communityId}`
+    );
+
+    const loginResponse = await this.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        email: credentials.email,
+        password: credentials.password,
+        communityId: communityId,
+      },
+    });
+
+    console.log(
+      `DEBUG: Login response for ${credentials.email}: ${loginResponse.statusCode} - ${loginResponse.body}`
+    );
+
+    if (loginResponse.statusCode !== 200) {
+      throw new Error(`Failed to login test user: ${loginResponse.body}`);
+    }
+
+    // Extract session ID from Set-Cookie header
+    const setCookieHeader = loginResponse.headers['set-cookie'];
+    let sessionId = '';
+
+    if (Array.isArray(setCookieHeader)) {
+      const sessionCookie = setCookieHeader.find((cookie) =>
+        cookie.includes('sessionId=')
+      );
+      sessionId = sessionCookie
+        ? sessionCookie.split('sessionId=')[1].split(';')[0]
+        : '';
+    } else if (setCookieHeader) {
+      sessionId = setCookieHeader.includes('sessionId=')
+        ? setCookieHeader.split('sessionId=')[1].split(';')[0]
+        : '';
+    }
+
+    if (!sessionId) {
+      throw new Error('Failed to extract session ID from login response');
+    }
+
+    return sessionId;
   }
 
   /**
-   * Create tokens for different user roles
+   * Create session tokens for different user roles
+   * Note: Community IDs are determined by the test fixtures in the actual test setup
    */
   async getTokens() {
     return {
-      admin: await this.getTestToken(1, 1),
-      editor: await this.getTestToken(2, 1),
-      viewer: await this.getTestToken(3, 1),
-      superAdmin: await this.getTestToken(999, 0), // Super admin has no specific community
-      anotherCommunity: await this.getTestToken(4, 2),
+      admin: await this.getTestSessionId(1, 1, 'admin'), // Community ID 1 for compatibility
+      editor: await this.getTestSessionId(2, 1, 'editor'),
+      viewer: await this.getTestSessionId(3, 1, 'viewer'),
+      superAdmin: await this.getTestSessionId(999, 1, 'super_admin'), // Super admin in system community
+      anotherCommunity: await this.getTestSessionId(4, 2, 'admin'), // Admin in demo community
     };
+  }
+
+  /**
+   * Backward compatibility method for getTestToken
+   */
+  async getTestToken(
+    userId = 1,
+    communityId = 1,
+    role = 'admin'
+  ): Promise<string> {
+    return await this.getTestSessionId(userId, communityId, role);
   }
 
   /**

@@ -160,8 +160,8 @@ export class SpeakerService {
     userRole: UserRole
   ): Promise<PaginatedResponse<Speaker>> {
     // Validate pagination parameters
-    const page = params.page || 1;
-    const limit = params.limit || 20;
+    const page = params.page !== undefined ? params.page : 1;
+    const limit = params.limit !== undefined ? params.limit : 20;
 
     if (page < 1 || limit < 1 || limit > 100) {
       throw new Error('Invalid pagination parameters');
@@ -343,6 +343,9 @@ export class SpeakerService {
     }
 
     if (data.name !== undefined) {
+      if (!data.name || data.name.trim().length === 0) {
+        throw new RequiredFieldError('name');
+      }
       if (data.name.length > 200) {
         throw new InvalidFieldLengthError('name', 200, data.name.length);
       }

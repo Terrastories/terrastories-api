@@ -173,12 +173,12 @@ describe('SpeakerService', () => {
       // Viewer role should not be able to create elders
       await expect(
         service.createSpeaker(elderData, testCommunityId, testUserId, 'viewer')
-      ).rejects.toThrow('permissions');
+      ).rejects.toThrow('Viewers cannot create speakers');
 
       // Editor role should not be able to create elders
       await expect(
         service.createSpeaker(elderData, testCommunityId, testUserId, 'editor')
-      ).rejects.toThrow('permissions');
+      ).rejects.toThrow('Only admins can create elder speakers');
 
       // Admin should be able to create elders
       vi.mocked(mockRepository.create).mockResolvedValue({
@@ -403,7 +403,7 @@ describe('SpeakerService', () => {
           testUserId,
           'viewer'
         )
-      ).rejects.toThrow('permissions');
+      ).rejects.toThrow('Only admins can update elder speakers');
 
       // Editor should not be able to update elders
       await expect(
@@ -414,12 +414,13 @@ describe('SpeakerService', () => {
           testUserId,
           'editor'
         )
-      ).rejects.toThrow('permissions');
+      ).rejects.toThrow('Only admins can update elder speakers');
     });
 
     it('should prevent elder status changes by non-admins', async () => {
+      const regularSpeaker = { ...mockSpeaker, elderStatus: false };
       vi.mocked(mockRepository.getByIdWithCommunityCheck).mockResolvedValue(
-        mockSpeaker
+        regularSpeaker
       );
 
       await expect(
@@ -446,7 +447,7 @@ describe('SpeakerService', () => {
           testUserId,
           'admin'
         )
-      ).rejects.toThrow('Name is required');
+      ).rejects.toThrow('name is required');
 
       await expect(
         service.updateSpeaker(
@@ -485,8 +486,9 @@ describe('SpeakerService', () => {
 
   describe('deleteSpeaker()', () => {
     it('should delete speaker when user has permission', async () => {
+      const regularSpeaker = { ...mockSpeaker, elderStatus: false };
       vi.mocked(mockRepository.getByIdWithCommunityCheck).mockResolvedValue(
-        mockSpeaker
+        regularSpeaker
       );
       vi.mocked(mockRepository.delete).mockResolvedValue(true);
 
@@ -512,18 +514,19 @@ describe('SpeakerService', () => {
     });
 
     it('should enforce deletion permissions', async () => {
+      const regularSpeaker = { ...mockSpeaker, elderStatus: false };
       vi.mocked(mockRepository.getByIdWithCommunityCheck).mockResolvedValue(
-        mockSpeaker
+        regularSpeaker
       );
 
       // Only admins can delete speakers
       await expect(
         service.deleteSpeaker(1, testCommunityId, testUserId, 'viewer')
-      ).rejects.toThrow('permissions');
+      ).rejects.toThrow('Only admins can delete speakers');
 
       await expect(
         service.deleteSpeaker(1, testCommunityId, testUserId, 'editor')
-      ).rejects.toThrow('permissions');
+      ).rejects.toThrow('Only admins can delete speakers');
     });
 
     it('should enforce enhanced elder deletion permissions', async () => {
@@ -538,8 +541,9 @@ describe('SpeakerService', () => {
     });
 
     it('should log speaker deletion for audit', async () => {
+      const regularSpeaker = { ...mockSpeaker, elderStatus: false };
       vi.mocked(mockRepository.getByIdWithCommunityCheck).mockResolvedValue(
-        mockSpeaker
+        regularSpeaker
       );
       vi.mocked(mockRepository.delete).mockResolvedValue(true);
 

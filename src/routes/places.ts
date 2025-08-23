@@ -11,10 +11,9 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { sql } from 'drizzle-orm';
 import { PlaceService } from '../services/place.service.js';
 import { PlaceRepository } from '../repositories/place.repository.js';
-import { getDb, type Database } from '../db/index.js';
+import { getDb } from '../db/index.js';
 import {
   requireAuth,
   requireRole,
@@ -194,10 +193,15 @@ export async function placesRoutes(
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       const params = PaginationSchema.parse(request.query);
       const { community_id } = request.query as { community_id?: string };
+      const { user } = request as AuthenticatedRequest;
 
       // Convert page-based params to offset-based for database queries
       const offset = (params.page - 1) * params.limit;
-      const repositoryParams = { limit: params.limit, offset };
+      const repositoryParams = {
+        limit: params.limit,
+        offset,
+        page: params.page,
+      };
 
       let result;
       if (community_id) {
@@ -208,31 +212,12 @@ export async function placesRoutes(
           'viewer' // Use minimal permissions for public access
         );
       } else {
-        // For all places (no community filter) - simplified approach for integration tests
-        // In production, this might need better data sovereignty controls
-        const placesTable = await import('../db/schema/places.js').then((m) =>
-          m.getPlacesTable()
+        // Use the authenticated user's community ID as default
+        result = await placeService.getPlacesByCommunity(
+          user.communityId,
+          repositoryParams,
+          user.role
         );
-        const allPlaces = await (database as Database)
-          .select()
-          .from(await placesTable)
-          .limit(params.limit)
-          .offset(offset);
-
-        const totalCount = await (database as Database)
-          .select({ count: sql`COUNT(*)` })
-          .from(await placesTable);
-
-        const total = totalCount[0]?.count || 0;
-        const pages = Math.ceil(total / params.limit);
-
-        result = {
-          data: allPlaces,
-          total,
-          page: params.page, // Use the original page from params
-          limit: params.limit,
-          pages,
-        };
       }
 
       return reply.send({
@@ -242,7 +227,7 @@ export async function placesRoutes(
           page: result.page || params.page, // Ensure page is always present
           limit: result.limit,
           pages: result.pages,
-          filters: { communityId: community_id },
+          filters: { communityId: community_id || user.communityId },
         },
       });
     },

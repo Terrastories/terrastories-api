@@ -20,7 +20,6 @@ import { getDb } from '../db/index.js';
 import {
   requireAuth,
   requireRole,
-  type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
 
 // Request validation schemas
@@ -190,7 +189,7 @@ export async function communityRoutes(
         },
       },
     },
-    async (request: AuthenticatedRequest, reply: FastifyReply) => {
+    async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         // Validate request body
         const validatedData = createCommunitySchema.parse(request.body);

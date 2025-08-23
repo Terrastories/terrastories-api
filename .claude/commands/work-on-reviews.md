@@ -33,9 +33,7 @@ interface ReviewComment {
 class ReviewAnalyzer {
   async analyzeComments(prNumber: number): Promise<ReviewComment[]> {
     // Fetch all review comments from GitHub
-    const reviews = await exec(
-      `gh pr reviews ${prNumber} --json body,author,state`
-    );
+    const reviews = await exec(`gh pr view ${prNumber} --json reviews`);
     const comments = await exec(`gh pr diff ${prNumber} --name-only`);
 
     // Parse and categorize each comment

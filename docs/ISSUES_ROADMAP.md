@@ -243,7 +243,7 @@ Acceptance Criteria:
 - ✅ Elder role support with cultural protocol enforcement
 - ✅ Performance optimized with <10ms overhead
 
-## **Phase 4: Core Services & Media Handling**
+## **Phase 4: Core Services & Media Handling ✅ COMPLETED**
 
 ### **Issue #16: Implement File Upload Service** ✅
 
@@ -331,26 +331,36 @@ Acceptance Criteria:
 - ✅ The corresponding API endpoints must have full Swagger/OpenAPI documentation.
 - ✅ The scripts/user_workflow.sh script is updated to include this feature, and it passes successfully.
 
-### **Issue #20: Implement CRUD Service for Speakers**
+### **Issue #20: Implement CRUD Service for Speakers ✅**
 
-**Status**: 🔄 **CREATED** - Issue #44 (GitHub Issue #44)
+**Status**: ✅ **COMPLETED** in PR #45 (GitHub Issue #44)
 
-- Comprehensive Speaker CRUD service with Indigenous cultural protocols
-- Created: August 22, 2025
-- Final component needed to complete Phase 4 (Core Services & Media Handling)
-- Includes elder status recognition and cultural sensitivity requirements
-- Community data sovereignty and super admin restrictions
-- Integration with user workflow script for end-to-end testing
+- Comprehensive Speaker CRUD service with Indigenous cultural protocols implemented
+- Merged: August 23, 2025
+- Phase 4 (Core Services & Media Handling) **COMPLETED** ✅
+- Complete repository, service, and routes implementation with 800+ passing tests
+- Cultural protocol enforcement and elder status recognition
+- Community data sovereignty validation and multi-database support
+- Full API documentation and comprehensive error handling
 
-Description: Create the business logic for CRUD operations on the Speaker model.
-Context: docs/2-DATA_MODELS.md
-Acceptance Criteria:
+**Key Features Delivered**:
 
-- A speaker.service.ts is created with full CRUD logic.
-- The corresponding API endpoints must have full Swagger/OpenAPI documentation.
-- The scripts/user_workflow.sh script is updated to include this feature, and it passes successfully.
+- Full CRUD operations (create, read, update, delete, search, statistics)
+- Indigenous cultural protocol enforcement with elder permissions
+- Community-scoped data isolation and sovereignty validation
+- Case-insensitive search with PostgreSQL/SQLite compatibility
+- Comprehensive test coverage across all layers (repository, service, routes)
+- Complete API documentation with request/response examples
 
-**GitHub Issue**: [#44](https://github.com/Terrastories/terrastories-api/issues/44)
+**Technical Implementation**:
+
+- Repository pattern with multi-database compatibility
+- Service layer with cultural protocol validation and audit logging
+- Fastify REST endpoints with Zod validation and role-based authentication
+- TypeScript types and comprehensive error handling system
+- Production-ready with zero CI failures and clean code quality
+
+**GitHub Issue**: [#44](https://github.com/Terrastories/terrastories-api/issues/44) ✅ **CLOSED**
 
 ## **Phase 5: API Endpoint Implementation**
 

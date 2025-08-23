@@ -150,6 +150,28 @@ export class SpeakerRepository {
       );
     }
 
+    // Validate photo URL format if provided
+    if (data.photoUrl !== undefined && data.photoUrl !== null) {
+      const urlOk =
+        typeof data.photoUrl === 'string' &&
+        /^https?:\/\/\S+/i.test(data.photoUrl);
+      if (!urlOk) {
+        throw new Error('Invalid photo URL format');
+      }
+    }
+
+    // Validate birth year range if provided
+    if (data.birthYear !== undefined && data.birthYear !== null) {
+      const year = data.birthYear;
+      const currentYear = new Date().getFullYear();
+      if (year < 1850) {
+        throw new Error('Birth year too early (minimum 1850)');
+      }
+      if (year > currentYear) {
+        throw new Error('Birth year cannot be in the future');
+      }
+    }
+
     const speakersTable = await getSpeakersTable();
 
     const speakerData: NewSpeaker = {
@@ -330,6 +352,28 @@ export class SpeakerRepository {
         100,
         data.culturalRole.length
       );
+    }
+
+    // Validate photo URL format if provided
+    if (data.photoUrl !== undefined && data.photoUrl !== null) {
+      const urlOk =
+        typeof data.photoUrl === 'string' &&
+        /^https?:\/\/\S+/i.test(data.photoUrl);
+      if (!urlOk) {
+        throw new Error('Invalid photo URL format');
+      }
+    }
+
+    // Validate birth year range if provided
+    if (data.birthYear !== undefined && data.birthYear !== null) {
+      const year = data.birthYear;
+      const currentYear = new Date().getFullYear();
+      if (year < 1850) {
+        throw new Error('Birth year too early (minimum 1850)');
+      }
+      if (year > currentYear) {
+        throw new Error('Birth year cannot be in the future');
+      }
     }
 
     const speakersTable = await getSpeakersTable();

@@ -81,3 +81,7 @@ temp/
 test_media.txt
 uploads/
 test_results.log
+test-report.junit.xml
+
+# Serena AI cache
+.serena/cache/

@@ -1,7 +1,7 @@
 # Terrastories API
 
 [![Build Status](https://github.com/terrastories/terrastories-api/workflows/CI/badge.svg)](https://github.com/terrastories/terrastories-api/actions)
-[![Coverage Status](https://codecov.io/gh/terrastories/terrastories-api/branch/main/graph/badge.svg)](https://codecov.io/gh/terrastories/terrastories-api)
+[![codecov](https://codecov.io/gh/terrastories/terrastories-api/graph/badge.svg?token=JFOR2UDW6Z)](https://codecov.io/gh/terrastories/terrastories-api)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Fastify](https://img.shields.io/badge/Fastify-5-black.svg)](https://fastify.dev/)

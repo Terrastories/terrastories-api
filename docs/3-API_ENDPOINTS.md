@@ -42,7 +42,7 @@ These endpoints require authentication and are for community members to manage c
 
 Creates a new speaker with Indigenous cultural protocol considerations.
 
-**Authentication:** Required (Admin or Editor role)  
+**Authentication:** Required (Admin or Editor role)
 **Cultural Protocol:** Elder creation requires admin permissions
 
 **Request Body:**
@@ -86,7 +86,7 @@ Creates a new speaker with Indigenous cultural protocol considerations.
 
 Lists speakers with pagination, filtering, and community isolation.
 
-**Authentication:** Required  
+**Authentication:** Required
 **Query Parameters:**
 
 - `page` (number, default: 1) - Page number
@@ -125,7 +125,7 @@ Lists speakers with pagination, filtering, and community isolation.
 
 Retrieves a specific speaker with community isolation enforcement.
 
-**Authentication:** Required  
+**Authentication:** Required
 **Cultural Protocol:** Community data sovereignty enforced
 
 **Response (200 OK):**
@@ -152,7 +152,7 @@ Retrieves a specific speaker with community isolation enforcement.
 
 Updates speaker information with cultural protocol validation.
 
-**Authentication:** Required (Admin or Editor role)  
+**Authentication:** Required (Admin or Editor role)
 **Cultural Protocol:** Elder status changes require admin permissions
 
 **Request Body:** Same as CREATE, all fields optional
@@ -163,7 +163,7 @@ Updates speaker information with cultural protocol validation.
 
 Soft deletes a speaker with enhanced cultural protocols for elders.
 
-**Authentication:** Required (Admin role)  
+**Authentication:** Required (Admin role)
 **Cultural Protocol:** Elder deletion requires additional validation
 
 **Response (200 OK):**
@@ -184,7 +184,7 @@ Soft deletes a speaker with enhanced cultural protocols for elders.
 
 Case-insensitive search across speaker names with community isolation.
 
-**Authentication:** Required  
+**Authentication:** Required
 **Query Parameters:**
 
 - `q` (string, required, min 2 chars) - Search query

@@ -76,3 +76,12 @@ Thumbs.db
 tmp/
 temp/
 .vercel
+
+# Test files and uploads (generated during development)
+test_media.txt
+uploads/
+test_results.log
+test-report.junit.xml
+
+# Serena AI cache
+.serena/cache/

@@ -7,9 +7,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Fastify, { FastifyInstance } from 'fastify';
 import { testDb, TestFixtures } from '../helpers/database.js';
-import { createApiClient, ApiTestClient } from '../helpers/api-client.js';
+import {
+  createApiClient,
+  ApiTestClient,
+  createTestApp as createRealTestApp,
+} from '../helpers/api-client.js';
 
 // Mock a simple Fastify app for testing
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function createTestApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
 
@@ -142,9 +147,97 @@ describe('API Integration Tests', () => {
     // Database is cleared by setup.ts, seed with test data for API tests
     fixtures = await testDb.seedTestData();
 
-    // Create test app and API client
-    app = await createTestApp();
+    // Create test users for authentication
+    const db = await testDb.getDb();
+    const { usersSqlite } = await import('../../src/db/schema/index.js');
+
+    // Create test users with proper password hash for 'testPassword123'
+    const testPasswordHash =
+      '$argon2id$v=19$m=65536,t=3,p=4$lqO13Fqx46nTW2lUiZJWLw$VIpjVVTVn3OVLoLgN+ZcGBmGqCeHZjK2FwayYOWm3OQ';
+
+    await db.insert(usersSqlite).values([
+      {
+        email: 'admin@test.com',
+        passwordHash: testPasswordHash,
+        firstName: 'Admin',
+        lastName: 'User',
+        role: 'admin',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'editor@test.com',
+        passwordHash: testPasswordHash,
+        firstName: 'Editor',
+        lastName: 'User',
+        role: 'editor',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'viewer@test.com',
+        passwordHash: testPasswordHash,
+        firstName: 'Viewer',
+        lastName: 'User',
+        role: 'viewer',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      },
+      {
+        email: 'superadmin@test.com',
+        passwordHash: testPasswordHash,
+        firstName: 'Super',
+        lastName: 'Admin',
+        role: 'super_admin',
+        communityId: fixtures.systemCommunity.id,
+        isActive: true,
+      },
+      // Additional admin user for anotherCommunity test scenario
+      {
+        email: 'admin2@test.com',
+        passwordHash: testPasswordHash,
+        firstName: 'Admin',
+        lastName: 'User 2',
+        role: 'admin',
+        communityId: fixtures.communities[1].id,
+        isActive: true,
+      },
+    ]);
+
+    // Create test app with real routes and API client
+    app = await createRealTestApp(testDb.db);
     apiClient = createApiClient(app);
+
+    // Update API client to use correct community IDs from fixtures
+    apiClient.getTokens = async () => {
+      return {
+        admin: await apiClient.getTestSessionId(
+          1,
+          fixtures.communities[0].id,
+          'admin'
+        ),
+        editor: await apiClient.getTestSessionId(
+          2,
+          fixtures.communities[0].id,
+          'editor'
+        ),
+        viewer: await apiClient.getTestSessionId(
+          3,
+          fixtures.communities[0].id,
+          'viewer'
+        ),
+        superAdmin: await apiClient.getTestSessionId(
+          999,
+          fixtures.systemCommunity.id,
+          'super_admin'
+        ),
+        anotherCommunity: await apiClient.getTestSessionId(
+          4,
+          fixtures.communities[1].id,
+          'admin2'
+        ),
+      };
+    };
   });
 
   afterEach(async () => {
@@ -231,7 +324,7 @@ describe('API Integration Tests', () => {
         tokens.admin
       );
 
-      apiClient.assertSuccess(response, 200);
+      apiClient.assertSuccess(response, 201);
 
       const result = apiClient.assertResponseStructure(response, ['data']);
       expect(result.data).toMatchObject({
@@ -276,7 +369,12 @@ describe('API Integration Tests', () => {
 
   describe('Places API', () => {
     it('should list all places', async () => {
-      const response = await apiClient.get('/api/v1/places');
+      const tokens = await apiClient.getTokens();
+      const response = await apiClient.get(
+        '/api/v1/places',
+        undefined,
+        tokens.admin
+      );
 
       apiClient.assertSuccess(response);
 
@@ -294,11 +392,16 @@ describe('API Integration Tests', () => {
     });
 
     it('should filter places by community', async () => {
+      const tokens = await apiClient.getTokens();
       const testCommunity = fixtures.communities[0];
 
-      const response = await apiClient.get('/api/v1/places', {
-        community_id: testCommunity.id,
-      });
+      const response = await apiClient.get(
+        '/api/v1/places',
+        {
+          community_id: testCommunity.id,
+        },
+        tokens.admin
+      );
 
       apiClient.assertSuccess(response);
 
@@ -312,9 +415,14 @@ describe('API Integration Tests', () => {
     });
 
     it('should handle empty results gracefully', async () => {
-      const response = await apiClient.get('/api/v1/places', {
-        community_id: 99999, // Non-existent community
-      });
+      const tokens = await apiClient.getTokens();
+      const response = await apiClient.get(
+        '/api/v1/places',
+        {
+          community_id: 99999, // Non-existent community
+        },
+        tokens.admin
+      );
 
       apiClient.assertSuccess(response);
 
@@ -332,7 +440,7 @@ describe('API Integration Tests', () => {
       const roleTests = [
         { role: 'admin', token: tokens.admin, shouldSucceed: true },
         { role: 'editor', token: tokens.editor, shouldSucceed: true },
-        { role: 'viewer', token: tokens.viewer, shouldSucceed: true },
+        { role: 'viewer', token: tokens.viewer, shouldSucceed: false }, // Viewers are read-only
         { role: 'superAdmin', token: tokens.superAdmin, shouldSucceed: true },
       ];
 
@@ -341,13 +449,13 @@ describe('API Integration Tests', () => {
           '/api/v1/communities',
           {
             name: `${test.role} Test Community`,
-            slug: `${test.role}-test`,
+            slug: `${test.role.toLowerCase()}-test`,
           },
           test.token
         );
 
         if (test.shouldSucceed) {
-          apiClient.assertSuccess(response);
+          apiClient.assertSuccess(response, 201);
         } else {
           apiClient.assertForbidden(response);
         }
@@ -376,11 +484,12 @@ describe('API Integration Tests', () => {
 
   describe('Error Handling', () => {
     it('should handle malformed JSON', async () => {
+      const tokens = await apiClient.getTokens();
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/communities',
         headers: {
-          Authorization: `Bearer ${await apiClient.getTestToken()}`,
+          cookie: `sessionId=${tokens.admin}`,
           'Content-Type': 'application/json',
         },
         payload: '{ invalid json }',
@@ -403,8 +512,8 @@ describe('API Integration Tests', () => {
         tokens.admin
       );
 
-      // Should handle large payloads (assuming no size limit configured)
-      apiClient.assertSuccess(response);
+      // Should gracefully reject oversized payloads with 400 Bad Request (description > 1000 chars)
+      expect(response.statusCode).toBe(400);
     });
 
     it('should handle concurrent requests', async () => {
@@ -426,7 +535,7 @@ describe('API Integration Tests', () => {
 
       // All requests should succeed
       responses.forEach((response) => {
-        apiClient.assertSuccess(response);
+        apiClient.assertSuccess(response, 201);
       });
 
       // Verify all communities were created

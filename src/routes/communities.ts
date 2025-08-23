@@ -17,6 +17,10 @@ import { z } from 'zod';
 import { CommunityService } from '../services/community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { getDb } from '../db/index.js';
+import {
+  requireAuth,
+  requireRole,
+} from '../shared/middleware/auth.middleware.js';
 
 // Request validation schemas
 const createCommunitySchema = z
@@ -90,6 +94,10 @@ export async function communityRoutes(
   fastify.post(
     '/communities',
     {
+      preHandler: [
+        requireAuth,
+        requireRole(['admin', 'editor', 'super_admin']),
+      ],
       schema: {
         description: 'Create a new community with cultural protocol support',
         tags: ['Communities'],
@@ -378,29 +386,28 @@ export async function communityRoutes(
             type: 'object',
             properties: {
               data: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'number' },
+                    name: { type: 'string' },
+                    description: { type: 'string' },
+                    slug: { type: 'string' },
+                    publicStories: { type: 'boolean' },
+                    locale: { type: 'string' },
+                    isActive: { type: 'boolean' },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' },
+                  },
+                },
+              },
+              meta: {
                 type: 'object',
                 properties: {
-                  communities: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        id: { type: 'number' },
-                        name: { type: 'string' },
-                        description: { type: 'string' },
-                        slug: { type: 'string' },
-                        publicStories: { type: 'boolean' },
-                        locale: { type: 'string' },
-                        isActive: { type: 'boolean' },
-                        createdAt: { type: 'string', format: 'date-time' },
-                        updatedAt: { type: 'string', format: 'date-time' },
-                      },
-                    },
-                  },
-                  total: { type: 'number' },
+                  page: { type: 'number' },
                   limit: { type: 'number' },
-                  offset: { type: 'number' },
-                  hasMore: { type: 'boolean' },
+                  total: { type: 'number' },
                 },
               },
             },
@@ -447,7 +454,16 @@ export async function communityRoutes(
 
         const result = await communityService.searchCommunities(searchParams);
 
-        return reply.status(200).send({ data: result });
+        // Transform response to match pagination format expected by tests
+        const page = Math.floor(offset / limit) + 1;
+        return reply.status(200).send({
+          data: result.communities,
+          meta: {
+            page,
+            limit: result.limit,
+            total: result.total,
+          },
+        });
       } catch (error) {
         fastify.log.error(
           { error, url: request.url },

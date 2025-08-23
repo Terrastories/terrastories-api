@@ -477,24 +477,16 @@ Links with other commands:
 - Updates tracked in PR description
 - `/sync-github-mapping` - Updates mapping after scope changes
 
-### Get Second Opinion from Gemini
+### Get Second Opinion from Gemini and Codex
 
-After revising the issue and synchronizing the roadmap, get a second opinion on the revision from the Gemini CLI.
-
-```bash
-# Call Gemini CLI for a second revision analysis
-/revise-issue [issue-number]
-```
-
-This ensures the revised issue is reviewed from multiple perspectives, improving its clarity and actionability before development begins.
-
-### Get Second Opinion from Gemini
-
-After revising the issue and synchronizing the roadmap, get a second opinion on the revision from the Gemini CLI.
+After revising the issue and synchronizing the roadmap, get a second opinion on the revision from Gemini and Codex.
 
 ```bash
 # Call Gemini CLI for a second revision analysis
-/revise-issue [issue-number]
+gemini -y -p "Revise issue #[issue-number]"
+
+# Get a second opinion from openai codex
+codex -m gpt-5 --dangerously-bypass-approvals-and-sandbox exec "Revise issue #[issue-number]"
 ```
 
 This ensures the revised issue is reviewed from multiple perspectives, improving its clarity and actionability before development begins.

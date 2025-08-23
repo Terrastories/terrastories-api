@@ -309,19 +309,38 @@ Acceptance Criteria:
 - ✅ The corresponding API endpoints must have full Swagger/OpenAPI documentation.
 - ✅ The scripts/user_workflow.sh script is updated to include community creation, and it passes successfully.
 
-### **Issue #19: Implement CRUD Service for Places**
+### **Issue #19: Implement CRUD Service for Places** ✅
+
+**Status**: ✅ **COMPLETED** in PR #43 (Issue #41)
+
+- Complete Places CRUD service with PostGIS spatial support and Indigenous cultural protocols
+- Merged: August 22, 2025
+- PostGIS spatial queries with SQLite fallback for development
+- Elder access controls and cultural significance validation
+- Community data isolation ensuring Indigenous data sovereignty
+- Geographic search (radius & bounding box queries)
+- Comprehensive test coverage (41 tests across all layers)
 
 Description: Create the business logic for all CRUD operations on the Place model.
 Context: docs/2-DATA_MODELS.md, docs/5-MEDIA_HANDLING.md
 Acceptance Criteria:
 
-- A place.service.ts is created.
-- It contains functions for create, getById, update, and delete.
-- Update/create functions handle saving photo_url and name_audio_url.
-- The corresponding API endpoints must have full Swagger/OpenAPI documentation.
-- The scripts/user_workflow.sh script is updated to include this feature, and it passes successfully.
+- ✅ A place.service.ts is created.
+- ✅ It contains functions for create, getById, update, and delete.
+- ✅ Update/create functions handle saving photo_url and name_audio_url.
+- ✅ The corresponding API endpoints must have full Swagger/OpenAPI documentation.
+- ✅ The scripts/user_workflow.sh script is updated to include this feature, and it passes successfully.
 
 ### **Issue #20: Implement CRUD Service for Speakers**
+
+**Status**: 🔄 **CREATED** - Issue #44 (GitHub Issue #44)
+
+- Comprehensive Speaker CRUD service with Indigenous cultural protocols
+- Created: August 22, 2025
+- Final component needed to complete Phase 4 (Core Services & Media Handling)
+- Includes elder status recognition and cultural sensitivity requirements
+- Community data sovereignty and super admin restrictions
+- Integration with user workflow script for end-to-end testing
 
 Description: Create the business logic for CRUD operations on the Speaker model.
 Context: docs/2-DATA_MODELS.md
@@ -330,6 +349,8 @@ Acceptance Criteria:
 - A speaker.service.ts is created with full CRUD logic.
 - The corresponding API endpoints must have full Swagger/OpenAPI documentation.
 - The scripts/user_workflow.sh script is updated to include this feature, and it passes successfully.
+
+**GitHub Issue**: [#44](https://github.com/Terrastories/terrastories-api/issues/44)
 
 ## **Phase 5: API Endpoint Implementation**
 

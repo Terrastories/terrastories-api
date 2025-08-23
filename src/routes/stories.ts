@@ -100,8 +100,12 @@ const listStoriesQuerySchema = z.object({
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
 });
 
-export default async function storiesRoutes(fastify: FastifyInstance) {
-  const db = await getDb();
+export default async function storiesRoutes(
+  fastify: FastifyInstance,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  options?: { database?: any }
+) {
+  const db = options?.database || (await getDb());
 
   // Type-safe repository instantiation with proper casting
   // StoryRepository requires BetterSQLite3Database, others accept Database union

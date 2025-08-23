@@ -192,21 +192,42 @@ export async function placesRoutes(
     preHandler: [requireAuth],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       const params = PaginationSchema.parse(request.query);
+      const { community_id } = request.query as { community_id?: string };
       const { user } = request as AuthenticatedRequest;
 
-      const result = await placeService.getPlacesByCommunity(
-        user.communityId,
-        params,
-        user.role
-      );
+      // Convert page-based params to offset-based for database queries
+      const offset = (params.page - 1) * params.limit;
+      const repositoryParams = {
+        limit: params.limit,
+        offset,
+        page: params.page,
+      };
+
+      let result;
+      if (community_id) {
+        // If community_id is specified, filter by that community
+        result = await placeService.getPlacesByCommunity(
+          parseInt(community_id, 10),
+          repositoryParams,
+          'viewer' // Use minimal permissions for public access
+        );
+      } else {
+        // Use the authenticated user's community ID as default
+        result = await placeService.getPlacesByCommunity(
+          user.communityId,
+          repositoryParams,
+          user.role
+        );
+      }
 
       return reply.send({
         data: result.data,
         meta: {
           total: result.total,
-          page: result.page,
+          page: result.page || params.page, // Ensure page is always present
           limit: result.limit,
           pages: result.pages,
+          filters: { communityId: community_id || user.communityId },
         },
       });
     },

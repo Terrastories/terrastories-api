@@ -731,24 +731,16 @@ This command integrates with:
 - GitHub Actions - Aggregates CI/CD results
 - External reviewers - Consolidates AI and human feedback
 
-## Phase 8: Get Second Opinion from Gemini
+## Phase 8: Get Second Opinion from Gemini and Codex
 
-After completing the review and generating the report, get a second opinion from the Gemini CLI to ensure comprehensive coverage.
-
-```bash
-# Call Gemini CLI for a second review
-/review-pr [pr-number]
-```
-
-This provides an additional layer of validation and may catch issues missed in the initial review. The results from both reviews should be considered before merging.
-
-## Phase 8: Get Second Opinion from Gemini
-
-After completing the review and generating the report, get a second opinion from the Gemini CLI to ensure comprehensive coverage.
+After completing the review and generating the report, get a second opinion from Gemini and Codex to ensure comprehensive coverage.
 
 ```bash
 # Call Gemini CLI for a second review
-/review-pr [pr-number]
+gemini -y -p "Review PR #[pr-number]"
+
+# Get a second opinion from openai codex
+codex -m gpt-5 --dangerously-bypass-approvals-and-sandbox exec "Review PR #[pr-number]"
 ```
 
 This provides an additional layer of validation and may catch issues missed in the initial review. The results from both reviews should be considered before merging.

@@ -46,7 +46,7 @@ export class UserService {
 
     // Hash the password securely before storing
     const passwordHash = await hashPassword(userData.password);
-    
+
     // Remove plain password and add hash
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { password, ...userDataWithoutPassword } = userData;
@@ -96,7 +96,7 @@ export class UserService {
 
   /**
    * Authenticate user by email and password
-   * 
+   *
    * Example usage of password comparison service
    */
   async authenticateUser(email: string, password: string): Promise<User> {

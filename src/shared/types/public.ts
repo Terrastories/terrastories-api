@@ -104,8 +104,8 @@ export type PublicPlace = z.infer<typeof PublicPlaceSchema>;
  * Transform internal story model to public DTO
  * Filters out sensitive fields and ensures only safe data is exposed
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function toPublicStory(story: any): PublicStory {
-  // eslint-disable-line @typescript-eslint/no-explicit-any
   return {
     id: Number(story.id),
     title: String(story.title || ''),
@@ -129,8 +129,8 @@ export function toPublicStory(story: any): PublicStory {
  * Transform internal place model to public DTO
  * Filters out sensitive fields and ensures only safe geographic data is exposed
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function toPublicPlace(place: any): PublicPlace {
-  // eslint-disable-line @typescript-eslint/no-explicit-any
   return {
     id: Number(place.id),
     name: String(place.name || ''),

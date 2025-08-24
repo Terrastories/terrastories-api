@@ -66,15 +66,6 @@ export async function memberRoutes(
   const placeService = new PlaceService(placeRepository);
   const speakerService = new SpeakerService(speakerRepository);
 
-  // Add rate limiting for all member routes
-  app.addHook(
-    'preHandler',
-    app.rateLimit({
-      max: 100, // 100 requests per minute for member dashboard
-      timeWindow: '1 minute',
-    })
-  );
-
   // Helper function to get authenticated user
   const getAuthenticatedUser = (request: FastifyRequest) => {
     const user = (request as AuthenticatedRequest).user;
@@ -128,6 +119,12 @@ export async function memberRoutes(
 
   // GET /api/v1/member/stories - List user's community stories
   app.get('/stories', {
+    config: {
+      rateLimit: {
+        max: 100, // 100 requests per minute for member dashboard
+        timeWindow: 60 * 1000, // 1 minute in milliseconds
+      },
+    },
     schema: {
       description: "List stories in member's community",
       tags: ['Member Stories'],
@@ -212,6 +209,12 @@ export async function memberRoutes(
 
   // GET /api/v1/member/stories/:id - Get specific story
   app.get('/stories/:id', {
+    config: {
+      rateLimit: {
+        max: 100, // 100 requests per minute for member dashboard
+        timeWindow: 60 * 1000, // 1 minute in milliseconds
+      },
+    },
     schema: {
       description: 'Get specific story by ID',
       tags: ['Member Stories'],
@@ -266,6 +269,12 @@ export async function memberRoutes(
 
   // GET /api/v1/member/places - List user's community places
   app.get('/places', {
+    config: {
+      rateLimit: {
+        max: 100, // 100 requests per minute for member dashboard
+        timeWindow: 60 * 1000, // 1 minute in milliseconds
+      },
+    },
     schema: {
       description: "List places in member's community",
       tags: ['Member Places'],
@@ -342,6 +351,12 @@ export async function memberRoutes(
 
   // GET /api/v1/member/speakers - List user's community speakers
   app.get('/speakers', {
+    config: {
+      rateLimit: {
+        max: 100, // 100 requests per minute for member dashboard
+        timeWindow: 60 * 1000, // 1 minute in milliseconds
+      },
+    },
     schema: {
       description: "List speakers in member's community",
       tags: ['Member Speakers'],

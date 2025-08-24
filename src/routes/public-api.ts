@@ -24,6 +24,12 @@ import { CommunityRepository } from '../repositories/community.repository.js';
 import { FileRepository } from '../repositories/file.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { getDb } from '../db/index.js';
+import {
+  toPublicStory,
+  toPublicPlace,
+  CommunityIdParamSchema,
+  PaginationQuerySchema,
+} from '../shared/types/public.js';
 
 // Note: Request validation schemas removed as they're not currently used
 // in favor of simple parameter validation within route handlers
@@ -80,18 +86,14 @@ export async function publicApiRoutes(
       preHandler: validateCommunity,
     },
     async (request, reply) => {
-      const { community_id } = request.params;
-      const page = parseInt(request.query.page || '1', 10);
-      const limit = parseInt(request.query.limit || '20', 10);
-
-      // Validate pagination parameters
-      if (page < 1 || limit < 1 || limit > 100) {
-        return reply.status(400).send({
-          error: 'Invalid pagination parameters',
-        });
-      }
-
       try {
+        // Validate parameters with Zod
+        const params = CommunityIdParamSchema.parse(request.params);
+        const query = PaginationQuerySchema.parse(request.query);
+
+        const { community_id } = params;
+        const page = parseInt(query.page, 10);
+        const limit = parseInt(query.limit, 10);
         const storyRepository = new StoryRepository(database);
         const fileRepository = new FileRepository(database);
         const userRepository = new UserRepository(database);
@@ -112,18 +114,26 @@ export async function publicApiRoutes(
         );
 
         return {
-          data: result.stories,
+          data: result.stories.map(toPublicStory),
           meta: {
             pagination: {
               page,
               limit,
               total: result.total,
               totalPages: Math.ceil(result.total / limit),
+              hasNextPage: page < Math.ceil(result.total / limit),
+              hasPrevPage: page > 1,
             },
           },
         };
       } catch (error) {
         console.error('Public stories listing error:', error);
+        // Handle validation errors
+        if (error instanceof Error && error.message.includes('Invalid')) {
+          return reply.status(400).send({
+            error: error.message,
+          });
+        }
         return reply.status(500).send({
           error: 'Internal server error',
         });
@@ -163,7 +173,7 @@ export async function publicApiRoutes(
         }
 
         return {
-          data: story,
+          data: toPublicStory(story),
         };
       } catch (error) {
         console.error('Public story retrieval error:', error);
@@ -210,13 +220,15 @@ export async function publicApiRoutes(
         );
 
         return {
-          data: result.data,
+          data: result.data.map(toPublicPlace),
           meta: {
             pagination: {
               page: result.page,
               limit: result.limit,
               total: result.total,
               totalPages: result.pages,
+              hasNextPage: result.page < result.pages,
+              hasPrevPage: result.page > 1,
             },
           },
         };
@@ -253,7 +265,7 @@ export async function publicApiRoutes(
           );
 
           return {
-            data: place,
+            data: toPublicPlace(place),
           };
         } catch (placeError: unknown) {
           // Handle specific place service errors

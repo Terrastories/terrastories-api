@@ -962,10 +962,10 @@ export class StoryService {
         total: result.total, // Use actual total from repository
       };
     } catch (error) {
-      this.logger.error(
-        'Failed to get public stories by community:',
-        error instanceof Error ? error : new Error(String(error))
-      );
+      this.logger.error('Failed to get public stories by community:', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       throw new Error('Failed to retrieve public stories');
     }
   }
@@ -1023,10 +1023,10 @@ export class StoryService {
 
       return story;
     } catch (error) {
-      this.logger.error(
-        'Failed to get public story by ID:',
-        error instanceof Error ? error : new Error(String(error))
-      );
+      this.logger.error('Failed to get public story by ID:', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       throw new Error('Failed to retrieve public story');
     }
   }

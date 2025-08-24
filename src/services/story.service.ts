@@ -920,6 +920,116 @@ export class StoryService {
     // Log to appropriate audit system for Indigenous community oversight
     this.logger.info('[CULTURAL_ACCESS_AUDIT]', logEntry);
   }
+
+  /**
+   * Get public stories for a community (for public API)
+   * Filters out private and elder-restricted content
+   */
+  async getPublicStoriesByCommunity(
+    communityId: string,
+    options: { page: number; limit: number }
+  ): Promise<{ stories: StoryWithRelations[]; total: number }> {
+    try {
+      // Get stories that are public and belong to the community
+      const result = await this.storyRepository.findMany(
+        {
+          communityId: parseInt(communityId, 10),
+          // Only public stories for the public API
+          isRestricted: false,
+        },
+        {
+          page: options.page,
+          limit: options.limit,
+        }
+      );
+
+      // For the public API, we'll use all non-restricted stories
+      // since isRestricted: false already filters out elder-only content
+      const publicStories = result.data;
+
+      // Log public access for audit purposes
+      this.logger.info('[PUBLIC_API_ACCESS]', {
+        timestamp: new Date().toISOString(),
+        operation: 'list_public_stories',
+        communityId: parseInt(communityId, 10),
+        storiesReturned: publicStories.length,
+        page: options.page,
+        limit: options.limit,
+      });
+
+      return {
+        stories: publicStories,
+        total: result.total, // Use actual total from repository
+      };
+    } catch (error) {
+      this.logger.error(
+        'Failed to get public stories by community:',
+        error instanceof Error ? error : new Error(String(error))
+      );
+      throw new Error('Failed to retrieve public stories');
+    }
+  }
+
+  /**
+   * Get a specific public story by ID with community validation
+   * Ensures story is public and belongs to the specified community
+   */
+  async getPublicStoryById(
+    storyId: string,
+    communityId: string
+  ): Promise<StoryWithRelations | null> {
+    try {
+      // Get the story with relations for public API
+      const story = await this.storyRepository.findByIdWithRelations(
+        parseInt(storyId, 10)
+      );
+
+      if (!story) {
+        return null;
+      }
+
+      // Verify story belongs to the community
+      if (story.communityId !== parseInt(communityId, 10)) {
+        this.logger.warn('[PUBLIC_API_ACCESS_DENIED]', {
+          timestamp: new Date().toISOString(),
+          reason: 'Story does not belong to specified community',
+          storyId: parseInt(storyId, 10),
+          storyCommunityId: story.communityId,
+          requestedCommunityId: parseInt(communityId, 10),
+        });
+        return null;
+      }
+
+      // Check if story is public (not restricted)
+      if (story.isRestricted) {
+        this.logger.warn('[PUBLIC_API_ACCESS_DENIED]', {
+          timestamp: new Date().toISOString(),
+          reason: 'Story has cultural restrictions and is not public',
+          storyId: parseInt(storyId, 10),
+          isRestricted: story.isRestricted,
+          communityId: parseInt(communityId, 10),
+        });
+        return null;
+      }
+
+      // Log successful public access
+      this.logger.info('[PUBLIC_API_ACCESS]', {
+        timestamp: new Date().toISOString(),
+        operation: 'get_public_story',
+        storyId: parseInt(storyId, 10),
+        storyTitle: story.title,
+        communityId: parseInt(communityId, 10),
+      });
+
+      return story;
+    } catch (error) {
+      this.logger.error(
+        'Failed to get public story by ID:',
+        error instanceof Error ? error : new Error(String(error))
+      );
+      throw new Error('Failed to retrieve public story');
+    }
+  }
 }
 
 // Export types for external use

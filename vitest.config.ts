@@ -64,7 +64,8 @@ export default defineConfig({
     },
 
     // Reporter configuration
-    reporter: ['verbose'],
+    reporter: process.env.CI ? ['verbose', 'junit'] : ['verbose'],
+    outputFile: process.env.CI ? { junit: './test-report.junit.xml' } : undefined,
 
     // Performance monitoring
     logHeapUsage: true,

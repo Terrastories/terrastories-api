@@ -6,6 +6,7 @@ import { communityRoutes } from './communities.js';
 import storiesRoutes from './stories.js';
 import { placesRoutes } from './places.js';
 import { speakerRoutes } from './speakers.js';
+import { publicApiRoutes } from './public-api.js';
 
 export interface RegisterRoutesOptions {
   database?: unknown;
@@ -16,6 +17,11 @@ export async function registerRoutes(
   options?: RegisterRoutesOptions
 ) {
   await app.register(healthRoute);
+
+  // Public API routes (no authentication required)
+  await app.register(publicApiRoutes, { prefix: '/api', ...options });
+
+  // Authenticated API routes
   await app.register(authRoutes, { prefix: '/api/v1', ...options });
   await app.register(communityRoutes, { prefix: '/api/v1', ...options });
   await app.register(fileRoutes, { prefix: '/api/v1', ...options });

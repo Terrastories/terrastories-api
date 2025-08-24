@@ -1,34 +1,37 @@
 
 # Comprehensive Pull Request Review Command
 
-description = "Perform a comprehensive pull request review, analyzing changes, aggregating feedback, and identifying fixes."
+description = "Perform a comprehensive pull request review, aggregate multi-source feedback, run local checks, and post a structured review comment."
 
 prompt = """
 You are a senior software engineer tasked with reviewing pull request {{args}}.
 
-Your goal is to provide a thorough, constructive, and actionable review.
+Your goal is to provide a thorough, constructive, and actionable review that aligns with the repository's PR Review Guidelines. You MUST post a comment to the GitHub PR with your review for completion.
 
-🚨 **MANDATORY REQUIREMENT**: You MUST post a comment to the GitHub PR with your review. The review is only complete when you have successfully posted a comment using the gh CLI commands provided below.
+— Step 1: Information Gathering
+Use the following to collect full PR context (substitute {{args}} with PR number or URL):
+- PR metadata: `!{gh pr view {{args}} --json title,body,author,files,additions,deletions,commits}`
+- Files changed list: `!{gh pr view {{args}} --json files --jq '.files[].path'}`
+- Full diff (for detailed inline review): `!{gh pr diff {{args}}}`
+- Comments and review threads: `!{gh pr view {{args}} --json comments,reviews}`
+- CI/CD status: `!{gh pr checks {{args}}}`
 
-**Step 1: Information Gathering**
-First, use the available tools to gather all context about PR {{args}}:
-1. Fetch the PR title, description, and author using: `!{gh pr view {{args}} --json title,body,author}`
-2. Get the full diff of the code changes: `!{gh pr diff {{args}}}`
-3. Retrieve all existing comments and review threads: `!{gh pr view {{args}} --json comments,reviews}`
-4. Check the status of all CI/CD jobs: `!{gh pr checks {{args}}}`
+— Step 2: Local Automated Checks
+If this repository contains a Node/TypeScript project (package.json present), run:
+- Lint + types + tests: `!{npm run validate || true}`
+- Coverage (80% min): `!{npm run test:coverage || true}`
+- Build verification: `!{npm run build || true}`
+- Security scan: `!{npm audit --audit-level moderate || true}`
+Include summarized outcomes and any failures in the review.
 
-**Step 2: Analysis & Categorization**
-Analyze all the information you've gathered. Categorize your findings into the following sections. For each point, include the file path and line number.
+— Step 3: Analysis & Categorization
+Analyze the diff, discussions, and checks. For each finding, include file path and line number when possible. Categorize into:
+- 🔴 Blocking Issues — security risks, breaking changes, failing tests, type errors, major architectural violations.
+- 🟡 Important Issues — performance concerns, error handling gaps, missing docs, accessibility issues, significant code quality problems.
+- 🔵 Suggestions — naming, refactors, style, small optimizations, clarity improvements.
 
-• 🔴 **Blocking Issues**: Critical problems that MUST be fixed before merging.
-  - Examples: Security flaws, breaking changes, failing tests, major bugs.
-• 🟡 **Important Issues**: Significant problems that SHOULD be fixed.
-  - Examples: Performance concerns, poor error handling, documentation gaps, accessibility issues.
-• 🔵 **Suggestions & Nitpicks**: Minor improvements to consider.
-  - Examples: Code style, refactoring opportunities, naming conventions, comment clarity.
-
-**Step 3: Generate Review Summary**
-Produce a clear, well-structured review summary in Markdown. Use this template:
+— Step 4: Review Summary Template
+Produce a review in the following Markdown format:
 
 ---
 ## 📊 PR Review for #{{args}}
@@ -36,53 +39,40 @@ Produce a clear, well-structured review summary in Markdown. Use this template:
 **Status:** [NEEDS WORK | READY FOR REVIEW | APPROVED]
 
 ### Summary
-A brief, one-sentence summary of the review.
+Concise assessment of scope, quality, and risk.
 
 ### 🔴 Blocking Issues
-- `path/to/file.ts:42`: [Description of the issue and why it's blocking.]
+- `path/to/file.ts:42`: [Critical issue with specific fix needed]
 
 ### 🟡 Important Issues
-- `path/to/another/file.js:12`: [Description of the issue and suggested fix.]
+- `path/to/another.ts:15`: [Important issue with suggested improvement]
 
 ### 🔵 Suggestions
-- `path/to/component.tsx:25`: [Suggestion for improvement.]
+- `path/to/component.tsx:28`: [Enhancement suggestion]
 
 ### ✅ Positive Feedback
-- [Highlight what was done well.]
+- [What was implemented well]
 
+### 📋 Checklist
+- [ ] All tests passing
+- [ ] TypeScript compilation clean
+- [ ] Linting issues resolved
+- [ ] Security scan clean
+- [ ] Documentation updated
+- [ ] Breaking changes documented
 ---
 
-**Step 4: Post the Review to GitHub (MANDATORY)**
-🚨 **CRITICAL: YOU MUST POST A COMMENT TO THE PR** 🚨
+Status guidance:
+- Use NEEDS WORK if any 🔴 Blocking remains or CI fails.
+- Use READY FOR REVIEW if no blockers and only 🟡/🔵 remain.
+- Use APPROVED only when all checks are green and issues are addressed.
 
-You are REQUIRED to post your review as a comment on the GitHub pull request. This is not optional.
+— Step 5: Post the Review to GitHub (MANDATORY)
+You are REQUIRED to post your review as a PR comment.
+1) Save the review content to a file `review-summary.md`.
+2) Post the comment: `!{gh pr comment {{args}} --body-file review-summary.md}`
+3) Verify posting: `!{gh pr view {{args}} --json comments --jq '.comments[-1].body' | head -20}`
+4) Clean up: `!{rm -f review-summary.md}`
 
-1. Create your complete review summary using the template above
-2. Post the review comment using: `!{gh pr comment {{args}} --body "$(cat <<'EOF'
-## 📊 PR Review for #{{args}}
-
-**Status:** [Your assessment]
-
-### Summary
-[Your summary here]
-
-### 🔴 Blocking Issues
-[List any blocking issues with file:line references]
-
-### 🟡 Important Issues
-[List important issues that should be addressed]
-
-### 🔵 Suggestions
-[List suggestions for improvement]
-
-### ✅ Positive Feedback
-[Highlight what was done well]
-
----
-*Review completed by Gemini CLI*
-EOF
-)"}`
-3. Verify the comment was posted: `!{gh pr view {{args}} --json comments --jq '.comments[-1].body' | head -20}`
-
-**Failure to post a comment means the review is incomplete and unsuccessful.**
+Note: Failure to post a comment means the review is incomplete and unsuccessful.
 """

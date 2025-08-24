@@ -18,7 +18,11 @@ import type {
   PaginationOptions,
 } from '../../src/repositories/story.repository.js';
 import type { Database } from '../../src/db/index.js';
-import { setupTestDb, cleanupTestDb, createTestData } from '../helpers/database.js';
+import {
+  setupTestDb,
+  cleanupTestDb,
+  createTestData,
+} from '../helpers/database.js';
 
 describe('StoryRepository', () => {
   let storyRepository: StoryRepository;
@@ -79,10 +83,14 @@ describe('StoryRepository', () => {
       expect(result.updatedAt).toBeDefined();
 
       // Verify associations were created
-      const storyWithRelations = await storyRepository.findByIdWithRelations(result.id);
+      const storyWithRelations = await storyRepository.findByIdWithRelations(
+        result.id
+      );
       expect(storyWithRelations?.places).toHaveLength(2);
       expect(storyWithRelations?.speakers).toHaveLength(1);
-      expect(storyWithRelations?.places[0].culturalContext).toBe('Sacred origin site');
+      expect(storyWithRelations?.places[0].culturalContext).toBe(
+        'Sacred origin site'
+      );
       expect(storyWithRelations?.speakers[0].culturalRole).toBe('narrator');
     });
 
@@ -112,7 +120,7 @@ describe('StoryRepository', () => {
 
       // Act - Create first story
       const firstStory = await storyRepository.create(baseStoryData);
-      
+
       // Act - Create second story with same title
       const secondStory = await storyRepository.create(baseStoryData);
 
@@ -196,7 +204,9 @@ describe('StoryRepository', () => {
       });
 
       // Act
-      const result = await storyRepository.findByIdWithRelations(storyWithoutAssociations.id);
+      const result = await storyRepository.findByIdWithRelations(
+        storyWithoutAssociations.id
+      );
 
       // Assert
       expect(result).toBeDefined();
@@ -293,7 +303,9 @@ describe('StoryRepository', () => {
         createdAt: testStory.createdAt,
         ...updates,
       });
-      expect(result.updatedAt.getTime()).toBeGreaterThan(testStory.updatedAt.getTime());
+      expect(result.updatedAt.getTime()).toBeGreaterThan(
+        testStory.updatedAt.getTime()
+      );
     });
 
     it('should update associations', async () => {
@@ -307,7 +319,9 @@ describe('StoryRepository', () => {
       await storyRepository.update(testStory.id, updates);
 
       // Assert
-      const updatedStory = await storyRepository.findByIdWithRelations(testStory.id);
+      const updatedStory = await storyRepository.findByIdWithRelations(
+        testStory.id
+      );
       expect(updatedStory!.places).toHaveLength(1);
       expect(updatedStory!.places[0].id).toBe(testData.places[1].id);
       expect(updatedStory!.speakers).toHaveLength(1);
@@ -325,7 +339,9 @@ describe('StoryRepository', () => {
       await storyRepository.update(testStory.id, updates);
 
       // Assert
-      const updatedStory = await storyRepository.findByIdWithRelations(testStory.id);
+      const updatedStory = await storyRepository.findByIdWithRelations(
+        testStory.id
+      );
       expect(updatedStory!.places).toHaveLength(0);
       expect(updatedStory!.speakers).toHaveLength(0);
     });
@@ -442,7 +458,7 @@ describe('StoryRepository', () => {
 
       // Assert
       expect(result.data.length).toBeGreaterThan(0);
-      result.data.forEach(story => {
+      result.data.forEach((story) => {
         expect(story.communityId).toBe(testData.community.id);
       });
     });
@@ -460,7 +476,7 @@ describe('StoryRepository', () => {
 
       // Assert
       expect(result.data.length).toBeGreaterThan(0);
-      result.data.forEach(story => {
+      result.data.forEach((story) => {
         expect(story.isRestricted).toBe(false);
       });
     });
@@ -528,7 +544,7 @@ describe('StoryRepository', () => {
       // Assert
       // Results should be sorted by creation date (newest first) by default
       for (let i = 1; i < result.data.length; i++) {
-        expect(result.data[i-1].createdAt.getTime()).toBeGreaterThanOrEqual(
+        expect(result.data[i - 1].createdAt.getTime()).toBeGreaterThanOrEqual(
           result.data[i].createdAt.getTime()
         );
       }
@@ -561,10 +577,14 @@ describe('StoryRepository', () => {
 
     it('should truncate long titles', async () => {
       // Arrange
-      const longTitle = 'This is a very long title that should be truncated to a reasonable length for URL use and database storage';
+      const longTitle =
+        'This is a very long title that should be truncated to a reasonable length for URL use and database storage';
 
       // Act
-      const slug = await storyRepository.generateUniqueSlug(longTitle, testData.community.id);
+      const slug = await storyRepository.generateUniqueSlug(
+        longTitle,
+        testData.community.id
+      );
 
       // Assert
       expect(slug.length).toBeLessThanOrEqual(50);
@@ -603,7 +623,7 @@ describe('StoryRepository', () => {
       }));
 
       await Promise.all(
-        manyStories.map(story => storyRepository.create(story))
+        manyStories.map((story) => storyRepository.create(story))
       );
 
       const startTime = Date.now();

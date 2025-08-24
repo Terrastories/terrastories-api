@@ -12,7 +12,12 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import { testDb } from '../helpers/database.js';
-import { UserService, DuplicateEmailError, WeakPasswordError, InvalidCommunityError } from '../../src/services/user.service.js';
+import {
+  UserService,
+  DuplicateEmailError,
+  WeakPasswordError,
+  InvalidCommunityError,
+} from '../../src/services/user.service.js';
 import { UserRepository } from '../../src/repositories/user.repository.js';
 import * as passwordService from '../../src/services/password.service.js';
 import type { CreateUserRequest } from '../../src/services/user.service.js';
@@ -31,7 +36,9 @@ describe('User Service', () => {
   let otherCommunityId: number;
 
   const mockHashPassword = vi.mocked(passwordService.hashPassword);
-  const mockValidatePasswordStrength = vi.mocked(passwordService.validatePasswordStrength);
+  const mockValidatePasswordStrength = vi.mocked(
+    passwordService.validatePasswordStrength
+  );
   const mockComparePassword = vi.mocked(passwordService.comparePassword);
 
   beforeEach(async () => {
@@ -49,8 +56,9 @@ describe('User Service', () => {
     vi.clearAllMocks();
 
     // Setup default mock behaviors
-    mockHashPassword.mockImplementation(async (password: string) => 
-      `$argon2id$v=19$m=65536,t=3,p=4$hashed_${password}`
+    mockHashPassword.mockImplementation(
+      async (password: string) =>
+        `$argon2id$v=19$m=65536,t=3,p=4$hashed_${password}`
     );
 
     mockValidatePasswordStrength.mockReturnValue({
@@ -88,10 +96,14 @@ describe('User Service', () => {
       expect(registeredUser.role).toBe(registrationData.role);
       expect(registeredUser.communityId).toBe(testCommunityId);
       expect(registeredUser.isActive).toBe(true);
-      expect(registeredUser.passwordHash).toBe(`$argon2id$v=19$m=65536,t=3,p=4$hashed_${registrationData.password}`);
+      expect(registeredUser.passwordHash).toBe(
+        `$argon2id$v=19$m=65536,t=3,p=4$hashed_${registrationData.password}`
+      );
 
       // Verify password strength was validated
-      expect(mockValidatePasswordStrength).toHaveBeenCalledWith(registrationData.password);
+      expect(mockValidatePasswordStrength).toHaveBeenCalledWith(
+        registrationData.password
+      );
 
       // Verify password was hashed
       expect(mockHashPassword).toHaveBeenCalledWith(registrationData.password);
@@ -111,7 +123,9 @@ describe('User Service', () => {
       await userService.registerUser(registrationData);
 
       // Attempt to register duplicate user
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(DuplicateEmailError);
+      await expect(userService.registerUser(registrationData)).rejects.toThrow(
+        DuplicateEmailError
+      );
       await expect(userService.registerUser(registrationData)).rejects.toThrow(
         'User with this email already exists in this community'
       );
@@ -151,7 +165,10 @@ describe('User Service', () => {
       // Mock weak password validation
       mockValidatePasswordStrength.mockReturnValue({
         isValid: false,
-        errors: ['Password must be at least 8 characters long', 'Password must contain uppercase letters'],
+        errors: [
+          'Password must be at least 8 characters long',
+          'Password must contain uppercase letters',
+        ],
         score: 1,
       });
 
@@ -164,7 +181,9 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(WeakPasswordError);
+      await expect(userService.registerUser(registrationData)).rejects.toThrow(
+        WeakPasswordError
+      );
       await expect(userService.registerUser(registrationData)).rejects.toThrow(
         'Password requirements not met: Password must be at least 8 characters long, Password must contain uppercase letters'
       );
@@ -183,7 +202,9 @@ describe('User Service', () => {
         communityId: 999999, // Non-existent community
       };
 
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(InvalidCommunityError);
+      await expect(userService.registerUser(registrationData)).rejects.toThrow(
+        InvalidCommunityError
+      );
       await expect(userService.registerUser(registrationData)).rejects.toThrow(
         'Invalid community ID'
       );
@@ -205,7 +226,9 @@ describe('User Service', () => {
     });
 
     test('should handle password hashing service errors', async () => {
-      mockHashPassword.mockRejectedValue(new Error('Hashing service unavailable'));
+      mockHashPassword.mockRejectedValue(
+        new Error('Hashing service unavailable')
+      );
 
       const registrationData: CreateUserRequest = {
         email: 'test@example.com',
@@ -216,7 +239,9 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      await expect(userService.registerUser(registrationData)).rejects.toThrow('Failed to register user: Hashing service unavailable');
+      await expect(userService.registerUser(registrationData)).rejects.toThrow(
+        'Failed to register user: Hashing service unavailable'
+      );
     });
 
     test('should validate email format', async () => {
@@ -229,7 +254,9 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      await expect(userService.registerUser(registrationData)).rejects.toThrow('Invalid email format');
+      await expect(userService.registerUser(registrationData)).rejects.toThrow(
+        'Invalid email format'
+      );
     });
 
     test('should validate required fields', async () => {
@@ -270,7 +297,10 @@ describe('User Service', () => {
       };
 
       const registeredUser = await userService.registerUser(registrationData);
-      const foundUser = await userService.getUserById(registeredUser.id, testCommunityId);
+      const foundUser = await userService.getUserById(
+        registeredUser.id,
+        testCommunityId
+      );
 
       expect(foundUser).toBeDefined();
       expect(foundUser.id).toBe(registeredUser.id);
@@ -291,13 +321,15 @@ describe('User Service', () => {
       const registeredUser = await userService.registerUser(registrationData);
 
       // Try to find user in different community
-      await expect(userService.getUserById(registeredUser.id, otherCommunityId)).rejects.toThrow(
-        'User not found'
-      );
+      await expect(
+        userService.getUserById(registeredUser.id, otherCommunityId)
+      ).rejects.toThrow('User not found');
     });
 
     test('should throw error for non-existent user ID', async () => {
-      await expect(userService.getUserById(999999, testCommunityId)).rejects.toThrow('User not found');
+      await expect(
+        userService.getUserById(999999, testCommunityId)
+      ).rejects.toThrow('User not found');
     });
   });
 
@@ -320,7 +352,11 @@ describe('User Service', () => {
         role: 'editor' as const,
       };
 
-      const updatedUser = await userService.updateUser(registeredUser.id, updates, testCommunityId);
+      const updatedUser = await userService.updateUser(
+        registeredUser.id,
+        updates,
+        testCommunityId
+      );
 
       expect(updatedUser.firstName).toBe(updates.firstName);
       expect(updatedUser.lastName).toBe(updates.lastName);
@@ -343,9 +379,9 @@ describe('User Service', () => {
       const updates = { firstName: 'Should Not Update' };
 
       // Try to update user from different community
-      await expect(userService.updateUser(registeredUser.id, updates, otherCommunityId)).rejects.toThrow(
-        'User not found'
-      );
+      await expect(
+        userService.updateUser(registeredUser.id, updates, otherCommunityId)
+      ).rejects.toThrow('User not found');
     });
 
     test('should throw DuplicateEmailError when updating to existing email', async () => {
@@ -372,8 +408,13 @@ describe('User Service', () => {
       await userService.registerUser(user2Data);
 
       // Try to update user1's email to user2's email
-      await expect(userService.updateUser(user1.id, { email: 'user2@example.com' }, testCommunityId))
-        .rejects.toThrow(DuplicateEmailError);
+      await expect(
+        userService.updateUser(
+          user1.id,
+          { email: 'user2@example.com' },
+          testCommunityId
+        )
+      ).rejects.toThrow(DuplicateEmailError);
     });
   });
 
@@ -392,7 +433,9 @@ describe('User Service', () => {
       await userService.deleteUser(registeredUser.id, testCommunityId);
 
       // Verify user is deleted
-      await expect(userService.getUserById(registeredUser.id, testCommunityId)).rejects.toThrow('User not found');
+      await expect(
+        userService.getUserById(registeredUser.id, testCommunityId)
+      ).rejects.toThrow('User not found');
     });
 
     test('should throw error when deleting user from wrong community', async () => {
@@ -408,10 +451,15 @@ describe('User Service', () => {
       const registeredUser = await userService.registerUser(registrationData);
 
       // Try to delete from different community
-      await expect(userService.deleteUser(registeredUser.id, otherCommunityId)).rejects.toThrow('User not found');
+      await expect(
+        userService.deleteUser(registeredUser.id, otherCommunityId)
+      ).rejects.toThrow('User not found');
 
       // Verify user still exists
-      const foundUser = await userService.getUserById(registeredUser.id, testCommunityId);
+      const foundUser = await userService.getUserById(
+        registeredUser.id,
+        testCommunityId
+      );
       expect(foundUser).toBeDefined();
     });
   });
@@ -457,11 +505,13 @@ describe('User Service', () => {
       // Configure mock to return false for wrong password
       mockComparePassword.mockResolvedValue(false);
 
-      await expect(userService.authenticateUser(
-        registrationData.email,
-        'wrongpassword',
-        testCommunityId
-      )).rejects.toThrow('Invalid email or password');
+      await expect(
+        userService.authenticateUser(
+          registrationData.email,
+          'wrongpassword',
+          testCommunityId
+        )
+      ).rejects.toThrow('Invalid email or password');
     });
   });
 
@@ -490,19 +540,43 @@ describe('User Service', () => {
       const user2 = await userService.registerUser(user2Data);
 
       // Verify getUserById respects community isolation
-      expect(await userService.getUserById(user1.id, testCommunityId)).toBeDefined();
-      await expect(userService.getUserById(user1.id, otherCommunityId)).rejects.toThrow();
+      expect(
+        await userService.getUserById(user1.id, testCommunityId)
+      ).toBeDefined();
+      await expect(
+        userService.getUserById(user1.id, otherCommunityId)
+      ).rejects.toThrow();
 
-      expect(await userService.getUserById(user2.id, otherCommunityId)).toBeDefined();
-      await expect(userService.getUserById(user2.id, testCommunityId)).rejects.toThrow();
+      expect(
+        await userService.getUserById(user2.id, otherCommunityId)
+      ).toBeDefined();
+      await expect(
+        userService.getUserById(user2.id, testCommunityId)
+      ).rejects.toThrow();
 
       // Verify update respects community isolation
-      await expect(userService.updateUser(user1.id, { firstName: 'Updated' }, otherCommunityId)).rejects.toThrow();
-      await expect(userService.updateUser(user2.id, { firstName: 'Updated' }, testCommunityId)).rejects.toThrow();
+      await expect(
+        userService.updateUser(
+          user1.id,
+          { firstName: 'Updated' },
+          otherCommunityId
+        )
+      ).rejects.toThrow();
+      await expect(
+        userService.updateUser(
+          user2.id,
+          { firstName: 'Updated' },
+          testCommunityId
+        )
+      ).rejects.toThrow();
 
       // Verify delete respects community isolation
-      await expect(userService.deleteUser(user1.id, otherCommunityId)).rejects.toThrow();
-      await expect(userService.deleteUser(user2.id, testCommunityId)).rejects.toThrow();
+      await expect(
+        userService.deleteUser(user1.id, otherCommunityId)
+      ).rejects.toThrow();
+      await expect(
+        userService.deleteUser(user2.id, testCommunityId)
+      ).rejects.toThrow();
     });
   });
 });

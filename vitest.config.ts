@@ -6,18 +6,18 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     setupFiles: ['./tests/setup.ts'],
-    
+
     // Test isolation and performance settings
     pool: 'forks', // Isolate database connections between tests
     testTimeout: 30000, // 30 seconds for integration tests
     hookTimeout: 30000, // 30 seconds for setup/teardown hooks
     teardownTimeout: 30000, // 30 seconds for cleanup
-    
+
     // Parallel execution settings
     maxConcurrency: 5, // Limit concurrent tests for database isolation
     minWorkers: 1,
     maxWorkers: 4,
-    
+
     // Test file patterns
     include: [
       'tests/**/*.{test,spec}.{js,ts}',
@@ -29,7 +29,7 @@ export default defineConfig({
       '**/*.d.ts',
       'src/db/migrations/',
     ],
-    
+
     // Coverage configuration with enforced thresholds
     coverage: {
       provider: 'v8',
@@ -45,7 +45,7 @@ export default defineConfig({
         'src/db/seed.ts', // Exclude seed files from coverage
         'src/server.ts', // Exclude server entry point
       ],
-      
+
       // Strict 80% coverage enforcement
       thresholds: {
         global: {
@@ -57,18 +57,18 @@ export default defineConfig({
         // Per-file thresholds to prevent single bad files
         perFile: true,
       },
-      
+
       // Fail build if coverage is below threshold
       skipFull: false,
       checkCoverage: true,
     },
-    
+
     // Reporter configuration
     reporter: ['verbose'],
-    
+
     // Performance monitoring
     logHeapUsage: true,
-    
+
     // Environment variables for testing
     env: {
       NODE_ENV: 'test',
@@ -76,7 +76,7 @@ export default defineConfig({
       LOG_LEVEL: 'warn', // Reduce noise in test output
     },
   },
-  
+
   // Path resolution
   resolve: {
     alias: {
@@ -84,7 +84,7 @@ export default defineConfig({
       '~tests': path.resolve(__dirname, './tests'),
     },
   },
-  
+
   // ESM configuration
   esbuild: {
     target: 'node18',

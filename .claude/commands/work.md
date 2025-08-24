@@ -621,12 +621,301 @@ class RefactorPhase {
 }
 ```
 
-## Phase 7: COMMIT
+## Phase 7: VALIDATION
+
+```typescript
+class ValidationPhase {
+  async execute(refactorResult: RefactorResult): Promise<ValidationResult> {
+    console.log('\n✅ Phase 7: Running comprehensive validation');
+
+    // Run the /validate-code command integration
+    console.log('  🔍 Executing validation suite...');
+
+    const validationResult = await this.runValidateCodeCommand();
+
+    if (!validationResult.success) {
+      console.log('  ❌ Validation failed - entering fix loop...');
+
+      // Enter iterative fix loop
+      let attempts = 0;
+      const maxAttempts = 5;
+
+      while (!validationResult.success && attempts < maxAttempts) {
+        attempts++;
+        console.log(`  🔧 Validation attempt ${attempts}/${maxAttempts}`);
+
+        // Fix issues automatically where possible
+        await this.attemptAutoFixes(validationResult.issues);
+
+        // Re-run validation
+        validationResult = await this.runValidateCodeCommand();
+      }
+
+      if (!validationResult.success) {
+        throw new Error(
+          `Validation failed after ${maxAttempts} attempts. Manual intervention required.`
+        );
+      }
+    }
+
+    // Update completion checklist memory
+    await this.updateCompletionChecklist(validationResult);
+
+    // Save checkpoint
+    await this.checkpoint.save('validate', validationResult);
+
+    console.log('  ✅ All validation checks passed');
+    console.log(`  📊 Quality score: ${validationResult.qualityScore}%`);
+
+    return validationResult;
+  }
+
+  private async runValidateCodeCommand(): Promise<ValidationResult> {
+    try {
+      // Simulate running /validate-code command
+      const typeCheckResult = await this.runCommand('npm run type-check');
+      const lintResult = await this.runCommand('npm run lint');
+      const testResult = await this.runCommand('npm test');
+      const buildResult = await this.runCommand('npm run build');
+
+      const allPassed =
+        typeCheckResult.success &&
+        lintResult.success &&
+        testResult.success &&
+        buildResult.success;
+
+      return {
+        success: allPassed,
+        timestamp: new Date().toISOString(),
+        checks: {
+          typeCheck: typeCheckResult,
+          lint: lintResult,
+          tests: testResult,
+          build: buildResult,
+        },
+        qualityScore: this.calculateQualityScore({
+          typeCheck: typeCheckResult,
+          lint: lintResult,
+          tests: testResult,
+          build: buildResult,
+        }),
+        issues: allPassed
+          ? []
+          : this.extractIssues({
+              typeCheck: typeCheckResult,
+              lint: lintResult,
+              tests: testResult,
+              build: buildResult,
+            }),
+      };
+    } catch (error) {
+      console.error('Validation command failed:', error);
+      throw new Error(`Validation execution failed: ${error.message}`);
+    }
+  }
+
+  private async attemptAutoFixes(issues: ValidationIssue[]): Promise<void> {
+    for (const issue of issues) {
+      console.log(
+        `    🔧 Attempting to fix: ${issue.category} - ${issue.description}`
+      );
+
+      switch (issue.category) {
+        case 'lint':
+          // Try auto-fixing linting issues
+          await this.runCommand('npm run lint -- --fix');
+          break;
+
+        case 'format':
+          // Try auto-formatting
+          await this.runCommand('npm run format');
+          break;
+
+        case 'typeCheck':
+          // Log type errors for manual intervention
+          console.log(
+            `    ⚠️ TypeScript error requires manual fix: ${issue.description}`
+          );
+          break;
+
+        case 'tests':
+          // Log test failures for manual intervention
+          console.log(
+            `    ⚠️ Test failure requires manual fix: ${issue.description}`
+          );
+          break;
+
+        default:
+          console.log(`    ⚠️ Unknown issue type: ${issue.category}`);
+      }
+    }
+  }
+
+  private async updateCompletionChecklist(
+    result: ValidationResult
+  ): Promise<void> {
+    const checklistUpdate = {
+      timestamp: result.timestamp,
+      validation: {
+        typeCheck: {
+          status: result.checks.typeCheck.success ? 'passed' : 'failed',
+          errors: result.checks.typeCheck.errors || 0,
+          warnings: result.checks.typeCheck.warnings || 0,
+          details: result.checks.typeCheck.output || 'No details available',
+        },
+        lint: {
+          status: result.checks.lint.success ? 'passed' : 'failed',
+          errors: result.checks.lint.errors || 0,
+          warnings: result.checks.lint.warnings || 0,
+          details: result.checks.lint.output || 'No details available',
+        },
+        tests: {
+          status: result.checks.tests.success ? 'passed' : 'failed',
+          total: result.checks.tests.total || 0,
+          passed: result.checks.tests.passed || 0,
+          failed: result.checks.tests.failed || 0,
+          coverage: result.checks.tests.coverage || {},
+          details: result.checks.tests.output || 'No details available',
+        },
+        build: {
+          status: result.checks.build.success ? 'passed' : 'failed',
+          errors: result.checks.build.errors || 0,
+          warnings: result.checks.build.warnings || 0,
+          details: result.checks.build.output || 'No details available',
+        },
+      },
+      readyForReview: result.success,
+      qualityScore: result.qualityScore,
+    };
+
+    // Write to completion checklist memory
+    const memoryPath = '.claude/memories/completion_checklist.md';
+    const currentContent = await this.readFile(memoryPath);
+    const updatedContent = this.updateMemoryContent(
+      currentContent,
+      checklistUpdate
+    );
+    await this.writeFile(memoryPath, updatedContent);
+
+    console.log('  📝 Updated completion checklist memory');
+  }
+
+  private calculateQualityScore(checks: any): number {
+    let score = 0;
+    let maxScore = 400; // 100 points per check
+
+    // TypeScript check (100 points)
+    score += checks.typeCheck.success
+      ? 100
+      : Math.max(0, 100 - (checks.typeCheck.errors || 0) * 10);
+
+    // Lint check (100 points)
+    score += checks.lint.success
+      ? 100
+      : Math.max(0, 100 - (checks.lint.errors || 0) * 5);
+
+    // Tests check (100 points)
+    score += checks.tests.success
+      ? 100
+      : Math.max(
+          0,
+          ((checks.tests.passed || 0) / (checks.tests.total || 1)) * 100
+        );
+
+    // Build check (100 points)
+    score += checks.build.success
+      ? 100
+      : Math.max(0, 100 - (checks.build.errors || 0) * 20);
+
+    return Math.round((score / maxScore) * 100);
+  }
+
+  private extractIssues(checks: any): ValidationIssue[] {
+    const issues: ValidationIssue[] = [];
+
+    if (!checks.typeCheck.success) {
+      issues.push({
+        category: 'typeCheck',
+        severity: 'high',
+        description: 'TypeScript compilation errors detected',
+        file: 'multiple',
+        details: checks.typeCheck.output,
+      });
+    }
+
+    if (!checks.lint.success) {
+      issues.push({
+        category: 'lint',
+        severity: 'medium',
+        description: 'ESLint rule violations detected',
+        file: 'multiple',
+        details: checks.lint.output,
+      });
+    }
+
+    if (!checks.tests.success) {
+      issues.push({
+        category: 'tests',
+        severity: 'high',
+        description: 'Test failures detected',
+        file: 'multiple',
+        details: checks.tests.output,
+      });
+    }
+
+    if (!checks.build.success) {
+      issues.push({
+        category: 'build',
+        severity: 'critical',
+        description: 'Build compilation errors detected',
+        file: 'multiple',
+        details: checks.build.output,
+      });
+    }
+
+    return issues;
+  }
+}
+
+interface ValidationResult {
+  success: boolean;
+  timestamp: string;
+  checks: {
+    typeCheck: CommandResult;
+    lint: CommandResult;
+    tests: CommandResult;
+    build: CommandResult;
+  };
+  qualityScore: number;
+  issues: ValidationIssue[];
+}
+
+interface ValidationIssue {
+  category: 'typeCheck' | 'lint' | 'tests' | 'build';
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  description: string;
+  file: string;
+  details?: string;
+}
+
+interface CommandResult {
+  success: boolean;
+  output?: string;
+  errors?: number;
+  warnings?: number;
+  total?: number;
+  passed?: number;
+  failed?: number;
+  coverage?: any;
+}
+```
+
+## Phase 8: COMMIT
 
 ```typescript
 class CommitPhase {
   async execute(issueNumber: number): Promise<CommitResult> {
-    console.log('\n📦 Phase 7: Creating branch and committing changes');
+    console.log('\n📦 Phase 8: Creating branch and committing changes');
 
     // 1. Create feature branch FIRST
     const branchName = `feature/issue-${issueNumber}`;
@@ -679,7 +968,7 @@ Closes #${issueNumber}`;
 }
 ```
 
-## Phase 8: PULL REQUEST
+## Phase 9: PULL REQUEST
 
 ```typescript
 class PullRequestPhase {
@@ -687,7 +976,7 @@ class PullRequestPhase {
     issueNumber: number,
     commitResult: CommitResult
   ): Promise<PRResult> {
-    console.log('\n🔀 Phase 8: Creating pull request');
+    console.log('\n🔀 Phase 9: Creating pull request');
 
     // 1. Generate PR body
     const body = await this.generatePRBody(issueNumber);
@@ -777,6 +1066,7 @@ class WorkflowOrchestrator {
         { name: 'implement', executor: new ImplementPhase() },
         { name: 'verify', executor: new VerifyPhase() },
         { name: 'refactor', executor: new RefactorPhase() },
+        { name: 'validate', executor: new ValidationPhase() },
         { name: 'commit', executor: new CommitPhase() },
         { name: 'pr', executor: new PullRequestPhase() },
       ];

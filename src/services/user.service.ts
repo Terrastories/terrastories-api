@@ -447,21 +447,47 @@ export class UserService {
 
       const offset = (page - 1) * limit;
 
-      // Build search filters (placeholder implementation)
-      const filters: any = {
+      // Build search filters
+      const searchFilters: {
+        limit?: number;
+        offset?: number;
+        communityId?: number;
+        role?: string;
+        search?: string;
+        isActive?: boolean;
+      } = {
         limit,
         offset,
       };
 
-      if (community) filters.communityId = community;
-      if (role) filters.role = role;
-      if (active !== undefined) filters.isActive = active;
-      if (search) filters.search = search;
+      const countFilters: {
+        communityId?: number;
+        role?: string;
+        search?: string;
+        isActive?: boolean;
+      } = {};
+
+      if (community) {
+        searchFilters.communityId = community;
+        countFilters.communityId = community;
+      }
+      if (role) {
+        searchFilters.role = role;
+        countFilters.role = role;
+      }
+      if (active !== undefined) {
+        searchFilters.isActive = active;
+        countFilters.isActive = active;
+      }
+      if (search) {
+        searchFilters.search = search;
+        countFilters.search = search;
+      }
 
       // Get users and count from repository
       const [users, total] = await Promise.all([
-        this.userRepository.searchUsers(filters), // This method doesn't exist yet
-        this.userRepository.countUsers(filters), // This method doesn't exist yet
+        this.userRepository.searchUsers(searchFilters),
+        this.userRepository.countUsers(countFilters),
       ]);
 
       // Transform users to response format

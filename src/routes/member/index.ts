@@ -6,7 +6,11 @@
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import type { AuthenticatedRequest } from '../../shared/middleware/auth.middleware.js';
+import {
+  requireAuth,
+  requireCommunityAccess,
+  type AuthenticatedRequest,
+} from '../../shared/middleware/auth.middleware.js';
 import { z } from 'zod';
 import { StoryService } from '../../services/story.service.js';
 import { PlaceService } from '../../services/place.service.js';
@@ -43,9 +47,9 @@ export interface MemberRoutesOptions {
  */
 export async function memberRoutes(
   app: FastifyInstance,
-  _options?: MemberRoutesOptions
+  options?: MemberRoutesOptions
 ) {
-  const db = await getDb();
+  const db = (options?.database as unknown) || (await getDb());
 
   // Type-safe repository instantiation
   const storyRepository = new StoryRepository(
@@ -119,6 +123,7 @@ export async function memberRoutes(
 
   // GET /api/v1/member/stories - List user's community stories
   app.get('/stories', {
+    preHandler: [requireAuth, requireCommunityAccess()],
     config: {
       rateLimit: {
         max: 100, // 100 requests per minute for member dashboard
@@ -214,6 +219,7 @@ export async function memberRoutes(
 
   // GET /api/v1/member/stories/:id - Get specific story
   app.get('/stories/:id', {
+    preHandler: [requireAuth, requireCommunityAccess()],
     config: {
       rateLimit: {
         max: 100, // 100 requests per minute for member dashboard
@@ -249,7 +255,7 @@ export async function memberRoutes(
           getAuthenticatedUser(request);
 
         const params = MemberIdParamSchema.parse(request.params);
-        const storyId = parseInt(params.id, 10);
+        const storyId = params.id;
 
         const story = await storyService.getStoryById(
           storyId,
@@ -279,6 +285,7 @@ export async function memberRoutes(
 
   // GET /api/v1/member/places - List user's community places
   app.get('/places', {
+    preHandler: [requireAuth, requireCommunityAccess()],
     config: {
       rateLimit: {
         max: 100, // 100 requests per minute for member dashboard
@@ -366,6 +373,7 @@ export async function memberRoutes(
 
   // GET /api/v1/member/speakers - List user's community speakers
   app.get('/speakers', {
+    preHandler: [requireAuth, requireCommunityAccess()],
     config: {
       rateLimit: {
         max: 100, // 100 requests per minute for member dashboard

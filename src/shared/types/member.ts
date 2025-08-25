@@ -32,13 +32,7 @@ export const MemberPaginationQuerySchema = z.object({
 });
 
 export const MemberIdParamSchema = z.object({
-  id: z.string().refine(
-    (val) => {
-      const parsed = parseInt(val, 10);
-      return !isNaN(parsed) && parsed >= 1;
-    },
-    { message: 'Invalid ID' }
-  ),
+  id: z.number().int().positive(),
 });
 
 // Story schemas

@@ -7,8 +7,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FastifyInstance } from 'fastify';
-import { testDb } from '../../../helpers/database.js';
-import { createTestApp } from '../../../helpers/api-client.js';
+import { testDb } from '../../helpers/database.js';
+import { createTestApp } from '../../helpers/api-client.js';
 
 describe('Member Stories API', () => {
   let app: FastifyInstance;
@@ -132,9 +132,9 @@ describe('Member Stories API', () => {
 
     it('should filter by community scope automatically', async () => {
       // Create stories in different communities
-      createTestStory({ communityId, title: 'Community 1 Story' });
+      await createTestStory({ communityId, title: 'Community 1 Story' });
       const otherCommunity = await createTestCommunity({ name: 'Community 2' });
-      createTestStory({
+      await createTestStory({
         communityId: otherCommunity.id,
         title: 'Community 2 Story',
       });
@@ -250,7 +250,7 @@ describe('Member Stories API', () => {
     let storyId: number;
 
     beforeEach(async () => {
-      const story = createTestStory({
+      const story = await createTestStory({
         communityId,
         title: 'Test Story',
         authorId: editorUserId,
@@ -298,7 +298,9 @@ describe('Member Stories API', () => {
       const otherCommunity = await createTestCommunity({
         name: 'Other Community',
       });
-      const otherStory = createTestStory({ communityId: otherCommunity.id });
+      const otherStory = await createTestStory({
+        communityId: otherCommunity.id,
+      });
 
       const response = await app.inject({
         method: 'GET',
@@ -317,14 +319,14 @@ describe('Member Stories API', () => {
     let otherUserStoryId: number;
 
     beforeEach(async () => {
-      const ownStory = createTestStory({
+      const ownStory = await createTestStory({
         communityId,
         title: 'Own Story',
         authorId: editorUserId,
       });
       ownStoryId = ownStory.id;
 
-      const otherStory = createTestStory({
+      const otherStory = await createTestStory({
         communityId,
         title: 'Other Story',
         authorId: adminUserId,
@@ -418,14 +420,14 @@ describe('Member Stories API', () => {
     let otherUserStoryId: number;
 
     beforeEach(async () => {
-      const ownStory = createTestStory({
+      const ownStory = await createTestStory({
         communityId,
         title: 'Own Story',
         authorId: editorUserId,
       });
       ownStoryId = ownStory.id;
 
-      const otherStory = createTestStory({
+      const otherStory = await createTestStory({
         communityId,
         title: 'Other Story',
         authorId: adminUserId,
@@ -487,7 +489,7 @@ describe('Member Stories API', () => {
     let restrictedStoryId: number;
 
     beforeEach(async () => {
-      const elderStory = createTestStory({
+      const elderStory = await createTestStory({
         communityId,
         title: 'Elder Story',
         authorId: elderUserId,
@@ -495,7 +497,7 @@ describe('Member Stories API', () => {
       });
       elderStoryId = elderStory.id;
 
-      const restrictedStory = createTestStory({
+      const restrictedStory = await createTestStory({
         communityId,
         title: 'Restricted Story',
         isRestricted: true,
@@ -582,7 +584,10 @@ describe('Member Stories API', () => {
     });
 
     it('should not leak internal fields in responses', async () => {
-      const story = createTestStory({ communityId, authorId: editorUserId });
+      const story = await createTestStory({
+        communityId,
+        authorId: editorUserId,
+      });
 
       const response = await app.inject({
         method: 'GET',
@@ -646,5 +651,13 @@ function createTestStory(data: {
     communityId: data.communityId,
     authorId: data.authorId || 1,
     ...data,
+  });
+}
+
+function createTestCommunity(data: { name: string }) {
+  // TODO: Implement test community factory
+  return Promise.resolve({
+    id: Math.floor(Math.random() * 10000),
+    name: data.name,
   });
 }

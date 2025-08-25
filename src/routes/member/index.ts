@@ -123,6 +123,11 @@ export async function memberRoutes(
       rateLimit: {
         max: 100, // 100 requests per minute for member dashboard
         timeWindow: 60 * 1000, // 1 minute in milliseconds
+        keyGenerator: (req: FastifyRequest) => {
+          const user = (req as AuthenticatedRequest).user;
+          // Prefer user-scoped limiting; fallback to IP if unauthenticated
+          return user ? `member:${user.communityId}:${user.id}` : req.ip;
+        },
       },
     },
     schema: {
@@ -213,6 +218,11 @@ export async function memberRoutes(
       rateLimit: {
         max: 100, // 100 requests per minute for member dashboard
         timeWindow: 60 * 1000, // 1 minute in milliseconds
+        keyGenerator: (req: FastifyRequest) => {
+          const user = (req as AuthenticatedRequest).user;
+          // Prefer user-scoped limiting; fallback to IP if unauthenticated
+          return user ? `member:${user.communityId}:${user.id}` : req.ip;
+        },
       },
     },
     schema: {
@@ -273,6 +283,11 @@ export async function memberRoutes(
       rateLimit: {
         max: 100, // 100 requests per minute for member dashboard
         timeWindow: 60 * 1000, // 1 minute in milliseconds
+        keyGenerator: (req: FastifyRequest) => {
+          const user = (req as AuthenticatedRequest).user;
+          // Prefer user-scoped limiting; fallback to IP if unauthenticated
+          return user ? `member:${user.communityId}:${user.id}` : req.ip;
+        },
       },
     },
     schema: {
@@ -355,6 +370,11 @@ export async function memberRoutes(
       rateLimit: {
         max: 100, // 100 requests per minute for member dashboard
         timeWindow: 60 * 1000, // 1 minute in milliseconds
+        keyGenerator: (req: FastifyRequest) => {
+          const user = (req as AuthenticatedRequest).user;
+          // Prefer user-scoped limiting; fallback to IP if unauthenticated
+          return user ? `member:${user.communityId}:${user.id}` : req.ip;
+        },
       },
     },
     schema: {

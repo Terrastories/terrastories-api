@@ -14,27 +14,21 @@ import type { Speaker } from '../../repositories/speaker.repository.js';
 // Request validation schemas
 export const MemberPaginationQuerySchema = z.object({
   page: z
-    .string()
+    .union([z.string(), z.number()])
     .optional()
-    .default('1')
-    .refine(
-      (val) => {
-        const parsed = parseInt(val, 10);
-        return !isNaN(parsed) && parsed >= 1;
-      },
-      { message: 'Page must be a positive integer' }
-    ),
+    .default(1)
+    .transform((val) => (typeof val === 'string' ? parseInt(val, 10) : val))
+    .refine((val) => Number.isInteger(val) && val >= 1, {
+      message: 'Page must be a positive integer',
+    }),
   limit: z
-    .string()
+    .union([z.string(), z.number()])
     .optional()
-    .default('20')
-    .refine(
-      (val) => {
-        const parsed = parseInt(val, 10);
-        return !isNaN(parsed) && parsed >= 1 && parsed <= 100;
-      },
-      { message: 'Limit must be between 1 and 100' }
-    ),
+    .default(20)
+    .transform((val) => (typeof val === 'string' ? parseInt(val, 10) : val))
+    .refine((val) => Number.isInteger(val) && val >= 1 && val <= 100, {
+      message: 'Limit must be between 1 and 100',
+    }),
 });
 
 export const MemberIdParamSchema = z.object({
@@ -245,8 +239,13 @@ export function toMemberStory(story: StoryWithRelations, userRole?: string) {
       lat: place.latitude,
       lng: place.longitude,
       region: place.region,
-      culturalSignificance: place.culturalSignificance,
-      culturalContext: place.culturalContext,
+      culturalSignificance: isElder
+        ? place.culturalSignificance
+        : place.culturalSignificance === 'sacred' ||
+            place.culturalSignificance === 'restricted'
+          ? 'general'
+          : place.culturalSignificance,
+      culturalContext: isElder ? place.culturalContext : undefined,
       storyRelationship: place.storyRelationship,
       sortOrder: place.sortOrder,
     })),
@@ -256,8 +255,13 @@ export function toMemberStory(story: StoryWithRelations, userRole?: string) {
       bio: speaker.bio,
       photoUrl: speaker.photoUrl,
       birthYear: speaker.birthYear,
-      elderStatus: speaker.elderStatus,
-      culturalRole: speaker.culturalRole,
+      culturalRole: isElder
+        ? speaker.culturalRole
+        : speaker.culturalRole === 'elder' ||
+            speaker.culturalRole === 'ceremonial_leader'
+          ? 'storyteller'
+          : speaker.culturalRole,
+      elderStatus: isElder ? speaker.elderStatus : false,
       storyRole: speaker.storyRole,
       sortOrder: speaker.sortOrder,
     })),

@@ -48,6 +48,11 @@ export async function superAdminRoutes(app: FastifyInstance) {
   const userService = new UserService(userRepository);
 
   // Add super admin role protection to all routes
+  // NOTE: Data sovereignty enforcement is NOT needed here because:
+  // 1. These routes are FOR super admins (system administration)
+  // 2. These routes don't expose cultural data (stories, places, speakers)
+  // 3. Data sovereignty is enforced on /member/* routes via requireCommunityAccess()
+  // 4. Tests verify super admins are blocked from /member/stories, /member/places, /member/speakers
   app.addHook('preHandler', requireRole(['super_admin']));
 
   /**

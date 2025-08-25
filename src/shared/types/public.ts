@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import { toISOString } from '../utils/date-transforms.js';
 
 // Input validation schemas for public API
 export const CommunityIdParamSchema = z.object({

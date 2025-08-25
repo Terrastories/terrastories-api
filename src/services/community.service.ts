@@ -14,6 +14,7 @@
  */
 
 import { CommunityRepository } from '../repositories/community.repository.js';
+import { toISOString } from '../shared/utils/date-transforms.js';
 import type {
   Community,
   CreateCommunityData,
@@ -342,14 +343,8 @@ export class CommunityService {
         locale: community.locale,
         culturalSettings: community.culturalSettings,
         isActive: community.isActive,
-        createdAt:
-          community.createdAt instanceof Date
-            ? community.createdAt.toISOString()
-            : new Date(community.createdAt).toISOString(),
-        updatedAt:
-          community.updatedAt instanceof Date
-            ? community.updatedAt.toISOString()
-            : new Date(community.updatedAt).toISOString(),
+        createdAt: toISOString(community.createdAt),
+        updatedAt: toISOString(community.updatedAt),
       };
 
       // Parse cultural settings if present
@@ -806,7 +801,7 @@ export class CommunityService {
         this.communityRepository.count(active),
       ]);
 
-      // Add user count for each community (placeholder for now)
+      // Transform communities to response format (userCount will be added at route level)
       const data = communities.map((community) => ({
         id: community.id,
         name: community.name,
@@ -815,13 +810,9 @@ export class CommunityService {
         locale: community.locale,
         publicStories: community.publicStories,
         isActive: community.isActive,
-        userCount: 0, // TODO: Implement actual user count
-        createdAt: community.createdAt instanceof Date 
-          ? community.createdAt.toISOString() 
-          : new Date(community.createdAt).toISOString(),
-        updatedAt: community.updatedAt instanceof Date 
-          ? community.updatedAt.toISOString() 
-          : new Date(community.updatedAt).toISOString(),
+        userCount: 0, // Actual count added at route level
+        createdAt: toISOString(community.createdAt),
+        updatedAt: toISOString(community.updatedAt),
       }));
 
       return {

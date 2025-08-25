@@ -560,4 +560,27 @@ export class UserRepository {
       throw new Error(`Failed to count users: ${errorMessage}`);
     }
   }
+
+  /**
+   * Count users by community ID for super admin operations
+   */
+  async countUsersByCommunity(communityId: number): Promise<number> {
+    try {
+      const usersTable = await getUsersTable();
+      
+      // Execute count query
+      const query = this.database
+        .select({ count: count() })
+        .from(usersTable)
+        .where(eq(usersTable.communityId, communityId));
+
+      const countResults = await query;
+      const countResult = countResults[0] as { count: number };
+      return Number(countResult.count);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to count users by community: ${errorMessage}`);
+    }
+  }
 }

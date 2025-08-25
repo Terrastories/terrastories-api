@@ -9,8 +9,9 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { AuthenticatedRequest } from '../shared/middleware/auth.middleware.js';
 import { requireRole } from '../shared/middleware/auth.middleware.js';
-import { CommunityService } from '../services/community.service.js';
-import { UserService } from '../services/user.service.js';
+import { toISOString, toISOStringOrNull } from '../shared/utils/date-transforms.js';
+import { CommunityService, CommunityValidationError, CommunityOperationError } from '../services/community.service.js';
+import { UserService, DuplicateEmailError, WeakPasswordError, InvalidCommunityError, UserNotFoundError } from '../services/user.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { getDb } from '../db/index.js';
@@ -82,7 +83,21 @@ export async function superAdminRoutes(app: FastifyInstance) {
           active,
         });
 
-        return reply.code(200).send(result);
+        // Add user counts for each community
+        const dataWithUserCounts = await Promise.all(
+          result.data.map(async (community) => {
+            const userCount = await userRepository.countUsersByCommunity(community.id);
+            return {
+              ...community,
+              userCount,
+            };
+          })
+        );
+
+        return reply.code(200).send({
+          ...result,
+          data: dataWithUserCounts,
+        });
       } catch (error) {
         request.log.error('Failed to list communities', { error });
         return reply.code(500).send({
@@ -203,12 +218,8 @@ export async function superAdminRoutes(app: FastifyInstance) {
             publicStories: community.publicStories,
             isActive: community.isActive,
             userCount: 0,
-            createdAt: community.createdAt instanceof Date 
-              ? community.createdAt.toISOString() 
-              : new Date(community.createdAt).toISOString(),
-            updatedAt: community.updatedAt instanceof Date 
-              ? community.updatedAt.toISOString() 
-              : new Date(community.updatedAt).toISOString(),
+            createdAt: toISOString(community.createdAt),
+            updatedAt: toISOString(community.updatedAt),
           },
           message: 'Community created successfully',
         };
@@ -217,19 +228,18 @@ export async function superAdminRoutes(app: FastifyInstance) {
       } catch (error) {
         request.log.error('Failed to create community', { error });
         
-        if (error instanceof Error) {
-          if (error.message.includes('validation')) {
-            return reply.code(400).send({
-              error: error.message,
-              statusCode: 400,
-            });
-          }
-          if (error.message.includes('already exists')) {
-            return reply.code(409).send({
-              error: error.message,
-              statusCode: 409,
-            });
-          }
+        if (error instanceof CommunityValidationError) {
+          return reply.code(400).send({
+            error: error.message,
+            statusCode: 400,
+          });
+        }
+        
+        if (error instanceof CommunityOperationError && error.message.includes('already exists')) {
+          return reply.code(409).send({
+            error: error.message,
+            statusCode: 409,
+          });
         }
 
         return reply.code(500).send({
@@ -279,12 +289,8 @@ export async function superAdminRoutes(app: FastifyInstance) {
             publicStories: community.publicStories,
             isActive: community.isActive,
             userCount: 0, // Note: User count aggregation not yet implemented
-            createdAt: community.createdAt instanceof Date 
-              ? community.createdAt.toISOString() 
-              : new Date(community.createdAt).toISOString(),
-            updatedAt: community.updatedAt instanceof Date 
-              ? community.updatedAt.toISOString() 
-              : new Date(community.updatedAt).toISOString(),
+            createdAt: toISOString(community.createdAt),
+            updatedAt: toISOString(community.updatedAt),
           },
           message: 'Community updated successfully',
         };
@@ -293,19 +299,18 @@ export async function superAdminRoutes(app: FastifyInstance) {
       } catch (error) {
         request.log.error('Failed to update community', { error, id: request.params.id });
         
-        if (error instanceof Error) {
-          if (error.message.includes('not found')) {
-            return reply.code(404).send({
-              error: 'Community not found',
-              statusCode: 404,
-            });
-          }
-          if (error.message.includes('validation')) {
-            return reply.code(400).send({
-              error: error.message,
-              statusCode: 400,
-            });
-          }
+        if (error instanceof CommunityValidationError) {
+          return reply.code(400).send({
+            error: error.message,
+            statusCode: 400,
+          });
+        }
+        
+        if (error instanceof CommunityOperationError && error.message.includes('not found')) {
+          return reply.code(404).send({
+            error: 'Community not found',
+            statusCode: 404,
+          });
         }
 
         return reply.code(500).send({
@@ -344,13 +349,11 @@ export async function superAdminRoutes(app: FastifyInstance) {
       } catch (error) {
         request.log.error('Failed to archive community', { error, id: request.params.id });
         
-        if (error instanceof Error) {
-          if (error.message.includes('not found')) {
-            return reply.code(404).send({
-              error: 'Community not found',
-              statusCode: 404,
-            });
-          }
+        if (error instanceof CommunityOperationError && error.message.includes('not found')) {
+          return reply.code(404).send({
+            error: 'Community not found',
+            statusCode: 404,
+          });
         }
 
         return reply.code(500).send({
@@ -395,7 +398,28 @@ export async function superAdminRoutes(app: FastifyInstance) {
           active,
         });
 
-        return reply.code(200).send(result);
+        // Add community names for each user
+        const uniqueCommunityIds = [...new Set(result.data.map(user => user.communityId))];
+        const communityNamesMap = new Map<number, string>();
+        
+        // Fetch community names in batch
+        await Promise.all(
+          uniqueCommunityIds.map(async (communityId) => {
+            const community = await communityRepository.findById(communityId);
+            communityNamesMap.set(communityId, community?.name || `Community ${communityId}`);
+          })
+        );
+
+        // Update users with community names
+        const dataWithCommunityNames = result.data.map((user) => ({
+          ...user,
+          communityName: communityNamesMap.get(user.communityId) || `Community ${user.communityId}`,
+        }));
+
+        return reply.code(200).send({
+          ...result,
+          data: dataWithCommunityNames,
+        });
       } catch (error) {
         request.log.error('Failed to list users', { error });
         return reply.code(500).send({
@@ -457,7 +481,11 @@ export async function superAdminRoutes(app: FastifyInstance) {
           });
         }
 
-        // Transform to response format (placeholder)
+        // Get community name
+        const community = await communityRepository.findById(user.communityId);
+        const communityName = community?.name || `Community ${user.communityId}`;
+
+        // Transform to response format
         const response = {
           data: {
             id: user.id,
@@ -466,19 +494,11 @@ export async function superAdminRoutes(app: FastifyInstance) {
             lastName: user.lastName,
             role: user.role,
             communityId: user.communityId,
-            communityName: `Community ${user.communityId}`, // Note: Community name lookup not yet implemented
+            communityName,
             isActive: user.isActive,
-            createdAt: user.createdAt instanceof Date 
-              ? user.createdAt.toISOString() 
-              : new Date(user.createdAt).toISOString(),
-            updatedAt: user.updatedAt instanceof Date 
-              ? user.updatedAt.toISOString() 
-              : new Date(user.updatedAt).toISOString(),
-            lastLoginAt: user.lastLoginAt ? (
-              user.lastLoginAt instanceof Date 
-                ? user.lastLoginAt.toISOString() 
-                : new Date(user.lastLoginAt).toISOString()
-            ) : null,
+            createdAt: toISOString(user.createdAt),
+            updatedAt: toISOString(user.updatedAt),
+            lastLoginAt: toISOStringOrNull(user.lastLoginAt),
           },
         };
 
@@ -516,6 +536,10 @@ export async function superAdminRoutes(app: FastifyInstance) {
       try {
         const user = await userService.createUserAsSuperAdmin(request.body);
 
+        // Get community name
+        const community = await communityRepository.findById(user.communityId);
+        const communityName = community?.name || `Community ${user.communityId}`;
+
         const response = {
           data: {
             id: user.id,
@@ -524,14 +548,10 @@ export async function superAdminRoutes(app: FastifyInstance) {
             lastName: user.lastName,
             role: user.role,
             communityId: user.communityId,
-            communityName: `Community ${user.communityId}`, // Note: Community name lookup not yet implemented
+            communityName,
             isActive: user.isActive,
-            createdAt: user.createdAt instanceof Date 
-              ? user.createdAt.toISOString() 
-              : new Date(user.createdAt).toISOString(),
-            updatedAt: user.updatedAt instanceof Date 
-              ? user.updatedAt.toISOString() 
-              : new Date(user.updatedAt).toISOString(),
+            createdAt: toISOString(user.createdAt),
+            updatedAt: toISOString(user.updatedAt),
             lastLoginAt: null,
           },
           message: 'User created successfully',
@@ -541,19 +561,25 @@ export async function superAdminRoutes(app: FastifyInstance) {
       } catch (error) {
         request.log.error('Failed to create user', { error });
         
-        if (error instanceof Error) {
-          if (error.message.includes('email already exists')) {
-            return reply.code(409).send({
-              error: error.message,
-              statusCode: 409,
-            });
-          }
-          if (error.message.includes('validation')) {
-            return reply.code(400).send({
-              error: error.message,
-              statusCode: 400,
-            });
-          }
+        if (error instanceof DuplicateEmailError) {
+          return reply.code(409).send({
+            error: error.message,
+            statusCode: 409,
+          });
+        }
+        
+        if (error instanceof WeakPasswordError) {
+          return reply.code(400).send({
+            error: error.message,
+            statusCode: 400,
+          });
+        }
+        
+        if (error instanceof InvalidCommunityError) {
+          return reply.code(400).send({
+            error: error.message,
+            statusCode: 400,
+          });
         }
 
         return reply.code(500).send({
@@ -593,6 +619,10 @@ export async function superAdminRoutes(app: FastifyInstance) {
         
         const user = await userService.updateUserAsSuperAdmin(id, request.body);
 
+        // Get community name
+        const community = await communityRepository.findById(user.communityId);
+        const communityName = community?.name || `Community ${user.communityId}`;
+
         const response = {
           data: {
             id: user.id,
@@ -601,19 +631,11 @@ export async function superAdminRoutes(app: FastifyInstance) {
             lastName: user.lastName,
             role: user.role,
             communityId: user.communityId,
-            communityName: `Community ${user.communityId}`, // Note: Community name lookup not yet implemented
+            communityName,
             isActive: user.isActive,
-            createdAt: user.createdAt instanceof Date 
-              ? user.createdAt.toISOString() 
-              : new Date(user.createdAt).toISOString(),
-            updatedAt: user.updatedAt instanceof Date 
-              ? user.updatedAt.toISOString() 
-              : new Date(user.updatedAt).toISOString(),
-            lastLoginAt: user.lastLoginAt ? (
-              user.lastLoginAt instanceof Date 
-                ? user.lastLoginAt.toISOString() 
-                : new Date(user.lastLoginAt).toISOString()
-            ) : null,
+            createdAt: toISOString(user.createdAt),
+            updatedAt: toISOString(user.updatedAt),
+            lastLoginAt: toISOStringOrNull(user.lastLoginAt),
           },
           message: 'User updated successfully',
         };
@@ -622,19 +644,25 @@ export async function superAdminRoutes(app: FastifyInstance) {
       } catch (error) {
         request.log.error('Failed to update user', { error, id: request.params.id });
         
-        if (error instanceof Error) {
-          if (error.message.includes('not found')) {
-            return reply.code(404).send({
-              error: 'User not found',
-              statusCode: 404,
-            });
-          }
-          if (error.message.includes('validation')) {
-            return reply.code(400).send({
-              error: error.message,
-              statusCode: 400,
-            });
-          }
+        if (error instanceof UserNotFoundError) {
+          return reply.code(404).send({
+            error: 'User not found',
+            statusCode: 404,
+          });
+        }
+        
+        if (error instanceof DuplicateEmailError) {
+          return reply.code(409).send({
+            error: error.message,
+            statusCode: 409,
+          });
+        }
+        
+        if (error instanceof InvalidCommunityError) {
+          return reply.code(400).send({
+            error: error.message,
+            statusCode: 400,
+          });
         }
 
         return reply.code(500).send({
@@ -673,13 +701,11 @@ export async function superAdminRoutes(app: FastifyInstance) {
       } catch (error) {
         request.log.error('Failed to deactivate user', { error, id: request.params.id });
         
-        if (error instanceof Error) {
-          if (error.message.includes('not found')) {
-            return reply.code(404).send({
-              error: 'User not found',
-              statusCode: 404,
-            });
-          }
+        if (error instanceof UserNotFoundError) {
+          return reply.code(404).send({
+            error: 'User not found',
+            statusCode: 404,
+          });
         }
 
         return reply.code(500).send({

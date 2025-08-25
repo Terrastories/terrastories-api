@@ -17,6 +17,7 @@ import { UserRepository } from '../repositories/user.repository.js';
 import * as passwordService from './password.service.js';
 import { CommunityService } from './community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
+import { toISOString, toISOStringOrNull } from '../shared/utils/date-transforms.js';
 import type {
   User,
   CreateUserData,
@@ -500,17 +501,9 @@ export class UserService {
         communityId: user.communityId,
         communityName: user.communityName || 'Unknown', // Would need join
         isActive: user.isActive,
-        createdAt: user.createdAt instanceof Date 
-          ? user.createdAt.toISOString() 
-          : new Date(user.createdAt).toISOString(),
-        updatedAt: user.updatedAt instanceof Date 
-          ? user.updatedAt.toISOString() 
-          : new Date(user.updatedAt).toISOString(),
-        lastLoginAt: user.lastLoginAt ? (
-          user.lastLoginAt instanceof Date 
-            ? user.lastLoginAt.toISOString() 
-            : new Date(user.lastLoginAt).toISOString()
-        ) : null,
+        createdAt: toISOString(user.createdAt),
+        updatedAt: toISOString(user.updatedAt),
+        lastLoginAt: toISOStringOrNull(user.lastLoginAt),
       }));
 
       return {

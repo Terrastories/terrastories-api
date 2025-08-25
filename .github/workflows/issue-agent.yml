@@ -11,9 +11,15 @@ permissions:
 
 jobs:
   revise:
-    if: ${{ secrets.OPENAI_API_KEY != null }}
     runs-on: ubuntu-latest
     steps:
+      - name: Check for OPENAI_API_KEY
+        run: |
+          if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "OPENAI_API_KEY secret is not set. Skipping issue revision."
+            exit 0
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 

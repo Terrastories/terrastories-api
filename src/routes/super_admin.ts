@@ -278,7 +278,7 @@ export async function superAdminRoutes(app: FastifyInstance) {
             locale: community.locale,
             publicStories: community.publicStories,
             isActive: community.isActive,
-            userCount: 0, // TODO: Get actual count
+            userCount: 0, // Note: User count aggregation not yet implemented
             createdAt: community.createdAt instanceof Date 
               ? community.createdAt.toISOString() 
               : new Date(community.createdAt).toISOString(),
@@ -466,7 +466,7 @@ export async function superAdminRoutes(app: FastifyInstance) {
             lastName: user.lastName,
             role: user.role,
             communityId: user.communityId,
-            communityName: 'Unknown', // TODO: Get from join
+            communityName: `Community ${user.communityId}`, // Note: Community name lookup not yet implemented
             isActive: user.isActive,
             createdAt: user.createdAt instanceof Date 
               ? user.createdAt.toISOString() 
@@ -524,7 +524,7 @@ export async function superAdminRoutes(app: FastifyInstance) {
             lastName: user.lastName,
             role: user.role,
             communityId: user.communityId,
-            communityName: 'Unknown', // TODO: Get from join
+            communityName: `Community ${user.communityId}`, // Note: Community name lookup not yet implemented
             isActive: user.isActive,
             createdAt: user.createdAt instanceof Date 
               ? user.createdAt.toISOString() 
@@ -601,7 +601,7 @@ export async function superAdminRoutes(app: FastifyInstance) {
             lastName: user.lastName,
             role: user.role,
             communityId: user.communityId,
-            communityName: 'Unknown', // TODO: Get from join
+            communityName: `Community ${user.communityId}`, // Note: Community name lookup not yet implemented
             isActive: user.isActive,
             createdAt: user.createdAt instanceof Date 
               ? user.createdAt.toISOString() 

@@ -407,4 +407,211 @@ export class UserService {
 
     await this.userRepository.delete(id, communityId);
   }
+
+  /**
+   * Super Admin Methods
+   * These methods provide cross-community access for super admin users only
+   */
+
+  /**
+   * Get all users across communities with pagination (super admin only)
+   * @param options - Query options including pagination and filters
+   * @returns Promise<{data: UserResponse[], meta: PaginationMeta}> - Paginated users
+   */
+  async getAllUsersForSuperAdmin(options: {
+    page?: number;
+    limit?: number;
+    community?: number;
+    role?: string;
+    search?: string;
+    active?: boolean;
+  } = {}): Promise<{
+    data: any[]; // UserResponse type - will define properly
+    meta: {
+      page: number;
+      limit: number;
+      total: number;
+      totalPages: number;
+    };
+  }> {
+    try {
+      const { page = 1, limit = 20, community, role, search, active } = options;
+
+      // Validate pagination
+      if (page < 1) {
+        throw new Error('Page must be at least 1');
+      }
+      if (limit < 1 || limit > 100) {
+        throw new Error('Limit must be between 1 and 100');
+      }
+
+      const offset = (page - 1) * limit;
+
+      // Build search filters (placeholder implementation)
+      const filters: any = {
+        limit,
+        offset,
+      };
+
+      if (community) filters.communityId = community;
+      if (role) filters.role = role;
+      if (active !== undefined) filters.isActive = active;
+      if (search) filters.search = search;
+
+      // Get users and count from repository
+      const [users, total] = await Promise.all([
+        this.userRepository.searchUsers(filters), // This method doesn't exist yet
+        this.userRepository.countUsers(filters), // This method doesn't exist yet
+      ]);
+
+      // Transform users to response format
+      const data = users.map((user: any) => ({
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+        communityId: user.communityId,
+        communityName: user.communityName || 'Unknown', // Would need join
+        isActive: user.isActive,
+        createdAt: user.createdAt instanceof Date 
+          ? user.createdAt.toISOString() 
+          : new Date(user.createdAt).toISOString(),
+        updatedAt: user.updatedAt instanceof Date 
+          ? user.updatedAt.toISOString() 
+          : new Date(user.updatedAt).toISOString(),
+        lastLoginAt: user.lastLoginAt ? (
+          user.lastLoginAt instanceof Date 
+            ? user.lastLoginAt.toISOString() 
+            : new Date(user.lastLoginAt).toISOString()
+        ) : null,
+      }));
+
+      return {
+        data,
+        meta: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      };
+    } catch (error) {
+      throw new Error(
+        `Super admin failed to get users: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Create user in any community as super admin
+   * @param data - User creation data
+   * @returns Promise<User> - Created user
+   */
+  async createUserAsSuperAdmin(data: {
+    email: string;
+    password: string;
+    firstName: string;
+    lastName: string;
+    role: string;
+    communityId: number;
+    isActive?: boolean;
+  }): Promise<any> {
+    try {
+      // Super admin can create users in any community
+      // Use the existing registerUser method but bypass community restrictions
+      const userData: CreateUserRequest = {
+        email: data.email,
+        password: data.password,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        communityId: data.communityId,
+        role: data.role as 'super_admin' | 'admin' | 'editor' | 'viewer',
+        isActive: data.isActive ?? true,
+      };
+
+      return await this.registerUser(userData);
+    } catch (error) {
+      throw new Error(
+        `Super admin failed to create user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Update user details as super admin (including role changes)
+   * @param id - User ID
+   * @param updates - Update data
+   * @returns Promise<User> - Updated user
+   */
+  async updateUserAsSuperAdmin(
+    id: number,
+    updates: {
+      firstName?: string;
+      lastName?: string;
+      role?: string;
+      communityId?: number;
+      isActive?: boolean;
+    }
+  ): Promise<any> {
+    try {
+      // Super admin can update any user including cross-community changes
+      const updateData: UpdateUserRequest = {
+        firstName: updates.firstName,
+        lastName: updates.lastName,
+        role: updates.role as 'super_admin' | 'admin' | 'editor' | 'viewer' | undefined,
+        communityId: updates.communityId,
+        isActive: updates.isActive,
+      };
+
+      return await this.updateUser(id, updateData);
+    } catch (error) {
+      throw new Error(
+        `Super admin failed to update user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Deactivate user as super admin
+   * @param id - User ID
+   * @returns Promise<{message: string, id: number}> - Success response
+   */
+  async deactivateUserAsSuperAdmin(id: number): Promise<{
+    message: string;
+    id: number;
+  }> {
+    try {
+      // Validate ID
+      if (!Number.isInteger(id) || id <= 0) {
+        throw new Error('Invalid user ID');
+      }
+
+      // Check if user exists
+      const user = await this.getUserById(id);
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      // Deactivate the user
+      await this.updateUser(id, { isActive: false });
+
+      return {
+        message: 'User deactivated successfully',
+        id,
+      };
+    } catch (error) {
+      throw new Error(
+        `Super admin failed to deactivate user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
 }

@@ -425,4 +425,139 @@ export class UserRepository {
       throw new Error(`Failed to count users: ${errorMessage}`);
     }
   }
+
+  /**
+   * Super Admin Methods - Cross-community operations
+   */
+
+  /**
+   * Search users across all communities (super admin only)
+   * @param options - Search and filter options
+   * @returns Promise<User[]> - Array of users across communities
+   */
+  async searchUsers(options: {
+    limit?: number;
+    offset?: number;
+    communityId?: number;
+    role?: string;
+    search?: string;
+    isActive?: boolean;
+  }): Promise<User[]> {
+    try {
+      const usersTable = await getUsersTable();
+      const {
+        limit = 20,
+        offset = 0,
+        communityId,
+        role,
+        search,
+        isActive,
+      } = options;
+
+      // Build where conditions (no community restriction for super admin)
+      const whereConditions = [];
+
+      if (communityId) {
+        whereConditions.push(eq(usersTable.communityId, communityId));
+      }
+
+      if (search) {
+        const searchTerm = search.toLowerCase();
+        whereConditions.push(
+          or(
+            like(sql`lower(${usersTable.firstName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.lastName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.email})`, `%${searchTerm}%`)
+          )!
+        );
+      }
+
+      if (role) {
+        whereConditions.push(eq(usersTable.role, role));
+      }
+
+      if (isActive !== undefined) {
+        whereConditions.push(eq(usersTable.isActive, isActive));
+      }
+
+      // Execute query
+      let query = this.database
+        .select()
+        .from(usersTable)
+        .orderBy(desc(usersTable.createdAt))
+        .limit(limit)
+        .offset(offset);
+
+      if (whereConditions.length > 0) {
+        query = query.where(and(...whereConditions));
+      }
+
+      const users = await query;
+      return users;
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to search users: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Count users across all communities (super admin only)
+   * @param options - Filter options
+   * @returns Promise<number> - Total count of users
+   */
+  async countUsers(options: {
+    communityId?: number;
+    role?: string;
+    search?: string;
+    isActive?: boolean;
+  }): Promise<number> {
+    try {
+      const usersTable = await getUsersTable();
+      const { communityId, role, search, isActive } = options;
+
+      // Build where conditions (no community restriction for super admin)
+      const whereConditions = [];
+
+      if (communityId) {
+        whereConditions.push(eq(usersTable.communityId, communityId));
+      }
+
+      if (search) {
+        const searchTerm = search.toLowerCase();
+        whereConditions.push(
+          or(
+            like(sql`lower(${usersTable.firstName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.lastName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.email})`, `%${searchTerm}%`)
+          )!
+        );
+      }
+
+      if (role) {
+        whereConditions.push(eq(usersTable.role, role));
+      }
+
+      if (isActive !== undefined) {
+        whereConditions.push(eq(usersTable.isActive, isActive));
+      }
+
+      // Execute count query
+      let query = this.database
+        .select({ count: count() })
+        .from(usersTable);
+
+      if (whereConditions.length > 0) {
+        query = query.where(and(...whereConditions));
+      }
+
+      const countResults = await query;
+      const countResult = countResults[0] as { count: number };
+      return Number(countResult.count);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to count users: ${errorMessage}`);
+    }
+  }
 }

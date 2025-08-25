@@ -26,6 +26,7 @@ import type {
   InvalidCommunityDataError,
 } from '../repositories/community.repository.js';
 import type { CommunityResponse as CommunityResponseSchema } from '../shared/schemas/communities.js';
+import type { CommunityResponse } from '../shared/schemas/super-admin.js';
 
 /**
  * Request data for community creation
@@ -744,6 +745,193 @@ export class CommunityService {
     } catch (error) {
       throw new CommunityOperationError(
         `Failed to get cultural protocols: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
+   * Super Admin Methods
+   * These methods provide cross-community access for super admin users only
+   */
+
+  /**
+   * Get all communities with pagination (super admin only)
+   * @param page - Page number (1-indexed)
+   * @param limit - Number of communities per page
+   * @param search - Optional search term
+   * @param locale - Optional locale filter
+   * @param active - Optional active status filter
+   * @returns Promise<{data: Community[], meta: PaginationMeta}> - Paginated communities
+   */
+  async getAllCommunitiesForSuperAdmin(options: {
+    page?: number;
+    limit?: number;
+    search?: string;
+    locale?: string;
+    active?: boolean;
+  } = {}): Promise<{
+    data: CommunityResponse[];
+    meta: {
+      page: number;
+      limit: number;
+      total: number;
+      totalPages: number;
+    };
+  }> {
+    try {
+      const { page = 1, limit = 20, search, locale, active } = options;
+
+      // Validate pagination
+      if (page < 1) {
+        throw new CommunityValidationError('Page must be at least 1');
+      }
+      if (limit < 1 || limit > 100) {
+        throw new CommunityValidationError('Limit must be between 1 and 100');
+      }
+
+      const offset = (page - 1) * limit;
+      
+      // Build search params
+      const searchParams: CommunitySearchParams = {
+        limit,
+        offset,
+        query: search,
+        locale,
+        isActive: active,
+      };
+
+      // Get communities and count
+      const [communities, total] = await Promise.all([
+        this.communityRepository.search(searchParams),
+        this.communityRepository.count(active),
+      ]);
+
+      // Add user count for each community (placeholder for now)
+      const data = communities.map((community) => ({
+        id: community.id,
+        name: community.name,
+        description: community.description,
+        slug: community.slug,
+        locale: community.locale,
+        publicStories: community.publicStories,
+        isActive: community.isActive,
+        userCount: 0, // TODO: Implement actual user count
+        createdAt: community.createdAt instanceof Date 
+          ? community.createdAt.toISOString() 
+          : new Date(community.createdAt).toISOString(),
+        updatedAt: community.updatedAt instanceof Date 
+          ? community.updatedAt.toISOString() 
+          : new Date(community.updatedAt).toISOString(),
+      }));
+
+      return {
+        data,
+        meta: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      };
+    } catch (error) {
+      if (error instanceof CommunityValidationError) {
+        throw error;
+      }
+
+      throw new CommunityOperationError(
+        `Failed to get communities for super admin: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Create community as super admin (with enhanced permissions)
+   * @param data - Community creation data
+   * @returns Promise<Community> - Created community
+   */
+  async createCommunityAsSuperAdmin(
+    data: CreateCommunityRequest
+  ): Promise<Community> {
+    try {
+      // Super admin can create communities with more relaxed validation
+      // and without community-scoped restrictions
+      return await this.createCommunity(data);
+    } catch (error) {
+      throw new CommunityOperationError(
+        `Super admin failed to create community: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Update community as super admin (with enhanced permissions)
+   * @param id - Community ID
+   * @param updates - Update data
+   * @returns Promise<Community> - Updated community
+   */
+  async updateCommunityAsSuperAdmin(
+    id: number,
+    updates: UpdateCommunityRequest
+  ): Promise<Community> {
+    try {
+      // Super admin can update any community
+      return await this.updateCommunity(id, updates);
+    } catch (error) {
+      throw new CommunityOperationError(
+        `Super admin failed to update community: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Archive community as super admin (soft delete)
+   * @param id - Community ID
+   * @returns Promise<{message: string, id: number}> - Success response
+   */
+  async archiveCommunityAsSuperAdmin(id: number): Promise<{
+    message: string;
+    id: number;
+  }> {
+    try {
+      // Validate ID
+      if (!Number.isInteger(id) || id <= 0) {
+        throw new CommunityValidationError('Invalid community ID');
+      }
+
+      // Check if community exists
+      const community = await this.communityRepository.findById(id);
+      if (!community) {
+        throw new CommunityOperationError('Community not found');
+      }
+
+      // Archive the community
+      const success = await this.deactivateCommunity(id);
+      if (!success) {
+        throw new CommunityOperationError('Failed to archive community');
+      }
+
+      return {
+        message: 'Community archived successfully',
+        id,
+      };
+    } catch (error) {
+      if (
+        error instanceof CommunityValidationError ||
+        error instanceof CommunityOperationError
+      ) {
+        throw error;
+      }
+
+      throw new CommunityOperationError(
+        `Super admin failed to archive community: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
       );
     }
   }

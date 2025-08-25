@@ -1,0 +1,74 @@
+name: Issues Reviewer
+
+on:
+  issues:
+    types: [opened]
+
+# Requires repository secret: OPENAI_API_KEY
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  revise:
+    if: ${{ secrets.OPENAI_API_KEY != null }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
+
+      - name: Revise issue via Codex
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Ensure gh is authenticated with the workflow token
+          gh auth status || gh auth setup-git
+
+          PROMPT=$(cat <<'EOF'
+          You are Codex running in CI to revise a newly opened GitHub issue for this repository.
+
+          Goal:
+          - Improve the issue to meet repository "Issue Review & Analysis Guidelines": ensure sections exist and are high quality.
+          - Keep author intent; clarify ambiguities; propose acceptance criteria and a concrete technical/testing plan.
+          - If scope increased >50%, note and suggest splitting.
+
+          What to do (execute commands as needed):
+          1) Fetch current issue JSON and body:
+             gh issue view "$ISSUE_NUMBER" --json number,title,body,labels,assignees,milestone,comments > current-issue.json
+          2) Produce a revised issue body in Markdown at revised-issue.md with these sections:
+             - Overview
+             - Acceptance Criteria (SMART checklist)
+             - Technical Plan
+             - Testing Strategy
+             - Dependencies
+             - Estimation
+             - Notes/Questions (for missing info)
+          3) Preserve original context; move unclear content under Notes/Questions.
+          4) Validate consistency: acceptance criteria align with technical plan; warn if scope increase >50%.
+          5) Update the GitHub issue body with the new Markdown:
+             gh issue edit "$ISSUE_NUMBER" --body-file revised-issue.md
+          6) Add a comment summarizing changes:
+             gh issue comment "$ISSUE_NUMBER" --body "📝 Issue revised to include Overview, Acceptance Criteria, Technical Plan, Testing Strategy, Dependencies, and Estimation. Please review and adjust as needed."
+          7) Exit successfully.
+
+          Constraints:
+          - Use concise, actionable wording.
+          - Follow repository coding/testing guidelines and naming conventions where relevant.
+          - Avoid changing scope without calling it out.
+          - Prefer SMART acceptance criteria and measurable tests.
+          EOF
+          )
+
+          codex exec --full-auto "$PROMPT"

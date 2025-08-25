@@ -46,7 +46,7 @@ You are a technical writer tasked with improving GitHub issue {{args}}.
 You are REQUIRED to post a revision summary as a comment on the GitHub issue. This is not optional.
 
 1. Create a comprehensive revision summary explaining what you changed and why
-2. Post the revision comment using: `!{gh issue comment {{args}} --body "$(cat <<'EOF'
+2. Post the revision comment using: `!{cat <<'EOF' | gh issue comment {{args}} --body-file -
 📝 **Issue Revision Complete**
 
 I've revised this issue to improve its clarity and actionability:
@@ -68,7 +68,7 @@ This issue now meets project standards and should be easier for developers to un
 ---
 *Revision completed by Gemini CLI*
 EOF
-)"}`
+}`
 3. Verify the comment was posted: `!{gh issue view {{args}} --json comments --jq '.comments[-1].body' | head -20}`
 
 **Failure to post a comment means the revision is incomplete and unsuccessful.**

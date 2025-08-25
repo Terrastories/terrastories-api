@@ -20,7 +20,7 @@ import { PlaceRepository } from '../../repositories/place.repository.js';
 import { SpeakerRepository } from '../../repositories/speaker.repository.js';
 import { FileRepository } from '../../repositories/file.repository.js';
 import { UserRepository } from '../../repositories/user.repository.js';
-import { getDb } from '../../db/index.js';
+import { getDb, type Database } from '../../db/index.js';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import {
   toMemberStory,
@@ -49,7 +49,7 @@ export async function memberRoutes(
   app: FastifyInstance,
   options?: MemberRoutesOptions
 ) {
-  const db = (options?.database as unknown) || (await getDb());
+  const db = (options?.database as Database) || (await getDb());
 
   // Type-safe repository instantiation
   const storyRepository = new StoryRepository(

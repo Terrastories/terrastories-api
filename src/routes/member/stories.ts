@@ -205,7 +205,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
         }
 
         const params = MemberIdParamSchema.parse(request.params);
-        const storyId = parseInt(params.id, 10);
+        const storyId = params.id;
 
         const story = await storyService.getStoryById(
           storyId,
@@ -408,7 +408,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
         }
 
         const params = MemberIdParamSchema.parse(request.params);
-        const storyId = parseInt(params.id, 10);
+        const storyId = params.id;
         const updates = UpdateStorySchema.parse(request.body);
 
         const updatedStory = await storyService.updateStory(
@@ -485,7 +485,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
         }
 
         const params = MemberIdParamSchema.parse(request.params);
-        const storyId = parseInt(params.id, 10);
+        const storyId = params.id;
 
         await storyService.deleteStory(storyId, user.id, userRole);
 

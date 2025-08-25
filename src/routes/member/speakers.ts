@@ -182,7 +182,7 @@ export async function memberSpeakersRoutes(app: FastifyInstance) {
         }
 
         const params = MemberIdParamSchema.parse(request.params);
-        const speakerId = parseInt(params.id, 10);
+        const speakerId = params.id;
 
         const speaker = await speakerService.getSpeakerById(
           speakerId,
@@ -402,7 +402,7 @@ export async function memberSpeakersRoutes(app: FastifyInstance) {
         }
 
         const params = MemberIdParamSchema.parse(request.params);
-        const speakerId = parseInt(params.id, 10);
+        const speakerId = params.id;
         const updates = UpdateSpeakerSchema.parse(request.body);
 
         const updateData = {
@@ -492,7 +492,7 @@ export async function memberSpeakersRoutes(app: FastifyInstance) {
         }
 
         const params = MemberIdParamSchema.parse(request.params);
-        const speakerId = parseInt(params.id, 10);
+        const speakerId = params.id;
 
         await speakerService.deleteSpeaker(
           speakerId,

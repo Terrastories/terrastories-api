@@ -185,7 +185,7 @@ export async function memberPlacesRoutes(app: FastifyInstance) {
         }
 
         const params = MemberIdParamSchema.parse(request.params);
-        const placeId = parseInt(params.id, 10);
+        const placeId = params.id;
 
         const place = await placeService.getPlaceById(
           placeId,
@@ -388,7 +388,7 @@ export async function memberPlacesRoutes(app: FastifyInstance) {
         }
 
         const params = MemberIdParamSchema.parse(request.params);
-        const placeId = parseInt(params.id, 10);
+        const placeId = params.id;
         const updates = UpdatePlaceSchema.parse(request.body);
 
         const updateData = {
@@ -477,7 +477,7 @@ export async function memberPlacesRoutes(app: FastifyInstance) {
         }
 
         const params = MemberIdParamSchema.parse(request.params);
-        const placeId = parseInt(params.id, 10);
+        const placeId = params.id;
 
         await placeService.deletePlace(
           placeId,

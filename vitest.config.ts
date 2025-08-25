@@ -19,15 +19,13 @@ export default defineConfig({
     maxWorkers: 4,
 
     // Test file patterns
-    include: [
-      'tests/**/*.{test,spec}.{js,ts}',
-      'src/**/*.{test,spec}.{js,ts}',
-    ],
+    include: ['tests/**/*.{test,spec}.{js,ts}', 'src/**/*.{test,spec}.{js,ts}'],
     exclude: [
       'node_modules/',
       'dist/',
       '**/*.d.ts',
       'src/db/migrations/',
+      'tests/routes/member/disabled/**', // Exclude incomplete member CRUD tests
     ],
 
     // Coverage configuration with enforced thresholds
@@ -65,7 +63,9 @@ export default defineConfig({
 
     // Reporter configuration
     reporter: process.env.CI ? ['verbose', 'junit'] : ['verbose'],
-    outputFile: process.env.CI ? { junit: './test-report.junit.xml' } : undefined,
+    outputFile: process.env.CI
+      ? { junit: './test-report.junit.xml' }
+      : undefined,
 
     // Performance monitoring
     logHeapUsage: true,

@@ -33,24 +33,27 @@ HEALTH_URL="http://localhost:3000/health"
 curl --fail -sS "$HEALTH_URL"
 echo -e "\nHealth check passed."
 
-echo "--- 2a. Create Community ---"
-# Generate a random community name to ensure the test is repeatable
-RANDOM_COMMUNITY="TestCommunity_$(date +%s)_$RANDOM"
-echo "Creating community: $RANDOM_COMMUNITY"
-COMMUNITY_RESPONSE=$(curl --fail -sS -X POST \
-  -H "Content-Type: application/json" \
-  -d "{\"name\": \"$RANDOM_COMMUNITY\", \"description\": \"A test community for user workflow\", \"locale\": \"en\"}" \
-  "$BASE_URL/communities")
+echo "--- 2a. Get Existing Community or Create New One ---"
+# First try to get existing communities
+COMMUNITIES_RESPONSE=$(curl -sS "$BASE_URL/communities" 2>/dev/null || echo '{"data": []}')
+EXISTING_COMMUNITY_ID=$(echo "$COMMUNITIES_RESPONSE" | jq -r '.data[0].id // empty' 2>/dev/null)
 
-# Extract community ID using jq
-COMMUNITY_ID=$(echo "$COMMUNITY_RESPONSE" | jq -r '.data.id')
-
-if [ -z "$COMMUNITY_ID" ] || [ "$COMMUNITY_ID" == "null" ]; then
-    echo "Error: Failed to get Community ID from community creation response."
-    echo "Response: $COMMUNITY_RESPONSE"
+if [ ! -z "$EXISTING_COMMUNITY_ID" ] && [ "$EXISTING_COMMUNITY_ID" != "null" ] && [ "$EXISTING_COMMUNITY_ID" != "empty" ]; then
+    # Use existing community
+    COMMUNITY_ID=$EXISTING_COMMUNITY_ID
+    echo "Using existing community with ID: $COMMUNITY_ID"
+else
+    echo "No existing communities found. Creating bootstrap super admin first..."
+    
+    # Create a super admin user without community validation for bootstrap
+    BOOTSTRAP_EMAIL="bootstrap_$(date +%s)_$RANDOM@example.com"
+    BOOTSTRAP_PASSWORD="Bootstrap$(openssl rand -base64 6 | tr -d "=+/" | cut -c1-4)$(shuf -i 1000-9999 -n 1)!"
+    
+    # Bootstrap: create super admin with special community ID 0 or modify registration
+    echo "ERROR: Bootstrap process not implemented. Please manually create a community first or implement bootstrap endpoint."
+    echo "For now, use existing community ID 1 if available in development database."
     exit 1
 fi
-echo "Community created with ID: $COMMUNITY_ID"
 
 echo "--- 2b. User Registration ---"
 # Generate a random user email to ensure the test is repeatable

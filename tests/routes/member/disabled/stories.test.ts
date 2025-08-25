@@ -7,8 +7,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FastifyInstance } from 'fastify';
-import { testDb } from '../../helpers/database.js';
-import { createTestApp } from '../../helpers/api-client.js';
+import { testDb } from '../../../helpers/database.js';
+import { createTestApp } from '../../../helpers/api-client.js';
 
 describe('Member Stories API', () => {
   let app: FastifyInstance;

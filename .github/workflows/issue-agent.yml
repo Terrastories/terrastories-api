@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   revise:
-    if: ${{ secrets.OPENAI_API_KEY != '' }}
+    if: ${{ secrets.OPENAI_API_KEY != null }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -72,4 +72,3 @@ jobs:
           )
 
           codex exec --full-auto "$PROMPT"
-

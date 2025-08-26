@@ -24,7 +24,9 @@ describe('Super Admin API', () => {
     const fixtures = await testDb.seedTestData();
     testCommunityId = fixtures.communities[1].id; // Skip system community
 
-    app = await createTestApp(testDb.db);
+    const db = await testDb.getDb();
+    console.log('Test database instance:', typeof db, !!db);
+    app = await createTestApp(db);
 
     // Create super admin user
     const superAdminUser = {
@@ -254,6 +256,9 @@ describe('Super Admin API', () => {
           method: 'POST',
           url: '/api/v1/super_admin/communities',
           cookies: { sessionId: superAdminSessionId },
+          headers: {
+            'content-type': 'application/json'
+          },
           payload: newCommunity,
         });
 

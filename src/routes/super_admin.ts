@@ -130,6 +130,58 @@ const PARAM_SCHEMAS = {
   },
 };
 
+const BODY_SCHEMAS = {
+  createCommunity: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', minLength: 2, maxLength: 100 },
+      description: { type: 'string', maxLength: 1000 },
+      slug: { type: 'string', minLength: 3, maxLength: 50, pattern: '^[a-z0-9-]+$' },
+      locale: { type: 'string', pattern: '^[a-z]{2,3}(-[A-Z]{2})?$', default: 'en' },
+      publicStories: { type: 'boolean', default: false },
+      isActive: { type: 'boolean', default: true },
+    },
+    required: ['name'],
+    additionalProperties: false,
+  },
+  updateCommunity: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', minLength: 2, maxLength: 100 },
+      description: { type: 'string', maxLength: 1000 },
+      locale: { type: 'string', pattern: '^[a-z]{2,3}(-[A-Z]{2})?$' },
+      publicStories: { type: 'boolean' },
+      isActive: { type: 'boolean' },
+    },
+    additionalProperties: false,
+  },
+  createUser: {
+    type: 'object',
+    properties: {
+      email: { type: 'string', format: 'email', maxLength: 255 },
+      password: { type: 'string', minLength: 8, maxLength: 128 },
+      firstName: { type: 'string', minLength: 1, maxLength: 50 },
+      lastName: { type: 'string', minLength: 1, maxLength: 50 },
+      role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+      communityId: { type: 'number', minimum: 1 },
+      isActive: { type: 'boolean', default: true },
+    },
+    required: ['email', 'password', 'firstName', 'lastName', 'role', 'communityId'],
+    additionalProperties: false,
+  },
+  updateUser: {
+    type: 'object',
+    properties: {
+      firstName: { type: 'string', minLength: 1, maxLength: 50 },
+      lastName: { type: 'string', minLength: 1, maxLength: 50 },
+      role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+      communityId: { type: 'number', minimum: 1 },
+      isActive: { type: 'boolean' },
+    },
+    additionalProperties: false,
+  },
+};
+
 export async function superAdminRoutes(
   app: FastifyInstance,
   options?: { database?: any }
@@ -348,9 +400,29 @@ export async function superAdminRoutes(
       description: 'Create new community (Super Admin)',
       tags: ['Super Admin - Communities'],
       security: [{ bearerAuth: [] }],
-      body: zodToJsonSchema(createCommunitySchema),
+      body: BODY_SCHEMAS.createCommunity,
       response: {
-        201: zodToJsonSchema(communityCreatedResponseSchema),
+        201: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                id: { type: 'number' },
+                name: { type: 'string' },
+                description: { type: ['string', 'null'] },
+                slug: { type: 'string' },
+                locale: { type: 'string' },
+                publicStories: { type: 'boolean' },
+                isActive: { type: 'boolean' },
+                userCount: { type: 'number' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+            },
+            message: { type: 'string' },
+          },
+        },
         400: ERROR_SCHEMAS[400],
         401: ERROR_SCHEMAS[401],
         403: ERROR_SCHEMAS[403],
@@ -424,9 +496,29 @@ export async function superAdminRoutes(
       tags: ['Super Admin - Communities'],
       security: [{ bearerAuth: [] }],
       params: PARAM_SCHEMAS.communityId,
-      body: zodToJsonSchema(updateCommunitySchema),
+      body: BODY_SCHEMAS.updateCommunity,
       response: {
-        200: zodToJsonSchema(communityUpdatedResponseSchema),
+        200: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                id: { type: 'number' },
+                name: { type: 'string' },
+                description: { type: ['string', 'null'] },
+                slug: { type: 'string' },
+                locale: { type: 'string' },
+                publicStories: { type: 'boolean' },
+                isActive: { type: 'boolean' },
+                userCount: { type: 'number' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+            },
+            message: { type: 'string' },
+          },
+        },
         400: ERROR_SCHEMAS[400],
         404: ERROR_SCHEMAS[404],
         401: ERROR_SCHEMAS[401],
@@ -507,7 +599,18 @@ export async function superAdminRoutes(
       security: [{ bearerAuth: [] }],
       params: PARAM_SCHEMAS.communityId,
       response: {
-        200: zodToJsonSchema(communityDeletedResponseSchema),
+        200: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                message: { type: 'string' },
+                id: { type: 'number' },
+              },
+            },
+          },
+        },
         404: ERROR_SCHEMAS[404],
         401: ERROR_SCHEMAS[401],
         403: ERROR_SCHEMAS[403],
@@ -579,7 +682,39 @@ export async function superAdminRoutes(
         additionalProperties: false,
       },
       response: {
-        200: zodToJsonSchema(paginatedUsersResponseSchema),
+        200: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'number' },
+                  email: { type: 'string', format: 'email' },
+                  firstName: { type: 'string' },
+                  lastName: { type: 'string' },
+                  role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+                  communityId: { type: 'number' },
+                  communityName: { type: 'string' },
+                  isActive: { type: 'boolean' },
+                  createdAt: { type: 'string', format: 'date-time' },
+                  updatedAt: { type: 'string', format: 'date-time' },
+                  lastLoginAt: { type: ['string', 'null'], format: 'date-time' },
+                },
+              },
+            },
+            meta: {
+              type: 'object',
+              properties: {
+                page: { type: 'number' },
+                limit: { type: 'number' },
+                total: { type: 'number' },
+                totalPages: { type: 'number' },
+              },
+            },
+          },
+        },
         401: ERROR_SCHEMAS[401],
         403: ERROR_SCHEMAS[403],
         500: ERROR_SCHEMAS[500],
@@ -740,9 +875,30 @@ export async function superAdminRoutes(
       description: 'Create user in any community (Super Admin)',
       tags: ['Super Admin - Users'],
       security: [{ bearerAuth: [] }],
-      body: zodToJsonSchema(createUserSchema),
+      body: BODY_SCHEMAS.createUser,
       response: {
-        201: zodToJsonSchema(userCreatedResponseSchema),
+        201: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                id: { type: 'number' },
+                email: { type: 'string', format: 'email' },
+                firstName: { type: 'string' },
+                lastName: { type: 'string' },
+                role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+                communityId: { type: 'number' },
+                communityName: { type: 'string' },
+                isActive: { type: 'boolean' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+                lastLoginAt: { type: ['string', 'null'], format: 'date-time' },
+              },
+            },
+            message: { type: 'string' },
+          },
+        },
         400: ERROR_SCHEMAS[400],
         401: ERROR_SCHEMAS[401],
         403: ERROR_SCHEMAS[403],
@@ -821,9 +977,30 @@ export async function superAdminRoutes(
       tags: ['Super Admin - Users'],
       security: [{ bearerAuth: [] }],
       params: PARAM_SCHEMAS.userId,
-      body: zodToJsonSchema(updateUserSchema),
+      body: BODY_SCHEMAS.updateUser,
       response: {
-        200: zodToJsonSchema(userUpdatedResponseSchema),
+        200: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                id: { type: 'number' },
+                email: { type: 'string', format: 'email' },
+                firstName: { type: 'string' },
+                lastName: { type: 'string' },
+                role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+                communityId: { type: 'number' },
+                communityName: { type: 'string' },
+                isActive: { type: 'boolean' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+                lastLoginAt: { type: ['string', 'null'], format: 'date-time' },
+              },
+            },
+            message: { type: 'string' },
+          },
+        },
         400: ERROR_SCHEMAS[400],
         404: ERROR_SCHEMAS[404],
         401: ERROR_SCHEMAS[401],
@@ -911,7 +1088,18 @@ export async function superAdminRoutes(
       security: [{ bearerAuth: [] }],
       params: PARAM_SCHEMAS.userId,
       response: {
-        200: zodToJsonSchema(userDeletedResponseSchema),
+        200: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                message: { type: 'string' },
+                id: { type: 'number' },
+              },
+            },
+          },
+        },
         404: ERROR_SCHEMAS[404],
         401: ERROR_SCHEMAS[401],
         403: ERROR_SCHEMAS[403],

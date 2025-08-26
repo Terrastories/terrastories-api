@@ -10,9 +10,11 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'vitest';
-import { PlaceRepository } from '../../src/repositories/place.repository.js';
+import {
+  PlaceRepository,
+  type CreatePlaceData,
+} from '../../src/repositories/place.repository.js';
 import { testDb } from '../helpers/database.js';
-import type { CreatePlaceData } from '../../src/repositories/place.repository.js';
 
 describe('PlaceRepository', () => {
   let repository: PlaceRepository;

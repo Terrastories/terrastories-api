@@ -10,9 +10,11 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'vitest';
-import { SpeakerRepository } from '../../src/repositories/speaker.repository.js';
+import {
+  SpeakerRepository,
+  type CreateSpeakerData,
+} from '../../src/repositories/speaker.repository.js';
 import { testDb } from '../helpers/database.js';
-import type { CreateSpeakerData } from '../../src/repositories/speaker.repository.js';
 
 describe('SpeakerRepository', () => {
   let repository: SpeakerRepository;

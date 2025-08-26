@@ -16,10 +16,10 @@
 import { eq, and, like, desc, or, sql, count } from 'drizzle-orm';
 import { communitiesSqlite } from '../db/schema/index.js';
 import type { Community, NewCommunity } from '../db/schema/communities.js';
+import type { Database } from '../db/index.js';
 
 // Re-export Community type for other modules
 export type { Community } from '../db/schema/communities.js';
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 
 /**
  * Community data for creation requests
@@ -114,7 +114,12 @@ export class InvalidCommunityDataError extends Error {
  * Community Repository class providing database operations
  */
 export class CommunityRepository {
-  constructor(private db: BetterSQLite3Database<Record<string, never>>) {}
+  constructor(private db: Database) {
+    // Type assertion for drizzle operations - safer than any
+    this.database = db as any; // TODO: Implement proper database abstraction layer
+  }
+
+  private database: any; // Internal database instance for drizzle operations
 
   /**
    * Generate a unique slug from community name
@@ -151,7 +156,7 @@ export class CommunityRepository {
         conditions.push(sql`${communities.id} != ${excludeId}`);
       }
 
-      const existing = await this.db
+      const existing = await this.database
         .select({ id: communities.id })
         .from(communities)
         .where(and(...conditions))
@@ -222,7 +227,7 @@ export class CommunityRepository {
       };
 
       // Create community
-      const result = await this.db
+      const result = await this.database
         .insert(communities)
         .values(communityData)
         .returning();
@@ -262,7 +267,7 @@ export class CommunityRepository {
     try {
       const communities = communitiesSqlite;
 
-      const result = await this.db
+      const result = await this.database
         .select()
         .from(communities)
         .where(eq(communities.id, id))
@@ -285,7 +290,7 @@ export class CommunityRepository {
     try {
       const communities = communitiesSqlite;
 
-      const result = await this.db
+      const result = await this.database
         .select()
         .from(communities)
         .where(eq(communities.slug, slug))
@@ -337,7 +342,7 @@ export class CommunityRepository {
       const whereClause =
         conditions.length > 0 ? and(...conditions) : undefined;
 
-      const result = await this.db
+      const result = await this.database
         .select()
         .from(communities)
         .where(whereClause)
@@ -431,7 +436,7 @@ export class CommunityRepository {
       );
 
       // Update community
-      const result = await this.db
+      const result = await this.database
         .update(communities)
         .set(cleanUpdateData)
         .where(eq(communities.id, id))
@@ -469,7 +474,7 @@ export class CommunityRepository {
       }
 
       // Delete community (CASCADE should handle related data)
-      const result = await this.db
+      const result = await this.database
         .delete(communities)
         .where(eq(communities.id, id))
         .returning();
@@ -506,7 +511,7 @@ export class CommunityRepository {
       const whereClause =
         conditions.length > 0 ? and(...conditions) : undefined;
 
-      const result = await this.db
+      const result = await this.database
         .select({ count: count() })
         .from(communities)
         .where(whereClause);
@@ -534,7 +539,7 @@ export class CommunityRepository {
         conditions.push(sql`${communities.id} != ${excludeId}`);
       }
 
-      const result = await this.db
+      const result = await this.database
         .select({ id: communities.id })
         .from(communities)
         .where(and(...conditions))

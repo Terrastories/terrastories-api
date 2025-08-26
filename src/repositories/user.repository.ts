@@ -14,7 +14,7 @@
  */
 
 import { eq, and, like, desc, asc, count, or, sql } from 'drizzle-orm';
-import { getUsersTable, type User, type NewUser } from '../db/schema/users.js';
+import { getUsersTable, type User, type NewUser, type UserRole } from '../db/schema/users.js';
 import {
   getCommunitiesTable,
   type Community,
@@ -439,7 +439,7 @@ export class UserRepository {
     limit?: number;
     offset?: number;
     communityId?: number;
-    role?: string;
+    role?: UserRole;
     search?: string;
     isActive?: boolean;
   }): Promise<User[]> {
@@ -508,7 +508,7 @@ export class UserRepository {
    */
   async countUsers(options: {
     communityId?: number;
-    role?: string;
+    role?: UserRole;
     search?: string;
     isActive?: boolean;
   }): Promise<number> {
@@ -581,6 +581,62 @@ export class UserRepository {
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
       throw new Error(`Failed to count users by community: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Find user by ID across all communities (super admin only)
+   * @param id - User ID
+   * @returns Promise<User | null> - User if found, null otherwise
+   */
+  async findByIdAsSuperAdmin(id: number): Promise<User | null> {
+    try {
+      const usersTable = await getUsersTable();
+      const users = await this.database
+        .select()
+        .from(usersTable)
+        .where(eq(usersTable.id, id))
+        .limit(1);
+
+      return users[0] || null;
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to find user by ID as super admin: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Update user by ID across all communities (super admin only)
+   * @param id - User ID
+   * @param data - Update data
+   * @returns Promise<User> - Updated user
+   */
+  async updateByIdAsSuperAdmin(id: number, data: Partial<NewUser>): Promise<User> {
+    try {
+      const usersTable = await getUsersTable();
+      
+      // Update the user
+      const updateData = {
+        ...data,
+        updatedAt: new Date(),
+      };
+
+      const updatedUsers = await this.database
+        .update(usersTable)
+        .set(updateData)
+        .where(eq(usersTable.id, id))
+        .returning();
+
+      if (!updatedUsers || updatedUsers.length === 0) {
+        throw new Error('User not found');
+      }
+
+      return updatedUsers[0];
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to update user by ID as super admin: ${errorMessage}`);
     }
   }
 }

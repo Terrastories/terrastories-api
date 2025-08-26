@@ -13,17 +13,17 @@ import { z } from 'zod';
 export const paginationQuerySchema = z.object({
   page: z
     .string()
-    .regex(/^\d+$/, 'Page must be a positive integer')
+    .default('1')
+    .refine((val) => /^\d+$/.test(val), 'Page must be a positive integer')
     .transform((val) => parseInt(val, 10))
-    .refine((val) => val >= 1, 'Page must be at least 1')
-    .default('1'),
+    .refine((val) => val >= 1, 'Page must be at least 1'),
   
   limit: z
     .string()
-    .regex(/^\d+$/, 'Limit must be a positive integer')
+    .default('20')
+    .refine((val) => /^\d+$/.test(val), 'Limit must be a positive integer')
     .transform((val) => parseInt(val, 10))
-    .refine((val) => val >= 1 && val <= 100, 'Limit must be between 1 and 100')
-    .default('20'),
+    .refine((val) => val >= 1 && val <= 100, 'Limit must be between 1 and 100'),
 });
 
 /**
@@ -323,7 +323,7 @@ export const communityDeletedResponseSchema = z.object({
 });
 
 export const userCreatedResponseSchema = z.object({
-  data: userResponseSchema.omit({ password: true }), // Never return password
+  data: userResponseSchema, // User response never includes password anyway
   message: z.string().default('User created successfully'),
 });
 

@@ -22,6 +22,7 @@ import type {
   User,
   CreateUserData,
   UpdateUserData,
+  UserRole,
 } from '../db/schema/index.js';
 
 /**
@@ -34,6 +35,7 @@ export interface CreateUserRequest {
   lastName: string;
   role?: 'super_admin' | 'admin' | 'editor' | 'elder' | 'viewer';
   communityId: number;
+  isActive?: boolean;
 }
 
 /**
@@ -45,6 +47,7 @@ export interface UpdateUserRequest {
   lastName?: string;
   role?: 'super_admin' | 'admin' | 'editor' | 'elder' | 'viewer';
   isActive?: boolean;
+  communityId?: number;
 }
 
 /**
@@ -423,7 +426,7 @@ export class UserService {
     page?: number;
     limit?: number;
     community?: number;
-    role?: string;
+    role?: UserRole;
     search?: string;
     active?: boolean;
   } = {}): Promise<{
@@ -453,7 +456,7 @@ export class UserService {
         limit?: number;
         offset?: number;
         communityId?: number;
-        role?: string;
+        role?: UserRole;
         search?: string;
         isActive?: boolean;
       } = {
@@ -463,7 +466,7 @@ export class UserService {
 
       const countFilters: {
         communityId?: number;
-        role?: string;
+        role?: UserRole;
         search?: string;
         isActive?: boolean;
       } = {};
@@ -579,15 +582,16 @@ export class UserService {
   ): Promise<any> {
     try {
       // Super admin can update any user including cross-community changes
-      const updateData: UpdateUserRequest = {
+      const updateData: Partial<UpdateUserData> = {
         firstName: updates.firstName,
         lastName: updates.lastName,
         role: updates.role as 'super_admin' | 'admin' | 'editor' | 'viewer' | undefined,
         communityId: updates.communityId,
         isActive: updates.isActive,
+        updatedAt: new Date(),
       };
 
-      return await this.updateUser(id, updateData);
+      return await this.userRepository.updateByIdAsSuperAdmin(id, updateData);
     } catch (error) {
       throw new Error(
         `Super admin failed to update user: ${
@@ -595,6 +599,15 @@ export class UserService {
         }`
       );
     }
+  }
+
+  /**
+   * Get user by ID as super admin (cross-community access)
+   * @param id - User ID
+   * @returns Promise<User | null> - User data or null if not found
+   */
+  async getUserByIdAsSuperAdmin(id: number): Promise<User | null> {
+    return await this.userRepository.findByIdAsSuperAdmin(id);
   }
 
   /**
@@ -613,13 +626,13 @@ export class UserService {
       }
 
       // Check if user exists
-      const user = await this.getUserById(id);
+      const user = await this.getUserByIdAsSuperAdmin(id);
       if (!user) {
         throw new Error('User not found');
       }
 
       // Deactivate the user
-      await this.updateUser(id, { isActive: false });
+      await this.userRepository.updateByIdAsSuperAdmin(id, { isActive: false });
 
       return {
         message: 'User deactivated successfully',

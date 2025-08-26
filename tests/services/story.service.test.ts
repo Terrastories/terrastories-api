@@ -11,13 +11,13 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { StoryService } from '../../src/services/story.service.js';
-import type {
-  StoryCreateInput,
-  StoryWithRelations,
-  PaginatedResult,
-  StoryFilters,
-  PaginationOptions,
+import {
+  StoryService,
+  type StoryCreateInput,
+  type StoryWithRelations,
+  type PaginatedResult,
+  type StoryFilters,
+  type PaginationOptions,
 } from '../../src/services/story.service.js';
 
 // Mock dependencies
@@ -229,7 +229,9 @@ describe('StoryService', () => {
       };
 
       // Mock repository methods
-      mockStoryRepository.generateUniqueSlug.mockResolvedValue('the-legend-of-sacred-mountain');
+      mockStoryRepository.generateUniqueSlug.mockResolvedValue(
+        'the-legend-of-sacred-mountain'
+      );
       mockFileRepository.validateFileAccess.mockResolvedValue({ valid: true });
       mockStoryRepository.validatePlacesInCommunity.mockResolvedValue(true);
       mockStoryRepository.validateSpeakersInCommunity.mockResolvedValue(true);
@@ -282,7 +284,9 @@ describe('StoryService', () => {
           testData.users.admin.role,
           testData.community.id
         )
-      ).rejects.toThrow('Places must belong to the same community as the story');
+      ).rejects.toThrow(
+        'Places must belong to the same community as the story'
+      );
     });
 
     it('should reject creation with invalid media files', async () => {
@@ -318,7 +322,9 @@ describe('StoryService', () => {
         createdBy: testData.users.editor.id,
       };
 
-      mockStoryRepository.generateUniqueSlug.mockResolvedValue('another-amazing-story');
+      mockStoryRepository.generateUniqueSlug.mockResolvedValue(
+        'another-amazing-story'
+      );
       mockStoryRepository.create.mockResolvedValue({
         ...storyInput,
         id: 1,
@@ -368,7 +374,9 @@ describe('StoryService', () => {
     it('should block super admin from community stories', async () => {
       // Arrange
       const elderOnlyStory = createElderOnlyStory();
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(elderOnlyStory);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        elderOnlyStory
+      );
 
       // Act
       const result = await storyService.getStoryById(
@@ -389,7 +397,9 @@ describe('StoryService', () => {
     it('should allow elder access to elder-only content', async () => {
       // Arrange
       const elderOnlyStory = createElderOnlyStory();
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(elderOnlyStory);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        elderOnlyStory
+      );
 
       // Act
       const result = await storyService.getStoryById(
@@ -406,7 +416,9 @@ describe('StoryService', () => {
     it('should deny editor access to elder-only content', async () => {
       // Arrange
       const elderOnlyStory = createElderOnlyStory();
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(elderOnlyStory);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        elderOnlyStory
+      );
 
       // Act
       const result = await storyService.getStoryById(
@@ -427,7 +439,9 @@ describe('StoryService', () => {
     it('should deny cross-community access', async () => {
       // Arrange
       const elderOnlyStory = createElderOnlyStory();
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(elderOnlyStory);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        elderOnlyStory
+      );
 
       // Act
       const result = await storyService.getStoryById(
@@ -493,17 +507,18 @@ describe('StoryService', () => {
   });
 
   describe('updateStory - Association Management', () => {
-    const createExistingStory = (): StoryWithRelations => ({
-      id: 1,
-      title: 'River Crossing Story',
-      slug: 'river-crossing-story',
-      communityId: testData.community.id,
-      createdBy: testData.users.editor.id,
-      mediaUrls: ['/uploads/old-image.jpg'],
-      places: [testData.places[0]],
-      speakers: [testData.speakers[0]],
-      culturalProtocols: { permissionLevel: 'community' },
-    } as any);
+    const createExistingStory = (): StoryWithRelations =>
+      ({
+        id: 1,
+        title: 'River Crossing Story',
+        slug: 'river-crossing-story',
+        communityId: testData.community.id,
+        createdBy: testData.users.editor.id,
+        mediaUrls: ['/uploads/old-image.jpg'],
+        places: [testData.places[0]],
+        speakers: [testData.speakers[0]],
+        culturalProtocols: { permissionLevel: 'community' },
+      }) as any;
 
     it('should update place and speaker associations', async () => {
       // Arrange
@@ -521,7 +536,9 @@ describe('StoryService', () => {
         speakers: [testData.speakers[1]],
       };
 
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(existingStory);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        existingStory
+      );
       mockStoryRepository.validatePlacesInCommunity.mockResolvedValue(true);
       mockStoryRepository.validateSpeakersInCommunity.mockResolvedValue(true);
       mockStoryRepository.update.mockResolvedValue(updatedStory);
@@ -548,7 +565,9 @@ describe('StoryService', () => {
         mediaUrls: ['/uploads/new-image.jpg'],
       };
 
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(existingStory);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        existingStory
+      );
       mockFileRepository.validateFileAccess.mockResolvedValue({ valid: true });
       mockStoryRepository.update.mockResolvedValue({
         ...existingStory,
@@ -570,7 +589,9 @@ describe('StoryService', () => {
     it('should reject updates by unauthorized users', async () => {
       // Arrange
       const existingStory = createExistingStory();
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(existingStory);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        existingStory
+      );
 
       // Act & Assert
       await expect(
@@ -585,18 +606,21 @@ describe('StoryService', () => {
   });
 
   describe('deleteStory', () => {
-    const createStoryToDelete = (): StoryWithRelations => ({
-      id: 1,
-      title: 'Story to Delete',
-      communityId: testData.community.id,
-      createdBy: testData.users.editor.id,
-      mediaUrls: ['/uploads/file-to-cleanup.jpg'],
-    } as any);
+    const createStoryToDelete = (): StoryWithRelations =>
+      ({
+        id: 1,
+        title: 'Story to Delete',
+        communityId: testData.community.id,
+        createdBy: testData.users.editor.id,
+        mediaUrls: ['/uploads/file-to-cleanup.jpg'],
+      }) as any;
 
     it('should delete story and clean up media files', async () => {
       // Arrange
       const storyToDelete = createStoryToDelete();
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(storyToDelete);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        storyToDelete
+      );
       mockStoryRepository.delete.mockResolvedValue(true);
 
       // Act
@@ -614,7 +638,9 @@ describe('StoryService', () => {
     it('should allow creators to delete their own stories', async () => {
       // Arrange
       const storyToDelete = createStoryToDelete();
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(storyToDelete);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        storyToDelete
+      );
       mockStoryRepository.delete.mockResolvedValue(true);
 
       // Act
@@ -631,7 +657,9 @@ describe('StoryService', () => {
     it('should reject deletion by unauthorized users', async () => {
       // Arrange
       const storyToDelete = createStoryToDelete();
-      mockStoryRepository.findByIdWithRelations.mockResolvedValue(storyToDelete);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        storyToDelete
+      );
 
       // Act & Assert
       await expect(

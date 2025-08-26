@@ -17,10 +17,10 @@ import {
   DuplicateEmailError,
   WeakPasswordError,
   InvalidCommunityError,
+  type CreateUserRequest,
 } from '../../src/services/user.service.js';
 import { UserRepository } from '../../src/repositories/user.repository.js';
 import * as passwordService from '../../src/services/password.service.js';
-import type { CreateUserRequest } from '../../src/services/user.service.js';
 
 // Mock the password service
 vi.mock('../../src/services/password.service.js', () => ({

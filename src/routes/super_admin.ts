@@ -37,7 +37,7 @@ import {
   createUserSchema,
   updateUserSchema,
   userIdParamSchema,
-  paginatedCommunitiesResponseSchema,
+  paginatedCommunitiesResponseSchema as _paginatedCommunitiesResponseSchema,
   paginatedUsersResponseSchema,
   communityCreatedResponseSchema,
   communityUpdatedResponseSchema,
@@ -45,16 +45,97 @@ import {
   userCreatedResponseSchema,
   userUpdatedResponseSchema,
   userDeletedResponseSchema,
-  errorResponseSchema,
-  validationErrorSchema,
-  notFoundErrorSchema,
-  forbiddenErrorSchema,
-  unauthorizedErrorSchema,
-  conflictErrorSchema,
+  errorResponseSchema as _errorResponseSchema,
+  validationErrorSchema as _validationErrorSchema,
+  notFoundErrorSchema as _notFoundErrorSchema,
+  forbiddenErrorSchema as _forbiddenErrorSchema,
+  unauthorizedErrorSchema as _unauthorizedErrorSchema,
+  conflictErrorSchema as _conflictErrorSchema,
 } from '../shared/schemas/super-admin.js';
 
-export async function superAdminRoutes(app: FastifyInstance) {
-  const db = await getDb();
+// Manual JSON Schema constants (zodToJsonSchema causes serialization issues)
+const ERROR_SCHEMAS = {
+  400: {
+    type: 'object',
+    properties: {
+      error: { type: 'string' },
+      statusCode: { type: 'number', const: 400 },
+      issues: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            field: { type: 'string' },
+            message: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+  401: {
+    type: 'object',
+    properties: {
+      error: { type: 'string' },
+      statusCode: { type: 'number', const: 401 },
+    },
+  },
+  403: {
+    type: 'object',
+    properties: {
+      error: { type: 'string' },
+      statusCode: { type: 'number', const: 403 },
+    },
+  },
+  404: {
+    type: 'object',
+    properties: {
+      error: { type: 'string' },
+      statusCode: { type: 'number', const: 404 },
+    },
+  },
+  409: {
+    type: 'object',
+    properties: {
+      error: { type: 'string' },
+      statusCode: { type: 'number', const: 409 },
+    },
+  },
+  500: {
+    type: 'object',
+    properties: {
+      error: { type: 'string' },
+      statusCode: { type: 'number' },
+      details: {
+        type: 'array',
+        items: { type: 'string' },
+      },
+    },
+  },
+};
+
+const PARAM_SCHEMAS = {
+  communityId: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', pattern: '^\\d+$' },
+    },
+    required: ['id'],
+  },
+  userId: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', pattern: '^\\d+$' },
+    },
+    required: ['id'],
+  },
+};
+
+export async function superAdminRoutes(
+  app: FastifyInstance,
+  options?: { database?: any }
+) {
+  // Initialize services - use provided database instance or default
+  const db = options?.database || (await getDb());
   const communityRepository = new CommunityRepository(db);
   const userRepository = new UserRepository(db);
   const communityService = new CommunityService(communityRepository);
@@ -91,10 +172,41 @@ export async function superAdminRoutes(app: FastifyInstance) {
         additionalProperties: false,
       },
       response: {
-        200: zodToJsonSchema(paginatedCommunitiesResponseSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        200: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'number' },
+                  name: { type: 'string' },
+                  description: { type: ['string', 'null'] },
+                  slug: { type: 'string' },
+                  locale: { type: 'string' },
+                  publicStories: { type: 'boolean' },
+                  isActive: { type: 'boolean' },
+                  userCount: { type: 'number' },
+                  createdAt: { type: 'string', format: 'date-time' },
+                  updatedAt: { type: 'string', format: 'date-time' },
+                },
+              },
+            },
+            meta: {
+              type: 'object',
+              properties: {
+                page: { type: 'number' },
+                limit: { type: 'number' },
+                total: { type: 'number' },
+                totalPages: { type: 'number' },
+              },
+            },
+          },
+        },
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (
@@ -104,11 +216,17 @@ export async function superAdminRoutes(app: FastifyInstance) {
       reply: FastifyReply
     ) => {
       try {
+        console.log('Route handler reached: GET /communities');
+
         const query = request.query as z.infer<
           typeof listCommunitiesQuerySchema
         >;
         const { page, limit, search, locale, active } = query;
+        console.log('Query params:', { page, limit, search, locale, active });
 
+        console.log(
+          'About to call communityService.getAllCommunitiesForSuperAdmin'
+        );
         const result = await communityService.getAllCommunitiesForSuperAdmin({
           page,
           limit,
@@ -116,25 +234,16 @@ export async function superAdminRoutes(app: FastifyInstance) {
           locale,
           active,
         });
+        console.log('Service call completed successfully');
 
-        // Add user counts for each community
-        const dataWithUserCounts = await Promise.all(
-          result.data.map(async (community) => {
-            const userCount = await userRepository.countUsersByCommunity(
-              community.id
-            );
-            return {
-              ...community,
-              userCount,
-            };
-          })
-        );
-
-        return reply.code(200).send({
-          ...result,
-          data: dataWithUserCounts,
-        });
+        // Temporarily skip user count aggregation to isolate the issue
+        return reply.code(200).send(result);
       } catch (error) {
+        console.error('Route handler error:', error);
+        console.error(
+          'Error stack:',
+          error instanceof Error ? error.stack : 'No stack'
+        );
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
@@ -155,7 +264,7 @@ export async function superAdminRoutes(app: FastifyInstance) {
       description: 'Get specific community details (Super Admin)',
       tags: ['Super Admin - Communities'],
       security: [{ bearerAuth: [] }],
-      params: zodToJsonSchema(communityIdParamSchema),
+      params: PARAM_SCHEMAS.communityId,
       response: {
         200: {
           type: 'object',
@@ -177,10 +286,10 @@ export async function superAdminRoutes(app: FastifyInstance) {
             },
           },
         },
-        404: zodToJsonSchema(notFoundErrorSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        404: ERROR_SCHEMAS[404],
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (
@@ -242,11 +351,11 @@ export async function superAdminRoutes(app: FastifyInstance) {
       body: zodToJsonSchema(createCommunitySchema),
       response: {
         201: zodToJsonSchema(communityCreatedResponseSchema),
-        400: zodToJsonSchema(validationErrorSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        409: zodToJsonSchema(conflictErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        400: ERROR_SCHEMAS[400],
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        409: ERROR_SCHEMAS[409],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (
@@ -314,15 +423,15 @@ export async function superAdminRoutes(app: FastifyInstance) {
       description: 'Update community (Super Admin)',
       tags: ['Super Admin - Communities'],
       security: [{ bearerAuth: [] }],
-      params: zodToJsonSchema(communityIdParamSchema),
+      params: PARAM_SCHEMAS.communityId,
       body: zodToJsonSchema(updateCommunitySchema),
       response: {
         200: zodToJsonSchema(communityUpdatedResponseSchema),
-        400: zodToJsonSchema(validationErrorSchema),
-        404: zodToJsonSchema(notFoundErrorSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        400: ERROR_SCHEMAS[400],
+        404: ERROR_SCHEMAS[404],
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (
@@ -396,13 +505,13 @@ export async function superAdminRoutes(app: FastifyInstance) {
       description: 'Archive community (Super Admin)',
       tags: ['Super Admin - Communities'],
       security: [{ bearerAuth: [] }],
-      params: zodToJsonSchema(communityIdParamSchema),
+      params: PARAM_SCHEMAS.communityId,
       response: {
         200: zodToJsonSchema(communityDeletedResponseSchema),
-        404: zodToJsonSchema(notFoundErrorSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        404: ERROR_SCHEMAS[404],
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (
@@ -471,9 +580,9 @@ export async function superAdminRoutes(app: FastifyInstance) {
       },
       response: {
         200: zodToJsonSchema(paginatedUsersResponseSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (
@@ -542,7 +651,7 @@ export async function superAdminRoutes(app: FastifyInstance) {
       description: 'Get specific user details (Super Admin)',
       tags: ['Super Admin - Users'],
       security: [{ bearerAuth: [] }],
-      params: zodToJsonSchema(userIdParamSchema),
+      params: PARAM_SCHEMAS.userId,
       response: {
         200: {
           type: 'object',
@@ -565,10 +674,10 @@ export async function superAdminRoutes(app: FastifyInstance) {
             },
           },
         },
-        404: zodToJsonSchema(notFoundErrorSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        404: ERROR_SCHEMAS[404],
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (
@@ -634,11 +743,11 @@ export async function superAdminRoutes(app: FastifyInstance) {
       body: zodToJsonSchema(createUserSchema),
       response: {
         201: zodToJsonSchema(userCreatedResponseSchema),
-        400: zodToJsonSchema(validationErrorSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        409: zodToJsonSchema(conflictErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        400: ERROR_SCHEMAS[400],
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        409: ERROR_SCHEMAS[409],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (
@@ -711,15 +820,15 @@ export async function superAdminRoutes(app: FastifyInstance) {
       description: 'Update user details including role changes (Super Admin)',
       tags: ['Super Admin - Users'],
       security: [{ bearerAuth: [] }],
-      params: zodToJsonSchema(userIdParamSchema),
+      params: PARAM_SCHEMAS.userId,
       body: zodToJsonSchema(updateUserSchema),
       response: {
         200: zodToJsonSchema(userUpdatedResponseSchema),
-        400: zodToJsonSchema(validationErrorSchema),
-        404: zodToJsonSchema(notFoundErrorSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        400: ERROR_SCHEMAS[400],
+        404: ERROR_SCHEMAS[404],
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (
@@ -800,13 +909,13 @@ export async function superAdminRoutes(app: FastifyInstance) {
       description: 'Deactivate user account (Super Admin)',
       tags: ['Super Admin - Users'],
       security: [{ bearerAuth: [] }],
-      params: zodToJsonSchema(userIdParamSchema),
+      params: PARAM_SCHEMAS.userId,
       response: {
         200: zodToJsonSchema(userDeletedResponseSchema),
-        404: zodToJsonSchema(notFoundErrorSchema),
-        401: zodToJsonSchema(unauthorizedErrorSchema),
-        403: zodToJsonSchema(forbiddenErrorSchema),
-        500: zodToJsonSchema(errorResponseSchema),
+        404: ERROR_SCHEMAS[404],
+        401: ERROR_SCHEMAS[401],
+        403: ERROR_SCHEMAS[403],
+        500: ERROR_SCHEMAS[500],
       },
     },
     handler: async (

@@ -1,6 +1,6 @@
 /**
  * Super Admin API Tests
- * 
+ *
  * Tests all super admin endpoints for community and user management
  * with proper role-based access control and data sovereignty enforcement.
  */
@@ -41,7 +41,7 @@ describe('Super Admin API', () => {
       url: '/api/v1/auth/register',
       payload: superAdminUser,
     });
-    superAdminUserId = superAdminRegResponse.json().data.id;
+    superAdminUserId = superAdminRegResponse.json().user.id;
 
     // Login super admin
     const superAdminLogin = await app.inject({
@@ -53,7 +53,10 @@ describe('Super Admin API', () => {
         communityId: testCommunityId,
       },
     });
-    superAdminSessionId = superAdminLogin.cookies[0].value;
+    const sessionCookie = superAdminLogin.cookies.find(
+      (cookie) => cookie.name === 'sessionId'
+    );
+    superAdminSessionId = sessionCookie?.value || '';
 
     // Create regular admin user for negative tests
     const adminUser = {
@@ -80,7 +83,10 @@ describe('Super Admin API', () => {
         communityId: testCommunityId,
       },
     });
-    adminSessionId = adminLogin.cookies[0].value;
+    const adminSessionCookie = adminLogin.cookies.find(
+      (cookie) => cookie.name === 'sessionId'
+    );
+    adminSessionId = adminSessionCookie?.value || '';
 
     // Create editor user for more negative tests
     const editorUser = {
@@ -107,7 +113,10 @@ describe('Super Admin API', () => {
         communityId: testCommunityId,
       },
     });
-    editorSessionId = editorLogin.cookies[0].value;
+    const editorSessionCookie = editorLogin.cookies.find(
+      (cookie) => cookie.name === 'sessionId'
+    );
+    editorSessionId = editorSessionCookie?.value || '';
   });
 
   afterEach(async () => {
@@ -725,7 +734,9 @@ describe('Super Admin API', () => {
 
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
-        error: expect.stringContaining('Super admins cannot access community cultural data'),
+        error: expect.stringContaining(
+          'Super admins cannot access community cultural data'
+        ),
         statusCode: 403,
       });
     });
@@ -739,7 +750,9 @@ describe('Super Admin API', () => {
 
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
-        error: expect.stringContaining('Super admins cannot access community cultural data'),
+        error: expect.stringContaining(
+          'Super admins cannot access community cultural data'
+        ),
         statusCode: 403,
       });
     });
@@ -753,7 +766,9 @@ describe('Super Admin API', () => {
 
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
-        error: expect.stringContaining('Super admins cannot access community cultural data'),
+        error: expect.stringContaining(
+          'Super admins cannot access community cultural data'
+        ),
         statusCode: 403,
       });
     });

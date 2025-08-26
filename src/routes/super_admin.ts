@@ -79,7 +79,17 @@ export async function superAdminRoutes(app: FastifyInstance) {
         'List all communities with pagination and filtering (Super Admin)',
       tags: ['Super Admin - Communities'],
       security: [{ bearerAuth: [] }],
-      querystring: zodToJsonSchema(listCommunitiesQuerySchema),
+      querystring: {
+        type: 'object',
+        properties: {
+          page: { type: 'string', pattern: '^\\d+$' },
+          limit: { type: 'string', pattern: '^\\d+$' },
+          search: { type: 'string', maxLength: 100 },
+          locale: { type: 'string', pattern: '^[a-z]{2,3}(-[A-Z]{2})?$' },
+          active: { type: 'string', enum: ['true', 'false'] },
+        },
+        additionalProperties: false,
+      },
       response: {
         200: zodToJsonSchema(paginatedCommunitiesResponseSchema),
         401: zodToJsonSchema(unauthorizedErrorSchema),
@@ -444,7 +454,21 @@ export async function superAdminRoutes(app: FastifyInstance) {
         'List all users across communities with filtering (Super Admin)',
       tags: ['Super Admin - Users'],
       security: [{ bearerAuth: [] }],
-      querystring: zodToJsonSchema(listUsersQuerySchema),
+      querystring: {
+        type: 'object',
+        properties: {
+          page: { type: 'string', pattern: '^\\d+$' },
+          limit: { type: 'string', pattern: '^\\d+$' },
+          community: { type: 'string', pattern: '^\\d+$' },
+          role: {
+            type: 'string',
+            enum: ['super_admin', 'admin', 'editor', 'viewer'],
+          },
+          search: { type: 'string', maxLength: 100 },
+          active: { type: 'string', enum: ['true', 'false'] },
+        },
+        additionalProperties: false,
+      },
       response: {
         200: zodToJsonSchema(paginatedUsersResponseSchema),
         401: zodToJsonSchema(unauthorizedErrorSchema),

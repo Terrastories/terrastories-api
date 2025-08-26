@@ -7,11 +7,23 @@
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import type { AuthenticatedRequest } from '../shared/middleware/auth.middleware.js';
 import { requireRole } from '../shared/middleware/auth.middleware.js';
-import { toISOString, toISOStringOrNull } from '../shared/utils/date-transforms.js';
-import { CommunityService, CommunityValidationError, CommunityOperationError } from '../services/community.service.js';
-import { UserService, DuplicateEmailError, WeakPasswordError, InvalidCommunityError, UserNotFoundError } from '../services/user.service.js';
+import {
+  toISOString,
+  toISOStringOrNull,
+} from '../shared/utils/date-transforms.js';
+import {
+  CommunityService,
+  CommunityValidationError,
+  CommunityOperationError,
+} from '../services/community.service.js';
+import {
+  UserService,
+  DuplicateEmailError,
+  WeakPasswordError,
+  InvalidCommunityError,
+  UserNotFoundError,
+} from '../services/user.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { getDb } from '../db/index.js';
@@ -62,7 +74,8 @@ export async function superAdminRoutes(app: FastifyInstance) {
   // GET /api/v1/super_admin/communities - List all communities
   app.get('/communities', {
     schema: {
-      description: 'List all communities with pagination and filtering (Super Admin)',
+      description:
+        'List all communities with pagination and filtering (Super Admin)',
       tags: ['Super Admin - Communities'],
       security: [{ bearerAuth: [] }],
       querystring: listCommunitiesQuerySchema,
@@ -74,13 +87,17 @@ export async function superAdminRoutes(app: FastifyInstance) {
       },
     },
     handler: async (
-      request: FastifyRequest<{ Querystring: z.infer<typeof listCommunitiesQuerySchema> }>,
+      request: FastifyRequest<{
+        Querystring: z.infer<typeof listCommunitiesQuerySchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
-        const query = request.query as z.infer<typeof listCommunitiesQuerySchema>;
+        const query = request.query as z.infer<
+          typeof listCommunitiesQuerySchema
+        >;
         const { page, limit, search, locale, active } = query;
-        
+
         const result = await communityService.getAllCommunitiesForSuperAdmin({
           page,
           limit,
@@ -92,7 +109,9 @@ export async function superAdminRoutes(app: FastifyInstance) {
         // Add user counts for each community
         const dataWithUserCounts = await Promise.all(
           result.data.map(async (community) => {
-            const userCount = await userRepository.countUsersByCommunity(community.id);
+            const userCount = await userRepository.countUsersByCommunity(
+              community.id
+            );
             return {
               ...community,
               userCount,
@@ -105,7 +124,8 @@ export async function superAdminRoutes(app: FastifyInstance) {
           data: dataWithUserCounts,
         });
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           { error: errorMessage },
           'Failed to list communities'
@@ -153,14 +173,16 @@ export async function superAdminRoutes(app: FastifyInstance) {
       },
     },
     handler: async (
-      request: FastifyRequest<{ Params: z.infer<typeof communityIdParamSchema> }>,
+      request: FastifyRequest<{
+        Params: z.infer<typeof communityIdParamSchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
         const { id } = request.params;
-        
+
         const community = await communityService.getCommunityById(id, true);
-        
+
         if (!community) {
           return reply.code(404).send({
             error: 'Community not found',
@@ -186,7 +208,8 @@ export async function superAdminRoutes(app: FastifyInstance) {
 
         return reply.code(200).send(response);
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           { error: errorMessage, id: request.params.id },
           'Failed to get community'
@@ -220,7 +243,9 @@ export async function superAdminRoutes(app: FastifyInstance) {
       reply: FastifyReply
     ) => {
       try {
-        const community = await communityService.createCommunityAsSuperAdmin(request.body);
+        const community = await communityService.createCommunityAsSuperAdmin(
+          request.body
+        );
 
         const response = {
           data: {
@@ -240,20 +265,24 @@ export async function superAdminRoutes(app: FastifyInstance) {
 
         return reply.code(201).send(response);
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           { error: errorMessage },
           'Failed to create community'
         );
-        
+
         if (error instanceof CommunityValidationError) {
           return reply.code(400).send({
             error: error.message,
             statusCode: 400,
           });
         }
-        
-        if (error instanceof CommunityOperationError && error.message.includes('already exists')) {
+
+        if (
+          error instanceof CommunityOperationError &&
+          error.message.includes('already exists')
+        ) {
           return reply.code(409).send({
             error: error.message,
             statusCode: 409,
@@ -294,8 +323,11 @@ export async function superAdminRoutes(app: FastifyInstance) {
     ) => {
       try {
         const { id } = request.params;
-        
-        const community = await communityService.updateCommunityAsSuperAdmin(id, request.body);
+
+        const community = await communityService.updateCommunityAsSuperAdmin(
+          id,
+          request.body
+        );
 
         const response = {
           data: {
@@ -315,20 +347,24 @@ export async function superAdminRoutes(app: FastifyInstance) {
 
         return reply.code(200).send(response);
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           { error: errorMessage, id: request.params.id },
           'Failed to update community'
         );
-        
+
         if (error instanceof CommunityValidationError) {
           return reply.code(400).send({
             error: error.message,
             statusCode: 400,
           });
         }
-        
-        if (error instanceof CommunityOperationError && error.message.includes('not found')) {
+
+        if (
+          error instanceof CommunityOperationError &&
+          error.message.includes('not found')
+        ) {
           return reply.code(404).send({
             error: 'Community not found',
             statusCode: 404,
@@ -359,23 +395,29 @@ export async function superAdminRoutes(app: FastifyInstance) {
       },
     },
     handler: async (
-      request: FastifyRequest<{ Params: z.infer<typeof communityIdParamSchema> }>,
+      request: FastifyRequest<{
+        Params: z.infer<typeof communityIdParamSchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
         const { id } = request.params;
-        
+
         const result = await communityService.archiveCommunityAsSuperAdmin(id);
 
         return reply.code(200).send({ data: result });
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           { error: errorMessage, id: request.params.id },
           'Failed to archive community'
         );
-        
-        if (error instanceof CommunityOperationError && error.message.includes('not found')) {
+
+        if (
+          error instanceof CommunityOperationError &&
+          error.message.includes('not found')
+        ) {
           return reply.code(404).send({
             error: 'Community not found',
             statusCode: 404,
@@ -397,7 +439,8 @@ export async function superAdminRoutes(app: FastifyInstance) {
   // GET /api/v1/super_admin/users - List all users
   app.get('/users', {
     schema: {
-      description: 'List all users across communities with filtering (Super Admin)',
+      description:
+        'List all users across communities with filtering (Super Admin)',
       tags: ['Super Admin - Users'],
       security: [{ bearerAuth: [] }],
       querystring: listUsersQuerySchema,
@@ -409,13 +452,15 @@ export async function superAdminRoutes(app: FastifyInstance) {
       },
     },
     handler: async (
-      request: FastifyRequest<{ Querystring: z.infer<typeof listUsersQuerySchema> }>,
+      request: FastifyRequest<{
+        Querystring: z.infer<typeof listUsersQuerySchema>;
+      }>,
       reply: FastifyReply
     ) => {
       try {
         const query = request.query as z.infer<typeof listUsersQuerySchema>;
         const { page, limit, community, role, search, active } = query;
-        
+
         const result = await userService.getAllUsersForSuperAdmin({
           page,
           limit,
@@ -426,21 +471,28 @@ export async function superAdminRoutes(app: FastifyInstance) {
         });
 
         // Add community names for each user
-        const uniqueCommunityIds = [...new Set(result.data.map(user => user.communityId))];
+        const uniqueCommunityIds = [
+          ...new Set(result.data.map((user) => user.communityId)),
+        ];
         const communityNamesMap = new Map<number, string>();
-        
+
         // Fetch community names in batch
         await Promise.all(
           uniqueCommunityIds.map(async (communityId) => {
             const community = await communityRepository.findById(communityId);
-            communityNamesMap.set(communityId, community?.name || `Community ${communityId}`);
+            communityNamesMap.set(
+              communityId,
+              community?.name || `Community ${communityId}`
+            );
           })
         );
 
         // Update users with community names
         const dataWithCommunityNames = result.data.map((user) => ({
           ...user,
-          communityName: communityNamesMap.get(user.communityId) || `Community ${user.communityId}`,
+          communityName:
+            communityNamesMap.get(user.communityId) ||
+            `Community ${user.communityId}`,
         }));
 
         return reply.code(200).send({
@@ -448,11 +500,9 @@ export async function superAdminRoutes(app: FastifyInstance) {
           data: dataWithCommunityNames,
         });
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        request.log.error(
-          { error: errorMessage },
-          'Failed to list users'
-        );
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
+        request.log.error({ error: errorMessage }, 'Failed to list users');
         return reply.code(500).send({
           error: 'Internal server error',
           statusCode: 500,
@@ -502,9 +552,9 @@ export async function superAdminRoutes(app: FastifyInstance) {
     ) => {
       try {
         const { id } = request.params;
-        
+
         const user = await userService.getUserByIdAsSuperAdmin(id);
-        
+
         if (!user) {
           return reply.code(404).send({
             error: 'User not found',
@@ -514,7 +564,8 @@ export async function superAdminRoutes(app: FastifyInstance) {
 
         // Get community name
         const community = await communityRepository.findById(user.communityId);
-        const communityName = community?.name || `Community ${user.communityId}`;
+        const communityName =
+          community?.name || `Community ${user.communityId}`;
 
         // Transform to response format
         const response = {
@@ -535,7 +586,8 @@ export async function superAdminRoutes(app: FastifyInstance) {
 
         return reply.code(200).send(response);
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           { error: errorMessage, id: request.params.id },
           'Failed to get user'
@@ -573,7 +625,8 @@ export async function superAdminRoutes(app: FastifyInstance) {
 
         // Get community name
         const community = await communityRepository.findById(user.communityId);
-        const communityName = community?.name || `Community ${user.communityId}`;
+        const communityName =
+          community?.name || `Community ${user.communityId}`;
 
         const response = {
           data: {
@@ -594,26 +647,24 @@ export async function superAdminRoutes(app: FastifyInstance) {
 
         return reply.code(201).send(response);
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        request.log.error(
-          { error: errorMessage },
-          'Failed to create user'
-        );
-        
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
+        request.log.error({ error: errorMessage }, 'Failed to create user');
+
         if (error instanceof DuplicateEmailError) {
           return reply.code(409).send({
             error: error.message,
             statusCode: 409,
           });
         }
-        
+
         if (error instanceof WeakPasswordError) {
           return reply.code(400).send({
             error: error.message,
             statusCode: 400,
           });
         }
-        
+
         if (error instanceof InvalidCommunityError) {
           return reply.code(400).send({
             error: error.message,
@@ -655,12 +706,13 @@ export async function superAdminRoutes(app: FastifyInstance) {
     ) => {
       try {
         const { id } = request.params;
-        
+
         const user = await userService.updateUserAsSuperAdmin(id, request.body);
 
         // Get community name
         const community = await communityRepository.findById(user.communityId);
-        const communityName = community?.name || `Community ${user.communityId}`;
+        const communityName =
+          community?.name || `Community ${user.communityId}`;
 
         const response = {
           data: {
@@ -681,26 +733,27 @@ export async function superAdminRoutes(app: FastifyInstance) {
 
         return reply.code(200).send(response);
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           { error: errorMessage, id: request.params.id },
           'Failed to update user'
         );
-        
+
         if (error instanceof UserNotFoundError) {
           return reply.code(404).send({
             error: 'User not found',
             statusCode: 404,
           });
         }
-        
+
         if (error instanceof DuplicateEmailError) {
           return reply.code(409).send({
             error: error.message,
             statusCode: 409,
           });
         }
-        
+
         if (error instanceof InvalidCommunityError) {
           return reply.code(400).send({
             error: error.message,
@@ -737,17 +790,18 @@ export async function superAdminRoutes(app: FastifyInstance) {
     ) => {
       try {
         const { id } = request.params;
-        
+
         const result = await userService.deactivateUserAsSuperAdmin(id);
 
         return reply.code(200).send({ data: result });
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
           { error: errorMessage, id: request.params.id },
           'Failed to deactivate user'
         );
-        
+
         if (error instanceof UserNotFoundError) {
           return reply.code(404).send({
             error: 'User not found',

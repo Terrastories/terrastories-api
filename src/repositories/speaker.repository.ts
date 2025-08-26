@@ -18,8 +18,11 @@
 // complex typing with multi-database compatibility.
 
 import { eq, and, desc, count, like, ilike } from 'drizzle-orm';
-import type { Speaker, NewSpeaker } from '../db/schema/speakers.js';
-import { getSpeakersTable } from '../db/schema/speakers.js';
+import {
+  type Speaker,
+  type NewSpeaker,
+  getSpeakersTable,
+} from '../db/schema/speakers.js';
 import { getCommunitiesTable } from '../db/schema/communities.js';
 import { getConfig } from '../shared/config/index.js';
 import type { Database } from '../db/index.js';

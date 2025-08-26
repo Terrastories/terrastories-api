@@ -13,19 +13,19 @@
  * - Multi-tenant architecture support
  */
 
-import { CommunityRepository } from '../repositories/community.repository.js';
-import { toISOString } from '../shared/utils/date-transforms.js';
-import type {
-  Community,
-  CreateCommunityData,
-  UpdateCommunityData,
-  CommunitySearchParams,
-  CulturalProtocols,
-  CommunityStats,
-  CommunityNotFoundError,
-  DuplicateSlugError,
-  InvalidCommunityDataError,
+import {
+  CommunityRepository,
+  type Community,
+  type CreateCommunityData,
+  type UpdateCommunityData,
+  type CommunitySearchParams,
+  type CulturalProtocols,
+  type CommunityStats,
+  type CommunityNotFoundError,
+  type DuplicateSlugError,
+  type InvalidCommunityDataError,
 } from '../repositories/community.repository.js';
+import { toISOString } from '../shared/utils/date-transforms.js';
 import type { CommunityResponse as CommunityResponseSchema } from '../shared/schemas/communities.js';
 import type { CommunityResponse } from '../shared/schemas/super-admin.js';
 
@@ -758,13 +758,15 @@ export class CommunityService {
    * @param active - Optional active status filter
    * @returns Promise<{data: Community[], meta: PaginationMeta}> - Paginated communities
    */
-  async getAllCommunitiesForSuperAdmin(options: {
-    page?: number;
-    limit?: number;
-    search?: string;
-    locale?: string;
-    active?: boolean;
-  } = {}): Promise<{
+  async getAllCommunitiesForSuperAdmin(
+    options: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      locale?: string;
+      active?: boolean;
+    } = {}
+  ): Promise<{
     data: CommunityResponse[];
     meta: {
       page: number;
@@ -785,7 +787,7 @@ export class CommunityService {
       }
 
       const offset = (page - 1) * limit;
-      
+
       // Build search params
       const searchParams: CommunitySearchParams = {
         limit,

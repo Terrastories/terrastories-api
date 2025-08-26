@@ -24,13 +24,13 @@ import {
   FileRepository,
   type PaginatedResult,
 } from '../repositories/file.repository.js';
-import type {
-  FileUploadResult,
-  FileUploadOptions,
-  FileMetadata,
-  CulturalRestrictions,
+import {
+  type FileUploadResult,
+  type FileUploadOptions,
+  type FileMetadata,
+  type CulturalRestrictions,
+  CulturalRestrictionsSchema,
 } from '../db/schema/files.js';
-import { CulturalRestrictionsSchema } from '../db/schema/files.js';
 import type { FileUploadConfig } from '../shared/config/types.js';
 
 /**
@@ -721,7 +721,7 @@ export class FileService {
     sanitized = sanitized.replace(/[`${}]/g, '_');
 
     // Remove control characters and null bytes
-    // eslint-disable-next-line no-control-regex
+
     sanitized = sanitized.replace(/[\x00-\x1F\x7F]/g, '');
 
     // Limit length while preserving extension

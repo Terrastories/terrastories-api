@@ -7,7 +7,7 @@
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+// import { zodToJsonSchema } from 'zod-to-json-schema'; // Replaced with manual schemas
 import { requireRole } from '../shared/middleware/auth.middleware.js';
 import {
   toISOString,
@@ -38,13 +38,13 @@ import {
   updateUserSchema,
   userIdParamSchema,
   paginatedCommunitiesResponseSchema as _paginatedCommunitiesResponseSchema,
-  paginatedUsersResponseSchema,
-  communityCreatedResponseSchema,
-  communityUpdatedResponseSchema,
-  communityDeletedResponseSchema,
-  userCreatedResponseSchema,
-  userUpdatedResponseSchema,
-  userDeletedResponseSchema,
+  paginatedUsersResponseSchema as _paginatedUsersResponseSchema,
+  communityCreatedResponseSchema as _communityCreatedResponseSchema,
+  communityUpdatedResponseSchema as _communityUpdatedResponseSchema,
+  communityDeletedResponseSchema as _communityDeletedResponseSchema,
+  userCreatedResponseSchema as _userCreatedResponseSchema,
+  userUpdatedResponseSchema as _userUpdatedResponseSchema,
+  userDeletedResponseSchema as _userDeletedResponseSchema,
   errorResponseSchema as _errorResponseSchema,
   validationErrorSchema as _validationErrorSchema,
   notFoundErrorSchema as _notFoundErrorSchema,
@@ -136,8 +136,17 @@ const BODY_SCHEMAS = {
     properties: {
       name: { type: 'string', minLength: 2, maxLength: 100 },
       description: { type: 'string', maxLength: 1000 },
-      slug: { type: 'string', minLength: 3, maxLength: 50, pattern: '^[a-z0-9-]+$' },
-      locale: { type: 'string', pattern: '^[a-z]{2,3}(-[A-Z]{2})?$', default: 'en' },
+      slug: {
+        type: 'string',
+        minLength: 3,
+        maxLength: 50,
+        pattern: '^[a-z0-9-]+$',
+      },
+      locale: {
+        type: 'string',
+        pattern: '^[a-z]{2,3}(-[A-Z]{2})?$',
+        default: 'en',
+      },
       publicStories: { type: 'boolean', default: false },
       isActive: { type: 'boolean', default: true },
     },
@@ -162,11 +171,21 @@ const BODY_SCHEMAS = {
       password: { type: 'string', minLength: 8, maxLength: 128 },
       firstName: { type: 'string', minLength: 1, maxLength: 50 },
       lastName: { type: 'string', minLength: 1, maxLength: 50 },
-      role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+      role: {
+        type: 'string',
+        enum: ['super_admin', 'admin', 'editor', 'viewer'],
+      },
       communityId: { type: 'number', minimum: 1 },
       isActive: { type: 'boolean', default: true },
     },
-    required: ['email', 'password', 'firstName', 'lastName', 'role', 'communityId'],
+    required: [
+      'email',
+      'password',
+      'firstName',
+      'lastName',
+      'role',
+      'communityId',
+    ],
     additionalProperties: false,
   },
   updateUser: {
@@ -174,7 +193,10 @@ const BODY_SCHEMAS = {
     properties: {
       firstName: { type: 'string', minLength: 1, maxLength: 50 },
       lastName: { type: 'string', minLength: 1, maxLength: 50 },
-      role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+      role: {
+        type: 'string',
+        enum: ['super_admin', 'admin', 'editor', 'viewer'],
+      },
       communityId: { type: 'number', minimum: 1 },
       isActive: { type: 'boolean' },
     },
@@ -268,17 +290,11 @@ export async function superAdminRoutes(
       reply: FastifyReply
     ) => {
       try {
-        console.log('Route handler reached: GET /communities');
-
         const query = request.query as z.infer<
           typeof listCommunitiesQuerySchema
         >;
         const { page, limit, search, locale, active } = query;
-        console.log('Query params:', { page, limit, search, locale, active });
 
-        console.log(
-          'About to call communityService.getAllCommunitiesForSuperAdmin'
-        );
         const result = await communityService.getAllCommunitiesForSuperAdmin({
           page,
           limit,
@@ -286,16 +302,10 @@ export async function superAdminRoutes(
           locale,
           active,
         });
-        console.log('Service call completed successfully');
 
         // Temporarily skip user count aggregation to isolate the issue
         return reply.code(200).send(result);
       } catch (error) {
-        console.error('Route handler error:', error);
-        console.error(
-          'Error stack:',
-          error instanceof Error ? error.stack : 'No stack'
-        );
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
@@ -352,8 +362,12 @@ export async function superAdminRoutes(
     ) => {
       try {
         const { id } = request.params;
+        const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
-        const community = await communityService.getCommunityById(id, true);
+        const community = await communityService.getCommunityById(
+          numericId,
+          true
+        );
 
         if (!community) {
           return reply.code(404).send({
@@ -535,9 +549,10 @@ export async function superAdminRoutes(
     ) => {
       try {
         const { id } = request.params;
+        const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
         const community = await communityService.updateCommunityAsSuperAdmin(
-          id,
+          numericId,
           request.body
         );
 
@@ -625,8 +640,10 @@ export async function superAdminRoutes(
     ) => {
       try {
         const { id } = request.params;
+        const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
-        const result = await communityService.archiveCommunityAsSuperAdmin(id);
+        const result =
+          await communityService.archiveCommunityAsSuperAdmin(numericId);
 
         return reply.code(200).send({ data: result });
       } catch (error) {
@@ -694,13 +711,19 @@ export async function superAdminRoutes(
                   email: { type: 'string', format: 'email' },
                   firstName: { type: 'string' },
                   lastName: { type: 'string' },
-                  role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+                  role: {
+                    type: 'string',
+                    enum: ['super_admin', 'admin', 'editor', 'viewer'],
+                  },
                   communityId: { type: 'number' },
                   communityName: { type: 'string' },
                   isActive: { type: 'boolean' },
                   createdAt: { type: 'string', format: 'date-time' },
                   updatedAt: { type: 'string', format: 'date-time' },
-                  lastLoginAt: { type: ['string', 'null'], format: 'date-time' },
+                  lastLoginAt: {
+                    type: ['string', 'null'],
+                    format: 'date-time',
+                  },
                 },
               },
             },
@@ -821,8 +844,9 @@ export async function superAdminRoutes(
     ) => {
       try {
         const { id } = request.params;
+        const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
-        const user = await userService.getUserByIdAsSuperAdmin(id);
+        const user = await userService.getUserByIdAsSuperAdmin(numericId);
 
         if (!user) {
           return reply.code(404).send({
@@ -887,7 +911,10 @@ export async function superAdminRoutes(
                 email: { type: 'string', format: 'email' },
                 firstName: { type: 'string' },
                 lastName: { type: 'string' },
-                role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+                role: {
+                  type: 'string',
+                  enum: ['super_admin', 'admin', 'editor', 'viewer'],
+                },
                 communityId: { type: 'number' },
                 communityName: { type: 'string' },
                 isActive: { type: 'boolean' },
@@ -989,7 +1016,10 @@ export async function superAdminRoutes(
                 email: { type: 'string', format: 'email' },
                 firstName: { type: 'string' },
                 lastName: { type: 'string' },
-                role: { type: 'string', enum: ['super_admin', 'admin', 'editor', 'viewer'] },
+                role: {
+                  type: 'string',
+                  enum: ['super_admin', 'admin', 'editor', 'viewer'],
+                },
                 communityId: { type: 'number' },
                 communityName: { type: 'string' },
                 isActive: { type: 'boolean' },
@@ -1017,8 +1047,12 @@ export async function superAdminRoutes(
     ) => {
       try {
         const { id } = request.params;
+        const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
-        const user = await userService.updateUserAsSuperAdmin(id, request.body);
+        const user = await userService.updateUserAsSuperAdmin(
+          numericId,
+          request.body
+        );
 
         // Get community name
         const community = await communityRepository.findById(user.communityId);
@@ -1112,8 +1146,9 @@ export async function superAdminRoutes(
     ) => {
       try {
         const { id } = request.params;
+        const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
-        const result = await userService.deactivateUserAsSuperAdmin(id);
+        const result = await userService.deactivateUserAsSuperAdmin(numericId);
 
         return reply.code(200).send({ data: result });
       } catch (error) {

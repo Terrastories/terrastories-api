@@ -138,21 +138,13 @@ export async function buildApp(options?: BuildAppOptions) {
     const isDevelopment = config.environment === 'development';
 
     if (error.statusCode && error.statusCode < 500) {
-      // Handle schema validation errors - try multiple possible validation properties
+      // Handle schema validation errors - all 400 errors are validation errors in this context
       if (error.statusCode === 400) {
-        // Check for various validation error formats that Fastify might use
-        if (
-          error.validation ||
-          error.validationContext ||
-          error.message === 'Bad Request' ||
-          (error.message && error.message.includes('validation'))
-        ) {
-          return reply.status(error.statusCode).send({
-            error: 'Request validation failed',
-            statusCode: error.statusCode,
-            issues: error.validation || error.validationContext || undefined,
-          });
-        }
+        return reply.status(error.statusCode).send({
+          error: 'Request validation failed',
+          statusCode: error.statusCode,
+          issues: error.validation || error.validationContext || undefined,
+        });
       }
 
       return reply.status(error.statusCode).send({

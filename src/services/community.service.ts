@@ -803,19 +803,45 @@ export class CommunityService {
         this.communityRepository.count(active),
       ]);
 
+      console.log('Service: communities from repository:', {
+        communitiesType: typeof communities,
+        communitiesLength: communities?.length,
+        firstCommunity: communities?.[0],
+        total,
+      });
+
       // Transform communities to response format (userCount will be added at route level)
-      const data = communities.map((community) => ({
-        id: community.id,
-        name: community.name,
-        description: community.description,
-        slug: community.slug,
-        locale: community.locale,
-        publicStories: community.publicStories,
-        isActive: community.isActive,
-        userCount: 0, // Actual count added at route level
-        createdAt: toISOString(community.createdAt),
-        updatedAt: toISOString(community.updatedAt),
-      }));
+      const data = communities.map((community, index) => {
+        if (!community) {
+          console.error('Service: undefined community at index', index);
+          throw new CommunityOperationError(
+            `Undefined community at index ${index}`
+          );
+        }
+        if (typeof community.id !== 'number') {
+          console.error(
+            'Service: invalid community ID at index',
+            index,
+            community
+          );
+          throw new CommunityOperationError(
+            `Invalid community ID at index ${index}: ${community?.id}`
+          );
+        }
+
+        return {
+          id: community.id,
+          name: community.name,
+          description: community.description,
+          slug: community.slug,
+          locale: community.locale,
+          publicStories: community.publicStories,
+          isActive: community.isActive,
+          userCount: 0, // Actual count added at route level
+          createdAt: toISOString(community.createdAt),
+          updatedAt: toISOString(community.updatedAt),
+        };
+      });
 
       return {
         data,
@@ -874,6 +900,16 @@ export class CommunityService {
       // Super admin can update any community
       return await this.updateCommunity(id, updates);
     } catch (error) {
+      // Re-throw specific error types for proper HTTP status codes
+      if (error instanceof CommunityValidationError) {
+        throw error;
+      }
+      if (
+        error instanceof CommunityOperationError &&
+        error.message.includes('not found')
+      ) {
+        throw new CommunityOperationError('Community not found');
+      }
       throw new CommunityOperationError(
         `Super admin failed to update community: ${
           error instanceof Error ? error.message : 'Unknown error'

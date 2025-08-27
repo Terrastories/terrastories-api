@@ -138,6 +138,15 @@ export async function buildApp(options?: BuildAppOptions) {
     const isDevelopment = config.environment === 'development';
 
     if (error.statusCode && error.statusCode < 500) {
+      // Handle schema validation errors
+      if (error.statusCode === 400 && error.validation) {
+        return reply.status(error.statusCode).send({
+          error: 'Request validation failed',
+          statusCode: error.statusCode,
+          issues: error.validation,
+        });
+      }
+
       return reply.status(error.statusCode).send({
         error: error.message,
         statusCode: error.statusCode,

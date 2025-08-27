@@ -17,7 +17,10 @@ import { UserRepository } from '../repositories/user.repository.js';
 import * as passwordService from './password.service.js';
 import { CommunityService } from './community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
-import { toISOString, toISOStringOrNull } from '../shared/utils/date-transforms.js';
+import {
+  toISOString,
+  toISOStringOrNull,
+} from '../shared/utils/date-transforms.js';
 import type {
   User,
   CreateUserData,
@@ -422,14 +425,16 @@ export class UserService {
    * @param options - Query options including pagination and filters
    * @returns Promise<{data: UserResponse[], meta: PaginationMeta}> - Paginated users
    */
-  async getAllUsersForSuperAdmin(options: {
-    page?: number;
-    limit?: number;
-    community?: number;
-    role?: UserRole;
-    search?: string;
-    active?: boolean;
-  } = {}): Promise<{
+  async getAllUsersForSuperAdmin(
+    options: {
+      page?: number;
+      limit?: number;
+      community?: number;
+      role?: UserRole;
+      search?: string;
+      active?: boolean;
+    } = {}
+  ): Promise<{
     data: any[]; // UserResponse type - will define properly
     meta: {
       page: number;
@@ -556,6 +561,14 @@ export class UserService {
 
       return await this.registerUser(userData);
     } catch (error) {
+      // Re-throw specific error types for proper HTTP status codes
+      if (
+        error instanceof DuplicateEmailError ||
+        error instanceof WeakPasswordError ||
+        error instanceof InvalidCommunityError
+      ) {
+        throw error;
+      }
       throw new Error(
         `Super admin failed to create user: ${
           error instanceof Error ? error.message : 'Unknown error'
@@ -585,7 +598,12 @@ export class UserService {
       const updateData: Partial<UpdateUserData> = {
         firstName: updates.firstName,
         lastName: updates.lastName,
-        role: updates.role as 'super_admin' | 'admin' | 'editor' | 'viewer' | undefined,
+        role: updates.role as
+          | 'super_admin'
+          | 'admin'
+          | 'editor'
+          | 'viewer'
+          | undefined,
         communityId: updates.communityId,
         isActive: updates.isActive,
         updatedAt: new Date(),
@@ -593,6 +611,12 @@ export class UserService {
 
       return await this.userRepository.updateByIdAsSuperAdmin(id, updateData);
     } catch (error) {
+      if (error instanceof Error && error.message.includes('User not found')) {
+        throw new UserNotFoundError();
+      }
+      if (error instanceof UserNotFoundError) {
+        throw error;
+      }
       throw new Error(
         `Super admin failed to update user: ${
           error instanceof Error ? error.message : 'Unknown error'
@@ -628,7 +652,7 @@ export class UserService {
       // Check if user exists
       const user = await this.getUserByIdAsSuperAdmin(id);
       if (!user) {
-        throw new Error('User not found');
+        throw new UserNotFoundError();
       }
 
       // Deactivate the user
@@ -639,6 +663,10 @@ export class UserService {
         id,
       };
     } catch (error) {
+      // Re-throw specific error types
+      if (error instanceof UserNotFoundError) {
+        throw error;
+      }
       throw new Error(
         `Super admin failed to deactivate user: ${
           error instanceof Error ? error.message : 'Unknown error'

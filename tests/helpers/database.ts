@@ -87,10 +87,9 @@ export class TestDatabaseManager {
       await migrate(this.db, { migrationsFolder });
       console.log('✅ Test database migrations applied');
     } catch (error: any) {
-      console.warn(
-        '⚠️ Migration error (may be already applied):',
-        error.message
-      );
+      console.error('❌ Migration failed:', error.message);
+      console.error('Migration error stack:', error.stack);
+      throw new Error(`Database migration failed: ${error.message}`);
     }
 
     // Add missing columns that are not in migrations yet

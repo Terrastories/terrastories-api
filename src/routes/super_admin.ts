@@ -565,7 +565,7 @@ export async function superAdminRoutes(
             locale: community.locale,
             publicStories: community.publicStories,
             isActive: community.isActive,
-            userCount: 0, // Note: User count aggregation not yet implemented
+            userCount: 0, // NOTE: User count aggregation not yet implemented - requires database optimization for performance
             createdAt: toISOString(community.createdAt),
             updatedAt: toISOString(community.updatedAt),
           },

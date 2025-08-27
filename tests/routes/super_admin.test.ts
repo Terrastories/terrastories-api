@@ -257,7 +257,7 @@ describe('Super Admin API', () => {
           url: '/api/v1/super_admin/communities',
           cookies: { sessionId: superAdminSessionId },
           headers: {
-            'content-type': 'application/json'
+            'content-type': 'application/json',
           },
           payload: newCommunity,
         });
@@ -794,8 +794,9 @@ describe('Super Admin API', () => {
         payload: newCommunity,
       });
 
-      // TODO: Verify audit log entry was created
-      // This would check the audit log table/service
+      // NOTE: Audit log verification not implemented yet
+      // Future enhancement: Add audit log table and verification service
+      // See issue #XX for full audit logging implementation
     });
 
     it('should log super admin actions for user operations', async () => {
@@ -815,8 +816,9 @@ describe('Super Admin API', () => {
         payload: newUser,
       });
 
-      // TODO: Verify audit log entry was created
-      // This would check the audit log table/service
+      // NOTE: Audit log verification not implemented yet
+      // Future enhancement: Add audit log table and verification service
+      // See issue #XX for full audit logging implementation
     });
   });
 });

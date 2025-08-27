@@ -17,7 +17,7 @@ export const paginationQuerySchema = z.object({
     .refine((val) => /^\d+$/.test(val), 'Page must be a positive integer')
     .transform((val) => parseInt(val, 10))
     .refine((val) => val >= 1, 'Page must be at least 1'),
-  
+
   limit: z
     .string()
     .default('20')
@@ -38,13 +38,13 @@ export const listCommunitiesQuerySchema = paginationQuerySchema.extend({
     .max(100, 'Search term too long')
     .optional()
     .describe('Search term for community name and description'),
-  
+
   locale: z
     .string()
     .regex(/^[a-z]{2,3}(-[A-Z]{2})?$/, 'Invalid locale format')
     .optional()
     .describe('Filter by community locale'),
-  
+
   active: z
     .string()
     .regex(/^(true|false)$/, 'Active must be true or false')
@@ -54,64 +54,67 @@ export const listCommunitiesQuerySchema = paginationQuerySchema.extend({
 });
 
 // Schema for creating communities (super admin version)
-export const createCommunitySchema = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(2, 'Community name must be at least 2 characters long')
-    .max(100, 'Community name cannot exceed 100 characters')
-    .regex(/^[^<>;"'&]*$/, 'Community name contains invalid characters'),
-  
-  description: z
-    .string()
-    .trim()
-    .max(1000, 'Description cannot exceed 1000 characters')
-    .optional()
-    .or(z.literal('')),
-  
-  slug: z
-    .string()
-    .trim()
-    .min(3, 'Slug must be at least 3 characters long')
-    .max(50, 'Slug cannot exceed 50 characters')
-    .regex(
-      /^[a-z0-9-]+$/,
-      'Slug can only contain lowercase letters, numbers, and hyphens'
-    )
-    .refine(
-      (slug) => !slug.startsWith('-') && !slug.endsWith('-'),
-      'Slug cannot start or end with hyphens'
-    )
-    .refine(
-      (slug) => !slug.includes('--'),
-      'Slug cannot contain consecutive hyphens'
-    )
-    .optional(),
-  
-  locale: z
-    .string()
-    .regex(
-      /^[a-z]{2,3}(-[A-Z]{2})?$/,
-      'Invalid locale format (use en, es, mic, en-US, etc.)'
-    )
-    .default('en'),
-  
-  publicStories: z
-    .boolean()
-    .default(false)
-    .describe('Whether community stories are publicly accessible'),
-  
-  isActive: z
-    .boolean()
-    .default(true)
-    .describe('Whether the community is active'),
-}).strict();
+export const createCommunitySchema = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(2, 'Community name must be at least 2 characters long')
+      .max(100, 'Community name cannot exceed 100 characters')
+      .regex(/^[^<>;"'&]*$/, 'Community name contains invalid characters'),
+
+    description: z
+      .string()
+      .trim()
+      .max(1000, 'Description cannot exceed 1000 characters')
+      .optional()
+      .or(z.literal('')),
+
+    slug: z
+      .string()
+      .trim()
+      .min(3, 'Slug must be at least 3 characters long')
+      .max(50, 'Slug cannot exceed 50 characters')
+      .regex(
+        /^[a-z0-9-]+$/,
+        'Slug can only contain lowercase letters, numbers, and hyphens'
+      )
+      .refine(
+        (slug) => !slug.startsWith('-') && !slug.endsWith('-'),
+        'Slug cannot start or end with hyphens'
+      )
+      .refine(
+        (slug) => !slug.includes('--'),
+        'Slug cannot contain consecutive hyphens'
+      )
+      .optional(),
+
+    locale: z
+      .string()
+      .regex(
+        /^[a-z]{2,3}(-[A-Z]{2})?$/,
+        'Invalid locale format (use en, es, mic, en-US, etc.)'
+      )
+      .default('en'),
+
+    publicStories: z
+      .boolean()
+      .default(false)
+      .describe('Whether community stories are publicly accessible'),
+
+    isActive: z
+      .boolean()
+      .default(true)
+      .describe('Whether the community is active'),
+  })
+  .strict();
 
 // Schema for updating communities
 export const updateCommunitySchema = createCommunitySchema
   .partial()
   .extend({
-    // Prevent slug updates for data consistency
+    // Prevent slug updates for data consistency - slugs are immutable after creation
+    // to prevent breaking external references, URLs, and API endpoints
     slug: z.never().optional(),
   })
   .strict();
@@ -138,19 +141,19 @@ export const listUsersQuerySchema = paginationQuerySchema.extend({
     .refine((val) => val > 0, 'Community ID must be positive')
     .optional()
     .describe('Filter by community ID'),
-  
+
   role: z
     .enum(['super_admin', 'admin', 'editor', 'viewer'])
     .optional()
     .describe('Filter by user role'),
-  
+
   search: z
     .string()
     .trim()
     .max(100, 'Search term too long')
     .optional()
     .describe('Search term for user name and email'),
-  
+
   active: z
     .string()
     .regex(/^(true|false)$/, 'Active must be true or false')
@@ -160,86 +163,86 @@ export const listUsersQuerySchema = paginationQuerySchema.extend({
 });
 
 // Schema for creating users (super admin version)
-export const createUserSchema = z.object({
-  email: z
-    .string()
-    .email('Invalid email format')
-    .max(255, 'Email too long')
-    .transform((email) => email.toLowerCase()),
-  
-  password: z
-    .string()
-    .min(8, 'Password must be at least 8 characters long')
-    .max(128, 'Password too long')
-    .regex(
-      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
-      'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character'
-    ),
-  
-  firstName: z
-    .string()
-    .trim()
-    .min(1, 'First name is required')
-    .max(50, 'First name too long')
-    .regex(/^[^<>;"'&]*$/, 'First name contains invalid characters'),
-  
-  lastName: z
-    .string()
-    .trim()
-    .min(1, 'Last name is required')
-    .max(50, 'Last name too long')
-    .regex(/^[^<>;"'&]*$/, 'Last name contains invalid characters'),
-  
-  role: z
-    .enum(['super_admin', 'admin', 'editor', 'viewer'])
-    .describe('User role in the community'),
-  
-  communityId: z
-    .number()
-    .int()
-    .positive('Community ID must be positive')
-    .describe('ID of the community the user belongs to'),
-  
-  isActive: z
-    .boolean()
-    .default(true)
-    .describe('Whether the user account is active'),
-}).strict();
+export const createUserSchema = z
+  .object({
+    email: z
+      .string()
+      .email('Invalid email format')
+      .max(255, 'Email too long')
+      .transform((email) => email.toLowerCase()),
+
+    password: z
+      .string()
+      .min(8, 'Password must be at least 8 characters long')
+      .max(128, 'Password too long')
+      .regex(
+        /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
+        'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character'
+      ),
+
+    firstName: z
+      .string()
+      .trim()
+      .min(1, 'First name is required')
+      .max(50, 'First name too long')
+      .regex(/^[^<>;"'&]*$/, 'First name contains invalid characters'),
+
+    lastName: z
+      .string()
+      .trim()
+      .min(1, 'Last name is required')
+      .max(50, 'Last name too long')
+      .regex(/^[^<>;"'&]*$/, 'Last name contains invalid characters'),
+
+    role: z
+      .enum(['super_admin', 'admin', 'editor', 'viewer'])
+      .describe('User role in the community'),
+
+    communityId: z
+      .number()
+      .int()
+      .positive('Community ID must be positive')
+      .describe('ID of the community the user belongs to'),
+
+    isActive: z
+      .boolean()
+      .default(true)
+      .describe('Whether the user account is active'),
+  })
+  .strict();
 
 // Schema for updating users
-export const updateUserSchema = z.object({
-  firstName: z
-    .string()
-    .trim()
-    .min(1, 'First name is required')
-    .max(50, 'First name too long')
-    .regex(/^[^<>;"'&]*$/, 'First name contains invalid characters')
-    .optional(),
-  
-  lastName: z
-    .string()
-    .trim()
-    .min(1, 'Last name is required')
-    .max(50, 'Last name too long')
-    .regex(/^[^<>;"'&]*$/, 'Last name contains invalid characters')
-    .optional(),
-  
-  role: z
-    .enum(['super_admin', 'admin', 'editor', 'viewer'])
-    .optional(),
-  
-  communityId: z
-    .number()
-    .int()
-    .positive('Community ID must be positive')
-    .optional(),
-  
-  isActive: z
-    .boolean()
-    .optional(),
-  
-  // Password updates handled separately for security
-}).strict();
+export const updateUserSchema = z
+  .object({
+    firstName: z
+      .string()
+      .trim()
+      .min(1, 'First name is required')
+      .max(50, 'First name too long')
+      .regex(/^[^<>;"'&]*$/, 'First name contains invalid characters')
+      .optional(),
+
+    lastName: z
+      .string()
+      .trim()
+      .min(1, 'Last name is required')
+      .max(50, 'Last name too long')
+      .regex(/^[^<>;"'&]*$/, 'Last name contains invalid characters')
+      .optional(),
+
+    role: z.enum(['super_admin', 'admin', 'editor', 'viewer']).optional(),
+
+    communityId: z
+      .number()
+      .int()
+      .positive('Community ID must be positive')
+      .optional(),
+
+    isActive: z.boolean().optional(),
+
+    // Password updates handled separately for security
+  })
+  .strict();
 
 // User ID parameter schema
 export const userIdParamSchema = z.object({
@@ -352,10 +355,14 @@ export const errorResponseSchema = z.object({
 export const validationErrorSchema = z.object({
   error: z.string().default('Validation failed'),
   statusCode: z.literal(400),
-  issues: z.array(z.object({
-    field: z.string(),
-    message: z.string(),
-  })).optional(),
+  issues: z
+    .array(
+      z.object({
+        field: z.string(),
+        message: z.string(),
+      })
+    )
+    .optional(),
 });
 
 export const notFoundErrorSchema = z.object({
@@ -394,8 +401,12 @@ export type UserIdParam = z.infer<typeof userIdParamSchema>;
 
 export type CommunityResponse = z.infer<typeof communityResponseSchema>;
 export type UserResponse = z.infer<typeof userResponseSchema>;
-export type PaginatedCommunitiesResponse = z.infer<typeof paginatedCommunitiesResponseSchema>;
-export type PaginatedUsersResponse = z.infer<typeof paginatedUsersResponseSchema>;
+export type PaginatedCommunitiesResponse = z.infer<
+  typeof paginatedCommunitiesResponseSchema
+>;
+export type PaginatedUsersResponse = z.infer<
+  typeof paginatedUsersResponseSchema
+>;
 
 /**
  * Validation helper functions

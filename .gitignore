@@ -85,3 +85,6 @@ test-report.junit.xml
 
 # Serena AI cache
 .serena/cache/
+
+# Temporary task tracking file (do not commit)
+task.markdown

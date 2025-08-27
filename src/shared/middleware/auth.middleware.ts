@@ -198,7 +198,7 @@ export async function enforceDataSovereignty(
     );
 
     return reply.status(403).send({
-      error: 'Super admins cannot access community cultural data',
+      error: 'Super administrators cannot access community data',
       reason: 'Indigenous data sovereignty protection',
       statusCode: 403,
     });

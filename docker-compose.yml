@@ -1,0 +1,132 @@
+# =============================================================================
+# TERRASTORIES API - BASE DOCKER COMPOSE CONFIGURATION
+# Base services configuration for all environments
+# Use with environment-specific override files
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # =============================================================================
+  # API SERVICE - Terrastories TypeScript/Fastify API
+  # =============================================================================
+  api:
+    build:
+      context: .
+      target: ${BUILD_TARGET:-development}
+    ports:
+      - '${PORT:-3000}:3000'
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3000
+      - HOST=0.0.0.0
+      - DATABASE_URL=${DATABASE_URL_PROD:-postgresql://terrastories:${POSTGRES_PASSWORD:-terrastories123}@db:5432/terrastories}
+      - DATABASE_URL_TEST=${DATABASE_URL_TEST:-:memory:}
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-minimum-32-characters-required-for-security}
+      - SESSION_SECRET=${SESSION_SECRET:-your-session-secret-minimum-32-characters-required-for-cookies}
+      - PASSWORD_ALGORITHM=${PASSWORD_ALGORITHM:-argon2id}
+      - PASSWORD_ARGON2_MEMORY=${PASSWORD_ARGON2_MEMORY:-65536}
+      - PASSWORD_ARGON2_ITERATIONS=${PASSWORD_ARGON2_ITERATIONS:-3}
+      - PASSWORD_ARGON2_PARALLELISM=${PASSWORD_ARGON2_PARALLELISM:-4}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3001}
+      - API_PREFIX=${API_PREFIX:-/api/v1}
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+      - UPLOAD_DIR=${UPLOAD_DIR:-/app/uploads}
+      - UPLOAD_MAX_FILE_SIZE=${UPLOAD_MAX_FILE_SIZE:-10485760}
+      - UPLOAD_ALLOWED_TYPES=${UPLOAD_ALLOWED_TYPES:-image/jpeg,image/png,image/webp,audio/mpeg,audio/wav,video/mp4,video/webm}
+      - UPLOAD_CLEANUP_INTERVAL=${UPLOAD_CLEANUP_INTERVAL:-86400000}
+      - OFFLINE_MODE=${OFFLINE_MODE:-false}
+      - TILE_SERVER_URL=${TILE_SERVER_URL:-http://tileserver:8080}
+      - SYNC_ENDPOINT=${SYNC_ENDPOINT:-https://api.terrastories.org}
+      - FIELD_KIT_MODE=${FIELD_KIT_MODE:-false}
+      - HEALTH_CHECK_ENDPOINT=${HEALTH_CHECK_ENDPOINT:-/health}
+      - METRICS_ENABLED=${METRICS_ENABLED:-true}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - HOT_RELOAD=${HOT_RELOAD:-true}
+      - DEBUG_PORT=${DEBUG_PORT:-9229}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+      - ./src:/app/src:ro # Development only - overridden in production
+    networks:
+      - terrastories-network
+    restart: unless-stopped
+
+  # =============================================================================
+  # DATABASE SERVICE - PostgreSQL with PostGIS
+  # =============================================================================
+  db:
+    image: postgis/postgis:13-master
+    environment:
+      POSTGRES_DB: terrastories
+      POSTGRES_USER: terrastories
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terrastories123}
+      POSTGRES_INITDB_ARGS: '--encoding=UTF-8'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - '5432:5432' # Development only - removed in production
+    networks:
+      - terrastories-network
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U terrastories -d terrastories']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # =============================================================================
+  # TILE SERVER SERVICE - Map tiles for offline functionality
+  # =============================================================================
+  tileserver:
+    image: maptiler/tileserver-gl:latest
+    ports:
+      - '${TILE_SERVER_PORT:-8080}:8080'
+    volumes:
+      - ./tiles:/data:ro
+      - ./config/tileserver/config.json:/data/config.json:ro
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    networks:
+      - terrastories-network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://localhost:8080/health',
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+# =============================================================================
+# VOLUMES - Named volumes for persistent data
+# =============================================================================
+volumes:
+  # PostgreSQL database data
+  postgres_data:
+    driver: local
+
+  # Upload files storage
+  uploads_data:
+    driver: local
+
+# =============================================================================
+# NETWORKS - Internal Docker network for service communication
+# =============================================================================
+networks:
+  terrastories-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

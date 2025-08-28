@@ -60,34 +60,35 @@ services:
 
   # =============================================================================
   # DATABASE SERVICE - Field Kit Configuration
-  # Use PostgreSQL but with minimal resources
+  # PostgreSQL service disabled - using SQLite for field deployments
+  # Uncomment below if PostgreSQL is needed instead of SQLite
   # =============================================================================
-  db:
-    # Remove public port exposure for security
-    ports: []
-    environment:
-      # Use simpler password for field deployment
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-fieldkit123}
-    # Minimal resource allocation
-    deploy:
-      resources:
-        limits:
-          cpus: '0.3'
-          memory: 128M
-        reservations:
-          cpus: '0.1'
-          memory: 64M
-    restart: unless-stopped
-    # Optimized for low-resource deployment
-    command: >
-      postgres
-      -c max_connections=20
-      -c shared_buffers=32MB
-      -c effective_cache_size=64MB
-      -c maintenance_work_mem=16MB
-      -c checkpoint_completion_target=0.9
-      -c wal_buffers=4MB
-      -c default_statistics_target=50
+  # db:
+  #   # Remove public port exposure for security
+  #   ports: []
+  #   environment:
+  #     # Use simpler password for field deployment
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-fieldkit123}
+  #   # Minimal resource allocation
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '0.3'
+  #         memory: 128M
+  #       reservations:
+  #         cpus: '0.1'
+  #         memory: 64M
+  #   restart: unless-stopped
+  #   # Optimized for low-resource deployment
+  #   command: >
+  #     postgres
+  #     -c max_connections=20
+  #     -c shared_buffers=32MB
+  #     -c effective_cache_size=64MB
+  #     -c maintenance_work_mem=16MB
+  #     -c checkpoint_completion_target=0.9
+  #     -c wal_buffers=4MB
+  #     -c default_statistics_target=50
 
   # =============================================================================
   # TILE SERVER SERVICE - Field Kit Configuration

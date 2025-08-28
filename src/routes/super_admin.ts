@@ -501,6 +501,11 @@ export async function superAdminRoutes(
           auditLogger.log(auditEntry);
         }
 
+        // Calculate actual user count for this community (should be 0 for new communities)
+        const userCount = await userRepository.countUsersByCommunity(
+          community.id
+        );
+
         const response = {
           data: {
             id: community.id,
@@ -510,7 +515,7 @@ export async function superAdminRoutes(
             locale: community.locale,
             publicStories: community.publicStories,
             isActive: community.isActive,
-            userCount: 0,
+            userCount,
             createdAt: toISOString(community.createdAt),
             updatedAt: toISOString(community.updatedAt),
           },

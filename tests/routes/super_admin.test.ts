@@ -781,25 +781,64 @@ describe('Super Admin API', () => {
 
   describe('Audit Logging', () => {
     it('should log super admin actions for community operations', async () => {
+      // Setup mock audit logger to capture log entries
+      const loggedEntries: any[] = [];
+      const mockLogger = (entry: any) => {
+        loggedEntries.push(entry);
+      };
+
+      // Import audit logger and add our mock
+      const { SuperAdminAuditLogger } = await import(
+        '../../src/shared/utils/audit-logger'
+      );
+      const auditLogger = SuperAdminAuditLogger.getInstance();
+      auditLogger.addLogger(mockLogger);
+
       const newCommunity = {
         name: 'Logged Community',
         description: 'Test audit logging',
         locale: 'en-US',
       };
 
-      await app.inject({
+      const response = await app.inject({
         method: 'POST',
         url: '/api/v1/super_admin/communities',
         cookies: { sessionId: superAdminSessionId },
         payload: newCommunity,
       });
 
-      // NOTE: Audit log verification not implemented yet
-      // Future enhancement: Add audit log table and verification service
-      // See issue #XX for full audit logging implementation
+      expect(response.statusCode).toBe(201);
+
+      // Verify audit log entry was created
+      expect(loggedEntries).toHaveLength(1);
+      expect(loggedEntries[0]).toMatchObject({
+        action: 'community_create',
+        resource: 'community',
+        success: true,
+        details: expect.objectContaining({
+          name: 'Logged Community',
+          locale: 'en-US',
+        }),
+      });
+      expect(loggedEntries[0].timestamp).toBeInstanceOf(Date);
+      expect(loggedEntries[0].adminUserId).toBeTypeOf('number');
+      expect(loggedEntries[0].adminEmail).toContain('@');
     });
 
     it('should log super admin actions for user operations', async () => {
+      // Setup mock audit logger to capture log entries
+      const loggedEntries: any[] = [];
+      const mockLogger = (entry: any) => {
+        loggedEntries.push(entry);
+      };
+
+      // Import audit logger and add our mock
+      const { SuperAdminAuditLogger } = await import(
+        '../../src/shared/utils/audit-logger'
+      );
+      const auditLogger = SuperAdminAuditLogger.getInstance();
+      auditLogger.addLogger(mockLogger);
+
       const newUser = {
         email: 'loggeduser@example.com',
         password: 'Password123@',
@@ -809,16 +848,30 @@ describe('Super Admin API', () => {
         communityId: testCommunityId,
       };
 
-      await app.inject({
+      const response = await app.inject({
         method: 'POST',
         url: '/api/v1/super_admin/users',
         cookies: { sessionId: superAdminSessionId },
         payload: newUser,
       });
 
-      // NOTE: Audit log verification not implemented yet
-      // Future enhancement: Add audit log table and verification service
-      // See issue #XX for full audit logging implementation
+      expect(response.statusCode).toBe(201);
+
+      // Verify audit log entry was created
+      expect(loggedEntries).toHaveLength(1);
+      expect(loggedEntries[0]).toMatchObject({
+        action: 'user_create',
+        resource: 'user',
+        success: true,
+        details: expect.objectContaining({
+          email: 'loggeduser@example.com',
+          role: 'viewer',
+          communityId: testCommunityId,
+        }),
+      });
+      expect(loggedEntries[0].timestamp).toBeInstanceOf(Date);
+      expect(loggedEntries[0].adminUserId).toBeTypeOf('number');
+      expect(loggedEntries[0].adminEmail).toContain('@');
     });
   });
 });

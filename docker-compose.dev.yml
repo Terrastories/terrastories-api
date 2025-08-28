@@ -67,7 +67,7 @@ services:
     restart: 'no'
     # Add development tile data
     volumes:
-      - ./tiles:/data:ro
+      - ./tiles:/data/tiles:ro
       - ./config/tileserver/config.dev.json:/data/config.json:ro
 
   # =============================================================================

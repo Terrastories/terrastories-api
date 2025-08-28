@@ -165,7 +165,7 @@ services:
     restart: unless-stopped
     # Production tile configuration
     volumes:
-      - ./tiles:/data:ro
+      - ./tiles:/data/tiles:ro
       - ./config/tileserver/config.prod.json:/data/config.json:ro
 
   # =============================================================================

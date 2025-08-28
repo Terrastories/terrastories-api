@@ -7,16 +7,19 @@
       "styles": "/data/tiles/styles",
       "mbtiles": "/data/tiles/mbtiles"
     },
-    "domains": ["localhost:8080", "localhost:3001"],
+    "domains": ["terrastories.org", "www.terrastories.org"],
     "formatQuality": {
-      "jpeg": 80,
-      "webp": 90
+      "jpeg": 85,
+      "webp": 95
     },
-    "maxzoom": 18,
-    "maxsize": 2048,
+    "maxzoom": 20,
+    "maxsize": 4096,
     "pbfAlias": "pbf",
     "cors": true,
-    "verbose": true
+    "cache": {
+      "size": 256,
+      "ttl": 3600
+    }
   },
   "styles": {},
   "data": {}

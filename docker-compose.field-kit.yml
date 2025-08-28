@@ -110,7 +110,7 @@ services:
     restart: unless-stopped
     # Field kit optimized tile configuration
     volumes:
-      - ./tiles:/data:ro
+      - ./tiles:/data/tiles:ro
       - ./config/tileserver/config.field-kit.json:/data/config.json:ro
     environment:
       # Reduce file watching overhead

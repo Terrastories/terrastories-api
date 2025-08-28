@@ -87,7 +87,7 @@ services:
     ports:
       - '${TILE_SERVER_PORT:-8080}:8080'
     volumes:
-      - ./tiles:/data:ro
+      - ./tiles:/data/tiles:ro
       - ./config/tileserver/config.json:/data/config.json:ro
     environment:
       - CHOKIDAR_USEPOLLING=true

@@ -1,11 +1,11 @@
 {
   "options": {
     "paths": {
-      "root": "/data",
-      "fonts": "/data/fonts",
-      "sprites": "/data/sprites",
-      "styles": "/data/styles",
-      "mbtiles": "/data/mbtiles"
+      "root": "/data/tiles",
+      "fonts": "/data/tiles/fonts",
+      "sprites": "/data/tiles/sprites",
+      "styles": "/data/tiles/styles",
+      "mbtiles": "/data/tiles/mbtiles"
     },
     "domains": ["localhost:8080"],
     "formatQuality": {

@@ -29,6 +29,10 @@ import { CommunityRepository } from '../repositories/community.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { getDb } from '../db/index.js';
 import {
+  getAuditLogger,
+  SuperAdminAuditLogger,
+} from '../shared/utils/audit-logger.js';
+import {
   listCommunitiesQuerySchema,
   createCommunitySchema,
   updateCommunitySchema,
@@ -215,6 +219,12 @@ export async function superAdminRoutes(
   const communityService = new CommunityService(communityRepository);
   const userService = new UserService(userRepository);
 
+  // Initialize audit logger for Indigenous oversight
+  const auditLogger = getAuditLogger();
+  auditLogger.addLogger((entry) => {
+    app.log.warn(entry, 'Super Admin Action Audit');
+  });
+
   // Add super admin role protection to all routes
   // NOTE: Data sovereignty enforcement is NOT needed here because:
   // 1. These routes are FOR super admins (system administration)
@@ -303,8 +313,23 @@ export async function superAdminRoutes(
           active,
         });
 
-        // Temporarily skip user count aggregation to isolate the issue
-        return reply.code(200).send(result);
+        // Add user counts for each community
+        const dataWithUserCounts = await Promise.all(
+          result.data.map(async (community) => {
+            const userCount = await userRepository.countUsersByCommunity(
+              community.id
+            );
+            return {
+              ...community,
+              userCount,
+            };
+          })
+        );
+
+        return reply.code(200).send({
+          ...result,
+          data: dataWithUserCounts,
+        });
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
@@ -376,6 +401,11 @@ export async function superAdminRoutes(
           });
         }
 
+        // Calculate actual user count for this community
+        const userCount = await userRepository.countUsersByCommunity(
+          community.id
+        );
+
         // Transform to super admin response format
         const response = {
           data: {
@@ -386,7 +416,7 @@ export async function superAdminRoutes(
             locale: community.locale,
             publicStories: community.publicStories,
             isActive: community.isActive,
-            userCount: community.memberCount || 0,
+            userCount,
             createdAt: community.createdAt,
             updatedAt: community.updatedAt,
           },
@@ -449,9 +479,27 @@ export async function superAdminRoutes(
       reply: FastifyReply
     ) => {
       try {
+        const authRequest = request as any; // Cast to access user
         const community = await communityService.createCommunityAsSuperAdmin(
           request.body
         );
+
+        // Audit log the community creation
+        if (authRequest.user) {
+          const auditEntry = SuperAdminAuditLogger.createCommunityEntry(
+            'community_create',
+            authRequest.user.id,
+            authRequest.user.email,
+            true,
+            community.id,
+            {
+              name: community.name,
+              slug: community.slug,
+              locale: community.locale,
+            }
+          );
+          auditLogger.log(auditEntry);
+        }
 
         const response = {
           data: {
@@ -556,6 +604,28 @@ export async function superAdminRoutes(
           request.body
         );
 
+        // Audit log the community update
+        const authRequest = request as any; // Cast to access user
+        if (authRequest.user) {
+          const auditEntry = SuperAdminAuditLogger.createCommunityEntry(
+            'community_update',
+            authRequest.user.id,
+            authRequest.user.email,
+            true,
+            community.id,
+            {
+              name: community.name,
+              changes: request.body,
+            }
+          );
+          auditLogger.log(auditEntry);
+        }
+
+        // Calculate actual user count for this community
+        const userCount = await userRepository.countUsersByCommunity(
+          community.id
+        );
+
         const response = {
           data: {
             id: community.id,
@@ -565,7 +635,7 @@ export async function superAdminRoutes(
             locale: community.locale,
             publicStories: community.publicStories,
             isActive: community.isActive,
-            userCount: 0, // NOTE: User count aggregation not yet implemented - requires database optimization for performance
+            userCount,
             createdAt: toISOString(community.createdAt),
             updatedAt: toISOString(community.updatedAt),
           },
@@ -762,35 +832,8 @@ export async function superAdminRoutes(
           active,
         });
 
-        // Add community names for each user
-        const uniqueCommunityIds = [
-          ...new Set(result.data.map((user) => user.communityId)),
-        ];
-        const communityNamesMap = new Map<number, string>();
-
-        // Fetch community names in batch
-        await Promise.all(
-          uniqueCommunityIds.map(async (communityId) => {
-            const community = await communityRepository.findById(communityId);
-            communityNamesMap.set(
-              communityId,
-              community?.name || `Community ${communityId}`
-            );
-          })
-        );
-
-        // Update users with community names
-        const dataWithCommunityNames = result.data.map((user) => ({
-          ...user,
-          communityName:
-            communityNamesMap.get(user.communityId) ||
-            `Community ${user.communityId}`,
-        }));
-
-        return reply.code(200).send({
-          ...result,
-          data: dataWithCommunityNames,
-        });
+        // Community names are now included via JOIN query in repository
+        return reply.code(200).send(result);
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
@@ -939,6 +982,24 @@ export async function superAdminRoutes(
     ) => {
       try {
         const user = await userService.createUserAsSuperAdmin(request.body);
+
+        // Audit log the user creation
+        const authRequest = request as any; // Cast to access user
+        if (authRequest.user) {
+          const auditEntry = SuperAdminAuditLogger.createUserEntry(
+            'user_create',
+            authRequest.user.id,
+            authRequest.user.email,
+            true,
+            user.id,
+            {
+              email: user.email,
+              role: user.role,
+              communityId: user.communityId,
+            }
+          );
+          auditLogger.log(auditEntry);
+        }
 
         // Get community name
         const community = await communityRepository.findById(user.communityId);

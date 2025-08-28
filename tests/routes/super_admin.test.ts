@@ -740,7 +740,7 @@ describe('Super Admin API', () => {
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
         error: expect.stringContaining(
-          'Super admins cannot access community cultural data'
+          'Super administrators cannot access community data'
         ),
         statusCode: 403,
       });
@@ -756,7 +756,7 @@ describe('Super Admin API', () => {
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
         error: expect.stringContaining(
-          'Super admins cannot access community cultural data'
+          'Super administrators cannot access community data'
         ),
         statusCode: 403,
       });
@@ -772,7 +772,7 @@ describe('Super Admin API', () => {
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
         error: expect.stringContaining(
-          'Super admins cannot access community cultural data'
+          'Super administrators cannot access community data'
         ),
         statusCode: 403,
       });

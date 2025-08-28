@@ -14,7 +14,12 @@
  */
 
 import { eq, and, like, desc, asc, count, or, sql } from 'drizzle-orm';
-import { getUsersTable, type User, type NewUser, type UserRole } from '../db/schema/users.js';
+import {
+  getUsersTable,
+  type User,
+  type NewUser,
+  type UserRole,
+} from '../db/schema/users.js';
 import {
   getCommunitiesTable,
   type Community,
@@ -442,9 +447,10 @@ export class UserRepository {
     role?: UserRole;
     search?: string;
     isActive?: boolean;
-  }): Promise<User[]> {
+  }): Promise<(User & { communityName?: string })[]> {
     try {
       const usersTable = await getUsersTable();
+      const communitiesTable = await getCommunitiesTable();
       const {
         limit = 20,
         offset = 0,
@@ -480,10 +486,25 @@ export class UserRepository {
         whereConditions.push(eq(usersTable.isActive, isActive));
       }
 
-      // Execute query
+      // Execute query with LEFT JOIN to get community names in one query
       let query = this.database
-        .select()
+        .select({
+          id: usersTable.id,
+          firstName: usersTable.firstName,
+          lastName: usersTable.lastName,
+          email: usersTable.email,
+          role: usersTable.role,
+          communityId: usersTable.communityId,
+          isActive: usersTable.isActive,
+          createdAt: usersTable.createdAt,
+          updatedAt: usersTable.updatedAt,
+          communityName: communitiesTable.name,
+        })
         .from(usersTable)
+        .leftJoin(
+          communitiesTable,
+          eq(usersTable.communityId, communitiesTable.id)
+        )
         .orderBy(desc(usersTable.createdAt))
         .limit(limit)
         .offset(offset);
@@ -543,9 +564,7 @@ export class UserRepository {
       }
 
       // Execute count query
-      let query = this.database
-        .select({ count: count() })
-        .from(usersTable);
+      let query = this.database.select({ count: count() }).from(usersTable);
 
       if (whereConditions.length > 0) {
         query = query.where(and(...whereConditions));
@@ -567,7 +586,7 @@ export class UserRepository {
   async countUsersByCommunity(communityId: number): Promise<number> {
     try {
       const usersTable = await getUsersTable();
-      
+
       // Execute count query
       const query = this.database
         .select({ count: count() })
@@ -602,7 +621,9 @@ export class UserRepository {
     } catch (error: unknown) {
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
-      throw new Error(`Failed to find user by ID as super admin: ${errorMessage}`);
+      throw new Error(
+        `Failed to find user by ID as super admin: ${errorMessage}`
+      );
     }
   }
 
@@ -612,10 +633,13 @@ export class UserRepository {
    * @param data - Update data
    * @returns Promise<User> - Updated user
    */
-  async updateByIdAsSuperAdmin(id: number, data: Partial<NewUser>): Promise<User> {
+  async updateByIdAsSuperAdmin(
+    id: number,
+    data: Partial<NewUser>
+  ): Promise<User> {
     try {
       const usersTable = await getUsersTable();
-      
+
       // Update the user
       const updateData = {
         ...data,
@@ -636,7 +660,9 @@ export class UserRepository {
     } catch (error: unknown) {
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
-      throw new Error(`Failed to update user by ID as super admin: ${errorMessage}`);
+      throw new Error(
+        `Failed to update user by ID as super admin: ${errorMessage}`
+      );
     }
   }
 }

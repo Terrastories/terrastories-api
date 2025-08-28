@@ -507,7 +507,7 @@ export class UserService {
         lastName: user.lastName,
         role: user.role,
         communityId: user.communityId,
-        communityName: user.communityName || 'Unknown', // Would need join
+        communityName: user.communityName || 'Unknown', // Provided via JOIN in repository
         isActive: user.isActive,
         createdAt: toISOString(user.createdAt),
         updatedAt: toISOString(user.updatedAt),

@@ -1,0 +1,253 @@
+# =============================================================================
+# TERRASTORIES API - FIELD KIT OVERRIDE
+# Offline-optimized configuration for remote Indigenous community deployment
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.field-kit.yml up -d
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # =============================================================================
+  # API SERVICE - Field Kit Configuration
+  # =============================================================================
+  api:
+    build:
+      target: production
+    environment:
+      - NODE_ENV=field-kit
+      - LOG_LEVEL=warn
+      - HOT_RELOAD=false
+      # Enable offline mode
+      - OFFLINE_MODE=true
+      - FIELD_KIT_MODE=true
+      # Use local tile server
+      - TILE_SERVER_URL=http://tileserver:8080
+      # Disable remote sync endpoint for offline
+      - SYNC_ENDPOINT=
+      # Use SQLite for simplicity in field deployment
+      - DATABASE_URL=./data/field-kit.db
+    ports:
+      - '3000:3000'
+    # Resource constraints for low-power hardware
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    restart: unless-stopped
+    # Field kit specific volumes
+    volumes:
+      - field_kit_data:/app/data
+      - uploads_data:/app/uploads
+    # Healthcheck with longer intervals for low-power devices
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://localhost:3000/health',
+        ]
+      interval: 60s
+      timeout: 30s
+      retries: 2
+      start_period: 60s
+
+  # =============================================================================
+  # DATABASE SERVICE - Field Kit Configuration
+  # PostgreSQL service disabled - using SQLite for field deployments
+  # Uncomment below if PostgreSQL is needed instead of SQLite
+  # =============================================================================
+  # db:
+  #   # Remove public port exposure for security
+  #   ports: []
+  #   environment:
+  #     # Use simpler password for field deployment
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-fieldkit123}
+  #   # Minimal resource allocation
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '0.3'
+  #         memory: 128M
+  #       reservations:
+  #         cpus: '0.1'
+  #         memory: 64M
+  #   restart: unless-stopped
+  #   # Optimized for low-resource deployment
+  #   command: >
+  #     postgres
+  #     -c max_connections=20
+  #     -c shared_buffers=32MB
+  #     -c effective_cache_size=64MB
+  #     -c maintenance_work_mem=16MB
+  #     -c checkpoint_completion_target=0.9
+  #     -c wal_buffers=4MB
+  #     -c default_statistics_target=50
+
+  # =============================================================================
+  # TILE SERVER SERVICE - Field Kit Configuration
+  # Critical for offline map functionality
+  # =============================================================================
+  tileserver:
+    # Keep port accessible for direct map access
+    ports:
+      - '8080:8080'
+    # Minimal resources but still functional
+    deploy:
+      resources:
+        limits:
+          cpus: '0.3'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    restart: unless-stopped
+    # Field kit optimized tile configuration
+    volumes:
+      - ./tiles:/data/tiles:ro
+      - ./config/tileserver/config.field-kit.json:/data/config.json:ro
+    environment:
+      # Reduce file watching overhead
+      - CHOKIDAR_USEPOLLING=false
+
+  # =============================================================================
+  # NGINX SERVICE - Simplified for Field Kit
+  # Lightweight configuration without SSL complexity
+  # =============================================================================
+  nginx:
+    image: nginx:1.21-alpine
+    ports:
+      - '80:80'
+    volumes:
+      # Simplified Nginx configuration
+      - ./config/nginx/nginx.field-kit.conf:/etc/nginx/nginx.conf:ro
+      # Static file serving
+      - uploads_data:/usr/share/nginx/html/uploads:ro
+    environment:
+      - API_HOST=api
+      - API_PORT=3000
+      - TILE_SERVER_HOST=tileserver
+      - TILE_SERVER_PORT=8080
+    depends_on:
+      - api
+      - tileserver
+    networks:
+      - terrastories-network
+    restart: unless-stopped
+    # Minimal resources for Nginx
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 64M
+        reservations:
+          cpus: '0.05'
+          memory: 32M
+    # Simple health check
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://localhost/health',
+        ]
+      interval: 60s
+      timeout: 30s
+      retries: 2
+
+  # =============================================================================
+  # FIELD KIT SERVICES - Offline-specific functionality
+  # =============================================================================
+
+  # Local file sync service for when connection is available
+  sync-service:
+    build:
+      context: .
+      target: production
+    volumes:
+      - field_kit_data:/app/data
+      - uploads_data:/app/uploads
+      - sync_queue:/app/sync-queue
+    environment:
+      - NODE_ENV=field-kit
+      - SYNC_MODE=queue
+      - OFFLINE_MODE=true
+    command: npm run sync:field-kit
+    depends_on:
+      - api
+    networks:
+      - terrastories-network
+    restart: unless-stopped
+    # Minimal resources for sync service
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
+    profiles:
+      - sync-enabled # Only start when sync is needed
+
+  # Backup service optimized for field conditions
+  field-backup:
+    image: alpine:3.18
+    volumes:
+      - field_kit_data:/data:ro
+      - uploads_data:/uploads:ro
+      - field_kit_backups:/backups
+      - ./scripts/field-kit-backup.sh:/backup.sh:ro
+    environment:
+      - BACKUP_RETENTION_DAYS=3 # Limited storage in field
+      - BACKUP_COMPRESSION=true
+    # Run backup twice daily due to limited connectivity windows
+    command: >
+      sh -c "
+      echo '0 6,18 * * * /backup.sh' | crontab - &&
+      crond -f -l 2
+      "
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 64M
+
+# =============================================================================
+# FIELD KIT-SPECIFIC VOLUMES
+# =============================================================================
+volumes:
+  # Field kit application data (SQLite databases, etc.)
+  field_kit_data:
+    driver: local
+
+  # Upload files storage (inherited from base configuration)
+  uploads_data:
+    driver: local
+
+  # Sync queue for when connectivity is available
+  sync_queue:
+    driver: local
+
+  # Local backups with limited retention
+  field_kit_backups:
+    driver: local
+
+# =============================================================================
+# FIELD KIT NETWORK CONFIGURATION
+# Optimized for offline operation
+# =============================================================================
+networks:
+  terrastories-network:
+    driver: bridge
+    # Use smaller subnet to reduce overhead
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24

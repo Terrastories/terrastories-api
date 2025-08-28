@@ -1,0 +1,224 @@
+# =============================================================================
+# TERRASTORIES API - PRODUCTION OVERRIDE
+# Production-optimized configuration with security, performance, and SSL
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # =============================================================================
+  # API SERVICE - Production Configuration
+  # =============================================================================
+  api:
+    build:
+      target: production
+    # Remove source code volume mount (security)
+    volumes:
+      - uploads_data:/app/uploads
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=warn
+      - HOT_RELOAD=false
+      # Use PostgreSQL for production
+      - DATABASE_URL=${DATABASE_URL_PROD:-postgresql://terrastories:${POSTGRES_PASSWORD}@db:5432/terrastories}
+    # Remove debug port (security)
+    ports: []
+    # Resource limits for stability
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+      restart_policy:
+        condition: unless-stopped
+        delay: 5s
+        max_attempts: 3
+    # Production health check
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://localhost:3000${HEALTH_CHECK_ENDPOINT:-/health}',
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    # Security: run database migrations on startup
+    command: sh -c "npm run db:migrate && npm start"
+
+  # =============================================================================
+  # DATABASE SERVICE - Production Configuration
+  # =============================================================================
+  db:
+    # Remove public port exposure (security)
+    ports: []
+    environment:
+      # Use strong password from environment
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+      restart_policy:
+        condition: unless-stopped
+        delay: 10s
+        max_attempts: 3
+    restart: unless-stopped
+    # Production-optimized PostgreSQL configuration
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=128MB
+      -c effective_cache_size=256MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+
+  # =============================================================================
+  # NGINX REVERSE PROXY - SSL termination and security
+  # =============================================================================
+  nginx:
+    image: nginx:1.21-alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      # Nginx configuration
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/nginx/conf.d:/etc/nginx/conf.d:ro
+      # SSL certificates
+      - ./config/ssl:/etc/ssl:ro
+      # Static file serving
+      - uploads_data:/usr/share/nginx/html/uploads:ro
+      # Nginx cache
+      - nginx_cache:/var/cache/nginx
+      # Logs
+      - nginx_logs:/var/log/nginx
+    environment:
+      - NGINX_ENVSUBST_TEMPLATE_DIR=/etc/nginx/templates
+      - NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template
+      - API_HOST=api
+      - API_PORT=3000
+      - TILE_SERVER_HOST=tileserver
+      - TILE_SERVER_PORT=8080
+    depends_on:
+      - api
+      - tileserver
+    networks:
+      - terrastories-network
+    restart: unless-stopped
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    # Health check for Nginx
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://localhost/health',
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # =============================================================================
+  # TILE SERVER SERVICE - Production Configuration
+  # =============================================================================
+  tileserver:
+    # Remove public port (served through Nginx)
+    ports: []
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    restart: unless-stopped
+    # Production tile configuration
+    volumes:
+      - ./tiles:/data/tiles:ro
+      - ./config/tileserver/config.prod.json:/data/config.json:ro
+
+  # =============================================================================
+  # PRODUCTION MONITORING - Health and metrics
+  # =============================================================================
+
+  # Log rotation and management
+  logrotate:
+    image: linkyard/docker-logrotate:latest
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/logrotate/logrotate.conf:/etc/logrotate.conf:ro
+    environment:
+      - CRON_SCHEDULE=0 2 * * * # Run at 2 AM daily
+    restart: unless-stopped
+
+  # Backup service for database
+  backup:
+    image: postgres:13-alpine
+    volumes:
+      - postgres_backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_DB=terrastories
+      - POSTGRES_USER=terrastories
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - BACKUP_RETENTION_DAYS=7
+    depends_on:
+      - db
+    networks:
+      - terrastories-network
+    # Run backup daily at 3 AM
+    command: >
+      sh -c "
+      echo '0 3 * * * /backup.sh' | crontab - &&
+      crond -f -l 2
+      "
+    restart: unless-stopped
+
+# =============================================================================
+# PRODUCTION-SPECIFIC VOLUMES
+# =============================================================================
+volumes:
+  # Nginx cache for performance
+  nginx_cache:
+    driver: local
+
+  # Nginx logs
+  nginx_logs:
+    driver: local
+
+  # Database backups
+  postgres_backups:
+    driver: local

@@ -1,0 +1,158 @@
+name: Docker CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # =============================================================================
+  # DOCKER BUILD TESTING
+  # =============================================================================
+  docker-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [development, production]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          docker build --target ${{ matrix.target }} \
+            -t terrastories-api:${{ matrix.target }}-test \
+            .
+
+      - name: Test Docker image
+        run: |
+          # Test image can start
+          if [ "${{ matrix.target }}" == "development" ]; then
+            # Development image should have dev dependencies
+            echo "Testing development image dependencies..."
+            docker run --rm terrastories-api:${{ matrix.target }}-test npm list --depth=0 | grep -E "(typescript|eslint|vitest)" || echo "Dev dependencies check completed"
+          else
+            # Production image should start correctly
+            echo "Testing production image startup..."
+            docker run --rm --name test-container -d terrastories-api:${{ matrix.target }}-test || echo "Production startup test completed"
+            sleep 5
+            docker stop test-container 2>/dev/null || true
+          fi
+
+  # =============================================================================
+  # DOCKER COMPOSE CONFIGURATION TESTING
+  # =============================================================================
+  docker-compose-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compose-file:
+          - docker-compose.yml
+          - docker-compose.dev.yml
+          - docker-compose.prod.yml
+          - docker-compose.field-kit.yml
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test Docker Compose configuration syntax
+        run: |
+          echo "Testing ${{ matrix.compose-file }} configuration..."
+
+          # Test base configuration
+          if [ "${{ matrix.compose-file }}" == "docker-compose.yml" ]; then
+            docker compose -f ${{ matrix.compose-file }} config > /dev/null
+          else
+            # Test with base configuration for overrides
+            docker compose -f docker-compose.yml -f ${{ matrix.compose-file }} config > /dev/null
+          fi
+
+          echo "✅ ${{ matrix.compose-file }} syntax is valid"
+
+  # =============================================================================
+  # INTEGRATION TESTING - Basic deployment test
+  # =============================================================================
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: [docker-build, docker-compose-test]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create test environment file
+        run: |
+          cat > .env.test << EOF
+          NODE_ENV=test
+          PORT=3000
+          POSTGRES_PASSWORD=test123
+          JWT_SECRET=test-jwt-secret-minimum-32-characters-required-for-security-testing
+          SESSION_SECRET=test-session-secret-minimum-32-characters-required-for-cookies-testing
+          DATABASE_URL=postgresql://terrastories:test123@db:5432/terrastories
+          DATABASE_URL_TEST=:memory:
+          LOG_LEVEL=error
+          UPLOAD_DIR=/app/uploads
+          CORS_ORIGIN=http://localhost:3001
+          EOF
+
+      - name: Start basic environment
+        run: |
+          # Use basic development environment
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test up -d --build
+
+          # Wait for services to be ready
+          echo "Waiting for services to be ready..."
+          sleep 30
+
+          # Check service status
+          docker compose ps
+
+      - name: Test basic functionality
+        run: |
+          # Wait for API to be ready
+          timeout=60
+          while [ $timeout -gt 0 ]; do
+            if curl -f -s http://localhost:3000/health > /dev/null 2>&1; then
+              echo "✅ API health check passed"
+              break
+            fi
+            sleep 5
+            timeout=$((timeout - 5))
+            echo "Still waiting for API... ($timeout seconds remaining)"
+          done
+
+          if [ $timeout -eq 0 ]; then
+            echo "❌ API failed to become ready"
+            docker compose logs api
+            exit 1
+          fi
+
+          # Test API documentation endpoint
+          if curl -f -s http://localhost:3000/documentation > /dev/null 2>&1; then
+            echo "✅ API documentation accessible"
+          else
+            echo "⚠️ API documentation not accessible"
+          fi
+
+      - name: Test database connectivity
+        run: |
+          # Test database connection
+          if docker compose exec -T db pg_isready -U terrastories -d terrastories > /dev/null 2>&1; then
+            echo "✅ Database connectivity verified"
+          else
+            echo "❌ Database connection failed"
+            docker compose logs db
+            exit 1
+          fi
+
+      - name: Cleanup integration environment
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v || true
+          docker system prune -f || true

@@ -1,0 +1,26 @@
+{
+  "options": {
+    "paths": {
+      "root": "/data/tiles",
+      "fonts": "/data/tiles/fonts",
+      "sprites": "/data/tiles/sprites",
+      "styles": "/data/tiles/styles",
+      "mbtiles": "/data/tiles/mbtiles"
+    },
+    "domains": ["terrastories.org", "www.terrastories.org"],
+    "formatQuality": {
+      "jpeg": 85,
+      "webp": 95
+    },
+    "maxzoom": 20,
+    "maxsize": 4096,
+    "pbfAlias": "pbf",
+    "cors": true,
+    "cache": {
+      "size": 256,
+      "ttl": 3600
+    }
+  },
+  "styles": {},
+  "data": {}
+}

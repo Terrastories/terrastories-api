@@ -1,0 +1,108 @@
+# =============================================================================
+# TERRASTORIES API - DEVELOPMENT OVERRIDE
+# Development-specific configuration with hot-reload and debugging
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # =============================================================================
+  # API SERVICE - Development Configuration
+  # =============================================================================
+  api:
+    build:
+      target: development
+    volumes:
+      # Enable hot-reload by mounting source code
+      - .:/app:delegated
+      # Preserve node_modules from container
+      - /app/node_modules
+      # Mount uploads directory for file handling
+      - uploads_data:/app/uploads
+    environment:
+      - NODE_ENV=development
+      - LOG_LEVEL=debug
+      - HOT_RELOAD=true
+      - DATABASE_URL=./data.db # Use SQLite for faster development
+    ports:
+      # Expose API port
+      - '3000:3000'
+      # Expose Node.js debug port for IDE debugging
+      - '9229:9229'
+    command: npm run dev
+    # Disable restart in development for faster feedback
+    restart: 'no'
+
+  # =============================================================================
+  # DATABASE SERVICE - Development Configuration
+  # =============================================================================
+  db:
+    # Keep PostgreSQL port exposed for database tools
+    ports:
+      - '5432:5432'
+    environment:
+      # Use less secure password for development
+      - POSTGRES_PASSWORD=dev_password_123
+    # Disable restart for faster development cycles
+    restart: 'no'
+    # Add development-specific database initialization
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./scripts/dev-seed.sql:/docker-entrypoint-initdb.d/02-dev-seed.sql:ro
+
+  # =============================================================================
+  # TILE SERVER SERVICE - Development Configuration
+  # =============================================================================
+  tileserver:
+    # Enable file watching for tile updates
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - CHOKIDAR_INTERVAL=1000
+    # Expose port for direct access during development
+    ports:
+      - '8080:8080'
+    # Disable restart for development
+    restart: 'no'
+    # Add development tile data
+    volumes:
+      - ./tiles:/data/tiles:ro
+      - ./config/tileserver/config.dev.json:/data/config.json:ro
+
+  # =============================================================================
+  # DEVELOPMENT TOOLS - Additional services for development
+  # =============================================================================
+
+  # Database administration tool
+  adminer:
+    image: adminer:4.8.1
+    ports:
+      - '8081:8080'
+    environment:
+      - ADMINER_DEFAULT_SERVER=db
+      - ADMINER_DESIGN=pepa-linha
+    networks:
+      - terrastories-network
+    restart: 'no'
+    depends_on:
+      - db
+
+  # Redis for session storage (development)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    networks:
+      - terrastories-network
+    restart: 'no'
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+# =============================================================================
+# DEVELOPMENT-SPECIFIC VOLUMES
+# =============================================================================
+volumes:
+  redis_data:
+    driver: local

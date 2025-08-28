@@ -1,0 +1,23 @@
+{
+  "options": {
+    "paths": {
+      "root": "/data/tiles",
+      "fonts": "/data/tiles/fonts",
+      "sprites": "/data/tiles/sprites",
+      "styles": "/data/tiles/styles",
+      "mbtiles": "/data/tiles/mbtiles"
+    },
+    "domains": ["localhost:8080", "localhost:3001"],
+    "formatQuality": {
+      "jpeg": 80,
+      "webp": 90
+    },
+    "maxzoom": 18,
+    "maxsize": 2048,
+    "pbfAlias": "pbf",
+    "cors": true,
+    "verbose": true
+  },
+  "styles": {},
+  "data": {}
+}

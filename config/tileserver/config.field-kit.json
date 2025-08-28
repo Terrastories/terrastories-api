@@ -1,0 +1,23 @@
+{
+  "options": {
+    "paths": {
+      "root": "/data/tiles",
+      "fonts": "/data/tiles/fonts",
+      "sprites": "/data/tiles/sprites",
+      "styles": "/data/tiles/styles",
+      "mbtiles": "/data/tiles/mbtiles"
+    },
+    "domains": ["localhost:8080", "nginx"],
+    "formatQuality": {
+      "jpeg": 60,
+      "webp": 70
+    },
+    "maxzoom": 16,
+    "maxsize": 1024,
+    "pbfAlias": "pbf",
+    "cors": true,
+    "serveStaticMaps": true
+  },
+  "styles": {},
+  "data": {}
+}

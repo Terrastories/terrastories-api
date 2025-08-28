@@ -227,6 +227,10 @@ volumes:
   field_kit_data:
     driver: local
 
+  # Upload files storage (inherited from base configuration)
+  uploads_data:
+    driver: local
+
   # Sync queue for when connectivity is available
   sync_queue:
     driver: local

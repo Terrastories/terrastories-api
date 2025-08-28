@@ -4,7 +4,7 @@
 # =============================================================================
 
 # Development stage - includes dev dependencies and debugging tools
-FROM node:20-alpine AS development
+FROM node:20.18.0-alpine AS development
 
 # Install system dependencies for native modules
 RUN apk add --no-cache \
@@ -33,7 +33,7 @@ CMD ["npm", "run", "dev"]
 
 # =============================================================================
 # Production build stage - compiles TypeScript
-FROM node:20-alpine AS builder
+FROM node:20.18.0-alpine AS builder
 
 # Install system dependencies for native modules
 RUN apk add --no-cache \
@@ -61,7 +61,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 # =============================================================================
 # Production runtime - minimal footprint
-FROM node:20-alpine AS production
+FROM node:20.18.0-alpine AS production
 
 # Install system dependencies for runtime
 RUN apk add --no-cache \

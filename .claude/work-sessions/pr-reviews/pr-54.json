@@ -1,0 +1,23 @@
+{
+  "prNumber": 54,
+  "startTime": "2025-08-28T17:30:00Z",
+  "totalComments": 1,
+  "resolvedComments": 1,
+  "inProgressComments": 0,
+  "pendingComments": 0,
+  "status": "completed",
+  "comments": [
+    {
+      "id": "github-actions-backup-error-handling",
+      "author": "github-actions",
+      "body": "Harden backup error handling - The script uses pg_dump without explicit error handling; if the first dump succeeds but the second fails, it may leave partial artifacts unnoticed. Add set -euo pipefail and a trap to surface failures and exit cleanly, ensuring backups are atomic and reliable.",
+      "path": "scripts/backup.sh",
+      "line": "30-39",
+      "category": "code",
+      "severity": "medium",
+      "status": "resolved",
+      "resolution": "Added comprehensive error handling with set -euo pipefail, error trap with cleanup function, explicit error checking for each pg_dump operation, and atomic backup operations",
+      "commits": []
+    }
+  ]
+}

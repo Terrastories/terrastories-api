@@ -4,7 +4,19 @@
 # Production backup with retention policy
 # =============================================================================
 
-set -e
+# Enable strict error handling
+set -euo pipefail
+
+# Trap to handle errors and provide cleanup
+trap 'echo "ERROR: Backup failed at $(date)" >&2; cleanup_on_error; exit 1' ERR
+
+# Cleanup function for error handling
+cleanup_on_error() {
+    echo "Cleaning up partial backup files..." >&2
+    [ -f "${BACKUP_PATH}.custom" ] && rm -f "${BACKUP_PATH}.custom"
+    [ -f "${BACKUP_PATH}" ] && rm -f "${BACKUP_PATH}"
+    [ -f "${BACKUP_PATH}.gz" ] && rm -f "${BACKUP_PATH}.gz"
+}
 
 # Configuration
 BACKUP_DIR="/backups"
@@ -26,8 +38,9 @@ echo "Database: $DB_NAME"
 echo "Host: $DB_HOST"
 echo "Backup file: $BACKUP_FILE"
 
-# Create database backup using pg_dump
-PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
+# Create database backup using pg_dump (custom format)
+echo "Creating custom format backup..."
+if ! PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
     --host="$DB_HOST" \
     --username="$DB_USER" \
     --dbname="$DB_NAME" \
@@ -36,10 +49,14 @@ PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
     --no-owner \
     --no-privileges \
     --format=custom \
-    --file="$BACKUP_PATH.custom"
+    --file="$BACKUP_PATH.custom"; then
+    echo "ERROR: Custom format backup failed" >&2
+    exit 1
+fi
 
 # Also create a plain SQL backup for easier inspection
-PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
+echo "Creating plain SQL backup..."
+if ! PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
     --host="$DB_HOST" \
     --username="$DB_USER" \
     --dbname="$DB_NAME" \
@@ -47,14 +64,24 @@ PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
     --no-owner \
     --no-privileges \
     --format=plain \
-    --file="$BACKUP_PATH"
+    --file="$BACKUP_PATH"; then
+    echo "ERROR: Plain SQL backup failed" >&2
+    exit 1
+fi
 
 # Compress the plain SQL backup
-gzip "$BACKUP_PATH"
+echo "Compressing plain SQL backup..."
+if ! gzip "$BACKUP_PATH"; then
+    echo "ERROR: Compression failed" >&2
+    exit 1
+fi
 
 # Get backup file sizes
 CUSTOM_SIZE=$(du -h "${BACKUP_PATH}.custom" | cut -f1)
 SQL_SIZE=$(du -h "${BACKUP_PATH}.gz" | cut -f1)
+
+# Clear error trap since we've successfully completed all critical operations
+trap - ERR
 
 echo "Backup completed successfully!"
 echo "Custom format: ${BACKUP_FILE}.custom (${CUSTOM_SIZE})"

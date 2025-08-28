@@ -67,10 +67,10 @@ jobs:
 
           # Test base configuration
           if [ "${{ matrix.compose-file }}" == "docker-compose.yml" ]; then
-            docker-compose -f ${{ matrix.compose-file }} config > /dev/null
+            docker compose -f ${{ matrix.compose-file }} config > /dev/null
           else
             # Test with base configuration for overrides
-            docker-compose -f docker-compose.yml -f ${{ matrix.compose-file }} config > /dev/null
+            docker compose -f docker-compose.yml -f ${{ matrix.compose-file }} config > /dev/null
           fi
 
           echo "✅ ${{ matrix.compose-file }} syntax is valid"
@@ -104,14 +104,14 @@ jobs:
       - name: Start basic environment
         run: |
           # Use basic development environment
-          docker-compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test up -d --build
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test up -d --build
 
           # Wait for services to be ready
           echo "Waiting for services to be ready..."
           sleep 30
 
           # Check service status
-          docker-compose ps
+          docker compose ps
 
       - name: Test basic functionality
         run: |
@@ -129,7 +129,7 @@ jobs:
 
           if [ $timeout -eq 0 ]; then
             echo "❌ API failed to become ready"
-            docker-compose logs api
+            docker compose logs api
             exit 1
           fi
 
@@ -143,16 +143,16 @@ jobs:
       - name: Test database connectivity
         run: |
           # Test database connection
-          if docker-compose exec -T db pg_isready -U terrastories -d terrastories > /dev/null 2>&1; then
+          if docker compose exec -T db pg_isready -U terrastories -d terrastories > /dev/null 2>&1; then
             echo "✅ Database connectivity verified"
           else
             echo "❌ Database connection failed"
-            docker-compose logs db
+            docker compose logs db
             exit 1
           fi
 
       - name: Cleanup integration environment
         if: always()
         run: |
-          docker-compose -f docker-compose.yml -f docker-compose.dev.yml down -v || true
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v || true
           docker system prune -f || true

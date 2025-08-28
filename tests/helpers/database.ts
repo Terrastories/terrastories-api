@@ -200,6 +200,24 @@ export class TestDatabaseManager {
   }
 
   /**
+   * Clear only places data from the database, preserving users and communities
+   */
+  async clearPlaces(): Promise<void> {
+    if (!this.db) return;
+
+    try {
+      // Clear stories that reference places first
+      await this.db.delete(stories);
+      await this.db.delete(files);
+      // Clear places
+      await this.db.delete(places);
+      console.log('🧹 Places test data cleared');
+    } catch (error: any) {
+      console.warn('⚠️ Could not clear places data:', error.message);
+    }
+  }
+
+  /**
    * Completely teardown the database
    */
   async teardown(): Promise<void> {

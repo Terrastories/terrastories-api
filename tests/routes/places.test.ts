@@ -11,7 +11,15 @@
  * - Cultural protocol enforcement
  */
 
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  test,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  afterEach,
+} from 'vitest';
 import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';

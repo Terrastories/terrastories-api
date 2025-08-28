@@ -214,9 +214,9 @@ describe('Docker Configuration Tests', () => {
       const dockerfilePath = path.join(projectRoot, 'Dockerfile');
       const content = await fs.readFile(dockerfilePath, 'utf-8');
 
-      expect(content).toContain('FROM node:20-alpine AS development');
-      expect(content).toContain('FROM node:20-alpine AS builder');
-      expect(content).toContain('FROM node:20-alpine AS production');
+      expect(content).toContain('FROM node:20.18.0-alpine AS development');
+      expect(content).toContain('FROM node:20.18.0-alpine AS builder');
+      expect(content).toContain('FROM node:20.18.0-alpine AS production');
     });
 
     it('should use non-root user in production stage', async () => {

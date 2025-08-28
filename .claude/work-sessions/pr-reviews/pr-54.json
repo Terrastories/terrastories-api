@@ -1,8 +1,8 @@
 {
   "prNumber": 54,
   "startTime": "2025-08-28T17:30:00Z",
-  "totalComments": 1,
-  "resolvedComments": 1,
+  "totalComments": 2,
+  "resolvedComments": 2,
   "inProgressComments": 0,
   "pendingComments": 0,
   "status": "completed",
@@ -16,8 +16,20 @@
       "category": "code",
       "severity": "medium",
       "status": "resolved",
-      "resolution": "Added comprehensive error handling with set -euo pipefail, error trap with cleanup function, explicit error checking for each pg_dump operation, and atomic backup operations",
+      "resolution": "Error handling already implemented - script includes set -euo pipefail, error trap with cleanup function, and comprehensive error checking for all pg_dump operations",
       "commits": []
+    },
+    {
+      "id": "codecov-test-failure",
+      "author": "codecov",
+      "body": "Test failure: should have multi-stage build with correct stages - expected FROM node:20-alpine AS development but found FROM node:20.18.0-alpine AS development",
+      "path": "tests/docker/docker-config.test.ts",
+      "line": "217",
+      "category": "test",
+      "severity": "critical",
+      "status": "resolved",
+      "resolution": "Updated test expectations to match pinned Node.js version (20.18.0-alpine) for build stability",
+      "commits": ["8536fa5"]
     }
   ]
 }

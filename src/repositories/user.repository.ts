@@ -628,6 +628,50 @@ export class UserRepository {
   }
 
   /**
+   * Find user by ID with community name in single query (super admin only)
+   * @param id - User ID
+   * @returns Promise<(User & { communityName?: string }) | null> - User with community name if found, null otherwise
+   */
+  async findByIdWithCommunityName(
+    id: number
+  ): Promise<(User & { communityName?: string }) | null> {
+    try {
+      const usersTable = await getUsersTable();
+      const communitiesTable = await getCommunitiesTable();
+
+      const users = await this.database
+        .select({
+          id: usersTable.id,
+          firstName: usersTable.firstName,
+          lastName: usersTable.lastName,
+          email: usersTable.email,
+          role: usersTable.role,
+          communityId: usersTable.communityId,
+          isActive: usersTable.isActive,
+          createdAt: usersTable.createdAt,
+          updatedAt: usersTable.updatedAt,
+          lastLoginAt: usersTable.lastLoginAt,
+          communityName: communitiesTable.name,
+        })
+        .from(usersTable)
+        .leftJoin(
+          communitiesTable,
+          eq(usersTable.communityId, communitiesTable.id)
+        )
+        .where(eq(usersTable.id, id))
+        .limit(1);
+
+      return users[0] || null;
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(
+        `Failed to find user by ID with community name: ${errorMessage}`
+      );
+    }
+  }
+
+  /**
    * Update user by ID across all communities (super admin only)
    * @param id - User ID
    * @param data - Update data

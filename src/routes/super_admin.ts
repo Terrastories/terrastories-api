@@ -239,6 +239,12 @@ export async function superAdminRoutes(
 
   // GET /api/v1/super_admin/communities - List all communities
   app.get('/communities', {
+    config: {
+      rateLimit: {
+        max: 10, // More restrictive for super admin endpoints
+        timeWindow: 60 * 1000, // 1 minute
+      },
+    },
     schema: {
       description:
         'List all communities with pagination and filtering (Super Admin)',
@@ -440,6 +446,12 @@ export async function superAdminRoutes(
 
   // POST /api/v1/super_admin/communities - Create new community
   app.post('/communities', {
+    config: {
+      rateLimit: {
+        max: 3, // Very restrictive for creation endpoints
+        timeWindow: 60 * 1000, // 1 minute
+      },
+    },
     schema: {
       description: 'Create new community (Super Admin)',
       tags: ['Super Admin - Communities'],
@@ -558,6 +570,12 @@ export async function superAdminRoutes(
 
   // PUT /api/v1/super_admin/communities/:id - Update community
   app.put('/communities/:id', {
+    config: {
+      rateLimit: {
+        max: 10, // Moderate limit for update endpoints
+        timeWindow: 60 * 1000, // 1 minute
+      },
+    },
     schema: {
       description: 'Update community (Super Admin)',
       tags: ['Super Admin - Communities'],
@@ -894,7 +912,7 @@ export async function superAdminRoutes(
         const { id } = request.params;
         const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
-        const user = await userService.getUserByIdAsSuperAdmin(numericId);
+        const user = await userService.getUserByIdWithCommunityName(numericId);
 
         if (!user) {
           return reply.code(404).send({
@@ -903,10 +921,8 @@ export async function superAdminRoutes(
           });
         }
 
-        // Get community name
-        const community = await communityRepository.findById(user.communityId);
         const communityName =
-          community?.name || `Community ${user.communityId}`;
+          user.communityName || `Community ${user.communityId}`;
 
         // Transform to response format
         const response = {
@@ -943,6 +959,12 @@ export async function superAdminRoutes(
 
   // POST /api/v1/super_admin/users - Create new user
   app.post('/users', {
+    config: {
+      rateLimit: {
+        max: 5, // Restrictive for user creation endpoints
+        timeWindow: 60 * 1000, // 1 minute
+      },
+    },
     schema: {
       description: 'Create user in any community (Super Admin)',
       tags: ['Super Admin - Users'],
@@ -1006,10 +1028,11 @@ export async function superAdminRoutes(
           auditLogger.log(auditEntry);
         }
 
-        // Get community name
-        const community = await communityRepository.findById(user.communityId);
+        // Get community name efficiently in single query
+        const userWithCommunity =
+          await userRepository.findByIdWithCommunityName(user.id);
         const communityName =
-          community?.name || `Community ${user.communityId}`;
+          userWithCommunity?.communityName || `Community ${user.communityId}`;
 
         const response = {
           data: {
@@ -1065,6 +1088,12 @@ export async function superAdminRoutes(
 
   // PUT /api/v1/super_admin/users/:id - Update user
   app.put('/users/:id', {
+    config: {
+      rateLimit: {
+        max: 10, // Moderate limit for user update endpoints
+        timeWindow: 60 * 1000, // 1 minute
+      },
+    },
     schema: {
       description: 'Update user details including role changes (Super Admin)',
       tags: ['Super Admin - Users'],
@@ -1120,10 +1149,11 @@ export async function superAdminRoutes(
           request.body
         );
 
-        // Get community name
-        const community = await communityRepository.findById(user.communityId);
+        // Get community name efficiently in single query
+        const userWithCommunity =
+          await userRepository.findByIdWithCommunityName(user.id);
         const communityName =
-          community?.name || `Community ${user.communityId}`;
+          userWithCommunity?.communityName || `Community ${user.communityId}`;
 
         const response = {
           data: {

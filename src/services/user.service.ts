@@ -635,6 +635,17 @@ export class UserService {
   }
 
   /**
+   * Get user by ID with community name in single query (super admin only)
+   * @param id - User ID
+   * @returns Promise<(User & { communityName?: string }) | null> - User with community name or null if not found
+   */
+  async getUserByIdWithCommunityName(
+    id: number
+  ): Promise<(User & { communityName?: string }) | null> {
+    return await this.userRepository.findByIdWithCommunityName(id);
+  }
+
+  /**
    * Deactivate user as super admin
    * @param id - User ID
    * @returns Promise<{message: string, id: number}> - Success response

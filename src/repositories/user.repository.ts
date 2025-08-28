@@ -14,7 +14,12 @@
  */
 
 import { eq, and, like, desc, asc, count, or, sql } from 'drizzle-orm';
-import { getUsersTable, type User, type NewUser } from '../db/schema/users.js';
+import {
+  getUsersTable,
+  type User,
+  type NewUser,
+  type UserRole,
+} from '../db/schema/users.js';
 import {
   getCommunitiesTable,
   type Community,
@@ -423,6 +428,285 @@ export class UserRepository {
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
       throw new Error(`Failed to count users: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Super Admin Methods - Cross-community operations
+   */
+
+  /**
+   * Search users across all communities (super admin only)
+   * @param options - Search and filter options
+   * @returns Promise<User[]> - Array of users across communities
+   */
+  async searchUsers(options: {
+    limit?: number;
+    offset?: number;
+    communityId?: number;
+    role?: UserRole;
+    search?: string;
+    isActive?: boolean;
+  }): Promise<(User & { communityName?: string })[]> {
+    try {
+      const usersTable = await getUsersTable();
+      const communitiesTable = await getCommunitiesTable();
+      const {
+        limit = 20,
+        offset = 0,
+        communityId,
+        role,
+        search,
+        isActive,
+      } = options;
+
+      // Build where conditions (no community restriction for super admin)
+      const whereConditions = [];
+
+      if (communityId) {
+        whereConditions.push(eq(usersTable.communityId, communityId));
+      }
+
+      if (search) {
+        const searchTerm = search.toLowerCase();
+        whereConditions.push(
+          or(
+            like(sql`lower(${usersTable.firstName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.lastName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.email})`, `%${searchTerm}%`)
+          )!
+        );
+      }
+
+      if (role) {
+        whereConditions.push(eq(usersTable.role, role));
+      }
+
+      if (isActive !== undefined) {
+        whereConditions.push(eq(usersTable.isActive, isActive));
+      }
+
+      // Execute query with LEFT JOIN to get community names in one query
+      let query = this.database
+        .select({
+          id: usersTable.id,
+          firstName: usersTable.firstName,
+          lastName: usersTable.lastName,
+          email: usersTable.email,
+          role: usersTable.role,
+          communityId: usersTable.communityId,
+          isActive: usersTable.isActive,
+          createdAt: usersTable.createdAt,
+          updatedAt: usersTable.updatedAt,
+          communityName: communitiesTable.name,
+        })
+        .from(usersTable)
+        .leftJoin(
+          communitiesTable,
+          eq(usersTable.communityId, communitiesTable.id)
+        )
+        .orderBy(desc(usersTable.createdAt))
+        .limit(limit)
+        .offset(offset);
+
+      if (whereConditions.length > 0) {
+        query = query.where(and(...whereConditions));
+      }
+
+      const users = await query;
+      return users;
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to search users: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Count users across all communities (super admin only)
+   * @param options - Filter options
+   * @returns Promise<number> - Total count of users
+   */
+  async countUsers(options: {
+    communityId?: number;
+    role?: UserRole;
+    search?: string;
+    isActive?: boolean;
+  }): Promise<number> {
+    try {
+      const usersTable = await getUsersTable();
+      const { communityId, role, search, isActive } = options;
+
+      // Build where conditions (no community restriction for super admin)
+      const whereConditions = [];
+
+      if (communityId) {
+        whereConditions.push(eq(usersTable.communityId, communityId));
+      }
+
+      if (search) {
+        const searchTerm = search.toLowerCase();
+        whereConditions.push(
+          or(
+            like(sql`lower(${usersTable.firstName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.lastName})`, `%${searchTerm}%`),
+            like(sql`lower(${usersTable.email})`, `%${searchTerm}%`)
+          )!
+        );
+      }
+
+      if (role) {
+        whereConditions.push(eq(usersTable.role, role));
+      }
+
+      if (isActive !== undefined) {
+        whereConditions.push(eq(usersTable.isActive, isActive));
+      }
+
+      // Execute count query
+      let query = this.database.select({ count: count() }).from(usersTable);
+
+      if (whereConditions.length > 0) {
+        query = query.where(and(...whereConditions));
+      }
+
+      const countResults = await query;
+      const countResult = countResults[0] as { count: number };
+      return Number(countResult.count);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to count users: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Count users by community ID for super admin operations
+   */
+  async countUsersByCommunity(communityId: number): Promise<number> {
+    try {
+      const usersTable = await getUsersTable();
+
+      // Execute count query
+      const query = this.database
+        .select({ count: count() })
+        .from(usersTable)
+        .where(eq(usersTable.communityId, communityId));
+
+      const countResults = await query;
+      const countResult = countResults[0] as { count: number };
+      return Number(countResult.count);
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to count users by community: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Find user by ID across all communities (super admin only)
+   * @param id - User ID
+   * @returns Promise<User | null> - User if found, null otherwise
+   */
+  async findByIdAsSuperAdmin(id: number): Promise<User | null> {
+    try {
+      const usersTable = await getUsersTable();
+      const users = await this.database
+        .select()
+        .from(usersTable)
+        .where(eq(usersTable.id, id))
+        .limit(1);
+
+      return users[0] || null;
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(
+        `Failed to find user by ID as super admin: ${errorMessage}`
+      );
+    }
+  }
+
+  /**
+   * Find user by ID with community name in single query (super admin only)
+   * @param id - User ID
+   * @returns Promise<(User & { communityName?: string }) | null> - User with community name if found, null otherwise
+   */
+  async findByIdWithCommunityName(
+    id: number
+  ): Promise<(User & { communityName?: string }) | null> {
+    try {
+      const usersTable = await getUsersTable();
+      const communitiesTable = await getCommunitiesTable();
+
+      const users = await this.database
+        .select({
+          id: usersTable.id,
+          firstName: usersTable.firstName,
+          lastName: usersTable.lastName,
+          email: usersTable.email,
+          role: usersTable.role,
+          communityId: usersTable.communityId,
+          isActive: usersTable.isActive,
+          createdAt: usersTable.createdAt,
+          updatedAt: usersTable.updatedAt,
+          lastLoginAt: usersTable.lastLoginAt,
+          communityName: communitiesTable.name,
+        })
+        .from(usersTable)
+        .leftJoin(
+          communitiesTable,
+          eq(usersTable.communityId, communitiesTable.id)
+        )
+        .where(eq(usersTable.id, id))
+        .limit(1);
+
+      return users[0] || null;
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(
+        `Failed to find user by ID with community name: ${errorMessage}`
+      );
+    }
+  }
+
+  /**
+   * Update user by ID across all communities (super admin only)
+   * @param id - User ID
+   * @param data - Update data
+   * @returns Promise<User> - Updated user
+   */
+  async updateByIdAsSuperAdmin(
+    id: number,
+    data: Partial<NewUser>
+  ): Promise<User> {
+    try {
+      const usersTable = await getUsersTable();
+
+      // Update the user
+      const updateData = {
+        ...data,
+        updatedAt: new Date(),
+      };
+
+      const updatedUsers = await this.database
+        .update(usersTable)
+        .set(updateData)
+        .where(eq(usersTable.id, id))
+        .returning();
+
+      if (!updatedUsers || updatedUsers.length === 0) {
+        throw new Error('User not found');
+      }
+
+      return updatedUsers[0];
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(
+        `Failed to update user by ID as super admin: ${errorMessage}`
+      );
     }
   }
 }

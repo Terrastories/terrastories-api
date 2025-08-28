@@ -14,15 +14,15 @@
  * - Comprehensive error handling and validation
  */
 
-import { PlaceRepository } from '../repositories/place.repository.js';
-import type {
-  Place,
-  CreatePlaceData,
-  UpdatePlaceData,
-  NearbySearchParams,
-  BoundsSearchParams,
-  CommunityPlaceParams,
-  PaginatedResponse,
+import {
+  PlaceRepository,
+  type Place,
+  type CreatePlaceData,
+  type UpdatePlaceData,
+  type NearbySearchParams,
+  type BoundsSearchParams,
+  type CommunityPlaceParams,
+  type PaginatedResponse,
 } from '../repositories/place.repository.js';
 import { validateCoordinates } from '../db/schema/places.js';
 import {

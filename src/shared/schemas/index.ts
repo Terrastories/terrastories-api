@@ -21,6 +21,11 @@ import {
   speakerExamples,
 } from './speakers.swagger.js';
 import { fileSchemas, fileParameters, fileExamples } from './files.swagger.js';
+import {
+  superAdminSchemas,
+  superAdminParameters,
+  superAdminExamples,
+} from './super-admin.swagger.js';
 // Community swagger schemas removed temporarily due to missing dependency
 
 // All schema definitions for OpenAPI
@@ -59,8 +64,23 @@ export const swaggerSchemas = {
   FileListResponse: fileSchemas.FileListResponse,
   FileErrorResponse: fileSchemas.FileErrorResponse,
 
-  // Community schemas
-  // Community schemas temporarily disabled
+  // Super Admin schemas
+  Community: superAdminSchemas.Community,
+  CreateCommunityRequest: superAdminSchemas.CreateCommunityRequest,
+  UpdateCommunityRequest: superAdminSchemas.UpdateCommunityRequest,
+  SuperAdminUser: superAdminSchemas.User,
+  CreateUserRequest: superAdminSchemas.CreateUserRequest,
+  UpdateUserRequest: superAdminSchemas.UpdateUserRequest,
+  PaginatedCommunitiesResponse: superAdminSchemas.PaginatedCommunitiesResponse,
+  PaginatedUsersResponse: superAdminSchemas.PaginatedUsersResponse,
+  CommunityCreatedResponse: superAdminSchemas.CommunityCreatedResponse,
+  CommunityUpdatedResponse: superAdminSchemas.CommunityUpdatedResponse,
+  CommunityDeletedResponse: superAdminSchemas.CommunityDeletedResponse,
+  UserCreatedResponse: superAdminSchemas.UserCreatedResponse,
+  UserUpdatedResponse: superAdminSchemas.UserUpdatedResponse,
+  UserDeletedResponse: superAdminSchemas.UserDeletedResponse,
+
+  // Community schemas (legacy - temporarily disabled)
   // Community: communitySwaggerSchemas.CommunityResponse,
   // CreateCommunity: communitySwaggerSchemas.CreateCommunityRequest,
   // UpdateCommunity: communitySwaggerSchemas.UpdateCommunityRequest,
@@ -68,12 +88,13 @@ export const swaggerSchemas = {
   // CommunitySearchResponse: communitySwaggerSchemas.CommunitySearchResponse,
   // CulturalProtocols: communitySwaggerSchemas.CulturalProtocols,
 
-  // Error schemas
-  ValidationError: userSchemas.ValidationError,
-  NotFoundError: userSchemas.NotFoundError,
-  ConflictError: userSchemas.ConflictError,
-  UnauthorizedError: userSchemas.UnauthorizedError,
-  ForbiddenError: userSchemas.ForbiddenError,
+  // Error schemas (using comprehensive super admin schemas)
+  ValidationError: superAdminSchemas.ValidationError,
+  NotFoundError: superAdminSchemas.NotFoundError,
+  ConflictError: superAdminSchemas.ConflictError,
+  UnauthorizedError: superAdminSchemas.UnauthorizedError,
+  ForbiddenError: superAdminSchemas.ForbiddenError,
+  InternalServerError: superAdminSchemas.InternalServerError,
 };
 
 // All parameter definitions
@@ -109,6 +130,19 @@ export const swaggerParameters = {
   search: fileParameters.search,
   mimeType: fileParameters.mimeType,
   culturalRestrictions: fileParameters.culturalRestrictions,
+
+  // Super Admin parameters
+  saPage: superAdminParameters.page,
+  saLimit: superAdminParameters.limit,
+  communitySearch: superAdminParameters.communitySearch,
+  communityLocale: superAdminParameters.communityLocale,
+  communityActive: superAdminParameters.communityActive,
+  userCommunity: superAdminParameters.userCommunity,
+  userRole: superAdminParameters.userRole,
+  userSearch: superAdminParameters.userSearch,
+  userActive: superAdminParameters.userActive,
+  communityId: superAdminParameters.communityId,
+  saUserId: superAdminParameters.userId,
 };
 
 // All example definitions
@@ -146,6 +180,12 @@ export const swaggerExamples = {
   uploadSuccessResponse: fileExamples.uploadSuccessResponse,
   uploadErrorResponse: fileExamples.uploadErrorResponse,
   fileListResponse: fileExamples.fileListResponse,
+
+  // Super Admin examples
+  secwepemcCommunity: superAdminExamples.communities.secwepemc,
+  mikmaqCommunity: superAdminExamples.communities.mikmaq,
+  adminUser: superAdminExamples.users.admin,
+  editorUser: superAdminExamples.users.editor,
 };
 
 // Export individual schema modules for specific use
@@ -166,4 +206,9 @@ export {
   speakerExamples,
 } from './speakers.swagger.js';
 export { fileSchemas, fileParameters, fileExamples } from './files.swagger.js';
+export {
+  superAdminSchemas,
+  superAdminParameters,
+  superAdminExamples,
+} from './super-admin.swagger.js';
 // export { communitySwaggerSchemas } from './communities.swagger.js';

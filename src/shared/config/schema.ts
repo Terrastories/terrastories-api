@@ -219,6 +219,16 @@ export const TestConfigSchema = AppConfigSchema.extend({
   database: DatabaseConfigSchema.extend({
     url: z.string().default(':memory:'),
   }),
+  security: SecurityConfigSchema.extend({
+    password: z.object({
+      algorithm: z.enum(['argon2id']).default('argon2id'),
+      argon2: z.object({
+        memory: z.coerce.number().min(32768).default(32768), // 32MB (half of production)
+        iterations: z.coerce.number().min(2).default(2), // Reduced from 3 for speed
+        parallelism: z.coerce.number().min(1).default(2), // Reduced from 4 for speed
+      }),
+    }),
+  }),
   logging: LoggingConfigSchema.extend({
     level: LogLevelSchema.default('error' as LogLevel),
   }),

@@ -15,13 +15,13 @@ import {
   CommunityService,
   CommunityValidationError,
   CommunityOperationError,
+  type CreateCommunityRequest,
+  type UpdateCommunityRequest,
 } from '../../src/services/community.service.js';
-import type {
-  CreateCommunityRequest,
-  UpdateCommunityRequest,
-} from '../../src/services/community.service.js';
-import { CommunityRepository } from '../../src/repositories/community.repository.js';
-import type { CulturalProtocols } from '../../src/repositories/community.repository.js';
+import {
+  CommunityRepository,
+  type CulturalProtocols,
+} from '../../src/repositories/community.repository.js';
 import { TestDatabaseManager } from '../helpers/database.js';
 
 describe('CommunityService', () => {

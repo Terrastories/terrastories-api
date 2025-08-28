@@ -17,10 +17,15 @@ import { UserRepository } from '../repositories/user.repository.js';
 import * as passwordService from './password.service.js';
 import { CommunityService } from './community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
+import {
+  toISOString,
+  toISOStringOrNull,
+} from '../shared/utils/date-transforms.js';
 import type {
   User,
   CreateUserData,
   UpdateUserData,
+  UserRole,
 } from '../db/schema/index.js';
 
 /**
@@ -33,6 +38,7 @@ export interface CreateUserRequest {
   lastName: string;
   role?: 'super_admin' | 'admin' | 'editor' | 'elder' | 'viewer';
   communityId: number;
+  isActive?: boolean;
 }
 
 /**
@@ -44,6 +50,7 @@ export interface UpdateUserRequest {
   lastName?: string;
   role?: 'super_admin' | 'admin' | 'editor' | 'elder' | 'viewer';
   isActive?: boolean;
+  communityId?: number;
 }
 
 /**
@@ -406,5 +413,276 @@ export class UserService {
     }
 
     await this.userRepository.delete(id, communityId);
+  }
+
+  /**
+   * Super Admin Methods
+   * These methods provide cross-community access for super admin users only
+   */
+
+  /**
+   * Get all users across communities with pagination (super admin only)
+   * @param options - Query options including pagination and filters
+   * @returns Promise<{data: UserResponse[], meta: PaginationMeta}> - Paginated users
+   */
+  async getAllUsersForSuperAdmin(
+    options: {
+      page?: number;
+      limit?: number;
+      community?: number;
+      role?: UserRole;
+      search?: string;
+      active?: boolean;
+    } = {}
+  ): Promise<{
+    data: any[]; // UserResponse type - will define properly
+    meta: {
+      page: number;
+      limit: number;
+      total: number;
+      totalPages: number;
+    };
+  }> {
+    try {
+      const { page = 1, limit = 20, community, role, search, active } = options;
+
+      // Validate pagination
+      if (page < 1) {
+        throw new Error('Page must be at least 1');
+      }
+      if (limit < 1 || limit > 100) {
+        throw new Error('Limit must be between 1 and 100');
+      }
+
+      const offset = (page - 1) * limit;
+
+      // Build search filters
+      const searchFilters: {
+        limit?: number;
+        offset?: number;
+        communityId?: number;
+        role?: UserRole;
+        search?: string;
+        isActive?: boolean;
+      } = {
+        limit,
+        offset,
+      };
+
+      const countFilters: {
+        communityId?: number;
+        role?: UserRole;
+        search?: string;
+        isActive?: boolean;
+      } = {};
+
+      if (community) {
+        searchFilters.communityId = community;
+        countFilters.communityId = community;
+      }
+      if (role) {
+        searchFilters.role = role;
+        countFilters.role = role;
+      }
+      if (active !== undefined) {
+        searchFilters.isActive = active;
+        countFilters.isActive = active;
+      }
+      if (search) {
+        searchFilters.search = search;
+        countFilters.search = search;
+      }
+
+      // Get users and count from repository
+      const [users, total] = await Promise.all([
+        this.userRepository.searchUsers(searchFilters),
+        this.userRepository.countUsers(countFilters),
+      ]);
+
+      // Transform users to response format
+      const data = users.map((user: any) => ({
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+        communityId: user.communityId,
+        communityName: user.communityName || 'Unknown', // Provided via JOIN in repository
+        isActive: user.isActive,
+        createdAt: toISOString(user.createdAt),
+        updatedAt: toISOString(user.updatedAt),
+        lastLoginAt: toISOStringOrNull(user.lastLoginAt),
+      }));
+
+      return {
+        data,
+        meta: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      };
+    } catch (error) {
+      throw new Error(
+        `Super admin failed to get users: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Create user in any community as super admin
+   * @param data - User creation data
+   * @returns Promise<User> - Created user
+   */
+  async createUserAsSuperAdmin(data: {
+    email: string;
+    password: string;
+    firstName: string;
+    lastName: string;
+    role: string;
+    communityId: number;
+    isActive?: boolean;
+  }): Promise<any> {
+    try {
+      // Super admin can create users in any community
+      // Use the existing registerUser method but bypass community restrictions
+      const userData: CreateUserRequest = {
+        email: data.email,
+        password: data.password,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        communityId: data.communityId,
+        role: data.role as 'super_admin' | 'admin' | 'editor' | 'viewer',
+        isActive: data.isActive ?? true,
+      };
+
+      return await this.registerUser(userData);
+    } catch (error) {
+      // Re-throw specific error types for proper HTTP status codes
+      if (
+        error instanceof DuplicateEmailError ||
+        error instanceof WeakPasswordError ||
+        error instanceof InvalidCommunityError
+      ) {
+        throw error;
+      }
+      throw new Error(
+        `Super admin failed to create user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Update user details as super admin (including role changes)
+   * @param id - User ID
+   * @param updates - Update data
+   * @returns Promise<User> - Updated user
+   */
+  async updateUserAsSuperAdmin(
+    id: number,
+    updates: {
+      firstName?: string;
+      lastName?: string;
+      role?: string;
+      communityId?: number;
+      isActive?: boolean;
+    }
+  ): Promise<any> {
+    try {
+      // Super admin can update any user including cross-community changes
+      const updateData: Partial<UpdateUserData> = {
+        firstName: updates.firstName,
+        lastName: updates.lastName,
+        role: updates.role as
+          | 'super_admin'
+          | 'admin'
+          | 'editor'
+          | 'viewer'
+          | undefined,
+        communityId: updates.communityId,
+        isActive: updates.isActive,
+        updatedAt: new Date(),
+      };
+
+      return await this.userRepository.updateByIdAsSuperAdmin(id, updateData);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('User not found')) {
+        throw new UserNotFoundError();
+      }
+      if (error instanceof UserNotFoundError) {
+        throw error;
+      }
+      throw new Error(
+        `Super admin failed to update user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Get user by ID as super admin (cross-community access)
+   * @param id - User ID
+   * @returns Promise<User | null> - User data or null if not found
+   */
+  async getUserByIdAsSuperAdmin(id: number): Promise<User | null> {
+    return await this.userRepository.findByIdAsSuperAdmin(id);
+  }
+
+  /**
+   * Get user by ID with community name in single query (super admin only)
+   * @param id - User ID
+   * @returns Promise<(User & { communityName?: string }) | null> - User with community name or null if not found
+   */
+  async getUserByIdWithCommunityName(
+    id: number
+  ): Promise<(User & { communityName?: string }) | null> {
+    return await this.userRepository.findByIdWithCommunityName(id);
+  }
+
+  /**
+   * Deactivate user as super admin
+   * @param id - User ID
+   * @returns Promise<{message: string, id: number}> - Success response
+   */
+  async deactivateUserAsSuperAdmin(id: number): Promise<{
+    message: string;
+    id: number;
+  }> {
+    try {
+      // Validate ID
+      if (!Number.isInteger(id) || id <= 0) {
+        throw new Error('Invalid user ID');
+      }
+
+      // Check if user exists
+      const user = await this.getUserByIdAsSuperAdmin(id);
+      if (!user) {
+        throw new UserNotFoundError();
+      }
+
+      // Deactivate the user
+      await this.userRepository.updateByIdAsSuperAdmin(id, { isActive: false });
+
+      return {
+        message: 'User deactivated successfully',
+        id,
+      };
+    } catch (error) {
+      // Re-throw specific error types
+      if (error instanceof UserNotFoundError) {
+        throw error;
+      }
+      throw new Error(
+        `Super admin failed to deactivate user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
   }
 }

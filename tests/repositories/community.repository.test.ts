@@ -15,12 +15,10 @@ import {
   CommunityRepository,
   CommunityNotFoundError,
   InvalidCommunityDataError,
-} from '../../src/repositories/community.repository.js';
-import type {
-  CreateCommunityData,
-  UpdateCommunityData,
-  CommunitySearchParams,
-  CulturalProtocols,
+  type CreateCommunityData,
+  type UpdateCommunityData,
+  type CommunitySearchParams,
+  type CulturalProtocols,
 } from '../../src/repositories/community.repository.js';
 import { TestDatabaseManager } from '../helpers/database.js';
 

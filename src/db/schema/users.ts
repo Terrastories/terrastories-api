@@ -56,6 +56,7 @@ export const usersPg = pgTable(
       .default('viewer'),
     communityId: pgInteger('community_id').notNull(),
     isActive: boolean('is_active').notNull().default(true),
+    lastLoginAt: timestamp('last_login_at').defaultNow(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -84,6 +85,8 @@ export const usersSqlite = sqliteTable(
       .default('viewer'),
     communityId: integer('community_id').notNull(),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
+    lastLoginAt: integer('last_login_at', { mode: 'timestamp' })
+      .$defaultFn(() => new Date()),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -139,6 +142,7 @@ export const insertUserSchema = createInsertSchema(usersPg, {
   email: z.string().email('Invalid email format'),
   role: UserRoleSchema.default('viewer'),
   isActive: z.boolean().default(true),
+  lastLoginAt: z.date().optional(),
 });
 
 export const selectUserSchema = createSelectSchema(usersPg);

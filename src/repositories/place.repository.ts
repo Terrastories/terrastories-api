@@ -18,8 +18,9 @@
 // complex typing with spatial queries and multi-database compatibility.
 
 import { eq, and, desc, sql, count } from 'drizzle-orm';
-import type { Place, NewPlace } from '../db/schema/places.js';
 import {
+  type Place,
+  type NewPlace,
   getPlacesTable,
   spatialHelpers,
   validateCoordinates,

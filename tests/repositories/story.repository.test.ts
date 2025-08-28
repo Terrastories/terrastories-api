@@ -10,12 +10,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { StoryRepository } from '../../src/repositories/story.repository.js';
-import type {
-  Story,
-  StoryCreateData,
-  StoryFilters,
-  PaginationOptions,
+import {
+  StoryRepository,
+  type Story,
+  type StoryCreateData,
+  type StoryFilters,
+  type PaginationOptions,
 } from '../../src/repositories/story.repository.js';
 import type { Database } from '../../src/db/index.js';
 import {

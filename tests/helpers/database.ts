@@ -87,10 +87,9 @@ export class TestDatabaseManager {
       await migrate(this.db, { migrationsFolder });
       console.log('✅ Test database migrations applied');
     } catch (error: any) {
-      console.warn(
-        '⚠️ Migration error (may be already applied):',
-        error.message
-      );
+      console.error('❌ Migration failed:', error.message);
+      console.error('Migration error stack:', error.stack);
+      throw new Error(`Database migration failed: ${error.message}`);
     }
 
     // Add missing columns that are not in migrations yet
@@ -197,6 +196,24 @@ export class TestDatabaseManager {
       console.log('🧹 All test data cleared');
     } catch (error: any) {
       console.warn('⚠️ Could not clear test data:', error.message);
+    }
+  }
+
+  /**
+   * Clear only places data from the database, preserving users and communities
+   */
+  async clearPlaces(): Promise<void> {
+    if (!this.db) return;
+
+    try {
+      // Clear stories that reference places first
+      await this.db.delete(stories);
+      await this.db.delete(files);
+      // Clear places
+      await this.db.delete(places);
+      console.log('🧹 Places test data cleared');
+    } catch (error: any) {
+      console.warn('⚠️ Could not clear places data:', error.message);
     }
   }
 

@@ -8,6 +8,7 @@ import { placesRoutes } from './places.js';
 import { speakerRoutes } from './speakers.js';
 import { publicApiRoutes } from './public-api.js';
 import { memberRoutes } from './member/index.js';
+import { superAdminRoutes } from './super_admin.js';
 
 export interface RegisterRoutesOptions {
   database?: unknown;
@@ -32,4 +33,7 @@ export async function registerRoutes(
 
   // Member dashboard routes (authenticated member endpoints)
   await app.register(memberRoutes, { prefix: '/api/v1/member', ...options });
+
+  // Super admin routes (system-level administrative endpoints)
+  await app.register(superAdminRoutes, { prefix: '/api/v1/super_admin', ...options });
 }

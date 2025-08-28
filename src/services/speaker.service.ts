@@ -13,13 +13,13 @@
  * - Audit logging for cultural compliance
  */
 
-import { SpeakerRepository } from '../repositories/speaker.repository.js';
-import type {
-  Speaker,
-  CommunitySpeakerParams,
-  SpeakerSearchParams,
-  PaginatedResponse,
-  SpeakerStats,
+import {
+  SpeakerRepository,
+  type Speaker,
+  type CommunitySpeakerParams,
+  type SpeakerSearchParams,
+  type PaginatedResponse,
+  type SpeakerStats,
 } from '../repositories/speaker.repository.js';
 import {
   SpeakerNotFoundError,

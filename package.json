@@ -6,20 +6,23 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "build": "npx tsc",
     "start": "node dist/server.js",
     "test": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint .",
+    "lint": "npx eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "type-check": "tsc --noEmit",
+    "type-check": "npx tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "prepare": "npx husky",
     "validate": "npm run type-check && npm run lint && npm test",
-    "compare:api": "node scripts/api-comparison.js"
+    "compare:api": "node scripts/api-comparison.js",
+    "test:compatibility": "vitest run tests/compatibility/comprehensive-compatibility.test.ts",
+    "compatibility:report": "node scripts/generate-compatibility-report.js",
+    "compatibility:full": "npm run test:compatibility && npm run compatibility:report"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

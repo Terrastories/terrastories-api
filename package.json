@@ -18,7 +18,8 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "prepare": "npx husky",
-    "validate": "npm run type-check && npm run lint && npm test"
+    "validate": "npm run type-check && npm run lint && npm test",
+    "compare:api": "node scripts/api-comparison.js"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

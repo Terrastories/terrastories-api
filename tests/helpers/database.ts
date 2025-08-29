@@ -542,7 +542,8 @@ export async function createTestData() {
     .values([
       {
         email: 'admin@test.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        passwordHash:
+          '$argon2id$v=19$m=65536,t=3,p=4$tCxyO6RAN/yxOKo7TkGnXg$3kM2t3GUmirQtHwtkPp/Pwu7fvbNwYoqWNvr/HLaGCE',
         firstName: 'Admin',
         lastName: 'User',
         role: 'admin',
@@ -551,7 +552,8 @@ export async function createTestData() {
       },
       {
         email: 'editor@test.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        passwordHash:
+          '$argon2id$v=19$m=65536,t=3,p=4$tCxyO6RAN/yxOKo7TkGnXg$3kM2t3GUmirQtHwtkPp/Pwu7fvbNwYoqWNvr/HLaGCE',
         firstName: 'Editor',
         lastName: 'User',
         role: 'editor',
@@ -560,7 +562,8 @@ export async function createTestData() {
       },
       {
         email: 'elder@test.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        passwordHash:
+          '$argon2id$v=19$m=65536,t=3,p=4$tCxyO6RAN/yxOKo7TkGnXg$3kM2t3GUmirQtHwtkPp/Pwu7fvbNwYoqWNvr/HLaGCE',
         firstName: 'Elder',
         lastName: 'User',
         role: 'elder',
@@ -569,7 +572,8 @@ export async function createTestData() {
       },
       {
         email: 'viewer@test.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        passwordHash:
+          '$argon2id$v=19$m=65536,t=3,p=4$tCxyO6RAN/yxOKo7TkGnXg$3kM2t3GUmirQtHwtkPp/Pwu7fvbNwYoqWNvr/HLaGCE',
         firstName: 'Viewer',
         lastName: 'User',
         role: 'viewer',
@@ -578,7 +582,8 @@ export async function createTestData() {
       },
       {
         email: 'superadmin@test.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        passwordHash:
+          '$argon2id$v=19$m=65536,t=3,p=4$tCxyO6RAN/yxOKo7TkGnXg$3kM2t3GUmirQtHwtkPp/Pwu7fvbNwYoqWNvr/HLaGCE',
         firstName: 'Super',
         lastName: 'Admin',
         role: 'super_admin',
@@ -587,7 +592,8 @@ export async function createTestData() {
       },
       {
         email: 'other@test.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$hash',
+        passwordHash:
+          '$argon2id$v=19$m=65536,t=3,p=4$tCxyO6RAN/yxOKo7TkGnXg$3kM2t3GUmirQtHwtkPp/Pwu7fvbNwYoqWNvr/HLaGCE',
         firstName: 'Other',
         lastName: 'Community',
         role: 'editor',

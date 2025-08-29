@@ -10,19 +10,19 @@ import { getUsersTable } from '../../src/db/schema/users.js';
 
 describe('Relationships Integration Tests', () => {
   let db: any;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   let _stories: any;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   let _places: any;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   let _speakers: any;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   let _storyPlaces: any;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   let _storySpeakers: any;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   let _communities: any;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   let _users: any;
 
   beforeAll(async () => {

@@ -1,6 +1,10 @@
 // Example: Service layer with error handling
 import { UserRepository } from '../repositories/userRepository';
-import { hashPassword, comparePassword, validatePasswordStrength } from '../services/password.service';
+import {
+  hashPassword,
+  comparePassword,
+  validatePasswordStrength,
+} from '../services/password.service';
 
 // Custom Error classes for specific failure scenarios
 export class UserNotFoundError extends Error {
@@ -48,11 +52,11 @@ export class UserService {
     const passwordHash = await hashPassword(userData.password);
 
     // Remove plain password and add hash
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
     const { password, ...userDataWithoutPassword } = userData;
     const userToCreate = {
       ...userDataWithoutPassword,
-      passwordHash
+      passwordHash,
     };
 
     return this.userRepository.create(userToCreate);
@@ -74,15 +78,19 @@ export class UserService {
     if (updates.email) {
       const existing = await this.userRepository.findByEmail(updates.email);
       if (existing && existing.id !== id) {
-        throw new DuplicateEmailError('This email is already in use by another account.');
+        throw new DuplicateEmailError(
+          'This email is already in use by another account.'
+        );
       }
     }
 
     const updatedUser = await this.userRepository.update(id, updates);
     if (!updatedUser) {
-        // This case might happen in a race condition if user is deleted
-        // between the check and the update.
-        throw new UserNotFoundError('Failed to update user as they could not be found.');
+      // This case might happen in a race condition if user is deleted
+      // between the check and the update.
+      throw new UserNotFoundError(
+        'Failed to update user as they could not be found.'
+      );
     }
     return updatedUser;
   }
@@ -117,11 +125,18 @@ export class UserService {
   /**
    * Change user password with validation
    */
-  async changePassword(userId: string, oldPassword: string, newPassword: string): Promise<void> {
+  async changePassword(
+    userId: string,
+    oldPassword: string,
+    newPassword: string
+  ): Promise<void> {
     const user = await this.getUserById(userId);
 
     // Verify old password
-    const isValidOldPassword = await comparePassword(oldPassword, user.passwordHash);
+    const isValidOldPassword = await comparePassword(
+      oldPassword,
+      user.passwordHash
+    );
     if (!isValidOldPassword) {
       throw new Error('Current password is incorrect');
     }

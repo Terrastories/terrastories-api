@@ -14,7 +14,7 @@ import {
 } from '../helpers/api-client.js';
 
 // Mock a simple Fastify app for testing
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+
 async function createTestApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
 

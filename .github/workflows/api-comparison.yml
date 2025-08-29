@@ -74,9 +74,10 @@ jobs:
 
       - name: Generate comparison report
         if: always()
+        continue-on-error: true
         run: |
           echo "📊 Generating API comparison report..."
-          node scripts/api-comparison.js report --output api-comparison-report.html
+          node scripts/api-comparison.js report --output api-comparison-report.html || echo "⚠️ Report generation failed, but continuing..."
 
       - name: Upload comparison report
         if: always()

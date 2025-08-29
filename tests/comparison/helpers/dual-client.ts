@@ -7,18 +7,16 @@ export interface ApiClientConfig {
   app: FastifyInstance;
 }
 
+export interface ApiResponse<T = unknown> {
+  statusCode: number;
+  body: T;
+  headers: Record<string, string | string[]>;
+}
+
 export interface ComparisonResult {
   match: boolean;
-  rails: {
-    statusCode: number;
-    body: any;
-    headers: Record<string, any>;
-  };
-  typescript: {
-    statusCode: number;
-    body: any;
-    headers: Record<string, any>;
-  };
+  rails: ApiResponse;
+  typescript: ApiResponse;
   differences?: string[];
   metrics?: {
     railsResponseTime: number;
@@ -28,7 +26,7 @@ export interface ComparisonResult {
 
 export interface RequestOptions {
   auth?: string;
-  data?: any;
+  data?: Record<string, unknown> | string;
   headers?: Record<string, string>;
 }
 
@@ -58,11 +56,30 @@ export class DualApiClient {
     const differ = await import('./response-differ');
     const responseDiffer = new differ.ResponseDiffer();
 
+    // Cache Rails response data to avoid double consumption
+    const railsStatus = railsResponse.status || railsResponse.statusCode;
+    const railsHeaders = railsResponse.headers;
+    const railsRawBody =
+      typeof railsResponse.text === 'function'
+        ? await railsResponse.text()
+        : railsResponse.body;
+
+    // Try to parse JSON for stable comparison
+    const railsBody = (() => {
+      try {
+        return typeof railsRawBody === 'string'
+          ? JSON.parse(railsRawBody)
+          : railsRawBody;
+      } catch {
+        return railsRawBody;
+      }
+    })();
+
     const comparison = responseDiffer.compareResponses(
       {
-        statusCode: railsResponse.status || railsResponse.statusCode,
-        body: railsResponse.body || (await railsResponse.text?.()),
-        headers: railsResponse.headers,
+        statusCode: railsStatus,
+        body: railsBody,
+        headers: railsHeaders,
       },
       {
         statusCode: typescriptResponse.statusCode,
@@ -74,9 +91,9 @@ export class DualApiClient {
     return {
       match: comparison.match,
       rails: {
-        statusCode: railsResponse.status || railsResponse.statusCode,
-        body: railsResponse.body || (await railsResponse.text?.()),
-        headers: railsResponse.headers,
+        statusCode: railsStatus,
+        body: railsBody,
+        headers: railsHeaders,
       },
       typescript: {
         statusCode: typescriptResponse.statusCode,
@@ -95,8 +112,6 @@ export class DualApiClient {
     endpoint: string,
     options: RequestOptions = {}
   ): Promise<ComparisonResult> {
-    const startTime = Date.now();
-
     const typescriptStart = Date.now();
     const typescriptResponse = await this.makeTypescriptRequest(
       method,
@@ -113,10 +128,55 @@ export class DualApiClient {
     );
     const railsTime = Date.now() - railsStart;
 
-    const comparison = await this.compareEndpoint(method, endpoint, options);
+    // Use existing responses instead of making duplicate calls
+    const differ = await import('./response-differ');
+    const responseDiffer = new differ.ResponseDiffer();
+
+    // Cache Rails response data to avoid double consumption
+    const railsStatus = railsResponse.status || railsResponse.statusCode;
+    const railsHeaders = railsResponse.headers;
+    const railsRawBody =
+      typeof railsResponse.text === 'function'
+        ? await railsResponse.text()
+        : railsResponse.body;
+
+    // Try to parse JSON for stable comparison
+    const railsBody = (() => {
+      try {
+        return typeof railsRawBody === 'string'
+          ? JSON.parse(railsRawBody)
+          : railsRawBody;
+      } catch {
+        return railsRawBody;
+      }
+    })();
+
+    const comparison = responseDiffer.compareResponses(
+      {
+        statusCode: railsStatus,
+        body: railsBody,
+        headers: railsHeaders,
+      },
+      {
+        statusCode: typescriptResponse.statusCode,
+        body: typescriptResponse.body,
+        headers: typescriptResponse.headers,
+      }
+    );
 
     return {
-      ...comparison,
+      match: comparison.match,
+      rails: {
+        statusCode: railsStatus,
+        body: railsBody,
+        headers: railsHeaders,
+      },
+      typescript: {
+        statusCode: typescriptResponse.statusCode,
+        body: typescriptResponse.body,
+        headers: typescriptResponse.headers,
+      },
+      differences: comparison.differences,
       metrics: {
         railsResponseTime: railsTime,
         typescriptResponseTime: typescriptTime,
@@ -132,14 +192,14 @@ export class DualApiClient {
     endpoint: string,
     options: RequestOptions = {}
   ): Promise<LightMyRequestResponse> {
-    const requestOptions: any = {
-      method: method.toUpperCase(),
+    const requestOptions = {
+      method: method.toUpperCase() as 'GET' | 'POST' | 'PUT' | 'DELETE',
       url: endpoint,
       headers: {
         'Content-Type': 'application/json',
         ...options.headers,
       },
-    };
+    } as any;
 
     // Add authentication if provided
     if (options.auth) {

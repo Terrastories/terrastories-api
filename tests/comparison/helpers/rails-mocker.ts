@@ -69,11 +69,12 @@ export class RailsMocker {
   }
 
   private normalizeEndpoint(endpoint: string): string {
-    // Replace numeric IDs with parameter placeholders
-    return endpoint
-      .replace(/\/\d+/g, '/:id')
+    // Remove query string to avoid false mismatches
+    const [pathOnly] = endpoint.split('?');
+    return pathOnly
       .replace(/\/(\d+)\/stories/, '/:community_id/stories')
-      .replace(/\/(\d+)\/places/, '/:community_id/places');
+      .replace(/\/(\d+)\/places/, '/:community_id/places')
+      .replace(/\/\d+/g, '/:id');
   }
 
   private mockCommunitiesResponse(method: string, options: RequestOptions) {

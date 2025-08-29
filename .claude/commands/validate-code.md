@@ -25,12 +25,14 @@ npm run type-check
 # 2. Linting
 npm run lint
 
-# 3. Test suite
-npm test
+# 3. Test suite (with JSON output for analysis)
+npm test -- --reporter=json --outputFile=test-results.json
 
 # 4. Build verification
 npm run build
 ```
+
+**Note**: Tests are run with JSON output to `test-results.json` for detailed failure analysis and automated fixing. This file is gitignored.
 
 ### Phase 2: Issue Detection & Resolution
 
@@ -114,7 +116,14 @@ class ValidateCodeCommand {
   private async runAllChecks(): Promise<ValidationResults> {
     const typeCheck = await this.runCommand('npm run type-check');
     const lint = await this.runCommand('npm run lint');
-    const test = await this.runCommand('npm test');
+
+    // Run tests with JSON output and increased timeout for long-running tests
+    console.log('🧪 Running tests (this may take several minutes)...');
+    const test = await this.runCommand(
+      'npm test -- --reporter=json --outputFile=test-results.json --run',
+      { timeout: 300000 } // 5 minute timeout
+    );
+
     const build = await this.runCommand('npm run build');
 
     return {
@@ -122,9 +131,43 @@ class ValidateCodeCommand {
         typeCheck.success && lint.success && test.success && build.success,
       typeErrors: this.parseTypeErrors(typeCheck.output),
       lintErrors: this.parseLintErrors(lint.output),
-      testFailures: this.parseTestFailures(test.output),
+      testFailures: await this.parseTestFailuresFromJson(),
       buildErrors: this.parseBuildErrors(build.output),
     };
+  }
+
+  private async parseTestFailuresFromJson(): Promise<TestFailure[]> {
+    try {
+      const testResults = await this.readFile('test-results.json');
+      const results = JSON.parse(testResults);
+
+      const failures: TestFailure[] = [];
+
+      // Parse Vitest JSON format
+      if (results.testResults) {
+        for (const suite of results.testResults) {
+          if (suite.status === 'failed') {
+            for (const test of suite.assertionResults || []) {
+              if (test.status === 'failed') {
+                failures.push({
+                  testName: test.title,
+                  suiteName: suite.name,
+                  errorMessage:
+                    test.failureMessages?.join('\n') || 'Test failed',
+                  filePath: suite.name,
+                  location: test.location,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      return failures;
+    } catch (error) {
+      console.warn('Could not parse test results JSON:', error.message);
+      return [];
+    }
   }
 
   private async updateCompletionChecklist(): Promise<void> {
@@ -186,13 +229,44 @@ npm run lint -- --fix
 
 ### Test Failures
 
-**Resolution Approach**:
+**JSON-Based Analysis & Resolution**:
 
-1. **Analyze Failure**: Read test output carefully
-2. **Identify Root Cause**: Code bug vs test issue
-3. **Fix Implementation**: Update code to pass test
-4. **Update Test**: If requirements changed
-5. **Verify Coverage**: Ensure coverage thresholds met
+1. **Parse JSON Results**: Read `test-results.json` for structured failure data
+2. **Categorize Failures**: Group by error type, file, or test suite
+3. **Analyze Root Cause**: Use structured error messages and stack traces
+4. **Fix Implementation**: Update code to pass failing tests
+5. **Update Test**: If requirements changed or test is outdated
+6. **Verify Coverage**: Ensure coverage thresholds met
+
+**Automated Fixing Strategy**:
+
+```typescript
+private async fixTestFailures(failures: TestFailure[]): Promise<void> {
+  // Group failures by file for efficient fixing
+  const failuresByFile = this.groupFailuresByFile(failures);
+
+  for (const [filePath, fileFailures] of Object.entries(failuresByFile)) {
+    console.log(`🔧 Fixing ${fileFailures.length} test failures in ${filePath}`);
+
+    // Analyze error patterns
+    const errorPatterns = this.analyzeErrorPatterns(fileFailures);
+
+    // Apply targeted fixes based on common patterns
+    await this.applyAutomaticFixes(filePath, errorPatterns);
+
+    // Re-run tests for this file to verify fixes
+    await this.runTestsForFile(filePath);
+  }
+}
+```
+
+**Common Test Error Patterns & Auto-Fixes**:
+
+- **Import/Module Errors**: Fix import paths and module resolution
+- **Type Assertion Failures**: Add proper type guards and assertions
+- **Async/Promise Issues**: Add proper await/async handling
+- **Mock/Stub Problems**: Update mocks to match new interfaces
+- **Database/Setup Issues**: Ensure proper test database setup
 
 ### Build Errors
 
@@ -244,6 +318,7 @@ Last validated: 2024-01-15T10:30:00Z
 **`--verbose`**: Show detailed output for each check
 **`--skip-build`**: Skip build verification (for speed)
 **`--coverage-threshold [number]`**: Override coverage requirement
+**`--timeout [ms]`**: Override test timeout (default: 300000ms/5min)
 
 ## Success Output
 
@@ -284,6 +359,128 @@ Issues found:
 🔧 Attempting fixes...
 ```
 
+## Practical Implementation
+
+### Manual Validation Command Sequence
+
+```bash
+#!/bin/bash
+# validate-code.sh - Comprehensive validation with JSON test output
+
+set -e  # Exit on first error
+
+echo "🔍 Starting comprehensive code validation..."
+
+# 1. Type checking
+echo "📝 Running TypeScript type check..."
+npm run type-check
+
+# 2. Linting
+echo "🧹 Running ESLint..."
+npm run lint
+
+# 3. Tests with JSON output (long-running)
+echo "🧪 Running test suite (this may take several minutes)..."
+echo "   • Generating JSON output for failure analysis"
+echo "   • Timeout set to 5 minutes"
+
+# Run tests with JSON reporter, handling both success and failure
+if npm test -- --reporter=json --outputFile=test-results.json --run; then
+  echo "✅ All tests passed"
+else
+  echo "❌ Tests failed - analyzing results..."
+
+  # Check if JSON file was created
+  if [ -f "test-results.json" ]; then
+    echo "📊 Test results saved to test-results.json for analysis"
+    # Parse and display summary of failures
+    node -e "
+      try {
+        const results = JSON.parse(require('fs').readFileSync('test-results.json', 'utf8'));
+        if (results.numFailedTests > 0) {
+          console.log(\`❌ \${results.numFailedTests} test(s) failed out of \${results.numTotalTests}\`);
+          console.log(\`⏱️  Total time: \${(results.testResults?.reduce((acc, r) => acc + (r.endTime - r.startTime), 0) || 0)}ms\`);
+        }
+      } catch (e) {
+        console.log('Could not parse test results');
+      }
+    "
+  fi
+  exit 1
+fi
+
+# 4. Build verification
+echo "🏗️  Running build verification..."
+npm run build
+
+echo ""
+echo "🎉 VALIDATION COMPLETE - All checks passed!"
+echo ""
+echo "📊 Summary:"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ TypeScript: 0 errors, 0 warnings"
+echo "✅ ESLint: 0 errors, 0 warnings"
+echo "✅ Tests: All tests passing"
+echo "✅ Build: Clean compilation"
+echo ""
+echo "🚀 Ready for review/merge"
+```
+
+### JSON Test Results Analysis
+
+```bash
+# Analyze test failures from JSON output
+analyze_test_failures() {
+  if [ ! -f "test-results.json" ]; then
+    echo "No test results file found"
+    return 1
+  fi
+
+  echo "🔍 Analyzing test failures..."
+
+  # Extract failure information
+  node -e "
+    const results = JSON.parse(require('fs').readFileSync('test-results.json', 'utf8'));
+
+    if (results.success) {
+      console.log('✅ All tests passed');
+      process.exit(0);
+    }
+
+    console.log(\`❌ \${results.numFailedTests} test(s) failed\`);
+    console.log('');
+
+    // Group failures by file
+    const failuresByFile = {};
+
+    if (results.testResults) {
+      results.testResults.forEach(suite => {
+        if (suite.status === 'failed' && suite.message) {
+          const file = suite.name || 'unknown';
+          if (!failuresByFile[file]) failuresByFile[file] = [];
+          failuresByFile[file].push(suite.message);
+        }
+      });
+    }
+
+    // Display grouped failures
+    Object.entries(failuresByFile).forEach(([file, failures]) => {
+      console.log(\`🔴 \${file}:\`);
+      failures.forEach((failure, i) => {
+        console.log(\`  \${i + 1}. \${failure.split('\\n')[0]}\`);
+      });
+      console.log('');
+    });
+  "
+}
+
+# Quick validation without build (for development)
+quick_validate() {
+  echo "⚡ Running quick validation (no build)..."
+  npm run type-check && npm run lint && echo "✅ Quick validation passed"
+}
+```
+
 ## Best Practices
 
 1. **Run Early**: Don't wait until end to validate
@@ -291,3 +488,5 @@ Issues found:
 3. **Understand Errors**: Don't just silence warnings
 4. **Maintain Standards**: Keep coverage and quality high
 5. **Document Decisions**: Note any exceptions in comments
+6. **Monitor Test Duration**: Use JSON output to track slow tests
+7. **Incremental Testing**: Run specific test files during development

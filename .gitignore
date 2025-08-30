@@ -82,9 +82,13 @@ test_media.txt
 uploads/
 test_results.log
 test-report.junit.xml
+test-results.json
+validation-results.json
 
 # Serena AI cache
 .serena/cache/
 
 # Temporary task tracking file (do not commit)
 task.markdown
+TASK.md
+TODO.md

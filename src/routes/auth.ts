@@ -347,7 +347,7 @@ export async function authRoutes(
         setUserSession(request, userSession);
 
         // Remove sensitive data from response
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
         const { passwordHash, ...userResponse } = user;
 
         // Return success response with user data (sessionId is handled by cookie)

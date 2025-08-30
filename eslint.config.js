@@ -115,6 +115,7 @@ export default [
       'coverage/',
       '*.js',
       'eslint.config.js',
+      'rails-source/',
     ],
   },
 ];

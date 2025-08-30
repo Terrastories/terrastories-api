@@ -60,12 +60,43 @@ class ReviewAggregator {
         const key = this.generateReviewKey(review);
         const existing = seen.get(key);
 
-        if (!existing || review.confidence > existing.confidence) {
+        // Prefer reviews with higher confidence or more recent timestamp
+        if (
+          !existing ||
+          review.confidence > existing.confidence ||
+          (review.confidence === existing.confidence &&
+            review.timestamp > existing.timestamp)
+        ) {
           seen.set(key, review);
         }
       });
 
     return Array.from(seen.values());
+  }
+
+  private generateReviewKey(review: Review): string {
+    // Create semantic key based on file, line range, and issue type
+    const fileKey = review.file?.replace(/\\/g, '/') || 'general';
+    const lineKey = review.line ? `L${review.line}` : 'general';
+    const typeKey = review.type || 'misc';
+
+    // Extract core issue from message (normalized)
+    const issueKey = this.normalizeIssueMessage(review.message);
+
+    return `${fileKey}:${lineKey}:${typeKey}:${issueKey}`;
+  }
+
+  private normalizeIssueMessage(message: string): string {
+    // Normalize common issue patterns to group similar feedback
+    return message
+      .toLowerCase()
+      .replace(/\b(should|could|might|may)\b/g, 'suggest')
+      .replace(/\b(line \d+|at line \d+)\b/g, 'LINE')
+      .replace(/\b\d+\b/g, 'NUM')
+      .replace(/['""`]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 100);
   }
 
   private identifyConflicts(reviews: AllReviews): Conflict[] {
@@ -85,6 +116,105 @@ class ReviewAggregator {
     });
 
     return conflicts;
+  }
+}
+```
+
+## Phase 0: Comment State Management
+
+```typescript
+interface CommentState {
+  id: string;
+  file: string;
+  line: number;
+  issueKey: string;
+  status: 'active' | 'resolved' | 'updated';
+  lastSeen: string;
+  originalMessage: string;
+  currentMessage?: string;
+}
+
+class CommentTracker {
+  private commentStateFile = '.claude/pr-comments-state.json';
+
+  async loadCommentState(prNumber: number): Promise<Map<string, CommentState>> {
+    try {
+      const stateContent = await fs.readFile(
+        `${this.commentStateFile}.${prNumber}`,
+        'utf-8'
+      );
+      const states = JSON.parse(stateContent);
+      return new Map(Object.entries(states));
+    } catch {
+      return new Map();
+    }
+  }
+
+  async saveCommentState(
+    prNumber: number,
+    states: Map<string, CommentState>
+  ): Promise<void> {
+    const statesObj = Object.fromEntries(states);
+    await fs.writeFile(
+      `${this.commentStateFile}.${prNumber}`,
+      JSON.stringify(statesObj, null, 2)
+    );
+  }
+
+  async getExistingComments(prNumber: number): Promise<GitHubComment[]> {
+    const result = await exec(
+      `gh pr view ${prNumber} --json comments --jq '.comments[] | select(.author.login == "github-actions[bot]" or .author.login == "anthropics[bot]")'`
+    );
+    return JSON.parse(result || '[]');
+  }
+
+  determineCommentAction(
+    review: Review,
+    existingState: CommentState | undefined,
+    existingComments: GitHubComment[]
+  ): CommentAction {
+    const issueKey = this.generateIssueKey(review);
+
+    // Find existing comment for this issue
+    const existingComment = existingComments.find((c) =>
+      c.body.includes(`<!-- issue-key: ${issueKey} -->`)
+    );
+
+    if (!existingState && !existingComment) {
+      return { action: 'create', review, issueKey };
+    }
+
+    if (
+      existingState?.status === 'resolved' &&
+      this.stillExists(review, existingComments)
+    ) {
+      return {
+        action: 'reopen',
+        review,
+        issueKey,
+        commentId: existingComment?.id,
+      };
+    }
+
+    if (existingComment && this.isResolved(review)) {
+      return {
+        action: 'resolve',
+        review,
+        issueKey,
+        commentId: existingComment.id,
+      };
+    }
+
+    if (existingComment && this.needsUpdate(review, existingState)) {
+      return {
+        action: 'update',
+        review,
+        issueKey,
+        commentId: existingComment.id,
+      };
+    }
+
+    return { action: 'skip', review, issueKey };
   }
 }
 ```
@@ -161,8 +291,16 @@ class ReviewCollector {
 
 ```typescript
 class ReviewAnalyzer {
-  async analyze(reviews: CollectedReviews): Promise<AnalyzedReviews> {
+  async analyze(
+    reviews: CollectedReviews,
+    prNumber: number,
+    commentTracker: CommentTracker
+  ): Promise<AnalyzedReviews> {
     console.log('\n📊 Analyzing collected reviews...');
+
+    // Load existing comment state
+    const commentState = await commentTracker.loadCommentState(prNumber);
+    const existingComments = await commentTracker.getExistingComments(prNumber);
 
     const categorized = {
       mustFix: [], // Blocking issues
@@ -170,6 +308,8 @@ class ReviewAnalyzer {
       consider: [], // Suggestions to consider
       nitpicks: [], // Style/preference issues
       praise: [], // Positive feedback
+      resolved: [], // Previously reported, now fixed
+      updated: [], // Partially addressed items
     };
 
     // Categorize each review
@@ -238,7 +378,148 @@ class ReviewAnalyzer {
 }
 ```
 
-## Phase 3: Auto-Fix Implementation
+## Phase 3: Smart Comment Management
+
+```typescript
+class SmartCommentManager {
+  constructor(private commentTracker: CommentTracker) {}
+
+  async manageComments(
+    prNumber: number,
+    analysis: AnalyzedReviews
+  ): Promise<CommentManagementResult> {
+    console.log('\n💬 Managing PR comments intelligently...');
+
+    const commentState = await this.commentTracker.loadCommentState(prNumber);
+    const existingComments =
+      await this.commentTracker.getExistingComments(prNumber);
+
+    const actions = {
+      created: [],
+      updated: [],
+      resolved: [],
+      skipped: [],
+    };
+
+    // Process each review item
+    for (const category of Object.keys(analysis.categorized)) {
+      for (const review of analysis.categorized[category]) {
+        const action = this.commentTracker.determineCommentAction(
+          review,
+          commentState.get(review.issueKey),
+          existingComments
+        );
+
+        await this.executeCommentAction(prNumber, action, actions);
+      }
+    }
+
+    // Update comment state
+    await this.updateCommentState(prNumber, actions, commentState);
+
+    return actions;
+  }
+
+  private async executeCommentAction(
+    prNumber: number,
+    action: CommentAction,
+    results: CommentManagementResult
+  ): Promise<void> {
+    switch (action.action) {
+      case 'create':
+        await this.createGroupedComment(prNumber, action.review);
+        results.created.push(action.review);
+        console.log(
+          `  ➕ Created: ${action.review.message.substring(0, 50)}...`
+        );
+        break;
+
+      case 'update':
+        await this.updateExistingComment(
+          prNumber,
+          action.commentId,
+          action.review
+        );
+        results.updated.push(action.review);
+        console.log(
+          `  🔄 Updated: ${action.review.message.substring(0, 50)}...`
+        );
+        break;
+
+      case 'resolve':
+        await this.resolveComment(prNumber, action.commentId, action.review);
+        results.resolved.push(action.review);
+        console.log(
+          `  ✅ Resolved: ${action.review.message.substring(0, 50)}...`
+        );
+        break;
+
+      case 'skip':
+        results.skipped.push(action.review);
+        console.log(`  ⏭️ Skipped: Already handled`);
+        break;
+    }
+  }
+
+  private async createGroupedComment(
+    prNumber: number,
+    review: Review
+  ): Promise<void> {
+    const comment = this.formatComment(review, 'create');
+    await exec(`gh pr comment ${prNumber} --body "${comment}"`);
+  }
+
+  private async updateExistingComment(
+    prNumber: number,
+    commentId: string,
+    review: Review
+  ): Promise<void> {
+    const updatedComment = this.formatComment(review, 'update');
+    await exec(
+      `gh api repos/:owner/:repo/pulls/comments/${commentId} --method PATCH --field body="${updatedComment}"`
+    );
+  }
+
+  private async resolveComment(
+    prNumber: number,
+    commentId: string,
+    review: Review
+  ): Promise<void> {
+    const resolvedComment = this.formatComment(review, 'resolve');
+    await exec(
+      `gh api repos/:owner/:repo/pulls/comments/${commentId} --method PATCH --field body="${resolvedComment}"`
+    );
+  }
+
+  private formatComment(
+    review: Review,
+    action: 'create' | 'update' | 'resolve'
+  ): string {
+    const statusEmoji = {
+      create: '🔍',
+      update: '🔄',
+      resolve: '✅',
+    };
+
+    const statusText = {
+      create: 'NEEDS WORK',
+      update: 'UPDATED',
+      resolve: 'RESOLVED',
+    };
+
+    return `${statusEmoji[action]} **${statusText[action]}**: ${review.message}
+
+<!-- issue-key: ${review.issueKey} -->
+<!-- status: ${statusText[action].toLowerCase()} -->
+<!-- last-updated: ${new Date().toISOString()} -->
+
+${action === 'resolve' ? '\n*This issue has been addressed and resolved.*' : ''}
+${action === 'update' ? '\n*This issue has been partially addressed.*' : ''}`;
+  }
+}
+```
+
+## Phase 4: Auto-Fix Implementation
 
 ```typescript
 class AutoFixer {
@@ -602,7 +883,7 @@ View full report: [Review Report](.claude/reviews/pr-${prNumber}-review.md)
 ## Success Output
 
 ```markdown
-✅ PR Review Complete!
+✅ PR Review Complete with Smart Comment Management!
 
 📊 Review Analysis:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -612,6 +893,14 @@ Total feedback items: 47
 - Should fix: 12 (10 addressed ✅)
 - Suggestions: 20 (5 applied)
 - Style issues: 12 (auto-fixed ✅)
+
+💬 Comment Management:
+
+- Resolved existing comments: 8 ✅
+- Updated partial fixes: 3 🔄
+- New issues found: 2 🔍
+- Duplicate issues skipped: 12 ⏭️
+- Comment noise reduced by: 85%
 
 🔧 Automatic Fixes:
 
@@ -623,8 +912,8 @@ Total feedback items: 47
 
 ⏭️ Manual Review Required:
 
-1. Complex refactoring suggestion (line 145-200)
-2. Architecture discussion needed
+1. Complex refactoring suggestion (line 145-200) - 🔄 UPDATED
+2. Architecture discussion needed - 🔍 NEW
 
 ✅ Validation Results:
 
@@ -643,6 +932,7 @@ Total feedback items: 47
 4. docs: update documentation per review feedback
 
 🎯 PR Status: READY TO MERGE
+📈 Comment Quality: Clean, No Duplicates
 
 Next command:
 /merge-pr [pr-number]
@@ -699,6 +989,20 @@ review_pr:
     include_style: true
     create_commits: true
 
+  # Smart comment management (NEW)
+  comments:
+    enable_smart_management: true
+    use_sticky_comments: true
+    group_similar_issues: true
+    auto_resolve_fixed: true
+    deduplication:
+      similarity_threshold: 0.8
+      time_window_hours: 24
+    status_tracking:
+      track_resolution: true
+      save_state: true
+      state_file: '.claude/pr-comments-state.json'
+
   conflict_resolution:
     priority_order:
       - security
@@ -719,6 +1023,9 @@ review_pr:
     add_pr_comment: true
     save_report: true
     notify_on_ready: true
+    # Enhanced reporting (NEW)
+    include_comment_stats: true
+    show_resolution_progress: true
 ```
 
 ## Integration Points

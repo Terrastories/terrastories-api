@@ -1,0 +1,3 @@
+# Ignore claude-code-review workflow to preserve exact whitespace matching main branch
+# (GitHub Action validation requires byte-for-byte identical content)
+.github/workflows/claude-code-review.yml

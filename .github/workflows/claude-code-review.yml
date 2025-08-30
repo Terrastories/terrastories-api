@@ -40,29 +40,19 @@ jobs:
           # Optional: Specify model (defaults to Claude Sonnet 4, uncomment for Claude Opus 4.1)
           # model: "claude-opus-4-1-20250805"
 
-          # Smart review prompt that tracks comment state
+          # Direct prompt for automated review (no @claude mention needed)
           direct_prompt: |
-            Review this pull request with intelligent comment management:
-
-            **For existing comments:**
-            - Mark as ✅ RESOLVED if the issue has been fixed
-            - Update with 🔄 UPDATED if partially addressed
-            - Keep as ❌ NEEDS WORK if still unresolved
-
-            **For new issues only:**
+            Please review this pull request and provide feedback on:
             - Code quality and best practices
-            - Potential bugs or security concerns
+            - Potential bugs or issues
             - Performance considerations
-            - Test coverage gaps
+            - Security concerns
+            - Test coverage
 
-            **Format responses as:**
-            - Group related issues together to reduce noise
-            - Use clear status indicators (✅/🔄/❌)
-            - Only comment on new findings or unresolved items
-            - Be constructive and specific with actionable feedback
+            Be constructive and helpful in your feedback.
 
-          # Enable sticky comments to update existing comments instead of creating new ones
-          use_sticky_comment: true
+          # Optional: Use sticky comments to make Claude reuse the same comment on subsequent pushes to the same PR
+          # use_sticky_comment: true
 
           # Optional: Customize review based on file types
           # direct_prompt: |

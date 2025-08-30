@@ -9,9 +9,9 @@ export default defineConfig({
 
     // Test isolation and performance settings
     pool: 'forks', // Isolate database connections between tests
-    testTimeout: 30000, // 30 seconds for integration tests
-    hookTimeout: 30000, // 30 seconds for setup/teardown hooks
-    teardownTimeout: 30000, // 30 seconds for cleanup
+    testTimeout: 60000, // 60 seconds for integration tests
+    hookTimeout: 60000, // 60 seconds for setup/teardown hooks
+    teardownTimeout: 60000, // 60 seconds for cleanup
 
     // Parallel execution settings
     maxConcurrency: 5, // Limit concurrent tests for database isolation

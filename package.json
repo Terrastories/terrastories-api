@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "test": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:ci": "node scripts/test-ci.js",
     "lint": "npx eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

@@ -207,7 +207,10 @@ describe('API Comparison Test Suite', () => {
       expect(comparison.metrics).toHaveProperty('railsResponseTime');
       expect(comparison.metrics).toHaveProperty('typescriptResponseTime');
       expect(comparison.metrics.railsResponseTime).toBeGreaterThan(0);
-      expect(comparison.metrics.typescriptResponseTime).toBeGreaterThan(0);
+      // TypeScript response time can be 0 in test environment (in-memory inject)
+      expect(comparison.metrics.typescriptResponseTime).toBeGreaterThanOrEqual(
+        0
+      );
 
       console.log(
         `Performance metrics: Rails ${comparison.metrics.railsResponseTime}ms vs TypeScript ${comparison.metrics.typescriptResponseTime}ms`

@@ -90,3 +90,5 @@ validation-results.json
 
 # Temporary task tracking file (do not commit)
 task.markdown
+TASK.md
+TODO.md

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Analyzes PR review comments and creates a temporary TASK.md file to systematically track and address all feedback. Provides a clear checklist and plan for passing all reviews with full validation.
+Analyzes PR review comments, issue comments, and general PR feedback to create a temporary TASK.md file for systematically tracking and addressing all feedback. Provides a clear checklist and plan for passing all reviews with full validation.
 
 ## Usage
 
@@ -15,7 +15,7 @@ Analyzes PR review comments and creates a temporary TASK.md file to systematical
 
 ## Workflow Overview
 
-1. **Fetch & Analyze Reviews** → Extract all review comments
+1. **Fetch & Analyze Feedback** → Extract all review comments, issue comments, and PR feedback
 2. **Generate TASK.md** → Create temporary tracking file with checklist
 3. **Execute Plan** → Work through tasks systematically
 4. **Validate & Update** → Run checks and update progress
@@ -39,7 +39,7 @@ Analyzes PR review comments and creates a temporary TASK.md file to systematical
 
 - [ ] **SECURITY-001**: Add input validation for user endpoints
   - **File**: `src/routes/auth.ts:45`
-  - **Reviewer**: @security-expert
+  - **Source**: Review comment by @security-expert
   - **Issue**: "Missing input sanitization could lead to injection attacks"
   - **Priority**: CRITICAL
   - **Status**: PENDING
@@ -50,7 +50,7 @@ Analyzes PR review comments and creates a temporary TASK.md file to systematical
 
 - [ ] **MAJOR-001**: Refactor database queries to use async/await
   - **File**: `src/services/place.service.ts:23-45`
-  - **Reviewer**: @code-reviewer
+  - **Source**: Review comment by @code-reviewer
   - **Issue**: "Using .then() chains instead of async/await makes code harder to read"
   - **Priority**: MAJOR
   - **Status**: PENDING
@@ -61,12 +61,21 @@ Analyzes PR review comments and creates a temporary TASK.md file to systematical
 
 - [ ] **MINOR-001**: Add JSDoc comments to public methods
   - **File**: `src/services/*.ts`
-  - **Reviewer**: @docs-maintainer
+  - **Source**: Issue comment by @docs-maintainer
   - **Issue**: "Public methods should have JSDoc documentation"
   - **Priority**: MINOR
   - **Status**: PENDING
   - **Plan**: Add comprehensive JSDoc to all public service methods
   - **Validation**: Documentation builds successfully
+
+- [ ] **COMMENT-001**: Consider adding error handling for edge cases
+  - **File**: `src/controllers/story.controller.ts:67`
+  - **Source**: PR comment by @reviewer-name
+  - **Issue**: "What happens if the story doesn't exist? Should return 404"
+  - **Priority**: MAJOR
+  - **Status**: PENDING
+  - **Plan**: Add proper error handling and 404 response
+  - **Validation**: Test error scenarios
 
 ---
 
@@ -109,6 +118,7 @@ After each task completion, run:
 
 ### SECURITY-001 Resolution
 
+- **Source**: Review comment by @security-expert
 - Added Zod schemas for all auth endpoints
 - Implemented input sanitization middleware
 - Updated tests to cover validation edge cases
@@ -116,10 +126,19 @@ After each task completion, run:
 
 ### MAJOR-001 Resolution
 
+- **Source**: Review comment by @code-reviewer
 - Converted all .then() chains to async/await
 - Maintained exact same functionality
 - Improved error handling with try/catch blocks
 - **Commit**: `def456a - refactor(services): convert to async/await pattern`
+
+### COMMENT-001 Resolution
+
+- **Source**: PR comment by @reviewer-name
+- Added proper 404 error handling for missing stories
+- Implemented comprehensive error response middleware
+- Added test cases for all error scenarios
+- **Commit**: `ghi789b - fix(controllers): add proper error handling for missing resources`
 
 ---
 
@@ -169,7 +188,8 @@ interface ReviewTask {
   title: string;
   file?: string;
   line?: number;
-  reviewer: string;
+  source: 'review_comment' | 'pr_comment' | 'issue_comment' | 'discussion';
+  author: string;
   issue: string;
   priority: 'CRITICAL' | 'MAJOR' | 'MINOR';
   category: 'security' | 'logic' | 'performance' | 'style' | 'docs' | 'tests';
@@ -178,27 +198,155 @@ interface ReviewTask {
   validationSteps: string[];
   resolutionNotes?: string;
   commitHash?: string;
+  originalUrl?: string; // Link back to the original comment/review
+}
+
+interface FeedbackSource {
+  type: 'review_comment' | 'pr_comment' | 'issue_comment';
+  id: string;
+  author: string;
+  body: string;
+  createdAt: string;
+  url?: string;
+  // Review-specific fields
+  path?: string;
+  line?: number;
+  diffHunk?: string;
+  // Issue/PR comment specific fields
+  issueNumber?: number;
 }
 
 class TaskFileGenerator {
   async generateTaskFile(prNumber: number, taskFileName = 'TASK.md'): Promise<void> {
-    // 1. Fetch all review comments
+    // 1. Fetch all feedback sources
     const reviews = await this.fetchReviews(prNumber);
+    const comments = await this.fetchComments(prNumber);
+    const issueComments = await this.fetchIssueComments(prNumber);
 
-    // 2. Categorize and prioritize
-    const tasks = await this.categorizeTasks(reviews);
+    // 2. Consolidate all feedback
+    const allFeedback = [...reviews, ...comments, ...issueComments];
 
-    // 3. Generate TASK.md content
+    // 3. Categorize and prioritize
+    const tasks = await this.categorizeTasks(allFeedback);
+
+    // 4. Generate TASK.md content
     const taskContent = await this.generateTaskContent(prNumber, tasks);
 
-    // 4. Write to file
+    // 5. Write to file
     await fs.writeFile(taskFileName, taskContent);
 
     console.log(`📋 Created ${taskFileName} with ${tasks.length} tasks`);
+    console.log(`🎯 Feedback sources:`);
+    console.log(`   📝 Review comments: ${reviews.length}`);
+    console.log(`   💬 PR comments: ${comments.length}`);
+    console.log(`   🔗 Issue comments: ${issueComments.length}`);
     console.log(`🎯 Priority breakdown:`);
     console.log(`   🔴 Critical: ${tasks.filter(t => t.priority === 'CRITICAL').length}`);
     console.log(`   🟡 Major: ${tasks.filter(t => t.priority === 'MAJOR').length}`);
     console.log(`   🟢 Minor: ${tasks.filter(t => t.priority === 'MINOR').length}`);
+  }
+
+  async fetchComments(prNumber: number): Promise<Comment[]> {
+    // Fetch general PR comments (not tied to specific lines)
+    const result = await exec(`gh pr view ${prNumber} --json comments`);
+    return this.parseGeneralComments(result.stdout);
+  }
+
+  async fetchIssueComments(prNumber: number): Promise<Comment[]> {
+    // Fetch issue comments if PR is linked to an issue
+    const prData = await exec(`gh pr view ${prNumber} --json body`);
+    const issueNumber = this.extractIssueNumber(prData.stdout);
+
+    if (issueNumber) {
+      const result = await exec(`gh issue view ${issueNumber} --json comments`);
+      return this.parseIssueComments(result.stdout);
+    }
+
+    return [];
+  }
+
+  async fetchDiscussions(prNumber: number): Promise<Comment[]> {
+    // Fetch any GitHub Discussions related to the PR
+    try {
+      const result = await exec(`gh api graphql -f query='
+        query {
+          repository(owner: "Terrastories", name: "terrastories-api") {
+            discussions(first: 10) {
+              nodes {
+                title
+                body
+                author { login }
+                comments(first: 20) {
+                  nodes {
+                    body
+                    author { login }
+                    createdAt
+                  }
+                }
+              }
+            }
+          }
+        }'`);
+
+      return this.parseDiscussions(result.stdout, prNumber);
+    } catch (error) {
+      console.warn('Could not fetch discussions:', error.message);
+      return [];
+    }
+  }
+
+  private categorizeFeedbackBySource(feedback: FeedbackSource[]): {
+    critical: FeedbackSource[];
+    major: FeedbackSource[];
+    minor: FeedbackSource[];
+  } {
+    const critical = [];
+    const major = [];
+    const minor = [];
+
+    for (const item of feedback) {
+      const priority = this.determinePriority(item);
+
+      switch (priority) {
+        case 'CRITICAL':
+          critical.push(item);
+          break;
+        case 'MAJOR':
+          major.push(item);
+          break;
+        case 'MINOR':
+          minor.push(item);
+          break;
+      }
+    }
+
+    return { critical, major, minor };
+  }
+
+  private determinePriority(feedback: FeedbackSource): 'CRITICAL' | 'MAJOR' | 'MINOR' {
+    const body = feedback.body.toLowerCase();
+
+    // Critical indicators
+    if (body.includes('security') ||
+        body.includes('vulnerability') ||
+        body.includes('breaking') ||
+        body.includes('critical') ||
+        body.includes('urgent')) {
+      return 'CRITICAL';
+    }
+
+    // Major indicators
+    if (body.includes('performance') ||
+        body.includes('architecture') ||
+        body.includes('refactor') ||
+        body.includes('logic') ||
+        body.includes('error') ||
+        body.includes('bug')) {
+      return 'MAJOR';
+    }
+
+    // Everything else is minor (style, docs, suggestions)
+    return 'MINOR';
   }
 }
 ````
@@ -362,8 +510,36 @@ echo "🎯 PR Number: $PR_NUMBER"
 if [ ! -f "$TASK_FILE" ]; then
   echo "📝 Generating task file..."
 
-  # Fetch PR reviews
+  # Fetch all feedback sources
+  echo "🔍 Fetching PR reviews..."
   gh pr view $PR_NUMBER --json reviews > /tmp/reviews.json
+
+  echo "🔍 Fetching PR comments..."
+  gh pr view $PR_NUMBER --json comments > /tmp/comments.json
+
+  echo "🔍 Checking for linked issue comments..."
+  gh pr view $PR_NUMBER --json body > /tmp/pr-body.json
+
+  echo "🔍 Searching for related discussions..."
+  gh api graphql -f query='
+    query {
+      repository(owner: "Terrastories", name: "terrastories-api") {
+        discussions(first: 10) {
+          nodes {
+            title
+            body
+            author { login }
+            comments(first: 20) {
+              nodes {
+                body
+                author { login }
+                createdAt
+              }
+            }
+          }
+        }
+      }
+    }' > /tmp/discussions.json 2>/dev/null || echo "No discussions found"
 
   # Generate TASK.md (this would call the TypeScript implementation)
   node -e "

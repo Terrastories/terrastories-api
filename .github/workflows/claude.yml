@@ -25,12 +25,22 @@ jobs:
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:
-      - name: Install system dependencies (self-hosted)
+      - name: Install system dependencies (self-hosted only)
         run: |
-          # Check if running on self-hosted runner and install dependencies
-          if ! command -v unzip &> /dev/null; then
-            sudo apt update
-            sudo apt install -y unzip curl wget
+          # Only install dependencies on self-hosted runners
+          # GitHub-hosted runners already have these dependencies
+          if [ "$RUNNER_ENVIRONMENT" != "github-hosted" ] && ! command -v unzip &> /dev/null; then
+            if command -v apt-get &> /dev/null; then
+              sudo apt update && sudo apt install -y unzip curl wget
+            elif command -v yum &> /dev/null; then
+              sudo yum install -y unzip curl wget
+            elif command -v apk &> /dev/null; then
+              sudo apk add --no-cache unzip curl wget
+            else
+              echo "Unknown package manager, skipping dependency installation"
+            fi
+          else
+            echo "Dependencies already available or GitHub-hosted runner detected"
           fi
 
       - name: Checkout repository

@@ -170,12 +170,12 @@ describe('ActiveStorage Migration', () => {
     `
     ).run();
 
-    // Insert test blobs
+    // Insert test blobs with correct MD5 checksums
     db.prepare(
       `
       INSERT OR REPLACE INTO active_storage_blobs (id, key, filename, content_type, metadata, byte_size, checksum) VALUES 
-      (1, 'testfile123', 'test-image.jpg', 'image/jpeg', '{}', 1024, 'dGVzdGNoZWNrc3Vt'),
-      (2, 'testfile456', 'elder-video.mp4', 'video/mp4', '{}', 2048, 'ZWxkZXJjaGVja3N1bQ==')
+      (1, 'testfile123', 'test-image.jpg', 'image/jpeg', '{}', 17, 'x4UGDIZnlswqFwjJlxVMjg=='),
+      (2, 'testfile456', 'elder-video.mp4', 'video/mp4', '{}', 19, 'bRh2zrvH83/JFiiCvJVEbw==')
     `
     ).run();
 
@@ -297,15 +297,16 @@ describe('ActiveStorage Migration', () => {
     });
 
     it('should migrate community files successfully with mocked files', async () => {
-      // Create mock ActiveStorage files
-      const testStorageDir = join(testConfig.activeStoragePath, 'te', 'st');
-      await fs.mkdir(testStorageDir, { recursive: true });
+      // Create mock ActiveStorage files with proper directory structure
+      // blob_key 'testfile123' should be in te/st/testfile123
+      const testStorageDir1 = join(testConfig.activeStoragePath, 'te', 'st');
+      await fs.mkdir(testStorageDir1, { recursive: true });
       await fs.writeFile(
-        join(testStorageDir, 'testfile123'),
+        join(testStorageDir1, 'testfile123'),
         'test file content'
       );
       await fs.writeFile(
-        join(testStorageDir, 'testfile456'),
+        join(testStorageDir1, 'testfile456'),
         'elder video content'
       );
 
@@ -319,8 +320,15 @@ describe('ActiveStorage Migration', () => {
       // Log errors for debugging if migration failed
       if (!result.success) {
         console.log('Migration errors:', result.errors);
+        console.log('Files processed:', result.filesProcessed);
+        console.log('Files migrated:', result.filesMigrated);
+        console.log('Files skipped:', result.filesSkipped);
       }
 
+      // Expect success or provide more detailed failure info
+      if (!result.success) {
+        throw new Error(`Migration failed: ${JSON.stringify(result, null, 2)}`);
+      }
       expect(result.success).toBe(true);
       expect(result.communityId).toBe(1);
       expect(result.filesProcessed).toBeGreaterThanOrEqual(0);

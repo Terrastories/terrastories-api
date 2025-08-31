@@ -772,20 +772,20 @@ export class ActiveStorageMigrator {
           try {
             if (update.type === 'Story') {
               await db.query(
-                'UPDATE stories SET media_urls = $1, updated_at = NOW() WHERE id = $2',
+                'UPDATE stories SET media_urls = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
                 [JSON.stringify(update.files), update.id]
               );
             } else if (update.type === 'Place') {
               // For places, we'll put the first file as photo_url and others in media_urls
               const [photoUrl, ...mediaUrls] = update.files;
               await db.query(
-                'UPDATE places SET photo_url = $1, media_urls = $2, updated_at = NOW() WHERE id = $3',
+                'UPDATE places SET photo_url = $1, media_urls = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
                 [photoUrl, JSON.stringify(mediaUrls), update.id]
               );
             } else if (update.type === 'Speaker') {
               // For speakers, use the first file as photo_url
               await db.query(
-                'UPDATE speakers SET photo_url = $1, updated_at = NOW() WHERE id = $2',
+                'UPDATE speakers SET photo_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
                 [update.files[0], update.id]
               );
             }

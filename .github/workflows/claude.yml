@@ -25,6 +25,14 @@ jobs:
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:
+      - name: Install system dependencies (self-hosted)
+        run: |
+          # Check if running on self-hosted runner and install dependencies
+          if ! command -v unzip &> /dev/null; then
+            sudo apt update
+            sudo apt install -y unzip curl wget
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:

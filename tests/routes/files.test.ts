@@ -16,6 +16,7 @@ import {
   afterEach,
   beforeAll,
   afterAll,
+  vi,
 } from 'vitest';
 import { createTestApp } from '../helpers/api-client.js';
 import { fileRoutes } from '../../src/routes/files.js';
@@ -26,6 +27,18 @@ import { createReadStream as createReadStreamSync } from 'fs';
 
 import { TestDataFactory, testDb } from '../helpers/database.js';
 import { getCommunitiesTable } from '../../src/db/schema/communities.js';
+
+// Mock Sharp to avoid needing real image data
+vi.mock('sharp', () => ({
+  default: vi.fn().mockImplementation(() => ({
+    metadata: vi.fn().mockResolvedValue({
+      width: 800,
+      height: 600,
+      channels: 3,
+      format: 'jpeg',
+    }),
+  })),
+}));
 
 // Helper function to create a valid minimal JPEG buffer
 function createTestJpegBuffer(): Buffer {

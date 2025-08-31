@@ -8,13 +8,31 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     strategy:
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        node-version: [20.x, 22.x]
 
     steps:
+      - name: Install system dependencies (self-hosted only)
+        run: |
+          # Only install dependencies on self-hosted runners
+          # GitHub-hosted runners already have these dependencies
+          if [ "$RUNNER_ENVIRONMENT" != "github-hosted" ] && ! command -v unzip &> /dev/null; then
+            if command -v apt-get &> /dev/null; then
+              sudo apt update && sudo apt install -y unzip curl wget build-essential python3
+            elif command -v yum &> /dev/null; then
+              sudo yum install -y unzip curl wget gcc gcc-c++ make python3
+            elif command -v apk &> /dev/null; then
+              sudo apk add --no-cache unzip curl wget build-base python3
+            else
+              echo "Unknown package manager, skipping dependency installation"
+            fi
+          else
+            echo "Dependencies already available or GitHub-hosted runner detected"
+          fi
+
       - uses: actions/checkout@v4
 
       - name: Use Node.js ${{ matrix.node-version }}

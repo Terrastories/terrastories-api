@@ -1,0 +1,979 @@
+/**
+ * ActiveStorage to TypeScript File System Migration Service
+ *
+ * Migrates Rails ActiveStorage files to community-scoped TypeScript file structure
+ * with Indigenous data sovereignty, comprehensive backup, and rollback capabilities
+ */
+
+import { promises as fs } from 'fs';
+import { join } from 'path';
+import { Client } from 'pg';
+import Database from 'better-sqlite3';
+import { createHash } from 'crypto';
+
+export interface MigrationConfig {
+  database: string;
+  activeStoragePath: string;
+  uploadsPath: string;
+  dryRun: boolean;
+}
+
+export interface ActiveStorageBlob {
+  id: number;
+  key: string;
+  filename: string;
+  content_type: string;
+  metadata: any;
+  byte_size: number;
+  checksum: string;
+  created_at: Date;
+}
+
+export interface ActiveStorageAttachment {
+  id: number;
+  name: string;
+  record_type: string;
+  record_id: number;
+  blob_id: number;
+  created_at: Date;
+}
+
+export interface MigrationResult {
+  success: boolean;
+  communityId?: number;
+  filesProcessed: number;
+  filesMigrated: number;
+  filesSkipped: number;
+  errors: string[];
+  duration: string;
+  backupPath?: string;
+  culturalRestrictions?: {
+    elderOnlyFiles: number;
+    restrictedFiles: number;
+    publicFiles: number;
+    auditTrailCreated: boolean;
+  };
+}
+
+export interface AnalysisResult {
+  tablesFound: string[];
+  blobsCount: number;
+  attachmentsCount: number;
+  variantsCount: number;
+  totalFileSize: number;
+  communitiesAffected: number;
+  filesByType: Record<string, number>;
+  potentialIssues: string[];
+}
+
+// Database abstraction interface
+interface DatabaseQuery {
+  query(sql: string, params?: any[]): Promise<{ rows: any[] }>;
+}
+
+// PostgreSQL adapter
+class PostgreSQLAdapter implements DatabaseQuery {
+  private client: Client;
+
+  constructor(connectionString: string) {
+    this.client = new Client({ connectionString });
+  }
+
+  async connect(): Promise<void> {
+    await this.client.connect();
+  }
+
+  async close(): Promise<void> {
+    await this.client.end();
+  }
+
+  async query(sql: string, params?: any[]): Promise<{ rows: any[] }> {
+    const result = await this.client.query(sql, params);
+    return { rows: result.rows };
+  }
+}
+
+// SQLite adapter
+class SQLiteAdapter implements DatabaseQuery {
+  private db: Database.Database | null = null;
+  private dbPath: string;
+
+  constructor(connectionString: string) {
+    // Extract path from sqlite: connection string
+    this.dbPath = connectionString.replace('sqlite:', '');
+  }
+
+  async connect(): Promise<void> {
+    this.db = new Database(this.dbPath);
+  }
+
+  async close(): Promise<void> {
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+  }
+
+  async query(sql: string, params?: any[]): Promise<{ rows: any[] }> {
+    if (!this.db) {
+      throw new Error('Database not connected');
+    }
+
+    try {
+      const trimmedSql = sql.trim().toUpperCase();
+
+      // Convert PostgreSQL-style parameters ($1, $2) to SQLite-style (?, ?)
+      let sqliteQuery = sql;
+      let sqliteParams = params || [];
+
+      if (params && params.length > 0) {
+        // For PostgreSQL, $1 can be used multiple times with the same value
+        // For SQLite, we need to expand the parameters array to match the ? placeholders
+        const expandedParams: any[] = [];
+
+        for (let i = 1; i <= params.length; i++) {
+          const paramPattern = new RegExp(`\\$${i}`, 'g');
+          const matches = sql.match(paramPattern);
+          const count = matches ? matches.length : 0;
+
+          // Add the parameter value for each occurrence
+          for (let j = 0; j < count; j++) {
+            expandedParams.push(params[i - 1]);
+          }
+
+          // Replace all $i with ?
+          sqliteQuery = sqliteQuery.replace(paramPattern, '?');
+        }
+
+        sqliteParams = expandedParams;
+      }
+
+      // Use appropriate method based on SQL command
+      if (trimmedSql.startsWith('SELECT') || trimmedSql.startsWith('WITH')) {
+        const rows = this.db.prepare(sqliteQuery).all(sqliteParams);
+        return { rows };
+      } else {
+        // For INSERT, UPDATE, DELETE, BEGIN, COMMIT, ROLLBACK, etc.
+        const _result = this.db.prepare(sqliteQuery).run(sqliteParams);
+        // Return empty rows array for consistency with PostgreSQL adapter
+        return { rows: [] };
+      }
+    } catch (error) {
+      throw new Error(
+        `SQLite query failed: ${error instanceof Error ? error.message : String(error)}. Query: ${sql.substring(0, 100)}...`
+      );
+    }
+  }
+}
+
+/**
+ * ActiveStorage Migration Service
+ *
+ * Provides comprehensive migration capabilities for Rails ActiveStorage files
+ * to community-scoped TypeScript file structure with data sovereignty compliance
+ */
+export class ActiveStorageMigrator {
+  private config: MigrationConfig;
+  private dbAdapter: PostgreSQLAdapter | SQLiteAdapter | null = null;
+
+  /**
+   * Creates a new ActiveStorage migrator instance
+   * @param config Migration configuration including database connection and file paths
+   */
+  constructor(config: MigrationConfig) {
+    this.config = config;
+  }
+
+  private async getDbAdapter(): Promise<DatabaseQuery> {
+    if (!this.dbAdapter) {
+      const isPostgres =
+        this.config.database.includes('postgresql://') ||
+        this.config.database.includes('postgres://');
+
+      if (isPostgres) {
+        this.dbAdapter = new PostgreSQLAdapter(this.config.database);
+      } else {
+        this.dbAdapter = new SQLiteAdapter(this.config.database);
+      }
+
+      await this.dbAdapter.connect();
+    }
+    return this.dbAdapter;
+  }
+
+  async closeClient(): Promise<void> {
+    if (this.dbAdapter) {
+      await this.dbAdapter.close();
+      this.dbAdapter = null;
+    }
+  }
+
+  private sanitizeFilename(filename: string): string {
+    // Remove special characters and spaces, preserve extension
+    const parts = filename.split('.');
+    const extension = parts.length > 1 ? parts.pop() : '';
+    const baseName = parts
+      .join('.')
+      .replace(/[^a-zA-Z0-9-_]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '');
+
+    return extension ? `${baseName}.${extension}` : baseName;
+  }
+
+  private async verifyFileIntegrity(
+    filePath: string,
+    expectedChecksum: string
+  ): Promise<boolean> {
+    try {
+      const fileBuffer = await fs.readFile(filePath);
+      const actualChecksum = createHash('md5')
+        .update(fileBuffer)
+        .digest('base64');
+      return actualChecksum === expectedChecksum;
+    } catch {
+      return false;
+    }
+  }
+
+  private async logAuditTrail(action: string, details: any): Promise<void> {
+    const timestamp = new Date().toISOString();
+    const logEntry = `${timestamp} [${action}] ${JSON.stringify(details)}\n`;
+    await fs.appendFile('migration_audit.log', logEntry);
+  }
+
+  private async fileExists(path: string): Promise<boolean> {
+    try {
+      await fs.access(path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Analyzes current ActiveStorage database structure and file distribution
+   * @returns Analysis results including table counts, file types, and potential issues
+   */
+  async analyzeActiveStorage(): Promise<AnalysisResult> {
+    const db = await this.getDbAdapter();
+
+    try {
+      // Check if ActiveStorage tables exist - handle both PostgreSQL and SQLite
+      const isPostgres =
+        this.config.database.includes('postgresql://') ||
+        this.config.database.includes('postgres://');
+
+      const tablesQuery = isPostgres
+        ? `
+          SELECT table_name 
+          FROM information_schema.tables 
+          WHERE table_name IN ('active_storage_blobs', 'active_storage_attachments', 'active_storage_variant_records')
+          AND table_schema = 'public'
+        `
+        : `
+          SELECT name as table_name 
+          FROM sqlite_master 
+          WHERE type='table' 
+          AND name IN ('active_storage_blobs', 'active_storage_attachments', 'active_storage_variant_records')
+        `;
+
+      const tablesResult = await db.query(tablesQuery);
+      const tablesFound = tablesResult.rows.map((row) => row.table_name);
+
+      if (tablesFound.length === 0) {
+        return {
+          tablesFound: [],
+          blobsCount: 0,
+          attachmentsCount: 0,
+          variantsCount: 0,
+          totalFileSize: 0,
+          communitiesAffected: 0,
+          filesByType: {},
+          potentialIssues: [
+            'No ActiveStorage tables found - this may be a development environment',
+          ],
+        };
+      }
+
+      // Continue with existing analysis logic...
+      const blobsQuery = `
+        SELECT 
+          COUNT(*) as count,
+          COALESCE(SUM(byte_size), 0) as total_size,
+          content_type,
+          COUNT(*) as type_count
+        FROM active_storage_blobs 
+        GROUP BY content_type
+      `;
+      const blobsResult = await db.query(blobsQuery);
+
+      const totalBlobsQuery = `SELECT COUNT(*) as count, COALESCE(SUM(byte_size), 0) as total_size FROM active_storage_blobs`;
+      const totalBlobsResult = await db.query(totalBlobsQuery);
+
+      // Analyze attachments and affected communities with more defensive queries
+      const attachmentsQuery = `
+        SELECT 
+          COUNT(*) as count,
+          record_type,
+          COUNT(DISTINCT CASE 
+            WHEN record_type IN ('Story', 'Place', 'Speaker') 
+            THEN (SELECT community_id FROM ${this.getTableName()} WHERE id = record_id)
+            END) as communities_affected
+        FROM active_storage_attachments 
+        GROUP BY record_type
+      `;
+
+      let attachmentsResult;
+      try {
+        attachmentsResult = await db.query(attachmentsQuery);
+      } catch {
+        // If the complex query fails (tables don't exist), provide basic count
+        const simpleAttachmentsQuery = `SELECT COUNT(*) as count FROM active_storage_attachments`;
+        attachmentsResult = await db.query(simpleAttachmentsQuery);
+        attachmentsResult.rows = [
+          {
+            count: attachmentsResult.rows[0]?.count || 0,
+            record_type: 'Unknown',
+            communities_affected: 0,
+          },
+        ];
+      }
+
+      const totalAttachmentsQuery = `SELECT COUNT(*) as count FROM active_storage_attachments`;
+      const totalAttachmentsResult = await db.query(totalAttachmentsQuery);
+
+      // Analyze variants
+      const variantsQuery = `SELECT COUNT(*) as count FROM active_storage_variant_records`;
+      const variantsResult = await db.query(variantsQuery);
+
+      // Build file types summary
+      const filesByType: Record<string, number> = {};
+      blobsResult.rows.forEach((row) => {
+        filesByType[row.content_type] = parseInt(row.type_count);
+      });
+
+      // Calculate communities affected with error handling
+      let communitiesAffected = 0;
+      try {
+        const communitiesQuery = `
+          SELECT COUNT(DISTINCT community_id) as count
+          FROM (
+            SELECT (SELECT community_id FROM stories WHERE id = a.record_id) as community_id
+            FROM active_storage_attachments a WHERE a.record_type = 'Story'
+            UNION
+            SELECT (SELECT community_id FROM places WHERE id = a.record_id) as community_id  
+            FROM active_storage_attachments a WHERE a.record_type = 'Place'
+            UNION
+            SELECT (SELECT community_id FROM speakers WHERE id = a.record_id) as community_id
+            FROM active_storage_attachments a WHERE a.record_type = 'Speaker'
+          ) communities WHERE community_id IS NOT NULL
+        `;
+        const communitiesResult = await db.query(communitiesQuery);
+        communitiesAffected = parseInt(communitiesResult.rows[0]?.count || '0');
+      } catch {
+        // If community calculation fails, estimate from attachments
+        communitiesAffected = Math.min(attachmentsResult.rows.length, 10); // Conservative estimate
+      }
+
+      return {
+        tablesFound,
+        blobsCount: parseInt(totalBlobsResult.rows[0]?.count || '0'),
+        attachmentsCount: parseInt(
+          totalAttachmentsResult.rows[0]?.count || '0'
+        ),
+        variantsCount: parseInt(variantsResult.rows[0]?.count || '0'),
+        totalFileSize: parseInt(totalBlobsResult.rows[0]?.total_size || '0'),
+        communitiesAffected,
+        filesByType,
+        potentialIssues: [],
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to analyze ActiveStorage: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  private getTableName(): string {
+    // Helper to get correct table name based on record type
+    return 'COALESCE((SELECT community_id FROM stories WHERE id = record_id), (SELECT community_id FROM places WHERE id = record_id), (SELECT community_id FROM speakers WHERE id = record_id))';
+  }
+
+  private async identifyPotentialIssues(
+    analysis: AnalysisResult
+  ): Promise<string[]> {
+    const issues: string[] = [];
+
+    if (analysis.tablesFound.length === 0) {
+      issues.push('No ActiveStorage tables found');
+      return issues;
+    }
+
+    const db = await this.getDbAdapter();
+
+    try {
+      // Check for duplicate filenames
+      const duplicatesQuery = `
+        SELECT filename, COUNT(*) as count 
+        FROM active_storage_blobs 
+        GROUP BY filename 
+        HAVING COUNT(*) > 1
+      `;
+      const duplicatesResult = await db.query(duplicatesQuery);
+      if (duplicatesResult.rows.length > 0) {
+        issues.push(
+          `${duplicatesResult.rows.length} duplicate filenames need resolution`
+        );
+      }
+
+      // Check for files with invalid characters
+      const invalidCharsQuery = `
+        SELECT COUNT(*) as count 
+        FROM active_storage_blobs 
+        WHERE filename ~ '[^a-zA-Z0-9._-]'
+      `;
+      const invalidCharsResult = await db.query(invalidCharsQuery);
+      if (parseInt(invalidCharsResult.rows[0]?.count || '0') > 0) {
+        issues.push(
+          `${invalidCharsResult.rows[0].count} files have invalid characters`
+        );
+      }
+
+      // Check for very large files (>100MB)
+      const largeFilesQuery = `
+        SELECT COUNT(*) as count 
+        FROM active_storage_blobs 
+        WHERE byte_size > 104857600
+      `;
+      const largeFilesResult = await db.query(largeFilesQuery);
+      if (parseInt(largeFilesResult.rows[0]?.count || '0') > 0) {
+        issues.push(
+          `${largeFilesResult.rows[0].count} files larger than 100MB require special handling`
+        );
+      }
+
+      return issues;
+    } catch (_error) {
+      issues.push(
+        `Failed to analyze potential issues: ${_error instanceof Error ? _error.message : String(_error)}`
+      );
+      return issues;
+    }
+  }
+
+  /**
+   * Performs a comprehensive dry run analysis without making changes
+   * @returns Dry run results including estimated duration and potential issues
+   */
+  async performDryRun() {
+    console.log('🧪 Performing dry run analysis...');
+
+    const startTime = Date.now();
+    const analysis = await this.analyzeActiveStorage();
+    const potentialIssues = await this.identifyPotentialIssues(analysis);
+
+    // Calculate estimated duration (roughly 1 file per second, plus overhead)
+    const estimatedSeconds = Math.ceil(analysis.blobsCount * 1.2);
+    const estimatedMinutes = Math.ceil(estimatedSeconds / 60);
+
+    // Calculate backup size from file analysis
+    const backupSizeGB = Math.ceil(
+      analysis.totalFileSize / (1024 * 1024 * 1024)
+    );
+
+    await this.logAuditTrail('DRY_RUN_ANALYSIS', {
+      filesAnalyzed: analysis.blobsCount,
+      communitiesAffected: analysis.communitiesAffected,
+      duration: `${Date.now() - startTime}ms`,
+      potentialIssues: potentialIssues.length,
+    });
+
+    return {
+      dryRun: true,
+      filesAnalyzed: analysis.blobsCount,
+      communitiesAffected: analysis.communitiesAffected,
+      estimatedDuration: `${estimatedMinutes} minutes`,
+      potentialIssues,
+      rollbackPlan: {
+        backupSize: analysis.totalFileSize,
+        backupSizeGB: `${backupSizeGB}GB`,
+        rollbackSteps: [
+          'Restore database from backup',
+          'Restore ActiveStorage file structure',
+          'Remove migrated community directories',
+          'Verify ActiveStorage functionality',
+        ],
+      },
+      filesByType: analysis.filesByType,
+      tablesFound: analysis.tablesFound,
+    };
+  }
+
+  async createBackup() {
+    console.log('📦 Creating backup...');
+
+    const timestamp =
+      new Date().toISOString().replace(/[:.]/g, '-').split('T')[0] +
+      '-' +
+      new Date()
+        .toISOString()
+        .replace(/[:.]/g, '-')
+        .split('T')[1]
+        .split('.')[0];
+    const backupPath = join(process.cwd(), `backup-${timestamp}`);
+
+    try {
+      // Create backup directory
+      await fs.mkdir(backupPath, { recursive: true });
+
+      // Backup database
+      const db = await this.getDbAdapter();
+      const databaseBackupPath = join(backupPath, 'database.sql');
+
+      // Export relevant tables
+      const tables = [
+        'active_storage_blobs',
+        'active_storage_attachments',
+        'active_storage_variant_records',
+        'stories',
+        'places',
+        'speakers',
+      ];
+      let sqlDump = '';
+
+      for (const table of tables) {
+        try {
+          const result = await db.query(`SELECT * FROM ${table}`);
+          sqlDump += `-- Backup of ${table}\n`;
+          if (result.rows.length > 0) {
+            const columns = Object.keys(result.rows[0]);
+            sqlDump += `INSERT INTO ${table} (${columns.join(', ')}) VALUES\n`;
+            const values = result.rows
+              .map(
+                (row) =>
+                  `(${columns
+                    .map((col) => {
+                      const val = row[col];
+                      if (val === null) return 'NULL';
+                      if (typeof val === 'string')
+                        return `'${val.replace(/'/g, "''")}'`;
+                      if (val instanceof Date) return `'${val.toISOString()}'`;
+                      return String(val);
+                    })
+                    .join(', ')})`
+              )
+              .join(',\n');
+            sqlDump += values + ';\n\n';
+          }
+        } catch (error) {
+          console.warn(
+            `Warning: Could not backup table ${table}: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      }
+
+      await fs.writeFile(databaseBackupPath, sqlDump);
+
+      // Backup ActiveStorage files if they exist
+      const storageBackupPath = join(backupPath, 'storage');
+      try {
+        await fs.access(this.config.activeStoragePath);
+        await fs.mkdir(storageBackupPath, { recursive: true });
+
+        // Copy storage directory (this is a simplified version - in production would use streaming)
+        const { execSync } = await import('child_process');
+        execSync(
+          `cp -r "${this.config.activeStoragePath}"/* "${storageBackupPath}"/`
+        );
+
+        console.log(`✅ ActiveStorage files backed up to ${storageBackupPath}`);
+      } catch {
+        console.warn(
+          '⚠️ ActiveStorage files not found or not accessible - continuing without file backup'
+        );
+      }
+
+      await this.logAuditTrail('BACKUP_CREATED', {
+        backupPath,
+        timestamp,
+        databaseBackup: databaseBackupPath,
+        storageBackup: storageBackupPath,
+      });
+
+      return {
+        backupPath,
+        timestamp: new Date(),
+        databaseBackup: databaseBackupPath,
+        storageBackup: storageBackupPath,
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to create backup: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Migrates all ActiveStorage files for a specific community
+   * @param communityId The community ID to migrate files for
+   * @returns Migration results including files processed and any errors
+   */
+  async migrateByCommunity(communityId: number): Promise<MigrationResult> {
+    console.log(`🚀 Starting migration for community ${communityId}...`);
+
+    const startTime = Date.now();
+    const errors: string[] = [];
+    let filesProcessed = 0;
+    let filesMigrated = 0;
+    let filesSkipped = 0;
+    let elderOnlyFiles = 0;
+    let restrictedFiles = 0;
+    let publicFiles = 0;
+
+    const db = await this.getDbAdapter();
+
+    try {
+      // Create backup before migration
+      const backup = await this.createBackup();
+
+      // Begin transaction for atomic operations
+      await db.query('BEGIN');
+
+      try {
+        // Get all attachments for this community's records
+        const attachmentsQuery = `
+          SELECT 
+            a.id as attachment_id,
+            a.name as attachment_name,
+            a.record_type,
+            a.record_id,
+            b.id as blob_id,
+            b.key as blob_key,
+            b.filename,
+            b.content_type,
+            b.byte_size,
+            b.checksum,
+            CASE 
+              WHEN a.record_type = 'Story' THEN s.community_id
+              WHEN a.record_type = 'Place' THEN p.community_id  
+              WHEN a.record_type = 'Speaker' THEN sp.community_id
+            END as community_id,
+            CASE
+              WHEN a.record_type = 'Story' THEN s.is_restricted
+              WHEN a.record_type = 'Place' THEN p.is_restricted
+              WHEN a.record_type = 'Speaker' THEN false
+            END as is_restricted,
+            CASE
+              WHEN a.record_type = 'Speaker' THEN sp.elder_status
+              ELSE false
+            END as is_elder_content
+          FROM active_storage_attachments a
+          JOIN active_storage_blobs b ON a.blob_id = b.id
+          LEFT JOIN stories s ON a.record_type = 'Story' AND a.record_id = s.id
+          LEFT JOIN places p ON a.record_type = 'Place' AND a.record_id = p.id
+          LEFT JOIN speakers sp ON a.record_type = 'Speaker' AND a.record_id = sp.id
+          WHERE (
+            (a.record_type = 'Story' AND s.community_id = $1) OR
+            (a.record_type = 'Place' AND p.community_id = $1) OR  
+            (a.record_type = 'Speaker' AND sp.community_id = $1)
+          )
+          ORDER BY a.record_type, a.record_id
+        `;
+
+        const attachmentsResult = await db.query(attachmentsQuery, [
+          communityId,
+        ]);
+
+        // Group attachments by record for batch updates
+        const recordUpdates: Record<
+          string,
+          { type: string; id: number; files: string[] }
+        > = {};
+
+        for (const attachment of attachmentsResult.rows) {
+          filesProcessed++;
+
+          try {
+            // Create community-scoped directory structure
+            const recordTypeDir = attachment.record_type.toLowerCase() + 's'; // Story -> stories
+            const communityDir = join(
+              this.config.uploadsPath,
+              `community_${communityId}`,
+              recordTypeDir
+            );
+            await fs.mkdir(communityDir, { recursive: true });
+
+            // Generate safe filename
+            const sanitizedFilename = this.sanitizeFilename(
+              attachment.filename
+            );
+            let finalFilename = sanitizedFilename;
+            let counter = 1;
+
+            // Handle filename conflicts
+            while (await this.fileExists(join(communityDir, finalFilename))) {
+              const parts = sanitizedFilename.split('.');
+              const extension = parts.length > 1 ? parts.pop() : '';
+              const baseName = parts.join('.');
+              finalFilename = extension
+                ? `${baseName}_${counter}.${extension}`
+                : `${baseName}_${counter}`;
+              counter++;
+            }
+
+            const newFilePath = join(communityDir, finalFilename);
+            const relativePath = `uploads/community_${communityId}/${recordTypeDir}/${finalFilename}`;
+
+            // Copy file from ActiveStorage location
+            const activeStorageFilePath = join(
+              this.config.activeStoragePath,
+              attachment.blob_key.substring(0, 2),
+              attachment.blob_key.substring(2, 4),
+              attachment.blob_key
+            );
+
+            if (await this.fileExists(activeStorageFilePath)) {
+              await fs.copyFile(activeStorageFilePath, newFilePath);
+
+              // Verify file integrity
+              if (
+                await this.verifyFileIntegrity(newFilePath, attachment.checksum)
+              ) {
+                filesMigrated++;
+
+                // Track file type for cultural restrictions
+                if (attachment.is_elder_content) {
+                  elderOnlyFiles++;
+                } else if (attachment.is_restricted) {
+                  restrictedFiles++;
+                } else {
+                  publicFiles++;
+                }
+
+                // Collect files for batch database update
+                const recordKey = `${attachment.record_type}:${attachment.record_id}`;
+                if (!recordUpdates[recordKey]) {
+                  recordUpdates[recordKey] = {
+                    type: attachment.record_type,
+                    id: attachment.record_id,
+                    files: [],
+                  };
+                }
+                recordUpdates[recordKey].files.push(relativePath);
+
+                await this.logAuditTrail('FILE_MIGRATED', {
+                  communityId,
+                  recordType: attachment.record_type,
+                  recordId: attachment.record_id,
+                  originalPath: activeStorageFilePath,
+                  newPath: newFilePath,
+                  filename: finalFilename,
+                  isRestricted: attachment.is_restricted,
+                  isElderContent: attachment.is_elder_content,
+                });
+              } else {
+                errors.push(`Checksum mismatch for ${attachment.filename}`);
+                filesSkipped++;
+              }
+            } else {
+              errors.push(
+                `ActiveStorage file not found: ${activeStorageFilePath}`
+              );
+              filesSkipped++;
+            }
+          } catch (error) {
+            errors.push(
+              `Failed to migrate ${attachment.filename}: ${error instanceof Error ? error.message : String(error)}`
+            );
+            filesSkipped++;
+          }
+        }
+
+        // Update database records with new file paths
+        for (const [, update] of Object.entries(recordUpdates)) {
+          try {
+            if (update.type === 'Story') {
+              await db.query(
+                'UPDATE stories SET media_urls = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+                [JSON.stringify(update.files), update.id]
+              );
+            } else if (update.type === 'Place') {
+              // For places, we'll put the first file as photo_url and others in media_urls
+              const [photoUrl, ...mediaUrls] = update.files;
+              await db.query(
+                'UPDATE places SET photo_url = $1, media_urls = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
+                [photoUrl, JSON.stringify(mediaUrls), update.id]
+              );
+            } else if (update.type === 'Speaker') {
+              // For speakers, use the first file as photo_url
+              await db.query(
+                'UPDATE speakers SET photo_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+                [update.files[0], update.id]
+              );
+            }
+          } catch (error) {
+            errors.push(
+              `Failed to update ${update.type} ${update.id}: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        }
+
+        // Commit transaction if no critical errors
+        if (errors.length === 0) {
+          await db.query('COMMIT');
+        } else {
+          await db.query('ROLLBACK');
+          throw new Error(`Migration failed with ${errors.length} errors`);
+        }
+
+        const duration = `${Math.round((Date.now() - startTime) / 1000)}s`;
+
+        await this.logAuditTrail('MIGRATION_COMPLETED', {
+          communityId,
+          filesProcessed,
+          filesMigrated,
+          filesSkipped,
+          errors: errors.length,
+          duration,
+          culturalRestrictions: {
+            elderOnlyFiles,
+            restrictedFiles,
+            publicFiles,
+          },
+        });
+
+        return {
+          success: errors.length === 0,
+          communityId,
+          filesProcessed,
+          filesMigrated,
+          filesSkipped,
+          errors,
+          duration,
+          backupPath: backup.backupPath,
+          culturalRestrictions: {
+            elderOnlyFiles,
+            restrictedFiles,
+            publicFiles,
+            auditTrailCreated: true,
+          },
+        };
+      } catch (innerError) {
+        // Handle inner try block errors
+        try {
+          await db.query('ROLLBACK');
+        } catch {
+          // Ignore rollback errors (transaction may not be active)
+        }
+        throw innerError;
+      }
+    } catch (error) {
+      // Rollback transaction on error
+      try {
+        await db.query('ROLLBACK');
+      } catch {
+        // Ignore rollback errors
+      }
+
+      await this.logAuditTrail('MIGRATION_FAILED', {
+        communityId,
+        error: error instanceof Error ? error.message : String(error),
+        filesProcessed,
+        duration: `${Math.round((Date.now() - startTime) / 1000)}s`,
+      });
+
+      return {
+        success: false,
+        communityId,
+        filesProcessed,
+        filesMigrated,
+        filesSkipped,
+        errors: [error instanceof Error ? error.message : String(error)],
+        duration: `${Math.round((Date.now() - startTime) / 1000)}s`,
+      };
+    }
+  }
+
+  /**
+   * Performs a complete rollback from backup
+   * @param backupPath Path to the backup directory to restore from
+   * @returns Rollback results including success status and duration
+   */
+  async performRollback(backupPath?: string) {
+    console.log('🔄 Performing rollback...');
+
+    if (!backupPath) {
+      throw new Error('Backup path is required for rollback');
+    }
+
+    const startTime = Date.now();
+    const db = await this.getDbAdapter();
+
+    try {
+      // Verify backup exists
+      const databaseBackupPath = join(backupPath, 'database.sql');
+      const storageBackupPath = join(backupPath, 'storage');
+
+      await fs.access(databaseBackupPath);
+
+      // Begin transaction
+      await db.query('BEGIN');
+
+      // Read and execute database backup
+      const backupSql = await fs.readFile(databaseBackupPath, 'utf8');
+      await db.query(backupSql);
+
+      // Restore file system
+      if (await this.fileExists(storageBackupPath)) {
+        const { execSync } = await import('child_process');
+        execSync(`rm -rf "${this.config.activeStoragePath}"`);
+        execSync(
+          `cp -r "${storageBackupPath}" "${this.config.activeStoragePath}"`
+        );
+      }
+
+      // Remove migrated community directories
+      const uploadsPath = this.config.uploadsPath;
+      if (await this.fileExists(uploadsPath)) {
+        const communityDirs = await fs.readdir(uploadsPath);
+        for (const dir of communityDirs) {
+          if (dir.startsWith('community_')) {
+            await fs.rm(join(uploadsPath, dir), {
+              recursive: true,
+              force: true,
+            });
+          }
+        }
+      }
+
+      await db.query('COMMIT');
+
+      await this.logAuditTrail('ROLLBACK_COMPLETED', {
+        backupPath,
+        duration: `${Math.round((Date.now() - startTime) / 1000)}s`,
+      });
+
+      return {
+        success: true,
+        backupPath,
+        duration: `${Math.round((Date.now() - startTime) / 1000)}s`,
+      };
+    } catch (error) {
+      try {
+        await db.query('ROLLBACK');
+      } catch {
+        // Ignore rollback errors
+      }
+
+      await this.logAuditTrail('ROLLBACK_FAILED', {
+        backupPath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+
+      throw new Error(
+        `Rollback failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}

@@ -11,7 +11,7 @@ jobs:
   # DOCKER BUILD TESTING
   # =============================================================================
   docker-build:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       matrix:
         target: [development, production]
@@ -48,7 +48,7 @@ jobs:
   # DOCKER COMPOSE CONFIGURATION TESTING
   # =============================================================================
   docker-compose-test:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       matrix:
         compose-file:
@@ -79,7 +79,7 @@ jobs:
   # INTEGRATION TESTING - Basic deployment test
   # =============================================================================
   integration-test:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [docker-build, docker-compose-test]
 
     steps:

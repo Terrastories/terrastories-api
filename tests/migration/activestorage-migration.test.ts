@@ -20,7 +20,7 @@ import Database from 'better-sqlite3';
 import {
   ActiveStorageMigrator,
   MigrationConfig,
-} from '../../src/services/activestorage-migrator.js';
+} from '../../src/services/activestorage-migrator';
 
 describe('ActiveStorage Migration', () => {
   let testDbPath: string;

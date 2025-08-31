@@ -166,10 +166,20 @@ class SQLiteAdapter implements DatabaseQuery {
   }
 }
 
+/**
+ * ActiveStorage Migration Service
+ *
+ * Provides comprehensive migration capabilities for Rails ActiveStorage files
+ * to community-scoped TypeScript file structure with data sovereignty compliance
+ */
 export class ActiveStorageMigrator {
   private config: MigrationConfig;
   private dbAdapter: PostgreSQLAdapter | SQLiteAdapter | null = null;
 
+  /**
+   * Creates a new ActiveStorage migrator instance
+   * @param config Migration configuration including database connection and file paths
+   */
   constructor(config: MigrationConfig) {
     this.config = config;
   }
@@ -241,6 +251,10 @@ export class ActiveStorageMigrator {
     }
   }
 
+  /**
+   * Analyzes current ActiveStorage database structure and file distribution
+   * @returns Analysis results including table counts, file types, and potential issues
+   */
   async analyzeActiveStorage(): Promise<AnalysisResult> {
     const db = await this.getDbAdapter();
 
@@ -448,6 +462,10 @@ export class ActiveStorageMigrator {
     }
   }
 
+  /**
+   * Performs a comprehensive dry run analysis without making changes
+   * @returns Dry run results including estimated duration and potential issues
+   */
   async performDryRun() {
     console.log('🧪 Performing dry run analysis...');
 
@@ -596,6 +614,11 @@ export class ActiveStorageMigrator {
     }
   }
 
+  /**
+   * Migrates all ActiveStorage files for a specific community
+   * @param communityId The community ID to migrate files for
+   * @returns Migration results including files processed and any errors
+   */
   async migrateByCommunity(communityId: number): Promise<MigrationResult> {
     console.log(`🚀 Starting migration for community ${communityId}...`);
 
@@ -872,6 +895,11 @@ export class ActiveStorageMigrator {
     }
   }
 
+  /**
+   * Performs a complete rollback from backup
+   * @param backupPath Path to the backup directory to restore from
+   * @returns Rollback results including success status and duration
+   */
   async performRollback(backupPath?: string) {
     console.log('🔄 Performing rollback...');
 

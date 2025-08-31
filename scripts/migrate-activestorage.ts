@@ -16,7 +16,7 @@
 import {
   ActiveStorageMigrator,
   MigrationConfig,
-} from '../src/services/activestorage-migrator.js';
+} from '../src/services/activestorage-migrator';
 
 // Environment validation function
 function validateEnvironment(): MigrationConfig {

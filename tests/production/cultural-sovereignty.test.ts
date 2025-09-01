@@ -13,6 +13,13 @@ import { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/app.js';
 import { TestDatabaseManager } from '../helpers/database.js';
 import { hash } from 'argon2';
+import { eq, like, and } from 'drizzle-orm';
+import {
+  communitiesSqlite as communitiesTable,
+  usersSqlite as usersTable,
+  storiesSqlite as storiesTable,
+  placesSqlite as placesTable,
+} from '../../src/db/schema/index.js';
 
 interface TestUser {
   id: string;
@@ -252,16 +259,18 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       ]);
 
       // Super admin queries should not return cultural content
-      const db = await getDatabaseConnection();
-      const superAdminQuery = `
-        SELECT id, title, privacy_level, cultural_restrictions 
-        FROM stories 
-        WHERE community_id = $1
-      `;
+      const database = await db.getDb();
 
       // This query should be intercepted by middleware and restricted
       expect(async () => {
-        await db.query(superAdminQuery, [community.id]);
+        await database
+          .select({
+            id: storiesTable.id,
+            title: storiesTable.title,
+            isRestricted: storiesTable.isRestricted,
+          })
+          .from(storiesTable)
+          .where(eq(storiesTable.communityId, parseInt(community.id)));
       }).rejects.toThrow('Super admin access to cultural data denied');
     });
   });
@@ -604,20 +613,25 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
     // Create communities in test database
     const created: TestCommunity[] = [];
     for (const community of communities) {
-      const result = await db.query(
-        `
-        INSERT INTO communities (name, locale, cultural_settings)
-        VALUES ($1, $2, $3)
-        RETURNING id, name, locale
-      `,
-        [
-          community.name,
-          community.locale,
-          JSON.stringify(community.cultural_protocols),
-        ]
-      );
+      const database = await db.getDb();
+      const insertedCommunity = await database
+        .insert(communitiesTable)
+        .values({
+          name: community.name,
+          slug: community.name.toLowerCase().replace(/\s+/g, '-'),
+          description: `Test community for ${community.name}`,
+          locale: community.locale,
+          culturalSettings: JSON.stringify(community.cultural_protocols),
+          publicStories: true,
+          isActive: true,
+        })
+        .returning({
+          id: communitiesTable.id,
+          name: communitiesTable.name,
+          locale: communitiesTable.locale,
+        });
 
-      created.push(result.rows[0]);
+      created.push(insertedCommunity[0]);
     }
 
     return created;
@@ -639,22 +653,26 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
         const email = `${roleData.role}@${community.name.replace(/\s+/g, '').toLowerCase()}.test`;
         const hashedPassword = await hash('test-password-123');
 
-        const result = await db.query(
-          `
-          INSERT INTO users (email, password_hash, role, community_id, elder_status)
-          VALUES ($1, $2, $3, $4, $5)
-          RETURNING id, email, role, community_id, elder_status
-        `,
-          [
-            email,
-            hashedPassword,
-            roleData.role,
-            community.id,
-            roleData.elder_status,
-          ]
-        );
+        const database = await db.getDb();
+        const insertedUser = await database
+          .insert(usersTable)
+          .values({
+            email: email,
+            passwordHash: hashedPassword,
+            firstName: 'Test',
+            lastName: 'User',
+            role: roleData.role,
+            communityId: parseInt(community.id),
+            isActive: true,
+          })
+          .returning({
+            id: usersTable.id,
+            email: usersTable.email,
+            role: usersTable.role,
+            communityId: usersTable.communityId,
+          });
 
-        users.push(result.rows[0]);
+        users.push(insertedUser[0]);
       }
     }
 
@@ -662,16 +680,26 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
     const superAdminEmail = 'superadmin@terrastories.test';
     const superAdminPassword = await hash('super-admin-password-123');
 
-    const superAdminResult = await db.query(
-      `
-      INSERT INTO users (email, password_hash, role, community_id)
-      VALUES ($1, $2, $3, NULL)
-      RETURNING id, email, role, community_id
-    `,
-      [superAdminEmail, superAdminPassword, 'super_admin']
-    );
+    const database = await db.getDb();
+    const superAdminInserted = await database
+      .insert(usersTable)
+      .values({
+        email: superAdminEmail,
+        passwordHash: superAdminPassword,
+        firstName: 'Super',
+        lastName: 'Admin',
+        role: 'super_admin',
+        communityId: 1, // SQLite doesn't support NULL for NOT NULL fields, use system community
+        isActive: true,
+      })
+      .returning({
+        id: usersTable.id,
+        email: usersTable.email,
+        role: usersTable.role,
+        communityId: usersTable.communityId,
+      });
 
-    users.push(superAdminResult.rows[0]);
+    users.push(superAdminInserted[0]);
 
     return users;
   }

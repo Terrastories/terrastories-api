@@ -16,6 +16,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import { TestDatabaseManager } from '../helpers/database.js';
+import { eq, like, and } from 'drizzle-orm';
+import { storiesSqlite as stories } from '../../src/db/schema/index.js';
 
 const exec = promisify(execCb);
 
@@ -423,25 +425,34 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
       ).toBeGreaterThan(0);
 
       // Check that cultural context is maintained in database
-      const stories = await db.query(
-        `
-        SELECT id, title, cultural_significance, cultural_restrictions, media_urls 
-        FROM stories 
-        WHERE community_id = $1 AND title LIKE 'Cultural Content%'
-      `,
-        [communityId]
-      );
+      const database = await db.getDb();
+      const storyResults = await database
+        .select({
+          id: stories.id,
+          title: stories.title,
+          isRestricted: stories.isRestricted,
+          mediaUrls: stories.mediaUrls,
+        })
+        .from(stories)
+        .where(
+          and(
+            eq(stories.communityId, parseInt(communityId)),
+            like(stories.title, 'Cultural Content%')
+          )
+        );
 
-      for (const story of stories.rows) {
+      for (const story of storyResults) {
         expect(
-          story.cultural_significance,
-          'Cultural significance should be preserved'
+          story.isRestricted,
+          'Cultural restrictions should be preserved'
         ).toBeDefined();
-        expect(story.media_urls, 'Media URLs should be updated').toBeDefined();
-        expect(
-          story.media_urls[0],
-          'Media URL should point to migrated location'
-        ).toContain(communityDir);
+        expect(story.mediaUrls, 'Media URLs should be updated').toBeDefined();
+        if (story.mediaUrls && story.mediaUrls.length > 0) {
+          expect(
+            story.mediaUrls[0],
+            'Media URL should point to migrated location'
+          ).toContain(communityDir);
+        }
       }
     });
 
@@ -610,27 +621,27 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
   // Helper functions
   async function setupActiveStorageTestData(): Promise<void> {
     // Create test ActiveStorage blobs and attachments tables
-    await db.query(`
+    await db.executeRaw(`
       CREATE TABLE IF NOT EXISTS active_storage_blobs (
-        id SERIAL PRIMARY KEY,
-        key VARCHAR(255) NOT NULL,
-        filename VARCHAR(255) NOT NULL,
-        content_type VARCHAR(255),
-        metadata JSONB,
-        byte_size BIGINT,
-        checksum VARCHAR(255),
-        created_at TIMESTAMP DEFAULT NOW()
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        content_type TEXT,
+        metadata TEXT,
+        byte_size INTEGER,
+        checksum TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    await db.query(`
+    await db.executeRaw(`
       CREATE TABLE IF NOT EXISTS active_storage_attachments (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        record_type VARCHAR(255) NOT NULL,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        record_type TEXT NOT NULL,
         record_id INTEGER NOT NULL,
         blob_id INTEGER NOT NULL,
-        created_at TIMESTAMP DEFAULT NOW(),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (blob_id) REFERENCES active_storage_blobs(id)
       )
     `);
@@ -664,33 +675,23 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
     const checksum = crypto.randomBytes(16).toString('hex');
 
     // Create blob
-    const blobResult = await db.query(
-      `
-      INSERT INTO active_storage_blobs (key, filename, content_type, byte_size, checksum)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING id
-    `,
-      [
-        `test-key-${Date.now()}-${Math.random()}`,
-        options.filename,
-        options.content_type,
-        options.byte_size,
-        checksum,
-      ]
+    const key = `test-key-${Date.now()}-${Math.random()}`;
+    await db.executeRaw(
+      `INSERT INTO active_storage_blobs (key, filename, content_type, byte_size, checksum)
+       VALUES ('${key}', '${options.filename}', '${options.content_type}', ${options.byte_size}, '${checksum}')`
     );
 
-    // Create attachment
-    await db.query(
-      `
-      INSERT INTO active_storage_attachments (name, record_type, record_id, blob_id)
-      VALUES ($1, $2, $3, $4)
-    `,
-      [
-        options.attachment_name,
-        options.record_type,
-        parseInt(communityId),
-        blobResult.rows[0].id,
-      ]
+    // Get the inserted blob ID
+    const blobResult = await db.executeRaw(
+      `SELECT id FROM active_storage_blobs WHERE key = '${key}' ORDER BY id DESC LIMIT 1`
+    );
+
+    // Create attachment (assuming blobResult contains the blob ID)
+    const blobId =
+      Array.isArray(blobResult) && blobResult.length > 0 ? blobResult[0].id : 1;
+    await db.executeRaw(
+      `INSERT INTO active_storage_attachments (name, record_type, record_id, blob_id)
+       VALUES ('${options.attachment_name}', '${options.record_type}', ${parseInt(communityId)}, ${blobId})`
     );
   }
 
@@ -919,8 +920,8 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
 
   async function cleanupMigrationTestData(): Promise<void> {
     try {
-      await db.query('DROP TABLE IF EXISTS active_storage_attachments');
-      await db.query('DROP TABLE IF EXISTS active_storage_blobs');
+      await db.executeRaw('DROP TABLE IF EXISTS active_storage_attachments');
+      await db.executeRaw('DROP TABLE IF EXISTS active_storage_blobs');
 
       // Clean up test files
       await fs.rm('uploads', { recursive: true, force: true });

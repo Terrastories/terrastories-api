@@ -14,7 +14,7 @@ import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 import { FastifyInstance } from 'fastify';
-import { createApp } from '../../src/app';
+import { buildApp } from '../../src/app.js';
 
 const exec = promisify(execCb);
 
@@ -46,7 +46,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     process.env.NODE_ENV = 'field-kit';
     process.env.OFFLINE_MODE = 'true';
 
-    app = createApp();
+    app = await buildApp();
     await app.ready();
 
     console.log('Field Kit deployment validation setup complete');
@@ -901,7 +901,9 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
   }
 
   afterAll(async () => {
-    await app.close();
+    if (app) {
+      await app.close();
+    }
     console.log('Field Kit deployment validation completed');
   });
 });

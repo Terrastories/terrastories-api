@@ -15,7 +15,7 @@ import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
-import { DatabaseManager } from '../../src/db/database';
+import { TestDatabaseManager } from '../helpers/database.js';
 
 const exec = promisify(execCb);
 
@@ -53,13 +53,13 @@ interface MigrationResult {
 }
 
 describe('ActiveStorage Migration Validation - Phase 2', () => {
-  let db: DatabaseManager;
+  let db: TestDatabaseManager;
   let testDataPath: string;
   let migrationScriptPath: string;
 
   beforeAll(async () => {
-    db = new DatabaseManager();
-    await db.connect();
+    db = new TestDatabaseManager();
+    await db.setup();
 
     testDataPath = path.join(
       process.cwd(),
@@ -912,7 +912,7 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
   afterAll(async () => {
     // Clean up test data
     await cleanupMigrationTestData();
-    await db.disconnect();
+    await db.teardown();
 
     console.log('ActiveStorage migration validation completed');
   });

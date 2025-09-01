@@ -529,51 +529,6 @@ Context: docs/5-MEDIA_HANDLING.md, docs/7-DEPLOYMENT.md
 
 **GitHub Issue**: [#57](https://github.com/Terrastories/terrastories-api/issues/57) ✅ **CLOSED**
 
-### **🚧 Outstanding Infrastructure Issues (Blocking Issue #59)**
-
-**Status**: ⚠️ **ACTIVE** - CI Infrastructure issues discovered during PR #66
-
-While the core migration is complete, the following CI/infrastructure issues must be resolved before production deployment:
-
-#### CI Pipeline Failures
-
-- **test (20.x)** and **test (22.x)**: Main CI test suite failing on both Node.js versions
-- **api-comparison**: API comparison test suite failing with exit code 1
-- **Git checkout errors**: CI jobs experiencing `git` process failures with exit code 128
-
-#### Code Quality Issues
-
-- **Linting violations**: Multiple console statements in production code
-  - `src/db/migrate.ts`: Console statements on multiple lines
-  - `src/db/index.ts`: Console statements on multiple lines
-- **ESLint warnings**: 78 warnings detected (0 errors) - primarily console statements
-
-#### Root Cause Analysis
-
-Based on PR #66 testing, the failures appear to be:
-
-1. **Infrastructure-related**: Git checkout issues during CI setup
-2. **Code quality**: Console statements left in production code violating lint rules
-3. **Environment-specific**: Test suite compatibility issues across Node.js versions
-
-#### Resolution Requirements for Issue #59
-
-Before production readiness validation can begin:
-
-1. **Fix CI git checkout process** - investigate repository state and CI environment
-2. **Remove all console statements** from production code (replace with proper logging) → **Issue #67**
-3. **Resolve test suite compatibility** across Node.js 20.x and 22.x environments
-4. **Verify API comparison suite** functionality with clean codebase
-
-#### Related Context
-
-- **Issue #64**: ✅ **RESOLVED** in PR #66 (Merged: 2025-09-05) - Performance test cleanup complete
-- **Issue #59**: Production readiness depends on CI pipeline stability
-- **Issue #67**: Console statement cleanup for CI pipeline fixes
-- **Current Status**: Issue #64 complete, CI environment issues remain in #67
-
-**Priority**: HIGH - Issue #67 must resolve before production deployment can proceed
-
 ### **Issue #64: Performance Test Cleanup and Foreign Key Issues ✅**
 
 **Status**: ✅ **COMPLETED** in PR #66 (Issue #64)

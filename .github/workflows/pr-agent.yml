@@ -10,7 +10,7 @@ jobs:
   pr_agent_job:
     # Skip if the event was triggered by a bot to avoid infinite loops
     if: ${{ github.event.sender.type != 'Bot' }}
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       issues: write
       pull-requests: write

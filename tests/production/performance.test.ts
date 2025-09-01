@@ -11,8 +11,8 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { FastifyInstance } from 'fastify';
-import { createApp } from '../../src/app';
-import { DatabaseManager } from '../../src/db/database';
+import { buildApp } from '../../src/app.js';
+import { TestDatabaseManager } from '../helpers/database.js';
 import { performance } from 'perf_hooks';
 
 interface PerformanceMetrics {
@@ -25,7 +25,7 @@ interface PerformanceMetrics {
 
 describe('Production Performance Validation - Phase 1', () => {
   let app: FastifyInstance;
-  let db: DatabaseManager;
+  let db: TestDatabaseManager;
   let baselineMetrics: PerformanceMetrics;
 
   beforeAll(async () => {
@@ -33,11 +33,11 @@ describe('Production Performance Validation - Phase 1', () => {
     process.env.NODE_ENV = 'test';
     process.env.LOG_LEVEL = 'error'; // Minimize logging overhead
 
-    app = createApp();
+    app = await buildApp();
     await app.ready();
 
-    db = new DatabaseManager();
-    await db.connect();
+    db = new TestDatabaseManager();
+    await db.setup();
 
     // Seed database with realistic test data
     await seedPerformanceTestData();
@@ -757,7 +757,7 @@ describe('Production Performance Validation - Phase 1', () => {
   afterAll(async () => {
     // Clean up performance test data
     await cleanupPerformanceTestData();
-    await db.disconnect();
+    await db.teardown();
     await app.close();
 
     console.log('Performance validation completed');

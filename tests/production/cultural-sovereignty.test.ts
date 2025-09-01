@@ -10,8 +10,8 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { FastifyInstance } from 'fastify';
-import { createApp } from '../../src/app';
-import { DatabaseManager } from '../../src/db/database';
+import { buildApp } from '../../src/app.js';
+import { TestDatabaseManager } from '../helpers/database.js';
 import { hash } from 'argon2';
 
 interface TestUser {
@@ -30,18 +30,18 @@ interface TestCommunity {
 
 describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
   let app: FastifyInstance;
-  let db: DatabaseManager;
+  let db: TestDatabaseManager;
   let testCommunities: TestCommunity[];
   let testUsers: TestUser[];
   let adminTokens: Record<string, string>;
 
   beforeAll(async () => {
     // Initialize test app and database
-    app = createApp();
+    app = await buildApp();
     await app.ready();
 
-    db = new DatabaseManager();
-    await db.connect();
+    db = new TestDatabaseManager();
+    await db.setup();
 
     // Create test communities representing different Indigenous communities
     testCommunities = await createTestCommunities();
@@ -752,7 +752,7 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
   afterAll(async () => {
     // Clean up test data
     await cleanupTestData();
-    await db.disconnect();
+    await db.teardown();
     await app.close();
 
     console.log('Cultural sovereignty validation completed');

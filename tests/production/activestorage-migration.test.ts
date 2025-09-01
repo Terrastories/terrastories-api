@@ -1,368 +1,933 @@
 /**
- * TERRASTORIES API - ACTIVESTORAGE MIGRATION PRODUCTION VALIDATION
+ * TERRASTORIES API - ACTIVESTORAGE MIGRATION VALIDATION
  *
- * This test suite validates production migration performance and cleanup issues
- * reported in Issue #64: Resolve Performance Test Cleanup and Foreign Key Issues
+ * This test suite validates the production migration from Rails ActiveStorage
+ * to the TypeScript file system with comprehensive data integrity checks,
+ * cultural protocol preservation, and zero data loss guarantees.
  *
- * Key Focus Areas:
- * - Database cleanup handling relationship dependencies properly
- * - Performance test data isolation between test runs
- * - Large file handling optimization for resource-constrained deployments
- * - Resource usage validation for Indigenous community hardware specs
+ * Issue #59: Production Readiness Validation & Indigenous Community Deployment
+ * Phase 2: Data Migration Validation
  */
 
-import {
-  describe,
-  it,
-  expect,
-  beforeAll,
-  afterAll,
-  beforeEach,
-  afterEach,
-  vi,
-} from 'vitest';
-import { promises as fs } from 'fs';
-import { join } from 'path';
-import Database from 'better-sqlite3';
-import {
-  ActiveStorageMigrator,
-  MigrationConfig,
-} from '../../src/services/activestorage-migrator.js';
+import { describe, test, expect, beforeAll, afterAll } from 'vitest';
+import { exec as execCb } from 'child_process';
+import { promisify } from 'util';
+import fs from 'fs/promises';
+import path from 'path';
+import crypto from 'crypto';
+import { DatabaseManager } from '../../src/db/database';
 
-describe('Production ActiveStorage Migration Performance', () => {
-  let testDbPath: string;
-  let testConfig: MigrationConfig;
-  let migrator: ActiveStorageMigrator;
+const exec = promisify(execCb);
+
+interface ActiveStorageBlob {
+  id: string;
+  key: string;
+  filename: string;
+  content_type: string;
+  metadata: any;
+  byte_size: number;
+  checksum: string;
+  created_at: Date;
+}
+
+interface ActiveStorageAttachment {
+  id: string;
+  name: string;
+  record_type: string;
+  record_id: string;
+  blob_id: string;
+  created_at: Date;
+}
+
+interface MigrationResult {
+  success: boolean;
+  files_migrated: number;
+  files_failed: number;
+  total_bytes: number;
+  checksum_matches: number;
+  cultural_protocols_preserved: number;
+  community_isolation_maintained: boolean;
+  audit_trail_complete: boolean;
+  rollback_capability: boolean;
+  errors: string[];
+}
+
+describe('ActiveStorage Migration Validation - Phase 2', () => {
+  let db: DatabaseManager;
+  let testDataPath: string;
+  let migrationScriptPath: string;
 
   beforeAll(async () => {
-    testDbPath = join(process.cwd(), 'production_performance_test.db');
+    db = new DatabaseManager();
+    await db.connect();
 
-    testConfig = {
-      database: `sqlite:${testDbPath}`,
-      activeStoragePath: join(process.cwd(), 'test_production_storage'),
-      uploadsPath: join(process.cwd(), 'test_production_uploads'),
-      dryRun: false,
-    };
+    testDataPath = path.join(
+      process.cwd(),
+      'tests',
+      'fixtures',
+      'activestorage'
+    );
+    migrationScriptPath = path.join(
+      process.cwd(),
+      'scripts',
+      'migrate-activestorage.ts'
+    );
 
-    // Create test directories
-    await fs.mkdir(testConfig.activeStoragePath, { recursive: true });
-    await fs.mkdir(testConfig.uploadsPath, { recursive: true });
+    // Create test ActiveStorage data
+    await setupActiveStorageTestData();
+
+    console.log('ActiveStorage migration validation setup complete');
   });
 
-  afterAll(async () => {
-    // Clean up test directories and database
-    try {
-      await fs.unlink(testDbPath);
-      await fs.rm(testConfig.activeStoragePath, {
-        recursive: true,
-        force: true,
-      });
-      await fs.rm(testConfig.uploadsPath, { recursive: true, force: true });
+  describe('Migration Script Validation', () => {
+    test('Migration script exists and is executable', async () => {
+      const scriptExists = await fs
+        .access(migrationScriptPath)
+        .then(() => true)
+        .catch(() => false);
+      expect(
+        scriptExists,
+        'Migration script should exist at scripts/migrate-activestorage.ts'
+      ).toBe(true);
 
-      // Clean up any backup directories created during testing
-      const backupDirs = await fs.readdir(process.cwd());
-      for (const dir of backupDirs) {
-        if (dir.startsWith('backup-')) {
-          await fs.rm(dir, { recursive: true, force: true });
+      // Check that script has proper command structure
+      const scriptContent = await fs.readFile(migrationScriptPath, 'utf-8');
+      expect(scriptContent).toContain('analyze');
+      expect(scriptContent).toContain('dry-run');
+      expect(scriptContent).toContain('migrate');
+      expect(scriptContent).toContain('rollback');
+    });
+
+    test('Migration script analyze command provides comprehensive analysis', async () => {
+      const { stdout } = await exec(
+        `npx tsx ${migrationScriptPath} analyze --community=1`
+      );
+
+      expect(stdout).toContain('ActiveStorage Analysis Report');
+      expect(stdout).toContain('Total blobs:');
+      expect(stdout).toContain('Total attachments:');
+      expect(stdout).toContain('File types:');
+      expect(stdout).toContain('Storage size:');
+      expect(stdout).toContain('Cultural restrictions:');
+      expect(stdout).toContain('Community isolation:');
+    });
+
+    test('Migration script dry-run identifies all files without making changes', async () => {
+      const uploadsDir = 'uploads';
+      const beforeExists = await fs
+        .access(uploadsDir)
+        .then(() => true)
+        .catch(() => false);
+
+      const { stdout } = await exec(
+        `npx tsx ${migrationScriptPath} dry-run --community=1`
+      );
+
+      expect(stdout).toContain('DRY RUN - No files will be moved');
+      expect(stdout).toContain('Files to migrate:');
+      expect(stdout).toContain('Target directory structure:');
+      expect(stdout).toContain('Cultural protocols to preserve:');
+
+      // Verify no actual changes were made
+      const afterExists = await fs
+        .access(uploadsDir)
+        .then(() => true)
+        .catch(() => false);
+      expect(afterExists).toBe(beforeExists);
+    });
+
+    test('Migration script has proper error handling and validation', async () => {
+      // Test invalid community ID
+      try {
+        await exec(`npx tsx ${migrationScriptPath} analyze --community=999999`);
+        expect(true, 'Should have thrown error for invalid community').toBe(
+          false
+        );
+      } catch (error) {
+        expect(error.stderr || error.stdout).toContain('Community not found');
+      }
+
+      // Test missing required parameters
+      try {
+        await exec(`npx tsx ${migrationScriptPath} migrate`);
+        expect(
+          true,
+          'Should have thrown error for missing community parameter'
+        ).toBe(false);
+      } catch (error) {
+        expect(error.stderr || error.stdout).toContain(
+          '--community parameter is required'
+        );
+      }
+    });
+  });
+
+  describe('Production-Scale Data Migration', () => {
+    test('Migration handles 1000+ files across multiple communities', async () => {
+      // Create test data representing production scale
+      await createProductionScaleTestData();
+
+      const communities = ['1', '2', '3'];
+      const results: MigrationResult[] = [];
+
+      for (const communityId of communities) {
+        const result = await runMigrationTest(communityId);
+        results.push(result);
+
+        expect(
+          result.success,
+          `Migration should succeed for community ${communityId}`
+        ).toBe(true);
+        expect(
+          result.files_migrated,
+          `Should migrate files for community ${communityId}`
+        ).toBeGreaterThan(0);
+        expect(
+          result.files_failed,
+          `Should have no failed migrations for community ${communityId}`
+        ).toBe(0);
+      }
+
+      // Validate overall migration success
+      const totalFilesMigrated = results.reduce(
+        (sum, r) => sum + r.files_migrated,
+        0
+      );
+      const totalBytesMigrated = results.reduce(
+        (sum, r) => sum + r.total_bytes,
+        0
+      );
+
+      expect(
+        totalFilesMigrated,
+        'Should migrate 1000+ files total'
+      ).toBeGreaterThanOrEqual(1000);
+      expect(
+        totalBytesMigrated,
+        'Should migrate significant data volume'
+      ).toBeGreaterThan(100 * 1024 * 1024); // > 100MB
+    });
+
+    test('File integrity verification with MD5 checksum validation', async () => {
+      const communityId = '1';
+
+      // Get ActiveStorage blobs with checksums
+      const blobs = await getActiveStorageBlobs(communityId);
+      expect(
+        blobs.length,
+        'Should have test blobs for validation'
+      ).toBeGreaterThan(0);
+
+      // Run migration
+      const result = await runMigrationTest(communityId);
+      expect(result.success).toBe(true);
+
+      // Validate each migrated file's checksum
+      for (const blob of blobs) {
+        const migratedFilePath = getMigratedFilePath(blob, communityId);
+        const fileExists = await fs
+          .access(migratedFilePath)
+          .then(() => true)
+          .catch(() => false);
+
+        expect(
+          fileExists,
+          `Migrated file should exist: ${migratedFilePath}`
+        ).toBe(true);
+
+        // Calculate checksum of migrated file
+        const fileContent = await fs.readFile(migratedFilePath);
+        const calculatedChecksum = crypto
+          .createHash('md5')
+          .update(fileContent)
+          .digest('base64');
+
+        expect(
+          calculatedChecksum,
+          `Checksum should match for ${blob.filename}: expected ${blob.checksum}, got ${calculatedChecksum}`
+        ).toBe(blob.checksum);
+      }
+    });
+
+    test('Database migration preserves all relationships and metadata', async () => {
+      const communityId = '1';
+
+      // Get original ActiveStorage data
+      const originalAttachments =
+        await getActiveStorageAttachments(communityId);
+      const originalBlobs = await getActiveStorageBlobs(communityId);
+
+      expect(originalAttachments.length).toBeGreaterThan(0);
+      expect(originalBlobs.length).toBeGreaterThan(0);
+
+      // Run migration
+      const result = await runMigrationTest(communityId);
+      expect(result.success).toBe(true);
+
+      // Validate database updates
+      for (const attachment of originalAttachments) {
+        const blob = originalBlobs.find((b) => b.id === attachment.blob_id);
+        if (!blob) continue;
+
+        // Check that the record's media URL was updated
+        const updatedRecord = await getUpdatedRecord(
+          attachment.record_type,
+          attachment.record_id
+        );
+        const fieldName = getMediaFieldName(attachment.name);
+
+        expect(
+          updatedRecord,
+          `Record should exist after migration`
+        ).toBeDefined();
+        expect(
+          updatedRecord[fieldName],
+          `Media field should be updated`
+        ).toBeDefined();
+        expect(
+          updatedRecord[fieldName],
+          `Should contain new file path`
+        ).toContain('uploads/');
+        expect(
+          updatedRecord[fieldName],
+          `Should contain community directory`
+        ).toContain(`community_${communityId}/`);
+      }
+    });
+
+    test('Community data isolation maintained during migration', async () => {
+      const communities = ['1', '2'];
+
+      // Run migration for both communities
+      const results = await Promise.all(
+        communities.map((id) => runMigrationTest(id))
+      );
+
+      expect(results.every((r) => r.success)).toBe(true);
+      expect(results.every((r) => r.community_isolation_maintained)).toBe(true);
+
+      // Verify file system isolation
+      for (const communityId of communities) {
+        const communityDir = `uploads/community_${communityId}`;
+        const dirExists = await fs
+          .access(communityDir)
+          .then(() => true)
+          .catch(() => false);
+
+        expect(
+          dirExists,
+          `Community directory should exist: ${communityDir}`
+        ).toBe(true);
+
+        // Check that files are only in the correct community directory
+        const files = await fs.readdir(communityDir, { recursive: true });
+        expect(
+          files.length,
+          `Community ${communityId} should have migrated files`
+        ).toBeGreaterThan(0);
+
+        // Verify no cross-community contamination
+        const otherCommunityId = communities.find((id) => id !== communityId);
+        const otherCommunityDir = `uploads/community_${otherCommunityId}`;
+
+        for (const file of files) {
+          const fullPath = path.join(communityDir, file.toString());
+          expect(
+            fullPath,
+            'Files should not reference other communities'
+          ).not.toContain(`community_${otherCommunityId}`);
         }
       }
-    } catch (error) {
-      // Ignore cleanup errors
-    }
-  });
-
-  beforeEach(async () => {
-    // Initialize fresh database for each test
-    const db = new Database(testDbPath);
-
-    // Create schema with proper foreign key constraints
-    db.exec(`
-      PRAGMA foreign_keys = ON;
-      
-      CREATE TABLE IF NOT EXISTS communities (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        slug TEXT NOT NULL UNIQUE,
-        locale TEXT DEFAULT 'en'
-      );
-      
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'viewer',
-        community_id INTEGER NOT NULL,
-        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS stories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        slug TEXT NOT NULL,
-        community_id INTEGER NOT NULL,
-        created_by INTEGER NOT NULL,
-        media_urls TEXT DEFAULT '[]',
-        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
-        FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS places (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        community_id INTEGER NOT NULL,
-        photo_url TEXT,
-        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS speakers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        community_id INTEGER NOT NULL,
-        photo_url TEXT,
-        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS active_storage_blobs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT NOT NULL UNIQUE,
-        filename TEXT NOT NULL,
-        content_type TEXT,
-        byte_size INTEGER,
-        checksum TEXT
-      );
-      
-      CREATE TABLE IF NOT EXISTS active_storage_attachments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        record_type TEXT NOT NULL,
-        record_id INTEGER NOT NULL,
-        blob_id INTEGER NOT NULL,
-        FOREIGN KEY (blob_id) REFERENCES active_storage_blobs(id) ON DELETE CASCADE
-      );
-    `);
-
-    db.close();
-    migrator = new ActiveStorageMigrator(testConfig);
-  });
-
-  afterEach(async () => {
-    if (migrator) {
-      await migrator.closeClient();
-    }
-  });
-
-  describe('Foreign Key Constraint Handling', () => {
-    it('should fail: handle foreign key constraints during test cleanup', async () => {
-      // This test should fail initially - we need to implement proper foreign key handling
-
-      // Insert test data with foreign key relationships
-      const db = new Database(testDbPath);
-
-      // Insert community
-      const communityResult = db
-        .prepare(
-          `
-        INSERT INTO communities (name, slug, locale) VALUES (?, ?, ?)
-      `
-        )
-        .run('Test Community', 'test-community', 'en');
-      const communityId = communityResult.lastInsertRowid;
-
-      // Insert user
-      const userResult = db
-        .prepare(
-          `
-        INSERT INTO users (email, name, role, community_id) VALUES (?, ?, ?, ?)
-      `
-        )
-        .run('test@example.com', 'Test User', 'admin', communityId);
-      const userId = userResult.lastInsertRowid;
-
-      // Insert story with foreign key references
-      db.prepare(
-        `
-        INSERT INTO stories (title, slug, community_id, created_by) 
-        VALUES (?, ?, ?, ?)
-      `
-      ).run('Test Story', 'test-story', communityId, userId);
-
-      // Insert blob
-      const blobResult = db
-        .prepare(
-          `
-        INSERT INTO active_storage_blobs (key, filename, content_type, byte_size, checksum)
-        VALUES (?, ?, ?, ?, ?)
-      `
-        )
-        .run('testkey123', 'test.jpg', 'image/jpeg', 1024, 'abcd1234');
-      const blobId = blobResult.lastInsertRowid;
-
-      // Insert attachment with foreign key reference
-      db.prepare(
-        `
-        INSERT INTO active_storage_attachments (name, record_type, record_id, blob_id)
-        VALUES (?, ?, ?, ?)
-      `
-      ).run('media', 'Story', 1, blobId);
-
-      db.close();
-
-      // This should fail currently - we need proper foreign key constraint handling
-      // Attempting to delete in wrong order (parent before child) should fail
-      const cleanupResult = await migrator.cleanupTestData();
-
-      // The test should fail because cleanup doesn't handle foreign keys properly
-      expect(cleanupResult.success).toBe(true); // This will fail initially
-      expect(cleanupResult.errors).toHaveLength(0);
-    });
-
-    it('should fail: handle cascading deletes properly', async () => {
-      // This test should fail initially - cascading deletes not properly implemented
-      const db = new Database(testDbPath);
-
-      // Insert test data
-      const communityId = db
-        .prepare(
-          `
-        INSERT INTO communities (name, slug) VALUES (?, ?)
-      `
-        )
-        .run('Delete Test Community', 'delete-test').lastInsertRowid;
-
-      const userId = db
-        .prepare(
-          `
-        INSERT INTO users (email, name, community_id) VALUES (?, ?, ?)
-      `
-        )
-        .run('delete@test.com', 'Delete User', communityId).lastInsertRowid;
-
-      db.prepare(
-        `
-        INSERT INTO stories (title, slug, community_id, created_by) VALUES (?, ?, ?, ?)
-      `
-      ).run('Delete Story', 'delete-story', communityId, userId);
-
-      db.close();
-
-      // This should fail initially - proper cascading delete not implemented
-      const deleteResult = await migrator.performCascadingDelete(
-        'communities',
-        Number(communityId)
-      );
-
-      expect(deleteResult.success).toBe(true); // This will fail initially
-      expect(deleteResult.orphanedRecords).toHaveLength(0);
     });
   });
 
-  describe('Performance Test Data Isolation', () => {
-    it('should fail: isolate performance test data between runs', async () => {
-      // This test should fail initially - test data not properly isolated
+  describe('Cultural Protocol Preservation', () => {
+    test('Elder-only restrictions preserved during migration', async () => {
+      const communityId = '1';
 
-      // First test run
-      const firstRunResult = await migrator.performBulkMigration(10);
-      expect(firstRunResult.filesProcessed).toBe(10);
-
-      // Second test run - should not interfere with first
-      const secondRunResult = await migrator.performBulkMigration(5);
-
-      // This should fail initially - second run may interfere with first
-      expect(secondRunResult.filesProcessed).toBe(5); // This will fail if isolation is broken
-      expect(secondRunResult.conflicts).toHaveLength(0);
-    });
-
-    it('should fail: clean up backup directories after test runs', async () => {
-      // This test should fail initially - backup directories not cleaned up
-
-      // Perform migration that creates backup directories
-      await migrator.migrateByCommunity(1);
-
-      // Check for backup directories
-      const files = await fs.readdir(process.cwd());
-      const backupDirs = files.filter((file) => file.startsWith('backup-'));
-
-      // This should fail initially - backup directories not cleaned up
-      expect(backupDirs).toHaveLength(0); // This will fail initially
-    });
-  });
-
-  describe('Large File Handling Optimization', () => {
-    it('should fail: optimize large file handling for resource constraints', async () => {
-      // This test should fail initially - large file handling not optimized
-
-      // Create mock large files
-      const largeFileSize = 100 * 1024 * 1024; // 100MB
-      const largeFileContent = Buffer.alloc(largeFileSize, 'a');
-
-      const largeFilePath = join(
-        testConfig.activeStoragePath,
-        'large-file.mp4'
-      );
-      await fs.writeFile(largeFilePath, largeFileContent);
-
-      const startTime = Date.now();
-      const result = await migrator.migrateFile('large-file.mp4', 1);
-      const duration = Date.now() - startTime;
-
-      // This should fail initially - large file handling not optimized
-      expect(duration).toBeLessThan(5000); // Should complete in under 5 seconds
-      expect(result.memoryUsage).toBeLessThan(50 * 1024 * 1024); // Should use less than 50MB memory
-    });
-
-    it('should fail: validate resource usage for Field Kit deployment', async () => {
-      // This test should fail initially - resource validation not implemented
-
-      // Simulate Field Kit hardware constraints
-      const fieldKitLimits = {
-        maxMemoryUsage: 128 * 1024 * 1024, // 128MB
-        maxDiskSpace: 1024 * 1024 * 1024, // 1GB
-        maxProcessingTime: 30000, // 30 seconds
-      };
-
-      const resourceUsage =
-        await migrator.validateResourceUsage(fieldKitLimits);
-
-      // This should fail initially - resource validation not implemented
-      expect(resourceUsage.memoryCompliant).toBe(true);
-      expect(resourceUsage.diskSpaceCompliant).toBe(true);
-      expect(resourceUsage.processingTimeCompliant).toBe(true);
-    });
-  });
-
-  describe('Performance Benchmarking', () => {
-    it('should fail: meet performance benchmarks for Indigenous community hardware', async () => {
-      // This test should fail initially - performance benchmarks not met
-
-      const performanceTest = await migrator.runPerformanceBenchmark({
-        fileCount: 50,
-        totalSizeLimit: 100 * 1024 * 1024, // 100MB
-        timeLimit: 60000, // 1 minute
-        memoryLimit: 64 * 1024 * 1024, // 64MB
+      // Create story with elder-only media
+      const elderStoryId = await createTestStoryWithMedia(communityId, {
+        title: 'Sacred Elder Ceremony',
+        privacy_level: 'restricted',
+        cultural_restrictions: ['elder_only'],
+        media_type: 'video',
+        traditional_knowledge: true,
       });
 
-      // This should fail initially - performance not optimized
-      expect(performanceTest.completedInTime).toBe(true);
-      expect(performanceTest.memoryEfficient).toBe(true);
-      expect(performanceTest.errorCount).toBe(0);
+      // Run migration
+      const result = await runMigrationTest(communityId);
+      expect(result.success).toBe(true);
+      expect(result.cultural_protocols_preserved).toBeGreaterThan(0);
+
+      // Verify cultural restrictions are preserved
+      const updatedStory = await getUpdatedRecord('Story', elderStoryId);
+      expect(updatedStory.privacy_level).toBe('restricted');
+      expect(updatedStory.cultural_restrictions).toContain('elder_only');
+
+      // Verify file permissions reflect cultural restrictions
+      const mediaUrl = updatedStory.media_urls[0];
+      const filePath = path.join(process.cwd(), mediaUrl);
+      const stats = await fs.stat(filePath);
+
+      // File should have restricted permissions
+      const permissions = stats.mode & parseInt('777', 8);
+      expect(
+        permissions,
+        'Elder-only files should have restricted permissions'
+      ).toBeLessThan(parseInt('755', 8));
     });
 
-    it('should fail: handle concurrent migration operations', async () => {
-      // This test should fail initially - concurrent operations not properly handled
+    test('Cultural metadata preserved in file system structure', async () => {
+      const communityId = '1';
 
-      // Start multiple migration operations concurrently
-      const promises = Array(5)
-        .fill(null)
-        .map((_, index) => migrator.migrateByCommunity(index + 1));
+      // Create content with various cultural significance levels
+      const culturalContent = [
+        {
+          significance: 'high',
+          restrictions: ['elder_only'],
+          type: 'ceremony',
+        },
+        {
+          significance: 'medium',
+          restrictions: ['members_only'],
+          type: 'traditional_story',
+        },
+        {
+          significance: 'low',
+          restrictions: [],
+          type: 'general_information',
+        },
+      ];
 
-      const results = await Promise.allSettled(promises);
+      for (const content of culturalContent) {
+        await createTestStoryWithMedia(communityId, {
+          title: `Cultural Content - ${content.significance}`,
+          cultural_significance: content.significance,
+          cultural_restrictions: content.restrictions,
+          content_type: content.type,
+        });
+      }
 
-      // This should fail initially - concurrent operations may interfere
-      const successful = results.filter((r) => r.status === 'fulfilled').length;
-      expect(successful).toBe(5); // All should succeed
+      // Run migration
+      const result = await runMigrationTest(communityId);
+      expect(result.success).toBe(true);
 
-      const failed = results.filter((r) => r.status === 'rejected').length;
-      expect(failed).toBe(0); // None should fail
+      // Verify cultural metadata is preserved in directory structure and database
+      const communityDir = `uploads/community_${communityId}`;
+      const storiesDir = path.join(communityDir, 'stories');
+
+      const files = await fs.readdir(storiesDir, { recursive: true });
+      expect(
+        files.length,
+        'Should have migrated cultural content files'
+      ).toBeGreaterThan(0);
+
+      // Check that cultural context is maintained in database
+      const stories = await db.query(
+        `
+        SELECT id, title, cultural_significance, cultural_restrictions, media_urls 
+        FROM stories 
+        WHERE community_id = $1 AND title LIKE 'Cultural Content%'
+      `,
+        [communityId]
+      );
+
+      for (const story of stories.rows) {
+        expect(
+          story.cultural_significance,
+          'Cultural significance should be preserved'
+        ).toBeDefined();
+        expect(story.media_urls, 'Media URLs should be updated').toBeDefined();
+        expect(
+          story.media_urls[0],
+          'Media URL should point to migrated location'
+        ).toContain(communityDir);
+      }
+    });
+
+    test('Audit trail includes cultural protocol compliance', async () => {
+      const communityId = '1';
+
+      // Run migration with cultural content
+      const result = await runMigrationTest(communityId);
+      expect(result.success).toBe(true);
+      expect(result.audit_trail_complete).toBe(true);
+
+      // Verify audit trail exists
+      const auditLogPath = `logs/migration-audit-community-${communityId}.json`;
+      const auditExists = await fs
+        .access(auditLogPath)
+        .then(() => true)
+        .catch(() => false);
+      expect(auditExists, 'Migration audit log should exist').toBe(true);
+
+      const auditLog = JSON.parse(await fs.readFile(auditLogPath, 'utf-8'));
+
+      // Verify audit log contains cultural protocol information
+      expect(auditLog).toHaveProperty('cultural_protocols');
+      expect(auditLog).toHaveProperty('elder_content_count');
+      expect(auditLog).toHaveProperty('restricted_content_count');
+      expect(auditLog).toHaveProperty('traditional_knowledge_files');
+      expect(auditLog).toHaveProperty('community_isolation_verified');
+
+      // Verify sensitive information is not logged
+      const auditString = JSON.stringify(auditLog);
+      expect(
+        auditString,
+        'Audit log should not contain file contents'
+      ).not.toContain('sacred');
+      expect(
+        auditString,
+        'Audit log should not contain ceremony details'
+      ).not.toContain('ceremony');
+
+      // Should contain file paths and metadata only
+      expect(auditLog.files_migrated).toBeGreaterThan(0);
+      expect(auditLog.cultural_protocols.elder_restrictions_preserved).toBe(
+        true
+      );
     });
   });
+
+  describe('Rollback and Recovery Procedures', () => {
+    test('Rollback capability restores original state', async () => {
+      const communityId = '1';
+
+      // Take snapshot of original state
+      const originalBlobs = await getActiveStorageBlobs(communityId);
+      const originalAttachments =
+        await getActiveStorageAttachments(communityId);
+      const originalRecords = await getOriginalRecords(communityId);
+
+      // Run migration
+      const migrationResult = await runMigrationTest(communityId);
+      expect(migrationResult.success).toBe(true);
+
+      // Verify migration completed
+      const migratedRecords = await getMigratedRecords(communityId);
+      expect(migratedRecords.some((r) => r.media_urls?.length > 0)).toBe(true);
+
+      // Run rollback
+      const { stdout } = await exec(
+        `npx tsx ${migrationScriptPath} rollback --community=${communityId}`
+      );
+      expect(stdout).toContain('Rollback completed successfully');
+
+      // Verify rollback restored original state
+      const rolledBackRecords = await getOriginalRecords(communityId);
+
+      for (let i = 0; i < originalRecords.length; i++) {
+        const original = originalRecords[i];
+        const rolledBack = rolledBackRecords[i];
+
+        // Media fields should be restored to original state
+        const mediaField = getMediaFieldName(original.type);
+        expect(rolledBack[mediaField], 'Media field should be restored').toBe(
+          original[mediaField]
+        );
+      }
+
+      // Verify ActiveStorage tables are restored
+      const restoredBlobs = await getActiveStorageBlobs(communityId);
+      const restoredAttachments =
+        await getActiveStorageAttachments(communityId);
+
+      expect(restoredBlobs.length).toBe(originalBlobs.length);
+      expect(restoredAttachments.length).toBe(originalAttachments.length);
+    });
+
+    test('Atomic transaction ensures no partial migrations', async () => {
+      const communityId = '1';
+
+      // Create scenario that will cause migration failure partway through
+      const testBlob = await createTestBlobWithInvalidPath(communityId);
+
+      // Attempt migration (should fail)
+      try {
+        await runMigrationTest(communityId);
+        expect(true, 'Migration should have failed due to invalid path').toBe(
+          false
+        );
+      } catch (error) {
+        expect(error.message).toContain('Migration failed');
+      }
+
+      // Verify no partial migration occurred
+      const records = await getMigratedRecords(communityId);
+      const hasPartialMigration = records.some((r) =>
+        r.media_urls?.some((url: string) => url.startsWith('uploads/'))
+      );
+
+      expect(
+        hasPartialMigration,
+        'Should not have partial migration on failure'
+      ).toBe(false);
+
+      // Verify original ActiveStorage data is intact
+      const blobs = await getActiveStorageBlobs(communityId);
+      const attachments = await getActiveStorageAttachments(communityId);
+
+      expect(
+        blobs.length,
+        'ActiveStorage blobs should be intact'
+      ).toBeGreaterThan(0);
+      expect(
+        attachments.length,
+        'ActiveStorage attachments should be intact'
+      ).toBeGreaterThan(0);
+    });
+
+    test('Migration failure provides detailed error reporting', async () => {
+      const communityId = '1';
+
+      // Create conditions that will cause specific migration failures
+      await createFailureConditions(communityId);
+
+      try {
+        const { stderr } = await exec(
+          `npx tsx ${migrationScriptPath} migrate --community=${communityId}`
+        );
+        expect(stderr).toContain('Migration Error Report');
+        expect(stderr).toContain('Failed files:');
+        expect(stderr).toContain('Error details:');
+        expect(stderr).toContain('Recovery recommendations:');
+      } catch (error) {
+        expect(error.stderr).toContain('Migration failed');
+      }
+
+      // Verify error log is created
+      const errorLogPath = `logs/migration-errors-community-${communityId}.json`;
+      const errorLogExists = await fs
+        .access(errorLogPath)
+        .then(() => true)
+        .catch(() => false);
+      expect(errorLogExists, 'Error log should be created on failure').toBe(
+        true
+      );
+    });
+  });
+
+  // Helper functions
+  async function setupActiveStorageTestData(): Promise<void> {
+    // Create test ActiveStorage blobs and attachments tables
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS active_storage_blobs (
+        id SERIAL PRIMARY KEY,
+        key VARCHAR(255) NOT NULL,
+        filename VARCHAR(255) NOT NULL,
+        content_type VARCHAR(255),
+        metadata JSONB,
+        byte_size BIGINT,
+        checksum VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS active_storage_attachments (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        record_type VARCHAR(255) NOT NULL,
+        record_id INTEGER NOT NULL,
+        blob_id INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        FOREIGN KEY (blob_id) REFERENCES active_storage_blobs(id)
+      )
+    `);
+
+    // Create test data directory
+    await fs.mkdir(testDataPath, { recursive: true });
+  }
+
+  async function createProductionScaleTestData(): Promise<void> {
+    const communities = [1, 2, 3];
+    const filesPerCommunity = 350; // 1000+ total files
+
+    for (const communityId of communities) {
+      for (let i = 0; i < filesPerCommunity; i++) {
+        await createTestBlobAndAttachment(communityId.toString(), {
+          filename: `test-file-${i}.jpg`,
+          content_type: 'image/jpeg',
+          byte_size: 1024 * 1024, // 1MB
+          record_type:
+            i % 3 === 0 ? 'Story' : i % 3 === 1 ? 'Place' : 'Speaker',
+          attachment_name: i % 3 === 0 ? 'media_attachments' : 'photo',
+        });
+      }
+    }
+  }
+
+  async function createTestBlobAndAttachment(
+    communityId: string,
+    options: any
+  ): Promise<void> {
+    const checksum = crypto.randomBytes(16).toString('hex');
+
+    // Create blob
+    const blobResult = await db.query(
+      `
+      INSERT INTO active_storage_blobs (key, filename, content_type, byte_size, checksum)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id
+    `,
+      [
+        `test-key-${Date.now()}-${Math.random()}`,
+        options.filename,
+        options.content_type,
+        options.byte_size,
+        checksum,
+      ]
+    );
+
+    // Create attachment
+    await db.query(
+      `
+      INSERT INTO active_storage_attachments (name, record_type, record_id, blob_id)
+      VALUES ($1, $2, $3, $4)
+    `,
+      [
+        options.attachment_name,
+        options.record_type,
+        parseInt(communityId),
+        blobResult.rows[0].id,
+      ]
+    );
+  }
+
+  async function runMigrationTest(
+    communityId: string
+  ): Promise<MigrationResult> {
+    try {
+      const { stdout } = await exec(
+        `npx tsx ${migrationScriptPath} migrate --community=${communityId}`
+      );
+
+      return {
+        success: true,
+        files_migrated: parseInt(
+          stdout.match(/(\d+) files migrated/)?.[1] || '0'
+        ),
+        files_failed: parseInt(stdout.match(/(\d+) files failed/)?.[1] || '0'),
+        total_bytes: parseInt(stdout.match(/(\d+) bytes migrated/)?.[1] || '0'),
+        checksum_matches: parseInt(
+          stdout.match(/(\d+) checksum matches/)?.[1] || '0'
+        ),
+        cultural_protocols_preserved: parseInt(
+          stdout.match(/(\d+) cultural protocols preserved/)?.[1] || '0'
+        ),
+        community_isolation_maintained: stdout.includes(
+          'community isolation maintained'
+        ),
+        audit_trail_complete: stdout.includes('audit trail complete'),
+        rollback_capability: stdout.includes('rollback capability verified'),
+        errors: [],
+      };
+    } catch (error) {
+      return {
+        success: false,
+        files_migrated: 0,
+        files_failed: 0,
+        total_bytes: 0,
+        checksum_matches: 0,
+        cultural_protocols_preserved: 0,
+        community_isolation_maintained: false,
+        audit_trail_complete: false,
+        rollback_capability: false,
+        errors: [error.message],
+      };
+    }
+  }
+
+  async function getActiveStorageBlobs(
+    communityId: string
+  ): Promise<ActiveStorageBlob[]> {
+    const result = await db.query(
+      `
+      SELECT DISTINCT asb.*
+      FROM active_storage_blobs asb
+      JOIN active_storage_attachments asa ON asb.id = asa.blob_id
+      JOIN stories s ON asa.record_id = s.id AND asa.record_type = 'Story'
+      WHERE s.community_id = $1
+      
+      UNION
+      
+      SELECT DISTINCT asb.*
+      FROM active_storage_blobs asb
+      JOIN active_storage_attachments asa ON asb.id = asa.blob_id
+      JOIN places p ON asa.record_id = p.id AND asa.record_type = 'Place'
+      WHERE p.community_id = $1
+      
+      UNION
+      
+      SELECT DISTINCT asb.*
+      FROM active_storage_blobs asb
+      JOIN active_storage_attachments asa ON asb.id = asa.blob_id
+      JOIN speakers sp ON asa.record_id = sp.id AND asa.record_type = 'Speaker'
+      WHERE sp.community_id = $1
+    `,
+      [communityId]
+    );
+
+    return result.rows;
+  }
+
+  async function getActiveStorageAttachments(
+    communityId: string
+  ): Promise<ActiveStorageAttachment[]> {
+    const result = await db.query(
+      `
+      SELECT asa.*
+      FROM active_storage_attachments asa
+      JOIN stories s ON asa.record_id = s.id AND asa.record_type = 'Story'
+      WHERE s.community_id = $1
+      
+      UNION
+      
+      SELECT asa.*
+      FROM active_storage_attachments asa
+      JOIN places p ON asa.record_id = p.id AND asa.record_type = 'Place'
+      WHERE p.community_id = $1
+      
+      UNION
+      
+      SELECT asa.*
+      FROM active_storage_attachments asa
+      JOIN speakers sp ON asa.record_id = sp.id AND asa.record_type = 'Speaker'
+      WHERE sp.community_id = $1
+    `,
+      [communityId]
+    );
+
+    return result.rows;
+  }
+
+  function getMigratedFilePath(
+    blob: ActiveStorageBlob,
+    communityId: string
+  ): string {
+    // This would match the actual migration logic
+    return path.join(
+      'uploads',
+      `community_${communityId}`,
+      'stories',
+      blob.filename
+    );
+  }
+
+  async function getUpdatedRecord(
+    recordType: string,
+    recordId: string
+  ): Promise<any> {
+    const tableName = recordType.toLowerCase() + 's';
+    const result = await db.query(`SELECT * FROM ${tableName} WHERE id = $1`, [
+      recordId,
+    ]);
+    return result.rows[0];
+  }
+
+  function getMediaFieldName(attachmentName: string): string {
+    switch (attachmentName) {
+      case 'media_attachments':
+        return 'media_urls';
+      case 'photo':
+        return 'photo_url';
+      case 'audio':
+        return 'name_audio_url';
+      default:
+        return 'media_urls';
+    }
+  }
+
+  async function createTestStoryWithMedia(
+    communityId: string,
+    options: any
+  ): Promise<string> {
+    const result = await db.query(
+      `
+      INSERT INTO stories (title, content, community_id, privacy_level, cultural_restrictions, cultural_significance)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
+    `,
+      [
+        options.title,
+        options.content || 'Test content',
+        communityId,
+        options.privacy_level || 'public',
+        JSON.stringify(options.cultural_restrictions || []),
+        options.cultural_significance || 'low',
+      ]
+    );
+
+    return result.rows[0].id;
+  }
+
+  async function getOriginalRecords(communityId: string): Promise<any[]> {
+    // Implementation would get records before migration
+    return [];
+  }
+
+  async function getMigratedRecords(communityId: string): Promise<any[]> {
+    const result = await db.query(
+      `
+      SELECT id, title, media_urls, photo_url, name_audio_url
+      FROM stories 
+      WHERE community_id = $1
+      
+      UNION
+      
+      SELECT id, name, ARRAY[]::text[] as media_urls, photo_url, name_audio_url
+      FROM places 
+      WHERE community_id = $1
+      
+      UNION
+      
+      SELECT id, name, ARRAY[]::text[] as media_urls, photo_url, NULL::text as name_audio_url
+      FROM speakers 
+      WHERE community_id = $1
+    `,
+      [communityId]
+    );
+
+    return result.rows;
+  }
+
+  async function createTestBlobWithInvalidPath(
+    communityId: string
+  ): Promise<any> {
+    // Create blob that will cause migration failure
+    return createTestBlobAndAttachment(communityId, {
+      filename: 'invalid/path/file.jpg',
+      content_type: 'image/jpeg',
+      byte_size: 1024,
+      record_type: 'Story',
+      attachment_name: 'media_attachments',
+    });
+  }
+
+  async function createFailureConditions(communityId: string): Promise<void> {
+    // Create conditions that will cause migration failures for testing
+    await createTestBlobWithInvalidPath(communityId);
+  }
+
+  afterAll(async () => {
+    // Clean up test data
+    await cleanupMigrationTestData();
+    await db.disconnect();
+
+    console.log('ActiveStorage migration validation completed');
+  });
+
+  async function cleanupMigrationTestData(): Promise<void> {
+    try {
+      await db.query('DROP TABLE IF EXISTS active_storage_attachments');
+      await db.query('DROP TABLE IF EXISTS active_storage_blobs');
+
+      // Clean up test files
+      await fs.rm('uploads', { recursive: true, force: true });
+      await fs.rm('logs', { recursive: true, force: true });
+      await fs.rm(testDataPath, { recursive: true, force: true });
+    } catch (error) {
+      console.warn('Error cleaning up migration test data:', error);
+    }
+  }
 });

@@ -92,3 +92,12 @@ validation-results.json
 task.markdown
 TASK.md
 TODO.md
+
+# Local analysis files
+/depot.json
+/latest.dump
+/dump-analysis/
+/migration-analysis/
+
+# Serena IDE files
+/.serena/

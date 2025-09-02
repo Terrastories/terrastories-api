@@ -93,8 +93,8 @@ export async function publicApiRoutes(
         const { community_id } = params;
         const page = parseInt(query.page, 10);
         const limit = parseInt(query.limit, 10);
-        const storyRepository = new StoryRepository(database);
-        const fileRepository = new FileRepository(database);
+        const storyRepository = new StoryRepository(database as any);
+        const fileRepository = new FileRepository(database as any);
         const userRepository = new UserRepository(database);
         const storyService = new StoryService(
           storyRepository,
@@ -152,8 +152,8 @@ export async function publicApiRoutes(
       const { community_id, id } = request.params;
 
       try {
-        const storyRepository = new StoryRepository(database);
-        const fileRepository = new FileRepository(database);
+        const storyRepository = new StoryRepository(database as any);
+        const fileRepository = new FileRepository(database as any);
         const userRepository = new UserRepository(database);
         const storyService = new StoryService(
           storyRepository,

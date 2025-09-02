@@ -6,7 +6,11 @@ import {
   communitiesSqlite,
   usersSqlite,
   placesSqlite,
-  speakersSqlite 
+  speakersSqlite,
+  type Community,
+  type User,
+  type Place,
+  type Speaker
 } from './schema/index.js';
 import { getConfig } from '../shared/config/index.js';
 import { hashPassword } from '../services/password.service.js';
@@ -246,12 +250,12 @@ async function seedDatabase(): Promise<SeedData> {
 
     // Prepare seed data summary
     const seedData: SeedData = {
-      communities: testCommunities.map(c => ({
+      communities: testCommunities.map((c: Community) => ({
         id: c.id,
         name: c.name,
         slug: c.slug,
       })),
-      users: demoUsers.map(u => ({
+      users: demoUsers.map((u: User) => ({
         id: u.id,
         email: u.email,
         firstName: u.firstName,
@@ -259,12 +263,12 @@ async function seedDatabase(): Promise<SeedData> {
         role: u.role,
         communityId: u.communityId,
       })),
-      places: testPlaces.map(p => ({
+      places: testPlaces.map((p: Place) => ({
         id: p.id,
         name: p.name,
         communityId: p.communityId,
       })),
-      speakers: testSpeakers.map(s => ({
+      speakers: testSpeakers.map((s: Speaker) => ({
         id: s.id,
         name: s.name,
         communityId: s.communityId,

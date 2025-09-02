@@ -13,7 +13,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { PlaceService } from '../services/place.service.js';
 import { PlaceRepository } from '../repositories/place.repository.js';
-import { getDb } from '../db/index.js';
+import { getDb, type Database } from '../db/index.js';
 import {
   requireAuth,
   requireRole,
@@ -122,8 +122,7 @@ const PlaceIdSchema = z.object({
  */
 export async function placesRoutes(
   fastify: FastifyInstance,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { database?: any }
+  options?: { database?: Database }
 ) {
   // Initialize service - use provided database instance or default
   const database = options?.database || (await getDb());

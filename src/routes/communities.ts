@@ -16,7 +16,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { CommunityService } from '../services/community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
-import { getDb } from '../db/index.js';
+import { getDb, type Database } from '../db/index.js';
 import { storiesSqlite as storiesTable } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import {
@@ -81,8 +81,7 @@ const createCommunitySchema = z
 
 export async function communityRoutes(
   fastify: FastifyInstance,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { database?: any }
+  options?: { database?: Database }
 ) {
   // Initialize services
   const database = options?.database || (await getDb());

@@ -26,7 +26,7 @@ import {
 } from '../repositories/story.repository.js';
 import { FileRepository } from '../repositories/file.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
-import { getDb } from '../db/index.js';
+import { getDb, type Database } from '../db/index.js';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import {
   requireAuth,
@@ -102,8 +102,7 @@ const listStoriesQuerySchema = z.object({
 
 export default async function storiesRoutes(
   fastify: FastifyInstance,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { database?: any }
+  options?: { database?: Database }
 ) {
   const db = options?.database || (await getDb());
 

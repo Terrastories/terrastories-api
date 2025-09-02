@@ -23,7 +23,7 @@ import { PlaceRepository } from '../repositories/place.repository.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { FileRepository } from '../repositories/file.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
-import { getDb } from '../db/index.js';
+import { getDb, type Database } from '../db/index.js';
 import {
   toPublicStory,
   toPublicPlace,
@@ -36,8 +36,7 @@ import {
 
 export async function publicApiRoutes(
   fastify: FastifyInstance,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { database?: any }
+  options?: { database?: Database }
 ) {
   // Initialize database connection - use provided database instance or default
   const database = options?.database || (await getDb());

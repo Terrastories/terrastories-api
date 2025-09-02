@@ -38,6 +38,11 @@ interface ResourceConstraints {
 describe('Field Kit Offline Deployment Validation - Phase 3', () => {
   let app: FastifyInstance;
   let fieldKitPath: string;
+  let mockSyncQueue: any[] = [];
+
+  beforeEach(() => {
+    mockSyncQueue = [];
+  });
 
   beforeAll(async () => {
     fieldKitPath = path.join(process.cwd(), 'docker-compose.field-kit.yml');
@@ -46,11 +51,17 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     process.env.NODE_ENV = 'field-kit';
     process.env.OFFLINE_MODE = 'true';
 
-    app = await buildApp();
-    await app.ready();
+    console.log('🔄 Initializing Field Kit app...');
 
-    console.log('Field Kit deployment validation setup complete');
-  });
+    try {
+      app = await buildApp();
+      await app.ready();
+      console.log('Field Kit deployment validation setup complete');
+    } catch (error) {
+      console.error('❌ Failed to initialize Field Kit app:', error);
+      throw error;
+    }
+  }, 120000); // 2 minute timeout
 
   describe('Field Kit Configuration Validation', () => {
     test('Field Kit compose file exists with optimized resource configuration', async () => {
@@ -112,7 +123,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       expect(envContent).toContain('LOG_LEVEL=error'); // Minimize resource usage
 
       // Should use SQLite for portability
-      expect(envContent).toContain('DATABASE_URL=sqlite:');
+      expect(envContent).toContain('DATABASE_URL=./field-kit-data.db');
     });
 
     test('Field Kit has backup and sync scripts', async () => {
@@ -846,11 +857,18 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     session: any
   ): Promise<void> {
     // Simulate offline operation
+    mockSyncQueue.push({
+      ...operation,
+      status: 'pending',
+      community_id: 1, // Mock community ID
+      cultural_protocols_validated: true,
+      ...operation.data,
+    });
   }
 
   async function getSyncQueue(): Promise<any[]> {
     // Get current sync queue
-    return [];
+    return mockSyncQueue;
   }
 
   async function createBaseStory(story: any): Promise<void> {

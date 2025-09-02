@@ -345,19 +345,39 @@ export async function authRoutes(
 
         // Set user session using middleware helper
         setUserSession(request, userSession);
+        
+        // Save the session to ensure it's persisted
+        await new Promise((resolve, reject) => {
+          request.session.save((err: any) => {
+            if (err) reject(err);
+            else resolve(undefined);
+          });
+        });
+
+        // Get the session ID that was created by Fastify
+        const sessionId = request.session.sessionId || 'session-created';
+        
+        // The Fastify session plugin should automatically set the session cookie
+        // but let's also set our own sessionId cookie for compatibility with the workflow script
+        reply.setCookie('sessionId', sessionId, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'strict',
+          maxAge: 24 * 60 * 60 * 1000, // 24 hours
+          path: '/'
+        });
 
         // Remove sensitive data from response
-
         const { passwordHash, ...userResponse } = user;
 
-        // Return success response with user data (sessionId is handled by cookie)
+        // Return success response with user data
         return reply.status(200).send({
           user: {
             ...userResponse,
             createdAt: userResponse.createdAt.toISOString(),
             updatedAt: userResponse.updatedAt.toISOString(),
           },
-          sessionId: request.session.sessionId || 'session-created',
+          sessionId: sessionId,
         });
       } catch (error) {
         fastify.log.error({ error, url: request.url }, 'Login error');

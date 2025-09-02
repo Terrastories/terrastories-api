@@ -78,6 +78,7 @@ export default [
       'src/db/migrate.ts',
       'src/db/seed.ts',
       'src/db/index.ts',
+      'src/routes/public-api.ts',
     ],
     languageOptions: {
       ecmaVersion: 2022,

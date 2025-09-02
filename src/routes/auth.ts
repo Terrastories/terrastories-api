@@ -18,7 +18,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { UserService } from '../services/user.service.js';
 import { UserRepository } from '../repositories/user.repository.js';
-import { getDb } from '../db/index.js';
+import { getDb, type Database } from '../db/index.js';
 import {
   setUserSession,
   clearUserSession,
@@ -88,8 +88,7 @@ const loginSchema = z.object({
 
 export async function authRoutes(
   fastify: FastifyInstance,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { database?: any }
+  options?: { database?: Database }
 ) {
   // Initialize services - use provided database instance or default
   const database = options?.database || (await getDb());
@@ -348,7 +347,7 @@ export async function authRoutes(
         
         // Save the session to ensure it's persisted
         await new Promise((resolve, reject) => {
-          request.session.save((err: any) => {
+          request.session.save((err: Error | null) => {
             if (err) reject(err);
             else resolve(undefined);
           });

@@ -205,10 +205,10 @@ describe('Production Performance Validation - Phase 1', () => {
       const queryLog: Array<{ sql: string; duration: number }> = [];
 
       // Mock database query logging
-      const originalQuery = db.query.bind(db);
-      db.query = async function (sql: string, params?: any[]) {
+      const originalExecute = db.executeRaw.bind(db);
+      db.executeRaw = async function (sql: string) {
         const start = performance.now();
-        const result = await originalQuery(sql, params);
+        const result = await originalExecute(sql);
         const duration = performance.now() - start;
 
         queryLog.push({ sql, duration });
@@ -245,7 +245,7 @@ describe('Production Performance Validation - Phase 1', () => {
       ).toBeLessThanOrEqual(1);
 
       // Restore original query method
-      db.query = originalQuery;
+      db.executeRaw = originalExecute;
     });
 
     test('Database indexes are properly utilized for common queries', async () => {

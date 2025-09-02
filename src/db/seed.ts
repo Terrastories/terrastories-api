@@ -53,7 +53,6 @@ async function seedDatabase(): Promise<SeedData> {
 
   // Determine database type and create connection
   let db: any;
-  let isPostgres = false;
 
   if (config.database.url.startsWith('postgresql://') || config.database.url.startsWith('postgres://')) {
     // PostgreSQL connection would go here

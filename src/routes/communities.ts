@@ -18,7 +18,7 @@ import { CommunityService } from '../services/community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { getDb } from '../db/index.js';
 import { storiesSqlite as storiesTable } from '../db/schema/index.js';
-import { inArray, and, eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import {
   requireAuth,
   requireRole,

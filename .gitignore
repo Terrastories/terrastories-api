@@ -101,3 +101,6 @@ TODO.md
 
 # Serena IDE files
 /.serena/
+
+# Backup directories
+backup-*/

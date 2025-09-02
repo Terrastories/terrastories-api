@@ -119,7 +119,7 @@ export class CommunityRepository {
     this.database = db as any; // TODO: Implement proper database abstraction layer
   }
 
-  private database: any; // Internal database instance for drizzle operations
+  private database: Database; // Internal database instance for drizzle operations
 
   /**
    * Generate a unique slug from community name

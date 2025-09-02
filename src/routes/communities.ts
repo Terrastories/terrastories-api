@@ -17,6 +17,8 @@ import { z } from 'zod';
 import { CommunityService } from '../services/community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { getDb } from '../db/index.js';
+import { storiesSqlite as storiesTable } from '../db/schema/index.js';
+import { inArray, and, eq } from 'drizzle-orm';
 import {
   requireAuth,
   requireRole,
@@ -480,6 +482,197 @@ export async function communityRoutes(
           });
         }
 
+        return reply.status(500).send({
+          error: 'Internal server error',
+          statusCode: 500,
+        });
+      }
+    }
+  );
+
+  /**
+   * Get Community Stories Endpoint
+   * GET /communities/:id/stories
+   */
+  fastify.get(
+    '/communities/:id/stories',
+    {
+      preHandler: [requireAuth],
+      schema: {
+        description: 'Get stories for a specific community',
+        tags: ['Communities', 'Stories'],
+        params: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', pattern: '^[0-9]+$' },
+          },
+          required: ['id'],
+        },
+        response: {
+          200: {
+            description: 'Stories retrieved successfully',
+            type: 'object',
+            properties: {
+              data: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'number' },
+                    title: { type: 'string' },
+                    community_id: { type: 'number' },
+                  },
+                },
+              },
+            },
+          },
+          404: {
+            description: 'Community not found',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const { id } = request.params as { id: string };
+        const communityId = parseInt(id, 10);
+        // @ts-ignore
+        const user = request.user;
+
+        const conditions = [eq(storiesTable.communityId, communityId)];
+
+        if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) {
+          // @ts-ignore
+          conditions.push(
+            inArray(storiesTable.privacy_level, ['public', 'members_only'])
+          );
+        }
+
+        const stories = await database
+          .select()
+          .from(storiesTable)
+          .where(and(...conditions));
+
+        return reply.status(200).send({ data: stories });
+      } catch (error) {
+        fastify.log.error(
+          { error, url: request.url },
+          'Get community stories error'
+        );
+        return reply.status(500).send({
+          error: 'Internal server error',
+          statusCode: 500,
+        });
+      }
+    }
+  );
+
+  /**
+   * Get Community Story by ID Endpoint
+   * GET /communities/:id/stories/:storyId
+   */
+  fastify.get(
+    '/communities/:id/stories/:storyId',
+    {
+      preHandler: [requireAuth],
+      schema: {
+        description: 'Get a specific story for a community',
+        tags: ['Communities', 'Stories'],
+        params: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', pattern: '^[0-9]+$' },
+            storyId: { type: 'string', pattern: '^[0-9]+$' },
+          },
+          required: ['id', 'storyId'],
+        },
+        response: {
+          200: {
+            description: 'Story retrieved successfully',
+            type: 'object',
+            properties: {
+              data: {
+                type: 'object',
+                properties: {
+                  id: { type: 'number' },
+                  title: { type: 'string' },
+                  community_id: { type: 'number' },
+                },
+              },
+            },
+          },
+          404: {
+            description: 'Story not found',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const { id, storyId } = request.params as {
+          id: string;
+          storyId: string;
+        };
+        const communityId = parseInt(id, 10);
+        const sId = parseInt(storyId, 10);
+        // @ts-ignore
+        const user = request.user;
+
+        const storyResult = await database
+          .select()
+          .from(storiesTable)
+          .where(
+            and(
+              eq(storiesTable.communityId, communityId),
+              eq(storiesTable.id, sId)
+            )
+          );
+
+        if (storyResult.length === 0) {
+          return reply
+            .status(404)
+            .send({ error: 'Story not found', statusCode: 404 });
+        }
+
+        const story = storyResult[0];
+
+        // @ts-ignore
+        if (user && user.role === 'super_admin') {
+          return reply.status(403).send({
+            error: 'super admin cannot access community cultural data',
+            statusCode: 403,
+          });
+        }
+
+        // @ts-ignore
+        if (
+          story.privacy_level === 'restricted' &&
+          story.cultural_restrictions.includes('elder_only')
+        ) {
+          // @ts-ignore
+          if (!user || user.role !== 'elder') {
+            return reply
+              .status(403)
+              .send({ error: 'Elder access required', statusCode: 403 });
+          }
+        }
+
+        return reply.status(200).send({ data: story });
+      } catch (error) {
+        fastify.log.error(
+          { error, url: request.url },
+          'Get community story error'
+        );
         return reply.status(500).send({
           error: 'Internal server error',
           statusCode: 500,

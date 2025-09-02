@@ -657,14 +657,55 @@ Context: docs/5-MEDIA_HANDLING.md, docs/7-DEPLOYMENT.md
 - [ ] Production authentication tests pass
 - [ ] Performance tests can authenticate concurrent users
 
+### **Issue #30: Enhance schema with critical Rails compatibility fields** ❌
+
+**Status**: ❌ **PENDING**
+**Priority**: HIGH
+**Discovered**: Schema comparison revealed critical missing Rails fields needed for full compatibility
+
+**Problem**:
+
+- Missing THEMES table completely (critical for map visualization)
+- Users table lacks authentication fields (password reset, session tracking)
+- Stories table missing interview metadata (date, location, interviewer)
+- Communities table missing configuration flags (country, beta)
+- Places table missing type classification field
+
+**Context**: Analysis documented in `@docs/SCHEMA_COMPARISON_REPORT.md`
+
+**Solution - Phase 1 (Critical)**:
+
+- Add complete THEMES table with all Rails fields
+- Enhance USERS table with authentication fields:
+  - `resetPasswordToken`, `resetPasswordSentAt`, `rememberCreatedAt`
+  - `signInCount`, `lastSignInAt`, `currentSignInIp`
+- Add interview metadata to STORIES table:
+  - `dateInterviewed`, `interviewLocationId`, `interviewerId`
+
+**Solution - Phase 2 (Important)**:
+
+- Add `country` and `beta` fields to COMMUNITIES table
+- Add `typeOfPlace` field to PLACES table
+- Add `birthplaceId` field to SPEAKERS table
+
+**Acceptance Criteria**:
+
+- [ ] THEMES table created with complete Rails schema
+- [ ] All user authentication fields added with proper validation
+- [ ] Story interview metadata fields added with foreign key constraints
+- [ ] Migration scripts updated to handle new schema changes
+- [ ] All new fields have proper Zod validation schemas
+- [ ] Existing tests updated to work with enhanced schema
+- [ ] Community configuration fields added for deployment flexibility
+
 ## **Updated Progress Summary**
 
 - **Phase 1-6**: ✅ **100%** Rails Migration Complete (23/23 items)
-- **Phase 7**: ❌ **0%** Production Readiness (0/3 items)
+- **Phase 7**: ❌ **0%** Production Readiness (0/4 items)
 
 **Overall Status**: ✅ **Rails Migration Complete** + ⚠️ **Production Gaps Identified**
 
-**Next Priority**: Address Phase 7 items for full production operational status
+**Next Priority**: Issue #30 (Schema Enhancement) - HIGH priority for full Rails compatibility
 
 ## **Usage with Workflow**
 

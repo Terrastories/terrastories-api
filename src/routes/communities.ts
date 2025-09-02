@@ -547,10 +547,8 @@ export async function communityRoutes(
         const conditions = [eq(storiesTable.communityId, communityId)];
 
         if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) {
-          // @ts-ignore
-          conditions.push(
-            inArray(storiesTable.privacy_level, ['public', 'members_only'])
-          );
+          // Only show non-restricted stories to non-admin users
+          conditions.push(eq(storiesTable.isRestricted, false));
         }
 
         const stories = await database

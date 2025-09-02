@@ -17,7 +17,7 @@ import { z } from 'zod';
 import { CommunityService } from '../services/community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { getDb, type Database } from '../db/index.js';
-import { storiesSqlite as storiesTable } from '../db/schema/index.js';
+import { storiesSqlite, storiesPg } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import {
   requireAuth,
@@ -87,6 +87,11 @@ export async function communityRoutes(
   const database = options?.database || (await getDb());
   const communityRepository = new CommunityRepository(database);
   const communityService = new CommunityService(communityRepository);
+
+  // Helper to get correct stories table
+  const getStoriesTable = () => {
+    return 'execute' in database ? storiesPg : storiesSqlite;
+  };
 
   /**
    * Create Community Endpoint
@@ -543,6 +548,7 @@ export async function communityRoutes(
         // @ts-ignore
         const user = request.user;
 
+        const storiesTable = getStoriesTable();
         const conditions = [eq(storiesTable.communityId, communityId)];
 
         if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) {
@@ -550,7 +556,7 @@ export async function communityRoutes(
           conditions.push(eq(storiesTable.isRestricted, false));
         }
 
-        const stories = await database
+        const stories = await (database as any)
           .select()
           .from(storiesTable)
           .where(and(...conditions));
@@ -625,7 +631,8 @@ export async function communityRoutes(
         // @ts-ignore
         const user = request.user;
 
-        const storyResult = await database
+        const storiesTable = getStoriesTable();
+        const storyResult = await (database as any)
           .select()
           .from(storiesTable)
           .where(

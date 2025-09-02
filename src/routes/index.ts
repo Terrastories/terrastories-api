@@ -18,7 +18,8 @@ export async function registerRoutes(
   app: FastifyInstance,
   options?: RegisterRoutesOptions
 ) {
-  await app.register(healthRoute);
+  // Health check route (no authentication required)
+  await app.register(healthRoute, { prefix: '/api/v1', ...options });
 
   // Public API routes (no authentication required)
   await app.register(publicApiRoutes, { prefix: '/api', ...options });
@@ -35,5 +36,8 @@ export async function registerRoutes(
   await app.register(memberRoutes, { prefix: '/api/v1/member', ...options });
 
   // Super admin routes (system-level administrative endpoints)
-  await app.register(superAdminRoutes, { prefix: '/api/v1/super_admin', ...options });
+  await app.register(superAdminRoutes, {
+    prefix: '/api/v1/super_admin',
+    ...options,
+  });
 }

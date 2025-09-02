@@ -13,7 +13,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { SpeakerService } from '../services/speaker.service.js';
 import { SpeakerRepository } from '../repositories/speaker.repository.js';
-import { getDb } from '../db/index.js';
+import { getDb, type Database } from '../db/index.js';
 import {
   requireAuth,
   requireRole,
@@ -112,8 +112,7 @@ const SpeakerIdSchema = z.object({
  */
 export async function speakerRoutes(
   fastify: FastifyInstance,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { database?: any }
+  options?: { database?: Database }
 ) {
   // Initialize service
   const database = options?.database || (await getDb());

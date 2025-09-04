@@ -75,6 +75,53 @@ export async function publicApiRoutes(
       });
     }
   }
+
+  // GET /communities - List all communities
+  fastify.get<{
+    Querystring: { page?: string; limit?: string };
+  }>(
+    '/communities',
+    async (request, reply) => {
+      try {
+        // Parse query parameters
+        const query = PaginationQuerySchema.parse(request.query);
+        const page = parseInt(query.page, 10);
+        const limit = parseInt(query.limit, 10);
+
+        const communityRepository = new CommunityRepository(database);
+
+        // Get active communities directly from repository (simpler for public API)
+        const communities = await communityRepository.findAllActive();
+        
+        // Simple pagination on results
+        const startIndex = (page - 1) * limit;
+        const endIndex = startIndex + limit;
+        const paginatedCommunities = communities.slice(startIndex, endIndex);
+        
+        const result = {
+          data: paginatedCommunities,
+          page,
+          limit,
+          total: communities.length,
+        };
+
+        return {
+          data: result.data,
+          meta: {
+            page: result.page,
+            limit: result.limit, 
+            total: result.total,
+          },
+        };
+      } catch (error) {
+        console.error('Public communities listing error:', error);
+        return reply.status(500).send({
+          error: 'Internal server error',
+        });
+      }
+    }
+  );
+
   // GET /communities/:community_id/stories
   fastify.get<{
     Params: { community_id: string };

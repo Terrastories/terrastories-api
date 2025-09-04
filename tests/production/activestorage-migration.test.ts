@@ -141,23 +141,25 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
     test('Migration script has proper error handling and validation', async () => {
       // Test invalid community ID
       try {
-        await exec(`npx tsx ${migrationScriptPath} analyze --community=999999`);
+        await exec(`DATABASE_URL=:memory: npx tsx ${migrationScriptPath} analyze --community=999999`);
         expect(true, 'Should have thrown error for invalid community').toBe(
           false
         );
-      } catch (error) {
-        expect(error.stderr || error.stdout).toContain('Community not found');
+      } catch (error: any) {
+        const errorOutput = error.stderr || error.stdout || error.message || '';
+        expect(errorOutput).toContain('Community not found');
       }
 
       // Test missing required parameters
       try {
-        await exec(`npx tsx ${migrationScriptPath} migrate`);
+        await exec(`DATABASE_URL=:memory: npx tsx ${migrationScriptPath} migrate`);
         expect(
           true,
           'Should have thrown error for missing community parameter'
         ).toBe(false);
-      } catch (error) {
-        expect(error.stderr || error.stdout).toContain(
+      } catch (error: any) {
+        const errorOutput = error.stderr || error.stdout || error.message || '';
+        expect(errorOutput).toContain(
           '--community parameter is required'
         );
       }
@@ -518,9 +520,11 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
       const migratedRecords = await getMigratedRecords(communityId);
       expect(migratedRecords.some((r) => r.media_urls?.length > 0)).toBe(true);
 
-      // Run rollback
+      // Run rollback with backup path
+      const backupPath = path.join(testDataPath, 'backup-test');
+      await fs.mkdir(backupPath, { recursive: true });
       const { stdout } = await exec(
-        `npx tsx ${migrationScriptPath} rollback --community=${communityId}`
+        `DATABASE_URL=:memory: npx tsx ${migrationScriptPath} rollback --backup-path=${backupPath}`
       );
       expect(stdout).toContain('Rollback completed successfully');
 
@@ -648,6 +652,68 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
 
     // Create test data directory
     await fs.mkdir(testDataPath, { recursive: true });
+    
+    // Insert test ActiveStorage blobs for each community
+    const communities = [1, 2, 3];
+    for (const communityId of communities) {
+      // First, create the corresponding stories, places, and speakers records
+      // that the attachments will reference
+      await db.executeRaw(`
+        INSERT OR IGNORE INTO stories (id, title, description, slug, community_id, created_by, language, is_restricted)
+        VALUES (${communityId}, 'Test Story ${communityId}', 'Test story description', 'test-story-${communityId}', ${communityId}, 1, 'en', false)
+      `);
+      
+      await db.executeRaw(`
+        INSERT OR IGNORE INTO places (id, name, description, latitude, longitude, community_id)
+        VALUES (${communityId}, 'Test Place ${communityId}', 'Test place description', 45.0, -93.0, ${communityId})
+      `);
+      
+      await db.executeRaw(`
+        INSERT OR IGNORE INTO speakers (id, name, bio, community_id)
+        VALUES (${communityId}, 'Test Speaker ${communityId}', 'Test speaker bio', ${communityId})
+      `);
+      
+      // Also ensure communities and users exist for foreign key constraints
+      await db.executeRaw(`
+        INSERT OR IGNORE INTO communities (id, name, slug, description, cultural_settings, public_stories)
+        VALUES (${communityId}, 'Test Community ${communityId}', 'test-community-${communityId}', 'Test community', '{}', true)
+      `);
+      
+      await db.executeRaw(`
+        INSERT OR IGNORE INTO users (id, email, password_hash, first_name, last_name, role, community_id, is_active)
+        VALUES (1, 'admin@test.com', 'hashed_password', 'Test', 'Admin', 'admin', ${communityId}, true)
+      `);
+      
+      // Insert test blobs
+      await db.executeRaw(`
+        INSERT INTO active_storage_blobs (key, filename, content_type, metadata, byte_size, checksum)
+        VALUES 
+          ('test-story-image-${communityId}', 'story_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 1024, 'test-checksum-${communityId}a'),
+          ('test-story-audio-${communityId}', 'story_audio_${communityId}.mp3', 'audio/mpeg', '{"cultural_restrictions": {"elder_only": true}}', 2048, 'test-checksum-${communityId}b'),
+          ('test-place-image-${communityId}', 'place_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 512, 'test-checksum-${communityId}c')
+      `);
+      
+      // Get the blob IDs that were just inserted (assuming auto-increment starts from 1)
+      const baseId = (communityId - 1) * 3;
+      
+      // Insert test attachments linking blobs to stories/places
+      await db.executeRaw(`
+        INSERT INTO active_storage_attachments (name, record_type, record_id, blob_id)
+        VALUES 
+          ('image', 'Story', ${communityId}, ${baseId + 1}),
+          ('audio', 'Story', ${communityId}, ${baseId + 2}),
+          ('image', 'Place', ${communityId}, ${baseId + 3})
+      `);
+      
+      // Create test files in the storage directory
+      const storageDir = path.join(testDataPath, 'storage', 'community_' + communityId);
+      await fs.mkdir(storageDir, { recursive: true });
+      
+      // Create dummy test files
+      await fs.writeFile(path.join(storageDir, `story_image_${communityId}.jpg`), Buffer.from('fake-image-data'));
+      await fs.writeFile(path.join(storageDir, `story_audio_${communityId}.mp3`), Buffer.from('fake-audio-data'));
+      await fs.writeFile(path.join(storageDir, `place_image_${communityId}.jpg`), Buffer.from('fake-place-image'));
+    }
   }
 
   async function createProductionScaleTestData(): Promise<void> {
@@ -700,7 +766,7 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
   ): Promise<MigrationResult> {
     try {
       const { stdout } = await exec(
-        `npx tsx ${migrationScriptPath} migrate --community=${communityId}`
+        `DATABASE_URL=:memory: npx tsx ${migrationScriptPath} migrate --community=${communityId}`
       );
 
       return {

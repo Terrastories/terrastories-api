@@ -55,10 +55,24 @@ describe('Super Admin API', () => {
         communityId: testCommunityId,
       },
     });
-    const sessionCookie = superAdminLogin.cookies.find(
-      (cookie) => cookie.name === 'sessionId'
-    );
-    superAdminSessionId = sessionCookie?.value || '';
+    // Extract SIGNED session cookie from Set-Cookie header
+    // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
+    const setCookieHeader = superAdminLogin.headers['set-cookie'];
+    let superAdminSessionCookie = '';
+
+    if (Array.isArray(setCookieHeader)) {
+      // Find all sessionId cookies
+      const sessionCookies = setCookieHeader.filter((cookie) =>
+        cookie.startsWith('sessionId=')
+      );
+      
+      // Use the signed cookie (longer one with signature) if available
+      superAdminSessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
+      superAdminSessionCookie = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+    }
+
+    superAdminSessionId = superAdminSessionCookie;
 
     // Create regular admin user for negative tests
     const adminUser = {
@@ -85,10 +99,20 @@ describe('Super Admin API', () => {
         communityId: testCommunityId,
       },
     });
-    const adminSessionCookie = adminLogin.cookies.find(
-      (cookie) => cookie.name === 'sessionId'
-    );
-    adminSessionId = adminSessionCookie?.value || '';
+    // Extract SIGNED session cookie for admin user
+    const adminSetCookieHeader = adminLogin.headers['set-cookie'];
+    let adminSessionCookie = '';
+
+    if (Array.isArray(adminSetCookieHeader)) {
+      const sessionCookies = adminSetCookieHeader.filter((cookie) =>
+        cookie.startsWith('sessionId=')
+      );
+      adminSessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (adminSetCookieHeader && typeof adminSetCookieHeader === 'string') {
+      adminSessionCookie = adminSetCookieHeader.startsWith('sessionId=') ? adminSetCookieHeader : '';
+    }
+
+    adminSessionId = adminSessionCookie;
 
     // Create editor user for more negative tests
     const editorUser = {
@@ -115,10 +139,20 @@ describe('Super Admin API', () => {
         communityId: testCommunityId,
       },
     });
-    const editorSessionCookie = editorLogin.cookies.find(
-      (cookie) => cookie.name === 'sessionId'
-    );
-    editorSessionId = editorSessionCookie?.value || '';
+    // Extract SIGNED session cookie for editor user
+    const editorSetCookieHeader = editorLogin.headers['set-cookie'];
+    let editorSessionCookie = '';
+
+    if (Array.isArray(editorSetCookieHeader)) {
+      const sessionCookies = editorSetCookieHeader.filter((cookie) =>
+        cookie.startsWith('sessionId=')
+      );
+      editorSessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (editorSetCookieHeader && typeof editorSetCookieHeader === 'string') {
+      editorSessionCookie = editorSetCookieHeader.startsWith('sessionId=') ? editorSetCookieHeader : '';
+    }
+
+    editorSessionId = editorSessionCookie;
   });
 
   afterEach(async () => {
@@ -132,7 +166,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: '/api/v1/super_admin/communities',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -158,7 +192,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: '/api/v1/super_admin/communities?page=1&limit=5',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -170,7 +204,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: '/api/v1/super_admin/communities?search=test',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -181,7 +215,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: '/api/v1/super_admin/communities',
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
         });
 
         expect(response.statusCode).toBe(403);
@@ -206,7 +240,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: `/api/v1/super_admin/communities/${testCommunityId}`,
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -227,7 +261,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: '/api/v1/super_admin/communities/99999',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(404);
@@ -237,7 +271,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: `/api/v1/super_admin/communities/${testCommunityId}`,
-          cookies: { sessionId: editorSessionId },
+          headers: { cookie: editorSessionId },
         });
 
         expect(response.statusCode).toBe(403);
@@ -255,8 +289,8 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/communities',
-          cookies: { sessionId: superAdminSessionId },
-          headers: {
+          headers: { 
+            cookie: superAdminSessionId,
             'content-type': 'application/json',
           },
           payload: newCommunity,
@@ -282,7 +316,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/communities',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: invalidCommunity,
         });
 
@@ -302,7 +336,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/communities',
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
           payload: newCommunity,
         });
 
@@ -320,7 +354,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'PUT',
           url: `/api/v1/super_admin/communities/${testCommunityId}`,
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: updates,
         });
 
@@ -339,7 +373,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'PUT',
           url: '/api/v1/super_admin/communities/99999',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: { name: 'Updated' },
         });
 
@@ -350,7 +384,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'PUT',
           url: `/api/v1/super_admin/communities/${testCommunityId}`,
-          cookies: { sessionId: editorSessionId },
+          headers: { cookie: editorSessionId },
           payload: { name: 'Updated' },
         });
 
@@ -370,7 +404,7 @@ describe('Super Admin API', () => {
         const createResponse = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/communities',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: newCommunity,
         });
 
@@ -379,7 +413,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'DELETE',
           url: `/api/v1/super_admin/communities/${communityId}`,
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -395,7 +429,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'DELETE',
           url: '/api/v1/super_admin/communities/99999',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(404);
@@ -405,7 +439,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'DELETE',
           url: `/api/v1/super_admin/communities/${testCommunityId}`,
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
         });
 
         expect(response.statusCode).toBe(403);
@@ -419,7 +453,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: '/api/v1/super_admin/users',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -449,7 +483,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: `/api/v1/super_admin/users?community=${testCommunityId}`,
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -463,7 +497,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: '/api/v1/super_admin/users?role=admin',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -477,7 +511,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: '/api/v1/super_admin/users',
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
         });
 
         expect(response.statusCode).toBe(403);
@@ -489,7 +523,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: `/api/v1/super_admin/users/${superAdminUserId}`,
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -512,7 +546,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: '/api/v1/super_admin/users/99999',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(404);
@@ -522,7 +556,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'GET',
           url: `/api/v1/super_admin/users/${superAdminUserId}`,
-          cookies: { sessionId: editorSessionId },
+          headers: { cookie: editorSessionId },
         });
 
         expect(response.statusCode).toBe(403);
@@ -543,7 +577,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/users',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: newUser,
         });
 
@@ -570,7 +604,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/users',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: invalidUser,
         });
 
@@ -590,7 +624,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/users',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: duplicateUser,
         });
 
@@ -613,7 +647,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/users',
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
           payload: newUser,
         });
 
@@ -632,7 +666,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'PUT',
           url: `/api/v1/super_admin/users/${superAdminUserId}`,
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: updates,
         });
 
@@ -652,7 +686,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'PUT',
           url: '/api/v1/super_admin/users/99999',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: { firstName: 'Updated' },
         });
 
@@ -663,7 +697,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'PUT',
           url: `/api/v1/super_admin/users/${superAdminUserId}`,
-          cookies: { sessionId: editorSessionId },
+          headers: { cookie: editorSessionId },
           payload: { firstName: 'Updated' },
         });
 
@@ -686,7 +720,7 @@ describe('Super Admin API', () => {
         const createResponse = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/users',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
           payload: userToDelete,
         });
 
@@ -695,7 +729,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'DELETE',
           url: `/api/v1/super_admin/users/${userId}`,
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(200);
@@ -711,7 +745,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'DELETE',
           url: '/api/v1/super_admin/users/99999',
-          cookies: { sessionId: superAdminSessionId },
+          headers: { cookie: superAdminSessionId },
         });
 
         expect(response.statusCode).toBe(404);
@@ -721,7 +755,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'DELETE',
           url: `/api/v1/super_admin/users/${superAdminUserId}`,
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
         });
 
         expect(response.statusCode).toBe(403);
@@ -734,7 +768,7 @@ describe('Super Admin API', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/member/stories',
-        cookies: { sessionId: superAdminSessionId },
+        headers: { cookie: superAdminSessionId },
       });
 
       expect(response.statusCode).toBe(403);
@@ -750,7 +784,7 @@ describe('Super Admin API', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/member/places',
-        cookies: { sessionId: superAdminSessionId },
+        headers: { cookie: superAdminSessionId },
       });
 
       expect(response.statusCode).toBe(403);
@@ -766,7 +800,7 @@ describe('Super Admin API', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/member/speakers',
-        cookies: { sessionId: superAdminSessionId },
+        headers: { cookie: superAdminSessionId },
       });
 
       expect(response.statusCode).toBe(403);
@@ -803,7 +837,7 @@ describe('Super Admin API', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/super_admin/communities',
-        cookies: { sessionId: superAdminSessionId },
+        headers: { cookie: superAdminSessionId },
         payload: newCommunity,
       });
 
@@ -851,7 +885,7 @@ describe('Super Admin API', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/super_admin/users',
-        cookies: { sessionId: superAdminSessionId },
+        headers: { cookie: superAdminSessionId },
         payload: newUser,
       });
 

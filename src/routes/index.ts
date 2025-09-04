@@ -18,8 +18,8 @@ export async function registerRoutes(
   app: FastifyInstance,
   options?: RegisterRoutesOptions
 ) {
-  // Health check route (no authentication required)
-  await app.register(healthRoute, { prefix: '/api/v1', ...options });
+  // Health check route (no authentication required) - at root level for monitoring
+  await app.register(healthRoute, options);
 
   // Public API routes (no authentication required)
   await app.register(publicApiRoutes, { prefix: '/api', ...options });
@@ -27,7 +27,7 @@ export async function registerRoutes(
   // Authenticated API routes
   await app.register(authRoutes, { prefix: '/api/v1', ...options });
   await app.register(communityRoutes, { prefix: '/api/v1', ...options });
-  await app.register(fileRoutes, { prefix: '/api/v1', ...options });
+  await app.register(fileRoutes, { prefix: '/api/v1/files', ...options });
   await app.register(storiesRoutes, { prefix: '/api/v1/stories', ...options });
   await app.register(placesRoutes, { prefix: '/api/v1', ...options });
   await app.register(speakerRoutes, { prefix: '/api/v1', ...options });

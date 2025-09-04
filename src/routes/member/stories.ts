@@ -53,7 +53,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
     app.log
   );
 
-  // GET /api/v1/member/stories - List user's community stories
+  // GET routes are handled in member/index.ts to avoid duplication
   app.get('/', {
     schema: {
       description: "List stories in member's community",
@@ -163,9 +163,8 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
         });
       }
     },
-  });
+  }); */
 
-  // GET /api/v1/member/stories/:id - Get specific story
   app.get('/:id', {
     schema: {
       description: 'Get specific story by ID',
@@ -254,6 +253,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
       }
     },
   });
+  // End of GET routes comment
 
   // POST /api/v1/member/stories - Create new story
   app.post('/', {

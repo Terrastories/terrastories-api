@@ -935,6 +935,7 @@ export class StoryService {
         {
           communityId: parseInt(communityId, 10),
           // Only public stories for the public API
+          privacyLevel: 'public',
           isRestricted: false,
         },
         {
@@ -963,6 +964,8 @@ export class StoryService {
       };
     } catch (error) {
       this.logger.error('Failed to get public stories by community:', {
+        communityId,
+        options,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
       });

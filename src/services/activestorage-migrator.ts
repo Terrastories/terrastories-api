@@ -697,7 +697,6 @@ export class ActiveStorageMigrator {
           filesSkipped: 0,
           errors: [],
           duration: '0s',
-          summary: `No files to migrate for community ${communityId}`,
         };
       }
       throw error;

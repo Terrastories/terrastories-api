@@ -104,12 +104,18 @@ export async function requireAuth(
   const authRequest = request as AuthenticatedRequest;
 
   // In field-kit or offline mode, allow special offline tokens
-  if (process.env.NODE_ENV === 'field-kit' || process.env.OFFLINE_MODE === 'true') {
+  if (
+    process.env.NODE_ENV === 'field-kit' ||
+    process.env.OFFLINE_MODE === 'true'
+  ) {
     const authHeader = request.headers.authorization;
     const cookie = request.headers.cookie;
-    
+
     // Check for field kit special tokens
-    if (authHeader?.includes('field-kit-admin-token') || cookie?.includes('field-kit-session')) {
+    if (
+      authHeader?.includes('field-kit-admin-token') ||
+      cookie?.includes('field-kit-session')
+    ) {
       // Create a mock user for field kit operations
       authRequest.user = {
         id: 1,
@@ -118,13 +124,11 @@ export async function requireAuth(
         communityId: 1,
         firstName: 'Field',
         lastName: 'Kit',
-        createdAt: new Date(),
-        updatedAt: new Date(),
       };
       // Also set session for compatibility with other middleware
-      authRequest.session = {
+      Object.assign(authRequest.session, {
         user: authRequest.user,
-      };
+      });
       return;
     }
   }

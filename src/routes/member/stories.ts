@@ -163,7 +163,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
         });
       }
     },
-  }); */
+  });
 
   app.get('/:id', {
     schema: {

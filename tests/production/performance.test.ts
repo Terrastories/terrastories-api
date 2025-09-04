@@ -453,11 +453,12 @@ describe('Production Performance Validation - Phase 1', () => {
         .replace(/ARRAY_AGG\(DISTINCT ([^)]+)\)/g, 'GROUP_CONCAT(DISTINCT $1)');
 
       console.log('Converted SQLite query:', sqliteQuery);
+      let result;
       try {
-        const result = await db.executeRaw(sqliteQuery);
+        result = await db.executeRaw(sqliteQuery);
       } catch (error) {
         console.log('Complex query failed, testing simple query instead');
-        const result = await db.executeRaw(`
+        result = await db.executeRaw(`
           SELECT s.id, s.title, 
                  0 as place_count,
                  0 as speaker_count

@@ -335,10 +335,30 @@ export class TestDatabaseManager {
   /**
    * Execute raw SQL for advanced testing scenarios
    */
+  /**
+   * Execute raw SQL for advanced testing scenarios
+   */
   async executeRaw(sql: string): Promise<any> {
     if (!this.sqlite) {
       throw new Error('Database not initialized');
     }
+    
+    // Handle queries that return results (like EXPLAIN QUERY PLAN)
+    const trimmedSql = sql.trim().toUpperCase();
+    if (trimmedSql.startsWith('EXPLAIN') || 
+        trimmedSql.startsWith('SELECT') || 
+        trimmedSql.startsWith('PRAGMA')) {
+      // Use prepare().all() for queries that return results
+      try {
+        const stmt = this.sqlite.prepare(sql);
+        return stmt.all();
+      } catch (error: any) {
+        console.error('Error executing query:', error.message);
+        throw error;
+      }
+    }
+    
+    // Use exec() for statements that don't return results
     return this.sqlite.exec(sql);
   }
 

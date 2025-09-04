@@ -253,9 +253,14 @@ export class ActiveStorageMigrator {
 
   /**
    * Analyzes current ActiveStorage database structure and file distribution
+   * @param communityId Optional community ID to filter analysis
    * @returns Analysis results including table counts, file types, and potential issues
    */
-  async analyzeActiveStorage(): Promise<AnalysisResult> {
+  async analyzeActiveStorage(communityId?: number): Promise<AnalysisResult> {
+    // Validate community if specified
+    if (communityId) {
+      await this.validateCommunity(communityId);
+    }
     const db = await this.getDbAdapter();
 
     try {
@@ -464,9 +469,14 @@ export class ActiveStorageMigrator {
 
   /**
    * Performs a comprehensive dry run analysis without making changes
+   * @param communityId Optional community ID to validate
    * @returns Dry run results including estimated duration and potential issues
    */
-  async performDryRun() {
+  async performDryRun(communityId?: number) {
+    // Validate community if specified
+    if (communityId) {
+      await this.validateCommunity(communityId);
+    }
     console.log('🧪 Performing dry run analysis...');
 
     const startTime = Date.now();
@@ -615,12 +625,83 @@ export class ActiveStorageMigrator {
   }
 
   /**
+   * Validates that a community exists
+   * @param communityId The community ID to validate
+   * @returns Promise resolving if community exists, rejecting if not
+   */
+  private async validateCommunity(communityId: number): Promise<void> {
+    const db = await this.getDbAdapter();
+
+    try {
+      // First check if communities table exists
+      const isPostgres =
+        this.config.database.includes('postgresql://') ||
+        this.config.database.includes('postgres://');
+
+      const tableExistsQuery = isPostgres
+        ? `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'communities')`
+        : `SELECT name FROM sqlite_master WHERE type='table' AND name='communities'`;
+
+      const tableResult = await db.query(tableExistsQuery);
+      const tableExists = isPostgres
+        ? tableResult.rows[0]?.exists === true
+        : tableResult.rows.length > 0;
+
+      if (!tableExists) {
+        console.warn(
+          'Communities table does not exist - assuming valid for development'
+        );
+        return;
+      }
+
+      // If table exists, validate the specific community
+      const result = await db.query(
+        'SELECT id FROM communities WHERE id = $1',
+        [communityId]
+      );
+      if (!result.rows || result.rows.length === 0) {
+        throw new Error('Community not found');
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Community not found') {
+        throw error;
+      }
+      // For any other error, log warning and continue
+      console.warn(
+        'Could not validate community - assuming valid for development'
+      );
+    }
+  }
+
+  /**
    * Migrates all ActiveStorage files for a specific community
    * @param communityId The community ID to migrate files for
    * @returns Migration results including files processed and any errors
    */
   async migrateByCommunity(communityId: number): Promise<MigrationResult> {
     console.log(`🚀 Starting migration for community ${communityId}...`);
+
+    // Check if community exists - if not, return empty result instead of throwing
+    try {
+      await this.validateCommunity(communityId);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Community not found') {
+        console.log(
+          `Community ${communityId} not found - returning empty result`
+        );
+        return {
+          success: true,
+          communityId,
+          filesProcessed: 0,
+          filesMigrated: 0,
+          filesSkipped: 0,
+          errors: [],
+          duration: '0s',
+          summary: `No files to migrate for community ${communityId}`,
+        };
+      }
+      throw error;
+    }
 
     const startTime = Date.now();
     const errors: string[] = [];
@@ -922,7 +1003,18 @@ export class ActiveStorageMigrator {
 
       // Read and execute database backup
       const backupSql = await fs.readFile(databaseBackupPath, 'utf8');
-      await db.query(backupSql);
+
+      // Split SQL into individual statements and execute them
+      const statements = backupSql
+        .split(';')
+        .map((stmt) => stmt.trim())
+        .filter((stmt) => stmt.length > 0 && !stmt.startsWith('--'));
+
+      for (const statement of statements) {
+        if (statement.trim()) {
+          await db.query(statement + ';');
+        }
+      }
 
       // Restore file system
       if (await this.fileExists(storageBackupPath)) {

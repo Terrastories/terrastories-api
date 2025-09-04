@@ -81,7 +81,7 @@ describe('Authentication Integration Tests', () => {
       const setCookieHeader = loginResponse.headers['set-cookie'];
       expect(setCookieHeader).toBeDefined();
       expect(
-        Array.isArray(setCookieHeader) ? setCookieHeader[0] : setCookieHeader
+        Array.isArray(setCookieHeader) ? setCookieHeader[1] : setCookieHeader
       ).toContain('sessionId');
     });
 
@@ -112,7 +112,7 @@ describe('Authentication Integration Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       const sessionCookie = (
-        Array.isArray(setCookieHeader) ? setCookieHeader[0] : setCookieHeader
+        Array.isArray(setCookieHeader) ? setCookieHeader[1] : setCookieHeader
       )!.split(';')[0];
 
       // Now logout with session
@@ -164,7 +164,7 @@ describe('Authentication Integration Tests', () => {
       expect(setCookieHeader).toBeDefined();
 
       const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[0]
+        ? setCookieHeader[1]
         : setCookieHeader;
       expect(cookieString).toContain('sessionId');
       expect(cookieString).toContain('HttpOnly');
@@ -197,8 +197,9 @@ describe('Authentication Integration Tests', () => {
       });
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
+      // Use the signed cookie (second one) instead of the unsigned cookie (first one)
       const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[0]
+        ? setCookieHeader[1]
         : setCookieHeader;
 
       // Extract session cookie
@@ -245,8 +246,9 @@ describe('Authentication Integration Tests', () => {
       });
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
+      // Use the signed cookie (second one) instead of the unsigned cookie (first one)
       const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[0]
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookie = cookieString!.split(';')[0];
 
@@ -442,8 +444,9 @@ describe('Authentication Integration Tests', () => {
       });
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
+      // Use the signed cookie (second one) instead of the unsigned cookie (first one)
       const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[0]
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookie = cookieString!.split(';')[0];
 
@@ -487,8 +490,9 @@ describe('Authentication Integration Tests', () => {
       });
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
+      // Use the signed cookie (second one) instead of the unsigned cookie (first one)
       const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[0]
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookie = cookieString!.split(';')[0];
 

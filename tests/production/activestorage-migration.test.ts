@@ -711,7 +711,16 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
         VALUES (1, 'admin@test.com', 'hashed_password', 'Test', 'Admin', 'admin', ${communityId}, true)
       `);
 
-      // Insert test blobs
+      // Clean up existing test data to avoid conflicts
+      await db.executeRaw(`
+        DELETE FROM active_storage_attachments 
+        WHERE blob_id IN (SELECT id FROM active_storage_blobs WHERE key LIKE 'test-%${communityId}')
+      `);
+
+      await db.executeRaw(`
+        DELETE FROM active_storage_blobs WHERE key LIKE 'test-%${communityId}'
+      `);
+
       await db.executeRaw(`
         INSERT INTO active_storage_blobs (key, filename, content_type, metadata, byte_size, checksum)
         VALUES 
@@ -720,17 +729,27 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
           ('test-place-image-${communityId}', 'place_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 512, 'test-checksum-${communityId}c')
       `);
 
-      // Get the blob IDs that were just inserted (assuming auto-increment starts from 1)
-      const baseId = (communityId - 1) * 3;
-
-      // Insert test attachments linking blobs to stories/places
-      await db.executeRaw(`
-        INSERT INTO active_storage_attachments (name, record_type, record_id, blob_id)
-        VALUES 
-          ('image', 'Story', ${communityId}, ${baseId + 1}),
-          ('audio', 'Story', ${communityId}, ${baseId + 2}),
-          ('image', 'Place', ${communityId}, ${baseId + 3})
+      // Get the actual blob IDs that were just inserted
+      const blobResults = await db.executeRaw(`
+        SELECT id FROM active_storage_blobs 
+        WHERE key LIKE 'test-%${communityId}' 
+        ORDER BY key
       `);
+
+      const blobIds = Array.isArray(blobResults)
+        ? blobResults.map((r) => r.id)
+        : [];
+
+      if (blobIds.length >= 3) {
+        // Insert test attachments linking blobs to stories/places
+        await db.executeRaw(`
+          INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id)
+          VALUES 
+            ('image', 'Story', ${communityId}, ${blobIds[0]}),
+            ('audio', 'Story', ${communityId}, ${blobIds[1]}),
+            ('image', 'Place', ${communityId}, ${blobIds[2]})
+        `);
+      }
 
       // Create test files in the ActiveStorage directory structure
       const storageDir = path.join(testDataPath, 'storage');

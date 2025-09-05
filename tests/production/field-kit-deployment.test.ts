@@ -235,7 +235,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       const session = await createOfflineSession();
       let storyId: number;
 
-      // Test create story (using session cookie for field kit auth)
+      // Test create story (using field kit authentication)
       const createResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/member/stories',
@@ -245,6 +245,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
           description: 'Created while offline',
         },
         headers: {
+          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -328,6 +329,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         method: 'GET',
         url: '/api/v1/member/stories',
         headers: {
+          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -348,6 +350,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         url: `/api/v1/member/stories/${storyId}`,
         payload: { title: 'Updated Offline Story' },
         headers: {
+          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -367,6 +370,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
           longitude: -123.1207,
         },
         headers: {
+          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -390,6 +394,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
           longitude: -123.1207,
         },
         headers: {
+          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -404,6 +409,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         method: 'GET',
         url: '/api/v1/member/places?lat=49.28&lng=-123.12&radius=1000',
         headers: {
+          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -436,6 +442,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         method: 'POST',
         url: '/api/v1/files/upload',
         headers: {
+          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
           ...form.getHeaders(),
         },
@@ -1041,8 +1048,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     }
 
     return {
-      token: 'Bearer-Token-Not-Used-In-Field-Kit',
-      cookie: sessionCookie,
+      token: 'field-kit-admin-token',
+      cookie: 'field-kit-session=active',
     };
   }
 

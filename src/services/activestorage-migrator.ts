@@ -179,9 +179,13 @@ export class ActiveStorageMigrator {
   /**
    * Creates a new ActiveStorage migrator instance
    * @param config Migration configuration including database connection and file paths
+   * @param externalDbAdapter Optional external database adapter for testing
    */
-  constructor(config: MigrationConfig) {
+  constructor(config: MigrationConfig, externalDbAdapter?: DatabaseQuery) {
     this.config = config;
+    if (externalDbAdapter) {
+      this.dbAdapter = externalDbAdapter;
+    }
   }
 
   private async getDbAdapter(): Promise<DatabaseQuery> {
@@ -662,8 +666,8 @@ export class ActiveStorageMigrator {
   private async validateCommunity(communityId: number): Promise<void> {
     // Skip community validation if we're using a test database adapter
     // @ts-ignore - checking for test adapter
-    if (this.dbAdapter && this.dbAdapter.testAdapter) {
-      return; // Skip validation in tests
+    if (this.dbAdapter && (this.dbAdapter as any).testAdapter) {
+      return; // Skip validation in tests - test adapter handles community setup
     }
 
     const isTestEnvironment =
@@ -682,7 +686,7 @@ export class ActiveStorageMigrator {
       try {
         // Check if communities table exists
         const tableExistsQuery =
-          'SELECT name FROM sqlite_master WHERE type="table" AND name="communities"';
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='communities'";
         const tableResult = await db.query(tableExistsQuery);
 
         if (tableResult.rows.length === 0) {
@@ -876,6 +880,14 @@ export class ActiveStorageMigrator {
         const attachmentsResult = await db.query(attachmentsQuery, [
           communityId,
         ]);
+
+        // Debug logging for migration queries
+        if (process.env.NODE_ENV === 'test') {
+          console.log(`Migration query for community ${communityId}:`);
+          console.log(
+            `Query returned ${attachmentsResult.rows.length} attachments`
+          );
+        }
 
         // Group attachments by record for batch updates
         const recordUpdates: Record<

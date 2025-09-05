@@ -181,21 +181,54 @@ export class TestDatabaseManager {
 
   /**
    * Clear all data from the database while preserving structure
+   * Now with proper foreign key constraint handling
    */
   async clearData(): Promise<void> {
     if (!this.db) return;
 
     try {
-      // Clear in dependency order (children first)
+      // Disable foreign key constraints temporarily for cleanup
+      if (this.sqlite) {
+        this.sqlite.pragma('foreign_keys = OFF');
+      }
+
+      // Clear in dependency order (children first to handle foreign keys)
+      // First clear join tables if they exist
+      try {
+        // Execute raw SQL for join tables since they may not be in schema yet
+        if (this.sqlite) {
+          this.sqlite.exec('DELETE FROM story_speakers WHERE 1=1');
+          this.sqlite.exec('DELETE FROM story_places WHERE 1=1');
+        }
+      } catch (error: any) {
+        // Join tables might not exist yet
+        console.warn(
+          '⚠️ Join tables not found (expected for some tests):',
+          error.message
+        );
+      }
+
+      // Clear main entity tables in dependency order
       await this.db.delete(stories);
       await this.db.delete(files);
       await this.db.delete(speakers);
       await this.db.delete(places);
       await this.db.delete(users);
       await this.db.delete(communities);
-      console.log('🧹 All test data cleared');
+
+      // Re-enable foreign key constraints
+      if (this.sqlite) {
+        this.sqlite.pragma('foreign_keys = ON');
+      }
+
+      console.log('🧹 All test data cleared with proper foreign key handling');
     } catch (error: any) {
       console.warn('⚠️ Could not clear test data:', error.message);
+
+      // Make sure foreign keys are re-enabled even if cleanup fails
+      if (this.sqlite) {
+        this.sqlite.pragma('foreign_keys = ON');
+      }
     }
   }
 

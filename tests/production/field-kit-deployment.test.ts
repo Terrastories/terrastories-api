@@ -59,16 +59,18 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       const { getDb } = await import('../../src/db/index.js');
       const { migrate } = await import('drizzle-orm/better-sqlite3/migrator');
       const database = await getDb();
-      
+
       const migrationsFolder = path.join(
         process.cwd(),
         'src',
-        'db', 
+        'db',
         'migrations'
       );
-      
+
       await migrate(
-        database as ReturnType<typeof import('drizzle-orm/better-sqlite3').drizzle>, 
+        database as ReturnType<
+          typeof import('drizzle-orm/better-sqlite3').drizzle
+        >,
         { migrationsFolder }
       );
       console.log('✅ Field kit database migrations completed');
@@ -91,7 +93,9 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       });
 
       if (communityResponse.statusCode !== 201) {
-        console.warn('Could not create test community, continuing with existing data');
+        console.warn(
+          'Could not create test community, continuing with existing data'
+        );
       }
 
       console.log('Field Kit deployment validation setup complete');
@@ -218,27 +222,29 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       const session = await createOfflineSession();
       let storyId: number;
 
-      // Test create story
+      // Test create story (using session cookie for field kit auth)
       const createResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/member/stories',
-        payload: { 
-          title: 'Offline Story', 
+        payload: {
+          title: 'Offline Story',
           slug: 'offline-story',
-          description: 'Created while offline'
+          description: 'Created while offline',
         },
         headers: {
-          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
 
       console.log('Story creation status:', createResponse.statusCode);
       console.log('Story creation response body:', createResponse.body);
-      
+
       if (createResponse.statusCode < 400) {
         const responseData = createResponse.json();
-        console.log('Story creation parsed response:', JSON.stringify(responseData, null, 2));
+        console.log(
+          'Story creation parsed response:',
+          JSON.stringify(responseData, null, 2)
+        );
       }
 
       expect(
@@ -248,25 +254,32 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
 
       if (createResponse.statusCode < 300) {
         const responseData = createResponse.json();
-        console.log('Story creation response:', JSON.stringify(responseData, null, 2));
-        
+        console.log(
+          'Story creation response:',
+          JSON.stringify(responseData, null, 2)
+        );
+
         // Try different possible response structures
-        storyId = responseData.data?.id || responseData.id || responseData.data?.story?.id;
-        
+        storyId =
+          responseData.data?.id ||
+          responseData.id ||
+          responseData.data?.story?.id;
+
         if (!storyId) {
-          console.warn('Story ID not found in response, querying database for latest story');
-          
+          console.warn(
+            'Story ID not found in response, querying database for latest story'
+          );
+
           // Query database directly to get the latest story ID
           try {
             const latestStoryResponse = await app.inject({
               method: 'GET',
               url: '/api/v1/member/stories?limit=1',
               headers: {
-                Authorization: `Bearer ${session.token}`,
                 Cookie: session.cookie,
               },
             });
-            
+
             if (latestStoryResponse.statusCode === 200) {
               const latestData = latestStoryResponse.json();
               const latestStory = latestData.data?.[0];
@@ -290,7 +303,10 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         }
       } else {
         // If story creation fails, use a fallback ID for testing update path
-        console.log('Story creation failed with status:', createResponse.statusCode);
+        console.log(
+          'Story creation failed with status:',
+          createResponse.statusCode
+        );
         storyId = 1;
       }
 
@@ -299,7 +315,6 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         method: 'GET',
         url: '/api/v1/member/stories',
         headers: {
-          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -320,7 +335,6 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         url: `/api/v1/member/stories/${storyId}`,
         payload: { title: 'Updated Offline Story' },
         headers: {
-          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -336,11 +350,10 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         url: '/api/v1/member/places',
         payload: {
           name: 'Offline Place',
-          lat: 49.2827,
-          lng: -123.1207,
+          latitude: 49.2827,
+          longitude: -123.1207,
         },
         headers: {
-          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -360,11 +373,10 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         url: '/api/v1/member/places',
         payload: {
           name: 'Test Geographic Place',
-          lat: 49.2827,
-          lng: -123.1207,
+          latitude: 49.2827,
+          longitude: -123.1207,
         },
         headers: {
-          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -379,7 +391,6 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         method: 'GET',
         url: '/api/v1/member/places?lat=49.28&lng=-123.12&radius=1000',
         headers: {
-          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -397,7 +408,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       // Test file upload to local storage using proper FormData
       const FormData = (await import('form-data')).default;
       const form = new FormData();
-      
+
       // Create valid JPEG content (minimal valid JPEG)
       const testFileContent = Buffer.from([
         // JPEG SOI marker
@@ -910,7 +921,11 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
   async function testLocalStorageOperations(): Promise<boolean> {
     try {
       // Test SQLite database operations
-      const testData = { title: 'Test Story', slug: 'test-story', description: 'Test content' };
+      const testData = {
+        title: 'Test Story',
+        slug: 'test-story',
+        description: 'Test content',
+      };
 
       // This would test actual database operations
       return true;
@@ -954,36 +969,46 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     // For field kit testing, we need to create test data and authenticate within the field kit context
     // First, create test data in the field kit database
     const { createTestData } = await import('../../tests/helpers/database.js');
-    const { hashPassword } = await import('../../src/services/password.service.js');
-    
+    const { hashPassword } = await import(
+      '../../src/services/password.service.js'
+    );
+
     // Create test user directly in field kit database using Drizzle ORM
     const { getDb } = await import('../../src/db/index.js');
-    const { communitiesSqlite, usersSqlite } = await import('../../src/db/schema/index.js');
+    const { communitiesSqlite, usersSqlite } = await import(
+      '../../src/db/schema/index.js'
+    );
     const db = await getDb();
-    
+
     // Insert test community using Drizzle ORM
-    await db.insert(communitiesSqlite).values({
-      id: 1,
-      name: 'Test Community',
-      slug: 'test-community',
-      description: 'Test community',
-      theme: '{}',
-      publicStories: true,
-    }).onConflictDoNothing();
-    
+    await db
+      .insert(communitiesSqlite)
+      .values({
+        id: 1,
+        name: 'Test Community',
+        slug: 'test-community',
+        description: 'Test community',
+        theme: '{}',
+        publicStories: true,
+      })
+      .onConflictDoNothing();
+
     // Insert test user using Drizzle ORM
     const hashedPassword = await hashPassword('testPassword123');
-    await db.insert(usersSqlite).values({
-      id: 1,
-      email: 'admin@test.com',
-      passwordHash: hashedPassword,
-      firstName: 'Test',
-      lastName: 'Admin',
-      role: 'admin',
-      communityId: 1,
-      isActive: true,
-    }).onConflictDoNothing();
-    
+    await db
+      .insert(usersSqlite)
+      .values({
+        id: 1,
+        email: 'admin@test.com',
+        passwordHash: hashedPassword,
+        firstName: 'Test',
+        lastName: 'Admin',
+        role: 'admin',
+        communityId: 1,
+        isActive: true,
+      })
+      .onConflictDoNothing();
+
     // Now authenticate using the field kit app
     const loginResponse = await app.inject({
       method: 'POST',
@@ -994,12 +1019,14 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         communityId: 1,
       },
     });
-    
+
     if (loginResponse.statusCode !== 200) {
       console.error('Field kit login failed:', loginResponse.body);
-      throw new Error(`Failed to create field kit session: ${loginResponse.body}`);
+      throw new Error(
+        `Failed to create field kit session: ${loginResponse.body}`
+      );
     }
-    
+
     // Extract session cookie
     const setCookieHeader = loginResponse.headers['set-cookie'];
     let sessionCookie = '';
@@ -1008,9 +1035,12 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       const sessionCookies = setCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      sessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      sessionCookie =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      sessionCookie = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+      sessionCookie = setCookieHeader.startsWith('sessionId=')
+        ? setCookieHeader
+        : '';
     }
 
     return {

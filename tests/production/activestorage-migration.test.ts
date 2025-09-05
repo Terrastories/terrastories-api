@@ -857,7 +857,7 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
        VALUES ('${options.attachment_name}', '${options.record_type}', ${parseInt(communityId)}, ${blobId})`
     );
 
-    // Create actual test file for this blob
+    // Create actual test file for this blob - use smaller files to prevent disk space issues
     const storageDir = path.join(testDataPath, 'storage');
     await fs.mkdir(storageDir, { recursive: true });
 
@@ -866,8 +866,10 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
     const keyDir2 = path.join(keyDir1, key.substring(2, 4));
     await fs.mkdir(keyDir2, { recursive: true });
 
-    // Create the actual file
-    const fileContent = Buffer.alloc(options.byte_size, 'test-data');
+    // Create smaller test files to avoid disk space issues
+    // Cap file size at 1KB for tests regardless of requested size
+    const actualFileSize = Math.min(options.byte_size, 1024);
+    const fileContent = Buffer.alloc(actualFileSize, 'test-data');
     await fs.writeFile(path.join(keyDir2, key), fileContent);
 
     // Also create by filename as fallback

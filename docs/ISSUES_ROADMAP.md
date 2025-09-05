@@ -584,53 +584,63 @@ Context: docs/5-MEDIA_HANDLING.md, docs/7-DEPLOYMENT.md
 
 ### **Issue #59: Production Readiness Validation & Indigenous Community Deployment** 🔄
 
-**Status**: 🔄 **IN PROGRESS** (PR #XX)
+**Status**: 🔄 **IN PROGRESS** (PR #60)
 **Priority**: CRITICAL
-**Progress**: 82% test pass rate achieved, infrastructure foundation complete
+**Progress**: Foundation tests (25 tests) and infrastructure validation complete
+
+**Current PR #60 Status**:
+
+- ✅ **Production Readiness Report Complete** - Comprehensive validation documentation created
+- ✅ **Test Infrastructure Complete** - All production test suites implemented (25 tests)
+- ❌ **CI Failures Blocking Merge** - Node.js 20.x and 22.x test failures need resolution
+- ❌ **Missing SpatiaLite Extension** - Spatial database support needed for geographic features
+- ❌ **Database Constraint Issues** - SQLite foreign key constraint failures in cleanup
 
 **Problem**:
+Production validation tests revealed critical operational gaps blocking Indigenous community deployment:
 
-- 16 production validation test failures blocking Indigenous community deployment
-- ActiveStorage migration system needs CLI integration fixes
-- Field Kit deployment authentication requires route registration fixes
-- Cultural sovereignty and performance tests need cleanup
+- Test failures due to missing SpatiaLite extension for spatial operations
+- SQLite foreign key constraint failures in test cleanup
+- Database connectivity issues between test environment and CLI scripts
+- Performance test timeouts under load testing
 
 **Context**: Comprehensive production readiness validation covering:
 
-- ActiveStorage migration from Rails to TypeScript (Phase 2 requirement)
+- Production Docker deployment configuration with SSL/TLS enforcement
+- Indigenous cultural protocol validation and data sovereignty
+- ActiveStorage migration system for Rails-to-TypeScript media migration
 - Field Kit offline deployment for remote Indigenous communities
-- Cultural sovereignty protocol enforcement
+- Performance and load testing under resource constraints
 - Infrastructure monitoring and operational excellence
-- Performance validation under resource constraints
 
-**Solution Approach**:
+**Implementation Strategy**: Breaking into focused subissues for parallel development:
 
-1. **Infrastructure Foundation** ✅ COMPLETED (16/16 tests passing)
-2. **ActiveStorage Migration** 🔄 IN PROGRESS (10 failures - CLI isolation issues)
-3. **Field Kit Deployment** 🔄 IN PROGRESS (3 failures - authentication fixed, route registration needed)
-4. **Cultural Sovereignty** 🔄 PENDING (1 failure - protocol validation)
-5. **Performance Optimization** 🔄 PENDING (1 failure - cleanup issues)
+1. **Issue #60: Fix Production Test Failures** 🔄 **CURRENT PR** - Resolve CI failures
+2. **Issue #61: ActiveStorage Migration Fixes** ❌ **SUBISSUE** - CLI integration fixes
+3. **Issue #62: Field Kit Deployment Enhancement** ❌ **SUBISSUE** - Member route fixes
+4. **Issue #63: Cultural Protocol Validation** ❌ **SUBISSUE** - Indigenous sovereignty fixes
+5. **Issue #64: Performance Test Optimization** ❌ **SUBISSUE** - Cleanup and constraints
 
-**Acceptance Criteria**:
+**Acceptance Criteria for Issue #59 (Current PR #60)**:
 
-- [x] Infrastructure tests: 100% pass rate (monitoring, backup, environment validation)
-- [ ] ActiveStorage tests: Fix CLI script isolation and database connectivity
-- [ ] Field Kit tests: Complete member route registration for offline deployment
-- [ ] Cultural sovereignty tests: Fix Indigenous protocol validation
-- [ ] Performance tests: Resolve cleanup and foreign key constraint issues
-- [ ] Overall target: 95%+ production test pass rate
+- [x] Production readiness report created with comprehensive validation results
+- [x] All production test suites implemented (infrastructure, cultural, performance, migration, deployment)
+- [ ] ❌ **CI tests pass** - Node.js 20.x and 22.x failures resolved
+- [ ] ❌ **SpatiaLite extension** - Spatial database support configured
+- [ ] ❌ **Database constraints** - Foreign key constraint issues resolved
+- [ ] Overall target: All CI checks pass, ready for merge
 
 **GitHub Issue**: [#59](https://github.com/Terrastories/terrastories-api/issues/59) 🔄 **IN PROGRESS**
 
-### **Issue #60: Fix ActiveStorage Migration System for Production Deployment** ❌
+### **Issue #61: Fix ActiveStorage Migration System for Production Deployment** ❌
 
-**Status**: ❌ **PENDING**
+**Status**: ❌ **PENDING** (New Issue)
 **Priority**: HIGH
-**Dependencies**: Issue #59 (Production Readiness)
+**Dependencies**: Issue #59 (Production Readiness) - CI test fixes
 
 **Problem**:
 
-- 10/11 ActiveStorage migration tests failing due to CLI script isolation issues
+- ActiveStorage migration tests failing in production validation suite
 - Database connectivity mismatch between test environment and CLI execution
 - File integrity validation and community data isolation need fixes
 - Complex Rails-to-TypeScript media migration requires enhanced reliability
@@ -651,32 +661,32 @@ Context: docs/5-MEDIA_HANDLING.md, docs/7-DEPLOYMENT.md
 
 **Acceptance Criteria**:
 
-- [ ] All 11 ActiveStorage migration tests pass (currently 1/11 passing)
+- [ ] All ActiveStorage migration tests pass in production suite
 - [ ] CLI script executes successfully: `npx tsx scripts/migrate-activestorage.ts analyze --community=1`
 - [ ] File integrity validation works with MD5 checksum verification
 - [ ] Community data isolation maintained during migration process
 - [ ] Rollback capability functional for production safety
 
-**GitHub Issue**: TBD (Issue #60)
+**GitHub Issue**: [#61](https://github.com/Terrastories/terrastories-api/issues/61) ❌ **PENDING**
 
-### **Issue #61: Complete Field Kit Deployment for Remote Indigenous Communities** ❌
+### **Issue #62: Complete Field Kit Deployment for Remote Indigenous Communities** ❌
 
-**Status**: ❌ **PENDING**
-**Priority**: HIGH  
-**Dependencies**: Issue #59 (Production Readiness)
+**Status**: ❌ **PENDING** (New Issue)
+**Priority**: MEDIUM
+**Dependencies**: Issue #59 (Production Readiness) - CI test fixes
 
 **Problem**:
 
-- 3/20 Field Kit deployment tests failing due to missing member route registration
-- Authentication fixed but CRUD operations return 500/400/415 errors
+- Field Kit deployment tests failing in production validation suite
+- Member routes not fully registered for offline deployment
 - PostGIS spatial queries need SQLite fallback for offline deployment
 - File upload endpoints not properly handling multipart data in field kit mode
 
 **Missing Functionality**:
 
-- `POST /api/v1/member/stories` - Returns 500 (route exists but failing)
-- `POST /api/v1/member/places` - Returns 400 (spatial data validation issues)
-- `POST /api/v1/files/upload` - Returns 415 (multipart handling broken)
+- Member CRUD operations failing in offline mode
+- Spatial data validation issues in resource-constrained environments
+- Multipart file handling broken for offline file uploads
 - Spatial query parameters for offline mapping functionality
 
 **Context**: Field Kit deployment enables Terrastories for remote Indigenous communities with:
@@ -695,25 +705,25 @@ Context: docs/5-MEDIA_HANDLING.md, docs/7-DEPLOYMENT.md
 
 **Acceptance Criteria**:
 
-- [ ] All 3 failing Field Kit tests pass (CRUD operations, spatial queries, file uploads)
+- [ ] All Field Kit deployment tests pass in production suite
 - [ ] Field Kit deployment works on minimal hardware (2GB RAM, limited storage)
 - [ ] Offline functionality maintains cultural protocol enforcement
 - [ ] Backup and sync scripts operational for community data management
 
-**GitHub Issue**: TBD (Issue #61)
+**GitHub Issue**: [#62](https://github.com/Terrastories/terrastories-api/issues/62) ❌ **PENDING**
 
-### **Issue #62: Fix Cultural Sovereignty Protocol Validation** ❌
+### **Issue #63: Fix Cultural Sovereignty Protocol Validation** ❌
 
-**Status**: ❌ **PENDING**
-**Priority**: MEDIUM
-**Dependencies**: Issue #59 (Production Readiness)
+**Status**: ❌ **PENDING** (New Issue)
+**Priority**: HIGH
+**Dependencies**: Issue #59 (Production Readiness) - CI test fixes
 
 **Problem**:
 
-- 1 cultural sovereignty test failure in Indigenous protocol validation
+- Cultural sovereignty tests failing in production validation suite
+- Indigenous protocol validation logic has edge case failures
+- Elder-only content access controls need audit logging completion
 - Cultural metadata preservation needs enhancement during data operations
-- Elder-only content access controls require debugging
-- Audit trail for Indigenous oversight and compliance needs fixes
 
 **Context**: Indigenous Cultural Protocol & Data Sovereignty requirements:
 
@@ -731,18 +741,18 @@ Context: docs/5-MEDIA_HANDLING.md, docs/7-DEPLOYMENT.md
 
 **Acceptance Criteria**:
 
-- [ ] Cultural sovereignty test passes (currently 0/1 passing)
+- [ ] All cultural sovereignty tests pass in production suite
 - [ ] Elder-only content properly restricted across all endpoints
 - [ ] Cultural significance levels enforced in data operations
 - [ ] Audit logging captures all cultural protocol compliance events
 
-**GitHub Issue**: TBD (Issue #62)
+**GitHub Issue**: [#63](https://github.com/Terrastories/terrastories-api/issues/63) ❌ **PENDING**
 
-### **Issue #63: Resolve Performance Test Cleanup and Foreign Key Issues** ❌
+### **Issue #64: Resolve Performance Test Cleanup and Foreign Key Issues** ❌
 
-**Status**: ❌ **PENDING**
+**Status**: ❌ **PENDING** (New Issue)
 **Priority**: LOW
-**Dependencies**: Issue #59 (Production Readiness)
+**Dependencies**: Issue #59 (Production Readiness) - CI test fixes
 
 **Problem**:
 
@@ -771,7 +781,7 @@ Context: docs/5-MEDIA_HANDLING.md, docs/7-DEPLOYMENT.md
 - [ ] Large file upload performance meets Field Kit hardware requirements
 - [ ] Resource usage validation works for minimal hardware deployments
 
-**GitHub Issue**: TBD (Issue #63)
+**GitHub Issue**: [#64](https://github.com/Terrastories/terrastories-api/issues/64) ❌ **PENDING**
 
 ### **Issue #64: Enhanced Schema with Critical Rails Compatibility Fields** ❌
 

@@ -75,6 +75,10 @@ export default [
       '*.config.ts',
       'vitest.config.ts',
       'drizzle.config.ts',
+      'src/db/migrate.ts',
+      'src/db/seed.ts',
+      'src/db/index.ts',
+      'src/routes/public-api.ts',
     ],
     languageOptions: {
       ecmaVersion: 2022,
@@ -89,7 +93,7 @@ export default [
       // Basic JavaScript rules
       'prefer-const': 'error',
       'no-var': 'error',
-      'no-console': 'warn',
+      'no-console': 'off', // Allow console in db setup files  
       'no-debugger': 'error',
       'no-duplicate-imports': 'error',
       'no-unused-vars': 'off',

@@ -18,22 +18,28 @@ export async function registerRoutes(
   app: FastifyInstance,
   options?: RegisterRoutesOptions
 ) {
-  await app.register(healthRoute);
+  const opts = options || {};
+
+  // Health check route (no authentication required) - at root level for monitoring
+  await app.register(healthRoute, opts);
 
   // Public API routes (no authentication required)
-  await app.register(publicApiRoutes, { prefix: '/api', ...options });
+  await app.register(publicApiRoutes, { prefix: '/api', ...opts });
 
   // Authenticated API routes
-  await app.register(authRoutes, { prefix: '/api/v1', ...options });
-  await app.register(communityRoutes, { prefix: '/api/v1', ...options });
-  await app.register(fileRoutes, { prefix: '/api/v1', ...options });
-  await app.register(storiesRoutes, { prefix: '/api/v1/stories', ...options });
-  await app.register(placesRoutes, { prefix: '/api/v1', ...options });
-  await app.register(speakerRoutes, { prefix: '/api/v1', ...options });
+  await app.register(authRoutes, { prefix: '/api/v1', ...opts });
+  await app.register(communityRoutes, { prefix: '/api/v1', ...opts });
+  await app.register(fileRoutes, { prefix: '/api/v1/files', ...opts });
+  await app.register(storiesRoutes, { prefix: '/api/v1/stories', ...opts });
+  await app.register(placesRoutes, { prefix: '/api/v1', ...opts });
+  await app.register(speakerRoutes, { prefix: '/api/v1', ...opts });
 
   // Member dashboard routes (authenticated member endpoints)
-  await app.register(memberRoutes, { prefix: '/api/v1/member', ...options });
+  await app.register(memberRoutes, { prefix: '/api/v1/member', ...opts });
 
   // Super admin routes (system-level administrative endpoints)
-  await app.register(superAdminRoutes, { prefix: '/api/v1/super_admin', ...options });
+  await app.register(superAdminRoutes, {
+    prefix: '/api/v1/super_admin',
+    ...opts,
+  });
 }

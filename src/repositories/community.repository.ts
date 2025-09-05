@@ -14,7 +14,7 @@
  */
 
 import { eq, and, like, desc, or, sql, count } from 'drizzle-orm';
-import { communitiesSqlite } from '../db/schema/index.js';
+import { communitiesSqlite, communitiesPg } from '../db/schema/index.js';
 import type { Community, NewCommunity } from '../db/schema/communities.js';
 import type { Database } from '../db/index.js';
 
@@ -114,12 +114,13 @@ export class InvalidCommunityDataError extends Error {
  * Community Repository class providing database operations
  */
 export class CommunityRepository {
-  constructor(private db: Database) {
-    // Type assertion for drizzle operations - safer than any
-    this.database = db as any; // TODO: Implement proper database abstraction layer
-  }
+  constructor(private database: Database) {}
 
-  private database: any; // Internal database instance for drizzle operations
+  private get communities() {
+    // Determine which schema to use based on database type
+    // This is a runtime check to use the correct schema
+    return 'execute' in this.database ? communitiesPg : communitiesSqlite;
+  }
 
   /**
    * Generate a unique slug from community name
@@ -146,19 +147,18 @@ export class CommunityRepository {
     }
 
     // Check for existing slugs and find unique variant
-    const communities = communitiesSqlite;
     let slug = baseSlug;
     let counter = 1;
 
     while (true) {
-      const conditions = [eq(communities.slug, slug)];
+      const conditions = [eq(this.communities.slug, slug)];
       if (excludeId) {
-        conditions.push(sql`${communities.id} != ${excludeId}`);
+        conditions.push(sql`${this.communities.id} != ${excludeId}`);
       }
 
-      const existing = await this.database
-        .select({ id: communities.id })
-        .from(communities)
+      const existing = await (this.database as any)
+        .select({ id: this.communities.id })
+        .from(this.communities)
         .where(and(...conditions))
         .limit(1);
 
@@ -180,8 +180,6 @@ export class CommunityRepository {
    */
   async create(data: CreateCommunityData): Promise<Community> {
     try {
-      const communities = communitiesSqlite;
-
       // Validate required fields
       if (!data.name?.trim()) {
         throw new InvalidCommunityDataError('Community name is required');
@@ -227,8 +225,8 @@ export class CommunityRepository {
       };
 
       // Create community
-      const result = await this.database
-        .insert(communities)
+      const result = await (this.database as any)
+        .insert(this.communities)
         .values(communityData)
         .returning();
 
@@ -265,12 +263,10 @@ export class CommunityRepository {
    */
   async findById(id: number): Promise<Community | null> {
     try {
-      const communities = communitiesSqlite;
-
-      const result = await this.database
+      const result = await (this.database as any)
         .select()
-        .from(communities)
-        .where(eq(communities.id, id))
+        .from(this.communities)
+        .where(eq(this.communities.id, id))
         .limit(1);
 
       return result.length > 0 ? result[0] : null;
@@ -288,12 +284,10 @@ export class CommunityRepository {
    */
   async findBySlug(slug: string): Promise<Community | null> {
     try {
-      const communities = communitiesSqlite;
-
-      const result = await this.database
+      const result = await (this.database as any)
         .select()
-        .from(communities)
-        .where(eq(communities.slug, slug))
+        .from(this.communities)
+        .where(eq(this.communities.slug, slug))
         .limit(1);
 
       return result.length > 0 ? result[0] : null;
@@ -311,7 +305,6 @@ export class CommunityRepository {
    */
   async search(params: CommunitySearchParams = {}): Promise<Community[]> {
     try {
-      const communities = communitiesSqlite;
       const { query, locale, isActive, limit = 50, offset = 0 } = params;
 
       // Build where conditions
@@ -322,31 +315,31 @@ export class CommunityRepository {
         const searchTerm = `%${query.trim()}%`;
         conditions.push(
           or(
-            like(communities.name, searchTerm),
-            like(communities.description, searchTerm)
+            like(this.communities.name, searchTerm),
+            like(this.communities.description, searchTerm)
           )
         );
       }
 
       // Filter by locale
       if (locale) {
-        conditions.push(eq(communities.locale, locale));
+        conditions.push(eq(this.communities.locale, locale));
       }
 
       // Filter by active status
       if (isActive !== undefined) {
-        conditions.push(eq(communities.isActive, isActive));
+        conditions.push(eq(this.communities.isActive, isActive));
       }
 
       // Execute query with pagination
       const whereClause =
         conditions.length > 0 ? and(...conditions) : undefined;
 
-      const result = await this.database
+      const result = await (this.database as any)
         .select()
-        .from(communities)
+        .from(this.communities)
         .where(whereClause)
-        .orderBy(desc(communities.createdAt))
+        .orderBy(desc(this.communities.createdAt))
         .limit(limit)
         .offset(offset);
 
@@ -379,8 +372,6 @@ export class CommunityRepository {
     updates: UpdateCommunityData
   ): Promise<Community | null> {
     try {
-      const communities = communitiesSqlite;
-
       // Check if community exists
       const existingCommunity = await this.findById(id);
       if (!existingCommunity) {
@@ -436,10 +427,10 @@ export class CommunityRepository {
       );
 
       // Update community
-      const result = await this.database
-        .update(communities)
+      const result = await (this.database as any)
+        .update(this.communities)
         .set(cleanUpdateData)
-        .where(eq(communities.id, id))
+        .where(eq(this.communities.id, id))
         .returning();
 
       return result.length > 0 ? result[0] : null;
@@ -465,8 +456,6 @@ export class CommunityRepository {
    */
   async delete(id: number): Promise<boolean> {
     try {
-      const communities = communitiesSqlite;
-
       // Check if community exists
       const existingCommunity = await this.findById(id);
       if (!existingCommunity) {
@@ -474,9 +463,9 @@ export class CommunityRepository {
       }
 
       // Delete community (CASCADE should handle related data)
-      const result = await this.database
-        .delete(communities)
-        .where(eq(communities.id, id))
+      const result = await (this.database as any)
+        .delete(this.communities)
+        .where(eq(this.communities.id, id))
         .returning();
 
       return result.length > 0;
@@ -501,19 +490,17 @@ export class CommunityRepository {
    */
   async count(isActive?: boolean): Promise<number> {
     try {
-      const communities = communitiesSqlite;
-
       const conditions = [];
       if (isActive !== undefined) {
-        conditions.push(eq(communities.isActive, isActive));
+        conditions.push(eq(this.communities.isActive, isActive));
       }
 
       const whereClause =
         conditions.length > 0 ? and(...conditions) : undefined;
 
-      const result = await this.database
+      const result = await (this.database as any)
         .select({ count: count() })
-        .from(communities)
+        .from(this.communities)
         .where(whereClause);
 
       return result[0]?.count || 0;
@@ -532,16 +519,14 @@ export class CommunityRepository {
    */
   async isSlugAvailable(slug: string, excludeId?: number): Promise<boolean> {
     try {
-      const communities = communitiesSqlite;
-
-      const conditions = [eq(communities.slug, slug)];
+      const conditions = [eq(this.communities.slug, slug)];
       if (excludeId) {
-        conditions.push(sql`${communities.id} != ${excludeId}`);
+        conditions.push(sql`${this.communities.id} != ${excludeId}`);
       }
 
-      const result = await this.database
-        .select({ id: communities.id })
-        .from(communities)
+      const result = await (this.database as any)
+        .select({ id: this.communities.id })
+        .from(this.communities)
         .where(and(...conditions))
         .limit(1);
 

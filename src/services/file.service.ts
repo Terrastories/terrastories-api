@@ -138,7 +138,14 @@ export class FileService {
         validation.detectedType!
       );
       const fullPath = join(this.uploadDir, relativePath);
-      const url = `/api/v1/files/${relativePath}`;
+
+      // For offline/field-kit mode, return local file path instead of API URL
+      const isOfflineMode =
+        process.env.NODE_ENV === 'field-kit' ||
+        process.env.OFFLINE_MODE === 'true';
+      const url = isOfflineMode
+        ? `uploads/${relativePath}`
+        : `/api/v1/files/${relativePath}`;
 
       // 5. Ensure directory exists
       await fs.mkdir(dirname(fullPath), { recursive: true });
@@ -641,7 +648,11 @@ export class FileService {
       }
 
       // Additional security checks for specific file types
-      if (mimeType.startsWith('image/') && process.env.NODE_ENV !== 'test') {
+      if (
+        mimeType.startsWith('image/') &&
+        process.env.NODE_ENV !== 'test' &&
+        process.env.NODE_ENV !== 'field-kit'
+      ) {
         try {
           // Validate image using sharp (will throw if corrupted)
           // Skip in test environment to allow minimal test data

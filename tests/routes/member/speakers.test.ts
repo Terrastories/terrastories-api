@@ -50,8 +50,20 @@ describe('Member Speakers API - GET Endpoints', () => {
         communityId: testCommunityId,
       },
     });
-    editorSessionId =
-      editorLogin.cookies.find((c) => c.name === 'sessionId')?.value || '';
+    // Extract SIGNED session cookie from Set-Cookie header
+    // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
+    const setCookieHeader = editorLogin.headers['set-cookie'];
+    if (Array.isArray(setCookieHeader)) {
+      // Find all sessionId cookies
+      const sessionCookies = setCookieHeader.filter((cookie) =>
+        cookie.startsWith('sessionId=')
+      );
+      
+      // Use the signed cookie (longer one with signature) if available
+      editorSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
+      editorSessionId = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+    }
   });
 
   afterEach(async () => {
@@ -73,7 +85,7 @@ describe('Member Speakers API - GET Endpoints', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/member/speakers',
-        cookies: { sessionId: editorSessionId },
+        headers: { cookie: editorSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -93,7 +105,7 @@ describe('Member Speakers API - GET Endpoints', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/member/speakers?page=1&limit=10',
-        cookies: { sessionId: editorSessionId },
+        headers: { cookie: editorSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -116,7 +128,7 @@ describe('Member Speakers API - GET Endpoints', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/member/speakers?page=0&limit=101',
-        cookies: { sessionId: editorSessionId },
+        headers: { cookie: editorSessionId },
       });
 
       expect(response.statusCode).toBe(400);
@@ -128,7 +140,7 @@ describe('Member Speakers API - GET Endpoints', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/member/speakers?culturalRole=storyteller&search=elder',
-        cookies: { sessionId: editorSessionId },
+        headers: { cookie: editorSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -143,7 +155,7 @@ describe('Member Speakers API - GET Endpoints', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/member/speakers',
-        cookies: { sessionId: editorSessionId },
+        headers: { cookie: editorSessionId },
       });
 
       expect(response.statusCode).toBe(200);

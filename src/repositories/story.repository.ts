@@ -142,6 +142,7 @@ export interface StoryFilters {
   search?: string;
   communityId?: number;
   isRestricted?: boolean;
+  privacyLevel?: string;
   tags?: string[];
   createdBy?: number;
   language?: string;
@@ -723,6 +724,10 @@ export class StoryRepository {
 
     if (filters.isRestricted !== undefined) {
       conditions.push(eq(storiesTable.isRestricted, filters.isRestricted));
+    }
+
+    if (filters.privacyLevel) {
+      conditions.push(eq(storiesTable.privacyLevel, filters.privacyLevel));
     }
 
     if (filters.createdBy) {

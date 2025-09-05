@@ -29,9 +29,9 @@ echo "Backup name: $BACKUP_NAME"
 # Create backup directory structure
 mkdir -p "$BACKUP_PATH"
 
-# Backup SQLite databases
+# Backup sqlite databases
 if [ -d "$DATA_DIR" ]; then
-    echo "Backing up SQLite databases..."
+    echo "Backing up sqlite databases..."
     cp -r "$DATA_DIR" "$BACKUP_PATH/data"
 fi
 
@@ -43,6 +43,15 @@ if [ -d "$UPLOADS_DIR" ]; then
     
     # Create manifest of all files
     find "$UPLOADS_DIR" -type f > "$BACKUP_PATH/uploads_manifest.txt"
+fi
+
+# Backup offline map tiles (critical for field operations)
+TILES_DIR="/tiles"
+if [ -d "$TILES_DIR" ]; then
+    echo "Backing up offline map tiles..."
+    # Backup tiles directory for offline mapping
+    cp -r "$TILES_DIR" "$BACKUP_PATH/tiles"
+    echo "Map tiles backed up for offline use"
 fi
 
 # Create backup metadata

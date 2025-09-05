@@ -19,7 +19,6 @@ import {
   vi,
 } from 'vitest';
 import { createTestApp } from '../helpers/api-client.js';
-import { fileRoutes } from '../../src/routes/files.js';
 import { FastifyInstance } from 'fastify';
 import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
@@ -104,21 +103,8 @@ describe('File Routes Integration', () => {
     const db = await testDb.setup();
     await testDb.clearData();
 
-    // Create test app with test database (includes auth routes)
+    // Create test app with test database (includes all routes including files)
     app = await createTestApp(db);
-
-    // Add multipart support for file uploads
-    const multipart = await import('@fastify/multipart');
-    await app.register(multipart.default, {
-      limits: {
-        fileSize: 10 * 1024 * 1024, // 10MB default
-        files: 5, // Maximum 5 files per request
-      },
-      addToBody: false, // Don't add to body, use request.file() instead
-    });
-
-    // Register file routes
-    await app.register(fileRoutes, { prefix: '/api/v1/files', database: db });
     await app.ready();
 
     // Create test community directly in the database
@@ -170,8 +156,20 @@ describe('File Routes Integration', () => {
       );
     }
 
-    authCookie =
-      loginResponse.cookies.find((c) => c.name === 'sessionId')?.value || '';
+    // Extract SIGNED session cookie from Set-Cookie header
+    // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
+    const setCookieHeader = loginResponse.headers['set-cookie'];
+    if (Array.isArray(setCookieHeader)) {
+      // Find all sessionId cookies
+      const sessionCookies = setCookieHeader.filter((cookie) =>
+        cookie.startsWith('sessionId=')
+      );
+      
+      // Use the signed cookie (longer one with signature) if available
+      authCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
+      authCookie = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+    }
 
     // Create test JPEG file for multipart uploads
     const jpegBuffer = createTestJpegBuffer();
@@ -200,9 +198,7 @@ describe('File Routes Integration', () => {
         url: '/api/v1/files/upload',
         headers: {
           ...form.getHeaders(),
-        },
-        cookies: {
-          sessionId: authCookie,
+          cookie: authCookie,
         },
         payload: form,
       });
@@ -271,9 +267,7 @@ describe('File Routes Integration', () => {
         )}`,
         headers: {
           ...form.getHeaders(),
-        },
-        cookies: {
-          sessionId: authCookie,
+          cookie: authCookie,
         },
         payload: form,
       });
@@ -302,9 +296,7 @@ describe('File Routes Integration', () => {
         url: '/api/v1/files/upload',
         headers: {
           'content-type': 'multipart/form-data; boundary=----formdata-test',
-        },
-        cookies: {
-          sessionId: authCookie,
+          cookie: authCookie,
         },
         payload: [
           '------formdata-test',
@@ -333,9 +325,7 @@ describe('File Routes Integration', () => {
         url: '/api/v1/files/upload',
         headers: {
           'content-type': 'multipart/form-data; boundary=----formdata-test',
-        },
-        cookies: {
-          sessionId: authCookie,
+          cookie: authCookie,
         },
         payload: [
           '------formdata-test',
@@ -374,9 +364,7 @@ describe('File Routes Integration', () => {
         url: '/api/v1/files/upload',
         headers: {
           ...form.getHeaders(),
-        },
-        cookies: {
-          sessionId: authCookie,
+          cookie: authCookie,
         },
         payload: form,
       });
@@ -388,8 +376,8 @@ describe('File Routes Integration', () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/files/${uploadedFileId}`,
-        cookies: {
-          sessionId: authCookie,
+        headers: {
+          cookie: authCookie,
         },
       });
 
@@ -427,9 +415,7 @@ describe('File Routes Integration', () => {
         )}`,
         headers: {
           ...form.getHeaders(),
-        },
-        cookies: {
-          sessionId: authCookie,
+          cookie: authCookie,
         },
         payload: form,
       });
@@ -440,8 +426,8 @@ describe('File Routes Integration', () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/files/${elderFileId}`,
-        cookies: {
-          sessionId: authCookie,
+        headers: {
+          cookie: authCookie,
         },
       });
 
@@ -472,9 +458,7 @@ describe('File Routes Integration', () => {
         url: '/api/v1/files/upload',
         headers: {
           ...form.getHeaders(),
-        },
-        cookies: {
-          sessionId: authCookie,
+          cookie: authCookie,
         },
         payload: form,
       });
@@ -486,8 +470,8 @@ describe('File Routes Integration', () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/files/${uploadedFileId}/info`,
-        cookies: {
-          sessionId: authCookie,
+        headers: {
+          cookie: authCookie,
         },
       });
 
@@ -522,9 +506,7 @@ describe('File Routes Integration', () => {
         url: '/api/v1/files/upload',
         headers: {
           ...form.getHeaders(),
-        },
-        cookies: {
-          sessionId: authCookie,
+          cookie: authCookie,
         },
         payload: form,
       });
@@ -536,8 +518,8 @@ describe('File Routes Integration', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: `/api/v1/files/${uploadedFileId}`,
-        cookies: {
-          sessionId: authCookie,
+        headers: {
+          cookie: authCookie,
         },
       });
 
@@ -547,8 +529,8 @@ describe('File Routes Integration', () => {
       const getResponse = await app.inject({
         method: 'GET',
         url: `/api/v1/files/${uploadedFileId}`,
-        cookies: {
-          sessionId: authCookie,
+        headers: {
+          cookie: authCookie,
         },
       });
 
@@ -575,9 +557,7 @@ describe('File Routes Integration', () => {
           url: '/api/v1/files/upload',
           headers: {
             ...form.getHeaders(),
-          },
-          cookies: {
-            sessionId: authCookie,
+            cookie: authCookie,
           },
           payload: form,
         });
@@ -588,8 +568,8 @@ describe('File Routes Integration', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/files?page=1&limit=10',
-        cookies: {
-          sessionId: authCookie,
+        headers: {
+          cookie: authCookie,
         },
       });
 
@@ -612,8 +592,8 @@ describe('File Routes Integration', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/files?type=image',
-        cookies: {
-          sessionId: authCookie,
+        headers: {
+          cookie: authCookie,
         },
       });
 

@@ -59,10 +59,14 @@ describe('Authentication Data Sovereignty Tests', () => {
         },
       });
 
+      expect(loginResponse.statusCode).toBe(200); // Ensure login succeeded
+
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const sessionCookie = (
-        Array.isArray(setCookieHeader) ? setCookieHeader[0] : setCookieHeader
-      )!.split(';')[0];
+      // Use the signed cookie (second one) instead of the unsigned cookie (first one)  
+      const signedCookie = Array.isArray(setCookieHeader) 
+        ? setCookieHeader[1] 
+        : setCookieHeader;
+      const sessionCookie = signedCookie!.split(';')[0];
 
       // Try to access community data - should be blocked
       const response = await app.inject({
@@ -107,9 +111,11 @@ describe('Authentication Data Sovereignty Tests', () => {
       });
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const sessionCookie = (
-        Array.isArray(setCookieHeader) ? setCookieHeader[0] : setCookieHeader
-      )!.split(';')[0];
+      // Use the signed cookie (second one) instead of the unsigned cookie (first one)
+      const signedCookie = Array.isArray(setCookieHeader) 
+        ? setCookieHeader[1] 
+        : setCookieHeader;
+      const sessionCookie = signedCookie!.split(';')[0];
 
       // Access community data - should be allowed
       const response = await app.inject({
@@ -154,9 +160,11 @@ describe('Authentication Data Sovereignty Tests', () => {
       });
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const sessionCookie = (
-        Array.isArray(setCookieHeader) ? setCookieHeader[0] : setCookieHeader
-      )!.split(';')[0];
+      // Use the signed cookie (second one) instead of the unsigned cookie (first one)
+      const signedCookie = Array.isArray(setCookieHeader) 
+        ? setCookieHeader[1] 
+        : setCookieHeader;
+      const sessionCookie = signedCookie!.split(';')[0];
 
       // Access community data - should be allowed
       const response = await app.inject({

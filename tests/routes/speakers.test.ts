@@ -90,19 +90,19 @@ describe('Speakers API Routes - Integration Tests', () => {
     });
     expect(adminLoginRes.statusCode).toBe(200);
 
-    // Extract session cookie from Set-Cookie header
+    // Extract SIGNED session cookie from Set-Cookie header
+    // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
     const setCookieHeader = adminLoginRes.headers['set-cookie'];
     if (Array.isArray(setCookieHeader)) {
-      const sessionCookie = setCookieHeader.find((cookie) =>
-        cookie.includes('sessionId=')
+      // Find all sessionId cookies
+      const sessionCookies = setCookieHeader.filter((cookie) =>
+        cookie.startsWith('sessionId=')
       );
-      adminSessionId = sessionCookie
-        ? sessionCookie.split('sessionId=')[1].split(';')[0]
-        : '';
-    } else if (setCookieHeader) {
-      adminSessionId = setCookieHeader.includes('sessionId=')
-        ? setCookieHeader.split('sessionId=')[1].split(';')[0]
-        : '';
+      
+      // Use the signed cookie (longer one with signature) if available
+      adminSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
+      adminSessionId = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
     }
 
     // Register editor user
@@ -127,16 +127,13 @@ describe('Speakers API Routes - Integration Tests', () => {
 
     const editorSetCookieHeader = editorLoginRes.headers['set-cookie'];
     if (Array.isArray(editorSetCookieHeader)) {
-      const sessionCookie = editorSetCookieHeader.find((cookie) =>
-        cookie.includes('sessionId=')
+      // Use the signed session cookie (longer one with signature)
+      const sessionCookies = editorSetCookieHeader.filter((cookie) =>
+        cookie.startsWith('sessionId=')
       );
-      editorSessionId = sessionCookie
-        ? sessionCookie.split('sessionId=')[1].split(';')[0]
-        : '';
-    } else if (editorSetCookieHeader) {
-      editorSessionId = editorSetCookieHeader.includes('sessionId=')
-        ? editorSetCookieHeader.split('sessionId=')[1].split(';')[0]
-        : '';
+      editorSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (editorSetCookieHeader && typeof editorSetCookieHeader === 'string') {
+      editorSessionId = editorSetCookieHeader.startsWith('sessionId=') ? editorSetCookieHeader : '';
     }
 
     // Register viewer user
@@ -161,16 +158,13 @@ describe('Speakers API Routes - Integration Tests', () => {
 
     const viewerSetCookieHeader = viewerLoginRes.headers['set-cookie'];
     if (Array.isArray(viewerSetCookieHeader)) {
-      const sessionCookie = viewerSetCookieHeader.find((cookie) =>
-        cookie.includes('sessionId=')
+      // Use the signed session cookie (longer one with signature)
+      const sessionCookies = viewerSetCookieHeader.filter((cookie) =>
+        cookie.startsWith('sessionId=')
       );
-      viewerSessionId = sessionCookie
-        ? sessionCookie.split('sessionId=')[1].split(';')[0]
-        : '';
-    } else if (viewerSetCookieHeader) {
-      viewerSessionId = viewerSetCookieHeader.includes('sessionId=')
-        ? viewerSetCookieHeader.split('sessionId=')[1].split(';')[0]
-        : '';
+      viewerSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (viewerSetCookieHeader && typeof viewerSetCookieHeader === 'string') {
+      viewerSessionId = viewerSetCookieHeader.startsWith('sessionId=') ? viewerSetCookieHeader : '';
     }
 
     const elderRegisterRes = await app.inject({
@@ -198,15 +192,18 @@ describe('Speakers API Routes - Integration Tests', () => {
     };
 
     test('should create speaker with valid data as admin', async () => {
+      console.log('🔍 DEBUG: Making authenticated request with cookie:', `"${adminSessionId}"`);
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/speakers',
         payload: validSpeakerData,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
+      console.log('🔍 DEBUG: Response status:', response.statusCode);
+      console.log('🔍 DEBUG: Response body:', response.body);
       expect(response.statusCode).toBe(201);
       const body = JSON.parse(response.body);
       expect(body.data).toBeDefined();
@@ -227,7 +224,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: minimalData,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -245,7 +242,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: validSpeakerData,
         headers: {
-          cookie: `sessionId=${editorSessionId}`,
+          cookie: editorSessionId,
         },
       });
 
@@ -265,7 +262,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: elderData,
         headers: {
-          cookie: `sessionId=${editorSessionId}`,
+          cookie: editorSessionId,
         },
       });
 
@@ -280,7 +277,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: elderData,
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -299,7 +296,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: elderData,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -325,7 +322,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: validSpeakerData,
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -342,7 +339,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: invalidData,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -362,7 +359,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: longNameData,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -380,7 +377,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: invalidUrlData,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -398,7 +395,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: '/api/v1/speakers',
         payload: invalidYearData,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -420,7 +417,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: false,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -433,7 +430,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -448,7 +445,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: `/api/v1/speakers/99999`,
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -471,7 +468,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -493,7 +490,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           isActive: true,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -507,7 +504,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           isActive: true,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -520,7 +517,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           isActive: false,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
     });
@@ -530,7 +527,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers?page=1&limit=10',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -553,7 +550,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers?elderOnly=true&page=1&limit=10',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -570,7 +567,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers?page=1&limit=10',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -587,7 +584,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers?page=1&limit=10',
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -602,7 +599,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers?sortBy=name&sortOrder=asc&page=1&limit=10',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -621,7 +618,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers?page=0&limit=10',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -653,7 +650,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: false,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
       const body = JSON.parse(createResponse.body);
@@ -669,7 +666,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           culturalRole: 'Elder Council',
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
       const elderBody = JSON.parse(elderResponse.body);
@@ -688,7 +685,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: `/api/v1/speakers/${createdSpeakerId}`,
         payload: updateData,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -709,7 +706,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: `/api/v1/speakers/${createdSpeakerId}`,
         payload: updateData,
         headers: {
-          cookie: `sessionId=${editorSessionId}`,
+          cookie: editorSessionId,
         },
       });
 
@@ -728,7 +725,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: `/api/v1/speakers/${elderSpeakerId}`,
         payload: updateData,
         headers: {
-          cookie: `sessionId=${editorSessionId}`,
+          cookie: editorSessionId,
         },
       });
 
@@ -739,7 +736,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: `/api/v1/speakers/${elderSpeakerId}`,
         payload: updateData,
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -756,7 +753,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: `/api/v1/speakers/${createdSpeakerId}`,
         payload: updateData,
         headers: {
-          cookie: `sessionId=${editorSessionId}`,
+          cookie: editorSessionId,
         },
       });
 
@@ -771,7 +768,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: `/api/v1/speakers/99999`,
         payload: { name: 'Updated' },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -788,7 +785,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         url: `/api/v1/speakers/${createdSpeakerId}`,
         payload: invalidData,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -820,7 +817,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: false,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
       const body = JSON.parse(createResponse.body);
@@ -835,7 +832,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           elderStatus: true,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
       const elderBody = JSON.parse(elderResponse.body);
@@ -847,7 +844,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'DELETE',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -858,7 +855,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -870,7 +867,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'DELETE',
         url: `/api/v1/speakers/${elderSpeakerId}`,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -886,7 +883,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'DELETE',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         headers: {
-          cookie: `sessionId=${editorSessionId}`,
+          cookie: editorSessionId,
         },
       });
 
@@ -896,7 +893,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'DELETE',
         url: `/api/v1/speakers/${createdSpeakerId}`,
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -908,7 +905,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'DELETE',
         url: `/api/v1/speakers/99999`,
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -936,7 +933,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           culturalRole: 'Elder',
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -948,7 +945,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           culturalRole: 'Storyteller',
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -960,7 +957,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           culturalRole: 'Knowledge Keeper',
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
     });
@@ -970,7 +967,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers/search?q=Maria&page=1&limit=10',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -987,7 +984,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers/search?q=NonExistent&page=1&limit=10',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -1002,7 +999,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers/search?page=1&limit=10',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -1014,7 +1011,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers/search?q=a&page=1&limit=10',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 
@@ -1043,7 +1040,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           isActive: true,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -1056,7 +1053,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           isActive: true,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
 
@@ -1069,7 +1066,7 @@ describe('Speakers API Routes - Integration Tests', () => {
           isActive: false,
         },
         headers: {
-          cookie: `sessionId=${adminSessionId}`,
+          cookie: adminSessionId,
         },
       });
     });
@@ -1079,7 +1076,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers/stats',
         headers: {
-          cookie: `sessionId=${viewerSessionId}`,
+          cookie: viewerSessionId,
         },
       });
 

@@ -19,7 +19,7 @@ import { join } from 'path';
 import { z } from 'zod';
 import { FileService } from '../services/file.service.js';
 import { FileRepository } from '../repositories/file.repository.js';
-import { getDb } from '../db/index.js';
+import { getDb, type Database } from '../db/index.js';
 import { getConfig } from '../shared/config/index.js';
 import {
   requireAuth,
@@ -58,8 +58,7 @@ const listFilesQuerySchema = z.object({
  */
 export async function fileRoutes(
   fastify: FastifyInstance,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { database?: any }
+  options?: { database?: Database }
 ) {
   // Initialize services - use provided database instance or default
   const db = options?.database || (await getDb());

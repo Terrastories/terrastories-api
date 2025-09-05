@@ -44,6 +44,7 @@ export const storiesPg = pgTable('stories', {
   communityId: pgInteger('community_id').notNull(),
   createdBy: pgInteger('created_by').notNull(),
   isRestricted: boolean('is_restricted').notNull().default(false),
+  privacyLevel: pgText('privacy_level').notNull().default('public'),
   mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
   language: pgText('language').notNull().default('en'),
   tags: jsonb('tags').$type<string[]>().default([]),
@@ -62,6 +63,7 @@ export const storiesSqlite = sqliteTable('stories', {
   isRestricted: integer('is_restricted', { mode: 'boolean' })
     .notNull()
     .default(false),
+  privacyLevel: sqliteText('privacy_level').notNull().default('public'),
   mediaUrls: sqliteText('media_urls', { mode: 'json' })
     .$type<string[]>()
     .default([]),
@@ -128,7 +130,11 @@ export const storiesSqliteRelations = relations(
 export const insertStorySchema = createInsertSchema(storiesPg, {
   title: z.string().min(1, 'Title is required').max(500, 'Title too long'),
   description: z.string().max(5000, 'Description too long').optional(),
-  slug: z.string().min(1, 'Slug is required').max(100, 'Slug too long').regex(/^[a-z0-9-]+$/, 'Slug must be lowercase alphanumeric with hyphens'),
+  slug: z
+    .string()
+    .min(1, 'Slug is required')
+    .max(100, 'Slug too long')
+    .regex(/^[a-z0-9-]+$/, 'Slug must be lowercase alphanumeric with hyphens'),
   mediaUrls: z.array(MediaUrlSchema).default([]),
   language: z.string().min(2).max(5).default('en'),
   tags: z.array(z.string().min(1).max(50)).default([]),
@@ -142,13 +148,20 @@ export type Story = typeof storiesPg.$inferSelect;
 export type NewStory = typeof storiesPg.$inferInsert;
 
 // Additional validation schemas for specific use cases
-export const createStorySchema = insertStorySchema.omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
-}).extend({
-  slug: z.string().min(1).max(100).regex(/^[a-z0-9-]+$/).optional(), // Optional for create, auto-generated from title
-});
+export const createStorySchema = insertStorySchema
+  .omit({
+    id: true,
+    createdAt: true,
+    updatedAt: true,
+  })
+  .extend({
+    slug: z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[a-z0-9-]+$/)
+      .optional(), // Optional for create, auto-generated from title
+  });
 
 export const updateStorySchema = insertStorySchema.partial().omit({
   id: true,

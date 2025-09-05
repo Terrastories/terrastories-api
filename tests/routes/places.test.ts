@@ -110,32 +110,48 @@ describe('Places API Routes - Integration Tests', () => {
       url: '/api/v1/auth/login',
       payload: { email: adminUser.email, password: adminUser.password },
     });
-    adminSessionId =
-      adminLogin.cookies.find((c) => c.name === 'sessionId')?.value || '';
+    // Extract SIGNED session cookie
+    const adminSetCookie = adminLogin.headers['set-cookie'];
+    if (Array.isArray(adminSetCookie)) {
+      const sessionCookies = adminSetCookie.filter((cookie) => cookie.startsWith('sessionId='));
+      adminSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    }
 
     const editorLogin = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/login',
       payload: { email: editorUser.email, password: editorUser.password },
     });
-    editorSessionId =
-      editorLogin.cookies.find((c) => c.name === 'sessionId')?.value || '';
+    // Extract SIGNED session cookie
+    const editorSetCookie = editorLogin.headers['set-cookie'];
+    if (Array.isArray(editorSetCookie)) {
+      const sessionCookies = editorSetCookie.filter((cookie) => cookie.startsWith('sessionId='));
+      editorSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    }
 
     const viewerLogin = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/login',
       payload: { email: viewerUser.email, password: viewerUser.password },
     });
-    viewerSessionId =
-      viewerLogin.cookies.find((c) => c.name === 'sessionId')?.value || '';
+    // Extract SIGNED session cookie
+    const viewerSetCookie = viewerLogin.headers['set-cookie'];
+    if (Array.isArray(viewerSetCookie)) {
+      const sessionCookies = viewerSetCookie.filter((cookie) => cookie.startsWith('sessionId='));
+      viewerSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    }
 
     const elderLogin = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/login',
       payload: { email: elderUser.email, password: elderUser.password },
     });
-    elderSessionId =
-      elderLogin.cookies.find((c) => c.name === 'sessionId')?.value || '';
+    // Extract SIGNED session cookie
+    const elderSetCookie = elderLogin.headers['set-cookie'];
+    if (Array.isArray(elderSetCookie)) {
+      const sessionCookies = elderSetCookie.filter((cookie) => cookie.startsWith('sessionId='));
+      elderSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    }
   });
 
   afterEach(async () => {
@@ -159,7 +175,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: placeData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(201);
@@ -182,7 +198,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: placeData,
-        cookies: { sessionId: editorSessionId },
+        headers: { cookie: editorSessionId },
       });
 
       expect(response.statusCode).toBe(201);
@@ -201,7 +217,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: placeData,
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(403);
@@ -234,7 +250,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: invalidData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(400);
@@ -254,7 +270,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: invalidData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(400);
@@ -277,7 +293,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: placeData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(201);
@@ -301,7 +317,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: placeData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       const body = JSON.parse(createResponse.body);
@@ -312,7 +328,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/places/${testPlaceId}`,
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -325,7 +341,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places/99999',
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(404);
@@ -356,7 +372,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: restrictedPlaceData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       const restrictedPlace = JSON.parse(createResponse.body);
@@ -366,7 +382,7 @@ describe('Places API Routes - Integration Tests', () => {
       const elderResponse = await app.inject({
         method: 'GET',
         url: `/api/v1/places/${restrictedId}`,
-        cookies: { sessionId: elderSessionId },
+        headers: { cookie: elderSessionId },
       });
 
       expect(elderResponse.statusCode).toBe(200);
@@ -375,7 +391,7 @@ describe('Places API Routes - Integration Tests', () => {
       const viewerResponse = await app.inject({
         method: 'GET',
         url: `/api/v1/places/${restrictedId}`,
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       // This might be 200 or 403 depending on cultural protocol implementation
@@ -397,7 +413,7 @@ describe('Places API Routes - Integration Tests', () => {
           method: 'POST',
           url: '/api/v1/places',
           payload: place,
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
         });
       }
     });
@@ -406,7 +422,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places?page=1&limit=2',
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -423,7 +439,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places',
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -456,7 +472,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: placeData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       const body = JSON.parse(createResponse.body);
@@ -473,7 +489,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/places/${testPlaceId}`,
         payload: updateData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -492,7 +508,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/places/${testPlaceId}`,
         payload: updateData,
-        cookies: { sessionId: editorSessionId },
+        headers: { cookie: editorSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -509,7 +525,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/places/${testPlaceId}`,
         payload: updateData,
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(403);
@@ -524,7 +540,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'PUT',
         url: '/api/v1/places/99999',
         payload: updateData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(404);
@@ -539,7 +555,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'PUT',
         url: `/api/v1/places/${testPlaceId}`,
         payload: updateData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(400);
@@ -560,7 +576,7 @@ describe('Places API Routes - Integration Tests', () => {
         method: 'POST',
         url: '/api/v1/places',
         payload: placeData,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       const body = JSON.parse(createResponse.body);
@@ -571,7 +587,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: `/api/v1/places/${testPlaceId}`,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(204);
@@ -580,7 +596,7 @@ describe('Places API Routes - Integration Tests', () => {
       const getResponse = await app.inject({
         method: 'GET',
         url: `/api/v1/places/${testPlaceId}`,
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(getResponse.statusCode).toBe(404);
@@ -590,7 +606,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: `/api/v1/places/${testPlaceId}`,
-        cookies: { sessionId: editorSessionId },
+        headers: { cookie: editorSessionId },
       });
 
       expect(response.statusCode).toBe(403);
@@ -600,7 +616,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: `/api/v1/places/${testPlaceId}`,
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(403);
@@ -610,7 +626,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: '/api/v1/places/99999',
-        cookies: { sessionId: adminSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(404);
@@ -631,7 +647,7 @@ describe('Places API Routes - Integration Tests', () => {
           method: 'POST',
           url: '/api/v1/places',
           payload: place,
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
         });
       }
     });
@@ -649,7 +665,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/places/near?${queryString}`,
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -665,7 +681,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places/near?latitude=200&longitude=-123.1207&radius=1',
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(400);
@@ -677,7 +693,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places/near',
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(400);
@@ -687,7 +703,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places/near?latitude=49.2827&longitude=-123.1207&radius=2000', // Too large
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(400);
@@ -707,7 +723,7 @@ describe('Places API Routes - Integration Tests', () => {
           method: 'POST',
           url: '/api/v1/places',
           payload: place,
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
         });
       }
     });
@@ -726,7 +742,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/places/bounds?${queryString}`,
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -741,7 +757,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places/bounds?north=49.27&south=49.29&east=-123.11&west=-123.13',
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(400);
@@ -755,7 +771,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places/bounds?north=49.29&south=49.27', // Missing east and west
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(400);
@@ -791,7 +807,7 @@ describe('Places API Routes - Integration Tests', () => {
           method: 'POST',
           url: '/api/v1/places',
           payload: place,
-          cookies: { sessionId: adminSessionId },
+          headers: { cookie: adminSessionId },
         });
       }
     });
@@ -800,7 +816,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places/stats',
-        cookies: { sessionId: viewerSessionId },
+        headers: { cookie: viewerSessionId },
       });
 
       expect(response.statusCode).toBe(200);

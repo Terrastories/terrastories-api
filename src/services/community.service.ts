@@ -803,27 +803,14 @@ export class CommunityService {
         this.communityRepository.count(active),
       ]);
 
-      console.log('Service: communities from repository:', {
-        communitiesType: typeof communities,
-        communitiesLength: communities?.length,
-        firstCommunity: communities?.[0],
-        total,
-      });
-
       // Transform communities to response format (userCount will be added at route level)
       const data = communities.map((community, index) => {
         if (!community) {
-          console.error('Service: undefined community at index', index);
           throw new CommunityOperationError(
             `Undefined community at index ${index}`
           );
         }
         if (typeof community.id !== 'number') {
-          console.error(
-            'Service: invalid community ID at index',
-            index,
-            community
-          );
           throw new CommunityOperationError(
             `Invalid community ID at index ${index}: ${community?.id}`
           );

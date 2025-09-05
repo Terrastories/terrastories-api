@@ -70,7 +70,7 @@ export async function publicApiRoutes(
       (request as FastifyRequest & { community: unknown }).community =
         community;
     } catch (error) {
-      console.error('Community validation error:', error);
+      request.log.error(error, 'Community validation error');
       return reply.status(500).send({
         error: 'Internal server error',
       });
@@ -127,7 +127,7 @@ export async function publicApiRoutes(
           },
         };
       } catch (error) {
-        console.error('Public stories listing error:', error);
+        request.log.error(error, 'Public stories listing error');
         // Handle validation errors
         if (error instanceof Error && error.message.includes('Invalid')) {
           return reply.status(400).send({
@@ -176,7 +176,7 @@ export async function publicApiRoutes(
           data: toPublicStory(story),
         };
       } catch (error) {
-        console.error('Public story retrieval error:', error);
+        request.log.error(error, 'Public story retrieval error');
         return reply.status(500).send({
           error: 'Internal server error',
         });
@@ -233,7 +233,7 @@ export async function publicApiRoutes(
           },
         };
       } catch (error) {
-        console.error('Public places listing error:', error);
+        request.log.error(error, 'Public places listing error');
         return reply.status(500).send({
           error: 'Internal server error',
         });
@@ -286,7 +286,7 @@ export async function publicApiRoutes(
           throw placeError;
         }
       } catch (error) {
-        console.error('Public place retrieval error:', error);
+        request.log.error(error, 'Public place retrieval error');
         return reply.status(500).send({
           error: 'Internal server error',
         });

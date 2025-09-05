@@ -78,7 +78,32 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
     // Create test ActiveStorage data
     await setupActiveStorageTestData();
 
-    console.log('ActiveStorage migration validation setup complete');
+    // Debug: Check that test data was created and is properly linked
+    const blobCount = await db.executeRaw(
+      'SELECT COUNT(*) as count FROM active_storage_blobs'
+    );
+    const attachmentCount = await db.executeRaw(
+      'SELECT COUNT(*) as count FROM active_storage_attachments'
+    );
+    const storiesCount = await db.executeRaw(
+      'SELECT COUNT(*) as count FROM stories'
+    );
+    const placesCount = await db.executeRaw(
+      'SELECT COUNT(*) as count FROM places'
+    );
+    console.log(
+      `ActiveStorage migration validation setup complete - Blobs: ${blobCount[0]?.count || 0}, Attachments: ${attachmentCount[0]?.count || 0}, Stories: ${storiesCount[0]?.count || 0}, Places: ${placesCount[0]?.count || 0}`
+    );
+
+    // Check a sample attachment to see how data is linked
+    const sampleAttachment = await db.executeRaw(
+      'SELECT * FROM active_storage_attachments LIMIT 1'
+    );
+    const sampleStory = await db.executeRaw(
+      'SELECT * FROM stories WHERE id = 1'
+    );
+    console.log('Sample attachment:', sampleAttachment[0]);
+    console.log('Sample story:', sampleStory[0]);
   });
 
   describe('Migration Script Validation', () => {
@@ -683,37 +708,37 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
     // Insert test ActiveStorage blobs for each community
     const communities = [1, 2, 3];
     for (const communityId of communities) {
-      // First, create the corresponding stories, places, and speakers records
-      // that the attachments will reference
-      const storyId = communityId;
-      const placeId = communityId;
-      const speakerId = communityId;
+      // Create unique IDs for stories, places, speakers to avoid conflicts
+      const storyId = communityId + 100; // Use offset to avoid ID conflicts
+      const placeId = communityId + 200;
+      const speakerId = communityId + 300;
+      const userId = communityId + 400;
+
+      // Also ensure communities and users exist for foreign key constraints first
+      await db.executeRaw(`
+        INSERT OR REPLACE INTO communities (id, name, slug, description, cultural_settings, public_stories, locale, created_at, updated_at) 
+        VALUES (${communityId}, 'Test Community ${communityId}', 'test-community-${communityId}', 'Test community', '{}', 1, 'en', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `);
+
+      await db.executeRaw(`
+        INSERT OR REPLACE INTO users (id, email, password_hash, first_name, last_name, role, community_id, is_active, created_at, updated_at) 
+        VALUES (${userId}, 'admin${communityId}@test.com', 'hashed_password', 'Test', 'Admin', 'admin', ${communityId}, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `);
 
       // Insert test data using safe template literals (executeRaw doesn't support parameters)
       await db.executeRaw(`
-        INSERT OR IGNORE INTO stories (id, title, description, slug, community_id, created_by, language, is_restricted, privacy_level) 
-        VALUES (${storyId}, 'Test Story ${communityId}', 'Test story description', 'test-story-${communityId}', ${communityId}, 1, 'en', 0, 'public')
+        INSERT OR REPLACE INTO stories (id, title, description, slug, community_id, created_by, language, is_restricted, privacy_level, media_urls, created_at, updated_at) 
+        VALUES (${storyId}, 'Test Story ${communityId}', 'Test story description', 'test-story-${communityId}', ${communityId}, ${userId}, 'en', 0, 'public', '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `);
 
       await db.executeRaw(`
-        INSERT OR IGNORE INTO places (id, name, description, latitude, longitude, community_id, is_restricted) 
-        VALUES (${placeId}, 'Test Place ${communityId}', 'Test place description', 45.0, -93.0, ${communityId}, 0)
+        INSERT OR REPLACE INTO places (id, name, description, latitude, longitude, community_id, is_restricted, media_urls, created_at, updated_at) 
+        VALUES (${placeId}, 'Test Place ${communityId}', 'Test place description', 45.0, -93.0, ${communityId}, 0, '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `);
 
       await db.executeRaw(`
-        INSERT OR IGNORE INTO speakers (id, name, bio, community_id) 
-        VALUES (${speakerId}, 'Test Speaker ${communityId}', 'Test speaker bio', ${communityId})
-      `);
-
-      // Also ensure communities and users exist for foreign key constraints
-      await db.executeRaw(`
-        INSERT OR IGNORE INTO communities (id, name, slug, description, cultural_settings, public_stories) 
-        VALUES (${communityId}, 'Test Community ${communityId}', 'test-community-${communityId}', 'Test community', '{}', 1)
-      `);
-
-      await db.executeRaw(`
-        INSERT OR IGNORE INTO users (id, email, password_hash, first_name, last_name, role, community_id, is_active) 
-        VALUES (1, 'admin@test.com', 'hashed_password', 'Test', 'Admin', 'admin', ${communityId}, 1)
+        INSERT OR REPLACE INTO speakers (id, name, bio, community_id, photo_url, created_at, updated_at) 
+        VALUES (${speakerId}, 'Test Speaker ${communityId}', 'Test speaker bio', ${communityId}, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `);
 
       // Clean up existing test data to avoid conflicts
@@ -756,19 +781,19 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
         : [];
 
       if (blobIds.length >= 3) {
-        // Insert test attachments linking blobs to stories/places
+        // Insert test attachments linking blobs to stories/places (using correct IDs)
         await db.executeRaw(`
-          INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
+          INSERT OR REPLACE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
           VALUES ('image', 'Story', ${storyId}, ${blobIds[0]})
         `);
 
         await db.executeRaw(`
-          INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
+          INSERT OR REPLACE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
           VALUES ('audio', 'Story', ${storyId}, ${blobIds[1]})
         `);
 
         await db.executeRaw(`
-          INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
+          INSERT OR REPLACE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
           VALUES ('image', 'Place', ${placeId}, ${blobIds[2]})
         `);
       }
@@ -866,12 +891,23 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
       `SELECT id FROM active_storage_blobs WHERE key = '${key}' ORDER BY id DESC LIMIT 1`
     );
 
-    // Create attachment (assuming blobResult contains the blob ID)
+    // Create attachment (linking to existing records with proper IDs)
     const blobId =
       Array.isArray(blobResult) && blobResult.length > 0 ? blobResult[0].id : 1;
+
+    // Use proper record IDs based on record type
+    let recordId = parseInt(communityId);
+    if (options.record_type === 'Story') {
+      recordId = parseInt(communityId) + 100;
+    } else if (options.record_type === 'Place') {
+      recordId = parseInt(communityId) + 200;
+    } else if (options.record_type === 'Speaker') {
+      recordId = parseInt(communityId) + 300;
+    }
+
     await db.executeRaw(
       `INSERT INTO active_storage_attachments (name, record_type, record_id, blob_id)
-       VALUES ('${options.attachment_name}', '${options.record_type}', ${parseInt(communityId)}, ${blobId})`
+       VALUES ('${options.attachment_name}', '${options.record_type}', ${recordId}, ${blobId})`
     );
 
     // Create actual test file for this blob - use smaller files to prevent disk space issues
@@ -897,72 +933,29 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
     communityId: string
   ): Promise<MigrationResult> {
     try {
-      // Instead of using the CLI script, use the migrator service directly
-      // with the same test database the test is using
+      // Ensure fresh test data before migration
+      await setupActiveStorageTestData();
+
+      // Use the migrator service with the test database adapter
       const { ActiveStorageMigrator } = await import(
         '../../src/services/activestorage-migrator.js'
       );
+      const { ActiveStorageTestAdapter } = await import(
+        '../helpers/activestorage-test-adapter.js'
+      );
+
       const activeStoragePath = path.join(testDataPath, 'storage');
+      const testAdapter = new ActiveStorageTestAdapter(db);
 
-      const migrator = new ActiveStorageMigrator({
-        database: ':memory:', // This will be overridden
-        activeStoragePath,
-        uploadsPath: './uploads',
-        dryRun: false,
-      });
-
-      // Monkey patch the database adapter to use our test database
-      // @ts-ignore - accessing private property for testing
-      migrator.dbAdapter = {
-        testAdapter: true, // Mark as test adapter to skip community validation
-        query: async (sql: string, params?: any[]) => {
-          // Convert to raw SQL execution
-          let query = sql;
-          if (params && params.length > 0) {
-            // Replace $1, $2, etc. with actual values for SQLite
-            for (let i = 0; i < params.length; i++) {
-              const placeholder = new RegExp(`\\$${i + 1}`, 'g');
-              if (typeof params[i] === 'string') {
-                query = query.replace(placeholder, `'${params[i]}'`);
-              } else if (params[i] === null) {
-                query = query.replace(placeholder, 'NULL');
-              } else {
-                query = query.replace(placeholder, String(params[i]));
-              }
-            }
-          }
-
-          try {
-            const result = await db.executeRaw(query);
-            const rows = Array.isArray(result)
-              ? result
-              : result
-                ? [result]
-                : [];
-
-            // Debug specific migration queries
-            if (
-              query.includes('active_storage_attachments') &&
-              query.includes('JOIN')
-            ) {
-              console.log('Migration query:', query);
-              console.log('Query result rows:', rows.length);
-              if (rows.length > 0) {
-                console.log('First result:', rows[0]);
-              }
-            }
-
-            return { rows };
-          } catch (error: any) {
-            // Log query for debugging
-            console.log('Query failed:', query);
-            console.log('Error:', error.message);
-            throw error;
-          }
+      const migrator = new ActiveStorageMigrator(
+        {
+          database: ':memory:', // Not used when external adapter provided
+          activeStoragePath,
+          uploadsPath: './uploads',
+          dryRun: false,
         },
-        connect: async () => {},
-        close: async () => {},
-      };
+        testAdapter
+      );
 
       const result = await migrator.migrateByCommunity(parseInt(communityId));
 
@@ -998,6 +991,9 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
   async function getActiveStorageBlobs(
     communityId: string
   ): Promise<ActiveStorageBlob[]> {
+    // Before running the query, ensure we have fresh test data since clearData() gets called between tests
+    await setupActiveStorageTestData();
+
     // Convert PostgreSQL UNION query with parameterized queries to SQLite syntax
     const result = await db.executeRaw(`
       SELECT DISTINCT asb.*
@@ -1030,6 +1026,9 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
   async function getActiveStorageAttachments(
     communityId: string
   ): Promise<ActiveStorageAttachment[]> {
+    // Before running the query, ensure we have fresh test data since clearData() gets called between tests
+    await setupActiveStorageTestData();
+
     // Convert PostgreSQL UNION query with parameterized queries to SQLite syntax
     const result = await db.executeRaw(`
       SELECT asa.*

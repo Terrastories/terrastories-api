@@ -685,30 +685,35 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
     for (const communityId of communities) {
       // First, create the corresponding stories, places, and speakers records
       // that the attachments will reference
+      const storyId = communityId;
+      const placeId = communityId;
+      const speakerId = communityId;
+
+      // Insert test data using safe template literals (executeRaw doesn't support parameters)
       await db.executeRaw(`
-        INSERT OR IGNORE INTO stories (id, title, description, slug, community_id, created_by, language, is_restricted)
-        VALUES (${communityId}, 'Test Story ${communityId}', 'Test story description', 'test-story-${communityId}', ${communityId}, 1, 'en', false)
+        INSERT OR IGNORE INTO stories (id, title, description, slug, community_id, created_by, language, is_restricted, privacy_level) 
+        VALUES (${storyId}, 'Test Story ${communityId}', 'Test story description', 'test-story-${communityId}', ${communityId}, 1, 'en', 0, 'public')
       `);
 
       await db.executeRaw(`
-        INSERT OR IGNORE INTO places (id, name, description, latitude, longitude, community_id)
-        VALUES (${communityId}, 'Test Place ${communityId}', 'Test place description', 45.0, -93.0, ${communityId})
+        INSERT OR IGNORE INTO places (id, name, description, latitude, longitude, community_id, is_restricted) 
+        VALUES (${placeId}, 'Test Place ${communityId}', 'Test place description', 45.0, -93.0, ${communityId}, 0)
       `);
 
       await db.executeRaw(`
-        INSERT OR IGNORE INTO speakers (id, name, bio, community_id)
-        VALUES (${communityId}, 'Test Speaker ${communityId}', 'Test speaker bio', ${communityId})
+        INSERT OR IGNORE INTO speakers (id, name, bio, community_id) 
+        VALUES (${speakerId}, 'Test Speaker ${communityId}', 'Test speaker bio', ${communityId})
       `);
 
       // Also ensure communities and users exist for foreign key constraints
       await db.executeRaw(`
-        INSERT OR IGNORE INTO communities (id, name, slug, description, cultural_settings, public_stories)
-        VALUES (${communityId}, 'Test Community ${communityId}', 'test-community-${communityId}', 'Test community', '{}', true)
+        INSERT OR IGNORE INTO communities (id, name, slug, description, cultural_settings, public_stories) 
+        VALUES (${communityId}, 'Test Community ${communityId}', 'test-community-${communityId}', 'Test community', '{}', 1)
       `);
 
       await db.executeRaw(`
-        INSERT OR IGNORE INTO users (id, email, password_hash, first_name, last_name, role, community_id, is_active)
-        VALUES (1, 'admin@test.com', 'hashed_password', 'Test', 'Admin', 'admin', ${communityId}, true)
+        INSERT OR IGNORE INTO users (id, email, password_hash, first_name, last_name, role, community_id, is_active) 
+        VALUES (1, 'admin@test.com', 'hashed_password', 'Test', 'Admin', 'admin', ${communityId}, 1)
       `);
 
       // Clean up existing test data to avoid conflicts
@@ -721,19 +726,29 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
         DELETE FROM active_storage_blobs WHERE key LIKE 'test-%${communityId}'
       `);
 
+      // Insert test blobs
+      const storyImageKey = `test-story-image-${communityId}`;
+      const storyAudioKey = `test-story-audio-${communityId}`;
+      const placeImageKey = `test-place-image-${communityId}`;
+
       await db.executeRaw(`
-        INSERT INTO active_storage_blobs (key, filename, content_type, metadata, byte_size, checksum)
-        VALUES 
-          ('test-story-image-${communityId}', 'story_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 1024, 'test-checksum-${communityId}a'),
-          ('test-story-audio-${communityId}', 'story_audio_${communityId}.mp3', 'audio/mpeg', '{"cultural_restrictions": {"elder_only": true}}', 2048, 'test-checksum-${communityId}b'),
-          ('test-place-image-${communityId}', 'place_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 512, 'test-checksum-${communityId}c')
+        INSERT INTO active_storage_blobs (key, filename, content_type, metadata, byte_size, checksum) 
+        VALUES ('${storyImageKey}', 'story_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 1024, 'test-checksum-${communityId}a')
+      `);
+
+      await db.executeRaw(`
+        INSERT INTO active_storage_blobs (key, filename, content_type, metadata, byte_size, checksum) 
+        VALUES ('${storyAudioKey}', 'story_audio_${communityId}.mp3', 'audio/mpeg', '{"cultural_restrictions": {"elder_only": true}}', 2048, 'test-checksum-${communityId}b')
+      `);
+
+      await db.executeRaw(`
+        INSERT INTO active_storage_blobs (key, filename, content_type, metadata, byte_size, checksum) 
+        VALUES ('${placeImageKey}', 'place_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 512, 'test-checksum-${communityId}c')
       `);
 
       // Get the actual blob IDs that were just inserted
       const blobResults = await db.executeRaw(`
-        SELECT id FROM active_storage_blobs 
-        WHERE key LIKE 'test-%${communityId}' 
-        ORDER BY key
+        SELECT id FROM active_storage_blobs WHERE key LIKE 'test-%${communityId}' ORDER BY key
       `);
 
       const blobIds = Array.isArray(blobResults)
@@ -743,11 +758,18 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
       if (blobIds.length >= 3) {
         // Insert test attachments linking blobs to stories/places
         await db.executeRaw(`
-          INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id)
-          VALUES 
-            ('image', 'Story', ${communityId}, ${blobIds[0]}),
-            ('audio', 'Story', ${communityId}, ${blobIds[1]}),
-            ('image', 'Place', ${communityId}, ${blobIds[2]})
+          INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
+          VALUES ('image', 'Story', ${storyId}, ${blobIds[0]})
+        `);
+
+        await db.executeRaw(`
+          INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
+          VALUES ('audio', 'Story', ${storyId}, ${blobIds[1]})
+        `);
+
+        await db.executeRaw(`
+          INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
+          VALUES ('image', 'Place', ${placeId}, ${blobIds[2]})
         `);
       }
 
@@ -755,12 +777,7 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
       const storageDir = path.join(testDataPath, 'storage');
       await fs.mkdir(storageDir, { recursive: true });
 
-      // Create dummy test files using ActiveStorage key structure
-      const storyImageKey = `test-story-image-${communityId}`;
-      const storyAudioKey = `test-story-audio-${communityId}`;
-      const placeImageKey = `test-place-image-${communityId}`;
-
-      // Create key-based directory structure like Rails ActiveStorage
+      // Create key-based directory structure like Rails ActiveStorage (reuse existing variables)
       const keys = [storyImageKey, storyAudioKey, placeImageKey];
       for (const key of keys) {
         const keyDir1 = path.join(storageDir, key.substring(0, 2));

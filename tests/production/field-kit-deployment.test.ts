@@ -8,7 +8,7 @@
  * Phase 3: Field Kit & Offline Deployment
  */
 
-import { describe, test, expect, beforeAll, afterAll } from 'vitest';
+import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { exec as execCb } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
@@ -366,8 +366,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         url: '/api/v1/member/places',
         payload: {
           name: 'Offline Place',
-          latitude: 49.2827,
-          longitude: -123.1207,
+          lat: 49.2827,
+          lng: -123.1207,
         },
         headers: {
           Authorization: `Bearer ${session.token}`,
@@ -390,8 +390,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         url: '/api/v1/member/places',
         payload: {
           name: 'Test Geographic Place',
-          latitude: 49.2827,
-          longitude: -123.1207,
+          lat: 49.2827,
+          lng: -123.1207,
         },
         headers: {
           Authorization: `Bearer ${session.token}`,
@@ -1039,17 +1039,20 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       const sessionCookies = setCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      sessionCookie =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      const fullCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      // Extract just the sessionId=value part, not the whole cookie with expiration etc.
+      sessionCookie = fullCookie.split(';')[0] || '';
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
       sessionCookie = setCookieHeader.startsWith('sessionId=')
-        ? setCookieHeader
+        ? setCookieHeader.split(';')[0]
         : '';
     }
-
+    
+    // Use the real session data from login response
+    const responseData = JSON.parse(loginResponse.body);
     return {
-      token: 'field-kit-admin-token',
-      cookie: 'field-kit-session=active',
+      token: responseData.sessionId || 'field-kit-admin-token',
+      cookie: sessionCookie || 'field-kit-session=active',
     };
   }
 

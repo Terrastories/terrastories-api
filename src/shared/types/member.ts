@@ -32,7 +32,10 @@ export const MemberPaginationQuerySchema = z.object({
 });
 
 export const MemberIdParamSchema = z.object({
-  id: z.number().int().positive(),
+  id: z
+    .string()
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().positive()),
 });
 
 // Story schemas

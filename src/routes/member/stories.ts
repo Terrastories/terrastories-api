@@ -206,12 +206,40 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
         const params = MemberIdParamSchema.parse(request.params);
         const storyId = params.id;
 
-        const story = await storyService.getStoryById(
-          storyId,
-          user.id,
-          userRole,
-          userCommunityId
-        );
+        let story;
+        try {
+          story = await storyService.getStoryById(
+            storyId,
+            user.id,
+            userRole,
+            userCommunityId
+          );
+        } catch (serviceError) {
+          // Log service-level error for debugging cultural sovereignty issues
+          request.log.error(
+            {
+              error:
+                serviceError instanceof Error
+                  ? serviceError.message
+                  : 'Unknown error',
+              storyId,
+              userId: user.id,
+              userRole,
+              userCommunityId,
+              stack:
+                serviceError instanceof Error ? serviceError.stack : undefined,
+            },
+            'Story service error in member route'
+          );
+
+          // For cultural sovereignty issues, treat as not found rather than internal error
+          return reply.code(404).send({
+            error: {
+              code: 'NOT_FOUND',
+              message: 'Story not found in your community',
+            },
+          });
+        }
 
         if (!story) {
           return reply.code(404).send({

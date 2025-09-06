@@ -250,63 +250,77 @@ export class StoryService {
       userRole,
     });
 
-    // Data sovereignty check for super admins
-    if (userRole === 'super_admin') {
-      this.logger.warn(
-        'Data sovereignty protection: Super admin blocked from community story access',
-        {
+    try {
+      // Data sovereignty check for super admins
+      if (userRole === 'super_admin') {
+        this.logger.warn(
+          'Data sovereignty protection: Super admin blocked from community story access',
+          {
+            userId,
+            storyId: id,
+            reason: 'data_sovereignty_protection',
+          }
+        );
+        return null;
+      }
+
+      const story = await this.storyRepository.findByIdWithRelations(id);
+      if (!story) {
+        return null;
+      }
+
+      // Community isolation check
+      if (story.communityId !== userCommunityId) {
+        this.logger.warn('Cross-community access denied', {
+          userId,
+          userCommunityId,
+          storyCommunityId: story.communityId,
+          storyId: id,
+        });
+        return null;
+      }
+
+      // Cultural protocol access validation
+      const accessResult = await this.validateCulturalAccess(
+        story,
+        { id: userId, role: userRole, communityId: userCommunityId } as Pick<
+          User,
+          'id' | 'role' | 'communityId'
+        >,
+        'read'
+      );
+
+      if (!accessResult.allowed) {
+        this.logger.warn('Cultural protocol access denied', {
           userId,
           storyId: id,
-          reason: 'data_sovereignty_protection',
-        }
+          reason: accessResult.reason,
+        });
+        return null;
+      }
+
+      // Audit log
+      await this.logCulturalAccess(
+        story,
+        { id: userId, role: userRole } as Pick<User, 'id' | 'role'>,
+        'read',
+        true
       );
-      return null;
-    }
 
-    const story = await this.storyRepository.findByIdWithRelations(id);
-    if (!story) {
-      return null;
-    }
-
-    // Community isolation check
-    if (story.communityId !== userCommunityId) {
-      this.logger.warn('Cross-community access denied', {
+      return story;
+    } catch (error) {
+      this.logger.error('Error in getStoryById - cultural sovereignty check', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        storyId: id,
         userId,
+        userRole,
         userCommunityId,
-        storyCommunityId: story.communityId,
-        storyId: id,
+        stack: error instanceof Error ? error.stack : undefined,
       });
+
+      // For cross-community access issues, return null to trigger 404 instead of 500
       return null;
     }
-
-    // Cultural protocol access validation
-    const accessResult = await this.validateCulturalAccess(
-      story,
-      { id: userId, role: userRole, communityId: userCommunityId } as Pick<
-        User,
-        'id' | 'role' | 'communityId'
-      >,
-      'read'
-    );
-
-    if (!accessResult.allowed) {
-      this.logger.warn('Cultural protocol access denied', {
-        userId,
-        storyId: id,
-        reason: accessResult.reason,
-      });
-      return null;
-    }
-
-    // Audit log
-    await this.logCulturalAccess(
-      story,
-      { id: userId, role: userRole } as Pick<User, 'id' | 'role'>,
-      'read',
-      true
-    );
-
-    return story;
   }
 
   /**
@@ -902,23 +916,35 @@ export class StoryService {
     allowed: boolean,
     reason?: string
   ): Promise<void> {
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      storyId: story.id,
-      storyTitle: story.title,
-      userId: user.id,
-      userRole: user.role,
-      communityId: story.communityId,
-      operation,
-      allowed,
-      reason,
-      culturalProtocols: (
-        story as StoryWithRelations & { culturalProtocols?: CulturalProtocols }
-      ).culturalProtocols,
-    };
+    try {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        storyId: story.id,
+        storyTitle: story.title,
+        userId: user.id,
+        userRole: user.role,
+        communityId: story.communityId,
+        operation,
+        allowed,
+        reason,
+        culturalProtocols: (
+          story as StoryWithRelations & {
+            culturalProtocols?: CulturalProtocols;
+          }
+        ).culturalProtocols,
+      };
 
-    // Log to appropriate audit system for Indigenous community oversight
-    this.logger.info('[CULTURAL_ACCESS_AUDIT]', logEntry);
+      // Log to appropriate audit system for Indigenous community oversight
+      this.logger.info('[CULTURAL_ACCESS_AUDIT]', logEntry);
+    } catch (error) {
+      // Audit logging failure should not break the application flow
+      this.logger.error('Failed to log cultural access', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        storyId: story.id,
+        userId: user.id,
+        operation,
+      });
+    }
   }
 
   /**

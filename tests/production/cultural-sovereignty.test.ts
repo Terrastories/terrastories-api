@@ -50,21 +50,23 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
     db = new TestDatabaseManager();
     await db.setup();
     await db.clearData();
-    
+
     // Use the same seeded data approach as working tests
     const fixtures = await db.seedTestData();
-    
+
     // Create test app with the test database (same as super admin tests)
     const testDatabase = await db.getDb();
     app = await createTestApp(testDatabase);
     await app.ready();
-    
+
     // Map seeded communities to test community format
-    testCommunities = fixtures.communities.slice(1, 3).map((community, index) => ({
-      id: community.id.toString(),
-      name: `Test Community ${index + 1}`,
-      locale: index === 0 ? 'en' : 'iu',
-    }));
+    testCommunities = fixtures.communities
+      .slice(1, 3)
+      .map((community, index) => ({
+        id: community.id.toString(),
+        name: `Test Community ${index + 1}`,
+        locale: index === 0 ? 'en' : 'iu',
+      }));
 
     // Create test users with different roles across communities
     testUsers = await createTestUsers();
@@ -93,11 +95,25 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       // User from Community A tries to access Community B's story
       const userASessionCookie = await getSessionCookie(communityA.id, 'admin');
 
+      // Debug: Log test setup
+      console.log('Test setup - Community A ID:', communityA.id);
+      console.log('Test setup - Community B ID:', communityB.id);
+      console.log('Test setup - Story B ID:', storyB.id);
+      console.log('Test setup - User A session cookie:', !!userASessionCookie);
+
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/member/stories/${storyB.id}`,
         headers: { cookie: userASessionCookie },
       });
+
+      // Debug: Log the actual response to understand the 500 error
+      console.log(
+        'Cross-community access response status:',
+        response.statusCode
+      );
+      console.log('Cross-community access response body:', response.body);
+      console.log('Cross-community access response headers:', response.headers);
 
       // Authentication is working - community members get 404 for stories outside their community
       // This demonstrates data sovereignty: Community A users cannot see Community B stories
@@ -118,7 +134,10 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       ]);
 
       // User from Community A lists stories
-      const userASessionCookie = await getSessionCookie(communityA.id, 'viewer');
+      const userASessionCookie = await getSessionCookie(
+        communityA.id,
+        'viewer'
+      );
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/communities/${communityA.id}/stories`,
@@ -128,7 +147,7 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       // Authentication is working - community stories endpoint returns only community's stories
       expect(response.statusCode).toBe(200);
       const stories = response.json().data;
-      
+
       // Verify all returned stories belong to communityA only
       expect(stories).toBeDefined();
       expect(Array.isArray(stories)).toBe(true);
@@ -172,7 +191,10 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       const fileB = await uploadTestFile(communityB.id, 'community-b-file.jpg');
 
       // User from Community A tries to access Community B's file
-      const userASessionCookie = await getSessionCookie(communityA.id, 'viewer');
+      const userASessionCookie = await getSessionCookie(
+        communityA.id,
+        'viewer'
+      );
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/files/${fileB.id}`,
@@ -188,7 +210,10 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
   describe('Super Admin Data Sovereignty Restrictions', () => {
     test('Super admin CANNOT access community-specific cultural data', async () => {
       const community = testCommunities[0];
-      const superAdminSessionCookie = await getSessionCookie('global', 'super_admin');
+      const superAdminSessionCookie = await getSessionCookie(
+        'global',
+        'super_admin'
+      );
 
       // Create cultural content in community
       const story = await createTestStory(
@@ -215,7 +240,10 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
     });
 
     test('Super admin can only access non-cultural administrative data', async () => {
-      const superAdminSessionCookie = await getSessionCookie('global', 'super_admin');
+      const superAdminSessionCookie = await getSessionCookie(
+        'global',
+        'super_admin'
+      );
 
       // Super admin can list communities (administrative data)
       const communitiesResponse = await app.inject({
@@ -264,7 +292,7 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
         })
         .from(storiesTable)
         .where(eq(storiesTable.communityId, parseInt(community.id)));
-        
+
       // Database queries succeed (data sovereignty enforced at HTTP layer)
       expect(Array.isArray(queryResult)).toBe(true);
     });
@@ -287,7 +315,10 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       );
 
       // Non-elder user tries to access
-      const regularUserSessionCookie = await getSessionCookie(community.id, 'viewer');
+      const regularUserSessionCookie = await getSessionCookie(
+        community.id,
+        'viewer'
+      );
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/communities/${community.id}/stories/${elderStory.id}`,
@@ -370,7 +401,9 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
 
       // Ensure clean slate by manually clearing stories for this community
       const db_connection = await db.getDb();
-      await db_connection.delete(storiesTable).where(eq(storiesTable.communityId, parseInt(community.id)));
+      await db_connection
+        .delete(storiesTable)
+        .where(eq(storiesTable.communityId, parseInt(community.id)));
 
       // Create mixed content
       await Promise.all([
@@ -691,7 +724,7 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
     role: string
   ): Promise<string> {
     const sessionKey = `${communityId}-${role}`;
-    
+
     // Return cached session if exists
     if (userSessions[sessionKey]) {
       return userSessions[sessionKey];
@@ -704,7 +737,10 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       firstName: role.charAt(0).toUpperCase() + role.slice(1),
       lastName: 'User',
       role: role === 'super_admin' ? 'super_admin' : role,
-      communityId: communityId === 'global' ? parseInt(testCommunities[0].id) : parseInt(communityId),
+      communityId:
+        communityId === 'global'
+          ? parseInt(testCommunities[0].id)
+          : parseInt(communityId),
     };
 
     // Register user
@@ -714,7 +750,6 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
         url: '/api/v1/auth/register',
         payload: testUser,
       });
-      
     } catch (error) {
       // User might already exist, which is fine
     }
@@ -738,14 +773,17 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       const sessionCookies = setCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      sessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      sessionCookie =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      sessionCookie = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+      sessionCookie = setCookieHeader.startsWith('sessionId=')
+        ? setCookieHeader
+        : '';
     }
 
     // Cache for reuse
     userSessions[sessionKey] = sessionCookie;
-    
+
     return sessionCookie;
   }
 
@@ -763,7 +801,10 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
         slug: `${title.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}-${Math.random().toString(36).substring(7)}`,
         communityId: parseInt(communityId),
         description: options.description || 'Test story description',
-        isRestricted: options.is_restricted || options.privacy_level === 'restricted' || false,
+        isRestricted:
+          options.is_restricted ||
+          options.privacy_level === 'restricted' ||
+          false,
         language: options.language || 'en',
         tags: options.tags || [],
         mediaUrls: options.media_urls || [],
@@ -819,16 +860,21 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
     // Mock implementation for audit logging (TODO: implement real audit logging system)
     // Check if this is a failed access scenario by looking for elder stories in recent activity
     const database = await db.getDb();
-    const elderStories = await database.select().from(storiesTable)
-      .where(and(
-        eq(storiesTable.communityId, parseInt(communityId)),
-        eq(storiesTable.isRestricted, true)
-      ))
+    const elderStories = await database
+      .select()
+      .from(storiesTable)
+      .where(
+        and(
+          eq(storiesTable.communityId, parseInt(communityId)),
+          eq(storiesTable.isRestricted, true)
+        )
+      )
       .limit(1);
-    
+
     // If there are elder stories and we're testing failed access, return access_denied
-    const isFailedAccessTest = elderStories.length > 0 && elderStories[0].title.includes('Elder Only');
-    
+    const isFailedAccessTest =
+      elderStories.length > 0 && elderStories[0].title.includes('Elder Only');
+
     return {
       user_id: 1,
       community_id: parseInt(communityId),
@@ -838,12 +884,16 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       timestamp: new Date().toISOString(),
       ip_address: '127.0.0.1',
       user_agent: 'Test Agent',
-      cultural_context: isFailedAccessTest ? 'elder_access_required' : 'general_community_access',
-      cultural_protocol: isFailedAccessTest ? 'elder_restriction_enforced' : 'access_granted',
+      cultural_context: isFailedAccessTest
+        ? 'elder_access_required'
+        : 'general_community_access',
+      cultural_protocol: isFailedAccessTest
+        ? 'elder_restriction_enforced'
+        : 'access_granted',
       user_elder_status: false,
       ...(isFailedAccessTest && {
-        denial_reason: 'elder_access_required'
-      })
+        denial_reason: 'elder_access_required',
+      }),
     };
   }
 

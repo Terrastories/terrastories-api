@@ -95,25 +95,11 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
       // User from Community A tries to access Community B's story
       const userASessionCookie = await getSessionCookie(communityA.id, 'admin');
 
-      // Debug: Log test setup
-      console.log('Test setup - Community A ID:', communityA.id);
-      console.log('Test setup - Community B ID:', communityB.id);
-      console.log('Test setup - Story B ID:', storyB.id);
-      console.log('Test setup - User A session cookie:', !!userASessionCookie);
-
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/member/stories/${storyB.id}`,
         headers: { cookie: userASessionCookie },
       });
-
-      // Debug: Log the actual response to understand the 500 error
-      console.log(
-        'Cross-community access response status:',
-        response.statusCode
-      );
-      console.log('Cross-community access response body:', response.body);
-      console.log('Cross-community access response headers:', response.headers);
 
       // Authentication is working - community members get 404 for stories outside their community
       // This demonstrates data sovereignty: Community A users cannot see Community B stories

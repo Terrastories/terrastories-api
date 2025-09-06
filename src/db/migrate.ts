@@ -16,6 +16,7 @@ const __dirname = path.dirname(__filename);
 
 async function runMigrations() {
   try {
+    // eslint-disable-next-line no-console
     console.log('🔄 Running database migrations...');
 
     const config = getConfig();
@@ -28,10 +29,12 @@ async function runMigrations() {
     const migrationsFolder = path.join(__dirname, 'migrations');
 
     if (isPostgres) {
+      // eslint-disable-next-line no-console
       console.log('📊 Running PostgreSQL migrations...');
 
       // Ensure PostGIS extension is enabled before running migrations
       if (config.database.spatialSupport) {
+        // eslint-disable-next-line no-console
         console.log('🌍 Setting up PostGIS extension...');
         try {
           const pgDatabase = database as ReturnType<
@@ -41,11 +44,14 @@ async function runMigrations() {
           await pgDatabase.execute(
             'CREATE EXTENSION IF NOT EXISTS postgis_topology;'
           );
+          // eslint-disable-next-line no-console
           console.log('✅ PostGIS extensions enabled');
         } catch (error: unknown) {
           const errorMessage =
             error instanceof Error ? error.message : 'Unknown error';
+          // eslint-disable-next-line no-console
           console.warn('⚠️ Could not enable PostGIS extensions:', errorMessage);
+          // eslint-disable-next-line no-console
           console.warn('   Please ensure PostgreSQL has PostGIS installed');
         }
       }
@@ -57,6 +63,7 @@ async function runMigrations() {
         { migrationsFolder }
       );
     } else {
+      // eslint-disable-next-line no-console
       console.log('📊 Running SQLite migrations...');
       await migrate(
         database as ReturnType<
@@ -66,23 +73,29 @@ async function runMigrations() {
       );
     }
 
+    // eslint-disable-next-line no-console
     console.log('✅ Migrations completed successfully!');
 
     // Test the connection after migration
     const { testConnection } = await import('./index.js');
     const connectionTest = await testConnection();
 
+    // eslint-disable-next-line no-console
     console.log('🔍 Database connection test:');
+    // eslint-disable-next-line no-console
     console.log(`  Connected: ${connectionTest.connected ? '✅' : '❌'}`);
+    // eslint-disable-next-line no-console
     console.log(
       `  Spatial Support: ${connectionTest.spatialSupport ? '✅' : '❌'}`
     );
     if (connectionTest.version) {
+      // eslint-disable-next-line no-console
       console.log(`  Spatial Version: ${connectionTest.version}`);
     }
 
     process.exit(0);
   } catch (error) {
+    // eslint-disable-next-line no-console
     console.error('❌ Migration failed:', error);
     process.exit(1);
   }

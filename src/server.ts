@@ -10,12 +10,15 @@ const start = async () => {
 
     // Graceful shutdown handling
     const gracefulShutdown = async (signal: string) => {
+      // eslint-disable-next-line no-console
       console.log(`Received ${signal}, shutting down gracefully...`);
       try {
         await app.close();
+        // eslint-disable-next-line no-console
         console.log('Server closed successfully');
         process.exit(0);
       } catch (err) {
+        // eslint-disable-next-line no-console
         console.error('Error during shutdown:', err);
         process.exit(1);
       }
@@ -26,9 +29,12 @@ const start = async () => {
 
     await app.listen({ port, host });
 
+    // eslint-disable-next-line no-console
     console.log(`🚀 Server ready at http://localhost:${port}`);
+    // eslint-disable-next-line no-console
     console.log(`📚 Swagger UI available at http://localhost:${port}/docs`);
   } catch (err) {
+    // eslint-disable-next-line no-console
     console.error('Error starting server:', err);
     process.exit(1);
   }

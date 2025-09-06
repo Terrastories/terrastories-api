@@ -29,6 +29,7 @@ import { getConfig } from '../../src/shared/config/index.js';
 import path from 'path';
 import fs from 'fs/promises';
 import { eq } from 'drizzle-orm';
+import FormDataLib from 'form-data';
 import {
   communitiesSqlite,
   usersSqlite,
@@ -64,8 +65,16 @@ describe('Field Kit Deployment', () => {
 
   afterAll(async () => {
     // Restore environment
-    process.env.NODE_ENV = originalEnv;
-    process.env.DATABASE_URL = originalDatabaseUrl;
+    if (originalEnv !== undefined) {
+      process.env.NODE_ENV = originalEnv;
+    } else {
+      delete process.env.NODE_ENV;
+    }
+    if (originalDatabaseUrl !== undefined) {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    } else {
+      delete process.env.DATABASE_URL;
+    }
     delete process.env.FIELD_KIT_MODE;
     delete process.env.OFFLINE_MODE;
 
@@ -481,12 +490,11 @@ describe('Field Kit Deployment', () => {
     it('should handle multipart file uploads in Field Kit mode', async () => {
       // Create test file content
       const testFileContent = 'test file content';
-      const form = new FormData();
-      form.append(
-        'file',
-        new Blob([testFileContent], { type: 'text/plain' }),
-        'test.txt'
-      );
+      const form = new FormDataLib();
+      form.append('file', Buffer.from(testFileContent), {
+        filename: 'test.txt',
+        contentType: 'text/plain',
+      });
       form.append('communityId', testCommunity.id.toString());
 
       const response = await app.inject({
@@ -494,25 +502,24 @@ describe('Field Kit Deployment', () => {
         url: '/api/v1/files/upload',
         headers: {
           authorization: `Bearer ${authToken}`,
-          'content-type':
-            'multipart/form-data; boundary=' + (form as any)._boundary,
+          ...form.getHeaders(),
         },
         payload: form,
       });
 
       // Should handle file upload gracefully (404 means route not registered, which is acceptable for Field Kit)
-      expect([200, 201, 400, 404, 500]).toContain(response.statusCode);
+      // For Field Kit mode, we expect either successful upload (200/201) or route not found (404)
+      expect([200, 201, 404]).toContain(response.statusCode);
     });
 
     it('should enforce file size limits for resource-constrained deployment', async () => {
       // Test with large file (should be rejected)
       const largeContent = 'x'.repeat(15 * 1024 * 1024); // 15MB file
-      const form = new FormData();
-      form.append(
-        'file',
-        new Blob([largeContent], { type: 'text/plain' }),
-        'large.txt'
-      );
+      const form = new FormDataLib();
+      form.append('file', Buffer.from(largeContent), {
+        filename: 'large.txt',
+        contentType: 'text/plain',
+      });
       form.append('communityId', testCommunity.id.toString());
 
       const response = await app.inject({
@@ -520,8 +527,7 @@ describe('Field Kit Deployment', () => {
         url: '/api/v1/files/upload',
         headers: {
           authorization: `Bearer ${authToken}`,
-          'content-type':
-            'multipart/form-data; boundary=' + (form as any)._boundary,
+          ...form.getHeaders(),
         },
         payload: form,
       });
@@ -531,15 +537,14 @@ describe('Field Kit Deployment', () => {
     });
 
     it('should handle multiple file uploads within limits', async () => {
-      const form = new FormData();
+      const form = new FormDataLib();
 
       // Add multiple small files
       for (let i = 0; i < 3; i++) {
-        form.append(
-          'files',
-          new Blob([`test content ${i}`], { type: 'text/plain' }),
-          `test${i}.txt`
-        );
+        form.append('files', Buffer.from(`test content ${i}`), {
+          filename: `test${i}.txt`,
+          contentType: 'text/plain',
+        });
       }
       form.append('communityId', testCommunity.id.toString());
 
@@ -548,14 +553,14 @@ describe('Field Kit Deployment', () => {
         url: '/api/v1/files/upload',
         headers: {
           authorization: `Bearer ${authToken}`,
-          'content-type':
-            'multipart/form-data; boundary=' + (form as any)._boundary,
+          ...form.getHeaders(),
         },
         payload: form,
       });
 
       // Should handle multiple files or provide appropriate response (404 means route not registered)
-      expect([200, 201, 400, 404, 500]).toContain(response.statusCode);
+      // For Field Kit mode, we expect successful multi-file upload (200/201) or route not found (404)
+      expect([200, 201, 404]).toContain(response.statusCode);
     });
   });
 
@@ -579,8 +584,13 @@ describe('Field Kit Deployment', () => {
       const finalMemory = process.memoryUsage();
       const memoryIncrease = finalMemory.heapUsed - initialMemory.heapUsed;
 
-      // Should not use more than 100MB additional memory
-      expect(memoryIncrease).toBeLessThan(100 * 1024 * 1024);
+      // Should not use more than configured memory threshold (default: 100MB)
+      // Can be configured via FIELD_KIT_MEMORY_THRESHOLD_MB environment variable
+      const memoryThresholdMB = parseInt(
+        process.env.FIELD_KIT_MEMORY_THRESHOLD_MB || '100'
+      );
+      const memoryThresholdBytes = memoryThresholdMB * 1024 * 1024;
+      expect(memoryIncrease).toBeLessThan(memoryThresholdBytes);
     });
 
     it('should handle limited storage scenarios', async () => {

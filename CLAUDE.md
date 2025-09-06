@@ -191,6 +191,8 @@ STOP and ask for help if:
 
 ### Commands
 
+Install with "npm i --include=deps --include=dev" to include all tooling.
+
 ```bash
 npm run dev        # Start with hot-reload
 npm test          # Run tests with coverage

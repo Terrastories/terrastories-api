@@ -11,8 +11,8 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { FastifyInstance } from 'fastify';
-import { buildApp } from '../../src/app.js';
 import { TestDatabaseManager } from '../helpers/database.js';
+import { createTestApp } from '../helpers/api-client.js';
 import { performance } from 'perf_hooks';
 
 interface PerformanceMetrics {
@@ -37,8 +37,7 @@ describe('Production Performance Validation - Phase 1', () => {
     db = new TestDatabaseManager();
     await db.setup();
 
-    app = await buildApp({ database: db.db });
-    await app.ready();
+    app = await createTestApp(db.db);
 
     // Seed database with realistic test data
     testFixtures = await db.seedTestData();
@@ -137,7 +136,6 @@ describe('Production Performance Validation - Phase 1', () => {
           url: endpoint.url,
           payload: endpoint.data,
           headers: {
-            Authorization: `Bearer ${session.token}`,
             Cookie: session.cookie,
           },
         });
@@ -195,7 +193,6 @@ describe('Production Performance Validation - Phase 1', () => {
         method: 'POST',
         url: '/api/v1/files/upload',
         headers: {
-          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
           ...form.getHeaders(),
         },
@@ -230,7 +227,6 @@ describe('Production Performance Validation - Phase 1', () => {
         method: 'GET',
         url: fileUrl,
         headers: {
-          Authorization: `Bearer ${session.token}`,
           Cookie: session.cookie,
         },
       });
@@ -504,7 +500,6 @@ describe('Production Performance Validation - Phase 1', () => {
           console.warn(`Failed to create session ${i + 1}:`, error);
           // Use a mock session for testing
           sessions.push({
-            token: 'mock-token',
             cookie: 'sessionId=mock-session',
           });
         }
@@ -536,7 +531,6 @@ describe('Production Performance Validation - Phase 1', () => {
             method: req.method as any,
             url: req.endpoint,
             headers: {
-              Authorization: `Bearer ${req.session.token}`,
               Cookie: req.session.cookie,
             },
           });
@@ -770,6 +764,13 @@ describe('Production Performance Validation - Phase 1', () => {
       },
     });
     console.log('User 1 registration:', registerResponse1.statusCode);
+    if (registerResponse1.statusCode !== 201) {
+      console.error('User 1 registration failed:', registerResponse1.body);
+    }
+    const user1 =
+      registerResponse1.statusCode === 201
+        ? registerResponse1.json().user
+        : null;
 
     const registerResponse2 = await app.inject({
       method: 'POST',
@@ -784,13 +785,23 @@ describe('Production Performance Validation - Phase 1', () => {
       },
     });
     console.log('User 2 registration:', registerResponse2.statusCode);
+    if (registerResponse2.statusCode !== 201) {
+      console.error('User 2 registration failed:', registerResponse2.body);
+    }
+    const user2 =
+      registerResponse2.statusCode === 201
+        ? registerResponse2.json().user
+        : null;
 
     // Create multiple stories for performance testing
     const storyInserts = [];
     for (let i = 1; i <= 100; i++) {
-      const communityId = Math.ceil(i / 50);
+      // Use actual community IDs from fixtures instead of hardcoded 1,2
+      const communityIndex = Math.floor((i - 1) / 50); // 0 for first 50, 1 for second 50
+      const communityId = communityIds[communityIndex];
+      const createdBy = communityIndex === 0 ? user1?.id || 1 : user2?.id || 1;
       storyInserts.push(`
-        (${i}, 'Performance Test Story ${i}', 'Content for story ${i}', 'performance-test-story-${i}', ${communityId}, 1, 0, 'en', datetime('now'), datetime('now'))
+        (${i}, 'Performance Test Story ${i}', 'Content for story ${i}', 'performance-test-story-${i}', ${communityId}, ${createdBy}, 0, 'en', datetime('now'), datetime('now'))
       `);
     }
 
@@ -806,7 +817,9 @@ describe('Production Performance Validation - Phase 1', () => {
       const lat = 49.2827 + (Math.random() - 0.5) * 0.1;
       const lng = -123.1207 + (Math.random() - 0.5) * 0.1;
 
-      const communityId = Math.ceil(i / 25);
+      // Use actual community IDs from fixtures instead of hardcoded 1,2
+      const communityIndex = Math.floor((i - 1) / 25); // 0 for first 25, 1 for second 25
+      const communityId = communityIds[communityIndex];
       placeInserts.push(`
         (${i}, 'Performance Test Place ${i}', ${communityId}, ${lng}, ${lat}, datetime('now'), datetime('now'))
       `);
@@ -845,7 +858,6 @@ describe('Production Performance Validation - Phase 1', () => {
   }
 
   async function createTestSession(): Promise<{
-    token: string;
     cookie: string;
   }> {
     // Create test user session using global test fixtures
@@ -872,14 +884,13 @@ describe('Production Performance Validation - Phase 1', () => {
     }
 
     const setCookieHeader = loginResponse.headers['set-cookie'];
+
     // Use the signed cookie (second one) instead of the unsigned cookie (first one)
     const cookieString = Array.isArray(setCookieHeader)
       ? setCookieHeader[1]
       : setCookieHeader;
     const cookie = cookieString!.split(';')[0];
-    const token = loginResponse.json().token || 'test-jwt-token';
-
-    return { token, cookie };
+    return { cookie };
   }
 
   function createMockFilePayload(filename: string, size: number): any {
@@ -905,7 +916,7 @@ describe('Production Performance Validation - Phase 1', () => {
   async function cleanupPerformanceTestData(): Promise<void> {
     try {
       // Delete in correct order to respect foreign key constraints
-      // 1. Delete junction table entries first
+      // 1. Delete junction table entries first (these reference stories)
       await db.executeRaw(
         "DELETE FROM story_places WHERE story_id IN (SELECT id FROM stories WHERE title LIKE 'Performance Test%')"
       );
@@ -913,27 +924,40 @@ describe('Production Performance Validation - Phase 1', () => {
         "DELETE FROM story_speakers WHERE story_id IN (SELECT id FROM stories WHERE title LIKE 'Performance Test%')"
       );
 
-      // 2. Delete stories (which reference communities and users)
+      // 2. Delete files that reference stories, places, or communities
+      await db.executeRaw(
+        "DELETE FROM files WHERE community_id IN (SELECT id FROM communities WHERE name LIKE 'Performance Test%')"
+      );
+
+      // 3. Delete stories (which reference communities, users, places, and speakers)
       await db.executeRaw(
         "DELETE FROM stories WHERE title LIKE 'Performance Test%'"
       );
 
-      // 3. Delete places (which reference communities)
+      // 4. Delete speakers (which reference communities)
+      await db.executeRaw(
+        "DELETE FROM speakers WHERE community_id IN (SELECT id FROM communities WHERE name LIKE 'Performance Test%')"
+      );
+
+      // 5. Delete places (which reference communities)
       await db.executeRaw(
         "DELETE FROM places WHERE name LIKE 'Performance Test%'"
       );
 
-      // 4. Delete users (which reference communities) - must come before deleting communities
+      // 6. Delete users (which reference communities) - must come before deleting communities
       await db.executeRaw(
         "DELETE FROM users WHERE email LIKE '%community%.test'"
       );
 
-      // 5. Delete communities last (no dependencies)
+      // 7. Delete communities last (no dependencies should remain)
       await db.executeRaw(
         "DELETE FROM communities WHERE name LIKE 'Performance Test%'"
       );
+
+      console.log('✅ Performance test data cleaned up successfully');
     } catch (error) {
-      console.warn('Error cleaning up performance test data:', error);
+      console.error('Error cleaning up performance test data:', error);
+      throw error; // Re-throw to ensure test failure is visible
     }
   }
 });

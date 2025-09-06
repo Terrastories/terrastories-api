@@ -126,6 +126,9 @@ export async function requireAuth(
         lastName: 'Kit',
       };
       // Also set session for compatibility with other middleware
+      if (!authRequest.session) {
+        authRequest.session = {} as FastifyRequest['session'];
+      }
       Object.assign(authRequest.session, {
         user: authRequest.user,
       });

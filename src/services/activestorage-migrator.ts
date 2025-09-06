@@ -682,7 +682,7 @@ export class ActiveStorageMigrator {
       try {
         // Check if communities table exists
         const tableExistsQuery =
-          'SELECT name FROM sqlite_master WHERE type="table" AND name="communities"';
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='communities'";
         const tableResult = await db.query(tableExistsQuery);
 
         if (tableResult.rows.length === 0) {

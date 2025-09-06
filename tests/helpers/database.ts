@@ -130,8 +130,18 @@ export class TestDatabaseManager {
             "ALTER TABLE stories ADD COLUMN privacy_level TEXT DEFAULT 'public' NOT NULL;"
           );
         }
-        this.sqlite.exec(alterCommands.join('\n'));
-        console.log('✅ Added missing stories columns (slug, privacy_level)');
+
+        try {
+          this.sqlite.exec(alterCommands.join('\n'));
+          console.log('✅ Added missing stories columns (slug, privacy_level)');
+        } catch (error: any) {
+          // Ignore duplicate column errors - this means the columns already exist
+          if (error.message.includes('duplicate column name')) {
+            console.log('ℹ️ Stories columns already exist, skipping add');
+          } else {
+            console.error('⚠️ Failed to add stories columns:', error.message);
+          }
+        }
       }
 
       // Add missing columns to join tables for story associations

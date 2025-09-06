@@ -8,7 +8,14 @@
  * Phase 3: Field Kit & Offline Deployment
  */
 
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import {
+  describe,
+  test,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+} from 'vitest';
 import { exec as execCb } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
@@ -83,7 +90,12 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         console.log('✅ Added privacy_level column to stories table');
       } catch (error: any) {
         // Column might already exist, which is fine
-        if (!error.message.includes('duplicate column name')) {
+        if (
+          error.message.includes('duplicate column name') ||
+          error.message.includes('already exists')
+        ) {
+          console.log('ℹ️ privacy_level column already exists, skipping add');
+        } else {
           console.warn('⚠️ Could not add privacy_level column:', error.message);
         }
       }
@@ -1039,7 +1051,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       const sessionCookies = setCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      const fullCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      const fullCookie =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
       // Extract just the sessionId=value part, not the whole cookie with expiration etc.
       sessionCookie = fullCookie.split(';')[0] || '';
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
@@ -1047,7 +1060,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         ? setCookieHeader.split(';')[0]
         : '';
     }
-    
+
     // Use the real session data from login response
     const responseData = JSON.parse(loginResponse.body);
     return {

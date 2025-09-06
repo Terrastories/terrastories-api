@@ -6,7 +6,10 @@
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import type { AuthenticatedRequest } from '../../shared/middleware/auth.middleware.js';
+import {
+  requireAuth,
+  type AuthenticatedRequest,
+} from '../../shared/middleware/auth.middleware.js';
 import { z } from 'zod';
 import { StoryService } from '../../services/story.service.js';
 import { StoryRepository } from '../../repositories/story.repository.js';
@@ -55,6 +58,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
 
   // GET routes are handled in member/index.ts to avoid duplication
   app.get('/', {
+    preHandler: [requireAuth],
     schema: {
       description: "List stories in member's community",
       tags: ['Member Stories'],
@@ -166,6 +170,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
   });
 
   app.get('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Get specific story by ID',
       tags: ['Member Stories'],
@@ -257,6 +262,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
 
   // POST /api/v1/member/stories - Create new story
   app.post('/', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Create new story',
       tags: ['Member Stories'],
@@ -353,6 +359,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
 
   // PUT /api/v1/member/stories/:id - Update story
   app.put('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Update story',
       tags: ['Member Stories'],
@@ -449,6 +456,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
 
   // DELETE /api/v1/member/stories/:id - Delete story
   app.delete('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Delete story',
       tags: ['Member Stories'],

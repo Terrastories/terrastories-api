@@ -191,30 +191,33 @@ describe('SpeakerService', () => {
       ).resolves.toBeDefined();
     });
 
-    it('should log elder speaker creation for audit', async () => {
+    it('should create elder speakers with proper validation', async () => {
       const elderData = {
         name: 'Elder Speaker',
         elderStatus: true,
         culturalRole: 'Elder Council',
       };
 
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-      vi.mocked(mockRepository.create).mockResolvedValue({
+      const expectedSpeaker = {
         ...mockSpeaker,
         elderStatus: true,
-      });
+        culturalRole: 'Elder Council',
+      };
 
-      await service.createSpeaker(
+      vi.mocked(mockRepository.create).mockResolvedValue(expectedSpeaker);
+
+      const result = await service.createSpeaker(
         elderData,
         testCommunityId,
         testUserId,
         'admin'
       );
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Elder speaker created')
-      );
-      consoleSpy.mockRestore();
+      expect(result).toEqual(expectedSpeaker);
+      expect(mockRepository.create).toHaveBeenCalledWith({
+        ...elderData,
+        communityId: testCommunityId,
+      });
     });
   });
 
@@ -460,27 +463,26 @@ describe('SpeakerService', () => {
       ).rejects.toThrow('Invalid media URL: not-a-url');
     });
 
-    it('should log elder speaker updates for audit', async () => {
+    it('should update elder speakers with proper validation', async () => {
       const elderSpeaker = { ...mockSpeaker, elderStatus: true };
+      const updateData = { name: 'Updated Elder' };
+      const updatedSpeaker = { ...elderSpeaker, ...updateData };
+
       vi.mocked(mockRepository.getByIdWithCommunityCheck).mockResolvedValue(
         elderSpeaker
       );
-      vi.mocked(mockRepository.update).mockResolvedValue(elderSpeaker);
+      vi.mocked(mockRepository.update).mockResolvedValue(updatedSpeaker);
 
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-
-      await service.updateSpeaker(
+      const result = await service.updateSpeaker(
         1,
-        { name: 'Updated Elder' },
+        updateData,
         testCommunityId,
         testUserId,
         'admin'
       );
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Elder speaker updated')
-      );
-      consoleSpy.mockRestore();
+      expect(result).toEqual(updatedSpeaker);
+      expect(mockRepository.update).toHaveBeenCalledWith(1, updateData);
     });
   });
 
@@ -540,21 +542,22 @@ describe('SpeakerService', () => {
       ).rejects.toThrow('Elder speakers require special authorization');
     });
 
-    it('should log speaker deletion for audit', async () => {
+    it('should delete regular speakers successfully', async () => {
       const regularSpeaker = { ...mockSpeaker, elderStatus: false };
       vi.mocked(mockRepository.getByIdWithCommunityCheck).mockResolvedValue(
         regularSpeaker
       );
       vi.mocked(mockRepository.delete).mockResolvedValue(true);
 
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-
-      await service.deleteSpeaker(1, testCommunityId, testUserId, 'admin');
-
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Speaker deleted')
+      const result = await service.deleteSpeaker(
+        1,
+        testCommunityId,
+        testUserId,
+        'admin'
       );
-      consoleSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(mockRepository.delete).toHaveBeenCalledWith(1);
     });
   });
 

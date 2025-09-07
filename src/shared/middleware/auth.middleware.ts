@@ -213,17 +213,20 @@ export async function enforceDataSovereignty(
 ): Promise<void> {
   const authRequest = request as AuthenticatedRequest;
 
-  if (!authRequest.session?.user) {
+  // Handle both session-based and direct user authentication
+  const user = authRequest.user || authRequest.session?.user;
+
+  if (!user) {
     return reply.status(401).send({
       error: 'Authentication required',
     });
   }
 
   // CRITICAL: Super admins cannot access community data (data sovereignty)
-  if (authRequest.session.user.role === 'super_admin') {
+  if (user.role === 'super_admin') {
     request.log.warn(
       {
-        userId: authRequest.session.user.id,
+        userId: user.id,
         action: 'community_data_access_blocked',
         reason: 'data_sovereignty_protection',
       },

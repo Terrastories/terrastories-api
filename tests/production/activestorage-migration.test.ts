@@ -608,12 +608,20 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
       // Verify no partial migration occurred
       const records = await getMigratedRecords(communityId);
       const hasPartialMigration = records.some((r) => {
-        const urls = Array.isArray(r.media_urls)
-          ? r.media_urls
-          : typeof r.media_urls === 'string'
-            ? JSON.parse(r.media_urls || '[]')
-            : [];
-        return urls.some((url: string) => url.startsWith('uploads/'));
+        let urls: string[] = [];
+        if (Array.isArray(r.media_urls)) {
+          urls = r.media_urls;
+        } else if (typeof r.media_urls === 'string') {
+          try {
+            const parsed = JSON.parse(r.media_urls || '[]');
+            urls = Array.isArray(parsed) ? parsed : [];
+          } catch {
+            urls = [];
+          }
+        }
+        return urls.some(
+          (url: string) => typeof url === 'string' && url.startsWith('uploads/')
+        );
       });
 
       expect(

@@ -7,7 +7,8 @@
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import {
-  requireCommunityAccess,
+  requireAuth,
+  enforceDataSovereignty,
   type AuthenticatedRequest,
 } from '../../shared/middleware/auth.middleware.js';
 import { z } from 'zod';
@@ -39,7 +40,7 @@ export async function memberPlacesRoutes(
 
   // GET /api/v1/member/places - List user's community places
   app.get('/', {
-    preHandler: [requireCommunityAccess()],
+    preHandler: [requireAuth, enforceDataSovereignty],
     schema: {
       description: "List places in member's community",
       tags: ['Member Places'],
@@ -158,7 +159,7 @@ export async function memberPlacesRoutes(
 
   // GET /api/v1/member/places/:id - Get specific place
   app.get('/:id', {
-    preHandler: [requireCommunityAccess()],
+    preHandler: [requireAuth, enforceDataSovereignty],
     schema: {
       description: 'Get specific place by ID',
       tags: ['Member Places'],
@@ -248,7 +249,7 @@ export async function memberPlacesRoutes(
 
   // POST /api/v1/member/places - Create new place
   app.post('/', {
-    preHandler: [requireCommunityAccess()],
+    preHandler: [requireAuth, enforceDataSovereignty],
     schema: {
       description: 'Create new place',
       tags: ['Member Places'],
@@ -346,7 +347,7 @@ export async function memberPlacesRoutes(
 
   // PUT /api/v1/member/places/:id - Update place
   app.put('/:id', {
-    preHandler: [requireCommunityAccess()],
+    preHandler: [requireAuth, enforceDataSovereignty],
     schema: {
       description: 'Update place',
       tags: ['Member Places'],
@@ -455,7 +456,7 @@ export async function memberPlacesRoutes(
 
   // DELETE /api/v1/member/places/:id - Delete place
   app.delete('/:id', {
-    preHandler: [requireCommunityAccess()],
+    preHandler: [requireAuth, enforceDataSovereignty],
     schema: {
       description: 'Delete place',
       tags: ['Member Places'],

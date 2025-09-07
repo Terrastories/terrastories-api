@@ -21,7 +21,8 @@ import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 import { FastifyInstance } from 'fastify';
-import { buildApp } from '../../src/app.js';
+import { TestDatabaseManager } from '../helpers/database.js';
+import { createTestApp } from '../helpers/api-client.js';
 
 const exec = promisify(execCb);
 
@@ -44,6 +45,7 @@ interface ResourceConstraints {
 
 describe('Field Kit Offline Deployment Validation - Phase 3', () => {
   let app: FastifyInstance;
+  let db: TestDatabaseManager;
   let fieldKitPath: string;
   let mockSyncQueue: any[] = [];
 
@@ -61,46 +63,14 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     console.log('🔄 Initializing Field Kit app...');
 
     try {
-      // Run database migrations before setting up app
-      console.log('📊 Running database migrations for field kit...');
-      const { getDb } = await import('../../src/db/index.js');
-      const { migrate } = await import('drizzle-orm/better-sqlite3/migrator');
-      const database = await getDb();
+      // Set up test database
+      console.log('📊 Setting up test database for field kit...');
+      db = new TestDatabaseManager();
+      await db.setup();
+      console.log('✅ Field kit test database setup completed');
 
-      const migrationsFolder = path.join(
-        process.cwd(),
-        'src',
-        'db',
-        'migrations'
-      );
-
-      await migrate(
-        database as ReturnType<
-          typeof import('drizzle-orm/better-sqlite3').drizzle
-        >,
-        { migrationsFolder }
-      );
-      console.log('✅ Field kit database migrations completed');
-
-      // Ensure privacy_level column exists (in case migration didn't run)
-      try {
-        await database.run(`
-          ALTER TABLE stories ADD COLUMN privacy_level TEXT NOT NULL DEFAULT 'public'
-        `);
-        console.log('✅ Added privacy_level column to stories table');
-      } catch (error: any) {
-        // Column might already exist, which is fine
-        if (
-          error.message.includes('duplicate column name') ||
-          error.message.includes('already exists')
-        ) {
-          console.log('ℹ️ privacy_level column already exists, skipping add');
-        } else {
-          console.warn('⚠️ Could not add privacy_level column:', error.message);
-        }
-      }
-
-      app = await buildApp();
+      // Initialize app with test database
+      app = await createTestApp(db.db);
       await app.ready();
 
       // Create test community for field kit operations
@@ -989,15 +959,13 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       '../../src/services/password.service.js'
     );
 
-    // Create test user directly in field kit database using Drizzle ORM
-    const { getDb } = await import('../../src/db/index.js');
+    // Create test user directly in field kit database using test database
     const { communitiesSqlite, usersSqlite } = await import(
       '../../src/db/schema/index.js'
     );
-    const db = await getDb();
 
     // Insert test community using Drizzle ORM
-    await db
+    await db.db
       .insert(communitiesSqlite)
       .values({
         id: 1,
@@ -1011,7 +979,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
 
     // Insert test user using Drizzle ORM
     const hashedPassword = await hashPassword('testPassword123');
-    await db
+    await db.db
       .insert(usersSqlite)
       .values({
         id: 1,
@@ -1200,6 +1168,9 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
   afterAll(async () => {
     if (app) {
       await app.close();
+    }
+    if (db) {
+      await db.cleanup();
     }
     console.log('Field Kit deployment validation completed');
   });

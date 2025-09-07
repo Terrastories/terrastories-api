@@ -104,3 +104,14 @@ TODO.md
 
 # Backup directories
 backup-*/
+
+# Debug scripts (should be in scripts/debug/)
+debug-*.js
+debug_*.js
+
+# Rails development files (local only)
+rails-source/
+
+# Development artifacts
+test-output.log
+*.tsbuildinfo

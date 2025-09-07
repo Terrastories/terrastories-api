@@ -7,10 +7,12 @@ This guide provides comprehensive instructions for migrating Rails ActiveStorage
 **Purpose**: Migrate from Rails ActiveStorage to TypeScript file service while preserving all files, associations, and cultural protocols.
 
 **Migration Path**:
+
 - **FROM**: ActiveStorage (database tables + hashed file structure)
 - **TO**: Community-scoped TypeScript file service (direct file paths in database)
 
 **Critical Requirements**:
+
 - 🛡️ **Zero Data Loss**: All files and associations must be preserved
 - 🏛️ **Indigenous Data Sovereignty**: Community data isolation maintained
 - 📊 **File Integrity**: All files verified using checksums
@@ -70,9 +72,14 @@ npm run migrate:activestorage analyze
 ```
 
 **Expected Output**:
+
 ```json
 {
-  "tablesFound": ["active_storage_blobs", "active_storage_attachments", "active_storage_variant_records"],
+  "tablesFound": [
+    "active_storage_blobs",
+    "active_storage_attachments",
+    "active_storage_variant_records"
+  ],
   "blobsCount": 1250,
   "attachmentsCount": 890,
   "variantsCount": 340,
@@ -90,6 +97,7 @@ npm run migrate:activestorage analyze 2>&1 | grep "Community"
 ### Step 3: Check for Potential Issues
 
 The analyzer will identify:
+
 - **Duplicate filenames** requiring resolution
 - **Cross-community conflicts** (files used by multiple communities)
 - **Invalid filenames** with special characters
@@ -107,6 +115,7 @@ npm run migrate:activestorage dry-run
 ```
 
 **Review Output**:
+
 ```json
 {
   "dryRun": true,
@@ -115,7 +124,7 @@ npm run migrate:activestorage dry-run
   "estimatedDuration": "15 minutes",
   "potentialIssues": [
     "5 duplicate filenames need resolution",
-    "2 files used across multiple communities", 
+    "2 files used across multiple communities",
     "1 file has invalid characters"
   ],
   "rollbackPlan": {
@@ -123,7 +132,7 @@ npm run migrate:activestorage dry-run
     "rollbackSteps": [
       "Restore database from backup",
       "Restore ActiveStorage file structure",
-      "Remove migrated community directories", 
+      "Remove migrated community directories",
       "Verify ActiveStorage functionality"
     ]
   }
@@ -133,14 +142,17 @@ npm run migrate:activestorage dry-run
 ### Step 2: Address Issues Identified
 
 **For Duplicate Filenames**:
+
 - The migration script will automatically append numeric suffixes
 - Review the naming strategy in dry run output
 
 **For Cross-Community Conflicts**:
+
 - Files will be copied to each community directory
 - Original ActiveStorage files remain until migration completes
 
 **For Invalid Characters**:
+
 - Files will be renamed with sanitized names
 - Original mapping preserved in migration log
 
@@ -158,7 +170,7 @@ grep -i "cultural\|elder\|restricted" migration_plan.log
 ### Step 1: Final Pre-Migration Checklist
 
 - [ ] ✅ **Database backup verified**
-- [ ] ✅ **ActiveStorage files backup verified**  
+- [ ] ✅ **ActiveStorage files backup verified**
 - [ ] ✅ **Dry run completed successfully**
 - [ ] ✅ **All identified issues addressed**
 - [ ] ✅ **Adequate disk space confirmed**
@@ -179,6 +191,7 @@ tail -f migration.log
 ```
 
 **Expected Output**:
+
 ```json
 {
   "success": true,
@@ -191,7 +204,7 @@ tail -f migration.log
   "backupCreated": "./backup-20250830-143022",
   "culturalRestrictions": {
     "elderOnlyFiles": 5,
-    "restrictedFiles": 2, 
+    "restrictedFiles": 2,
     "publicFiles": 36,
     "auditTrailCreated": true
   }
@@ -220,7 +233,7 @@ Once single community validation passes:
 # Migrate all communities
 npm run migrate:activestorage migrate --all-communities
 
-# Monitor overall progress  
+# Monitor overall progress
 tail -f migration_all.log
 ```
 
@@ -236,7 +249,7 @@ active_storage_variant_records (id, blob_id, variation_digest, created_at)
 
 -- Model tables with no direct file references
 stories (id, title, desc, community_id, ...)
-places (id, name, description, community_id, ...)  
+places (id, name, description, community_id, ...)
 speakers (id, name, bio, community_id, ...)
 ```
 
@@ -304,6 +317,7 @@ uploads/
 ### Community Data Isolation
 
 Each community's files are isolated in separate directories:
+
 ```
 uploads/community_{id}/
 ```
@@ -317,6 +331,7 @@ uploads/community_{id}/
 ### Audit Trail
 
 Complete audit trail maintained in `migration_audit.log`:
+
 ```
 2025-08-30 14:30:22 [INFO] Starting migration for community 1
 2025-08-30 14:30:23 [INFO] Processing elder-only file: sacred_ceremony.mp4
@@ -329,6 +344,7 @@ Complete audit trail maintained in `migration_audit.log`:
 ### When to Rollback
 
 Rollback if any of these conditions occur:
+
 - **File integrity checks fail** (checksum mismatches)
 - **Database updates fail** (transaction errors)
 - **API endpoints return errors** for migrated communities
@@ -418,12 +434,14 @@ curl -H "Authorization: Bearer viewer-token" \
 ### Common Issues
 
 #### Issue: "Checksum mismatch during validation"
+
 ```bash
 # Solution: Re-run migration for specific files
 npm run migrate:activestorage repair --community=1 --verify-checksums
 ```
 
-#### Issue: "Database transaction failed"  
+#### Issue: "Database transaction failed"
+
 ```bash
 # Solution: Check database connection and retry
 psql $DATABASE_URL -c "SELECT 1;"
@@ -431,6 +449,7 @@ npm run migrate:activestorage migrate --community=1 --retry
 ```
 
 #### Issue: "Insufficient disk space"
+
 ```bash
 # Solution: Clean up temporary files and ensure 2x space
 df -h
@@ -438,6 +457,7 @@ rm -rf /tmp/migration_*
 ```
 
 #### Issue: "Cultural protocol violation"
+
 ```bash
 # Solution: Review audit log and apply manual corrections
 grep "VIOLATION" migration_audit.log
@@ -478,16 +498,19 @@ grep "VIOLATION" migration_audit.log
 ## 📞 Support & Contacts
 
 ### Technical Issues
+
 - **Developer Team**: Check GitHub issues or create new issue
 - **Database Issues**: Database administrator contact
 - **Infrastructure**: DevOps/infrastructure team
 
-### Cultural Protocol Questions  
+### Cultural Protocol Questions
+
 - **Community Relations**: Contact appropriate community liaisons
 - **Elder Council**: Escalate through proper cultural channels
 - **Data Sovereignty**: Indigenous data governance representatives
 
 ### Emergency Rollback
+
 - **24/7 Support**: Emergency contact for immediate rollback
 - **Backup Recovery**: Data recovery specialist contact
 - **Community Notification**: Communication channels for affected communities
@@ -495,7 +518,7 @@ grep "VIOLATION" migration_audit.log
 ## 📚 Additional Resources
 
 - **Rails ActiveStorage Docs**: Understanding the original system
-- **Terrastories API Docs**: TypeScript API endpoint documentation  
+- **Terrastories API Docs**: TypeScript API endpoint documentation
 - **Indigenous Data Governance**: Cultural protocols and sovereignty guidelines
 - **File Service Documentation**: Technical details of new file handling system
 
@@ -503,6 +526,6 @@ grep "VIOLATION" migration_audit.log
 
 **Version**: 1.0  
 **Last Updated**: August 30, 2025  
-**Next Review**: After first production migration  
+**Next Review**: After first production migration
 
 ⚠️ **Important**: This migration affects Indigenous community data. Always consult with appropriate community representatives and follow cultural protocols throughout the process.

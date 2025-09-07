@@ -8,6 +8,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import {
   requireAuth,
+  requireCommunityAccess,
   type AuthenticatedRequest,
 } from '../../shared/middleware/auth.middleware.js';
 import { z } from 'zod';
@@ -39,7 +40,7 @@ export async function memberSpeakersRoutes(
 
   // GET /api/v1/member/speakers - List user's community speakers
   app.get('/', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, requireCommunityAccess()],
     schema: {
       description: "List speakers in member's community",
       tags: ['Member Speakers'],
@@ -155,7 +156,7 @@ export async function memberSpeakersRoutes(
 
   // GET /api/v1/member/speakers/:id - Get specific speaker
   app.get('/:id', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, requireCommunityAccess()],
     schema: {
       description: 'Get specific speaker by ID',
       tags: ['Member Speakers'],
@@ -244,7 +245,7 @@ export async function memberSpeakersRoutes(
 
   // POST /api/v1/member/speakers - Create new speaker
   app.post('/', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, requireCommunityAccess()],
     schema: {
       description: 'Create new speaker',
       tags: ['Member Speakers'],
@@ -352,7 +353,7 @@ export async function memberSpeakersRoutes(
 
   // PUT /api/v1/member/speakers/:id - Update speaker
   app.put('/:id', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, requireCommunityAccess()],
     schema: {
       description: 'Update speaker',
       tags: ['Member Speakers'],
@@ -470,7 +471,7 @@ export async function memberSpeakersRoutes(
 
   // DELETE /api/v1/member/speakers/:id - Delete speaker
   app.delete('/:id', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, requireCommunityAccess()],
     schema: {
       description: 'Delete speaker',
       tags: ['Member Speakers'],

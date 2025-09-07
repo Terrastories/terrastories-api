@@ -142,6 +142,7 @@ export interface StoryFilters {
   search?: string;
   communityId?: number;
   isRestricted?: boolean;
+  privacyLevel?: string;
   tags?: string[];
   createdBy?: number;
   language?: string;
@@ -406,153 +407,217 @@ export class StoryRepository {
   ): Promise<StoryWithRelations[]> {
     if (storyIds.length === 0) return [];
 
-    // Bulk load stories using proper Drizzle IN clause
-    const storiesTable = this.getStoriesTable();
-    const stories = await this.db
-      .select()
-      .from(storiesTable)
-      .where(inArray(storiesTable.id, storyIds))
-      .execute();
+    try {
+      // Bulk load stories using proper Drizzle IN clause
+      const storiesTable = this.getStoriesTable();
+      const stories = await this.db
+        .select()
+        .from(storiesTable)
+        .where(inArray(storiesTable.id, storyIds))
+        .execute();
 
-    // Bulk load communities for all stories
-    const communityIds = [...new Set(stories.map((s) => s.communityId))];
-    const communitiesTable = this.getCommunitiesTable();
-    const communities = await this.db
-      .select()
-      .from(communitiesTable)
-      .where(inArray(communitiesTable.id, communityIds))
-      .execute();
+      // Bulk load communities for all stories
+      const communityIds = [...new Set(stories.map((s) => s.communityId))];
+      const communitiesTable = this.getCommunitiesTable();
+      const communities = await this.db
+        .select()
+        .from(communitiesTable)
+        .where(inArray(communitiesTable.id, communityIds))
+        .execute();
 
-    // Bulk load authors for all stories
-    const authorIds = [...new Set(stories.map((s) => s.createdBy))];
-    const usersTable = this.getUsersTable();
-    const authors = await this.db
-      .select()
-      .from(usersTable)
-      .where(inArray(usersTable.id, authorIds))
-      .execute();
+      // Bulk load authors for all stories
+      const authorIds = [...new Set(stories.map((s) => s.createdBy))];
+      const usersTable = this.getUsersTable();
+      const authors = await this.db
+        .select()
+        .from(usersTable)
+        .where(inArray(usersTable.id, authorIds))
+        .execute();
 
-    // Create lookup maps for efficient joins
-    const communityMap = new Map(communities.map((c) => [c.id, c]));
-    const authorMap = new Map(authors.map((a) => [a.id, a]));
+      // Create lookup maps for efficient joins
+      const communityMap = new Map(communities.map((c) => [c.id, c]));
+      const authorMap = new Map(authors.map((a) => [a.id, a]));
 
-    // Bulk load story associations through proper database joins
-    const storyPlacesTable = this.getStoryPlacesTable();
-    const placesTable = this.getPlacesTable();
-    const storySpeakersTable = this.getStorySpeakersTable();
-    const speakersTable = this.getSpeakersTable();
+      // Bulk load story associations through proper database joins
+      const storyPlacesTable = this.getStoryPlacesTable();
+      const placesTable = this.getPlacesTable();
 
-    // Get all place associations for these stories
-    const allPlaceAssociations = await this.db
-      .select({
-        storyId: storyPlacesTable.storyId,
-        placeId: placesTable.id,
-        name: placesTable.name,
-        description: placesTable.description,
-        latitude: placesTable.latitude,
-        longitude: placesTable.longitude,
-        region: placesTable.region,
-        culturalSignificance: placesTable.culturalSignificance,
-        culturalContext: storyPlacesTable.culturalContext,
-        sortOrder: storyPlacesTable.sortOrder,
-      })
-      .from(storyPlacesTable)
-      .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
-      .where(inArray(storyPlacesTable.storyId, storyIds))
-      .orderBy(storyPlacesTable.storyId, storyPlacesTable.sortOrder);
-
-    // Get all speaker associations for these stories
-    const allSpeakerAssociations = await this.db
-      .select({
-        storyId: storySpeakersTable.storyId,
-        speakerId: speakersTable.id,
-        name: speakersTable.name,
-        bio: speakersTable.bio,
-        photoUrl: speakersTable.photoUrl,
-        birthYear: speakersTable.birthYear,
-        elderStatus: speakersTable.elderStatus,
-        culturalRole: speakersTable.culturalRole,
-        storyRole: storySpeakersTable.storyRole,
-        sortOrder: storySpeakersTable.sortOrder,
-      })
-      .from(storySpeakersTable)
-      .innerJoin(
-        speakersTable,
-        eq(storySpeakersTable.speakerId, speakersTable.id)
-      )
-      .where(inArray(storySpeakersTable.storyId, storyIds))
-      .orderBy(storySpeakersTable.storyId, storySpeakersTable.sortOrder);
-
-    // Create lookup maps for associations
-    const placesByStory = new Map<number, typeof allPlaceAssociations>();
-    const speakersByStory = new Map<number, typeof allSpeakerAssociations>();
-
-    allPlaceAssociations.forEach((place) => {
-      if (!placesByStory.has(place.storyId)) {
-        placesByStory.set(place.storyId, []);
+      // Get all place associations for these stories
+      let allPlaceAssociations: any[] = [];
+      try {
+        allPlaceAssociations = await this.db
+          .select({
+            storyId: storyPlacesTable.storyId,
+            placeId: placesTable.id,
+            name: placesTable.name,
+            description: placesTable.description,
+            latitude: placesTable.latitude,
+            longitude: placesTable.longitude,
+            region: placesTable.region,
+            culturalSignificance: placesTable.culturalSignificance,
+            // These columns might not exist yet
+            culturalContext: storyPlacesTable.culturalContext,
+            sortOrder: storyPlacesTable.sortOrder,
+          })
+          .from(storyPlacesTable)
+          .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
+          .where(inArray(storyPlacesTable.storyId, storyIds))
+          .orderBy(storyPlacesTable.storyId, storyPlacesTable.sortOrder);
+      } catch {
+        // Try simpler query without missing columns
+        try {
+          allPlaceAssociations = await this.db
+            .select({
+              storyId: storyPlacesTable.storyId,
+              placeId: placesTable.id,
+              name: placesTable.name,
+              description: placesTable.description,
+              latitude: placesTable.latitude,
+              longitude: placesTable.longitude,
+              region: placesTable.region,
+              culturalSignificance: placesTable.culturalSignificance,
+            })
+            .from(storyPlacesTable)
+            .innerJoin(
+              placesTable,
+              eq(storyPlacesTable.placeId, placesTable.id)
+            )
+            .where(inArray(storyPlacesTable.storyId, storyIds));
+        } catch {
+          allPlaceAssociations = [];
+        }
       }
-      placesByStory.get(place.storyId)!.push(place);
-    });
 
-    allSpeakerAssociations.forEach((speaker) => {
-      if (!speakersByStory.has(speaker.storyId)) {
-        speakersByStory.set(speaker.storyId, []);
+      const storySpeakersTable = this.getStorySpeakersTable();
+      const speakersTable = this.getSpeakersTable();
+
+      // Get all speaker associations for these stories
+      let allSpeakerAssociations: any[] = [];
+      try {
+        allSpeakerAssociations = await this.db
+          .select({
+            storyId: storySpeakersTable.storyId,
+            speakerId: speakersTable.id,
+            name: speakersTable.name,
+            bio: speakersTable.bio,
+            photoUrl: speakersTable.photoUrl,
+            birthYear: speakersTable.birthYear,
+            elderStatus: speakersTable.elderStatus,
+            culturalRole: speakersTable.culturalRole,
+            // These columns might not exist yet
+            storyRole: storySpeakersTable.storyRole,
+            sortOrder: storySpeakersTable.sortOrder,
+          })
+          .from(storySpeakersTable)
+          .innerJoin(
+            speakersTable,
+            eq(storySpeakersTable.speakerId, speakersTable.id)
+          )
+          .where(inArray(storySpeakersTable.storyId, storyIds))
+          .orderBy(storySpeakersTable.storyId, storySpeakersTable.sortOrder);
+      } catch {
+        // Try simpler query without missing columns
+        try {
+          allSpeakerAssociations = await this.db
+            .select({
+              storyId: storySpeakersTable.storyId,
+              speakerId: speakersTable.id,
+              name: speakersTable.name,
+              bio: speakersTable.bio,
+              photoUrl: speakersTable.photoUrl,
+              birthYear: speakersTable.birthYear,
+              elderStatus: speakersTable.elderStatus,
+              culturalRole: speakersTable.culturalRole,
+            })
+            .from(storySpeakersTable)
+            .innerJoin(
+              speakersTable,
+              eq(storySpeakersTable.speakerId, speakersTable.id)
+            )
+            .where(inArray(storySpeakersTable.storyId, storyIds));
+        } catch {
+          allSpeakerAssociations = [];
+        }
       }
-      speakersByStory.get(speaker.storyId)!.push(speaker);
-    });
 
-    // Build stories with relations
-    return stories.map((story) => {
-      const community = communityMap.get(story.communityId);
-      const author = authorMap.get(story.createdBy);
+      // Create lookup maps for associations
+      const placesByStory = new Map<number, any[]>();
+      const speakersByStory = new Map<number, any[]>();
 
-      // Get places for this story
-      const storyPlaces = placesByStory.get(story.id) || [];
-      const places = storyPlaces.map((p) => ({
-        id: p.placeId,
-        name: p.name,
-        description: p.description || undefined,
-        latitude: p.latitude,
-        longitude: p.longitude,
-        region: p.region || undefined,
-        culturalSignificance: p.culturalSignificance || undefined,
-        culturalContext: p.culturalContext || undefined,
-        storyRelationship: 'mentioned',
-        sortOrder: p.sortOrder || 0,
-      }));
+      allPlaceAssociations.forEach((place) => {
+        if (!placesByStory.has(place.storyId)) {
+          placesByStory.set(place.storyId, []);
+        }
+        placesByStory.get(place.storyId)!.push(place);
+      });
 
-      // Get speakers for this story
-      const storySpeakers = speakersByStory.get(story.id) || [];
-      const speakers = storySpeakers.map((s) => ({
-        id: s.speakerId,
-        name: s.name,
-        bio: s.bio || undefined,
-        photoUrl: s.photoUrl || undefined,
-        birthYear: s.birthYear || undefined,
-        elderStatus: s.elderStatus,
-        culturalRole: s.storyRole || s.culturalRole || undefined,
-        storyRole: s.storyRole || 'narrator',
-        sortOrder: s.sortOrder || 0,
-      }));
+      allSpeakerAssociations.forEach((speaker) => {
+        if (!speakersByStory.has(speaker.storyId)) {
+          speakersByStory.set(speaker.storyId, []);
+        }
+        speakersByStory.get(speaker.storyId)!.push(speaker);
+      });
 
-      return {
-        ...story,
-        community: community || null,
-        author: author || null,
-        places,
-        speakers,
-        culturalProtocols: {
-          permissionLevel: story.isRestricted ? 'restricted' : 'public',
-          culturalSignificance: 'Standard story',
-          restrictions: story.isRestricted ? ['Community members only'] : [],
-          ceremonialContent: false,
-          elderApprovalRequired: false,
-          accessNotes: story.isRestricted
-            ? 'Restricted access'
-            : 'Public access',
-        },
-      };
-    }) as StoryWithRelations[];
+      // Build stories with relations
+      return stories.map((story) => {
+        const community = communityMap.get(story.communityId);
+        const author = authorMap.get(story.createdBy);
+
+        // Get places for this story
+        const storyPlaces = placesByStory.get(story.id) || [];
+        const places = storyPlaces.map((p) => ({
+          id: p.placeId,
+          name: p.name,
+          description: p.description || undefined,
+          latitude: p.latitude,
+          longitude: p.longitude,
+          region: p.region || undefined,
+          culturalSignificance: p.culturalSignificance || undefined,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          culturalContext: (p as any).culturalContext || undefined,
+          storyRelationship: 'mentioned',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          sortOrder: (p as any).sortOrder || 0,
+        }));
+
+        // Get speakers for this story
+        const storySpeakers = speakersByStory.get(story.id) || [];
+        const speakers = storySpeakers.map((s) => ({
+          id: s.speakerId,
+          name: s.name,
+          bio: s.bio || undefined,
+          photoUrl: s.photoUrl || undefined,
+          birthYear: s.birthYear || undefined,
+          elderStatus: s.elderStatus,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          culturalRole: (s as any).storyRole || s.culturalRole || undefined,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          storyRole: (s as any).storyRole || 'narrator',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          sortOrder: (s as any).sortOrder || 0,
+        }));
+
+        return {
+          ...story,
+          community: community || null,
+          author: author || null,
+          places,
+          speakers,
+          culturalProtocols: {
+            permissionLevel: story.isRestricted ? 'restricted' : 'public',
+            culturalSignificance: 'Standard story',
+            restrictions: story.isRestricted ? ['Community members only'] : [],
+            ceremonialContent: false,
+            elderApprovalRequired: false,
+            accessNotes: story.isRestricted
+              ? 'Restricted access'
+              : 'Public access',
+          },
+        };
+      }) as StoryWithRelations[];
+    } catch (error) {
+      throw error;
+    }
   }
 
   /**
@@ -723,6 +788,10 @@ export class StoryRepository {
 
     if (filters.isRestricted !== undefined) {
       conditions.push(eq(storiesTable.isRestricted, filters.isRestricted));
+    }
+
+    if (filters.privacyLevel) {
+      conditions.push(eq(storiesTable.privacyLevel, filters.privacyLevel));
     }
 
     if (filters.createdBy) {

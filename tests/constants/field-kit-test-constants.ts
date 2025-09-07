@@ -1,12 +1,13 @@
 /**
  * Field Kit Deployment Test Constants
- * 
+ *
  * Shared constants for Field Kit deployment validation tests
  * to improve maintainability and avoid hardcoded values throughout tests.
  */
 
 // Authentication & Users
-export const TEST_PASSWORD_HASH = '$2b$10$K7L1OJ45/4Y2nIvhRVpCe.FSmhDlwjA4J9DL.hDVnl7ZqLMYxmYUi';
+export const TEST_PASSWORD_HASH =
+  '$2b$10$K7L1OJ45/4Y2nIvhRVpCe.FSmhDlwjA4J9DL.hDVnl7ZqLMYxmYUi';
 export const TEST_PASSWORD = 'password123';
 export const JWT_SECRET_FALLBACK = 'test-field-kit-secret';
 
@@ -27,7 +28,7 @@ export const TEST_USER_ADMIN = {
 };
 
 export const TEST_USER_EDITOR = {
-  firstName: 'Test', 
+  firstName: 'Test',
   lastName: 'Editor',
   role: 'editor' as const,
   isActive: true,
@@ -35,7 +36,7 @@ export const TEST_USER_EDITOR = {
 
 export const TEST_USER_VIEWER = {
   firstName: 'Test',
-  lastName: 'Viewer', 
+  lastName: 'Viewer',
   role: 'viewer' as const,
   isActive: true,
 };
@@ -50,17 +51,17 @@ export const TEST_FILES = {
   SMALL: {
     filename: 'test.txt',
     contentType: 'text/plain',
-    content: SMALL_FILE_CONTENT
+    content: SMALL_FILE_CONTENT,
   },
   LARGE: {
     filename: 'large.txt',
-    contentType: 'text/plain', 
-    content: LARGE_FILE_CONTENT
-  }
+    contentType: 'text/plain',
+    content: LARGE_FILE_CONTENT,
+  },
 } as const;
 
 // Performance test constants
 export const PERFORMANCE_TEST = {
   CONCURRENT_REQUESTS: 100,
-  HEALTH_CHECK_ENDPOINT: '/health'
+  HEALTH_CHECK_ENDPOINT: '/health',
 } as const;

@@ -6,13 +6,16 @@
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import type { AuthenticatedRequest } from '../../shared/middleware/auth.middleware.js';
+import {
+  requireAuth,
+  type AuthenticatedRequest,
+} from '../../shared/middleware/auth.middleware.js';
 import { z } from 'zod';
 import { StoryService } from '../../services/story.service.js';
 import { StoryRepository } from '../../repositories/story.repository.js';
 import { FileRepository } from '../../repositories/file.repository.js';
 import { UserRepository } from '../../repositories/user.repository.js';
-import { getDb } from '../../db/index.js';
+import { getDb, type Database } from '../../db/index.js';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import {
   toMemberStory,
@@ -37,8 +40,15 @@ const listStoriesQuerySchema = MemberPaginationQuerySchema.extend({
     ),
 });
 
-export async function memberStoriesRoutes(app: FastifyInstance) {
-  const db = await getDb();
+export interface MemberStoriesRoutesOptions {
+  database?: Database;
+}
+
+export async function memberStoriesRoutes(
+  app: FastifyInstance,
+  options?: MemberStoriesRoutesOptions
+) {
+  const db = options?.database || (await getDb());
   // Type-safe repository instantiation with proper casting
   // StoryRepository requires BetterSQLite3Database, using unknown intermediate for type safety
   const storyRepository = new StoryRepository(
@@ -53,8 +63,9 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
     app.log
   );
 
-  // GET /api/v1/member/stories - List user's community stories
+  // GET routes are handled in member/index.ts to avoid duplication
   app.get('/', {
+    preHandler: [requireAuth],
     schema: {
       description: "List stories in member's community",
       tags: ['Member Stories'],
@@ -165,8 +176,8 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
     },
   });
 
-  // GET /api/v1/member/stories/:id - Get specific story
   app.get('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Get specific story by ID',
       tags: ['Member Stories'],
@@ -254,9 +265,11 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
       }
     },
   });
+  // End of GET routes comment
 
   // POST /api/v1/member/stories - Create new story
   app.post('/', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Create new story',
       tags: ['Member Stories'],
@@ -353,6 +366,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
 
   // PUT /api/v1/member/stories/:id - Update story
   app.put('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Update story',
       tags: ['Member Stories'],
@@ -449,6 +463,7 @@ export async function memberStoriesRoutes(app: FastifyInstance) {
 
   // DELETE /api/v1/member/stories/:id - Delete story
   app.delete('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Delete story',
       tags: ['Member Stories'],

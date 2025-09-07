@@ -44,7 +44,7 @@ export class ApiTestClient {
       url,
       headers: {
         'Content-Type': 'application/json',
-        cookie: `sessionId=${session}`,
+        cookie: session,
       },
     };
 
@@ -192,28 +192,28 @@ export class ApiTestClient {
       throw new Error(`Failed to login test user: ${loginResponse.body}`);
     }
 
-    // Extract session ID from Set-Cookie header
+    // Extract SIGNED session cookie from Set-Cookie header
+    // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
     const setCookieHeader = loginResponse.headers['set-cookie'];
-    let sessionId = '';
+    let sessionCookie = '';
 
     if (Array.isArray(setCookieHeader)) {
-      const sessionCookie = setCookieHeader.find((cookie) =>
-        cookie.includes('sessionId=')
+      // Find all sessionId cookies
+      const sessionCookies = setCookieHeader.filter((cookie) =>
+        cookie.startsWith('sessionId=')
       );
-      sessionId = sessionCookie
-        ? sessionCookie.split('sessionId=')[1].split(';')[0]
-        : '';
-    } else if (setCookieHeader) {
-      sessionId = setCookieHeader.includes('sessionId=')
-        ? setCookieHeader.split('sessionId=')[1].split(';')[0]
-        : '';
+      
+      // Use the signed cookie (longer one with signature) if available
+      sessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
+      sessionCookie = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
     }
 
-    if (!sessionId) {
-      throw new Error('Failed to extract session ID from login response');
+    if (!sessionCookie) {
+      throw new Error('Failed to extract session cookie from login response');
     }
 
-    return sessionId;
+    return sessionCookie;
   }
 
   /**
@@ -423,6 +423,14 @@ export async function createTestApp(
         path: '/',
       },
       saveUninitialized: false,
+    });
+
+    // Multipart form data support (for file uploads)
+    await app.register((await import('@fastify/multipart')).default, {
+      limits: {
+        fileSize: 10 * 1024 * 1024, // 10MB default
+        files: 5, // Maximum 5 files per request
+      },
     });
 
     // Register all routes with test database

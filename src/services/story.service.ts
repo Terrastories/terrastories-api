@@ -607,21 +607,28 @@ export class StoryService {
       scopedFilters.isRestricted = false;
     }
 
-    // Get results with all filtering done at database level
-    const result = await this.storyRepository.findMany(
-      scopedFilters,
-      pagination
-    );
+    try {
+      // Get results with all filtering done at database level
+      const result = await this.storyRepository.findMany(
+        scopedFilters,
+        pagination
+      );
 
-    // Return database results directly - no additional in-memory filtering
-    // All cultural protocol filtering is now handled by database queries
-    return {
-      data: result.data,
-      total: result.total,
-      page: result.page,
-      limit: result.limit,
-      totalPages: result.totalPages,
-    };
+      // Return database results directly - no additional in-memory filtering
+      // All cultural protocol filtering is now handled by database queries
+      return {
+        data: result.data,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        totalPages: result.totalPages,
+      };
+    } catch (error) {
+      this.logger.error('Error in story repository findMany:', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error; // Re-throw for the caller to handle
+    }
   }
 
   /**
@@ -935,6 +942,7 @@ export class StoryService {
         {
           communityId: parseInt(communityId, 10),
           // Only public stories for the public API
+          privacyLevel: 'public',
           isRestricted: false,
         },
         {
@@ -963,6 +971,8 @@ export class StoryService {
       };
     } catch (error) {
       this.logger.error('Failed to get public stories by community:', {
+        communityId,
+        options,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
       });

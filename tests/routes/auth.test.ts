@@ -762,18 +762,20 @@ describe('Authentication Routes', () => {
 
       expect(loginResponse.statusCode).toBe(200);
 
-      // Extract session cookie for logout request
-      const sessionCookie = loginResponse.cookies.find(
-        (cookie) => cookie.name === 'sessionId'
-      );
-      expect(sessionCookie).toBeDefined();
+      // Extract signed session cookie for logout request
+      const setCookieHeader = loginResponse.headers['set-cookie'];
+      // Use the signed cookie (second one) instead of the unsigned cookie (first one)
+      const signedCookie = Array.isArray(setCookieHeader) 
+        ? setCookieHeader[1] 
+        : setCookieHeader;
+      const sessionCookie = signedCookie!.split(';')[0];
 
-      // Now logout using the session
+      // Now logout using the signed session cookie
       const logoutResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/logout',
-        cookies: {
-          sessionId: sessionCookie.value,
+        headers: {
+          cookie: sessionCookie,
         },
       });
 
@@ -822,15 +824,18 @@ describe('Authentication Routes', () => {
         },
       });
 
-      const sessionCookie = loginResponse.cookies.find(
-        (cookie) => cookie.name === 'sessionId'
-      );
+      // Extract signed session cookie from headers
+      const setCookieHeader = loginResponse.headers['set-cookie'];
+      const signedCookie = Array.isArray(setCookieHeader) 
+        ? setCookieHeader[1] 
+        : setCookieHeader;
+      const sessionCookieValue = signedCookie!.split(';')[0];
 
       const logoutResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/logout',
-        cookies: {
-          sessionId: sessionCookie.value,
+        headers: {
+          cookie: sessionCookieValue,
         },
       });
 
@@ -886,16 +891,19 @@ describe('Authentication Routes', () => {
         },
       });
 
-      const sessionCookie = loginResponse.cookies.find(
-        (cookie) => cookie.name === 'sessionId'
-      );
+      // Extract signed session cookie from headers
+      const setCookieHeader = loginResponse.headers['set-cookie'];
+      const signedCookie = Array.isArray(setCookieHeader) 
+        ? setCookieHeader[1] 
+        : setCookieHeader;
+      const sessionCookieValue = signedCookie!.split(';')[0];
 
       // Normal logout should work (can't easily mock session.destroy() error)
       const logoutResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/logout',
-        cookies: {
-          sessionId: sessionCookie.value,
+        headers: {
+          cookie: sessionCookieValue,
         },
       });
 
@@ -941,17 +949,20 @@ describe('Authentication Routes', () => {
       const loginData = JSON.parse(loginResponse.body);
       expect(loginData.user.id).toBe(registeredUser.user.id);
 
-      const sessionCookie = loginResponse.cookies.find(
-        (cookie) => cookie.name === 'sessionId'
-      );
-      expect(sessionCookie).toBeDefined();
+      // Extract signed session cookie from headers
+      const setCookieHeader = loginResponse.headers['set-cookie'];
+      const signedCookie = Array.isArray(setCookieHeader) 
+        ? setCookieHeader[1] 
+        : setCookieHeader;
+      const sessionCookieValue = signedCookie!.split(';')[0];
+      expect(sessionCookieValue).toBeDefined();
 
       // 3. Logout
       const logoutResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/logout',
-        cookies: {
-          sessionId: sessionCookie.value,
+        headers: {
+          cookie: sessionCookieValue,
         },
       });
 
@@ -963,8 +974,8 @@ describe('Authentication Routes', () => {
       const meResponse = await app.inject({
         method: 'GET',
         url: '/api/v1/auth/me',
-        cookies: {
-          sessionId: sessionCookie.value,
+        headers: {
+          cookie: sessionCookieValue,
         },
       });
 
@@ -998,16 +1009,19 @@ describe('Authentication Routes', () => {
         },
       });
 
-      const sessionCookie = loginResponse.cookies.find(
-        (cookie) => cookie.name === 'sessionId'
-      );
+      // Extract signed session cookie from headers
+      const setCookieHeader = loginResponse.headers['set-cookie'];
+      const signedCookie = Array.isArray(setCookieHeader) 
+        ? setCookieHeader[1] 
+        : setCookieHeader;
+      const sessionCookieValue = signedCookie!.split(';')[0];
 
       // Verify session works before logout
       const meResponseBefore = await app.inject({
         method: 'GET',
         url: '/api/v1/auth/me',
-        cookies: {
-          sessionId: sessionCookie.value,
+        headers: {
+          cookie: sessionCookieValue,
         },
       });
       expect(meResponseBefore.statusCode).toBe(200);
@@ -1016,8 +1030,8 @@ describe('Authentication Routes', () => {
       const logoutResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/logout',
-        cookies: {
-          sessionId: sessionCookie.value,
+        headers: {
+          cookie: sessionCookieValue,
         },
       });
       expect(logoutResponse.statusCode).toBe(200);
@@ -1026,8 +1040,8 @@ describe('Authentication Routes', () => {
       const meResponseAfter = await app.inject({
         method: 'GET',
         url: '/api/v1/auth/me',
-        cookies: {
-          sessionId: sessionCookie.value,
+        headers: {
+          cookie: sessionCookieValue,
         },
       });
       expect(meResponseAfter.statusCode).toBe(401);
@@ -1036,8 +1050,8 @@ describe('Authentication Routes', () => {
       const doubleLogoutResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/logout',
-        cookies: {
-          sessionId: sessionCookie.value,
+        headers: {
+          cookie: sessionCookieValue,
         },
       });
       expect(doubleLogoutResponse.statusCode).toBe(401);
@@ -1084,27 +1098,33 @@ describe('Authentication Routes', () => {
       expect(login1.statusCode).toBe(200);
       expect(login2.statusCode).toBe(200);
 
-      const session1 = login1.cookies.find(
-        (cookie) => cookie.name === 'sessionId'
-      );
-      const session2 = login2.cookies.find(
-        (cookie) => cookie.name === 'sessionId'
-      );
+      // Extract signed session cookies from headers
+      const setCookieHeader1 = login1.headers['set-cookie'];
+      const signedCookie1 = Array.isArray(setCookieHeader1) 
+        ? setCookieHeader1[1] 
+        : setCookieHeader1;
+      const session1Value = signedCookie1!.split(';')[0];
+
+      const setCookieHeader2 = login2.headers['set-cookie'];
+      const signedCookie2 = Array.isArray(setCookieHeader2) 
+        ? setCookieHeader2[1] 
+        : setCookieHeader2;
+      const session2Value = signedCookie2!.split(';')[0];
 
       // Both sessions should be different
-      expect(session1.value).not.toBe(session2.value);
+      expect(session1Value).not.toBe(session2Value);
 
       // Both should work independently
       const me1 = await app.inject({
         method: 'GET',
         url: '/api/v1/auth/me',
-        cookies: { sessionId: session1.value },
+        headers: { cookie: session1Value },
       });
 
       const me2 = await app.inject({
         method: 'GET',
         url: '/api/v1/auth/me',
-        cookies: { sessionId: session2.value },
+        headers: { cookie: session2Value },
       });
 
       expect(me1.statusCode).toBe(200);
@@ -1114,7 +1134,7 @@ describe('Authentication Routes', () => {
       const logout1 = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/logout',
-        cookies: { sessionId: session1.value },
+        headers: { cookie: session1Value },
       });
       expect(logout1.statusCode).toBe(200);
 
@@ -1122,13 +1142,13 @@ describe('Authentication Routes', () => {
       const me1After = await app.inject({
         method: 'GET',
         url: '/api/v1/auth/me',
-        cookies: { sessionId: session1.value },
+        headers: { cookie: session1Value },
       });
 
       const me2After = await app.inject({
         method: 'GET',
         url: '/api/v1/auth/me',
-        cookies: { sessionId: session2.value },
+        headers: { cookie: session2Value },
       });
 
       expect(me1After.statusCode).toBe(401);

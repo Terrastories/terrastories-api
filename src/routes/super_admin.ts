@@ -27,7 +27,7 @@ import {
 } from '../services/user.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
-import { getDb } from '../db/index.js';
+import { getDb, type Database } from '../db/index.js';
 import {
   getAuditLogger,
   SuperAdminAuditLogger,
@@ -210,7 +210,7 @@ const BODY_SCHEMAS = {
 
 export async function superAdminRoutes(
   app: FastifyInstance,
-  options?: { database?: any }
+  options?: { database?: Database }
 ) {
   // Initialize services - use provided database instance or default
   const db = options?.database || (await getDb());

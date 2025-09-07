@@ -90,7 +90,7 @@ export async function testConnection(): Promise<{
         const result = await (
           database as ReturnType<typeof drizzlePostgres>
         ).execute('SELECT PostGIS_Version() as version');
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
         version = (result as any).rows[0]?.version || null;
         spatialSupport = !!version;
       } catch {
@@ -99,7 +99,6 @@ export async function testConnection(): Promise<{
     } else {
       // Test SQLite + SpatiaLite
       try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const result = (database as any)
           .prepare('SELECT spatialite_version() as version')
           .get();

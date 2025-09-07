@@ -116,12 +116,32 @@ export class TestDatabaseManager {
         .prepare('PRAGMA table_info(stories)')
         .all() as any[];
       const hasSlug = storiesTableInfo.some((col: any) => col.name === 'slug');
+      const hasPrivacyLevel = storiesTableInfo.some(
+        (col: any) => col.name === 'privacy_level'
+      );
 
-      if (!hasSlug) {
-        this.sqlite.exec(`
-          ALTER TABLE stories ADD COLUMN slug TEXT;
-        `);
-        console.log('✅ Added missing stories columns');
+      if (!hasSlug || !hasPrivacyLevel) {
+        const alterCommands = [];
+        if (!hasSlug) {
+          alterCommands.push('ALTER TABLE stories ADD COLUMN slug TEXT;');
+        }
+        if (!hasPrivacyLevel) {
+          alterCommands.push(
+            "ALTER TABLE stories ADD COLUMN privacy_level TEXT DEFAULT 'public' NOT NULL;"
+          );
+        }
+
+        try {
+          this.sqlite.exec(alterCommands.join('\n'));
+          console.log('✅ Added missing stories columns (slug, privacy_level)');
+        } catch (error: any) {
+          // Ignore duplicate column errors - this means the columns already exist
+          if (error.message.includes('duplicate column name')) {
+            console.log('ℹ️ Stories columns already exist, skipping add');
+          } else {
+            console.error('⚠️ Failed to add stories columns:', error.message);
+          }
+        }
       }
 
       // Add missing columns to join tables for story associations
@@ -368,10 +388,32 @@ export class TestDatabaseManager {
   /**
    * Execute raw SQL for advanced testing scenarios
    */
+  /**
+   * Execute raw SQL for advanced testing scenarios
+   */
   async executeRaw(sql: string): Promise<any> {
     if (!this.sqlite) {
       throw new Error('Database not initialized');
     }
+
+    // Handle queries that return results (like EXPLAIN QUERY PLAN)
+    const trimmedSql = sql.trim().toUpperCase();
+    if (
+      trimmedSql.startsWith('EXPLAIN') ||
+      trimmedSql.startsWith('SELECT') ||
+      trimmedSql.startsWith('PRAGMA')
+    ) {
+      // Use prepare().all() for queries that return results
+      try {
+        const stmt = this.sqlite.prepare(sql);
+        return stmt.all();
+      } catch (error: any) {
+        console.error('Error executing query:', error.message);
+        throw error;
+      }
+    }
+
+    // Use exec() for statements that don't return results
     return this.sqlite.exec(sql);
   }
 

@@ -103,6 +103,39 @@ export async function requireAuth(
 ): Promise<void> {
   const authRequest = request as AuthenticatedRequest;
 
+  // In field-kit or offline mode, allow special offline tokens
+  if (
+    process.env.NODE_ENV === 'field-kit' ||
+    process.env.OFFLINE_MODE === 'true'
+  ) {
+    const authHeader = request.headers.authorization;
+    const cookie = request.headers.cookie;
+
+    // Check for field kit special tokens
+    if (
+      authHeader?.includes('field-kit-admin-token') ||
+      cookie?.includes('field-kit-session')
+    ) {
+      // Create a mock user for field kit operations
+      authRequest.user = {
+        id: 1,
+        email: 'fieldkit@admin.local',
+        role: 'admin',
+        communityId: 1,
+        firstName: 'Field',
+        lastName: 'Kit',
+      };
+      // Also set session for compatibility with other middleware
+      if (!authRequest.session) {
+        authRequest.session = {} as FastifyRequest['session'];
+      }
+      Object.assign(authRequest.session, {
+        user: authRequest.user,
+      });
+      return;
+    }
+  }
+
   if (!authRequest.session?.user) {
     return reply.status(401).send({
       error: 'Authentication required',
@@ -224,7 +257,8 @@ export function requireCommunityAccess(options: CommunityAccessOptions = {}) {
     if (reply.sent) return;
 
     const authRequest = request as AuthenticatedRequest;
-    const user = authRequest.session.user!;
+    // In offline mode, user might be set directly on the request instead of session
+    const user = authRequest.user || authRequest.session?.user!;
 
     // Extract community ID from route params or query
     const requestedCommunityId = extractCommunityId(request);

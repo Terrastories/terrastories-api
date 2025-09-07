@@ -6,11 +6,14 @@
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import type { AuthenticatedRequest } from '../../shared/middleware/auth.middleware.js';
+import {
+  requireAuth,
+  type AuthenticatedRequest,
+} from '../../shared/middleware/auth.middleware.js';
 import { z } from 'zod';
 import { SpeakerService } from '../../services/speaker.service.js';
 import { SpeakerRepository } from '../../repositories/speaker.repository.js';
-import { getDb } from '../../db/index.js';
+import { getDb, type Database } from '../../db/index.js';
 import {
   toMemberSpeaker,
   createPaginationMeta,
@@ -22,13 +25,21 @@ import {
   SpeakerSearchQuerySchema,
 } from '../../shared/types/member.js';
 
-export async function memberSpeakersRoutes(app: FastifyInstance) {
-  const db = await getDb();
+export interface MemberSpeakersRoutesOptions {
+  database?: Database;
+}
+
+export async function memberSpeakersRoutes(
+  app: FastifyInstance,
+  options?: MemberSpeakersRoutesOptions
+) {
+  const db = options?.database || (await getDb());
   const speakerRepository = new SpeakerRepository(db);
   const speakerService = new SpeakerService(speakerRepository);
 
   // GET /api/v1/member/speakers - List user's community speakers
   app.get('/', {
+    preHandler: [requireAuth],
     schema: {
       description: "List speakers in member's community",
       tags: ['Member Speakers'],
@@ -144,6 +155,7 @@ export async function memberSpeakersRoutes(app: FastifyInstance) {
 
   // GET /api/v1/member/speakers/:id - Get specific speaker
   app.get('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Get specific speaker by ID',
       tags: ['Member Speakers'],
@@ -232,6 +244,7 @@ export async function memberSpeakersRoutes(app: FastifyInstance) {
 
   // POST /api/v1/member/speakers - Create new speaker
   app.post('/', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Create new speaker',
       tags: ['Member Speakers'],
@@ -339,6 +352,7 @@ export async function memberSpeakersRoutes(app: FastifyInstance) {
 
   // PUT /api/v1/member/speakers/:id - Update speaker
   app.put('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Update speaker',
       tags: ['Member Speakers'],
@@ -456,6 +470,7 @@ export async function memberSpeakersRoutes(app: FastifyInstance) {
 
   // DELETE /api/v1/member/speakers/:id - Delete speaker
   app.delete('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Delete speaker',
       tags: ['Member Speakers'],

@@ -23,7 +23,7 @@ import { PlaceRepository } from '../repositories/place.repository.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { FileRepository } from '../repositories/file.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
-import { getDb } from '../db/index.js';
+import { getDb, type Database } from '../db/index.js';
 import {
   toPublicStory,
   toPublicPlace,
@@ -36,8 +36,7 @@ import {
 
 export async function publicApiRoutes(
   fastify: FastifyInstance,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { database?: any }
+  options?: { database?: Database }
 ) {
   // Initialize database connection - use provided database instance or default
   const database = options?.database || (await getDb());
@@ -76,6 +75,50 @@ export async function publicApiRoutes(
       });
     }
   }
+
+  // GET /communities - List all communities
+  fastify.get<{
+    Querystring: { page?: string; limit?: string };
+  }>('/communities', async (request, reply) => {
+    try {
+      // Parse query parameters
+      const query = PaginationQuerySchema.parse(request.query);
+      const page = parseInt(query.page, 10);
+      const limit = parseInt(query.limit, 10);
+
+      const communityRepository = new CommunityRepository(database);
+
+      // Get active communities directly from repository (simpler for public API)
+      const communities = await communityRepository.findAllActive();
+
+      // Simple pagination on results
+      const startIndex = (page - 1) * limit;
+      const endIndex = startIndex + limit;
+      const paginatedCommunities = communities.slice(startIndex, endIndex);
+
+      const result = {
+        data: paginatedCommunities,
+        page,
+        limit,
+        total: communities.length,
+      };
+
+      return {
+        data: result.data,
+        meta: {
+          page: result.page,
+          limit: result.limit,
+          total: result.total,
+        },
+      };
+    } catch (error) {
+      console.error('Public communities listing error:', error);
+      return reply.status(500).send({
+        error: 'Internal server error',
+      });
+    }
+  });
+
   // GET /communities/:community_id/stories
   fastify.get<{
     Params: { community_id: string };
@@ -94,8 +137,8 @@ export async function publicApiRoutes(
         const { community_id } = params;
         const page = parseInt(query.page, 10);
         const limit = parseInt(query.limit, 10);
-        const storyRepository = new StoryRepository(database);
-        const fileRepository = new FileRepository(database);
+        const storyRepository = new StoryRepository(database as any);
+        const fileRepository = new FileRepository(database as any);
         const userRepository = new UserRepository(database);
         const storyService = new StoryService(
           storyRepository,
@@ -153,8 +196,8 @@ export async function publicApiRoutes(
       const { community_id, id } = request.params;
 
       try {
-        const storyRepository = new StoryRepository(database);
-        const fileRepository = new FileRepository(database);
+        const storyRepository = new StoryRepository(database as any);
+        const fileRepository = new FileRepository(database as any);
         const userRepository = new UserRepository(database);
         const storyService = new StoryService(
           storyRepository,

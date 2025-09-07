@@ -6,11 +6,14 @@
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import type { AuthenticatedRequest } from '../../shared/middleware/auth.middleware.js';
+import {
+  requireAuth,
+  type AuthenticatedRequest,
+} from '../../shared/middleware/auth.middleware.js';
 import { z } from 'zod';
 import { PlaceService } from '../../services/place.service.js';
 import { PlaceRepository } from '../../repositories/place.repository.js';
-import { getDb } from '../../db/index.js';
+import { getDb, type Database } from '../../db/index.js';
 import {
   toMemberPlace,
   createPaginationMeta,
@@ -22,13 +25,21 @@ import {
   PlaceSearchQuerySchema,
 } from '../../shared/types/member.js';
 
-export async function memberPlacesRoutes(app: FastifyInstance) {
-  const db = await getDb();
+export interface MemberPlacesRoutesOptions {
+  database?: Database;
+}
+
+export async function memberPlacesRoutes(
+  app: FastifyInstance,
+  options?: MemberPlacesRoutesOptions
+) {
+  const db = options?.database || (await getDb());
   const placeRepository = new PlaceRepository(db);
   const placeService = new PlaceService(placeRepository);
 
   // GET /api/v1/member/places - List user's community places
   app.get('/', {
+    preHandler: [requireAuth],
     schema: {
       description: "List places in member's community",
       tags: ['Member Places'],
@@ -147,6 +158,7 @@ export async function memberPlacesRoutes(app: FastifyInstance) {
 
   // GET /api/v1/member/places/:id - Get specific place
   app.get('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Get specific place by ID',
       tags: ['Member Places'],
@@ -236,6 +248,7 @@ export async function memberPlacesRoutes(app: FastifyInstance) {
 
   // POST /api/v1/member/places - Create new place
   app.post('/', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Create new place',
       tags: ['Member Places'],
@@ -333,6 +346,7 @@ export async function memberPlacesRoutes(app: FastifyInstance) {
 
   // PUT /api/v1/member/places/:id - Update place
   app.put('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Update place',
       tags: ['Member Places'],
@@ -441,6 +455,7 @@ export async function memberPlacesRoutes(app: FastifyInstance) {
 
   // DELETE /api/v1/member/places/:id - Delete place
   app.delete('/:id', {
+    preHandler: [requireAuth],
     schema: {
       description: 'Delete place',
       tags: ['Member Places'],

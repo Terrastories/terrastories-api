@@ -217,6 +217,9 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
     test('File integrity verification with MD5 checksum validation', async () => {
       const communityId = '1';
 
+      // Ensure we have test data for this specific test
+      await setupActiveStorageTestData();
+
       // Get ActiveStorage blobs with checksums
       const blobs = await getActiveStorageBlobs(communityId);
       expect(
@@ -257,6 +260,9 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
 
     test('Database migration preserves all relationships and metadata', async () => {
       const communityId = '1';
+
+      // Ensure we have test data for this specific test
+      await setupActiveStorageTestData();
 
       // Get original ActiveStorage data
       const originalAttachments =
@@ -351,6 +357,9 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
     test('Elder-only restrictions preserved during migration', async () => {
       const communityId = '1';
 
+      // Ensure we have test data for this specific test
+      await setupActiveStorageTestData();
+
       // Create story with elder-only media
       const elderStoryId = await createTestStoryWithMedia(communityId, {
         title: 'Sacred Elder Ceremony',
@@ -385,6 +394,9 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
 
     test('Cultural metadata preserved in file system structure', async () => {
       const communityId = '1';
+
+      // Ensure we have test data for this specific test
+      await setupActiveStorageTestData();
 
       // Create content with various cultural significance levels
       const culturalContent = [
@@ -463,6 +475,9 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
     test('Audit trail includes cultural protocol compliance', async () => {
       const communityId = '1';
 
+      // Ensure we have test data for this specific test
+      await setupActiveStorageTestData();
+
       // Run migration with cultural content
       const result = await runMigrationTest(communityId);
       expect(result.success).toBe(true);
@@ -507,6 +522,9 @@ describe('ActiveStorage Migration Validation - Phase 2', () => {
   describe('Rollback and Recovery Procedures', () => {
     test('Rollback capability restores original state', async () => {
       const communityId = '1';
+
+      // Ensure we have test data for this specific test
+      await setupActiveStorageTestData();
 
       // Take snapshot of original state
       const originalBlobs = await getActiveStorageBlobs(communityId);
@@ -571,24 +589,32 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
     test('Atomic transaction ensures no partial migrations', async () => {
       const communityId = '1';
 
+      // Ensure we have test data for this specific test
+      await setupActiveStorageTestData();
+
       // Create scenario that will cause migration failure partway through
       const testBlob = await createTestBlobWithInvalidPath(communityId);
 
       // Attempt migration (should fail)
-      try {
-        await runMigrationTest(communityId);
+      const result = await runMigrationTest(communityId);
+      if (result.success) {
         expect(true, 'Migration should have failed due to invalid path').toBe(
           false
         );
-      } catch (error) {
-        expect(error.message).toContain('Migration failed');
+      } else {
+        expect(result.errors.length).toBeGreaterThan(0);
       }
 
       // Verify no partial migration occurred
       const records = await getMigratedRecords(communityId);
-      const hasPartialMigration = records.some((r) =>
-        r.media_urls?.some((url: string) => url.startsWith('uploads/'))
-      );
+      const hasPartialMigration = records.some((r) => {
+        const urls = Array.isArray(r.media_urls)
+          ? r.media_urls
+          : typeof r.media_urls === 'string'
+            ? JSON.parse(r.media_urls || '[]')
+            : [];
+        return urls.some((url: string) => url.startsWith('uploads/'));
+      });
 
       expect(
         hasPartialMigration,
@@ -641,6 +667,18 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
 
   // Helper functions
   async function setupActiveStorageTestData(): Promise<void> {
+    // Ensure places table has photo_url column that migration expects
+    try {
+      await db.executeRaw('ALTER TABLE places ADD COLUMN photo_url TEXT');
+      console.log('✅ Added photo_url column to places table');
+    } catch (error: any) {
+      if (error.message.includes('duplicate column')) {
+        console.log('ℹ️ photo_url column already exists in places table');
+      } else {
+        console.warn('⚠️ Could not add photo_url column:', error.message);
+      }
+    }
+
     // Create test ActiveStorage blobs and attachments tables
     await db.executeRaw(`
       CREATE TABLE IF NOT EXISTS active_storage_blobs (
@@ -689,22 +727,6 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
       const placeId = communityId;
       const speakerId = communityId;
 
-      // Insert test data using safe template literals (executeRaw doesn't support parameters)
-      await db.executeRaw(`
-        INSERT OR IGNORE INTO stories (id, title, description, slug, community_id, created_by, language, is_restricted, privacy_level) 
-        VALUES (${storyId}, 'Test Story ${communityId}', 'Test story description', 'test-story-${communityId}', ${communityId}, 1, 'en', 0, 'public')
-      `);
-
-      await db.executeRaw(`
-        INSERT OR IGNORE INTO places (id, name, description, latitude, longitude, community_id, is_restricted) 
-        VALUES (${placeId}, 'Test Place ${communityId}', 'Test place description', 45.0, -93.0, ${communityId}, 0)
-      `);
-
-      await db.executeRaw(`
-        INSERT OR IGNORE INTO speakers (id, name, bio, community_id) 
-        VALUES (${speakerId}, 'Test Speaker ${communityId}', 'Test speaker bio', ${communityId})
-      `);
-
       // Also ensure communities and users exist for foreign key constraints
       await db.executeRaw(`
         INSERT OR IGNORE INTO communities (id, name, slug, description, cultural_settings, public_stories) 
@@ -713,8 +735,37 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
 
       await db.executeRaw(`
         INSERT OR IGNORE INTO users (id, email, password_hash, first_name, last_name, role, community_id, is_active) 
-        VALUES (1, 'admin@test.com', 'hashed_password', 'Test', 'Admin', 'admin', ${communityId}, 1)
+        VALUES (${communityId}, 'admin${communityId}@test.com', 'hashed_password', 'Test', 'Admin', 'admin', ${communityId}, 1)
       `);
+
+      // Insert test data and get actual IDs - make slug unique per call
+      const timestamp = Date.now();
+      await db.executeRaw(`
+        INSERT INTO stories (title, description, slug, community_id, created_by, language, is_restricted, privacy_level, media_urls, created_at, updated_at) 
+        VALUES ('Test Story ${communityId}', 'Test story description', 'test-story-${communityId}-${timestamp}', ${communityId}, ${communityId}, 'en', 0, 'public', '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `);
+      const storyResult = await db.executeRaw(
+        'SELECT last_insert_rowid() as id'
+      );
+      const actualStoryId = storyResult[0]?.id || storyId;
+
+      await db.executeRaw(`
+        INSERT INTO places (name, description, latitude, longitude, community_id, is_restricted, media_urls, created_at, updated_at) 
+        VALUES ('Test Place ${communityId}', 'Test place description', 45.0, -93.0, ${communityId}, 0, '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `);
+      const placeResult = await db.executeRaw(
+        'SELECT last_insert_rowid() as id'
+      );
+      const actualPlaceId = placeResult[0]?.id || placeId;
+
+      await db.executeRaw(`
+        INSERT INTO speakers (name, bio, community_id, elder_status, created_at, updated_at) 
+        VALUES ('Test Speaker ${communityId}', 'Test speaker bio', ${communityId}, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `);
+      const speakerResult = await db.executeRaw(
+        'SELECT last_insert_rowid() as id'
+      );
+      const actualSpeakerId = speakerResult[0]?.id || speakerId;
 
       // Clean up existing test data to avoid conflicts
       await db.executeRaw(`
@@ -726,108 +777,119 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
         DELETE FROM active_storage_blobs WHERE key LIKE 'test-%${communityId}'
       `);
 
-      // Insert test blobs
+      // Insert test blobs with realistic checksums (base64)
       const storyImageKey = `test-story-image-${communityId}`;
       const storyAudioKey = `test-story-audio-${communityId}`;
       const placeImageKey = `test-place-image-${communityId}`;
 
+      // Generate checksums that match what we'll create as file content
+      const imageChecksum =
+        Buffer.from('fake-image-data').toString('base64').substring(0, 22) +
+        '==';
+      const audioChecksum =
+        Buffer.from('fake-audio-data').toString('base64').substring(0, 22) +
+        '==';
+      const placeChecksum =
+        Buffer.from('fake-place-image').toString('base64').substring(0, 22) +
+        '==';
+
       await db.executeRaw(`
         INSERT INTO active_storage_blobs (key, filename, content_type, metadata, byte_size, checksum) 
-        VALUES ('${storyImageKey}', 'story_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 1024, 'test-checksum-${communityId}a')
+        VALUES ('${storyImageKey}', 'story_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 15, '${imageChecksum}')
       `);
 
       await db.executeRaw(`
         INSERT INTO active_storage_blobs (key, filename, content_type, metadata, byte_size, checksum) 
-        VALUES ('${storyAudioKey}', 'story_audio_${communityId}.mp3', 'audio/mpeg', '{"cultural_restrictions": {"elder_only": true}}', 2048, 'test-checksum-${communityId}b')
+        VALUES ('${storyAudioKey}', 'story_audio_${communityId}.mp3', 'audio/mpeg', '{"cultural_restrictions": {"elder_only": true}}', 15, '${audioChecksum}')
       `);
 
       await db.executeRaw(`
         INSERT INTO active_storage_blobs (key, filename, content_type, metadata, byte_size, checksum) 
-        VALUES ('${placeImageKey}', 'place_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 512, 'test-checksum-${communityId}c')
+        VALUES ('${placeImageKey}', 'place_image_${communityId}.jpg', 'image/jpeg', '{"cultural_restrictions": {"elder_only": false}}', 16, '${placeChecksum}')
       `);
 
       // Get the actual blob IDs that were just inserted
       const blobResults = await db.executeRaw(`
-        SELECT id FROM active_storage_blobs WHERE key LIKE 'test-%${communityId}' ORDER BY key
+        SELECT id, key FROM active_storage_blobs WHERE key LIKE 'test-%${communityId}' ORDER BY key
       `);
 
-      const blobIds = Array.isArray(blobResults)
-        ? blobResults.map((r) => r.id)
-        : [];
+      const blobs = Array.isArray(blobResults) ? blobResults : [];
+      console.log(
+        `Created ${blobs.length} blobs for community ${communityId}:`,
+        blobs.map((b) => b.key)
+      );
 
-      if (blobIds.length >= 3) {
-        // Insert test attachments linking blobs to stories/places
+      if (blobs.length >= 3) {
+        // Insert test attachments linking blobs to stories/places/speakers using actual IDs
         await db.executeRaw(`
           INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
-          VALUES ('image', 'Story', ${storyId}, ${blobIds[0]})
+          VALUES ('image', 'Story', ${actualStoryId}, ${blobs[0].id})
         `);
 
         await db.executeRaw(`
           INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
-          VALUES ('audio', 'Story', ${storyId}, ${blobIds[1]})
+          VALUES ('audio', 'Story', ${actualStoryId}, ${blobs[1].id})
         `);
 
         await db.executeRaw(`
           INSERT OR IGNORE INTO active_storage_attachments (name, record_type, record_id, blob_id) 
-          VALUES ('image', 'Place', ${placeId}, ${blobIds[2]})
+          VALUES ('image', 'Place', ${actualPlaceId}, ${blobs[2].id})
         `);
+
+        // Verify attachments were created
+        const attachmentResults = await db.executeRaw(`
+          SELECT COUNT(*) as count FROM active_storage_attachments 
+          WHERE blob_id IN (${blobs.map((b) => b.id).join(',')})
+        `);
+        console.log(
+          `Created ${attachmentResults[0]?.count || 0} attachments for community ${communityId}`
+        );
       }
 
       // Create test files in the ActiveStorage directory structure
       const storageDir = path.join(testDataPath, 'storage');
       await fs.mkdir(storageDir, { recursive: true });
 
-      // Create key-based directory structure like Rails ActiveStorage (reuse existing variables)
+      // Create key-based directory structure like Rails ActiveStorage
       const keys = [storyImageKey, storyAudioKey, placeImageKey];
-      for (const key of keys) {
+      const contents = [
+        'fake-image-data',
+        'fake-audio-data',
+        'fake-place-image',
+      ];
+
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const content = contents[i];
+
         const keyDir1 = path.join(storageDir, key.substring(0, 2));
         const keyDir2 = path.join(keyDir1, key.substring(2, 4));
         await fs.mkdir(keyDir2, { recursive: true });
+
+        // Create the file with the key-based path structure
+        await fs.writeFile(path.join(keyDir2, key), Buffer.from(content));
+
+        // Also create by filename as fallback
+        await fs.writeFile(
+          path.join(
+            storageDir,
+            `${content.split('-')[1]}_${communityId}.${i === 1 ? 'mp3' : 'jpg'}`
+          ),
+          Buffer.from(content)
+        );
       }
-
-      // Also create files directly by filename for fallback
-      await fs.writeFile(
-        path.join(storageDir, `story_image_${communityId}.jpg`),
-        Buffer.from('fake-image-data')
-      );
-      await fs.writeFile(
-        path.join(storageDir, `story_audio_${communityId}.mp3`),
-        Buffer.from('fake-audio-data')
-      );
-      await fs.writeFile(
-        path.join(storageDir, `place_image_${communityId}.jpg`),
-        Buffer.from('fake-place-image')
-      );
-
-      // Create files using the key-based path structure
-      await fs.writeFile(
-        path.join(
-          storageDir,
-          storyImageKey.substring(0, 2),
-          storyImageKey.substring(2, 4),
-          storyImageKey
-        ),
-        Buffer.from('fake-image-data')
-      );
-      await fs.writeFile(
-        path.join(
-          storageDir,
-          storyAudioKey.substring(0, 2),
-          storyAudioKey.substring(2, 4),
-          storyAudioKey
-        ),
-        Buffer.from('fake-audio-data')
-      );
-      await fs.writeFile(
-        path.join(
-          storageDir,
-          placeImageKey.substring(0, 2),
-          placeImageKey.substring(2, 4),
-          placeImageKey
-        ),
-        Buffer.from('fake-place-image')
-      );
     }
+
+    // Verify test data was created correctly
+    const totalBlobs = await db.executeRaw(
+      'SELECT COUNT(*) as count FROM active_storage_blobs'
+    );
+    const totalAttachments = await db.executeRaw(
+      'SELECT COUNT(*) as count FROM active_storage_attachments'
+    );
+    console.log(
+      `ActiveStorage test data setup complete: ${totalBlobs[0]?.count} blobs, ${totalAttachments[0]?.count} attachments`
+    );
   }
 
   async function createProductionScaleTestData(): Promise<void> {
@@ -835,13 +897,90 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
     const filesPerCommunity = 350; // 1000+ total files
 
     for (const communityId of communities) {
+      // First ensure we have enough records to reference
+      const recordsNeeded = Math.ceil(filesPerCommunity / 3); // Divide by 3 record types
+
+      // Create additional stories/places/speakers for this test and get actual IDs
+      const createdStoryIds = [];
+      const createdPlaceIds = [];
+      const createdSpeakerIds = [];
+
+      for (let j = 1; j <= recordsNeeded; j++) {
+        // Insert and get actual ID for stories
+        await db.executeRaw(`
+          INSERT INTO stories (title, description, slug, community_id, created_by, language, is_restricted, privacy_level, media_urls, created_at, updated_at) 
+          VALUES ('Production Story ${j}', 'Production test story', 'prod-story-${communityId}-${j}', ${communityId}, ${communityId}, 'en', 0, 'public', '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `);
+        const storyResult = await db.executeRaw(
+          'SELECT last_insert_rowid() as id'
+        );
+        const storyId = storyResult[0]?.id;
+        if (storyId) createdStoryIds.push(storyId);
+
+        // Insert and get actual ID for places
+        await db.executeRaw(`
+          INSERT INTO places (name, description, latitude, longitude, community_id, is_restricted, media_urls, created_at, updated_at) 
+          VALUES ('Production Place ${j}', 'Production test place', 45.0, -93.0, ${communityId}, 0, '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `);
+        const placeResult = await db.executeRaw(
+          'SELECT last_insert_rowid() as id'
+        );
+        const placeId = placeResult[0]?.id;
+        if (placeId) createdPlaceIds.push(placeId);
+
+        // Insert and get actual ID for speakers
+        await db.executeRaw(`
+          INSERT INTO speakers (name, bio, community_id, elder_status, created_at, updated_at) 
+          VALUES ('Production Speaker ${j}', 'Production test speaker', ${communityId}, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `);
+        const speakerResult = await db.executeRaw(
+          'SELECT last_insert_rowid() as id'
+        );
+        const speakerId = speakerResult[0]?.id;
+        if (speakerId) createdSpeakerIds.push(speakerId);
+      }
+
+      // Create the file attachments using actual record IDs
       for (let i = 0; i < filesPerCommunity; i++) {
+        const recordIndex = Math.floor(i / 3); // 0-based index for arrays
+        const recordType =
+          i % 3 === 0 ? 'Story' : i % 3 === 1 ? 'Place' : 'Speaker';
+
+        let actualRecordId;
+        if (recordType === 'Story' && recordIndex < createdStoryIds.length) {
+          actualRecordId = createdStoryIds[recordIndex];
+        } else if (
+          recordType === 'Place' &&
+          recordIndex < createdPlaceIds.length
+        ) {
+          actualRecordId = createdPlaceIds[recordIndex];
+        } else if (
+          recordType === 'Speaker' &&
+          recordIndex < createdSpeakerIds.length
+        ) {
+          actualRecordId = createdSpeakerIds[recordIndex];
+        } else {
+          // Fallback - cycle through available IDs if we run out
+          if (recordType === 'Story' && createdStoryIds.length > 0) {
+            actualRecordId =
+              createdStoryIds[recordIndex % createdStoryIds.length];
+          } else if (recordType === 'Place' && createdPlaceIds.length > 0) {
+            actualRecordId =
+              createdPlaceIds[recordIndex % createdPlaceIds.length];
+          } else if (recordType === 'Speaker' && createdSpeakerIds.length > 0) {
+            actualRecordId =
+              createdSpeakerIds[recordIndex % createdSpeakerIds.length];
+          } else {
+            continue; // Skip this attachment if no records exist
+          }
+        }
+
         await createTestBlobAndAttachment(communityId.toString(), {
           filename: `test-file-${i}.jpg`,
           content_type: 'image/jpeg',
-          byte_size: 1024 * 1024, // 1MB
-          record_type:
-            i % 3 === 0 ? 'Story' : i % 3 === 1 ? 'Place' : 'Speaker',
+          byte_size: 1024, // Use smaller files to prevent issues
+          record_type: recordType,
+          record_id: actualRecordId,
           attachment_name: i % 3 === 0 ? 'media_attachments' : 'photo',
         });
       }
@@ -852,13 +991,21 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
     communityId: string,
     options: any
   ): Promise<void> {
-    const checksum = crypto.randomBytes(16).toString('hex');
+    // Create realistic checksum (base64 encoded)
+    const fileContent = Buffer.alloc(
+      Math.min(options.byte_size, 1024),
+      'test-data'
+    );
+    const checksum = crypto
+      .createHash('md5')
+      .update(fileContent)
+      .digest('base64');
 
     // Create blob
     const key = `test-key-${Date.now()}-${Math.random()}`;
     await db.executeRaw(
       `INSERT INTO active_storage_blobs (key, filename, content_type, byte_size, checksum)
-       VALUES ('${key}', '${options.filename}', '${options.content_type}', ${options.byte_size}, '${checksum}')`
+       VALUES ('${key}', '${options.filename}', '${options.content_type}', ${fileContent.length}, '${checksum}')`
     );
 
     // Get the inserted blob ID
@@ -866,12 +1013,14 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
       `SELECT id FROM active_storage_blobs WHERE key = '${key}' ORDER BY id DESC LIMIT 1`
     );
 
-    // Create attachment (assuming blobResult contains the blob ID)
+    // Create attachment - use proper record_id if provided, otherwise fallback to communityId
     const blobId =
       Array.isArray(blobResult) && blobResult.length > 0 ? blobResult[0].id : 1;
+    const recordId = options.record_id || parseInt(communityId);
+
     await db.executeRaw(
       `INSERT INTO active_storage_attachments (name, record_type, record_id, blob_id)
-       VALUES ('${options.attachment_name}', '${options.record_type}', ${parseInt(communityId)}, ${blobId})`
+       VALUES ('${options.attachment_name}', '${options.record_type}', ${recordId}, ${blobId})`
     );
 
     // Create actual test file for this blob - use smaller files to prevent disk space issues
@@ -883,10 +1032,7 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
     const keyDir2 = path.join(keyDir1, key.substring(2, 4));
     await fs.mkdir(keyDir2, { recursive: true });
 
-    // Create smaller test files to avoid disk space issues
-    // Cap file size at 1KB for tests regardless of requested size
-    const actualFileSize = Math.min(options.byte_size, 1024);
-    const fileContent = Buffer.alloc(actualFileSize, 'test-data');
+    // Write the actual file content that matches the checksum
     await fs.writeFile(path.join(keyDir2, key), fileContent);
 
     // Also create by filename as fallback
@@ -947,6 +1093,44 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
             ) {
               console.log('Migration query:', query);
               console.log('Query result rows:', rows.length);
+
+              // Debug what's actually in the tables
+              if (rows.length === 0) {
+                const attachmentsCount = await db.executeRaw(
+                  'SELECT COUNT(*) as count FROM active_storage_attachments'
+                );
+                const blobsCount = await db.executeRaw(
+                  'SELECT COUNT(*) as count FROM active_storage_blobs'
+                );
+                const storiesCount = await db.executeRaw(
+                  'SELECT COUNT(*) as count FROM stories WHERE community_id = 1'
+                );
+                const placesCount = await db.executeRaw(
+                  'SELECT COUNT(*) as count FROM places WHERE community_id = 1'
+                );
+                const speakersCount = await db.executeRaw(
+                  'SELECT COUNT(*) as count FROM speakers WHERE community_id = 1'
+                );
+
+                console.log('Table counts:', {
+                  attachments: attachmentsCount[0]?.count,
+                  blobs: blobsCount[0]?.count,
+                  stories_community_1: storiesCount[0]?.count,
+                  places_community_1: placesCount[0]?.count,
+                  speakers_community_1: speakersCount[0]?.count,
+                });
+
+                // Sample some data to see what record_ids exist
+                const sampleAttachments = await db.executeRaw(
+                  'SELECT record_type, record_id FROM active_storage_attachments LIMIT 5'
+                );
+                const sampleStories = await db.executeRaw(
+                  'SELECT id, community_id FROM stories LIMIT 5'
+                );
+                console.log('Sample attachments:', sampleAttachments);
+                console.log('Sample stories:', sampleStories);
+              }
+
               if (rows.length > 0) {
                 console.log('First result:', rows[0]);
               }
@@ -1150,6 +1334,14 @@ INSERT INTO active_storage_attachments (id, name, record_type, record_id, blob_i
   async function createTestBlobWithInvalidPath(
     communityId: string
   ): Promise<any> {
+    // Create blob that will cause migration failure - but first create the directory structure
+    const invalidDir = path.join(testDataPath, 'storage', 'invalid', 'path');
+    await fs.mkdir(invalidDir, { recursive: true });
+
+    // Create the actual file at the invalid path
+    const invalidFilePath = path.join(invalidDir, 'file.jpg');
+    await fs.writeFile(invalidFilePath, Buffer.from('invalid-file-data'));
+
     // Create blob that will cause migration failure
     return createTestBlobAndAttachment(communityId, {
       filename: 'invalid/path/file.jpg',

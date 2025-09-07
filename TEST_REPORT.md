@@ -106,7 +106,7 @@ Root cause was database connection mismatch. Member routes were using production
 
 **Remaining Root Causes:**
 
-1. Story creation shares the same service-layer issue as performance test
+1. ~~Story creation shares the same service-layer issue as performance test~~ **FIXED** - was database connection issue
 2. Spatial query validation needs improvement
 3. File retrieval (404) suggests file storage/retrieval path issues
 
@@ -263,15 +263,20 @@ Failed to extract metadata: Error: Input buffer has corrupt header: VipsJpeg: Bo
 
 ## Next Steps for Remaining Issues
 
-**High Priority (Service Layer):**
+**High Priority (Validation & Files):**
 
-1. **Investigate story service query failure** - affects both performance test and field-kit deployment
-   - Root cause: Internal service error despite correct auth, community, and data setup
-   - Debug story service/repository query logic
+1. ~~**Investigate story service query failure**~~ **COMPLETED** - was database connection mismatch, now resolved
+2. **Fix spatial query validation** - improve PostGIS/SQLite query compatibility for remaining field-kit spatial tests
+3. **Fix file retrieval 404 errors** - investigate file storage/path resolution for performance and field-kit tests
 
-**Medium Priority (Implementation Details):** 2. **Fix spatial query validation** - improve PostGIS/SQLite query compatibility 3. **Fix file retrieval 404 errors** - investigate file storage/path resolution 4. **Optimize spatial query performance** - reduce SpatiaLite warnings (non-blocking)
+**Medium Priority (Implementation Details):**
 
-**Low Priority (Polish):** 5. **Address media processing warnings** - replace corrupt test images 6. **Implement comprehensive spatial fallbacks** - for better test coverage
+4. **Optimize spatial query performance** - reduce SpatiaLite warnings (non-blocking)
+
+**Low Priority (Polish):**
+
+5. **Address media processing warnings** - replace corrupt test images
+6. **Implement comprehensive spatial fallbacks** - for better test coverage
 
 ---
 

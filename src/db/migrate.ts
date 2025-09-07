@@ -41,11 +41,14 @@ async function runMigrations() {
           await pgDatabase.execute(
             'CREATE EXTENSION IF NOT EXISTS postgis_topology;'
           );
+
           console.log('✅ PostGIS extensions enabled');
         } catch (error: unknown) {
           const errorMessage =
             error instanceof Error ? error.message : 'Unknown error';
+
           console.warn('⚠️ Could not enable PostGIS extensions:', errorMessage);
+
           console.warn('   Please ensure PostgreSQL has PostGIS installed');
         }
       }
@@ -73,7 +76,9 @@ async function runMigrations() {
     const connectionTest = await testConnection();
 
     console.log('🔍 Database connection test:');
+
     console.log(`  Connected: ${connectionTest.connected ? '✅' : '❌'}`);
+
     console.log(
       `  Spatial Support: ${connectionTest.spatialSupport ? '✅' : '❌'}`
     );

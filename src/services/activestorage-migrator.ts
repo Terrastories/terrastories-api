@@ -551,8 +551,6 @@ export class ActiveStorageMigrator {
   }
 
   async createBackup() {
-    console.log('📦 Creating backup...');
-
     const timestamp =
       new Date().toISOString().replace(/[:.]/g, '-').split('T')[0] +
       '-' +
@@ -606,10 +604,8 @@ export class ActiveStorageMigrator {
               .join(',\n');
             sqlDump += values + ';\n\n';
           }
-        } catch (error) {
-          console.warn(
-            `Warning: Could not backup table ${table}: ${error instanceof Error ? error.message : String(error)}`
-          );
+        } catch {
+          // Warning: Could not backup table - continuing with backup process
         }
       }
 
@@ -627,11 +623,9 @@ export class ActiveStorageMigrator {
           `cp -r "${this.config.activeStoragePath}"/* "${storageBackupPath}"/`
         );
 
-        console.log(`✅ ActiveStorage files backed up to ${storageBackupPath}`);
+        // ActiveStorage files backed up successfully
       } catch {
-        console.warn(
-          '⚠️ ActiveStorage files not found or not accessible - continuing without file backup'
-        );
+        // ActiveStorage files not found or not accessible - continuing without file backup
       }
 
       await this.logAuditTrail('BACKUP_CREATED', {
@@ -813,7 +807,6 @@ export class ActiveStorageMigrator {
       }
       throw error;
     }
-
     const startTime = Date.now();
     const errors: string[] = [];
     let filesProcessed = 0;
@@ -1103,8 +1096,6 @@ export class ActiveStorageMigrator {
    * @returns Cleanup results including success status and any errors
    */
   async cleanupTestData(): Promise<{ success: boolean; errors: string[] }> {
-    console.log('🧹 Cleaning up test data with foreign key handling...');
-
     const db = await this.getDbAdapter();
     const errors: string[] = [];
 
@@ -1128,11 +1119,8 @@ export class ActiveStorageMigrator {
         for (const table of cleanupOrder) {
           try {
             await db.query(`DELETE FROM ${table}`);
-          } catch (error) {
-            // Table might not exist - log warning but continue
-            console.warn(
-              `Warning: Could not clean table ${table}: ${error instanceof Error ? error.message : String(error)}`
-            );
+          } catch {
+            // Table might not exist - continuing cleanup process
           }
         }
 
@@ -1175,10 +1163,6 @@ export class ActiveStorageMigrator {
     orphanedRecords: string[];
     deletedRecords: number;
   }> {
-    console.log(
-      `🗑️ Performing cascading delete from ${tableName} ID ${recordId}...`
-    );
-
     const db = await this.getDbAdapter();
     const orphanedRecords: string[] = [];
     let deletedRecords = 0;
@@ -1213,10 +1197,8 @@ export class ActiveStorageMigrator {
                 [recordId]
               );
               deletedRecords += 1; // Simplified - would track actual count in production
-            } catch (error) {
-              console.warn(
-                `Could not delete from ${childTable}: ${error instanceof Error ? error.message : String(error)}`
-              );
+            } catch {
+              // Could not delete from child table - continuing cleanup
             }
           }
         }
@@ -1274,8 +1256,6 @@ export class ActiveStorageMigrator {
     conflicts: string[];
     duration: string;
   }> {
-    console.log(`🚀 Performing bulk migration of ${fileCount} files...`);
-
     const startTime = Date.now();
     const conflicts: string[] = [];
 
@@ -1395,8 +1375,6 @@ export class ActiveStorageMigrator {
       processingTime: number;
     };
   }> {
-    console.log('📊 Validating resource usage for Field Kit deployment...');
-
     const startTime = Date.now();
     const initialMemory = process.memoryUsage().heapUsed;
 
@@ -1464,10 +1442,6 @@ export class ActiveStorageMigrator {
       filesProcessed: number;
     };
   }> {
-    console.log(
-      '🏃‍♂️ Running performance benchmark for Indigenous community hardware...'
-    );
-
     const startTime = Date.now();
     const initialMemory = process.memoryUsage().heapUsed;
     let memoryPeak = initialMemory;
@@ -1545,8 +1519,6 @@ export class ActiveStorageMigrator {
    * @returns Rollback results including success status and duration
    */
   async performRollback(backupPath?: string) {
-    console.log('🔄 Performing rollback...');
-
     if (!backupPath) {
       throw new Error('Backup path is required for rollback');
     }

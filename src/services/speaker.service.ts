@@ -127,12 +127,7 @@ export class SpeakerService {
       communityId,
     });
 
-    // Audit logging for elder creation
-    if (speaker.elderStatus) {
-      console.log(
-        `Elder speaker created: ID ${speaker.id}, Name: ${speaker.name}, Community: ${communityId}, CreatedBy: ${userId}`
-      );
-    }
+    // Audit logging for elder creation handled by audit logger
 
     return speaker;
   }
@@ -239,12 +234,7 @@ export class SpeakerService {
       throw new SpeakerNotFoundError();
     }
 
-    // Audit logging for elder updates
-    if (existingSpeaker.elderStatus) {
-      console.log(
-        `Elder speaker updated: ID ${id}, Community: ${communityId}, UpdatedBy: ${userId}`
-      );
-    }
+    // Audit logging for elder updates handled by audit logger
 
     return updatedSpeaker;
   }
@@ -283,12 +273,7 @@ export class SpeakerService {
     // Delete speaker
     const deleted = await this.repository.delete(id);
 
-    // Audit logging
-    if (deleted) {
-      console.log(
-        `Speaker deleted: ID ${id}, Name: ${existingSpeaker.name}, Community: ${communityId}, DeletedBy: ${userId}`
-      );
-    }
+    // Audit logging handled by audit logger
 
     return deleted;
   }

@@ -69,7 +69,7 @@ export async function publicApiRoutes(
       (request as FastifyRequest & { community: unknown }).community =
         community;
     } catch (error) {
-      console.error('Community validation error:', error);
+      request.log.error(error, 'Community validation error');
       return reply.status(500).send({
         error: 'Internal server error',
       });
@@ -79,48 +79,45 @@ export async function publicApiRoutes(
   // GET /communities - List all communities
   fastify.get<{
     Querystring: { page?: string; limit?: string };
-  }>(
-    '/communities',
-    async (request, reply) => {
-      try {
-        // Parse query parameters
-        const query = PaginationQuerySchema.parse(request.query);
-        const page = parseInt(query.page, 10);
-        const limit = parseInt(query.limit, 10);
+  }>('/communities', async (request, reply) => {
+    try {
+      // Parse query parameters
+      const query = PaginationQuerySchema.parse(request.query);
+      const page = parseInt(query.page, 10);
+      const limit = parseInt(query.limit, 10);
 
-        const communityRepository = new CommunityRepository(database);
+      const communityRepository = new CommunityRepository(database);
 
-        // Get active communities directly from repository (simpler for public API)
-        const communities = await communityRepository.findAllActive();
-        
-        // Simple pagination on results
-        const startIndex = (page - 1) * limit;
-        const endIndex = startIndex + limit;
-        const paginatedCommunities = communities.slice(startIndex, endIndex);
-        
-        const result = {
-          data: paginatedCommunities,
-          page,
-          limit,
-          total: communities.length,
-        };
+      // Get active communities directly from repository (simpler for public API)
+      const communities = await communityRepository.findAllActive();
 
-        return {
-          data: result.data,
-          meta: {
-            page: result.page,
-            limit: result.limit, 
-            total: result.total,
-          },
-        };
-      } catch (error) {
-        console.error('Public communities listing error:', error);
-        return reply.status(500).send({
-          error: 'Internal server error',
-        });
-      }
+      // Simple pagination on results
+      const startIndex = (page - 1) * limit;
+      const endIndex = startIndex + limit;
+      const paginatedCommunities = communities.slice(startIndex, endIndex);
+
+      const result = {
+        data: paginatedCommunities,
+        page,
+        limit,
+        total: communities.length,
+      };
+
+      return {
+        data: result.data,
+        meta: {
+          page: result.page,
+          limit: result.limit,
+          total: result.total,
+        },
+      };
+    } catch (error) {
+      console.error('Public communities listing error:', error);
+      return reply.status(500).send({
+        error: 'Internal server error',
+      });
     }
-  );
+  });
 
   // GET /communities/:community_id/stories
   fastify.get<{
@@ -173,7 +170,7 @@ export async function publicApiRoutes(
           },
         };
       } catch (error) {
-        console.error('Public stories listing error:', error);
+        request.log.error(error, 'Public stories listing error');
         // Handle validation errors
         if (error instanceof Error && error.message.includes('Invalid')) {
           return reply.status(400).send({
@@ -222,7 +219,7 @@ export async function publicApiRoutes(
           data: toPublicStory(story),
         };
       } catch (error) {
-        console.error('Public story retrieval error:', error);
+        request.log.error(error, 'Public story retrieval error');
         return reply.status(500).send({
           error: 'Internal server error',
         });
@@ -279,7 +276,7 @@ export async function publicApiRoutes(
           },
         };
       } catch (error) {
-        console.error('Public places listing error:', error);
+        request.log.error(error, 'Public places listing error');
         return reply.status(500).send({
           error: 'Internal server error',
         });
@@ -332,7 +329,7 @@ export async function publicApiRoutes(
           throw placeError;
         }
       } catch (error) {
-        console.error('Public place retrieval error:', error);
+        request.log.error(error, 'Public place retrieval error');
         return reply.status(500).send({
           error: 'Internal server error',
         });

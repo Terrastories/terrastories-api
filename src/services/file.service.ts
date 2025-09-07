@@ -394,7 +394,6 @@ export class FileService {
         await fs.unlink(fullPath);
       } catch {
         // File may not exist on disk, but continue with database deletion
-        console.warn(`File not found on disk: ${fullPath}`);
       }
 
       // Delete from database
@@ -864,8 +863,8 @@ export class FileService {
       // For now, return undefined for non-image files
 
       return undefined;
-    } catch (error) {
-      console.warn(`Failed to extract metadata: ${error}`);
+    } catch {
+      // Failed to extract metadata - returning undefined
       return undefined;
     }
   }

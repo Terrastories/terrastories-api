@@ -38,11 +38,9 @@ export async function getDb(): Promise<Database> {
     if (config.database.spatialSupport && config.environment !== 'test') {
       try {
         await queryClient`SELECT PostGIS_Version()`;
-        console.log('✅ PostGIS extension verified');
+        // PostGIS extension verified
       } catch {
-        console.warn(
-          '⚠️ PostGIS extension not found. Spatial features will be limited.'
-        );
+        // PostGIS extension not found - spatial features will be limited
       }
     }
   } else {
@@ -56,11 +54,9 @@ export async function getDb(): Promise<Database> {
       try {
         sqlite.loadExtension('mod_spatialite');
         sqlite.exec('SELECT InitSpatialMetaData()');
-        console.log('✅ SpatiaLite extension loaded');
+        // SpatiaLite extension loaded
       } catch {
-        console.warn(
-          '⚠️ SpatiaLite extension not found. Spatial features will be limited.'
-        );
+        // SpatiaLite extension not found - spatial features will be limited
       }
     }
 
@@ -94,7 +90,7 @@ export async function testConnection(): Promise<{
         const result = await (
           database as ReturnType<typeof drizzlePostgres>
         ).execute('SELECT PostGIS_Version() as version');
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
         version = (result as any).rows[0]?.version || null;
         spatialSupport = !!version;
       } catch {
@@ -103,7 +99,6 @@ export async function testConnection(): Promise<{
     } else {
       // Test SQLite + SpatiaLite
       try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const result = (database as any)
           .prepare('SELECT spatialite_version() as version')
           .get();
@@ -119,8 +114,8 @@ export async function testConnection(): Promise<{
       spatialSupport,
       version,
     };
-  } catch (error) {
-    console.error('Database connection test failed:', error);
+  } catch {
+    // Database connection test failed
     return {
       connected: false,
       spatialSupport: false,

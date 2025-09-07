@@ -1,6 +1,6 @@
 /**
  * Super Admin Audit Logger
- * 
+ *
  * Provides audit logging for super admin actions to ensure transparency
  * and compliance with Indigenous data sovereignty requirements.
  */
@@ -9,8 +9,16 @@
  * Super admin audit log entry
  */
 export interface SuperAdminAuditLog {
-  action: 'community_create' | 'community_update' | 'community_delete' | 'community_view' | 
-          'user_create' | 'user_update' | 'user_delete' | 'user_view' | 'user_list';
+  action:
+    | 'community_create'
+    | 'community_update'
+    | 'community_delete'
+    | 'community_view'
+    | 'user_create'
+    | 'user_update'
+    | 'user_delete'
+    | 'user_view'
+    | 'user_list';
   resource: 'community' | 'user';
   resourceId?: number;
   adminUserId: number;
@@ -53,11 +61,11 @@ export class SuperAdminAuditLogger {
    * Log a super admin action
    */
   log(entry: SuperAdminAuditLog): void {
-    this.loggers.forEach(logger => {
+    this.loggers.forEach((logger) => {
       try {
         logger(entry);
-      } catch (error) {
-        console.error('Failed to write audit log:', error);
+      } catch {
+        // Failed to write audit log - silently continue to avoid infinite recursion
       }
     });
   }

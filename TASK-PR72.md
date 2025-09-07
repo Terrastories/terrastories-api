@@ -3,7 +3,7 @@
 **PR #72**: Fix ActiveStorage migration system with comprehensive production testing
 **Created**: 2025-09-07
 **Status**: IN PROGRESS
-**Progress**: 5/15 tasks completed (33%)
+**Progress**: 6/15 tasks completed (40%)
 
 ---
 
@@ -101,14 +101,15 @@
 
 ### 🟢 Minor Issues (Style, Documentation, Suggestions)
 
-- [ ] **MINOR-001**: Sanitize and cap logged errors
-  - **File**: `src/services/activestorage-migrator.ts:1029-1051`
+- [x] **MINOR-001**: Sanitize and cap logged errors
+  - **File**: `src/services/activestorage-migrator.ts:1178-1229`
   - **Source**: GitHub Actions code suggestion
   - **Issue**: "Avoid logging full errors objects; they may contain PII or break JSON serialization"
   - **Priority**: MINOR
-  - **Status**: PENDING
+  - **Status**: COMPLETED
   - **Plan**: Replace raw errors with sanitized, capped messages and add error_count
-  - **Validation**: Test error logging, verify no PII exposure
+  - **Validation**: ✅ Errors now sanitized, capped to 50, and include error_count metric
+  - **Resolution**: Added error sanitization function with message extraction and 50-item cap
 
 - [ ] **MINOR-002**: Add file size limits for Field Kit
   - **File**: General performance optimization

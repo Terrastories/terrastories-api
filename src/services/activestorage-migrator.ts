@@ -1175,6 +1175,15 @@ export class ActiveStorageMigrator {
 
         const duration = `${Math.round((Date.now() - startTime) / 1000)}s`;
 
+        // Sanitize and cap logged errors to prevent PII exposure and log bloat
+        const sanitizeError = (e: unknown) =>
+          typeof e === 'string'
+            ? e
+            : (e as any)?.message
+              ? String((e as any).message)
+              : 'Unknown error';
+        const errorMessages = errors.slice(0, 50).map(sanitizeError); // cap to 50
+
         // Create comprehensive audit log for community
         const auditSummary = {
           communityId,
@@ -1183,7 +1192,8 @@ export class ActiveStorageMigrator {
           files_migrated: filesMigrated,
           files_processed: filesProcessed,
           files_skipped: filesSkipped,
-          errors: errors,
+          error_count: errors.length,
+          errors: errorMessages,
           duration,
           cultural_protocols: {
             elder_restrictions_preserved: true,
@@ -1216,7 +1226,7 @@ export class ActiveStorageMigrator {
           filesProcessed,
           filesMigrated,
           filesSkipped,
-          errors,
+          errors: errorMessages, // Use sanitized and capped errors
           duration,
           backupPath: backup.backupPath,
           culturalRestrictions: {

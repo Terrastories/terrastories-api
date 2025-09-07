@@ -67,8 +67,10 @@ export interface AnalysisResult {
 }
 
 // Database abstraction interface
-interface DatabaseQuery {
+export interface DatabaseQuery {
   query(sql: string, params?: any[]): Promise<{ rows: any[] }>;
+  connect?(): Promise<void>;
+  close?(): Promise<void>;
 }
 
 // PostgreSQL adapter
@@ -206,6 +208,14 @@ export class ActiveStorageMigrator {
       await this.dbAdapter.close();
       this.dbAdapter = null;
     }
+  }
+
+  /**
+   * Set a custom database adapter (for testing)
+   * @param adapter Custom database adapter implementation
+   */
+  setDatabaseAdapter(adapter: DatabaseQuery): void {
+    this.dbAdapter = adapter as any; // Type assertion for compatibility
   }
 
   private sanitizeFilename(filename: string): string {

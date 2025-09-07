@@ -13,7 +13,7 @@ import {
 import { z } from 'zod';
 import { PlaceService } from '../../services/place.service.js';
 import { PlaceRepository } from '../../repositories/place.repository.js';
-import { getDb } from '../../db/index.js';
+import { getDb, type Database } from '../../db/index.js';
 import {
   toMemberPlace,
   createPaginationMeta,
@@ -25,8 +25,15 @@ import {
   PlaceSearchQuerySchema,
 } from '../../shared/types/member.js';
 
-export async function memberPlacesRoutes(app: FastifyInstance) {
-  const db = await getDb();
+export interface MemberPlacesRoutesOptions {
+  database?: Database;
+}
+
+export async function memberPlacesRoutes(
+  app: FastifyInstance,
+  options?: MemberPlacesRoutesOptions
+) {
+  const db = options?.database || (await getDb());
   const placeRepository = new PlaceRepository(db);
   const placeService = new PlaceService(placeRepository);
 

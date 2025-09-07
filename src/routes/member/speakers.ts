@@ -13,7 +13,7 @@ import {
 import { z } from 'zod';
 import { SpeakerService } from '../../services/speaker.service.js';
 import { SpeakerRepository } from '../../repositories/speaker.repository.js';
-import { getDb } from '../../db/index.js';
+import { getDb, type Database } from '../../db/index.js';
 import {
   toMemberSpeaker,
   createPaginationMeta,
@@ -25,8 +25,15 @@ import {
   SpeakerSearchQuerySchema,
 } from '../../shared/types/member.js';
 
-export async function memberSpeakersRoutes(app: FastifyInstance) {
-  const db = await getDb();
+export interface MemberSpeakersRoutesOptions {
+  database?: Database;
+}
+
+export async function memberSpeakersRoutes(
+  app: FastifyInstance,
+  options?: MemberSpeakersRoutesOptions
+) {
+  const db = options?.database || (await getDb());
   const speakerRepository = new SpeakerRepository(db);
   const speakerService = new SpeakerService(speakerRepository);
 

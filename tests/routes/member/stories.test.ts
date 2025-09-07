@@ -58,11 +58,14 @@ describe('Member Stories API - GET Endpoints', () => {
       const sessionCookies = setCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      
+
       // Use the signed cookie (longer one with signature) if available
-      editorSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      editorSessionId =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      editorSessionId = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+      editorSessionId = setCookieHeader.startsWith('sessionId=')
+        ? setCookieHeader
+        : '';
     }
   });
 

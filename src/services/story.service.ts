@@ -607,21 +607,26 @@ export class StoryService {
       scopedFilters.isRestricted = false;
     }
 
-    // Get results with all filtering done at database level
-    const result = await this.storyRepository.findMany(
-      scopedFilters,
-      pagination
-    );
+    try {
+      // Get results with all filtering done at database level
+      const result = await this.storyRepository.findMany(
+        scopedFilters,
+        pagination
+      );
 
-    // Return database results directly - no additional in-memory filtering
-    // All cultural protocol filtering is now handled by database queries
-    return {
-      data: result.data,
-      total: result.total,
-      page: result.page,
-      limit: result.limit,
-      totalPages: result.totalPages,
-    };
+      // Return database results directly - no additional in-memory filtering
+      // All cultural protocol filtering is now handled by database queries
+      return {
+        data: result.data,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        totalPages: result.totalPages,
+      };
+    } catch (error) {
+      this.logger.error('Error in story repository findMany:', error);
+      throw error; // Re-throw for the caller to handle
+    }
   }
 
   /**

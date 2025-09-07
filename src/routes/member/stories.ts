@@ -15,7 +15,7 @@ import { StoryService } from '../../services/story.service.js';
 import { StoryRepository } from '../../repositories/story.repository.js';
 import { FileRepository } from '../../repositories/file.repository.js';
 import { UserRepository } from '../../repositories/user.repository.js';
-import { getDb } from '../../db/index.js';
+import { getDb, type Database } from '../../db/index.js';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import {
   toMemberStory,
@@ -40,8 +40,15 @@ const listStoriesQuerySchema = MemberPaginationQuerySchema.extend({
     ),
 });
 
-export async function memberStoriesRoutes(app: FastifyInstance) {
-  const db = await getDb();
+export interface MemberStoriesRoutesOptions {
+  database?: Database;
+}
+
+export async function memberStoriesRoutes(
+  app: FastifyInstance,
+  options?: MemberStoriesRoutesOptions
+) {
+  const db = options?.database || (await getDb());
   // Type-safe repository instantiation with proper casting
   // StoryRepository requires BetterSQLite3Database, using unknown intermediate for type safety
   const storyRepository = new StoryRepository(

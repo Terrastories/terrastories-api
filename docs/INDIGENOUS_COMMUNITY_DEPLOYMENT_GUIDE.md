@@ -102,6 +102,16 @@ nano .env.production
 
 #### 3. Production Environment Configuration
 
+**🔒 SECURITY NOTICE: Secret Management is Critical**
+
+Before proceeding:
+
+1. **Generate all secrets using cryptographically secure methods**
+2. **Never use the example values provided below in production**
+3. **Store secrets securely** (environment files should not be committed to version control)
+4. **Use minimum entropy**: Secrets should be at least 32 characters for JWT/session keys
+5. **Consider using secret management tools** like HashiCorp Vault, AWS Secrets Manager, or similar
+
 ```bash
 # .env.production - Indigenous Community Production Settings
 
@@ -114,11 +124,14 @@ HOST=0.0.0.0
 DATABASE_URL=postgresql://terrastories_user:secure_password@localhost:5432/terrastories_production
 POSTGRES_DB=terrastories_production
 POSTGRES_USER=terrastories_user
-POSTGRES_PASSWORD=secure_password
+# ⚠️ WARNING: Use a strong, unique password for production
+POSTGRES_PASSWORD=CHANGE_THIS_STRONG_UNIQUE_PASSWORD
 
-# Security Configuration
-JWT_SECRET=your-super-secure-jwt-secret-at-least-32-characters
-SESSION_SECRET=your-super-secure-session-secret-at-least-32-characters
+# Security Configuration (CRITICAL - CHANGE ALL DEFAULTS)
+# ⚠️ WARNING: Generate unique, cryptographically secure secrets for production
+# Use: openssl rand -base64 32
+JWT_SECRET=CHANGE_THIS_GENERATE_UNIQUE_32_CHAR_SECRET
+SESSION_SECRET=CHANGE_THIS_GENERATE_UNIQUE_32_CHAR_SECRET
 
 # File Storage Configuration
 UPLOAD_DIR=./data/uploads
@@ -144,6 +157,20 @@ SSL_KEY_PATH=/path/to/ssl/private-key.pem
 BACKUP_ENABLED=true
 BACKUP_RETENTION_DAYS=90  # Adjust based on community requirements
 BACKUP_ENCRYPTION=true
+```
+
+**🔧 Quick Secret Generation Commands:**
+
+```bash
+# Generate secure JWT and Session secrets
+echo "JWT_SECRET=$(openssl rand -base64 32)"
+echo "SESSION_SECRET=$(openssl rand -base64 32)"
+
+# Generate secure database password
+echo "POSTGRES_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')"
+
+# Generate secure GPG passphrase for backups
+echo "GPG_PASSPHRASE=$(openssl rand -base64 32)"
 ```
 
 #### 4. Deploy with Docker Compose
@@ -281,10 +308,21 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/terrastories-api
-Environment=NODE_ENV=field-kit
+EnvironmentFile=/home/ubuntu/terrastories-api/.env.field-kit
 ExecStart=/usr/bin/node dist/server.js
 Restart=always
 RestartSec=10
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/home/ubuntu/terrastories-api/data
+ReadWritePaths=/home/ubuntu/terrastories-api/logs
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -299,6 +337,14 @@ sudo systemctl status terrastories-field-kit
 ```
 
 #### 5. WiFi Hotspot Setup (for local access)
+
+**🔒 SECURITY RECOMMENDATIONS:**
+
+- Use WPA3 if hardware supports it (replace `wpa=2` with `wpa=3`)
+- Change the default SSID and passphrase regularly
+- Consider disabling broadcast during culturally sensitive events (`ignore_broadcast_ssid=1`)
+- Restrict network access to local application only (no internet routing)
+- Monitor connected devices and implement MAC address filtering if needed
 
 ```bash
 # Install hostapd and dnsmasq
@@ -316,7 +362,9 @@ macaddr_acl=0
 auth_algs=1
 ignore_broadcast_ssid=0
 wpa=2
-wpa_passphrase=CommunityStories2024
+# ⚠️ WARNING: Use a strong, unique passphrase (minimum 12 characters)
+# Consider WPA3 if hardware supports it for enhanced security
+wpa_passphrase=CHANGE_THIS_STRONG_UNIQUE_PASSPHRASE
 wpa_key_mgmt=WPA-PSK
 wpa_pairwise=TKIP
 rsn_pairwise=CCMP
@@ -438,6 +486,31 @@ gpg --cipher-algo AES256 --symmetric --output $BACKUP_DIR/media_backup_$DATE.tar
 rm $BACKUP_DIR/media_backup_$DATE.tar.gz
 
 echo "Media backup completed: media_backup_$DATE.tar.gz.gpg"
+```
+
+**🔐 GPG Key Management for Indigenous Data Sovereignty:**
+
+Critical considerations for GPG encryption keys:
+
+- **Community Key Custody**: Communities should control their own encryption keys
+- **Key Rotation**: Establish periodic key rotation policies (recommend annually)
+- **Multiple Custodians**: Share key management among trusted community members
+- **Secure Storage**: Store master keys offline, in community-controlled locations
+- **Recovery Planning**: Document key recovery procedures for community continuity
+
+```bash
+# Generate community-controlled GPG key
+gpg --full-generate-key
+# Choose: RSA (sign and encrypt), 4096 bits
+# Set expiration: 1 year (force annual review)
+# Use community contact information
+
+# Export community public key for sharing
+gpg --export --armor your-community@email.com > community-public-key.asc
+
+# Create encrypted key backup (store offline)
+gpg --export-secret-keys --armor your-community@email.com > community-private-key.asc
+# Encrypt this file and store in multiple secure locations
 ```
 
 #### Automated Backup Schedule

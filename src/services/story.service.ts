@@ -624,7 +624,9 @@ export class StoryService {
         totalPages: result.totalPages,
       };
     } catch (error) {
-      this.logger.error('Error in story repository findMany:', error);
+      this.logger.error('Error in story repository findMany:', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error; // Re-throw for the caller to handle
     }
   }

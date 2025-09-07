@@ -443,7 +443,7 @@ export class StoryRepository {
       const placesTable = this.getPlacesTable();
 
       // Get all place associations for these stories
-      let allPlaceAssociations = [];
+      let allPlaceAssociations: any[] = [];
       try {
         allPlaceAssociations = await this.db
           .select({
@@ -492,7 +492,7 @@ export class StoryRepository {
       const speakersTable = this.getSpeakersTable();
 
       // Get all speaker associations for these stories
-      let allSpeakerAssociations = [];
+      let allSpeakerAssociations: any[] = [];
       try {
         allSpeakerAssociations = await this.db
           .select({
@@ -541,8 +541,8 @@ export class StoryRepository {
       }
 
       // Create lookup maps for associations
-      const placesByStory = new Map<number, typeof allPlaceAssociations>();
-      const speakersByStory = new Map<number, typeof allSpeakerAssociations>();
+      const placesByStory = new Map<number, any[]>();
+      const speakersByStory = new Map<number, any[]>();
 
       allPlaceAssociations.forEach((place) => {
         if (!placesByStory.has(place.storyId)) {

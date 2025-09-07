@@ -22,11 +22,8 @@ export async function buildApp(options?: BuildAppOptions) {
     logger: {
       level: config.logging.level,
     },
-    // @ts-expect-error - Fastify v5 types don't yet properly export routerOptions interface
-    routerOptions: {
-      ignoreTrailingSlash: true,
-      caseSensitive: false,
-    },
+    ignoreTrailingSlash: true,
+    caseSensitive: false,
     disableRequestLogging: config.environment === 'test',
   });
 

@@ -107,10 +107,7 @@ function isValidLongitude(lng: number): boolean {
  */
 function validateMapboxUrl(url: string): boolean {
   if (!url) return true; // Optional field
-  return (
-    url.startsWith('mapbox://styles/') ||
-    url.startsWith('https://api.mapbox.com/styles/')
-  );
+  return url.startsWith('mapbox://styles/');
 }
 
 /**

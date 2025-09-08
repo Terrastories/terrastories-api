@@ -1,4 +1,4 @@
-import { eq, and, desc, count, sql } from 'drizzle-orm';
+import { eq, and, desc, count, sql, like } from 'drizzle-orm';
 import {
   themes,
   type Theme,
@@ -753,5 +753,70 @@ export class ThemesRepository {
     neLng?: number
   ): boolean {
     return validateGeographicBounds(swLat, swLng, neLat, neLng);
+  }
+
+  /**
+   * Count themes for a community with optional filters
+   */
+  async countByCommunityId(
+    communityId: number,
+    options?: { activeOnly?: boolean; searchTerm?: string }
+  ): Promise<number> {
+    let query = (this.db as any)
+      .select({ count: sql`count(*)` })
+      .from(themes)
+      .where(eq(themes.communityId, communityId));
+
+    if (options?.activeOnly) {
+      query = query.where(eq(themes.active, true));
+    }
+
+    if (options?.searchTerm) {
+      query = query.where(like(themes.name, `%${options.searchTerm}%`));
+    }
+
+    const [result] = await query;
+    return Number(result.count);
+  }
+
+  /**
+   * Update theme with community ownership check
+   */
+  async updateWithCommunityCheck(
+    id: number,
+    communityId: number,
+    data: UpdateTheme
+  ): Promise<Theme | null> {
+    // First check if theme exists and belongs to community
+    const existingTheme = await this.findByIdWithCommunityCheck(
+      id,
+      communityId
+    );
+    if (!existingTheme) {
+      return null;
+    }
+
+    // Use existing update method
+    return this.update(id, data);
+  }
+
+  /**
+   * Delete theme with community ownership check
+   */
+  async deleteWithCommunityCheck(
+    id: number,
+    communityId: number
+  ): Promise<boolean> {
+    // First check if theme exists and belongs to community
+    const existingTheme = await this.findByIdWithCommunityCheck(
+      id,
+      communityId
+    );
+    if (!existingTheme) {
+      return false;
+    }
+
+    // Use existing delete method
+    return this.delete(id);
   }
 }

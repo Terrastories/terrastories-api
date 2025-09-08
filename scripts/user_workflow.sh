@@ -4,7 +4,7 @@
 set -e
 
 # --- Configuration ---
-BASE_URL="http://localhost:3002/api/v1"
+BASE_URL="http://localhost:3000/api/v1"
 COOKIE_JAR=$(mktemp)
 echo "Cookie jar created at: $COOKIE_JAR"
 
@@ -32,7 +32,7 @@ trap cleanup EXIT
 # --- User Journey Simulation ---
 
 echo "--- 1. Health Check ---"
-HEALTH_URL="http://localhost:3002/health"
+HEALTH_URL="http://localhost:3000/health"
 curl --fail -sS "$HEALTH_URL"
 echo -e "\nHealth check passed."
 
@@ -113,10 +113,10 @@ echo "Geographic search completed. Found places near coordinates."
 
 echo "--- 6. Create a Story ---"
 echo "Creating a test story linked to the place..."
-STORY_RESPONSE=$(curl -sS -X POST \
+STORY_RESPONSE=$(curl --fail -sS -X POST \
   -b "$COOKIE_JAR" \
   -H "Content-Type: application/json" \
-  -d "{\"title\": \"Legend of the Sacred Mountain\", \"description\": \"A traditional story about the sacred mountain and its spirits.\", \"communityId\": $COMMUNITY_ID, \"placeIds\": [$PLACE_ID], \"speakerIds\": []}" \
+  -d "{\"title\": \"Legend of the Sacred Mountain\", \"description\": \"A traditional story about the sacred mountain and its spirits.\", \"communityId\": $COMMUNITY_ID, \"placeIds\": [$PLACE_ID], \"speakerIds\": [], \"culturalProtocols\": {\"permissionLevel\": \"public\"}}" \
   "$BASE_URL/stories" 2>/dev/null || echo '{"error": "Story creation failed"}')
 
 # Extract story ID with better error handling

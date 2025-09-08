@@ -17,6 +17,7 @@ import {
   filesSqlite,
   storiesSqlite,
   speakersSqlite,
+  themesSqlite,
   Community,
   Place,
   User,
@@ -30,6 +31,7 @@ const users = usersSqlite;
 const files = filesSqlite;
 const stories = storiesSqlite;
 const speakers = speakersSqlite;
+const themes = themesSqlite;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,6 +44,7 @@ export type TestDatabase = ReturnType<
     files: typeof files;
     stories: typeof stories;
     speakers: typeof speakers;
+    themes: typeof themes;
   }>
 >;
 
@@ -70,7 +73,7 @@ export class TestDatabaseManager {
 
     // Create Drizzle instance
     this.db = drizzle(this.sqlite, {
-      schema: { communities, places, users, files, stories, speakers },
+      schema: { communities, places, users, files, stories, speakers, themes },
     });
 
     // Run migrations
@@ -92,7 +95,7 @@ export class TestDatabaseManager {
       throw new Error(`Database migration failed: ${error.message}`);
     }
 
-    // Add missing columns that are not in migrations yet
+    // Add missing columns and tables that are not in migrations yet
     try {
       // Check if locale column exists in communities, if not add missing columns
       const communitiesTableInfo = this.sqlite
@@ -109,6 +112,43 @@ export class TestDatabaseManager {
           ALTER TABLE communities ADD COLUMN is_active INTEGER DEFAULT 1 NOT NULL;
         `);
         console.log('✅ Added missing communities columns');
+      }
+
+      // Create themes table if it doesn't exist (new feature not in migrations yet)
+      const tables = this.sqlite
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='themes'"
+        )
+        .all();
+
+      if (tables.length === 0) {
+        this.sqlite.exec(`
+          CREATE TABLE IF NOT EXISTS themes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              description TEXT,
+              mapbox_style_url TEXT,
+              mapbox_access_token TEXT,
+              center_lat REAL,
+              center_long REAL,
+              sw_boundary_lat REAL,
+              sw_boundary_long REAL,
+              ne_boundary_lat REAL,
+              ne_boundary_long REAL,
+              active INTEGER NOT NULL DEFAULT 0,
+              community_id INTEGER NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              FOREIGN KEY (community_id) REFERENCES communities(id)
+          );
+
+          -- Add indexes for performance (matching Rails schema)
+          CREATE INDEX IF NOT EXISTS idx_themes_community_id ON themes(community_id);
+          CREATE INDEX IF NOT EXISTS idx_themes_active ON themes(active);
+          CREATE INDEX IF NOT EXISTS idx_themes_name ON themes(name);
+          CREATE INDEX IF NOT EXISTS idx_themes_community_active ON themes(community_id, active);
+        `);
+        console.log('✅ Added themes table with indexes');
       }
 
       // Check if slug column exists in stories, if not add missing columns
@@ -233,6 +273,7 @@ export class TestDatabaseManager {
       await this.db.delete(files);
       await this.db.delete(speakers);
       await this.db.delete(places);
+      await this.db.delete(themes);
       await this.db.delete(users);
       await this.db.delete(communities);
 

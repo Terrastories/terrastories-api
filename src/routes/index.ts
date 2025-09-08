@@ -6,6 +6,7 @@ import { communityRoutes } from './communities.js';
 import storiesRoutes from './stories.js';
 import { placesRoutes } from './places.js';
 import { speakerRoutes } from './speakers.js';
+import { themesRoutes } from './themes.js';
 import { publicApiRoutes } from './public-api.js';
 import { memberRoutes } from './member/index.js';
 import { superAdminRoutes } from './super_admin.js';
@@ -33,6 +34,7 @@ export async function registerRoutes(
   await app.register(storiesRoutes, { prefix: '/api/v1/stories', ...opts });
   await app.register(placesRoutes, { prefix: '/api/v1', ...opts });
   await app.register(speakerRoutes, { prefix: '/api/v1', ...opts });
+  await app.register(themesRoutes, { prefix: '/api/v1/themes', ...opts });
 
   // Member dashboard routes (authenticated member endpoints)
   await app.register(memberRoutes, { prefix: '/api/v1/member', ...opts });

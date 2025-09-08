@@ -1,10 +1,20 @@
-# Terrastories API Setup Guide
+# Terrastories TypeScript API Setup Guide
+
+**✅ Migration Complete**: The Rails-to-TypeScript backend migration is now complete! This guide covers the **production-ready TypeScript API** setup.
 
 ## Prerequisites
 
-- Node.js 18+ (recommended: Node.js 20)
-- npm or yarn
-- Git
+### Required Software
+
+- **Node.js 20.x or 22.x** (verified in CI)
+- **npm 9+** or **yarn 3+**
+- **Git 2.30+**
+- **Docker & Docker Compose** (recommended for production)
+
+### Optional for Development
+
+- **PostgreSQL 14+** with **PostGIS 3.2+** (or use Docker)
+- **Redis 6+** (for session storage in production)
 
 ## Quick Start
 

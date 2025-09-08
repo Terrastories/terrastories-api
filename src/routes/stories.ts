@@ -127,16 +127,6 @@ export default async function storiesRoutes(
    */
   fastify.post<{
     Body: z.infer<typeof createStorySchema>;
-    Reply: {
-      201: {
-        data: StoryWithRelations;
-        message: string;
-      };
-      400: { error: string };
-      401: { error: string };
-      403: { error: string };
-      422: { error: string };
-    };
   }>(
     '/',
     {
@@ -337,7 +327,14 @@ export default async function storiesRoutes(
         );
 
         return reply.status(201).send({
-          data: story,
+          data: {
+            id: story.id,
+            title: story.title,
+            description: story.description,
+            slug: story.slug,
+            communityId: story.communityId,
+            createdBy: story.createdBy,
+          },
           message: 'Story created successfully',
         });
       } catch (error: unknown) {

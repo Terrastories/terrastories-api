@@ -919,45 +919,8 @@ describe('Production Performance Validation - Phase 1', () => {
 
   async function cleanupPerformanceTestData(): Promise<void> {
     try {
-      // Delete in correct order to respect foreign key constraints
-      // 1. Delete junction table entries first (these reference stories)
-      await db.executeRaw(
-        "DELETE FROM story_places WHERE story_id IN (SELECT id FROM stories WHERE title LIKE 'Performance Test%')"
-      );
-      await db.executeRaw(
-        "DELETE FROM story_speakers WHERE story_id IN (SELECT id FROM stories WHERE title LIKE 'Performance Test%')"
-      );
-
-      // 2. Delete files that reference stories, places, or communities
-      await db.executeRaw(
-        "DELETE FROM files WHERE community_id IN (SELECT id FROM communities WHERE name LIKE 'Performance Test%')"
-      );
-
-      // 3. Delete stories (which reference communities, users, places, and speakers)
-      await db.executeRaw(
-        "DELETE FROM stories WHERE title LIKE 'Performance Test%'"
-      );
-
-      // 4. Delete speakers (which reference communities)
-      await db.executeRaw(
-        "DELETE FROM speakers WHERE community_id IN (SELECT id FROM communities WHERE name LIKE 'Performance Test%')"
-      );
-
-      // 5. Delete places (which reference communities)
-      await db.executeRaw(
-        "DELETE FROM places WHERE name LIKE 'Performance Test%'"
-      );
-
-      // 6. Delete users (which reference communities) - must come before deleting communities
-      await db.executeRaw(
-        "DELETE FROM users WHERE email LIKE '%community%.test'"
-      );
-
-      // 7. Delete communities last (no dependencies should remain)
-      await db.executeRaw(
-        "DELETE FROM communities WHERE name LIKE 'Performance Test%'"
-      );
-
+      // Use the proper clearData method that handles foreign key constraints correctly
+      await db.clearData();
       console.log('✅ Performance test data cleaned up successfully');
     } catch (error) {
       console.error('Error cleaning up performance test data:', error);

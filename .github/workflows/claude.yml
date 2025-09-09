@@ -1,4 +1,7 @@
-name: Claude Code
+name: Claude Interactive Assistant
+
+# This workflow triggers when users mention @claude in comments
+# For automatic code reviews, see: claude-code-review.yml
 
 on:
   issue_comment:
@@ -20,8 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
+      pull-requests: write # Changed from 'read' - needed for creating comments/reviews
+      issues: write # Added for issue operations
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:

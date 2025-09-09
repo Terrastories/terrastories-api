@@ -277,7 +277,7 @@ export async function memberStoriesRoutes(
       security: [{ bearerAuth: [] }],
       body: {
         type: 'object',
-        required: ['title', 'slug'],
+        required: ['title'], // Only title is required, matching CreateStorySchema
         properties: {
           title: { type: 'string', minLength: 1, maxLength: 200 },
           description: { type: 'string' },
@@ -296,6 +296,10 @@ export async function memberStoriesRoutes(
           placeIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
           speakerIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
           isRestricted: { type: 'boolean', default: false },
+          // Interview metadata for Indigenous storytelling context
+          dateInterviewed: { type: 'string', format: 'date-time' },
+          interviewLocationId: { type: 'integer', minimum: 1 },
+          interviewerId: { type: 'integer', minimum: 1 },
         },
       },
       response: {

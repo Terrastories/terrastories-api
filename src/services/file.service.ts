@@ -144,7 +144,7 @@ export class FileService {
         process.env.NODE_ENV === 'field-kit' ||
         process.env.OFFLINE_MODE === 'true';
       const url = isOfflineMode
-        ? `uploads/${relativePath}`
+        ? `/api/v1/files/uploads/${relativePath}`
         : `/api/v1/files/${relativePath}`;
 
       // 5. Ensure directory exists

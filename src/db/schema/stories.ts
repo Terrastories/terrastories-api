@@ -29,7 +29,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg } from './communities.js';
+import { communitiesPg, communitiesSqlite } from './communities.js';
 import { usersPg } from './users.js';
 import { placesPg, placesSqlite } from './places.js';
 import { speakersPg, speakersSqlite } from './speakers.js';
@@ -66,7 +66,9 @@ export const storiesSqlite = sqliteTable('stories', {
   title: sqliteText('title').notNull(),
   description: sqliteText('description'),
   slug: sqliteText('slug').notNull(),
-  communityId: integer('community_id').notNull(),
+  communityId: integer('community_id')
+    .notNull()
+    .references(() => communitiesSqlite.id),
   createdBy: integer('created_by').notNull(),
   isRestricted: integer('is_restricted', { mode: 'boolean' })
     .notNull()

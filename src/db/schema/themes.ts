@@ -110,7 +110,9 @@ export const themesSqlite = sqliteTable('themes', {
   neBoundaryLat: real('ne_boundary_lat'),
   neBoundaryLong: real('ne_boundary_long'),
   active: integer('active', { mode: 'boolean' }).notNull().default(false),
-  communityId: integer('community_id').notNull(),
+  communityId: integer('community_id')
+    .notNull()
+    .references(() => communitiesSqlite.id),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),

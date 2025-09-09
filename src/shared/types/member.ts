@@ -60,6 +60,10 @@ export const CreateStorySchema = z.object({
       })
     )
     .optional(),
+  // Interview metadata for Indigenous storytelling context
+  dateInterviewed: z.coerce.date().optional(),
+  interviewLocationId: z.number().int().positive().optional(),
+  interviewerId: z.number().int().positive().optional(),
 });
 
 export const UpdateStorySchema = z.object({
@@ -86,6 +90,10 @@ export const UpdateStorySchema = z.object({
       })
     )
     .optional(),
+  // Interview metadata for Indigenous storytelling context
+  dateInterviewed: z.coerce.date().optional(),
+  interviewLocationId: z.number().int().positive().optional(),
+  interviewerId: z.number().int().positive().optional(),
 });
 
 // Place schemas
@@ -120,8 +128,9 @@ export const UpdatePlaceSchema = z.object({
 export const PlaceSearchQuerySchema = MemberPaginationQuerySchema.extend({
   search: z.string().optional(),
   lat: z
-    .string()
+    .union([z.string(), z.number()])
     .optional()
+    .transform((val) => (val === undefined ? undefined : String(val)))
     .refine(
       (val) =>
         val === undefined ||
@@ -129,8 +138,9 @@ export const PlaceSearchQuerySchema = MemberPaginationQuerySchema.extend({
       { message: 'Invalid latitude' }
     ),
   lng: z
-    .string()
+    .union([z.string(), z.number()])
     .optional()
+    .transform((val) => (val === undefined ? undefined : String(val)))
     .refine(
       (val) =>
         val === undefined ||
@@ -138,8 +148,9 @@ export const PlaceSearchQuerySchema = MemberPaginationQuerySchema.extend({
       { message: 'Invalid longitude' }
     ),
   radius: z
-    .string()
+    .union([z.string(), z.number()])
     .optional()
+    .transform((val) => (val === undefined ? undefined : String(val)))
     .refine(
       (val) => val === undefined || (!isNaN(Number(val)) && Number(val) > 0),
       { message: 'Radius must be a positive number' }

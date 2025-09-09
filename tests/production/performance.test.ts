@@ -124,7 +124,11 @@ describe('Production Performance Validation - Phase 1', () => {
         {
           method: 'POST',
           url: '/api/v1/member/stories',
-          data: { title: 'Test Story', content: 'Test content' },
+          data: {
+            title: 'Test Story',
+            description: 'Test content',
+            slug: 'test-story-perf',
+          },
         },
       ];
 

@@ -28,7 +28,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg } from './communities.js';
+import { communitiesPg, communitiesSqlite } from './communities.js';
 
 // Role enum validation with cultural roles
 export const UserRoleSchema = z.enum([
@@ -91,7 +91,9 @@ export const usersSqlite = sqliteTable(
     })
       .notNull()
       .default('viewer'),
-    communityId: integer('community_id').notNull(),
+    communityId: integer('community_id')
+      .notNull()
+      .references(() => communitiesSqlite.id),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
     lastLoginAt: integer('last_login_at', { mode: 'timestamp' }).$defaultFn(
       () => new Date()

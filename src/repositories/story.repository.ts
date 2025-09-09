@@ -421,7 +421,12 @@ export class StoryRepository {
       const [location] = await this.db
         .select()
         .from(placesTable)
-        .where(eq(placesTable.id, story.interviewLocationId))
+        .where(
+          and(
+            eq(placesTable.id, story.interviewLocationId),
+            eq(placesTable.communityId, story.communityId)
+          )
+        )
         .limit(1);
 
       if (location) {
@@ -444,7 +449,12 @@ export class StoryRepository {
       const [speaker] = await this.db
         .select()
         .from(speakersTable)
-        .where(eq(speakersTable.id, story.interviewerId))
+        .where(
+          and(
+            eq(speakersTable.id, story.interviewerId),
+            eq(speakersTable.communityId, story.communityId)
+          )
+        )
         .limit(1);
 
       if (speaker) {
@@ -992,7 +1002,7 @@ export class StoryRepository {
         .from(placesTable)
         .where(
           and(
-            sql`${placesTable.id} IN (${placeIds.join(',')})`,
+            inArray(placesTable.id, placeIds),
             eq(placesTable.communityId, communityId)
           )
         );

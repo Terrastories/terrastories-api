@@ -2,7 +2,8 @@
 -- Issue #81: Add story interview metadata fields
 
 -- Add interview metadata fields for Indigenous storytelling context
-ALTER TABLE stories ADD COLUMN date_interviewed TEXT;
+-- Use INTEGER for timestamp (compatible with both PostgreSQL and SQLite)
+ALTER TABLE stories ADD COLUMN date_interviewed INTEGER;
 ALTER TABLE stories ADD COLUMN interview_location_id INTEGER REFERENCES places(id);
 ALTER TABLE stories ADD COLUMN interviewer_id INTEGER REFERENCES speakers(id);
 

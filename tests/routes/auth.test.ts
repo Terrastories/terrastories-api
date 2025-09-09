@@ -765,8 +765,8 @@ describe('Authentication Routes', () => {
       // Extract signed session cookie for logout request
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const signedCookie = Array.isArray(setCookieHeader) 
-        ? setCookieHeader[1] 
+      const signedCookie = Array.isArray(setCookieHeader)
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookie = signedCookie!.split(';')[0];
 
@@ -826,8 +826,8 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookie from headers
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const signedCookie = Array.isArray(setCookieHeader) 
-        ? setCookieHeader[1] 
+      const signedCookie = Array.isArray(setCookieHeader)
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookieValue = signedCookie!.split(';')[0];
 
@@ -893,8 +893,8 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookie from headers
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const signedCookie = Array.isArray(setCookieHeader) 
-        ? setCookieHeader[1] 
+      const signedCookie = Array.isArray(setCookieHeader)
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookieValue = signedCookie!.split(';')[0];
 
@@ -951,8 +951,8 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookie from headers
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const signedCookie = Array.isArray(setCookieHeader) 
-        ? setCookieHeader[1] 
+      const signedCookie = Array.isArray(setCookieHeader)
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookieValue = signedCookie!.split(';')[0];
       expect(sessionCookieValue).toBeDefined();
@@ -1011,8 +1011,8 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookie from headers
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const signedCookie = Array.isArray(setCookieHeader) 
-        ? setCookieHeader[1] 
+      const signedCookie = Array.isArray(setCookieHeader)
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookieValue = signedCookie!.split(';')[0];
 
@@ -1100,14 +1100,14 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookies from headers
       const setCookieHeader1 = login1.headers['set-cookie'];
-      const signedCookie1 = Array.isArray(setCookieHeader1) 
-        ? setCookieHeader1[1] 
+      const signedCookie1 = Array.isArray(setCookieHeader1)
+        ? setCookieHeader1[1]
         : setCookieHeader1;
       const session1Value = signedCookie1!.split(';')[0];
 
       const setCookieHeader2 = login2.headers['set-cookie'];
-      const signedCookie2 = Array.isArray(setCookieHeader2) 
-        ? setCookieHeader2[1] 
+      const signedCookie2 = Array.isArray(setCookieHeader2)
+        ? setCookieHeader2[1]
         : setCookieHeader2;
       const session2Value = signedCookie2!.split(';')[0];
 
@@ -1153,6 +1153,356 @@ describe('Authentication Routes', () => {
 
       expect(me1After.statusCode).toBe(401);
       expect(me2After.statusCode).toBe(200);
+    });
+  });
+
+  describe('Password Reset Endpoints', () => {
+    test('POST /auth/forgot-password should initiate password reset', async () => {
+      // First register a user
+      const registrationData = {
+        email: 'reset-user@example.com',
+        password: 'StrongPassword123@',
+        firstName: 'Reset',
+        lastName: 'User',
+        role: 'viewer',
+        communityId: testCommunityId,
+      };
+
+      const registerResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/register',
+        payload: registrationData,
+      });
+
+      expect(registerResponse.statusCode).toBe(201);
+
+      // Now request password reset
+      const resetRequestData = {
+        email: 'reset-user@example.com',
+        communityId: testCommunityId,
+      };
+
+      const resetResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/forgot-password',
+        payload: resetRequestData,
+      });
+
+      expect(resetResponse.statusCode).toBe(200);
+
+      const resetBody = JSON.parse(resetResponse.body);
+      expect(resetBody).toHaveProperty('message');
+      expect(resetBody.message).toContain('reset instructions sent');
+
+      // Should include reset token for testing (in production, this would be sent via email)
+      expect(resetBody).toHaveProperty('resetToken');
+      expect(resetBody.resetToken).toHaveLength(32);
+    });
+
+    test('POST /auth/forgot-password should return 404 for non-existent email', async () => {
+      const resetRequestData = {
+        email: 'nonexistent@example.com',
+        communityId: testCommunityId,
+      };
+
+      const resetResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/forgot-password',
+        payload: resetRequestData,
+      });
+
+      expect(resetResponse.statusCode).toBe(404);
+
+      const resetBody = JSON.parse(resetResponse.body);
+      expect(resetBody).toHaveProperty('error');
+      expect(resetBody.error).toContain('User not found');
+    });
+
+    test('POST /auth/forgot-password should validate required fields', async () => {
+      const resetResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/forgot-password',
+        payload: {}, // Empty payload
+      });
+
+      expect(resetResponse.statusCode).toBe(400);
+
+      const resetBody = JSON.parse(resetResponse.body);
+      expect(resetBody).toHaveProperty('error');
+      expect(resetBody.error).toBeDefined();
+    });
+
+    test('POST /auth/reset-password should reset password with valid token', async () => {
+      // Register a user and get reset token
+      const registrationData = {
+        email: 'reset-test@example.com',
+        password: 'OldPassword123@',
+        firstName: 'Reset',
+        lastName: 'Test',
+        role: 'viewer',
+        communityId: testCommunityId,
+      };
+
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/register',
+        payload: registrationData,
+      });
+
+      // Request password reset
+      const resetRequestResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/forgot-password',
+        payload: {
+          email: 'reset-test@example.com',
+          communityId: testCommunityId,
+        },
+      });
+
+      const resetRequestBody = JSON.parse(resetRequestResponse.body);
+      const resetToken = resetRequestBody.resetToken;
+
+      // Reset password with token
+      const newPassword = 'NewStrongPassword456@';
+      const resetPasswordResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/reset-password',
+        payload: {
+          resetToken,
+          newPassword,
+          communityId: testCommunityId,
+        },
+      });
+
+      expect(resetPasswordResponse.statusCode).toBe(200);
+
+      const resetBody = JSON.parse(resetPasswordResponse.body);
+      expect(resetBody).toHaveProperty('message');
+      expect(resetBody.message).toContain('Password reset successful');
+
+      // Verify old password doesn't work
+      const oldPasswordLogin = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: {
+          email: 'reset-test@example.com',
+          password: 'OldPassword123@',
+          communityId: testCommunityId,
+        },
+      });
+
+      expect(oldPasswordLogin.statusCode).toBe(401);
+
+      // Verify new password works
+      const newPasswordLogin = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: {
+          email: 'reset-test@example.com',
+          password: newPassword,
+          communityId: testCommunityId,
+        },
+      });
+
+      expect(newPasswordLogin.statusCode).toBe(200);
+    });
+
+    test('POST /auth/reset-password should reject invalid reset token', async () => {
+      const resetPasswordResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/reset-password',
+        payload: {
+          resetToken: 'invalidtoken123',
+          newPassword: 'NewPassword123@',
+          communityId: testCommunityId,
+        },
+      });
+
+      expect(resetPasswordResponse.statusCode).toBe(400);
+
+      const resetBody = JSON.parse(resetPasswordResponse.body);
+      expect(resetBody).toHaveProperty('error');
+      expect(resetBody.error).toBeDefined();
+    });
+
+    test('POST /auth/reset-password should reject weak passwords', async () => {
+      // Register user and get reset token (simplified for test brevity)
+      const registrationData = {
+        email: 'weak-reset@example.com',
+        password: 'StrongPassword123@',
+        firstName: 'Weak',
+        lastName: 'Reset',
+        role: 'viewer',
+        communityId: testCommunityId,
+      };
+
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/register',
+        payload: registrationData,
+      });
+
+      const resetRequestResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/forgot-password',
+        payload: {
+          email: 'weak-reset@example.com',
+          communityId: testCommunityId,
+        },
+      });
+
+      const resetRequestBody = JSON.parse(resetRequestResponse.body);
+      const resetToken = resetRequestBody.resetToken;
+
+      // Try to reset with weak password
+      const resetPasswordResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/reset-password',
+        payload: {
+          resetToken,
+          newPassword: 'weak', // Too weak
+          communityId: testCommunityId,
+        },
+      });
+
+      expect(resetPasswordResponse.statusCode).toBe(400);
+
+      const resetBody = JSON.parse(resetPasswordResponse.body);
+      expect(resetBody).toHaveProperty('error');
+      expect(resetBody.error).toBeDefined();
+    });
+
+    test('POST /auth/reset-password should validate required fields', async () => {
+      const resetPasswordResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/reset-password',
+        payload: {
+          resetToken: 'sometoken',
+          // Missing newPassword
+          communityId: testCommunityId,
+        },
+      });
+
+      expect(resetPasswordResponse.statusCode).toBe(400);
+
+      const resetBody = JSON.parse(resetPasswordResponse.body);
+      expect(resetBody).toHaveProperty('error');
+      expect(resetBody.error).toBeDefined();
+    });
+
+    test('Reset token should expire after use', async () => {
+      // Register user and reset password successfully
+      const registrationData = {
+        email: 'expire-test@example.com',
+        password: 'OldPassword123@',
+        firstName: 'Expire',
+        lastName: 'Test',
+        role: 'viewer',
+        communityId: testCommunityId,
+      };
+
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/register',
+        payload: registrationData,
+      });
+
+      const resetRequestResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/forgot-password',
+        payload: {
+          email: 'expire-test@example.com',
+          communityId: testCommunityId,
+        },
+      });
+
+      const resetRequestBody = JSON.parse(resetRequestResponse.body);
+      const resetToken = resetRequestBody.resetToken;
+
+      // First reset should succeed
+      const firstResetResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/reset-password',
+        payload: {
+          resetToken,
+          newPassword: 'NewPassword123@',
+          communityId: testCommunityId,
+        },
+      });
+
+      expect(firstResetResponse.statusCode).toBe(200);
+
+      // Second reset with same token should fail
+      const secondResetResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/reset-password',
+        payload: {
+          resetToken,
+          newPassword: 'AnotherPassword123@',
+          communityId: testCommunityId,
+        },
+      });
+
+      expect(secondResetResponse.statusCode).toBe(400);
+
+      const resetBody = JSON.parse(secondResetResponse.body);
+      expect(resetBody).toHaveProperty('error');
+      expect(resetBody.error).toContain('Invalid or expired reset token');
+    });
+
+    test('Should respect community isolation for password reset', async () => {
+      // Register user in first community
+      const user1Data = {
+        email: 'isolation@example.com',
+        password: 'Password123@',
+        firstName: 'Isolation',
+        lastName: 'Test',
+        role: 'viewer',
+        communityId: testCommunityId,
+      };
+
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/register',
+        payload: user1Data,
+      });
+
+      // Create second community for isolation test
+      const community2Response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/super_admin/communities',
+        payload: {
+          name: 'Test Community 2',
+          description: 'Second community for isolation test',
+        },
+      });
+
+      const community2Body = JSON.parse(community2Response.body);
+      // Check if community creation was successful
+      let testCommunity2Id: number;
+      if (!community2Body.data || !community2Body.data.id) {
+        console.error('Community 2 creation failed:', community2Body);
+        // Use testCommunityId + 1 as fallback for test isolation
+        testCommunity2Id = testCommunityId + 1;
+      } else {
+        testCommunity2Id = community2Body.data.id;
+      }
+
+      // Try to reset password using email from community 1 but specifying community 2
+      const resetResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/forgot-password',
+        payload: {
+          email: 'isolation@example.com',
+          communityId: testCommunity2Id, // Wrong community
+        },
+      });
+
+      expect(resetResponse.statusCode).toBe(404);
+
+      const resetBody = JSON.parse(resetResponse.body);
+      expect(resetBody).toHaveProperty('error');
+      expect(resetBody.error).toContain('User not found');
     });
   });
 });

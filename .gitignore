@@ -85,6 +85,9 @@ test-report.junit.xml
 test-results.json
 validation-results.json
 
+# Test fixtures (automatically generated)
+tests/fixtures/activestorage/storage/
+
 # Serena AI cache
 .serena/cache/
 

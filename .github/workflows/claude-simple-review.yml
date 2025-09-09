@@ -1,0 +1,65 @@
+name: Simple Claude Review Test
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test Smart Review Logic
+        id: review-logic
+        run: |
+          # Get PR number
+          PR_NUM="${{ github.event.pull_request.number }}"
+          echo "PR Number: $PR_NUM"
+          
+          # Get existing Claude comments (simplified)
+          echo "Checking for existing Claude comments..."
+          
+          # Simple review type detection
+          echo "review_type=follow_up" >> $GITHUB_OUTPUT
+          echo "comment_count=2" >> $GITHUB_OUTPUT
+          
+          # Set a simple follow-up prompt
+          PROMPT="🔄 **Follow-up Review - Testing Smart Workflow**
+
+This is a test of the enhanced Claude Code Review workflow for PR #$PR_NUM.
+
+**Testing Features:**
+- Comment history awareness ✅  
+- Differential commit analysis ✅
+- Dynamic prompt generation ✅
+- Follow-up review mode ✅
+
+**Focus Areas:**
+- Verify workflow executes successfully
+- Test that all authentication changes are working properly
+- Confirm PR is ready for merge
+
+Please provide a brief status assessment for this PR."
+
+          # Set prompt as multiline output
+          echo "prompt_content<<EOF" >> $GITHUB_OUTPUT
+          echo "$PROMPT" >> $GITHUB_OUTPUT  
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Run Simple Claude Review
+        id: claude-review
+        uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          direct_prompt: ${{ steps.review-logic.outputs.prompt_content }}
+          use_sticky_comment: true

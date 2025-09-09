@@ -3,6 +3,26 @@ name: Claude Automatic Code Review
 on:
   pull_request:
     types: [opened, synchronize]
+    paths:
+      - "src/**/*.ts"
+      - "src/**/*.tsx" 
+      - "src/**/*.js"
+      - "src/**/*.jsx"
+      - "src/**/*.json"
+      - "server/**/*.ts"
+      - "server/**/*.js"
+      - "api/**/*.ts"
+      - "api/**/*.js"
+      - "db/**/*.ts"
+      - "db/**/*.js"
+      - "db/**/*.sql"
+      - "migrations/**/*.sql"
+      - "scripts/**/*.ts"
+      - "scripts/**/*.js"
+      - "*.md"
+      - "package.json"
+      - "package-lock.json"
+      - "drizzle.config.ts"
 
 jobs:
   claude-review:
@@ -21,12 +41,15 @@ jobs:
         uses: anthropics/claude-code-action@beta
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
           direct_prompt: |
             Please review this pull request focusing on:
             - Code quality and TypeScript best practices
-            - Security vulnerabilities  
-            - Test coverage
+            - Security vulnerabilities and data sovereignty  
+            - Test coverage and edge cases
             - Performance considerations
+            - PostGIS spatial functionality (if applicable)
+            - Cultural protocol compliance (if applicable)
             
-            Provide constructive feedback prioritized by severity.
-          mode: "tag"
+            Provide constructive feedback prioritized by severity (CRITICAL > MAJOR > MINOR).
+          use_sticky_comment: true

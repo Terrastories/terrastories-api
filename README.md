@@ -448,3 +448,5 @@ When seeking support, please:
 ---
 
 **[Join our community](https://github.com/terrastories/terrastories-api/discussions) • [Report issues](https://github.com/terrastories/terrastories-api/issues) • [Contribute code](CONTRIBUTING.md)**
+
+# Test comment to trigger Claude review workflow

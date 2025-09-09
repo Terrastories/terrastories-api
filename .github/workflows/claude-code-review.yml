@@ -1,14 +1,17 @@
-name: Smart Claude Code Review
+name: Claude Automatic Code Review
 
 on:
   pull_request:
     types: [opened, synchronize]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    paths:
+      - "src/**/*.ts"
+      - "src/**/*.tsx" 
+      - "src/**/*.js"
+      - "src/**/*.jsx"
+      - "src/**/*.json"
+      - "*.md"
+      - "package.json"
+      - "package-lock.json"
 
 jobs:
   claude-review:
@@ -175,7 +178,7 @@ Please provide a concise status update rather than a full re-review."
           
           echo "Generated prompt for review type: $REVIEW_TYPE (new_changes: $HAS_NEW_CHANGES)"
 
-      - name: Run Smart Claude Code Review
+      - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@beta
         with:
@@ -185,10 +188,13 @@ Please provide a concise status update rather than a full re-review."
           direct_prompt: ${{ steps.prompt-gen.outputs.prompt_content }}
           
           # Enable tools for running tests and analysis
-          allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run typecheck),Bash(git log),Bash(git diff)"
+          allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run type-check),Bash(git log),Bash(git diff)"
           
           # Use sticky comments for follow-up reviews to maintain context
           use_sticky_comment: ${{ steps.pr-analysis.outputs.review_type == 'follow_up' }}
+          
+          # Ensure proper permissions for posting reviews
+          mode: "tag"
 
       - name: Update Review Tracking
         if: always()

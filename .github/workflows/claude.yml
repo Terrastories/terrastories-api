@@ -1,4 +1,7 @@
-name: Claude Code
+name: Claude Interactive Assistant
+
+# This workflow triggers when users mention @claude in comments
+# For automatic code reviews, see: claude-code-review.yml
 
 on:
   issue_comment:

@@ -184,6 +184,43 @@ export class TestDatabaseManager {
         }
       }
 
+      // Check if authentication fields exist in users table (Issue #80)
+      const usersTableInfo = this.sqlite
+        .prepare('PRAGMA table_info(users)')
+        .all() as any[];
+      const hasResetToken = usersTableInfo.some(
+        (col: any) => col.name === 'reset_password_token'
+      );
+
+      if (!hasResetToken) {
+        this.sqlite.exec(`
+          ALTER TABLE users ADD COLUMN reset_password_token TEXT;
+          ALTER TABLE users ADD COLUMN reset_password_sent_at INTEGER;
+          ALTER TABLE users ADD COLUMN remember_created_at INTEGER;
+          ALTER TABLE users ADD COLUMN sign_in_count INTEGER DEFAULT 0 NOT NULL;
+          ALTER TABLE users ADD COLUMN last_sign_in_at INTEGER;
+          ALTER TABLE users ADD COLUMN current_sign_in_ip TEXT;
+        `);
+        console.log('✅ Added missing users authentication fields');
+      }
+
+      // Add indexes for performance optimization
+      try {
+        this.sqlite.exec(`
+          CREATE INDEX IF NOT EXISTS idx_users_reset_password_token ON users(reset_password_token) WHERE reset_password_token IS NOT NULL;
+          CREATE INDEX IF NOT EXISTS idx_users_community_email ON users(community_id, email);
+        `);
+        console.log('✅ Added authentication performance indexes');
+      } catch (error: any) {
+        // Indexes might already exist
+        if (!error.message.includes('already exists')) {
+          console.error(
+            '⚠️ Failed to add authentication indexes:',
+            error.message
+          );
+        }
+      }
+
       // Add missing columns to join tables for story associations
       try {
         const storyPlacesInfo = this.sqlite

@@ -660,9 +660,13 @@ describe('User Service', () => {
       );
 
       const newPassword = 'NewStrongPassword456@';
-      mockValidatePasswordStrength.mockResolvedValue(undefined);
+      mockValidatePasswordStrength.mockReturnValue({
+        isValid: true,
+        errors: [],
+        score: 5,
+      });
 
-      await userService.resetPassword(resetToken, newPassword);
+      await userService.resetPassword(resetToken, newPassword, testCommunityId);
 
       // Verify password was hashed and user was updated
       expect(mockHashPassword).toHaveBeenCalledWith(newPassword);
@@ -679,7 +683,11 @@ describe('User Service', () => {
 
     test('should throw error for invalid reset token', async () => {
       await expect(
-        userService.resetPassword('invalidtoken', 'NewPassword123@')
+        userService.resetPassword(
+          'invalidtoken',
+          'NewPassword123@',
+          testCommunityId
+        )
       ).rejects.toThrow('Invalid or expired reset token');
     });
 
@@ -710,7 +718,11 @@ describe('User Service', () => {
       );
 
       await expect(
-        userService.resetPassword(resetToken, 'NewPassword123@')
+        userService.resetPassword(
+          resetToken,
+          'NewPassword123@',
+          testCommunityId
+        )
       ).rejects.toThrow('Invalid or expired reset token');
     });
 
@@ -730,12 +742,14 @@ describe('User Service', () => {
         testCommunityId
       );
 
-      mockValidatePasswordStrength.mockRejectedValue(
-        new Error('Password too weak')
-      );
+      mockValidatePasswordStrength.mockReturnValue({
+        isValid: false,
+        errors: ['Password too weak'],
+        score: 0,
+      });
 
       await expect(
-        userService.resetPassword(resetToken, 'weak')
+        userService.resetPassword(resetToken, 'weak', testCommunityId)
       ).rejects.toThrow(WeakPasswordError);
     });
   });
@@ -892,15 +906,19 @@ describe('User Service', () => {
     test('should validate reset token format', async () => {
       // Test with various invalid token formats
       await expect(
-        userService.resetPassword('', 'Password123@')
+        userService.resetPassword('', 'Password123@', testCommunityId)
       ).rejects.toThrow('Invalid or expired reset token');
 
       await expect(
-        userService.resetPassword('short', 'Password123@')
+        userService.resetPassword('short', 'Password123@', testCommunityId)
       ).rejects.toThrow('Invalid or expired reset token');
 
       await expect(
-        userService.resetPassword('invalidcharacters!@#', 'Password123@')
+        userService.resetPassword(
+          'invalidcharacters!@#',
+          'Password123@',
+          testCommunityId
+        )
       ).rejects.toThrow('Invalid or expired reset token');
     });
 

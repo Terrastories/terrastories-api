@@ -585,10 +585,19 @@ export async function authRoutes(
 
         // In production, the reset token would be sent via email
         // For testing purposes, we return it in the response
-        return reply.code(200).send({
+        const response: any = {
           message: 'Password reset instructions sent to your email',
-          resetToken, // Remove this in production
-        });
+        };
+
+        // Only include reset token in test/development environments
+        if (
+          process.env.NODE_ENV === 'test' ||
+          process.env.NODE_ENV === 'development'
+        ) {
+          response.resetToken = resetToken;
+        }
+
+        return reply.code(200).send(response);
       } catch (error) {
         if (
           error instanceof Error &&
@@ -627,7 +636,7 @@ export async function authRoutes(
         tags: ['Authentication'],
         body: {
           type: 'object',
-          required: ['resetToken', 'newPassword'],
+          required: ['resetToken', 'newPassword', 'communityId'],
           properties: {
             resetToken: {
               type: 'string',
@@ -639,6 +648,10 @@ export async function authRoutes(
               type: 'string',
               description: 'New password (must meet strength requirements)',
               minLength: 8,
+            },
+            communityId: {
+              type: 'number',
+              description: 'Community ID for security scoping',
             },
           },
         },
@@ -669,13 +682,14 @@ export async function authRoutes(
     },
     async (request, reply) => {
       try {
-        const { resetToken, newPassword } = request.body as {
+        const { resetToken, newPassword, communityId } = request.body as {
           resetToken: string;
           newPassword: string;
+          communityId: number;
         };
 
-        // Reset the password
-        await userService.resetPassword(resetToken, newPassword);
+        // Reset the password within the specified community
+        await userService.resetPassword(resetToken, newPassword, communityId);
 
         return reply.code(200).send({
           message:

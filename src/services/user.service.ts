@@ -435,11 +435,16 @@ export class UserService {
   }
 
   /**
-   * Reset password using a valid reset token
+   * Reset password using a valid reset token within a specific community
    * @param resetToken - Token from password reset email
    * @param newPassword - New password to set
+   * @param communityId - Community ID to scope the token lookup
    */
-  async resetPassword(resetToken: string, newPassword: string): Promise<void> {
+  async resetPassword(
+    resetToken: string,
+    newPassword: string,
+    communityId: number
+  ): Promise<void> {
     // Validate token format (32-character hex)
     if (
       !resetToken ||
@@ -449,8 +454,11 @@ export class UserService {
       throw new Error('Invalid or expired reset token');
     }
 
-    // Find user by reset token
-    const user = await this.userRepository.findByResetToken(resetToken);
+    // Find user by reset token within the specified community
+    const user = await this.userRepository.findByResetToken(
+      resetToken,
+      communityId
+    );
     if (!user) {
       throw new Error('Invalid or expired reset token');
     }
@@ -464,11 +472,11 @@ export class UserService {
     }
 
     // Validate new password strength
-    try {
-      await passwordService.validatePasswordStrength(newPassword);
-    } catch {
+    const passwordValidation =
+      passwordService.validatePasswordStrength(newPassword);
+    if (!passwordValidation.isValid) {
       throw new WeakPasswordError(
-        'Password does not meet strength requirements'
+        `Password requirements not met: ${passwordValidation.errors.join(', ')}`
       );
     }
 

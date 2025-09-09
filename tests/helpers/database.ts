@@ -151,7 +151,7 @@ export class TestDatabaseManager {
         console.log('✅ Added themes table with indexes');
       }
 
-      // Check if slug column exists in stories, if not add missing columns
+      // Check if columns exist in stories, if not add missing columns
       const storiesTableInfo = this.sqlite
         .prepare('PRAGMA table_info(stories)')
         .all() as any[];
@@ -159,8 +159,24 @@ export class TestDatabaseManager {
       const hasPrivacyLevel = storiesTableInfo.some(
         (col: any) => col.name === 'privacy_level'
       );
+      const hasDateInterviewed = storiesTableInfo.some(
+        (col: any) => col.name === 'date_interviewed'
+      );
+      const hasInterviewLocationId = storiesTableInfo.some(
+        (col: any) => col.name === 'interview_location_id'
+      );
+      const hasInterviewerId = storiesTableInfo.some(
+        (col: any) => col.name === 'interviewer_id'
+      );
 
-      if (!hasSlug || !hasPrivacyLevel) {
+      const needsColumns =
+        !hasSlug ||
+        !hasPrivacyLevel ||
+        !hasDateInterviewed ||
+        !hasInterviewLocationId ||
+        !hasInterviewerId;
+
+      if (needsColumns) {
         const alterCommands = [];
         if (!hasSlug) {
           alterCommands.push('ALTER TABLE stories ADD COLUMN slug TEXT;');
@@ -170,10 +186,28 @@ export class TestDatabaseManager {
             "ALTER TABLE stories ADD COLUMN privacy_level TEXT DEFAULT 'public' NOT NULL;"
           );
         }
+        // Add interview metadata columns from migration 0008
+        if (!hasDateInterviewed) {
+          alterCommands.push(
+            'ALTER TABLE stories ADD COLUMN date_interviewed INTEGER;'
+          );
+        }
+        if (!hasInterviewLocationId) {
+          alterCommands.push(
+            'ALTER TABLE stories ADD COLUMN interview_location_id INTEGER REFERENCES places(id);'
+          );
+        }
+        if (!hasInterviewerId) {
+          alterCommands.push(
+            'ALTER TABLE stories ADD COLUMN interviewer_id INTEGER REFERENCES speakers(id);'
+          );
+        }
 
         try {
           this.sqlite.exec(alterCommands.join('\n'));
-          console.log('✅ Added missing stories columns (slug, privacy_level)');
+          console.log(
+            '✅ Added missing stories columns (slug, privacy_level, interview metadata)'
+          );
         } catch (error: any) {
           // Ignore duplicate column errors - this means the columns already exist
           if (error.message.includes('duplicate column name')) {

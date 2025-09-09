@@ -228,6 +228,129 @@ export async function fileRoutes(
   );
 
   /**
+   * Serve static files for field-kit mode (offline file paths)
+   */
+  fastify.get(
+    '/uploads/*',
+    {
+      preHandler: [requireAuth],
+      schema: {
+        description: 'Serve static files for field-kit offline mode',
+        summary: 'Get file content by path',
+        tags: ['Files'],
+        params: {
+          type: 'object',
+          properties: {
+            '*': {
+              type: 'string',
+              description: 'File path',
+            },
+          },
+        },
+        response: {
+          200: {
+            description: 'File content',
+            type: 'string',
+            format: 'binary',
+          },
+          401: {
+            description: 'Unauthorized - authentication required',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+          404: {
+            description: 'File not found',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const authRequest = request as AuthenticatedRequest;
+
+      try {
+        if (!authRequest.session?.user) {
+          return reply.status(401).send({
+            error: 'Authentication required',
+            statusCode: 401,
+          });
+        }
+
+        // Extract file path from URL
+        const requestUrl = request.url;
+        const pathMatch = requestUrl.match(/\/uploads\/(.+)$/);
+        if (!pathMatch) {
+          return reply.status(404).send({
+            error: 'Invalid file path',
+            statusCode: 404,
+          });
+        }
+
+        const filePath = pathMatch[1];
+
+        // Build full file path
+        const fullPath = join(config.fileUpload.uploadDir, filePath);
+
+        // Check if file exists on disk
+        try {
+          const stats = await stat(fullPath);
+          if (!stats.isFile()) {
+            throw new Error('Not a file');
+          }
+        } catch {
+          return reply.status(404).send({
+            error: 'File not found',
+            statusCode: 404,
+          });
+        }
+
+        // For field-kit mode, serve files directly without database lookup for performance
+        // This is acceptable since field-kit runs in isolated, trusted environments
+        const isFieldKitMode = config.environment === 'field-kit';
+
+        if (isFieldKitMode) {
+          // In field-kit mode, serve files directly for performance
+          // Set appropriate headers for common file types
+          const ext = filePath.split('.').pop()?.toLowerCase();
+          let mimeType = 'application/octet-stream';
+
+          if (ext === 'txt') mimeType = 'text/plain';
+          else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+          else if (ext === 'png') mimeType = 'image/png';
+          else if (ext === 'mp3') mimeType = 'audio/mpeg';
+          else if (ext === 'mp4') mimeType = 'video/mp4';
+
+          reply.header('Content-Type', mimeType);
+          reply.header('Cache-Control', 'public, max-age=31536000'); // 1 year cache
+
+          // Stream file to response
+          const stream = createReadStream(fullPath);
+          return reply.send(stream);
+        }
+
+        // In non-field-kit modes, require proper database lookup
+        return reply.status(404).send({
+          error: 'File access method not supported in this environment',
+          statusCode: 404,
+        });
+      } catch (error) {
+        fastify.log.error(error, 'Static file serving error');
+        return reply.status(500).send({
+          error: 'Internal server error',
+          statusCode: 500,
+        });
+      }
+    }
+  );
+
+  /**
    * Serve file endpoint with access control
    */
   fastify.get(

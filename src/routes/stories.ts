@@ -64,6 +64,10 @@ const createStorySchema = z.object({
   speakerIds: z.array(z.number().int().positive()).optional(),
   placeContexts: z.array(z.string()).optional(),
   speakerRoles: z.array(z.string()).optional(),
+  // Interview metadata for Indigenous storytelling context
+  dateInterviewed: z.coerce.date().optional(),
+  interviewLocationId: z.number().int().positive().optional(),
+  interviewerId: z.number().int().positive().optional(),
 });
 
 const updateStorySchema = createStorySchema
@@ -247,6 +251,22 @@ export default async function storiesRoutes(
               },
               description: 'Role of each speaker in the story',
             },
+            dateInterviewed: {
+              type: 'string',
+              format: 'date-time',
+              description:
+                'Date when the interview was conducted for this story',
+            },
+            interviewLocationId: {
+              type: 'integer',
+              minimum: 1,
+              description: 'ID of the place where the interview was conducted',
+            },
+            interviewerId: {
+              type: 'integer',
+              minimum: 1,
+              description: 'ID of the person who conducted the interview',
+            },
           },
           required: ['title', 'communityId'],
         },
@@ -334,6 +354,11 @@ export default async function storiesRoutes(
             slug: story.slug,
             communityId: story.communityId,
             createdBy: story.createdBy,
+            dateInterviewed: story.dateInterviewed,
+            interviewLocationId: story.interviewLocationId,
+            interviewerId: story.interviewerId,
+            interviewLocation: story.interviewLocation,
+            interviewer: story.interviewer,
           },
           message: 'Story created successfully',
         });
@@ -711,6 +736,22 @@ export default async function storiesRoutes(
                 minimum: 1,
               },
               description: 'Updated speaker associations',
+            },
+            dateInterviewed: {
+              type: 'string',
+              format: 'date-time',
+              description:
+                'Date when the interview was conducted for this story',
+            },
+            interviewLocationId: {
+              type: 'integer',
+              minimum: 1,
+              description: 'ID of the place where the interview was conducted',
+            },
+            interviewerId: {
+              type: 'integer',
+              minimum: 1,
+              description: 'ID of the person who conducted the interview',
             },
           },
         },

@@ -29,8 +29,10 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg } from './communities.js';
+import { communitiesPg, communitiesSqlite } from './communities.js';
 import { usersPg } from './users.js';
+import { placesPg, placesSqlite } from './places.js';
+import { speakersPg, speakersSqlite } from './speakers.js';
 
 // Media URL validation schema
 export const MediaUrlSchema = z.string().url('Invalid media URL format');
@@ -48,6 +50,12 @@ export const storiesPg = pgTable('stories', {
   mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
   language: pgText('language').notNull().default('en'),
   tags: jsonb('tags').$type<string[]>().default([]),
+  // Interview metadata fields for Indigenous storytelling context
+  dateInterviewed: timestamp('date_interviewed'),
+  interviewLocationId: pgInteger('interview_location_id').references(
+    () => placesPg.id
+  ),
+  interviewerId: pgInteger('interviewer_id').references(() => speakersPg.id),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -58,7 +66,9 @@ export const storiesSqlite = sqliteTable('stories', {
   title: sqliteText('title').notNull(),
   description: sqliteText('description'),
   slug: sqliteText('slug').notNull(),
-  communityId: integer('community_id').notNull(),
+  communityId: integer('community_id')
+    .notNull()
+    .references(() => communitiesSqlite.id),
   createdBy: integer('created_by').notNull(),
   isRestricted: integer('is_restricted', { mode: 'boolean' })
     .notNull()
@@ -69,6 +79,12 @@ export const storiesSqlite = sqliteTable('stories', {
     .default([]),
   language: sqliteText('language').notNull().default('en'),
   tags: sqliteText('tags', { mode: 'json' }).$type<string[]>().default([]),
+  // Interview metadata fields for Indigenous storytelling context
+  dateInterviewed: integer('date_interviewed', { mode: 'timestamp' }),
+  interviewLocationId: integer('interview_location_id').references(
+    () => placesSqlite.id
+  ),
+  interviewerId: integer('interviewer_id').references(() => speakersSqlite.id),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -102,6 +118,15 @@ export const storiesRelations = relations(
       fields: [storiesPg.createdBy],
       references: [usersPg.id],
     }),
+    // Interview metadata relations
+    interviewLocation: one(placesPg, {
+      fields: [storiesPg.interviewLocationId],
+      references: [placesPg.id],
+    }),
+    interviewer: one(speakersPg, {
+      fields: [storiesPg.interviewerId],
+      references: [speakersPg.id],
+    }),
     // Many-to-many relations through join tables (will be available after join tables are created)
     // storyPlaces: many(storyPlaces),
     // storySpeakers: many(storySpeakers),
@@ -119,6 +144,15 @@ export const storiesSqliteRelations = relations(
     author: one(usersPg, {
       fields: [storiesSqlite.createdBy],
       references: [usersPg.id],
+    }),
+    // Interview metadata relations
+    interviewLocation: one(placesSqlite, {
+      fields: [storiesSqlite.interviewLocationId],
+      references: [placesSqlite.id],
+    }),
+    interviewer: one(speakersSqlite, {
+      fields: [storiesSqlite.interviewerId],
+      references: [speakersSqlite.id],
     }),
     // Many-to-many relations through join tables (will be available after join tables are created)
     // storyPlaces: many(storyPlaces),
@@ -139,6 +173,18 @@ export const insertStorySchema = createInsertSchema(storiesPg, {
   language: z.string().min(2).max(5).default('en'),
   tags: z.array(z.string().min(1).max(50)).default([]),
   isRestricted: z.boolean().default(false),
+  // Interview metadata validation with cultural protocol considerations
+  dateInterviewed: z.coerce.date().optional(),
+  interviewLocationId: z
+    .number()
+    .int()
+    .positive('Interview location ID must be positive')
+    .optional(),
+  interviewerId: z
+    .number()
+    .int()
+    .positive('Interviewer ID must be positive')
+    .optional(),
 });
 
 export const selectStorySchema = createSelectSchema(storiesPg);

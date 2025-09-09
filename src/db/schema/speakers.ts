@@ -28,7 +28,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg } from './communities.js';
+import { communitiesPg, communitiesSqlite } from './communities.js';
 
 // Cultural role validation schema
 export const CulturalRoleSchema = z.string().min(1).max(100);
@@ -53,7 +53,9 @@ export const speakersSqlite = sqliteTable('speakers', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: sqliteText('name').notNull(),
   bio: sqliteText('bio'),
-  communityId: integer('community_id').notNull(),
+  communityId: integer('community_id')
+    .notNull()
+    .references(() => communitiesSqlite.id),
   photoUrl: sqliteText('photo_url'),
   birthYear: integer('birth_year'),
   elderStatus: integer('elder_status', { mode: 'boolean' })

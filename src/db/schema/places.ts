@@ -32,7 +32,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg } from './communities.js';
+import { communitiesPg, communitiesSqlite } from './communities.js';
 import { SpatialUtils } from '../../shared/utils/spatial.js';
 
 // Coordinate validation schemas
@@ -75,7 +75,9 @@ export const placesSqlite = sqliteTable('places', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: sqliteText('name').notNull(),
   description: sqliteText('description'),
-  communityId: integer('community_id').notNull(),
+  communityId: integer('community_id')
+    .notNull()
+    .references(() => communitiesSqlite.id),
   latitude: real('latitude').notNull(),
   longitude: real('longitude').notNull(),
   region: sqliteText('region'),

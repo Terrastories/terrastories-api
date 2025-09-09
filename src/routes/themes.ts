@@ -82,7 +82,7 @@ export async function themesRoutes(
         description:
           'Creates a new theme for map visualization with geographic bounds and styling options.',
         tags: ['Themes'],
-        security: [{ sessionAuth: [] }],
+        security: [{ bearerAuth: [] }],
         body: {
           type: 'object',
           properties: {
@@ -250,7 +250,7 @@ export async function themesRoutes(
         description:
           "Retrieves a paginated list of themes for the authenticated user's community.",
         tags: ['Themes'],
-        security: [{ sessionAuth: [] }],
+        security: [{ bearerAuth: [] }],
         querystring: {
           type: 'object',
           properties: {
@@ -392,7 +392,7 @@ export async function themesRoutes(
         description:
           "Retrieves all active themes for the authenticated user's community.",
         tags: ['Themes'],
-        security: [{ sessionAuth: [] }],
+        security: [{ bearerAuth: [] }],
         response: {
           200: {
             type: 'object',
@@ -461,7 +461,7 @@ export async function themesRoutes(
         summary: 'Get theme by ID',
         description: 'Retrieves a specific theme by ID (community-scoped).',
         tags: ['Themes'],
-        security: [{ sessionAuth: [] }],
+        security: [{ bearerAuth: [] }],
         params: {
           type: 'object',
           properties: {
@@ -549,7 +549,7 @@ export async function themesRoutes(
         description:
           'Updates an existing theme (admin only, community-scoped).',
         tags: ['Themes'],
-        security: [{ sessionAuth: [] }],
+        security: [{ bearerAuth: [] }],
         params: {
           type: 'object',
           properties: {
@@ -716,7 +716,7 @@ export async function themesRoutes(
         summary: 'Delete theme',
         description: 'Deletes a theme (admin only, community-scoped).',
         tags: ['Themes'],
-        security: [{ sessionAuth: [] }],
+        security: [{ bearerAuth: [] }],
         params: {
           type: 'object',
           properties: {
@@ -726,6 +726,7 @@ export async function themesRoutes(
         },
         response: {
           204: {
+            type: 'null',
             description: 'Theme deleted successfully',
           },
           404: {

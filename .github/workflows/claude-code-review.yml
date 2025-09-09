@@ -9,9 +9,20 @@ on:
       - "src/**/*.js"
       - "src/**/*.jsx"
       - "src/**/*.json"
+      - "server/**/*.ts"
+      - "server/**/*.js"
+      - "api/**/*.ts"
+      - "api/**/*.js"
+      - "db/**/*.ts"
+      - "db/**/*.js"
+      - "db/**/*.sql"
+      - "migrations/**/*.sql"
+      - "scripts/**/*.ts"
+      - "scripts/**/*.js"
       - "*.md"
       - "package.json"
       - "package-lock.json"
+      - "drizzle.config.ts"
 
 jobs:
   claude-review:

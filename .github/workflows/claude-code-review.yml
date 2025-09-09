@@ -168,8 +168,11 @@ No new commits have been made since the last Claude review.
 Please provide a concise status update rather than a full re-review."
           fi
           
-          # Save prompt to file for the action
-          echo "$PROMPT" > review_prompt.txt
+          # Set prompt as output for the Claude action
+          echo "prompt_content<<EOF" >> $GITHUB_OUTPUT
+          echo "$PROMPT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
           echo "Generated prompt for review type: $REVIEW_TYPE (new_changes: $HAS_NEW_CHANGES)"
 
       - name: Run Smart Claude Code Review
@@ -179,7 +182,7 @@ Please provide a concise status update rather than a full re-review."
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           
           # Use dynamic prompt based on PR state
-          direct_prompt_file: review_prompt.txt
+          direct_prompt: ${{ steps.prompt-gen.outputs.prompt_content }}
           
           # Enable tools for running tests and analysis
           allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run typecheck),Bash(git log),Bash(git diff)"

@@ -216,4 +216,3 @@ Please provide a concise status update rather than a full re-review."
           echo "Review type: ${{ steps.pr-analysis.outputs.review_type }}" >> .github/claude_review_log.txt
           echo "New commits: ${{ steps.new-commits.outputs.new_commit_count }}" >> .github/claude_review_log.txt
           echo "---" >> .github/claude_review_log.txt
-

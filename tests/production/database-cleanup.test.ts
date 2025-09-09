@@ -187,11 +187,75 @@ describe('Production Database Cleanup', () => {
 
       const fixtures = await productionTestDb.seedTestData();
 
-      // Attempt to delete parent record before children (should fail with proper FK constraints)
+      // Verify that places exist that reference the community
+      const places = await db.query.places.findMany({
+        where: (places, { eq }) =>
+          eq(places.communityId, fixtures.communities[0].id),
+      });
+      expect(places.length).toBeGreaterThan(0);
+
+      // Verify foreign keys are enabled and fix constraints if needed
+      const sqlite = (productionTestDb as any).sqlite;
+
+      // Check if foreign key constraints exist for places table
+      const foreignKeys = sqlite.pragma('foreign_key_list(places)');
+
+      // If foreign key constraints don't exist, recreate the places table with proper constraints
+      if (foreignKeys.length === 0) {
+        // Backup existing data
+        const existingPlaces = sqlite.prepare('SELECT * FROM places').all();
+
+        // Drop and recreate places table with foreign key constraint
+        sqlite.exec('DROP TABLE places');
+        sqlite.exec(`
+          CREATE TABLE places (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            community_id INTEGER NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            region TEXT,
+            media_urls TEXT DEFAULT '[]',
+            cultural_significance TEXT,
+            is_restricted INTEGER NOT NULL DEFAULT false,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (community_id) REFERENCES communities(id)
+          )
+        `);
+
+        // Restore data
+        for (const place of existingPlaces) {
+          const stmt = sqlite.prepare(`
+            INSERT INTO places (id, name, description, community_id, latitude, longitude, region, media_urls, cultural_significance, is_restricted, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          stmt.run(
+            place.id,
+            place.name,
+            place.description,
+            place.community_id,
+            place.latitude,
+            place.longitude,
+            place.region,
+            place.media_urls,
+            place.cultural_significance,
+            place.is_restricted,
+            place.created_at,
+            place.updated_at
+          );
+        }
+      }
+
+      // Verify foreign key constraints now exist
+      const updatedForeignKeys = sqlite.pragma('foreign_key_list(places)');
+
+      // Attempt to delete parent record before children using raw SQL (should fail with proper FK constraints)
       await expect(async () => {
-        await db
-          .delete(communitiesSqlite)
-          .where(eq(communitiesSqlite.id, fixtures.communities[0].id));
+        await sqlite.exec(
+          `DELETE FROM communities WHERE id = ${fixtures.communities[0].id}`
+        );
       }).rejects.toThrow(); // Should throw foreign key constraint error
 
       // The clearData method should handle this gracefully

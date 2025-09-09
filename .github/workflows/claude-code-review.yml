@@ -19,6 +19,10 @@ on:
       - "migrations/**/*.sql"
       - "scripts/**/*.ts"
       - "scripts/**/*.js"
+      - "tests/**/*" # Added test files - critical for review
+      - "docs/**/*" # Added docs - important for cultural sensitivity
+      - "*.ts" # Added root-level TypeScript config files
+      - "*.config.*" # Added config files
       - "*.md"
       - "package.json"
       - "package-lock.json"
@@ -42,14 +46,22 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
+          allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run type-check),Bash(git log),Bash(git diff),Edit,Write,Read"
           direct_prompt: |
-            Please review this pull request focusing on:
+            You are reviewing code for Terrastories, an Indigenous community geostorytelling platform.
+            
+            IMPORTANT: First check for and address any relevant automated review suggestions from GitHub bots, CodeCov, or other automated tools. Implement any security, performance, or critical configuration improvements they suggest.
+            
+            Then review this pull request focusing on:
             - Code quality and TypeScript best practices
-            - Security vulnerabilities and data sovereignty  
+            - Security vulnerabilities and data sovereignty compliance
             - Test coverage and edge cases
-            - Performance considerations
+            - Performance considerations (especially PostGIS queries)
             - PostGIS spatial functionality (if applicable)
-            - Cultural protocol compliance (if applicable)
+            - Cultural protocol compliance and Indigenous community sensitivity
+            - Automated tool suggestions that should be implemented
             
             Provide constructive feedback prioritized by severity (CRITICAL > MAJOR > MINOR).
+            
+            For automated suggestions: If GitHub Actions bots, security scanners, or other tools have provided relevant suggestions, implement the important ones automatically before providing your review.
           use_sticky_comment: true

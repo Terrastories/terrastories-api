@@ -53,9 +53,11 @@ export interface StoryCreateInput {
   speakerIds?: number[];
   culturalProtocols?: CulturalProtocols;
   language?: string;
-  dateInterviewed?: Date;
-  interviewer?: string;
   tags?: string[];
+  // Interview metadata for Indigenous storytelling context
+  dateInterviewed?: Date;
+  interviewLocationId?: number;
+  interviewerId?: number;
 }
 
 /**
@@ -181,6 +183,33 @@ export class StoryService {
       }
     }
 
+    // Validate interview metadata community scoping
+    if (input.interviewLocationId) {
+      const locationValid =
+        await this.storyRepository.validateInterviewLocationInCommunity(
+          input.interviewLocationId,
+          input.communityId
+        );
+      if (!locationValid) {
+        throw new InsufficientPermissionsError(
+          'Interview location must belong to the same community as the story'
+        );
+      }
+    }
+
+    if (input.interviewerId) {
+      const interviewerValid =
+        await this.storyRepository.validateInterviewerInCommunity(
+          input.interviewerId,
+          input.communityId
+        );
+      if (!interviewerValid) {
+        throw new InsufficientPermissionsError(
+          'Interviewer must belong to the same community as the story'
+        );
+      }
+    }
+
     // Process cultural protocols
     const processedProtocols = this.processCulturalProtocols(
       input.culturalProtocols,
@@ -213,6 +242,10 @@ export class StoryService {
       culturalProtocols: processedProtocols,
       placeIds: input.placeIds,
       speakerIds: input.speakerIds,
+      // Interview metadata for Indigenous storytelling context
+      dateInterviewed: input.dateInterviewed,
+      interviewLocationId: input.interviewLocationId,
+      interviewerId: input.interviewerId,
     };
 
     // Create story
@@ -447,6 +480,33 @@ export class StoryService {
       }
     }
 
+    // Validate interview metadata updates
+    if (updates.interviewLocationId) {
+      const locationValid =
+        await this.storyRepository.validateInterviewLocationInCommunity(
+          updates.interviewLocationId,
+          existingStory.communityId
+        );
+      if (!locationValid) {
+        throw new InsufficientPermissionsError(
+          'Interview location must belong to the same community as the story'
+        );
+      }
+    }
+
+    if (updates.interviewerId) {
+      const interviewerValid =
+        await this.storyRepository.validateInterviewerInCommunity(
+          updates.interviewerId,
+          existingStory.communityId
+        );
+      if (!interviewerValid) {
+        throw new InsufficientPermissionsError(
+          'Interviewer must belong to the same community as the story'
+        );
+      }
+    }
+
     // Process cultural protocol updates
     let processedProtocols = updates.culturalProtocols;
     if (updates.culturalProtocols) {
@@ -471,6 +531,10 @@ export class StoryService {
       placeIds: updates.placeIds,
       speakerIds: updates.speakerIds,
       isRestricted,
+      // Interview metadata updates
+      dateInterviewed: updates.dateInterviewed,
+      interviewLocationId: updates.interviewLocationId,
+      interviewerId: updates.interviewerId,
     };
 
     // Perform update

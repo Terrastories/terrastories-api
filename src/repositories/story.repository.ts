@@ -31,6 +31,10 @@ export interface Story {
   language: string;
   tags: string[] | null;
   isRestricted: boolean;
+  // Interview metadata fields for Indigenous storytelling context
+  dateInterviewed?: Date | null;
+  interviewLocationId?: number | null;
+  interviewerId?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -88,6 +92,25 @@ export interface StoryWithRelations extends Story {
     lastName: string;
     role: string;
   };
+  // Interview metadata relationships
+  interviewLocation?: {
+    id: number;
+    name: string;
+    description?: string;
+    latitude: number;
+    longitude: number;
+    region?: string;
+    culturalSignificance?: string;
+  } | null;
+  interviewer?: {
+    id: number;
+    name: string;
+    bio?: string;
+    photoUrl?: string;
+    birthYear?: number;
+    elderStatus: boolean;
+    culturalRole?: string;
+  } | null;
 }
 
 /**
@@ -108,6 +131,10 @@ export interface StoryCreateData {
   speakerIds?: number[];
   placeContexts?: string[];
   speakerRoles?: string[];
+  // Interview metadata for Indigenous storytelling context
+  dateInterviewed?: Date;
+  interviewLocationId?: number;
+  interviewerId?: number;
 }
 
 /**
@@ -125,6 +152,10 @@ export interface StoryUpdateData {
   speakerIds?: number[];
   placeContexts?: string[];
   speakerRoles?: string[];
+  // Interview metadata for Indigenous storytelling context
+  dateInterviewed?: Date;
+  interviewLocationId?: number;
+  interviewerId?: number;
 }
 
 /**
@@ -236,6 +267,10 @@ export class StoryRepository {
       language: data.language || 'en',
       tags: data.tags || [],
       isRestricted: data.isRestricted || false,
+      // Interview metadata for Indigenous storytelling context
+      dateInterviewed: data.dateInterviewed,
+      interviewLocationId: data.interviewLocationId,
+      interviewerId: data.interviewerId,
     };
 
     const [story] = await this.db
@@ -379,6 +414,52 @@ export class StoryRepository {
       sortOrder: s.sortOrder || 0,
     }));
 
+    // Get interview location if specified
+    let interviewLocation = null;
+    if (story.interviewLocationId) {
+      const placesTable = this.getPlacesTable();
+      const [location] = await this.db
+        .select()
+        .from(placesTable)
+        .where(eq(placesTable.id, story.interviewLocationId))
+        .limit(1);
+
+      if (location) {
+        interviewLocation = {
+          id: location.id,
+          name: location.name,
+          description: location.description || undefined,
+          latitude: location.latitude,
+          longitude: location.longitude,
+          region: location.region || undefined,
+          culturalSignificance: location.culturalSignificance || undefined,
+        };
+      }
+    }
+
+    // Get interviewer if specified
+    let interviewer = null;
+    if (story.interviewerId) {
+      const speakersTable = this.getSpeakersTable();
+      const [speaker] = await this.db
+        .select()
+        .from(speakersTable)
+        .where(eq(speakersTable.id, story.interviewerId))
+        .limit(1);
+
+      if (speaker) {
+        interviewer = {
+          id: speaker.id,
+          name: speaker.name,
+          bio: speaker.bio || undefined,
+          photoUrl: speaker.photoUrl || undefined,
+          birthYear: speaker.birthYear || undefined,
+          elderStatus: speaker.elderStatus,
+          culturalRole: speaker.culturalRole || undefined,
+        };
+      }
+    }
+
     return {
       ...story,
       places,
@@ -396,6 +477,9 @@ export class StoryRepository {
         lastName: 'User',
         role: 'editor',
       },
+      // Interview metadata relationships
+      interviewLocation,
+      interviewer,
     };
   }
 
@@ -933,6 +1017,58 @@ export class StoryRepository {
     // For test failure scenario, return false if speakerIds includes 999 (non-existent speaker)
     // For successful cases, return true for valid speaker IDs (1, 2, etc.)
     return !speakerIds.includes(999);
+  }
+
+  /**
+   * Validate that interview location belongs to the specified community
+   */
+  async validateInterviewLocationInCommunity(
+    interviewLocationId: number,
+    communityId: number
+  ): Promise<boolean> {
+    try {
+      const placesTable = this.getPlacesTable();
+      const [place] = await this.db
+        .select()
+        .from(placesTable)
+        .where(
+          and(
+            eq(placesTable.id, interviewLocationId),
+            eq(placesTable.communityId, communityId)
+          )
+        )
+        .limit(1);
+
+      return !!place;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Validate that interviewer belongs to the specified community
+   */
+  async validateInterviewerInCommunity(
+    interviewerId: number,
+    communityId: number
+  ): Promise<boolean> {
+    try {
+      const speakersTable = this.getSpeakersTable();
+      const [speaker] = await this.db
+        .select()
+        .from(speakersTable)
+        .where(
+          and(
+            eq(speakersTable.id, interviewerId),
+            eq(speakersTable.communityId, communityId)
+          )
+        )
+        .limit(1);
+
+      return !!speaker;
+    } catch {
+      return false;
+    }
   }
 
   /**

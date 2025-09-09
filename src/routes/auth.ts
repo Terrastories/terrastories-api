@@ -344,7 +344,7 @@ export async function authRoutes(
 
         // Set user session using middleware helper
         setUserSession(request, userSession);
-        
+
         // Save the session to ensure it's persisted
         await new Promise((resolve, reject) => {
           request.session.save((err: Error | null) => {
@@ -355,7 +355,7 @@ export async function authRoutes(
 
         // Get the session ID that was created by Fastify
         const sessionId = request.session.sessionId || 'session-created';
-        
+
         // The Fastify session plugin should automatically set the session cookie
         // but let's also set our own sessionId cookie for compatibility with the workflow script
         reply.setCookie('sessionId', sessionId, {
@@ -363,7 +363,7 @@ export async function authRoutes(
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'strict',
           maxAge: 24 * 60 * 60 * 1000, // 24 hours
-          path: '/'
+          path: '/',
         });
 
         // Remove sensitive data from response
@@ -496,6 +496,211 @@ export async function authRoutes(
         return reply.status(500).send({
           error: 'Internal server error',
           statusCode: 500,
+        });
+      }
+    }
+  );
+
+  /**
+   * Forgot Password Endpoint
+   * POST /auth/forgot-password
+   * Initiates password reset process by generating a reset token
+   */
+  fastify.post(
+    '/auth/forgot-password',
+    {
+      config: {
+        rateLimit: {
+          max: config.auth.rateLimit.max,
+          timeWindow: config.auth.rateLimit.timeWindow,
+        },
+      },
+      schema: {
+        description: 'Initiate password reset process',
+        tags: ['Authentication'],
+        body: {
+          type: 'object',
+          required: ['email', 'communityId'],
+          properties: {
+            email: {
+              type: 'string',
+              format: 'email',
+              description: 'User email address',
+            },
+            communityId: {
+              type: 'number',
+              description: 'Community ID for scoping',
+            },
+          },
+        },
+        response: {
+          200: {
+            description: 'Reset instructions sent (includes token for testing)',
+            type: 'object',
+            properties: {
+              message: { type: 'string' },
+              resetToken: {
+                type: 'string',
+                description:
+                  'Reset token (testing only - sent via email in production)',
+              },
+            },
+          },
+          400: {
+            description: 'Bad Request - validation error',
+            type: 'object',
+            properties: {
+              error: { type: 'string', example: 'Validation error' },
+            },
+          },
+          404: {
+            description: 'Not Found - user not found',
+            type: 'object',
+            properties: {
+              error: { type: 'string', example: 'User not found' },
+            },
+          },
+          500: {
+            description: 'Internal Server Error',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const { email, communityId } = request.body as {
+          email: string;
+          communityId: number;
+        };
+
+        // Initiate password reset
+        const resetToken = await userService.initiatePasswordReset(
+          email,
+          communityId
+        );
+
+        // In production, the reset token would be sent via email
+        // For testing purposes, we return it in the response
+        return reply.code(200).send({
+          message: 'Password reset instructions sent to your email',
+          resetToken, // Remove this in production
+        });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes('User not found')
+        ) {
+          return reply.code(404).send({
+            error: 'User not found with the provided email and community',
+          });
+        }
+
+        // Log unexpected errors
+        request.log.error(error, 'Password reset request failed');
+        return reply.code(500).send({
+          error: 'Internal server error during password reset request',
+        });
+      }
+    }
+  );
+
+  /**
+   * Reset Password Endpoint
+   * POST /auth/reset-password
+   * Resets user password using a valid reset token
+   */
+  fastify.post(
+    '/auth/reset-password',
+    {
+      config: {
+        rateLimit: {
+          max: config.auth.rateLimit.max,
+          timeWindow: config.auth.rateLimit.timeWindow,
+        },
+      },
+      schema: {
+        description: 'Reset password using valid reset token',
+        tags: ['Authentication'],
+        body: {
+          type: 'object',
+          required: ['resetToken', 'newPassword'],
+          properties: {
+            resetToken: {
+              type: 'string',
+              description: 'Password reset token from forgot-password request',
+              minLength: 32,
+              maxLength: 32,
+            },
+            newPassword: {
+              type: 'string',
+              description: 'New password (must meet strength requirements)',
+              minLength: 8,
+            },
+          },
+        },
+        response: {
+          200: {
+            description: 'Password reset successful',
+            type: 'object',
+            properties: {
+              message: { type: 'string' },
+            },
+          },
+          400: {
+            description: 'Bad Request - invalid token or weak password',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          500: {
+            description: 'Internal Server Error',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const { resetToken, newPassword } = request.body as {
+          resetToken: string;
+          newPassword: string;
+        };
+
+        // Reset the password
+        await userService.resetPassword(resetToken, newPassword);
+
+        return reply.code(200).send({
+          message:
+            'Password reset successful. You can now login with your new password.',
+        });
+      } catch (error) {
+        if (error instanceof Error) {
+          // Handle specific error types
+          if (error.message.includes('Invalid or expired reset token')) {
+            return reply.code(400).send({
+              error: 'Invalid or expired reset token',
+            });
+          }
+
+          if (error.message.includes('Password does not meet')) {
+            return reply.code(400).send({
+              error: 'Password does not meet strength requirements',
+            });
+          }
+        }
+
+        // Log unexpected errors
+        request.log.error(error, 'Password reset failed');
+        return reply.code(500).send({
+          error: 'Internal server error during password reset',
         });
       }
     }

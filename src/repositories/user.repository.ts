@@ -210,6 +210,27 @@ export class UserRepository {
   }
 
   /**
+   * Find user by reset password token
+   * @param resetToken - Password reset token
+   * @returns User with matching reset token, or null if not found
+   */
+  async findByResetToken(resetToken: string): Promise<User | null> {
+    const usersTable = await getUsersTable();
+
+    try {
+      const [result] = await this.database
+        .select()
+        .from(usersTable)
+        .where(eq(usersTable.resetPasswordToken, resetToken))
+        .limit(1);
+
+      return result ? result : null;
+    } catch (error) {
+      throw new Error(`Failed to find user by reset token: ${error}`);
+    }
+  }
+
+  /**
    * Update user within a specific community
    *
    * @param id - User ID

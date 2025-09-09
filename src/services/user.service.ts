@@ -13,6 +13,7 @@
  * - Comprehensive error handling
  */
 
+import crypto from 'crypto';
 import { UserRepository } from '../repositories/user.repository.js';
 import * as passwordService from './password.service.js';
 import { CommunityService } from './community.service.js';
@@ -397,6 +398,159 @@ export class UserService {
     }
 
     return updatedUser;
+  }
+
+  /**
+   * Initiate password reset by generating a secure token
+   * @param email - User's email address
+   * @param communityId - Community scope for the reset
+   * @returns Reset token to be sent via email
+   */
+  async initiatePasswordReset(
+    email: string,
+    communityId: number
+  ): Promise<string> {
+    // Find user by email within community
+    const user = await this.userRepository.findByEmail(email, communityId);
+    if (!user) {
+      throw new UserNotFoundError();
+    }
+
+    // Generate secure random token (32-character hex)
+    const resetToken = crypto.randomBytes(16).toString('hex');
+    const resetSentAt = new Date();
+
+    // Update user with reset token and timestamp
+    await this.userRepository.update(
+      user.id,
+      {
+        resetPasswordToken: resetToken,
+        resetPasswordSentAt: resetSentAt,
+        updatedAt: new Date(),
+      },
+      communityId
+    );
+
+    return resetToken;
+  }
+
+  /**
+   * Reset password using a valid reset token
+   * @param resetToken - Token from password reset email
+   * @param newPassword - New password to set
+   */
+  async resetPassword(resetToken: string, newPassword: string): Promise<void> {
+    // Validate token format (32-character hex)
+    if (
+      !resetToken ||
+      resetToken.length !== 32 ||
+      !/^[a-f0-9]+$/i.test(resetToken)
+    ) {
+      throw new Error('Invalid or expired reset token');
+    }
+
+    // Find user by reset token
+    const user = await this.userRepository.findByResetToken(resetToken);
+    if (!user) {
+      throw new Error('Invalid or expired reset token');
+    }
+
+    // Check if token is expired (1 hour window)
+    if (
+      !user.resetPasswordSentAt ||
+      Date.now() - user.resetPasswordSentAt.getTime() > 60 * 60 * 1000
+    ) {
+      throw new Error('Invalid or expired reset token');
+    }
+
+    // Validate new password strength
+    try {
+      await passwordService.validatePasswordStrength(newPassword);
+    } catch {
+      throw new WeakPasswordError(
+        'Password does not meet strength requirements'
+      );
+    }
+
+    // Hash new password
+    const hashedPassword = await passwordService.hashPassword(newPassword);
+
+    // Update user with new password and clear reset fields
+    await this.userRepository.update(
+      user.id,
+      {
+        passwordHash: hashedPassword,
+        resetPasswordToken: null,
+        resetPasswordSentAt: null,
+        updatedAt: new Date(),
+      },
+      user.communityId
+    );
+  }
+
+  /**
+   * Authenticate user with IP tracking and sign-in count
+   * @param email - User's email
+   * @param password - User's password
+   * @param communityId - Community ID
+   * @param ipAddress - Client IP address for tracking
+   * @returns Authenticated user
+   */
+  async authenticateUserWithTracking(
+    email: string,
+    password: string,
+    communityId: number,
+    ipAddress: string
+  ): Promise<User> {
+    // Authenticate user normally first
+    const user = await this.authenticateUser(email, password, communityId);
+
+    // Update sign-in tracking fields
+    await this.userRepository.update(
+      user.id,
+      {
+        signInCount: user.signInCount + 1,
+        lastSignInAt: user.currentSignInIp ? new Date() : null, // Track previous sign-in
+        currentSignInIp: ipAddress,
+        updatedAt: new Date(),
+      },
+      communityId
+    );
+
+    // Return updated user
+    return (await this.userRepository.findById(user.id, communityId)) as User;
+  }
+
+  /**
+   * Set remember me token for persistent sessions
+   * @param userId - User ID
+   * @param communityId - Community ID
+   */
+  async setRememberToken(userId: number, communityId: number): Promise<void> {
+    await this.userRepository.update(
+      userId,
+      {
+        rememberCreatedAt: new Date(),
+        updatedAt: new Date(),
+      },
+      communityId
+    );
+  }
+
+  /**
+   * Clear remember me token
+   * @param userId - User ID
+   * @param communityId - Community ID
+   */
+  async clearRememberToken(userId: number, communityId: number): Promise<void> {
+    await this.userRepository.update(
+      userId,
+      {
+        rememberCreatedAt: null,
+        updatedAt: new Date(),
+      },
+      communityId
+    );
   }
 
   /**

@@ -1,4 +1,4 @@
-name: Claude Code Review
+name: Smart Claude Code Review
 
 on:
   pull_request:
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: read
       id-token: write
     
@@ -29,50 +29,171 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0  # Full history needed for commit analysis
 
-      - name: Run Claude Code Review
+      - name: Get PR Comment Analysis
+        id: pr-analysis
+        run: |
+          # Get PR number
+          PR_NUM="${{ github.event.pull_request.number }}"
+          
+          # Get all comments from this PR
+          gh api "/repos/${{ github.repository }}/issues/$PR_NUM/comments" \
+            --jq '.[] | select(.user.login == "claude" or (.user.type == "Bot" and (.body | contains("Claude")))) | {created_at, updated_at, body}' \
+            > claude_comments.json || echo "[]" > claude_comments.json
+          
+          # Get the latest Claude comment timestamp (if any)
+          LAST_COMMENT_TIME=$(jq -r 'map(.created_at) | max // "1970-01-01T00:00:00Z"' claude_comments.json)
+          echo "last_comment_time=$LAST_COMMENT_TIME" >> $GITHUB_OUTPUT
+          
+          # Count existing Claude comments
+          COMMENT_COUNT=$(jq 'length' claude_comments.json)
+          echo "comment_count=$COMMENT_COUNT" >> $GITHUB_OUTPUT
+          
+          # Check if this is first review
+          if [ "$COMMENT_COUNT" -eq 0 ]; then
+            echo "review_type=initial" >> $GITHUB_OUTPUT
+          else
+            echo "review_type=follow_up" >> $GITHUB_OUTPUT
+          fi
+          
+          # Extract previously mentioned issues for context
+          jq -r '.[].body' claude_comments.json | grep -E "(CRITICAL|MAJOR|BUG|ISSUE|TODO|FIXME)" | head -10 > previous_issues.txt || touch previous_issues.txt
+          
+          echo "Previous issues context:"
+          cat previous_issues.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Get New Commits Since Last Review
+        id: new-commits
+        run: |
+          LAST_COMMENT_TIME="${{ steps.pr-analysis.outputs.last_comment_time }}"
+          
+          # Get commits since last Claude comment
+          NEW_COMMITS=$(git log --since="$LAST_COMMENT_TIME" --oneline --no-merges) || NEW_COMMITS=""
+          NEW_COMMIT_COUNT=$(echo "$NEW_COMMITS" | grep -c . || echo "0")
+          
+          echo "new_commit_count=$NEW_COMMIT_COUNT" >> $GITHUB_OUTPUT
+          
+          if [ "$NEW_COMMIT_COUNT" -gt 0 ]; then
+            echo "New commits since last review:"
+            echo "$NEW_COMMITS"
+            echo "$NEW_COMMITS" > new_commits.txt
+            
+            # Get diff for new commits only
+            git diff HEAD~$NEW_COMMIT_COUNT HEAD > new_changes.diff
+            echo "has_new_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "No new commits since last review"
+            echo "has_new_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Smart Review Prompt
+        id: prompt-gen
+        run: |
+          REVIEW_TYPE="${{ steps.pr-analysis.outputs.review_type }}"
+          COMMENT_COUNT="${{ steps.pr-analysis.outputs.comment_count }}"
+          NEW_COMMIT_COUNT="${{ steps.new-commits.outputs.new_commit_count }}"
+          HAS_NEW_CHANGES="${{ steps.new-commits.outputs.has_new_changes }}"
+          
+          if [ "$REVIEW_TYPE" = "initial" ]; then
+            # First review - comprehensive analysis
+            PROMPT="🔍 **Initial Code Review**
+
+Please conduct a comprehensive review of this pull request focusing on:
+
+**Code Quality & Standards:**
+- TypeScript best practices and type safety
+- Code organization and architecture
+- Error handling and edge cases
+- Performance considerations
+
+**Security & Safety:**
+- Input validation and sanitization  
+- Authentication and authorization
+- Data privacy and security vulnerabilities
+- SQL injection and XSS prevention
+
+**Testing & Reliability:**
+- Test coverage and quality
+- Edge case handling
+- Integration test scenarios
+- Mock and fixture appropriateness
+
+**Documentation & Maintainability:**
+- Code comments and documentation
+- API documentation completeness
+- README and setup instructions
+- Migration and deployment considerations
+
+Please be thorough but constructive. Prioritize issues by severity (CRITICAL > MAJOR > MINOR)."
+
+          elif [ "$HAS_NEW_CHANGES" = "true" ]; then
+            # Follow-up review with new changes
+            PROMPT="🔄 **Follow-up Review - New Changes Analysis**
+
+This PR has been updated with $NEW_COMMIT_COUNT new commit(s) since the last review.
+
+**Focus Areas for New Changes:**
+1. **Incremental Analysis**: Review only the new commits and changes
+2. **Issue Resolution**: Check if previously mentioned issues have been addressed
+3. **New Concerns**: Identify any new issues introduced by recent changes
+4. **Progress Assessment**: Acknowledge improvements made since last review
+
+**Previous Context Available:**
+- This is review #$((COMMENT_COUNT + 1)) for this PR
+- Previous issues and feedback are available in comment history
+- Focus on NEW problems, don't repeat previous feedback unless still relevant
+
+**Review Guidelines:**
+- ✅ Acknowledge resolved issues from previous reviews
+- 🔍 Focus on net-new changes and their implications  
+- ⚠️ Flag any regressions or new issues introduced
+- 💡 Provide fresh insights not covered in previous reviews
+
+Please provide a focused review that builds on previous feedback rather than repeating it."
+
+          else
+            # No new changes since last review
+            PROMPT="⏭️ **No New Changes Detected**
+
+No new commits have been made since the last Claude review. 
+
+**Quick Status Check:**
+- Verify if any previously mentioned issues still need attention
+- Check if the PR is ready for approval based on previous feedback
+- Provide a brief summary of current PR status
+
+Please provide a concise status update rather than a full re-review."
+          fi
+          
+          # Save prompt to file for the action
+          echo "$PROMPT" > review_prompt.txt
+          echo "Generated prompt for review type: $REVIEW_TYPE (new_changes: $HAS_NEW_CHANGES)"
+
+      - name: Run Smart Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@beta
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          
+          # Use dynamic prompt based on PR state
+          direct_prompt_file: review_prompt.txt
+          
+          # Enable tools for running tests and analysis
+          allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run typecheck),Bash(git log),Bash(git diff)"
+          
+          # Use sticky comments for follow-up reviews to maintain context
+          use_sticky_comment: ${{ steps.pr-analysis.outputs.review_type == 'follow_up' }}
 
-          # Optional: Specify model (defaults to Claude Sonnet 4, uncomment for Claude Opus 4.1)
-          # model: "claude-opus-4-1-20250805"
-
-          # Direct prompt for automated review (no @claude mention needed)
-          direct_prompt: |
-            Please review this pull request and provide feedback on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Performance considerations
-            - Security concerns
-            - Test coverage
-            
-            Be constructive and helpful in your feedback.
-
-          # Optional: Use sticky comments to make Claude reuse the same comment on subsequent pushes to the same PR
-          # use_sticky_comment: true
-          
-          # Optional: Customize review based on file types
-          # direct_prompt: |
-          #   Review this PR focusing on:
-          #   - For TypeScript files: Type safety and proper interface usage
-          #   - For API endpoints: Security, input validation, and error handling
-          #   - For React components: Performance, accessibility, and best practices
-          #   - For tests: Coverage, edge cases, and test quality
-          
-          # Optional: Different prompts for different authors
-          # direct_prompt: |
-          #   ${{ github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR' && 
-          #   'Welcome! Please review this PR from a first-time contributor. Be encouraging and provide detailed explanations for any suggestions.' ||
-          #   'Please provide a thorough code review focusing on our coding standards and best practices.' }}
-          
-          # Optional: Add specific tools for running tests or linting
-          # allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run typecheck)"
-          
-          # Optional: Skip review for certain conditions
-          # if: |
-          #   !contains(github.event.pull_request.title, '[skip-review]') &&
-          #   !contains(github.event.pull_request.title, '[WIP]')
+      - name: Update Review Tracking
+        if: always()
+        run: |
+          # Log review completion for future reference
+          echo "Review completed at $(date -u)" >> .github/claude_review_log.txt
+          echo "PR #${{ github.event.pull_request.number }}" >> .github/claude_review_log.txt
+          echo "Review type: ${{ steps.pr-analysis.outputs.review_type }}" >> .github/claude_review_log.txt
+          echo "New commits: ${{ steps.new-commits.outputs.new_commit_count }}" >> .github/claude_review_log.txt
+          echo "---" >> .github/claude_review_log.txt
 

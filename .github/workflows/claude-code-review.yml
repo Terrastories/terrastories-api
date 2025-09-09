@@ -99,29 +99,29 @@ jobs:
           
           if [ "$REVIEW_TYPE" = "initial" ]; then
             # First review - comprehensive analysis
-            PROMPT="🔍 **Initial Code Review**
+            PROMPT="Initial Code Review
 
 Please conduct a comprehensive review of this pull request focusing on:
 
-**Code Quality & Standards:**
+Code Quality and Standards:
 - TypeScript best practices and type safety
 - Code organization and architecture
 - Error handling and edge cases
 - Performance considerations
 
-**Security & Safety:**
-- Input validation and sanitization  
+Security and Safety:
+- Input validation and sanitization
 - Authentication and authorization
 - Data privacy and security vulnerabilities
 - SQL injection and XSS prevention
 
-**Testing & Reliability:**
+Testing and Reliability:
 - Test coverage and quality
 - Edge case handling
 - Integration test scenarios
 - Mock and fixture appropriateness
 
-**Documentation & Maintainability:**
+Documentation and Maintainability:
 - Code comments and documentation
 - API documentation completeness
 - README and setup instructions
@@ -131,36 +131,36 @@ Please be thorough but constructive. Prioritize issues by severity (CRITICAL > M
 
           elif [ "$HAS_NEW_CHANGES" = "true" ]; then
             # Follow-up review with new changes
-            PROMPT="🔄 **Follow-up Review - New Changes Analysis**
+            PROMPT="Follow-up Review - New Changes Analysis
 
 This PR has been updated with $NEW_COMMIT_COUNT new commit(s) since the last review.
 
-**Focus Areas for New Changes:**
-1. **Incremental Analysis**: Review only the new commits and changes
-2. **Issue Resolution**: Check if previously mentioned issues have been addressed
-3. **New Concerns**: Identify any new issues introduced by recent changes
-4. **Progress Assessment**: Acknowledge improvements made since last review
+Focus Areas for New Changes:
+1. Incremental Analysis: Review only the new commits and changes
+2. Issue Resolution: Check if previously mentioned issues have been addressed
+3. New Concerns: Identify any new issues introduced by recent changes
+4. Progress Assessment: Acknowledge improvements made since last review
 
-**Previous Context Available:**
+Previous Context Available:
 - This is review #$((COMMENT_COUNT + 1)) for this PR
 - Previous issues and feedback are available in comment history
 - Focus on NEW problems, don't repeat previous feedback unless still relevant
 
-**Review Guidelines:**
-- ✅ Acknowledge resolved issues from previous reviews
-- 🔍 Focus on net-new changes and their implications  
-- ⚠️ Flag any regressions or new issues introduced
-- 💡 Provide fresh insights not covered in previous reviews
+Review Guidelines:
+- Acknowledge resolved issues from previous reviews
+- Focus on net-new changes and their implications
+- Flag any regressions or new issues introduced
+- Provide fresh insights not covered in previous reviews
 
 Please provide a focused review that builds on previous feedback rather than repeating it."
 
           else
             # No new changes since last review
-            PROMPT="⏭️ **No New Changes Detected**
+            PROMPT="No New Changes Detected
 
-No new commits have been made since the last Claude review. 
+No new commits have been made since the last Claude review.
 
-**Quick Status Check:**
+Quick Status Check:
 - Verify if any previously mentioned issues still need attention
 - Check if the PR is ready for approval based on previous feedback
 - Provide a brief summary of current PR status

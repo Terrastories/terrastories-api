@@ -518,7 +518,7 @@ export class UserService {
       user.id,
       {
         signInCount: user.signInCount + 1,
-        lastSignInAt: user.currentSignInIp ? new Date() : null, // Track previous sign-in
+        lastSignInAt: new Date(), // Always track the sign-in time
         currentSignInIp: ipAddress,
         updatedAt: new Date(),
       },

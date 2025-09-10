@@ -153,6 +153,22 @@ export const baseCommunitySchema = z.object({
     .boolean()
     .default(true)
     .describe('Whether the community is active'),
+
+  // Rails compatibility fields
+  country: z
+    .string()
+    .length(2, 'Country code must be 2 characters')
+    .regex(
+      /^[A-Z]{2}$/,
+      'Country code must be uppercase letters (ISO 3166-1 alpha-2)'
+    )
+    .optional()
+    .describe('ISO 3166-1 alpha-2 country code (e.g., US, CA, MX)'),
+
+  beta: z
+    .boolean()
+    .default(false)
+    .describe('Whether the community is in beta/testing mode'),
 });
 
 /**
@@ -167,6 +183,9 @@ export const createCommunitySchema = baseCommunitySchema
     locale: baseCommunitySchema.shape.locale,
     culturalSettings: baseCommunitySchema.shape.culturalSettings,
     isActive: baseCommunitySchema.shape.isActive,
+    // Rails compatibility fields
+    country: baseCommunitySchema.shape.country,
+    beta: baseCommunitySchema.shape.beta,
   })
   .strict();
 
@@ -251,6 +270,21 @@ export const communitySearchSchema = z
       .refine((val) => val >= 0, 'Offset must be non-negative')
       .default(0)
       .describe('Number of results to skip'),
+
+    // Rails compatibility filters
+    country: z
+      .string()
+      .length(2, 'Country code must be 2 characters')
+      .regex(/^[A-Z]{2}$/, 'Country code must be uppercase letters')
+      .optional()
+      .describe('Filter by country code'),
+
+    beta: z
+      .string()
+      .regex(/^(true|false)$/, 'beta must be true or false')
+      .transform((val) => val === 'true')
+      .optional()
+      .describe('Filter by beta status'),
   })
   .strict();
 
@@ -303,6 +337,9 @@ export const communityResponseSchema = z.object({
   locale: z.string(),
   culturalSettings: z.string().nullable(),
   isActive: z.boolean(),
+  // Rails compatibility fields
+  country: z.string().nullable(),
+  beta: z.boolean(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 

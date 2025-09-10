@@ -104,6 +104,12 @@ export class TestDatabaseManager {
       const hasLocale = communitiesTableInfo.some(
         (col: any) => col.name === 'locale'
       );
+      const hasCountry = communitiesTableInfo.some(
+        (col: any) => col.name === 'country'
+      );
+      const hasBeta = communitiesTableInfo.some(
+        (col: any) => col.name === 'beta'
+      );
 
       if (!hasLocale) {
         this.sqlite.exec(`
@@ -112,6 +118,21 @@ export class TestDatabaseManager {
           ALTER TABLE communities ADD COLUMN is_active INTEGER DEFAULT 1 NOT NULL;
         `);
         console.log('✅ Added missing communities columns');
+      }
+
+      // Add Rails compatibility fields if missing
+      if (!hasCountry) {
+        this.sqlite.exec(`
+          ALTER TABLE communities ADD COLUMN country TEXT;
+        `);
+        console.log('✅ Added country column to communities');
+      }
+
+      if (!hasBeta) {
+        this.sqlite.exec(`
+          ALTER TABLE communities ADD COLUMN beta INTEGER DEFAULT 0 NOT NULL;
+        `);
+        console.log('✅ Added beta column to communities');
       }
 
       // Create themes table if it doesn't exist (new feature not in migrations yet)

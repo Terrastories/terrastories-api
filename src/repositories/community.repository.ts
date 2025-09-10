@@ -32,6 +32,9 @@ export interface CreateCommunityData {
   locale?: string;
   culturalSettings?: string;
   isActive?: boolean;
+  // Rails compatibility fields
+  country?: string;
+  beta?: boolean;
 }
 
 /**
@@ -45,6 +48,9 @@ export interface UpdateCommunityData {
   culturalSettings?: string;
   isActive?: boolean;
   updatedAt?: Date;
+  // Rails compatibility fields
+  country?: string;
+  beta?: boolean;
 }
 
 /**
@@ -56,6 +62,9 @@ export interface CommunitySearchParams {
   isActive?: boolean;
   limit?: number;
   offset?: number;
+  // Rails compatibility filters
+  country?: string;
+  beta?: boolean;
 }
 
 /**
@@ -211,6 +220,15 @@ export class CommunityRepository {
         }
       }
 
+      // Validate country code if provided (ISO 3166-1 alpha-2)
+      if (data.country) {
+        if (data.country.length !== 2 || !/^[A-Z]{2}$/.test(data.country)) {
+          throw new InvalidCommunityDataError(
+            'Country code must be a 2-character uppercase ISO 3166-1 alpha-2 code (e.g., US, CA, MX)'
+          );
+        }
+      }
+
       // Prepare community data
       const communityData: NewCommunity = {
         name: data.name.trim(),
@@ -220,6 +238,9 @@ export class CommunityRepository {
         locale: data.locale || 'en',
         culturalSettings: data.culturalSettings || null,
         isActive: data.isActive ?? true,
+        // Rails compatibility fields
+        country: data.country || null,
+        beta: data.beta ?? false,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -305,7 +326,15 @@ export class CommunityRepository {
    */
   async search(params: CommunitySearchParams = {}): Promise<Community[]> {
     try {
-      const { query, locale, isActive, limit = 50, offset = 0 } = params;
+      const {
+        query,
+        locale,
+        isActive,
+        country,
+        beta,
+        limit = 50,
+        offset = 0,
+      } = params;
 
       // Build where conditions
       const conditions = [];
@@ -329,6 +358,16 @@ export class CommunityRepository {
       // Filter by active status
       if (isActive !== undefined) {
         conditions.push(eq(this.communities.isActive, isActive));
+      }
+
+      // Filter by country
+      if (country) {
+        conditions.push(eq(this.communities.country, country));
+      }
+
+      // Filter by beta status
+      if (beta !== undefined) {
+        conditions.push(eq(this.communities.beta, beta));
       }
 
       // Execute query with pagination
@@ -406,6 +445,18 @@ export class CommunityRepository {
         } catch {
           throw new InvalidCommunityDataError(
             'Invalid cultural settings JSON format'
+          );
+        }
+      }
+
+      // Validate country code if provided (ISO 3166-1 alpha-2)
+      if (updates.country !== undefined && updates.country !== null) {
+        if (
+          updates.country.length !== 2 ||
+          !/^[A-Z]{2}$/.test(updates.country)
+        ) {
+          throw new InvalidCommunityDataError(
+            'Country code must be a 2-character uppercase ISO 3166-1 alpha-2 code (e.g., US, CA, MX)'
           );
         }
       }

@@ -28,6 +28,9 @@ export interface Story {
   communityId: number;
   createdBy: number;
   mediaUrls: string[] | null;
+  // Direct file URL columns for dual-read capability (Issue #89)
+  imageUrl?: string | null;
+  audioUrl?: string | null;
   language: string;
   tags: string[] | null;
   isRestricted: boolean;
@@ -123,6 +126,9 @@ export interface StoryCreateData {
   communityId: number;
   createdBy: number;
   mediaUrls?: string[];
+  // Direct file URL fields for dual-read capability (Issue #89)
+  imageUrl?: string;
+  audioUrl?: string;
   language?: string;
   tags?: string[];
   isRestricted?: boolean;
@@ -144,6 +150,9 @@ export interface StoryUpdateData {
   title?: string;
   description?: string;
   mediaUrls?: string[];
+  // Direct file URL fields for dual-read capability (Issue #89)
+  imageUrl?: string;
+  audioUrl?: string;
   language?: string;
   tags?: string[];
   isRestricted?: boolean;

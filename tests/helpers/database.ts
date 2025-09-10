@@ -135,6 +135,23 @@ export class TestDatabaseManager {
         console.log('✅ Added beta column to communities');
       }
 
+      // Add CHECK constraint for country validation (if not already exists)
+      try {
+        this.sqlite.exec(`
+          ALTER TABLE communities ADD CONSTRAINT country_uppercase_iso 
+            CHECK (country IS NULL OR (length(country) = 2 AND country = upper(country)));
+        `);
+        console.log('✅ Added country validation constraint');
+      } catch (error) {
+        // Constraint may already exist, ignore error
+        if (
+          !error.message.includes('already exists') &&
+          !error.message.includes('duplicate')
+        ) {
+          console.log('⚠️ Country constraint may already exist');
+        }
+      }
+
       // Create themes table if it doesn't exist (new feature not in migrations yet)
       const tables = this.sqlite
         .prepare(

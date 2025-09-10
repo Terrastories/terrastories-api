@@ -7,6 +7,11 @@
 ALTER TABLE communities ADD COLUMN country TEXT;
 ALTER TABLE communities ADD COLUMN beta INTEGER DEFAULT 0 NOT NULL;
 
+-- Add CHECK constraint to ensure country codes are uppercase and 2 characters
+-- This ensures index effectiveness and data integrity at database level
+ALTER TABLE communities ADD CONSTRAINT country_uppercase_iso 
+  CHECK (country IS NULL OR (length(country) = 2 AND country = upper(country)));
+
 -- Add indexes for performance optimization on frequently filtered fields
 CREATE INDEX IF NOT EXISTS idx_communities_country ON communities(country) WHERE country IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_communities_beta ON communities(beta);

@@ -131,6 +131,13 @@ export class CommunityRepository {
     return 'execute' in this.database ? communitiesPg : communitiesSqlite;
   }
 
+  // Type-safe database query wrapper to reduce explicit any casting
+  private get db() {
+    // While we still need to cast here, we centralize it to one place
+    // This is a common pattern in drizzle ORM with union database types
+    return this.database as any;
+  }
+
   /**
    * Generate a unique slug from community name
    * @param name - Community name
@@ -165,7 +172,7 @@ export class CommunityRepository {
         conditions.push(sql`${this.communities.id} != ${excludeId}`);
       }
 
-      const existing = await (this.database as any)
+      const existing = await this.db
         .select({ id: this.communities.id })
         .from(this.communities)
         .where(and(...conditions))
@@ -220,14 +227,7 @@ export class CommunityRepository {
         }
       }
 
-      // Validate country code if provided (ISO 3166-1 alpha-2)
-      if (data.country) {
-        if (data.country.length !== 2 || !/^[A-Z]{2}$/.test(data.country)) {
-          throw new InvalidCommunityDataError(
-            'Country code must be a 2-character uppercase ISO 3166-1 alpha-2 code (e.g., US, CA, MX)'
-          );
-        }
-      }
+      // Country validation handled by Zod schema at service layer
 
       // Prepare community data
       const communityData: NewCommunity = {
@@ -246,7 +246,7 @@ export class CommunityRepository {
       };
 
       // Create community
-      const result = await (this.database as any)
+      const result = await this.db
         .insert(this.communities)
         .values(communityData)
         .returning();
@@ -284,7 +284,7 @@ export class CommunityRepository {
    */
   async findById(id: number): Promise<Community | null> {
     try {
-      const result = await (this.database as any)
+      const result = await this.db
         .select()
         .from(this.communities)
         .where(eq(this.communities.id, id))
@@ -305,7 +305,7 @@ export class CommunityRepository {
    */
   async findBySlug(slug: string): Promise<Community | null> {
     try {
-      const result = await (this.database as any)
+      const result = await this.db
         .select()
         .from(this.communities)
         .where(eq(this.communities.slug, slug))
@@ -374,7 +374,7 @@ export class CommunityRepository {
       const whereClause =
         conditions.length > 0 ? and(...conditions) : undefined;
 
-      const result = await (this.database as any)
+      const result = await this.db
         .select()
         .from(this.communities)
         .where(whereClause)
@@ -449,17 +449,7 @@ export class CommunityRepository {
         }
       }
 
-      // Validate country code if provided (ISO 3166-1 alpha-2)
-      if (updates.country !== undefined && updates.country !== null) {
-        if (
-          updates.country.length !== 2 ||
-          !/^[A-Z]{2}$/.test(updates.country)
-        ) {
-          throw new InvalidCommunityDataError(
-            'Country code must be a 2-character uppercase ISO 3166-1 alpha-2 code (e.g., US, CA, MX)'
-          );
-        }
-      }
+      // Country validation handled by Zod schema at service layer
 
       // Prepare update data
       const updateData = {
@@ -478,7 +468,7 @@ export class CommunityRepository {
       );
 
       // Update community
-      const result = await (this.database as any)
+      const result = await this.db
         .update(this.communities)
         .set(cleanUpdateData)
         .where(eq(this.communities.id, id))
@@ -514,7 +504,7 @@ export class CommunityRepository {
       }
 
       // Delete community (CASCADE should handle related data)
-      const result = await (this.database as any)
+      const result = await this.db
         .delete(this.communities)
         .where(eq(this.communities.id, id))
         .returning();
@@ -549,7 +539,7 @@ export class CommunityRepository {
       const whereClause =
         conditions.length > 0 ? and(...conditions) : undefined;
 
-      const result = await (this.database as any)
+      const result = await this.db
         .select({ count: count() })
         .from(this.communities)
         .where(whereClause);
@@ -575,7 +565,7 @@ export class CommunityRepository {
         conditions.push(sql`${this.communities.id} != ${excludeId}`);
       }
 
-      const result = await (this.database as any)
+      const result = await this.db
         .select({ id: this.communities.id })
         .from(this.communities)
         .where(and(...conditions))

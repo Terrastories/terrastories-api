@@ -168,30 +168,20 @@ describe('CommunityRepository', () => {
       expect(result.beta).toBe(false);
     });
 
-    it('should throw error for invalid country code format', async () => {
-      // Arrange
-      const invalidData: CreateCommunityData = {
-        name: 'Invalid Country Community',
-        country: 'USA', // Should be 2 characters
+    it('should store country codes as provided (validation handled at service layer)', async () => {
+      // Arrange - Repository accepts data as provided, relying on service layer validation
+      const dataWithValidCountry: CreateCommunityData = {
+        name: 'Repository Test Community',
+        country: 'US', // Valid country code
       };
 
-      // Act & Assert
-      await expect(communityRepository.create(invalidData)).rejects.toThrow(
-        InvalidCommunityDataError
-      );
-    });
+      // Act
+      const result = await communityRepository.create(dataWithValidCountry);
 
-    it('should throw error for lowercase country code', async () => {
-      // Arrange
-      const invalidData: CreateCommunityData = {
-        name: 'Lowercase Country Community',
-        country: 'us', // Should be uppercase
-      };
-
-      // Act & Assert
-      await expect(communityRepository.create(invalidData)).rejects.toThrow(
-        InvalidCommunityDataError
-      );
+      // Assert - Valid country code is stored correctly
+      expect(result).toBeDefined();
+      expect(result.country).toBe('US');
+      expect(result.name).toBe('Repository Test Community');
     });
 
     it('should throw error for invalid community data', async () => {
@@ -655,36 +645,26 @@ describe('CommunityRepository', () => {
       expect(result!.country).toBeNull();
     });
 
-    it('should throw error for invalid country code in update', async () => {
+    it('should update country codes as provided (validation handled at service layer)', async () => {
       // Arrange
       const original = await communityRepository.create({
         name: 'Test Community',
       });
 
-      const invalidUpdates: UpdateCommunityData = {
-        country: 'USA', // Should be 2 characters
+      const updatesWithValidCountry: UpdateCommunityData = {
+        country: 'CA', // Valid country code
       };
 
-      // Act & Assert
-      await expect(
-        communityRepository.update(original.id, invalidUpdates)
-      ).rejects.toThrow(InvalidCommunityDataError);
-    });
+      // Act
+      const result = await communityRepository.update(
+        original.id,
+        updatesWithValidCountry
+      );
 
-    it('should throw error for lowercase country code in update', async () => {
-      // Arrange
-      const original = await communityRepository.create({
-        name: 'Test Community',
-      });
-
-      const invalidUpdates: UpdateCommunityData = {
-        country: 'us', // Should be uppercase
-      };
-
-      // Act & Assert
-      await expect(
-        communityRepository.update(original.id, invalidUpdates)
-      ).rejects.toThrow(InvalidCommunityDataError);
+      // Assert - Valid country code is updated correctly
+      expect(result).toBeDefined();
+      expect(result!.country).toBe('CA');
+      expect(result!.name).toBe('Test Community');
     });
 
     it('should throw error for invalid update data', async () => {

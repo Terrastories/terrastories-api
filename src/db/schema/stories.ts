@@ -48,6 +48,9 @@ export const storiesPg = pgTable('stories', {
   isRestricted: boolean('is_restricted').notNull().default(false),
   privacyLevel: pgText('privacy_level').notNull().default('public'),
   mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
+  // Direct file URL columns for dual-read capability (Issue #89)
+  imageUrl: pgText('image_url'),
+  audioUrl: pgText('audio_url'),
   language: pgText('language').notNull().default('en'),
   tags: jsonb('tags').$type<string[]>().default([]),
   // Interview metadata fields for Indigenous storytelling context
@@ -77,6 +80,9 @@ export const storiesSqlite = sqliteTable('stories', {
   mediaUrls: sqliteText('media_urls', { mode: 'json' })
     .$type<string[]>()
     .default([]),
+  // Direct file URL columns for dual-read capability (Issue #89)
+  imageUrl: sqliteText('image_url'),
+  audioUrl: sqliteText('audio_url'),
   language: sqliteText('language').notNull().default('en'),
   tags: sqliteText('tags', { mode: 'json' }).$type<string[]>().default([]),
   // Interview metadata fields for Indigenous storytelling context

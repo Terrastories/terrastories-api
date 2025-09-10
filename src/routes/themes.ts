@@ -2,17 +2,24 @@
  * Themes API Routes - Complete Map Theme Management
  *
  * RESTful API endpoints for theme management with:
- * - Complete CRUD operations
+ * - Complete CRUD operations via service layer
  * - Geographic bounds management
  * - Mapbox style URL integration
  * - Cultural protocol enforcement
  * - Community data isolation
+ * - Indigenous data sovereignty protection
  * - Comprehensive input validation
  */
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { ThemesRepository } from '../repositories/themes.repository.js';
+import {
+  ThemesService,
+  type ThemeCreateInput,
+  type ThemeUpdateInput,
+  type ThemeSearchOptions,
+} from '../services/themes.service.js';
 import { getDb, type Database } from '../db/index.js';
 import {
   requireAuth,
@@ -21,6 +28,7 @@ import {
 } from '../shared/middleware/auth.middleware.js';
 import { handleRouteError } from '../shared/middleware/error.middleware.js';
 import { createThemeSchema, updateThemeSchema } from '../db/schema/themes.js';
+import type { Logger } from '../shared/types/index.js';
 
 /**
  * Additional Zod schemas for API operations
@@ -66,6 +74,24 @@ export async function themesRoutes(
 ) {
   const db = options?.database || (await getDb());
   const themesRepository = new ThemesRepository(db);
+
+  // Initialize minimal logger for themes service
+  const logger: Logger = {
+    info: (_message: string, _meta?: Record<string, unknown>) => {
+      // In production, this would integrate with proper logging system
+    },
+    debug: (_message: string, _meta?: Record<string, unknown>) => {
+      // Debug logging disabled in routes
+    },
+    warn: (_message: string, _meta?: Record<string, unknown>) => {
+      // Warning logging disabled in routes
+    },
+    error: (_message: string, _meta?: Record<string, unknown>) => {
+      // Error logging disabled in routes - handled by route error handlers
+    },
+  };
+
+  const themesService = new ThemesService(themesRepository, logger);
 
   /**
    * Create Theme
@@ -210,21 +236,31 @@ export async function themesRoutes(
     async (request, reply: FastifyReply) => {
       const authRequest = request as AuthenticatedRequest;
       try {
-        // Validate input
+        // Validate input using createThemeSchema, then transform to service input
         const validatedData = createThemeSchema.parse(request.body);
 
-        // Ensure community ownership
-        if (
-          authRequest.user.role !== 'super_admin' &&
-          validatedData.communityId !== authRequest.user.communityId
-        ) {
-          return reply
-            .code(403)
-            .send({ error: 'Cannot create themes for other communities' });
-        }
+        const themeInput: ThemeCreateInput = {
+          name: validatedData.name,
+          description: validatedData.description,
+          mapboxStyleUrl: validatedData.mapboxStyleUrl,
+          mapboxAccessToken: validatedData.mapboxAccessToken,
+          centerLat: validatedData.centerLat,
+          centerLong: validatedData.centerLong,
+          swBoundaryLat: validatedData.swBoundaryLat,
+          swBoundaryLong: validatedData.swBoundaryLong,
+          neBoundaryLat: validatedData.neBoundaryLat,
+          neBoundaryLong: validatedData.neBoundaryLong,
+          active: validatedData.active,
+          communityId: validatedData.communityId,
+        };
 
-        // Create theme
-        const theme = await themesRepository.create(validatedData);
+        // Create theme via service layer (handles all validation and permissions)
+        const theme = await themesService.createTheme(
+          themeInput,
+          authRequest.user.id,
+          authRequest.user.role,
+          authRequest.user.communityId
+        );
 
         return reply.code(201).send({
           data: theme,
@@ -338,39 +374,30 @@ export async function themesRoutes(
       try {
         const query = ListThemesQuerySchema.parse(request.query);
 
-        // Use the existing repository method with correct parameters
-        const result = await themesRepository.findByCommunityIdPaginated(
-          authRequest.user.communityId,
-          {
-            page: query.page,
-            limit: query.limit,
-            sortBy: query.sortBy,
-            sortOrder: query.sortOrder,
-          }
+        const searchOptions: ThemeSearchOptions = {
+          page: query.page,
+          limit: query.limit,
+          sortBy: query.sortBy,
+          sortOrder: query.sortOrder,
+          activeOnly: query.active,
+          searchTerm: query.search,
+        };
+
+        // Use service layer for complete business logic and validation
+        const result = await themesService.listThemes(
+          searchOptions,
+          authRequest.user.id,
+          authRequest.user.role,
+          authRequest.user.communityId
         );
 
-        // Filter by active status if requested (post-processing since the repository doesn't support this filter)
-        let filteredThemes = result.themes;
-        if (query.active !== undefined) {
-          filteredThemes = result.themes.filter(
-            (theme) => theme.active === query.active
-          );
-        }
-
-        // Filter by search term if requested (post-processing)
-        if (query.search) {
-          filteredThemes = filteredThemes.filter((theme) =>
-            theme.name.toLowerCase().includes(query.search!.toLowerCase())
-          );
-        }
-
         return reply.send({
-          data: filteredThemes,
+          data: result.data,
           meta: {
-            total: filteredThemes.length,
-            page: query.page,
-            limit: query.limit,
-            totalPages: Math.ceil(filteredThemes.length / query.limit),
+            total: result.total,
+            page: result.page,
+            limit: result.limit,
+            totalPages: result.pages,
           },
         });
       } catch (error) {
@@ -434,7 +461,10 @@ export async function themesRoutes(
     async (request, reply: FastifyReply) => {
       const authRequest = request as AuthenticatedRequest;
       try {
-        const themes = await themesRepository.findActiveThemes(
+        // Use service layer for active themes with full validation
+        const themes = await themesService.getActiveThemes(
+          authRequest.user.id,
+          authRequest.user.role,
           authRequest.user.communityId
         );
 
@@ -515,8 +545,11 @@ export async function themesRoutes(
       try {
         const { id } = ThemeIdParamSchema.parse(request.params);
 
-        const theme = await themesRepository.findByIdWithCommunityCheck(
+        // Use service layer with full validation and cultural protocol enforcement
+        const theme = await themesService.getThemeById(
           id,
+          authRequest.user.id,
+          authRequest.user.role,
           authRequest.user.communityId
         );
 
@@ -683,10 +716,27 @@ export async function themesRoutes(
         const { id } = ThemeIdParamSchema.parse(request.params);
         const validatedData = updateThemeSchema.parse(request.body);
 
-        const updatedTheme = await themesRepository.updateWithCommunityCheck(
+        const updateInput: ThemeUpdateInput = {
+          name: validatedData.name,
+          description: validatedData.description,
+          mapboxStyleUrl: validatedData.mapboxStyleUrl,
+          mapboxAccessToken: validatedData.mapboxAccessToken,
+          centerLat: validatedData.centerLat,
+          centerLong: validatedData.centerLong,
+          swBoundaryLat: validatedData.swBoundaryLat,
+          swBoundaryLong: validatedData.swBoundaryLong,
+          neBoundaryLat: validatedData.neBoundaryLat,
+          neBoundaryLong: validatedData.neBoundaryLong,
+          active: validatedData.active,
+        };
+
+        // Use service layer with full validation and cultural protocol enforcement
+        const updatedTheme = await themesService.updateTheme(
           id,
-          authRequest.user.communityId,
-          validatedData
+          updateInput,
+          authRequest.user.id,
+          authRequest.user.role,
+          authRequest.user.communityId
         );
 
         if (!updatedTheme) {
@@ -755,8 +805,11 @@ export async function themesRoutes(
       try {
         const { id } = ThemeIdParamSchema.parse(request.params);
 
-        const deleted = await themesRepository.deleteWithCommunityCheck(
+        // Use service layer with full validation and cultural protocol enforcement
+        const deleted = await themesService.deleteTheme(
           id,
+          authRequest.user.id,
+          authRequest.user.role,
           authRequest.user.communityId
         );
 

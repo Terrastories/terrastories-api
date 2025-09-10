@@ -11,7 +11,7 @@ const isPostgres =
 
 export default defineConfig({
   dialect: isPostgres ? 'postgresql' : 'sqlite',
-  schema: './src/db/schema/index.ts',
+  schema: './src/db/schema/*.ts',
   out: './src/db/migrations',
   dbCredentials: isPostgres
     ? {

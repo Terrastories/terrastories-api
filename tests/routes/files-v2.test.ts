@@ -7,41 +7,230 @@
  * Tests follow TDD approach - defining expected API behavior before implementation.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  beforeAll,
+  afterAll,
+  vi,
+} from 'vitest';
 import { FastifyInstance } from 'fastify';
-import { build } from '../helpers/app.js';
-import { createAuthenticatedUser, type TestUser } from '../helpers/auth.js';
-import { setupTestDatabase, cleanupTestDatabase } from '../helpers/database.js';
-import { createFormData } from '../helpers/multipart.js';
+import { createTestApp } from '../helpers/api-client.js';
+import { TestDataFactory, testDb } from '../helpers/database.js';
+import { createReadStream } from 'fs';
+import { writeFile, mkdir, rm } from 'fs/promises';
+import { getCommunitiesTable } from '../../src/db/schema/communities.js';
+import { join } from 'path';
 
 describe('Files V2 Routes', () => {
   let app: FastifyInstance;
-  let testUser: TestUser;
+  let testUser: any;
   let testCommunity: any;
+  let authCookie: string;
+  let testUploadDir: string;
+
+  // Helper to create test file content
+  function createTestFileBuffer(content: string = 'test file content'): Buffer {
+    return Buffer.from(content, 'utf-8');
+  }
+
+  // Helper to create form data for file uploads
+  async function createFormDataForUpload(params: {
+    filename: string;
+    content: string;
+    mimetype: string;
+    community: string;
+    entity: string;
+    entityId: string;
+  }) {
+    const FormData = (await import('form-data')).default;
+    const form = new FormData();
+
+    // Create file buffer and write to temporary file
+    const fileBuffer = createTestFileBuffer(params.content);
+    const tempFilePath = join(testUploadDir, params.filename);
+    await writeFile(tempFilePath, fileBuffer);
+
+    // Append file to form data
+    form.append('file', createReadStream(tempFilePath), {
+      filename: params.filename,
+      contentType: params.mimetype,
+    });
+
+    // Append other form fields
+    form.append('community', params.community);
+    form.append('entity', params.entity);
+    form.append('entityId', params.entityId);
+
+    return {
+      headers: form.getHeaders(),
+      payload: form,
+    };
+  }
+
+  beforeAll(async () => {
+    // Create temporary upload directory for tests
+    testUploadDir = join(process.cwd(), 'test-uploads-v2-integration');
+    await mkdir(testUploadDir, { recursive: true });
+
+    // Override environment for testing
+    process.env.FILES_V2_UPLOAD_DIR = testUploadDir;
+    process.env.NODE_ENV = 'test';
+    process.env.FILES_MAX_SIZE_MB = '25';
+  });
+
+  afterAll(async () => {
+    // Clean up test upload directory
+    await rm(testUploadDir, { recursive: true, force: true });
+    await testDb.teardown();
+  });
+
+  // Helper function to create authenticated user in different community
+  async function createCrossCommunitAuth() {
+    const db = testDb.getDb();
+    const communitiesTable = await getCommunitiesTable();
+
+    // Create another community
+    const [otherCommunity] = await db
+      .insert(communitiesTable)
+      .values(TestDataFactory.createCommunity({ name: 'Other Community' }))
+      .returning();
+
+    // Register user in other community
+    const userEmail = 'other-user@example.com';
+    const userPassword = 'OtherPassword123!';
+    const registerResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        email: userEmail,
+        password: userPassword,
+        firstName: 'Other',
+        lastName: 'User',
+        role: 'editor',
+        communityId: otherCommunity.id,
+      },
+    });
+
+    if (registerResponse.statusCode !== 201) {
+      throw new Error(
+        `Other user registration failed: ${registerResponse.body}`
+      );
+    }
+
+    const otherUser = JSON.parse(registerResponse.body).user;
+
+    // Login to get auth cookie
+    const loginResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        email: userEmail,
+        password: userPassword,
+        communityId: otherCommunity.id,
+      },
+    });
+
+    if (loginResponse.statusCode !== 200) {
+      throw new Error(`Other user login failed: ${loginResponse.body}`);
+    }
+
+    // Extract session cookie
+    const cookies = loginResponse.cookies;
+    const sessionCookie = cookies.find((cookie) => cookie.name === 'sessionId');
+    if (!sessionCookie) {
+      throw new Error('No session cookie found for other user');
+    }
+    const otherAuthCookie = `${sessionCookie.name}=${sessionCookie.value}`;
+
+    return {
+      user: otherUser,
+      community: otherCommunity,
+      authCookie: otherAuthCookie,
+    };
+  }
 
   beforeEach(async () => {
-    await setupTestDatabase();
-    app = await build({ testing: true });
+    const db = await testDb.setup();
+    await testDb.clearData();
 
-    // Create test user and community
-    const authResult = await createAuthenticatedUser(app);
-    testUser = authResult.user;
-    testCommunity = authResult.community;
+    // Create test app with test database
+    app = await createTestApp(db);
+    await app.ready();
+
+    // Create test community directly in the database
+    const communitiesTable = await getCommunitiesTable();
+    [testCommunity] = await db
+      .insert(communitiesTable)
+      .values(
+        TestDataFactory.createCommunity({ name: 'Files V2 Test Community' })
+      )
+      .returning();
+
+    // Register user via API to ensure password is handled correctly
+    const userEmail = 'files-v2-user@example.com';
+    const userPassword = 'SecurePassword123!';
+    const registerResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        email: userEmail,
+        password: userPassword,
+        firstName: 'FilesV2',
+        lastName: 'User',
+        role: 'editor',
+        communityId: testCommunity.id,
+      },
+    });
+
+    if (registerResponse.statusCode !== 201) {
+      throw new Error(
+        `Registration failed with status ${registerResponse.statusCode}: ${registerResponse.body}`
+      );
+    }
+
+    const registerResult = JSON.parse(registerResponse.body);
+    testUser = registerResult.user;
+
+    // Login to get auth cookie
+    const loginResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        email: userEmail,
+        password: userPassword,
+        communityId: testCommunity.id,
+      },
+    });
+
+    if (loginResponse.statusCode !== 200) {
+      throw new Error(
+        `Login failed with status ${loginResponse.statusCode}: ${loginResponse.body}`
+      );
+    }
+
+    // Extract session cookie
+    const cookies = loginResponse.cookies;
+    const sessionCookie = cookies.find((cookie) => cookie.name === 'sessionId');
+    if (!sessionCookie) {
+      throw new Error('No session cookie found in login response');
+    }
+    authCookie = `${sessionCookie.name}=${sessionCookie.value}`;
   });
 
   afterEach(async () => {
     await app.close();
-    await cleanupTestDatabase();
   });
 
   describe('POST /api/v1/files-v2/upload', () => {
     it('should upload a file with entity parameters', async () => {
-      const formData = createFormData({
-        file: {
-          filename: 'test.txt',
-          content: 'test file content',
-          mimetype: 'text/plain',
-        },
+      const formData = await createFormDataForUpload({
+        filename: 'test.txt',
+        content: 'test file content',
+        mimetype: 'text/plain',
         community: testCommunity.slug,
         entity: 'stories',
         entityId: '123',
@@ -52,7 +241,7 @@ describe('Files V2 Routes', () => {
         url: '/api/v1/files-v2/upload',
         headers: {
           ...formData.headers,
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
         payload: formData.payload,
       });
@@ -91,12 +280,10 @@ describe('Files V2 Routes', () => {
       ];
 
       for (const { entity, entityId } of entities) {
-        const formData = createFormData({
-          file: {
-            filename: `${entity}-test.txt`,
-            content: `${entity} content`,
-            mimetype: 'text/plain',
-          },
+        const formData = await createFormDataForUpload({
+          filename: `${entity}-test.txt`,
+          content: `${entity} content`,
+          mimetype: 'text/plain',
           community: testCommunity.slug,
           entity,
           entityId: entityId.toString(),
@@ -107,7 +294,7 @@ describe('Files V2 Routes', () => {
           url: '/api/v1/files-v2/upload',
           headers: {
             ...formData.headers,
-            authorization: `Bearer ${testUser.token}`,
+            cookie: authCookie,
           },
           payload: formData.payload,
         });
@@ -145,7 +332,7 @@ describe('Files V2 Routes', () => {
       ];
 
       for (const { missing, fields } of testCases) {
-        const formData = createFormData({
+        const formData = await createFormDataForUpload({
           ...fields,
           ...(missing !== 'file' && {
             file: {
@@ -161,7 +348,7 @@ describe('Files V2 Routes', () => {
           url: '/api/v1/files-v2/upload',
           headers: {
             ...formData.headers,
-            authorization: `Bearer ${testUser.token}`,
+            cookie: authCookie,
           },
           payload: formData.payload,
         });
@@ -177,7 +364,7 @@ describe('Files V2 Routes', () => {
       const invalidEntities = ['invalid', 'users', 'communities', ''];
 
       for (const entity of invalidEntities) {
-        const formData = createFormData({
+        const formData = await createFormDataForUpload({
           file: {
             filename: 'test.txt',
             content: 'test content',
@@ -193,7 +380,7 @@ describe('Files V2 Routes', () => {
           url: '/api/v1/files-v2/upload',
           headers: {
             ...formData.headers,
-            authorization: `Bearer ${testUser.token}`,
+            cookie: authCookie,
           },
           payload: formData.payload,
         });
@@ -225,7 +412,7 @@ describe('Files V2 Routes', () => {
       ];
 
       for (const { filename, mimetype, shouldSucceed } of testCases) {
-        const formData = createFormData({
+        const formData = await createFormDataForUpload({
           file: {
             filename,
             content: 'file content',
@@ -241,7 +428,7 @@ describe('Files V2 Routes', () => {
           url: '/api/v1/files-v2/upload',
           headers: {
             ...formData.headers,
-            authorization: `Bearer ${testUser.token}`,
+            cookie: authCookie,
           },
           payload: formData.payload,
         });
@@ -259,9 +446,9 @@ describe('Files V2 Routes', () => {
 
     it('should enforce community access control', async () => {
       // Create another user in different community
-      const otherAuth = await createAuthenticatedUser(app);
+      const otherAuth = await createCrossCommunitAuth();
 
-      const formData = createFormData({
+      const formData = await createFormDataForUpload({
         file: {
           filename: 'unauthorized.txt',
           content: 'unauthorized content',
@@ -277,7 +464,7 @@ describe('Files V2 Routes', () => {
         url: '/api/v1/files-v2/upload',
         headers: {
           ...formData.headers,
-          authorization: `Bearer ${otherAuth.user.token}`, // Use other user's token
+          cookie: otherAuth.authCookie, // Use other user's cookie
         },
         payload: formData.payload,
       });
@@ -287,7 +474,7 @@ describe('Files V2 Routes', () => {
     });
 
     it('should require authentication', async () => {
-      const formData = createFormData({
+      const formData = await createFormDataForUpload({
         file: {
           filename: 'test.txt',
           content: 'test content',
@@ -312,7 +499,7 @@ describe('Files V2 Routes', () => {
       // Create large file content (assuming 10MB limit)
       const largeContent = 'x'.repeat(11 * 1024 * 1024); // 11MB
 
-      const formData = createFormData({
+      const formData = await createFormDataForUpload({
         file: {
           filename: 'large.txt',
           content: largeContent,
@@ -328,7 +515,7 @@ describe('Files V2 Routes', () => {
         url: '/api/v1/files-v2/upload',
         headers: {
           ...formData.headers,
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
         payload: formData.payload,
       });
@@ -340,7 +527,7 @@ describe('Files V2 Routes', () => {
     it('should handle rate limiting', async () => {
       // Make multiple rapid requests to trigger rate limiting
       const requests = Array.from({ length: 15 }, () => {
-        const formData = createFormData({
+        const formData = await createFormDataForUpload({
           file: {
             filename: 'rate-test.txt',
             content: 'rate limit test',
@@ -356,7 +543,7 @@ describe('Files V2 Routes', () => {
           url: '/api/v1/files-v2/upload',
           headers: {
             ...formData.headers,
-            authorization: `Bearer ${testUser.token}`,
+            cookie: authCookie,
           },
           payload: formData.payload,
         });
@@ -381,7 +568,7 @@ describe('Files V2 Routes', () => {
 
     beforeEach(async () => {
       // Upload a test file first
-      const formData = createFormData({
+      const formData = await createFormDataForUpload({
         file: {
           filename: 'download-test.txt',
           content: 'download test content',
@@ -397,7 +584,7 @@ describe('Files V2 Routes', () => {
         url: '/api/v1/files-v2/upload',
         headers: {
           ...formData.headers,
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
         payload: formData.payload,
       });
@@ -410,7 +597,7 @@ describe('Files V2 Routes', () => {
         method: 'GET',
         url: `/api/v1/files-v2/${testCommunity.slug}/stories/123/${uploadedFile.filename}`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -429,7 +616,7 @@ describe('Files V2 Routes', () => {
         method: 'GET',
         url: `/api/v1/files-v2/${testCommunity.slug}/stories/123/non-existent.txt`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -438,13 +625,13 @@ describe('Files V2 Routes', () => {
     });
 
     it('should enforce community access control', async () => {
-      const otherAuth = await createAuthenticatedUser(app);
+      const otherAuth = await createCrossCommunitAuth();
 
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/files-v2/${testCommunity.slug}/stories/123/${uploadedFile.filename}`,
         headers: {
-          authorization: `Bearer ${otherAuth.user.token}`,
+          cookie: otherAuth.authCookie,
         },
       });
 
@@ -465,7 +652,7 @@ describe('Files V2 Routes', () => {
           method: 'GET',
           url: path,
           headers: {
-            authorization: `Bearer ${testUser.token}`,
+            cookie: authCookie,
           },
         });
 
@@ -485,7 +672,7 @@ describe('Files V2 Routes', () => {
     it('should handle large file streaming', async () => {
       // Upload a larger file first
       const largeContent = 'x'.repeat(1024 * 100); // 100KB
-      const formData = createFormData({
+      const formData = await createFormDataForUpload({
         file: {
           filename: 'large-download.txt',
           content: largeContent,
@@ -501,7 +688,7 @@ describe('Files V2 Routes', () => {
         url: '/api/v1/files-v2/upload',
         headers: {
           ...formData.headers,
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
         payload: formData.payload,
       });
@@ -512,7 +699,7 @@ describe('Files V2 Routes', () => {
         method: 'GET',
         url: `/api/v1/files-v2/${testCommunity.slug}/stories/124/${largeFile.filename}`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -529,7 +716,7 @@ describe('Files V2 Routes', () => {
 
     beforeEach(async () => {
       // Upload a test file first
-      const formData = createFormData({
+      const formData = await createFormDataForUpload({
         file: {
           filename: 'delete-test.txt',
           content: 'to be deleted',
@@ -545,7 +732,7 @@ describe('Files V2 Routes', () => {
         url: '/api/v1/files-v2/upload',
         headers: {
           ...formData.headers,
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
         payload: formData.payload,
       });
@@ -558,7 +745,7 @@ describe('Files V2 Routes', () => {
         method: 'DELETE',
         url: `/api/v1/files-v2/${testCommunity.slug}/stories/123/${uploadedFile.filename}`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -570,7 +757,7 @@ describe('Files V2 Routes', () => {
         method: 'GET',
         url: `/api/v1/files-v2/${testCommunity.slug}/stories/123/${uploadedFile.filename}`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -582,7 +769,7 @@ describe('Files V2 Routes', () => {
         method: 'DELETE',
         url: `/api/v1/files-v2/${testCommunity.slug}/stories/123/non-existent.txt`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -591,13 +778,13 @@ describe('Files V2 Routes', () => {
     });
 
     it('should enforce community access control', async () => {
-      const otherAuth = await createAuthenticatedUser(app);
+      const otherAuth = await createCrossCommunitAuth();
 
       const response = await app.inject({
         method: 'DELETE',
         url: `/api/v1/files-v2/${testCommunity.slug}/stories/123/${uploadedFile.filename}`,
         headers: {
-          authorization: `Bearer ${otherAuth.user.token}`,
+          cookie: otherAuth.authCookie,
         },
       });
 
@@ -641,7 +828,7 @@ describe('Files V2 Routes', () => {
         entityId,
         mimetype = 'text/plain',
       } of testFiles) {
-        const formData = createFormData({
+        const formData = await createFormDataForUpload({
           file: {
             filename: name,
             content: `${entity} content`,
@@ -657,7 +844,7 @@ describe('Files V2 Routes', () => {
           url: '/api/v1/files-v2/upload',
           headers: {
             ...formData.headers,
-            authorization: `Bearer ${testUser.token}`,
+            cookie: authCookie,
           },
           payload: formData.payload,
         });
@@ -669,7 +856,7 @@ describe('Files V2 Routes', () => {
         method: 'GET',
         url: `/api/v1/files-v2/list?community=${testCommunity.slug}`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -691,7 +878,7 @@ describe('Files V2 Routes', () => {
         method: 'GET',
         url: `/api/v1/files-v2/list?community=${testCommunity.slug}&entity=stories`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -709,7 +896,7 @@ describe('Files V2 Routes', () => {
         method: 'GET',
         url: `/api/v1/files-v2/list?community=${testCommunity.slug}&entity=stories&entityId=123`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -725,7 +912,7 @@ describe('Files V2 Routes', () => {
         method: 'GET',
         url: `/api/v1/files-v2/list?community=${testCommunity.slug}&page=1&limit=2`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -740,7 +927,7 @@ describe('Files V2 Routes', () => {
         method: 'GET',
         url: `/api/v1/files-v2/list?community=${testCommunity.slug}&page=2&limit=2`,
         headers: {
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
       });
 
@@ -750,13 +937,13 @@ describe('Files V2 Routes', () => {
     });
 
     it('should enforce community access control', async () => {
-      const otherAuth = await createAuthenticatedUser(app);
+      const otherAuth = await createCrossCommunitAuth();
 
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/files-v2/list?community=${testCommunity.slug}`,
         headers: {
-          authorization: `Bearer ${otherAuth.user.token}`,
+          cookie: otherAuth.authCookie,
         },
       });
 
@@ -789,7 +976,7 @@ describe('Files V2 Routes', () => {
           method: 'GET',
           url: `/api/v1/files-v2/list${query}`,
           headers: {
-            authorization: `Bearer ${testUser.token}`,
+            cookie: authCookie,
           },
         });
 
@@ -808,7 +995,7 @@ describe('Files V2 Routes', () => {
             url: '/api/v1/files-v2/upload',
             headers: {
               'content-type': 'application/json',
-              authorization: `Bearer ${testUser.token}`,
+              cookie: authCookie,
             },
             payload: '{"invalid": json}',
           },
@@ -819,7 +1006,7 @@ describe('Files V2 Routes', () => {
           request: {
             method: 'GET' as const,
             url: '/api/v1/files-v2/invalid-path',
-            headers: { authorization: `Bearer ${testUser.token}` },
+            headers: { cookie: authCookie },
           },
           expectedStatus: 404,
         },
@@ -845,7 +1032,7 @@ describe('Files V2 Routes', () => {
         },
       };
 
-      const formData = createFormData({
+      const formData = await createFormDataForUpload({
         file: {
           filename: 'error-test.txt',
           content: 'error content',
@@ -861,7 +1048,7 @@ describe('Files V2 Routes', () => {
         url: '/api/v1/files-v2/upload',
         headers: {
           ...formData.headers,
-          authorization: `Bearer ${testUser.token}`,
+          cookie: authCookie,
         },
         payload: formData.payload,
       });

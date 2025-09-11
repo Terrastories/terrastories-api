@@ -143,14 +143,30 @@ export class FileServiceV2 {
       throw new FileValidationError('Filename is required', 'filename');
     }
 
-    // Convert to buffer if needed
+    // Convert to buffer (support stream and buffer)
     let fileBuffer: Buffer;
     if (Buffer.isBuffer(file.file)) {
       fileBuffer = file.file;
+    } else if (typeof (file.file as any).on === 'function') {
+      const chunks: Buffer[] = [];
+      let total = 0;
+      await new Promise<void>((resolve, reject) => {
+        (file.file as any)
+          .on('data', (chunk: Buffer) => {
+            total += chunk.length;
+            if (total > this.config.maxSizeBytes) {
+              (file.file as any).destroy?.();
+              reject(new FileSizeError(total, this.config.maxSizeBytes));
+              return;
+            }
+            chunks.push(chunk);
+          })
+          .on('end', () => resolve())
+          .on('error', (err: Error) => reject(err));
+      });
+      fileBuffer = Buffer.concat(chunks);
     } else {
-      // Handle stream case - in practice this would need to be read to buffer
-      // For now, assume file.file is already a buffer in tests
-      fileBuffer = file.file as unknown as Buffer;
+      throw new FileValidationError('Unsupported file input type', 'file');
     }
 
     // Validate file size

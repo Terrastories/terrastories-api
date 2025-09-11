@@ -330,6 +330,71 @@ describe('CommunityService', () => {
         ).rejects.toThrow(CommunityValidationError);
       });
     });
+
+    it('should create community with Rails compatibility fields (country and beta)', async () => {
+      // Arrange
+      const createRequest: CreateCommunityRequest = {
+        name: 'Canadian Heritage Community',
+        description: 'A community in Canada for testing Rails compatibility',
+        country: 'CA',
+        beta: true,
+      };
+
+      // Act
+      const result = await communityService.createCommunity(createRequest);
+
+      // Assert
+      expect(result).toBeDefined();
+      expect(result.name).toBe('Canadian Heritage Community');
+      expect(result.country).toBe('CA');
+      expect(result.beta).toBe(true);
+    });
+
+    it('should create community with null country and default beta=false', async () => {
+      // Arrange
+      const createRequest: CreateCommunityRequest = {
+        name: 'Default Rails Fields Community',
+        description: 'A community with default Rails compatibility fields',
+        // country and beta not provided
+      };
+
+      // Act
+      const result = await communityService.createCommunity(createRequest);
+
+      // Assert
+      expect(result).toBeDefined();
+      expect(result.name).toBe('Default Rails Fields Community');
+      expect(result.country).toBeNull();
+      expect(result.beta).toBe(false);
+    });
+
+    it('should throw validation error for invalid country code', async () => {
+      // Arrange
+      const createRequest: CreateCommunityRequest = {
+        name: 'Invalid Country Community',
+        description: 'A community with invalid country code',
+        country: 'USA', // Should be 2 characters
+      };
+
+      // Act & Assert
+      await expect(
+        communityService.createCommunity(createRequest)
+      ).rejects.toThrow(CommunityValidationError);
+    });
+
+    it('should throw validation error for lowercase country code', async () => {
+      // Arrange
+      const createRequest: CreateCommunityRequest = {
+        name: 'Lowercase Country Community',
+        description: 'A community with lowercase country code',
+        country: 'us', // Should be uppercase
+      };
+
+      // Act & Assert
+      await expect(
+        communityService.createCommunity(createRequest)
+      ).rejects.toThrow(CommunityValidationError);
+    });
   });
 
   describe('getCommunityById', () => {
@@ -616,6 +681,84 @@ describe('CommunityService', () => {
       // Act & Assert
       await expect(
         communityService.updateCommunity(community.id, { name: '' })
+      ).rejects.toThrow(CommunityValidationError);
+    });
+
+    it('should update Rails compatibility fields (country and beta)', async () => {
+      // Arrange
+      const community = await communityService.createCommunity({
+        name: 'Test Community',
+        country: 'US',
+        beta: false,
+      });
+
+      const updates: UpdateCommunityRequest = {
+        country: 'CA',
+        beta: true,
+      };
+
+      // Act
+      const result = await communityService.updateCommunity(
+        community.id,
+        updates
+      );
+
+      // Assert
+      expect(result.country).toBe('CA');
+      expect(result.beta).toBe(true);
+      expect(result.name).toBe('Test Community'); // Should remain unchanged
+    });
+
+    it('should update country to null', async () => {
+      // Arrange
+      const community = await communityService.createCommunity({
+        name: 'Test Community',
+        country: 'US',
+      });
+
+      const updates: UpdateCommunityRequest = {
+        country: null,
+      };
+
+      // Act
+      const result = await communityService.updateCommunity(
+        community.id,
+        updates
+      );
+
+      // Assert
+      expect(result.country).toBeNull();
+    });
+
+    it('should throw validation error for invalid country code in update', async () => {
+      // Arrange
+      const community = await communityService.createCommunity({
+        name: 'Test Community',
+      });
+
+      const updates: UpdateCommunityRequest = {
+        country: 'USA', // Should be 2 characters
+      };
+
+      // Act & Assert
+      await expect(
+        communityService.updateCommunity(community.id, updates)
+      ).rejects.toThrow(CommunityValidationError);
+    });
+
+    it('should throw validation error for lowercase country code in update', async () => {
+      // Arrange
+      const community = await communityService.createCommunity({
+        name: 'Test Community',
+      });
+
+      const updates: UpdateCommunityRequest = {
+        country: 'us', // Should be uppercase
+      };
+
+      // Act & Assert
+      await expect(
+        communityService.updateCommunity(community.id, updates)
       ).rejects.toThrow(CommunityValidationError);
     });
   });

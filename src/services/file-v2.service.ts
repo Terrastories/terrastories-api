@@ -119,7 +119,7 @@ export class FileServiceV2 {
       return result;
     } catch (error) {
       if (error instanceof Error) {
-        throw new Error(`File upload failed: ${error.message}`);
+        throw error; // preserve original message for upstream mapping
       }
       throw new Error('File upload failed: Unknown error');
     }

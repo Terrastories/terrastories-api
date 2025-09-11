@@ -526,7 +526,7 @@ describe('Files V2 Routes', () => {
 
     it('should handle rate limiting', async () => {
       // Make multiple rapid requests to trigger rate limiting
-      const requests = Array.from({ length: 15 }, () => {
+      const requests = Array.from({ length: 15 }, async () => {
         const formData = await createFormDataForUpload({
           file: {
             filename: 'rate-test.txt',

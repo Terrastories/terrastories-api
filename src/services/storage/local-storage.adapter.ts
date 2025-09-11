@@ -9,7 +9,7 @@
  */
 
 import { promises as fs } from 'fs';
-import { join, dirname, normalize, resolve } from 'path';
+import { join, dirname, normalize, resolve, relative } from 'path';
 import { createHash } from 'crypto';
 import type {
   StorageAdapter,
@@ -52,10 +52,13 @@ export class LocalStorageAdapter implements StorageAdapter {
     const resolvedPath = resolve(fullPath);
     const resolvedBaseDir = resolve(this.baseDir);
 
-    if (
-      !resolvedPath.startsWith(resolvedBaseDir + '/') &&
-      resolvedPath !== resolvedBaseDir
-    ) {
+    // Use path.relative to check containment in a cross-platform way
+    const relativePath = relative(resolvedBaseDir, resolvedPath);
+    const isInsideBase =
+      relativePath === '' ||
+      (!relativePath.startsWith('..') && !relativePath.startsWith('/'));
+
+    if (!isInsideBase) {
       throw new Error('Invalid path: path traversal detected');
     }
 
@@ -80,13 +83,7 @@ export class LocalStorageAdapter implements StorageAdapter {
     const fullPath = join(this.baseDir, safePath);
 
     // Ensure the file path doesn't escape the base directory
-    const resolvedPath = resolve(fullPath);
-    const resolvedBaseDir = resolve(this.baseDir);
-
-    if (
-      !resolvedPath.startsWith(resolvedBaseDir + '/') &&
-      resolvedPath !== resolvedBaseDir
-    ) {
+    if (!this.isPathContained(fullPath)) {
       throw new Error('Invalid path: path traversal detected');
     }
 
@@ -113,13 +110,7 @@ export class LocalStorageAdapter implements StorageAdapter {
     const fullPath = join(this.baseDir, safePath);
 
     // Ensure the file path doesn't escape the base directory
-    const resolvedPath = resolve(fullPath);
-    const resolvedBaseDir = resolve(this.baseDir);
-
-    if (
-      !resolvedPath.startsWith(resolvedBaseDir + '/') &&
-      resolvedPath !== resolvedBaseDir
-    ) {
+    if (!this.isPathContained(fullPath)) {
       throw new Error('Invalid path: path traversal detected');
     }
 
@@ -143,13 +134,7 @@ export class LocalStorageAdapter implements StorageAdapter {
       const fullPath = join(this.baseDir, safePath);
 
       // Ensure the file path doesn't escape the base directory
-      const resolvedPath = resolve(fullPath);
-      const resolvedBaseDir = resolve(this.baseDir);
-
-      if (
-        !resolvedPath.startsWith(resolvedBaseDir + '/') &&
-        resolvedPath !== resolvedBaseDir
-      ) {
+      if (!this.isPathContained(fullPath)) {
         return false;
       }
 
@@ -165,13 +150,7 @@ export class LocalStorageAdapter implements StorageAdapter {
     const fullPath = join(this.baseDir, safePath);
 
     // Ensure the file path doesn't escape the base directory
-    const resolvedPath = resolve(fullPath);
-    const resolvedBaseDir = resolve(this.baseDir);
-
-    if (
-      !resolvedPath.startsWith(resolvedBaseDir + '/') &&
-      resolvedPath !== resolvedBaseDir
-    ) {
+    if (!this.isPathContained(fullPath)) {
       throw new Error('Invalid path: path traversal detected');
     }
 
@@ -244,5 +223,22 @@ export class LocalStorageAdapter implements StorageAdapter {
     }
 
     return normalized;
+  }
+
+  /**
+   * Cross-platform containment check using path.relative
+   * @param fullPath - The full resolved path to check
+   * @returns true if path is contained within base directory
+   */
+  private isPathContained(fullPath: string): boolean {
+    const resolvedPath = resolve(fullPath);
+    const resolvedBaseDir = resolve(this.baseDir);
+
+    // Use path.relative to check containment in a cross-platform way
+    const relativePath = relative(resolvedBaseDir, resolvedPath);
+    return (
+      relativePath === '' ||
+      (!relativePath.startsWith('..') && !relativePath.startsWith('/'))
+    );
   }
 }

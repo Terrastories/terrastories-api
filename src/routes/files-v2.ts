@@ -230,14 +230,20 @@ export async function filesV2Routes(fastify: FastifyInstance) {
         }
 
         // Parse form fields from multipart data
-        // For now, we'll use query parameters like the existing file service
-        // In a production implementation, proper multipart field parsing would be needed
-        const query = request.query as Record<string, unknown>;
-
+        // Try to get fields from file object first, fallback to query parameters
         const fields = {
-          community: query.community,
-          entity: query.entity,
-          entityId: query.entityId,
+          community:
+            (file.fields?.community as any)?.value ||
+            file.fields?.community ||
+            (request.query as any).community,
+          entity:
+            (file.fields?.entity as any)?.value ||
+            file.fields?.entity ||
+            (request.query as any).entity,
+          entityId:
+            (file.fields?.entityId as any)?.value ||
+            file.fields?.entityId ||
+            (request.query as any).entityId,
         };
 
         const validatedFields = uploadRequestSchema.parse(fields);

@@ -20,6 +20,9 @@ import type {
  * This suite can be used to test any implementation of StorageAdapter
  * to ensure it follows the expected contract.
  */
+// Import LocalStorageAdapter for testing
+import { LocalStorageAdapter } from '../../../src/services/storage/local-storage.adapter.js';
+
 export function testStorageAdapterCompliance(
   name: string,
   createAdapter: () => StorageAdapter,
@@ -355,3 +358,29 @@ export function testStorageAdapterCompliance(
     });
   });
 }
+
+// Run compliance tests for LocalStorageAdapter
+describe('LocalStorageAdapter Interface Compliance', () => {
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = join(
+      tmpdir(),
+      `interface-test-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    );
+    await fs.mkdir(testDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    try {
+      await fs.rm(testDir, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup errors
+    }
+  });
+
+  testStorageAdapterCompliance(
+    'LocalStorage',
+    () => new LocalStorageAdapter({ baseDir: testDir })
+  );
+});

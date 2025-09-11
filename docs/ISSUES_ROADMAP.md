@@ -859,7 +859,7 @@ Production validation tests revealed critical operational gaps blocking Indigeno
 
 **Solution - Phase 2 (Important)**:
 
-- Add `country` and `beta` fields to COMMUNITIES table
+- ✅ Add `country` and `beta` fields to COMMUNITIES table ✅ **COMPLETED** in PR #93 (Issue #88)
 - Add `typeOfPlace` field to PLACES table
 - Add `birthplaceId` field to SPEAKERS table
 
@@ -871,7 +871,7 @@ Production validation tests revealed critical operational gaps blocking Indigeno
 - [ ] Migration scripts updated to handle new schema changes
 - [ ] All new fields have proper Zod validation schemas
 - [ ] Existing tests updated to work with enhanced schema
-- [ ] Community configuration fields added for deployment flexibility
+- [x] Community configuration fields added for deployment flexibility ✅ **COMPLETED** (country + beta fields)
 
 **GitHub Issue**: TBD (Issue #65)
 

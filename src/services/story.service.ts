@@ -26,6 +26,8 @@ import type { FileRepository } from '../repositories/file.repository.js';
 import type { UserRepository } from '../repositories/user.repository.js';
 import type { User } from '../db/schema/users.js';
 import type { Logger } from '../shared/types/index.js';
+import { getConfig } from '../shared/config/index.js';
+import { fileOperationsMetrics } from '../shared/metrics/file-operations.js';
 
 /**
  * Cultural protocols for story access and modifications
@@ -49,6 +51,9 @@ export interface StoryCreateInput {
   communityId: number;
   createdBy: number;
   mediaUrls?: string[];
+  // Direct file URL fields for dual-read capability (Issue #89)
+  imageUrl?: string;
+  audioUrl?: string;
   placeIds?: number[];
   speakerIds?: number[];
   culturalProtocols?: CulturalProtocols;
@@ -113,6 +118,104 @@ export class StoryService {
     private readonly userRepository: UserRepository,
     private readonly logger: Logger
   ) {}
+
+  /**
+   * Log file operation for observability (Issue #89)
+   */
+  private logFileOperation(
+    operation: 'upload' | 'access' | 'delete' | 'dual_read',
+    details: {
+      storyId: number;
+      userId?: number;
+      fileType?: 'image' | 'audio' | 'legacy';
+      fileUrl?: string;
+      bytesTransferred?: number;
+      duration?: number;
+      success?: boolean;
+      errorMessage?: string;
+      feature?: 'native_enabled' | 'legacy_mode';
+    }
+  ): void {
+    const logData = {
+      operation: `FILE_${operation.toUpperCase()}`,
+      timestamp: new Date().toISOString(),
+      storyId: details.storyId,
+      userId: details.userId,
+      fileType: details.fileType,
+      fileUrl: details.fileUrl,
+      bytesTransferred: details.bytesTransferred,
+      duration: details.duration,
+      success: details.success ?? true,
+      feature: details.feature,
+      ...(details.errorMessage && { error: details.errorMessage }),
+    };
+
+    if (details.success === false) {
+      this.logger.error('[FILE_OPERATION_FAILURE]', logData);
+    } else {
+      this.logger.info('[FILE_OPERATION]', logData);
+    }
+
+    // Record metrics (Issue #89)
+    fileOperationsMetrics.recordOperation(
+      operation,
+      details.success ?? true,
+      details.bytesTransferred || 0,
+      details.duration || 0
+    );
+  }
+
+  /**
+   * Apply dual-read logic to story with file URL resolution
+   * Issue #89: Supports both native file URL columns and legacy mediaUrls array
+   */
+  private applyDualRead(story: StoryWithRelations): StoryWithRelations {
+    const config = getConfig();
+    const startTime = Date.now();
+
+    if (config.features.filesNativeEnabled) {
+      // Native file URLs enabled - prefer direct columns, fallback to mediaUrls array
+      const imageUrl = story.imageUrl || story.mediaUrls?.[0];
+      const audioUrl = story.audioUrl || story.mediaUrls?.[1];
+
+      // Log dual-read operation with metrics
+      this.logFileOperation('dual_read', {
+        storyId: story.id,
+        duration: Date.now() - startTime,
+        feature: 'native_enabled',
+        fileType: 'image',
+        fileUrl: imageUrl,
+        success: true,
+      });
+
+      return {
+        ...story,
+        // Native fields (preferred)
+        imageUrl,
+        audioUrl,
+        // Legacy field (for backward compatibility, marked deprecated in API)
+        mediaUrls: story.mediaUrls || [],
+      };
+    } else {
+      // Legacy mode - use mediaUrls array only
+      this.logFileOperation('dual_read', {
+        storyId: story.id,
+        duration: Date.now() - startTime,
+        feature: 'legacy_mode',
+        fileType: 'legacy',
+        success: true,
+      });
+
+      return {
+        ...story,
+        // Native fields set to null when disabled
+        imageUrl: null,
+        audioUrl: null,
+        // Legacy field (primary source)
+        mediaUrls: story.mediaUrls || [],
+      };
+    }
+  }
 
   /**
    * Create a new story with cultural protocol validation
@@ -229,6 +332,8 @@ export class StoryService {
     }
 
     // Prepare data for repository
+    // Dual-write logic: prepare data for both native columns and legacy mediaUrls
+    const config = getConfig();
     const storyData: StoryCreateData = {
       title: input.title,
       description: input.description,
@@ -236,6 +341,9 @@ export class StoryService {
       communityId: input.communityId,
       createdBy: input.createdBy,
       mediaUrls: input.mediaUrls,
+      // Direct file URL fields (Issue #89)
+      imageUrl: config.features.filesNativeEnabled ? input.imageUrl : undefined,
+      audioUrl: config.features.filesNativeEnabled ? input.audioUrl : undefined,
       language: input.language,
       tags: input.tags,
       isRestricted,
@@ -251,6 +359,30 @@ export class StoryService {
     // Create story
     const story = await this.storyRepository.create(storyData);
 
+    // Log file operations for observability (Issue #89)
+    if (input.imageUrl) {
+      this.logFileOperation('upload', {
+        storyId: story.id,
+        userId,
+        fileType: 'image',
+        fileUrl: input.imageUrl,
+        feature: config.features.filesNativeEnabled
+          ? 'native_enabled'
+          : 'legacy_mode',
+      });
+    }
+    if (input.audioUrl) {
+      this.logFileOperation('upload', {
+        storyId: story.id,
+        userId,
+        fileType: 'audio',
+        fileUrl: input.audioUrl,
+        feature: config.features.filesNativeEnabled
+          ? 'native_enabled'
+          : 'legacy_mode',
+      });
+    }
+
     // Audit log for cultural oversight
     await this.logCulturalAccess(
       story,
@@ -265,7 +397,7 @@ export class StoryService {
       userId,
     });
 
-    return story;
+    return this.applyDualRead(story);
   }
 
   /**
@@ -339,7 +471,7 @@ export class StoryService {
       true
     );
 
-    return story;
+    return this.applyDualRead(story);
   }
 
   /**
@@ -407,7 +539,7 @@ export class StoryService {
       true
     );
 
-    return story;
+    return this.applyDualRead(story);
   }
 
   /**
@@ -522,10 +654,19 @@ export class StoryService {
       : undefined;
 
     // Prepare update data
+    // Dual-write logic for updates: prepare data for both native columns and legacy mediaUrls
+    const config = getConfig();
     const updateData: Partial<StoryCreateData> = {
       title: updates.title,
       description: updates.description,
       mediaUrls: updates.mediaUrls,
+      // Direct file URL fields (Issue #89)
+      imageUrl: config.features.filesNativeEnabled
+        ? updates.imageUrl
+        : undefined,
+      audioUrl: config.features.filesNativeEnabled
+        ? updates.audioUrl
+        : undefined,
       language: updates.language,
       tags: updates.tags,
       placeIds: updates.placeIds,
@@ -536,6 +677,30 @@ export class StoryService {
       interviewLocationId: updates.interviewLocationId,
       interviewerId: updates.interviewerId,
     };
+
+    // Log file updates for observability (Issue #89)
+    if (updates.imageUrl && updates.imageUrl !== existingStory.imageUrl) {
+      this.logFileOperation('upload', {
+        storyId: id,
+        userId,
+        fileType: 'image',
+        fileUrl: updates.imageUrl,
+        feature: config.features.filesNativeEnabled
+          ? 'native_enabled'
+          : 'legacy_mode',
+      });
+    }
+    if (updates.audioUrl && updates.audioUrl !== existingStory.audioUrl) {
+      this.logFileOperation('upload', {
+        storyId: id,
+        userId,
+        fileType: 'audio',
+        fileUrl: updates.audioUrl,
+        feature: config.features.filesNativeEnabled
+          ? 'native_enabled'
+          : 'legacy_mode',
+      });
+    }
 
     // Perform update
     const updatedStory = await this.storyRepository.update(id, updateData);
@@ -601,6 +766,37 @@ export class StoryService {
 
     // Permission validation
     this.validateDeletionPermissions(existingStory, userId, userRole);
+
+    // Log file deletions for observability (Issue #89)
+    if (existingStory.imageUrl) {
+      this.logFileOperation('delete', {
+        storyId: id,
+        userId,
+        fileType: 'image',
+        fileUrl: existingStory.imageUrl,
+        feature: 'native_enabled',
+      });
+    }
+    if (existingStory.audioUrl) {
+      this.logFileOperation('delete', {
+        storyId: id,
+        userId,
+        fileType: 'audio',
+        fileUrl: existingStory.audioUrl,
+        feature: 'native_enabled',
+      });
+    }
+    if (existingStory.mediaUrls?.length) {
+      existingStory.mediaUrls.forEach((url) => {
+        this.logFileOperation('delete', {
+          storyId: id,
+          userId,
+          fileType: 'legacy',
+          fileUrl: url,
+          feature: 'legacy_mode',
+        });
+      });
+    }
 
     // Perform deletion
     const success = await this.storyRepository.delete(id);
@@ -681,7 +877,7 @@ export class StoryService {
       // Return database results directly - no additional in-memory filtering
       // All cultural protocol filtering is now handled by database queries
       return {
-        data: result.data,
+        data: result.data.map((story) => this.applyDualRead(story)),
         total: result.total,
         page: result.page,
         limit: result.limit,
@@ -718,7 +914,7 @@ export class StoryService {
       userCommunityId
     );
 
-    return result.data;
+    return result.data.map((story) => this.applyDualRead(story));
   }
 
   /**
@@ -1030,7 +1226,7 @@ export class StoryService {
       });
 
       return {
-        stories: publicStories,
+        stories: publicStories.map((story) => this.applyDualRead(story)),
         total: result.total, // Use actual total from repository
       };
     } catch (error) {
@@ -1095,7 +1291,7 @@ export class StoryService {
         communityId: parseInt(communityId, 10),
       });
 
-      return story;
+      return this.applyDualRead(story);
     } catch (error) {
       this.logger.error('Failed to get public story by ID:', {
         error: error instanceof Error ? error.message : String(error),

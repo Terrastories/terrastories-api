@@ -75,12 +75,21 @@ export const placeSchemas = {
           type: 'string',
           format: 'uri',
         },
-        description: 'Array of media file URLs associated with this place',
+        description:
+          'DEPRECATED: Use photoUrl instead. Array of media file URLs associated with this place',
         example: [
           'https://example.com/images/sacred-mountain.jpg',
           'https://example.com/audio/ceremony-sounds.mp3',
         ],
         default: [],
+        deprecated: true,
+      },
+      photoUrl: {
+        type: 'string',
+        format: 'uri',
+        description:
+          'Direct URL to the primary photo file for this place (dual-read capability)',
+        example: 'https://example.com/images/sacred-mountain.jpg',
       },
       culturalSignificance: {
         type: 'string',

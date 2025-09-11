@@ -149,6 +149,8 @@ export interface FeatureConfig {
   mediaUpload: boolean;
   /** Enable admin interface */
   adminInterface: boolean;
+  /** Enable native file URL columns (dual-read functionality) */
+  filesNativeEnabled: boolean;
 }
 
 /**

@@ -40,6 +40,8 @@ export const speakersPg = pgTable('speakers', {
   bio: pgText('bio'),
   communityId: pgInteger('community_id').notNull(),
   photoUrl: pgText('photo_url'),
+  // Direct file URL column for dual-read capability (Issue #89)
+  bioAudioUrl: pgText('bio_audio_url'),
   birthYear: pgInteger('birth_year'),
   elderStatus: boolean('elder_status').notNull().default(false),
   culturalRole: pgText('cultural_role'),
@@ -57,6 +59,8 @@ export const speakersSqlite = sqliteTable('speakers', {
     .notNull()
     .references(() => communitiesSqlite.id),
   photoUrl: sqliteText('photo_url'),
+  // Direct file URL column for dual-read capability (Issue #89)
+  bioAudioUrl: sqliteText('bio_audio_url'),
   birthYear: integer('birth_year'),
   elderStatus: integer('elder_status', { mode: 'boolean' })
     .notNull()

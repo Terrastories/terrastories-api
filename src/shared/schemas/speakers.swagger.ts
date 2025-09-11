@@ -54,6 +54,13 @@ export const speakerSchemas = {
         description: "URL to the speaker's profile photo",
         example: 'https://example.com/photos/maria-awati.jpg',
       },
+      bioAudioUrl: {
+        type: 'string',
+        format: 'uri',
+        description:
+          'Direct URL to audio biography file for this speaker (dual-read capability)',
+        example: 'https://example.com/audio/maria-awati-bio.mp3',
+      },
       birthYear: {
         type: 'integer',
         minimum: 1900,

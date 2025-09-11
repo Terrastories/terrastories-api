@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { healthRoute } from './health.js';
 import { authRoutes } from './auth.js';
 import { fileRoutes } from './files.js';
+import { filesV2Routes } from './files-v2.js';
 import { communityRoutes } from './communities.js';
 import storiesRoutes from './stories.js';
 import { placesRoutes } from './places.js';
@@ -31,6 +32,7 @@ export async function registerRoutes(
   await app.register(authRoutes, { prefix: '/api/v1', ...opts });
   await app.register(communityRoutes, { prefix: '/api/v1', ...opts });
   await app.register(fileRoutes, { prefix: '/api/v1/files', ...opts });
+  await app.register(filesV2Routes, { prefix: '/api/v1/files-v2', ...opts });
   await app.register(storiesRoutes, { prefix: '/api/v1/stories', ...opts });
   await app.register(placesRoutes, { prefix: '/api/v1', ...opts });
   await app.register(speakerRoutes, { prefix: '/api/v1', ...opts });

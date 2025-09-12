@@ -65,12 +65,28 @@ export const storySchemas = {
           type: 'string',
           format: 'uri',
         },
-        description: 'Array of media file URLs associated with this story',
+        description:
+          'DEPRECATED: Use imageUrl and audioUrl instead. Array of media file URLs associated with this story',
         example: [
           'https://example.com/audio/story1.mp3',
           'https://example.com/images/mountain.jpg',
         ],
         default: [],
+        deprecated: true,
+      },
+      imageUrl: {
+        type: 'string',
+        format: 'uri',
+        description:
+          'Direct URL to the primary image file for this story (dual-read capability)',
+        example: 'https://example.com/images/mountain.jpg',
+      },
+      audioUrl: {
+        type: 'string',
+        format: 'uri',
+        description:
+          'Direct URL to the primary audio file for this story (dual-read capability)',
+        example: 'https://example.com/audio/story1.mp3',
       },
       language: {
         type: 'string',
@@ -145,9 +161,25 @@ export const storySchemas = {
           type: 'string',
           format: 'uri',
         },
-        description: 'Array of media file URLs associated with this story',
+        description:
+          'DEPRECATED: Use imageUrl and audioUrl instead. Array of media file URLs associated with this story',
         example: ['https://example.com/audio/story1.mp3'],
         default: [],
+        deprecated: true,
+      },
+      imageUrl: {
+        type: 'string',
+        format: 'uri',
+        description:
+          'Direct URL to the primary image file for this story (dual-read capability)',
+        example: 'https://example.com/images/story-image.jpg',
+      },
+      audioUrl: {
+        type: 'string',
+        format: 'uri',
+        description:
+          'Direct URL to the primary audio file for this story (dual-read capability)',
+        example: 'https://example.com/audio/story1.mp3',
       },
       language: {
         type: 'string',
@@ -199,8 +231,24 @@ export const storySchemas = {
           type: 'string',
           format: 'uri',
         },
-        description: 'Updated array of media file URLs',
+        description:
+          'DEPRECATED: Use imageUrl and audioUrl instead. Updated array of media file URLs',
         example: ['https://example.com/audio/story1_updated.mp3'],
+        deprecated: true,
+      },
+      imageUrl: {
+        type: 'string',
+        format: 'uri',
+        description:
+          'Updated direct URL to the primary image file (dual-read capability)',
+        example: 'https://example.com/images/updated-image.jpg',
+      },
+      audioUrl: {
+        type: 'string',
+        format: 'uri',
+        description:
+          'Updated direct URL to the primary audio file (dual-read capability)',
+        example: 'https://example.com/audio/story1_updated.mp3',
       },
       language: {
         type: 'string',
@@ -493,6 +541,8 @@ export const storyExamples = {
       'https://example.com/audio/sacred_mountain_story.mp3',
       'https://example.com/images/sacred_mountain.jpg',
     ],
+    imageUrl: 'https://example.com/images/sacred_mountain.jpg',
+    audioUrl: 'https://example.com/audio/sacred_mountain_story.mp3',
     language: 'en',
     tags: [
       'traditional-knowledge',
@@ -511,6 +561,8 @@ export const storyExamples = {
     createdBy: 5,
     isRestricted: false,
     mediaUrls: ['https://example.com/audio/story.mp3'],
+    imageUrl: 'https://example.com/images/story-image.jpg',
+    audioUrl: 'https://example.com/audio/story.mp3',
     language: 'en',
     tags: ['traditional-knowledge', 'sacred-places'],
   },
@@ -524,6 +576,8 @@ export const storyExamples = {
     createdBy: 3,
     isRestricted: true,
     mediaUrls: [],
+    imageUrl: null,
+    audioUrl: null,
     language: 'indigenous-lang',
     tags: ['traditional-knowledge', 'ceremony', 'elders', 'restricted'],
     createdAt: '2024-01-10T14:20:00Z',
@@ -544,6 +598,8 @@ export const storyExamples = {
       'https://example.com/images/migration_map.jpg',
       'https://example.com/images/seasonal_markers.jpg',
     ],
+    imageUrl: 'https://example.com/images/migration_map.jpg',
+    audioUrl: 'https://example.com/audio/elder_narration.mp3',
     language: 'en',
     tags: ['migration', 'seasons', 'traditional-knowledge', 'geography'],
     createdAt: '2024-01-20T09:15:00Z',
@@ -561,6 +617,8 @@ export const storyExamples = {
         createdBy: 5,
         isRestricted: false,
         mediaUrls: ['https://example.com/audio/story1.mp3'],
+        imageUrl: 'https://example.com/images/story1-image.jpg',
+        audioUrl: 'https://example.com/audio/story1.mp3',
         language: 'en',
         tags: ['traditional-knowledge', 'sacred-places'],
         createdAt: '2024-01-15T10:30:00Z',
@@ -574,6 +632,8 @@ export const storyExamples = {
         createdBy: 3,
         isRestricted: false,
         mediaUrls: [],
+        imageUrl: null,
+        audioUrl: null,
         language: 'en',
         tags: ['creation', 'origin', 'traditional-knowledge'],
         createdAt: '2024-01-10T14:20:00Z',

@@ -40,6 +40,9 @@ export interface CreateCommunityRequest {
   locale?: string;
   culturalSettings?: CulturalProtocols | string;
   isActive?: boolean;
+  // Rails compatibility fields
+  country?: string;
+  beta?: boolean;
 }
 
 /**
@@ -52,6 +55,9 @@ export interface UpdateCommunityRequest {
   locale?: string;
   culturalSettings?: CulturalProtocols | string;
   isActive?: boolean;
+  // Rails compatibility fields
+  country?: string;
+  beta?: boolean;
 }
 
 // Community response type now imported from schema validation
@@ -263,6 +269,15 @@ export class CommunityService {
         );
       }
     }
+
+    // Validate country code if provided (ISO 3166-1 alpha-2)
+    if (data.country) {
+      if (data.country.length !== 2 || !/^[A-Z]{2}$/.test(data.country)) {
+        throw new CommunityValidationError(
+          'Country code must be a 2-character uppercase ISO 3166-1 alpha-2 code (e.g., US, CA, MX)'
+        );
+      }
+    }
   }
 
   /**
@@ -289,6 +304,9 @@ export class CommunityService {
         locale: data.locale || 'en',
         culturalSettings: culturalSettingsJson,
         isActive: data.isActive ?? true,
+        // Rails compatibility fields
+        country: data.country || undefined,
+        beta: data.beta ?? false,
       };
 
       // Create community through repository
@@ -343,6 +361,9 @@ export class CommunityService {
         locale: community.locale,
         culturalSettings: community.culturalSettings,
         isActive: community.isActive,
+        // Rails compatibility fields
+        country: community.country,
+        beta: community.beta,
         createdAt: toISOString(community.createdAt),
         updatedAt: toISOString(community.updatedAt),
       };
@@ -502,6 +523,18 @@ export class CommunityService {
         }
       }
 
+      // Validate country code if provided (ISO 3166-1 alpha-2)
+      if (updates.country !== undefined && updates.country !== null) {
+        if (
+          updates.country.length !== 2 ||
+          !/^[A-Z]{2}$/.test(updates.country)
+        ) {
+          throw new CommunityValidationError(
+            'Country code must be a 2-character uppercase ISO 3166-1 alpha-2 code (e.g., US, CA, MX)'
+          );
+        }
+      }
+
       // Process cultural settings
       const culturalSettingsJson = this.validateCulturalSettings(
         updates.culturalSettings
@@ -515,6 +548,9 @@ export class CommunityService {
         locale: updates.locale,
         culturalSettings: culturalSettingsJson,
         isActive: updates.isActive,
+        // Rails compatibility fields
+        country: updates.country,
+        beta: updates.beta,
       };
 
       // Remove undefined values
@@ -825,6 +861,9 @@ export class CommunityService {
           publicStories: community.publicStories,
           isActive: community.isActive,
           userCount: 0, // Actual count added at route level
+          // Rails compatibility fields
+          country: community.country,
+          beta: community.beta,
           createdAt: toISOString(community.createdAt),
           updatedAt: toISOString(community.updatedAt),
         };

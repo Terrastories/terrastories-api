@@ -58,6 +58,8 @@ export const placesPg = pgTable(
     longitude: pgReal('longitude').notNull(),
     region: pgText('region'),
     mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
+    // Direct file URL column for dual-read capability (Issue #89)
+    photoUrl: pgText('photo_url'),
     culturalSignificance: pgText('cultural_significance'),
     isRestricted: boolean('is_restricted').notNull().default(false),
     createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -84,6 +86,8 @@ export const placesSqlite = sqliteTable('places', {
   mediaUrls: sqliteText('media_urls', { mode: 'json' })
     .$type<string[]>()
     .default([]),
+  // Direct file URL column for dual-read capability (Issue #89)
+  photoUrl: sqliteText('photo_url'),
   culturalSignificance: sqliteText('cultural_significance'),
   isRestricted: integer('is_restricted', { mode: 'boolean' })
     .notNull()

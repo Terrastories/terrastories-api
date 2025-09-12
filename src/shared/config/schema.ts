@@ -149,6 +149,7 @@ export const FeatureConfigSchema = z.object({
   syncEnabled: z.boolean().default(true),
   mediaUpload: z.boolean().default(true),
   adminInterface: z.boolean().default(true),
+  filesNativeEnabled: booleanFromEnv(false),
 });
 
 // Main application configuration schema
@@ -189,6 +190,7 @@ export const FieldKitConfigSchema = AppConfigSchema.extend({
     syncEnabled: z.boolean().default(false),
     mediaUpload: z.boolean().default(true),
     adminInterface: z.boolean().default(true),
+    filesNativeEnabled: booleanFromEnv(true), // Enable native files in field-kit
   }),
   logging: LoggingConfigSchema.extend({
     level: LogLevelSchema.default('info' as LogLevel),
@@ -204,6 +206,7 @@ export const OfflineConfigSchema = AppConfigSchema.extend({
     syncEnabled: z.boolean().default(false),
     mediaUpload: z.boolean().default(false),
     adminInterface: z.boolean().default(false),
+    filesNativeEnabled: booleanFromEnv(true), // Enable native files in offline mode
   }),
   logging: LoggingConfigSchema.extend({
     level: LogLevelSchema.default('error' as LogLevel),

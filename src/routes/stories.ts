@@ -33,6 +33,27 @@ import {
   requireCommunityAccess,
   type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
+import { getConfig } from '../shared/config/index.js';
+
+/**
+ * Add deprecation warnings to API responses for legacy file fields
+ * Issue #89: Mark mediaUrls as deprecated when FILES_NATIVE_ENABLED=true
+ */
+function addDeprecationWarnings() {
+  const config = getConfig();
+  const warnings = [];
+
+  if (config.features.filesNativeEnabled) {
+    warnings.push({
+      field: 'mediaUrls',
+      message: 'DEPRECATED: Use imageUrl and audioUrl fields instead',
+      deprecatedIn: 'v2.0.0',
+      removedIn: 'v3.0.0',
+    });
+  }
+
+  return warnings.length > 0 ? warnings : undefined;
+}
 
 // Request validation schemas
 const createStorySchema = z.object({
@@ -46,6 +67,9 @@ const createStorySchema = z.object({
     .optional(),
   communityId: z.number().int().positive(),
   mediaUrls: z.array(z.string().url()).optional(),
+  // Direct file URL fields for dual-read capability (Issue #89)
+  imageUrl: z.string().url().optional(),
+  audioUrl: z.string().url().optional(),
   language: z.string().min(2).max(10).default('en'),
   tags: z.array(z.string()).optional(),
   culturalProtocols: z
@@ -496,7 +520,11 @@ export default async function storiesRoutes(
           return reply.status(404).send({ error: 'Story not found' });
         }
 
-        return reply.send({ data: story });
+        const warnings = addDeprecationWarnings();
+        return reply.send({
+          data: story,
+          ...(warnings && { deprecations: warnings }),
+        });
       } catch (error: unknown) {
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
@@ -611,7 +639,11 @@ export default async function storiesRoutes(
           return reply.status(404).send({ error: 'Story not found' });
         }
 
-        return reply.send({ data: story });
+        const warnings = addDeprecationWarnings();
+        return reply.send({
+          data: story,
+          ...(warnings && { deprecations: warnings }),
+        });
       } catch (error: unknown) {
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
@@ -839,9 +871,11 @@ export default async function storiesRoutes(
           userRole
         );
 
+        const warnings = addDeprecationWarnings();
         return reply.send({
           data: story,
           message: 'Story updated successfully',
+          ...(warnings && { deprecations: warnings }),
         });
       } catch (error: unknown) {
         const errorMessage =
@@ -1156,6 +1190,7 @@ export default async function storiesRoutes(
           communityId
         );
 
+        const warnings = addDeprecationWarnings();
         return reply.send({
           data: result.data,
           meta: {
@@ -1164,6 +1199,7 @@ export default async function storiesRoutes(
             limit: result.limit,
             totalPages: result.totalPages,
           },
+          ...(warnings && { deprecations: warnings }),
         });
       } catch (error: unknown) {
         const errorMessage =

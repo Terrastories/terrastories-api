@@ -32,6 +32,9 @@ export interface CreateCommunityData {
   locale?: string;
   culturalSettings?: string;
   isActive?: boolean;
+  // Rails compatibility fields
+  country?: string;
+  beta?: boolean;
 }
 
 /**
@@ -45,6 +48,9 @@ export interface UpdateCommunityData {
   culturalSettings?: string;
   isActive?: boolean;
   updatedAt?: Date;
+  // Rails compatibility fields
+  country?: string;
+  beta?: boolean;
 }
 
 /**
@@ -56,6 +62,9 @@ export interface CommunitySearchParams {
   isActive?: boolean;
   limit?: number;
   offset?: number;
+  // Rails compatibility filters
+  country?: string;
+  beta?: boolean;
 }
 
 /**
@@ -122,6 +131,13 @@ export class CommunityRepository {
     return 'execute' in this.database ? communitiesPg : communitiesSqlite;
   }
 
+  // Type-safe database query wrapper to reduce explicit any casting
+  private get db() {
+    // While we still need to cast here, we centralize it to one place
+    // This is a common pattern in drizzle ORM with union database types
+    return this.database as any;
+  }
+
   /**
    * Generate a unique slug from community name
    * @param name - Community name
@@ -156,7 +172,7 @@ export class CommunityRepository {
         conditions.push(sql`${this.communities.id} != ${excludeId}`);
       }
 
-      const existing = await (this.database as any)
+      const existing = await this.db
         .select({ id: this.communities.id })
         .from(this.communities)
         .where(and(...conditions))
@@ -211,6 +227,8 @@ export class CommunityRepository {
         }
       }
 
+      // Country validation handled by Zod schema at service layer
+
       // Prepare community data
       const communityData: NewCommunity = {
         name: data.name.trim(),
@@ -220,12 +238,15 @@ export class CommunityRepository {
         locale: data.locale || 'en',
         culturalSettings: data.culturalSettings || null,
         isActive: data.isActive ?? true,
+        // Rails compatibility fields
+        country: data.country || null,
+        beta: data.beta ?? false,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
 
       // Create community
-      const result = await (this.database as any)
+      const result = await this.db
         .insert(this.communities)
         .values(communityData)
         .returning();
@@ -263,7 +284,7 @@ export class CommunityRepository {
    */
   async findById(id: number): Promise<Community | null> {
     try {
-      const result = await (this.database as any)
+      const result = await this.db
         .select()
         .from(this.communities)
         .where(eq(this.communities.id, id))
@@ -284,7 +305,7 @@ export class CommunityRepository {
    */
   async findBySlug(slug: string): Promise<Community | null> {
     try {
-      const result = await (this.database as any)
+      const result = await this.db
         .select()
         .from(this.communities)
         .where(eq(this.communities.slug, slug))
@@ -305,7 +326,15 @@ export class CommunityRepository {
    */
   async search(params: CommunitySearchParams = {}): Promise<Community[]> {
     try {
-      const { query, locale, isActive, limit = 50, offset = 0 } = params;
+      const {
+        query,
+        locale,
+        isActive,
+        country,
+        beta,
+        limit = 50,
+        offset = 0,
+      } = params;
 
       // Build where conditions
       const conditions = [];
@@ -331,11 +360,21 @@ export class CommunityRepository {
         conditions.push(eq(this.communities.isActive, isActive));
       }
 
+      // Filter by country
+      if (country) {
+        conditions.push(eq(this.communities.country, country));
+      }
+
+      // Filter by beta status
+      if (beta !== undefined) {
+        conditions.push(eq(this.communities.beta, beta));
+      }
+
       // Execute query with pagination
       const whereClause =
         conditions.length > 0 ? and(...conditions) : undefined;
 
-      const result = await (this.database as any)
+      const result = await this.db
         .select()
         .from(this.communities)
         .where(whereClause)
@@ -410,6 +449,8 @@ export class CommunityRepository {
         }
       }
 
+      // Country validation handled by Zod schema at service layer
+
       // Prepare update data
       const updateData = {
         ...updates,
@@ -427,7 +468,7 @@ export class CommunityRepository {
       );
 
       // Update community
-      const result = await (this.database as any)
+      const result = await this.db
         .update(this.communities)
         .set(cleanUpdateData)
         .where(eq(this.communities.id, id))
@@ -463,7 +504,7 @@ export class CommunityRepository {
       }
 
       // Delete community (CASCADE should handle related data)
-      const result = await (this.database as any)
+      const result = await this.db
         .delete(this.communities)
         .where(eq(this.communities.id, id))
         .returning();
@@ -498,7 +539,7 @@ export class CommunityRepository {
       const whereClause =
         conditions.length > 0 ? and(...conditions) : undefined;
 
-      const result = await (this.database as any)
+      const result = await this.db
         .select({ count: count() })
         .from(this.communities)
         .where(whereClause);
@@ -524,7 +565,7 @@ export class CommunityRepository {
         conditions.push(sql`${this.communities.id} != ${excludeId}`);
       }
 
-      const result = await (this.database as any)
+      const result = await this.db
         .select({ id: this.communities.id })
         .from(this.communities)
         .where(and(...conditions))

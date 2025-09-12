@@ -176,9 +176,9 @@ export const insertUserSchema = createInsertSchema(usersPg, {
 
 export const selectUserSchema = createSelectSchema(usersPg);
 
-// TypeScript types
-export type User = typeof usersPg.$inferSelect;
-export type NewUser = typeof usersPg.$inferInsert;
+// TypeScript types - Use SQLite for consistency with current deployment
+export type User = typeof usersSqlite.$inferSelect;
+export type NewUser = typeof usersSqlite.$inferInsert;
 export type CreateUserData = NewUser;
 export type UpdateUserData = Partial<NewUser>;
 

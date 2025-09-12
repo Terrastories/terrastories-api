@@ -121,9 +121,9 @@ export const storyPlacesSqliteRelations = relations(
 export const insertStoryPlaceSchema = createInsertSchema(storyPlacesPg);
 export const selectStoryPlaceSchema = createSelectSchema(storyPlacesPg);
 
-// TypeScript types
-export type StoryPlace = typeof storyPlacesPg.$inferSelect;
-export type NewStoryPlace = typeof storyPlacesPg.$inferInsert;
+// TypeScript types - Use SQLite for consistency with current deployment
+export type StoryPlace = typeof storyPlacesSqlite.$inferSelect;
+export type NewStoryPlace = typeof storyPlacesSqlite.$inferInsert;
 
 // Additional validation schemas for specific use cases
 export const createStoryPlaceSchema = insertStoryPlaceSchema.omit({

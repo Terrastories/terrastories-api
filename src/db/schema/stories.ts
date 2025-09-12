@@ -196,8 +196,9 @@ export const insertStorySchema = createInsertSchema(storiesPg, {
 export const selectStorySchema = createSelectSchema(storiesPg);
 
 // TypeScript types
-export type Story = typeof storiesPg.$inferSelect;
-export type NewStory = typeof storiesPg.$inferInsert;
+// For development/test environments using SQLite
+export type Story = typeof storiesSqlite.$inferSelect;
+export type NewStory = typeof storiesSqlite.$inferInsert;
 
 // Additional validation schemas for specific use cases
 export const createStorySchema = insertStorySchema

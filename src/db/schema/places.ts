@@ -144,9 +144,9 @@ export const insertPlaceSchema = createInsertSchema(placesPg, {
 
 export const selectPlaceSchema = createSelectSchema(placesPg);
 
-// TypeScript types
-export type Place = typeof placesPg.$inferSelect;
-export type NewPlace = typeof placesPg.$inferInsert;
+// TypeScript types - Use SQLite for consistency with current deployment
+export type Place = typeof placesSqlite.$inferSelect;
+export type NewPlace = typeof placesSqlite.$inferInsert;
 
 // Additional validation schemas for specific use cases
 export const createPlaceSchema = insertPlaceSchema.omit({

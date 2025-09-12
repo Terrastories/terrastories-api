@@ -122,9 +122,9 @@ export const insertSpeakerSchema = createInsertSchema(speakersPg, {
 
 export const selectSpeakerSchema = createSelectSchema(speakersPg);
 
-// TypeScript types
-export type Speaker = typeof speakersPg.$inferSelect;
-export type NewSpeaker = typeof speakersPg.$inferInsert;
+// TypeScript types - Use SQLite for consistency with current deployment
+export type Speaker = typeof speakersSqlite.$inferSelect;
+export type NewSpeaker = typeof speakersSqlite.$inferInsert;
 
 // Additional validation schemas for specific use cases
 export const createSpeakerSchema = insertSpeakerSchema.omit({

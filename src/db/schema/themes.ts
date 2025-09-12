@@ -218,7 +218,7 @@ export const updateThemeSchema = createThemeSchema
   .partial()
   .omit({ communityId: true });
 
-// TypeScript types
+// TypeScript types - Use SQLite for consistency with current deployment
 export type ThemePg = typeof themesPg.$inferSelect;
 export type ThemeSqlite = typeof themesSqlite.$inferSelect;
 export type NewThemePg = typeof themesPg.$inferInsert;
@@ -226,11 +226,10 @@ export type NewThemeSqlite = typeof themesSqlite.$inferInsert;
 export type CreateTheme = z.infer<typeof createThemeSchema>;
 export type UpdateTheme = z.infer<typeof updateThemeSchema>;
 
-// Generic types that work with both databases
-export type Theme = ThemePg | ThemeSqlite;
-export type NewTheme = NewThemePg | NewThemeSqlite;
+// Consistent types for current SQLite deployment
+export type Theme = typeof themesSqlite.$inferSelect;
+export type NewTheme = typeof themesSqlite.$inferInsert;
 
-// Export the appropriate table based on database type
-export const themes = process.env.NODE_ENV === 'test' ? themesSqlite : themesPg;
-export const themesRelations =
-  process.env.NODE_ENV === 'test' ? themesSqliteRelations : themesPgRelations;
+// Export the SQLite table to match the types
+export const themes = themesSqlite;
+export const themesRelations = themesSqliteRelations;

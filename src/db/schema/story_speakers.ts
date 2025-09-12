@@ -121,9 +121,9 @@ export const storySpeakersSqliteRelations = relations(
 export const insertStorySpeakerSchema = createInsertSchema(storySpeakersPg);
 export const selectStorySpeakerSchema = createSelectSchema(storySpeakersPg);
 
-// TypeScript types
-export type StorySpeaker = typeof storySpeakersPg.$inferSelect;
-export type NewStorySpeaker = typeof storySpeakersPg.$inferInsert;
+// TypeScript types - Use SQLite for consistency with current deployment
+export type StorySpeaker = typeof storySpeakersSqlite.$inferSelect;
+export type NewStorySpeaker = typeof storySpeakersSqlite.$inferInsert;
 
 // Additional validation schemas for specific use cases
 export const createStorySpeakerSchema = insertStorySpeakerSchema.omit({

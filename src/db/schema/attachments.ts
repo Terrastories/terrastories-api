@@ -56,7 +56,7 @@ export async function getAttachmentsTable() {
 }
 
 // Zod schemas
-export const insertAttachmentSchema = createInsertSchema(attachmentsPg, {
+export const insertAttachmentSchema = createInsertSchema(attachmentsSqlite, {
   url: z.string().url('Invalid URL format'),
   attachableId: z
     .number()
@@ -65,7 +65,7 @@ export const insertAttachmentSchema = createInsertSchema(attachmentsPg, {
   attachableType: z.string().min(1, 'Attachable type cannot be empty'),
 });
 
-export const selectAttachmentSchema = createSelectSchema(attachmentsPg);
+export const selectAttachmentSchema = createSelectSchema(attachmentsSqlite);
 
 // TypeScript types - Use SQLite for consistency with current deployment
 export type Attachment = typeof attachmentsSqlite.$inferSelect;

@@ -230,7 +230,6 @@ export type UpdateTheme = z.infer<typeof updateThemeSchema>;
 export type Theme = typeof themesSqlite.$inferSelect;
 export type NewTheme = typeof themesSqlite.$inferInsert;
 
-// Export the appropriate table based on database type
-export const themes = process.env.NODE_ENV === 'test' ? themesSqlite : themesPg;
-export const themesRelations =
-  process.env.NODE_ENV === 'test' ? themesSqliteRelations : themesPgRelations;
+// Export the SQLite table to match the types
+export const themes = themesSqlite;
+export const themesRelations = themesSqliteRelations;

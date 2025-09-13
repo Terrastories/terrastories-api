@@ -101,8 +101,12 @@ async function main(): Promise<void> {
           );
           console.log(`Community isolation: Maintained`);
           console.log('\nDetailed Results:', JSON.stringify(analysis, null, 2));
-        } catch (error: any) {
-          if (error.message.includes('Community not found')) {
+        } catch (error: unknown) {
+          const msg =
+            error && typeof error === 'object' && 'message' in error
+              ? String((error as any).message)
+              : '';
+          if (msg.includes('Community not found')) {
             console.error('❌ Community not found');
             process.exit(1);
           }
@@ -150,8 +154,12 @@ async function main(): Promise<void> {
             '\nDetailed Dry Run Results:',
             JSON.stringify(dryRunResult, null, 2)
           );
-        } catch (error: any) {
-          if (error.message.includes('Community not found')) {
+        } catch (error: unknown) {
+          const msg =
+            error && typeof error === 'object' && 'message' in error
+              ? String((error as any).message)
+              : '';
+          if (msg.includes('Community not found')) {
             console.error('❌ Community not found');
             process.exit(1);
           }
@@ -184,8 +192,10 @@ async function main(): Promise<void> {
             }
 
             console.log(`${result.filesMigrated} files migrated`);
-            console.log(`${result.filesSkipped} files failed`);
-            console.log(`${result.filesProcessed * 1024} bytes migrated`);
+            console.log(`${result.filesSkipped} files skipped`);
+            if (typeof result.bytesMigrated === 'number') {
+              console.log(`${result.bytesMigrated} bytes migrated`);
+            }
             console.log(`${result.filesMigrated} checksum matches`);
             console.log(
               `${result.culturalRestrictions?.elderOnlyFiles || 0} cultural protocols preserved`
@@ -198,8 +208,12 @@ async function main(): Promise<void> {
               '\nDetailed Migration Result:',
               JSON.stringify(result, null, 2)
             );
-          } catch (error: any) {
-            if (error.message.includes('Community not found')) {
+          } catch (error: unknown) {
+            const msg =
+              error && typeof error === 'object' && 'message' in error
+                ? String((error as any).message)
+                : '';
+            if (msg.includes('Community not found')) {
               console.error('❌ Community not found');
               process.exit(1);
             }

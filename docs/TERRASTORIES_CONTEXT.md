@@ -8,7 +8,7 @@ Terrastories is a sophisticated **offline-first geostorytelling application** de
 
 - **Original Stack**: Ruby on Rails (v5.2+) backend with a hybrid React frontend (react-rails gem)
 - **Database**: PostgreSQL with PostGIS for spatial data
-- **Storage**: Rails ActiveStorage for media files (audio, video, images)
+- **Storage**: Native TypeScript file service for media files (audio, video, images)
 - **Deployment**: Dockerized multi-service architecture (Rails, PostgreSQL, Nginx, Tileserver)
 - **Key Feature**: Multi-tenant design where each "Community" is a distinct data silo
 
@@ -42,7 +42,7 @@ The primary content entity, representing oral histories and narratives.
   - belongs_to a Community
   - has_and_belongs_to_many Places
   - has_and_belongs_to_many Speakers
-  - has_many_attached media files (via ActiveStorage in Rails)
+  - has_many_attached media files (via native TypeScript file service)
 
 ### Place
 
@@ -131,19 +131,22 @@ Key endpoints:
 
 ## Media Handling Architecture
 
-### Original Rails Implementation (ActiveStorage)
+### Current TypeScript Implementation (Post-Migration)
 
-- **Polymorphic Associations**: Files can be attached to any model (Story, Place, Speaker)
-- **Blob Storage**: File metadata stored in `active_storage_blobs` table
-- **Attachments**: Relationship data in `active_storage_attachments` table
-- **File Organization**: Files stored with UUID-based keys in Rails storage directory
+**Native File Service**: Complete replacement of ActiveStorage with TypeScript file service (`file-v2.service.ts`)
 
-### TypeScript Migration Strategy
+- **Direct File System**: Files stored directly in community-organized structure
+- **Community Isolation**: Files organized by community: `uploads/<community>/<entity>/<id>/`
+- **File Organization**: Direct paths stored in database (no blob/attachment tables)
+- **Media URL Generation**: Direct file serving with community-scoped access control
+- **Cultural Protocols**: Indigenous data sovereignty maintained throughout file operations
 
-- **Direct File System**: Replace ActiveStorage with direct file system storage
-- **Community Isolation**: Organize files by community: `uploads/community_{id}/{stories|places|speakers}/`
-- **Media URL Generation**: Direct file serving with access control
-- **Migration Process**: ActiveStorage-to-filesystem migration script with integrity validation
+### Migration Completed (2025-09-12)
+
+- ✅ **Legacy Removal**: ActiveStorage tables and code safely removed
+- ✅ **Data Preservation**: All files migrated with integrity validation
+- ✅ **Zero Downtime**: Seamless transition maintained service availability
+- ✅ **Audit Trail**: Complete migration records preserved in archive
 
 ### File Upload Implementation
 

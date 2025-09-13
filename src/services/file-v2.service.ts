@@ -122,12 +122,21 @@ export class FileServiceV2 {
     if (this.isAppConfig(config)) {
       // Convert AppConfig to internal format
       this.config = this.convertAppConfigToInternal(config);
+      // eslint-disable-next-line no-console
+      console.warn(
+        'FileServiceV2: Using centralized AppConfig. Consider migrating legacy FileServiceV2Config usage.'
+      );
     } else {
       // Handle legacy FileServiceV2Config format
       const baseUploadPath = config?.baseUploadPath || 'uploads';
 
       // Validate baseUploadPath for security (even in legacy mode)
       this.validateUploadPath(baseUploadPath);
+
+      // eslint-disable-next-line no-console
+      console.warn(
+        'FileServiceV2: Using legacy FileServiceV2Config format. Consider migrating to centralized AppConfig system for better configuration management.'
+      );
 
       this.config = {
         maxSizeBytes: config?.maxSizeBytes || 25 * 1024 * 1024, // 25MB
@@ -535,13 +544,15 @@ export class FileServiceV2 {
     const hasFileService =
       'fileService' in config &&
       config.fileService != null &&
-      typeof (config as Record<string, unknown>).fileService === 'object';
+      typeof config.fileService === 'object';
 
     if (!hasFileService) return false;
 
     // Validate that fileService has the expected structure
-    const fileService = (config as Record<string, unknown>)
-      .fileService as Record<string, unknown>;
+    const fileService = config.fileService as unknown as Record<
+      string,
+      unknown
+    >;
     const hasRequiredProps =
       typeof fileService.maxSizeMB === 'number' &&
       typeof fileService.enableVideo === 'boolean' &&
@@ -594,6 +605,30 @@ export class FileServiceV2 {
       );
     }
 
+    // Check for very long paths that could cause filesystem issues
+    if (uploadPath.length > 255) {
+      throw new FileValidationError(
+        'Upload path is too long (max 255 characters)',
+        'baseUploadPath'
+      );
+    }
+
+    // Check for URL schemes (http://, https://, ftp://, etc.)
+    if (/^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(uploadPath)) {
+      throw new FileValidationError(
+        'Invalid upload path: URLs are not allowed',
+        'baseUploadPath'
+      );
+    }
+
+    // Check for Windows drive notation (C:, D:, etc.)
+    if (/^[a-zA-Z]:/.test(uploadPath)) {
+      throw new FileValidationError(
+        'Invalid upload path: Windows drive notation not allowed',
+        'baseUploadPath'
+      );
+    }
+
     // Check for path traversal attempts
     if (
       uploadPath.includes('..') ||
@@ -604,6 +639,19 @@ export class FileServiceV2 {
     ) {
       throw new FileValidationError(
         'Invalid upload path: contains path traversal or dangerous characters',
+        'baseUploadPath'
+      );
+    }
+
+    // Check for Unicode path traversal attempts
+    if (
+      uploadPath.includes('\u2215') || // Division slash
+      uploadPath.includes('\u2216') || // Set minus
+      uploadPath.includes('\u2044') || // Fraction slash
+      uploadPath.includes('\u29F8') // Big solidus
+    ) {
+      throw new FileValidationError(
+        'Invalid upload path: contains Unicode path traversal characters',
         'baseUploadPath'
       );
     }

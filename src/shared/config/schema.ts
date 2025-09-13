@@ -190,6 +190,10 @@ export const FileServiceConfigSchema = z.object({
   baseUploadPath: z
     .string()
     .min(1, 'baseUploadPath cannot be empty')
+    .refine(
+      (path) => path.trim().length > 0,
+      'baseUploadPath cannot be whitespace-only'
+    )
     .default('uploads'),
   enableCulturalProtocols: booleanFromEnv(false), // Placeholder for Indigenous data sovereignty
 });

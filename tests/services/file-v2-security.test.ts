@@ -5,6 +5,11 @@ import {
 } from '../../src/services/file-v2.service.js';
 import type { StorageAdapter } from '../../src/services/storage/storage-adapter.interface.js';
 import type { AppConfig } from '../../src/shared/config/types.js';
+import {
+  createValidAppConfig,
+  createMaliciousAppConfig,
+  createMaliciousLegacyConfig,
+} from '../helpers/test-fixtures.js';
 
 // Mock StorageAdapter
 const mockStorageAdapter: StorageAdapter = {
@@ -23,97 +28,49 @@ describe('FileServiceV2 Security Validation', () => {
 
   describe('Upload Path Security Validation', () => {
     it('should reject path traversal attempts in AppConfig', () => {
-      const maliciousAppConfig: Partial<AppConfig> = {
-        fileService: {
-          maxSizeMB: 25,
-          enableVideo: false,
-          encryptAtRest: false,
-          uploadRateLimit: 10,
-          baseUploadPath: '../../../etc/passwd',
-          enableCulturalProtocols: false,
-        },
-      };
+      const maliciousAppConfig = createMaliciousAppConfig(
+        '../../../etc/passwd'
+      );
 
       expect(
-        () =>
-          new FileServiceV2(mockStorageAdapter, maliciousAppConfig as AppConfig)
+        () => new FileServiceV2(mockStorageAdapter, maliciousAppConfig)
       ).toThrow(FileValidationError);
     });
 
     it('should reject absolute paths in AppConfig', () => {
-      const maliciousAppConfig: Partial<AppConfig> = {
-        fileService: {
-          maxSizeMB: 25,
-          enableVideo: false,
-          encryptAtRest: false,
-          uploadRateLimit: 10,
-          baseUploadPath: '/etc/passwd',
-          enableCulturalProtocols: false,
-        },
-      };
+      const maliciousAppConfig = createMaliciousAppConfig('/etc/passwd');
 
       expect(
-        () =>
-          new FileServiceV2(mockStorageAdapter, maliciousAppConfig as AppConfig)
+        () => new FileServiceV2(mockStorageAdapter, maliciousAppConfig)
       ).toThrow(FileValidationError);
     });
 
     it('should reject double slashes in AppConfig', () => {
-      const maliciousAppConfig: Partial<AppConfig> = {
-        fileService: {
-          maxSizeMB: 25,
-          enableVideo: false,
-          encryptAtRest: false,
-          uploadRateLimit: 10,
-          baseUploadPath: 'uploads//malicious',
-          enableCulturalProtocols: false,
-        },
-      };
+      const maliciousAppConfig = createMaliciousAppConfig('uploads//malicious');
 
       expect(
-        () =>
-          new FileServiceV2(mockStorageAdapter, maliciousAppConfig as AppConfig)
+        () => new FileServiceV2(mockStorageAdapter, maliciousAppConfig)
       ).toThrow(FileValidationError);
     });
 
     it('should reject Windows dangerous characters', () => {
-      const maliciousAppConfig: Partial<AppConfig> = {
-        fileService: {
-          maxSizeMB: 25,
-          enableVideo: false,
-          encryptAtRest: false,
-          uploadRateLimit: 10,
-          baseUploadPath: 'uploads<malicious>',
-          enableCulturalProtocols: false,
-        },
-      };
+      const maliciousAppConfig = createMaliciousAppConfig('uploads<malicious>');
 
       expect(
-        () =>
-          new FileServiceV2(mockStorageAdapter, maliciousAppConfig as AppConfig)
+        () => new FileServiceV2(mockStorageAdapter, maliciousAppConfig)
       ).toThrow(FileValidationError);
     });
 
     it('should reject null bytes', () => {
-      const maliciousAppConfig: Partial<AppConfig> = {
-        fileService: {
-          maxSizeMB: 25,
-          enableVideo: false,
-          encryptAtRest: false,
-          uploadRateLimit: 10,
-          baseUploadPath: 'uploads\0malicious',
-          enableCulturalProtocols: false,
-        },
-      };
+      const maliciousAppConfig = createMaliciousAppConfig('uploads\0malicious');
 
       expect(
-        () =>
-          new FileServiceV2(mockStorageAdapter, maliciousAppConfig as AppConfig)
+        () => new FileServiceV2(mockStorageAdapter, maliciousAppConfig)
       ).toThrow(FileValidationError);
     });
 
     it('should accept valid relative paths', () => {
-      const validAppConfig: Partial<AppConfig> = {
+      const validAppConfig = createValidAppConfig({
         fileService: {
           maxSizeMB: 25,
           enableVideo: false,
@@ -122,21 +79,17 @@ describe('FileServiceV2 Security Validation', () => {
           baseUploadPath: 'uploads/custom/path',
           enableCulturalProtocols: false,
         },
-      };
+      });
 
       expect(
-        () => new FileServiceV2(mockStorageAdapter, validAppConfig as AppConfig)
+        () => new FileServiceV2(mockStorageAdapter, validAppConfig)
       ).not.toThrow();
     });
 
     it('should also validate legacy config baseUploadPath', () => {
-      const maliciousLegacyConfig = {
-        maxSizeBytes: 25 * 1024 * 1024,
-        allowedMimeTypes: ['image/*'],
-        enableVideo: false,
-        uploadRateLimit: 10,
-        baseUploadPath: '../../../etc/passwd',
-      };
+      const maliciousLegacyConfig = createMaliciousLegacyConfig(
+        '../../../etc/passwd'
+      );
 
       expect(
         () => new FileServiceV2(mockStorageAdapter, maliciousLegacyConfig)
@@ -144,38 +97,57 @@ describe('FileServiceV2 Security Validation', () => {
     });
 
     it('should validate empty paths', () => {
-      const invalidAppConfig: Partial<AppConfig> = {
-        fileService: {
-          maxSizeMB: 25,
-          enableVideo: false,
-          encryptAtRest: false,
-          uploadRateLimit: 10,
-          baseUploadPath: '',
-          enableCulturalProtocols: false,
-        },
-      };
+      const invalidAppConfig = createMaliciousAppConfig('');
 
       expect(
-        () =>
-          new FileServiceV2(mockStorageAdapter, invalidAppConfig as AppConfig)
+        () => new FileServiceV2(mockStorageAdapter, invalidAppConfig)
       ).toThrow(FileValidationError);
     });
 
     it('should validate whitespace-only paths', () => {
-      const invalidAppConfig: Partial<AppConfig> = {
-        fileService: {
-          maxSizeMB: 25,
-          enableVideo: false,
-          encryptAtRest: false,
-          uploadRateLimit: 10,
-          baseUploadPath: '   ',
-          enableCulturalProtocols: false,
-        },
-      };
+      const invalidAppConfig = createMaliciousAppConfig('   ');
 
       expect(
-        () =>
-          new FileServiceV2(mockStorageAdapter, invalidAppConfig as AppConfig)
+        () => new FileServiceV2(mockStorageAdapter, invalidAppConfig)
+      ).toThrow(FileValidationError);
+    });
+
+    it('should reject Windows drive notation', () => {
+      const maliciousAppConfig = createMaliciousAppConfig(
+        'C:\\Windows\\System32'
+      );
+
+      expect(
+        () => new FileServiceV2(mockStorageAdapter, maliciousAppConfig)
+      ).toThrow(FileValidationError);
+    });
+
+    it('should reject unicode path traversal attempts', () => {
+      const maliciousAppConfig = createMaliciousAppConfig(
+        'uploads\u2215..\u2215etc\u2215passwd'
+      ); // Unicode slash
+
+      expect(
+        () => new FileServiceV2(mockStorageAdapter, maliciousAppConfig)
+      ).toThrow(FileValidationError);
+    });
+
+    it('should reject URLs as paths', () => {
+      const maliciousAppConfig = createMaliciousAppConfig(
+        'http://evil.com/uploads'
+      );
+
+      expect(
+        () => new FileServiceV2(mockStorageAdapter, maliciousAppConfig)
+      ).toThrow(FileValidationError);
+    });
+
+    it('should reject very long paths', () => {
+      const veryLongPath = 'a'.repeat(300); // Exceeds most filesystem limits
+      const maliciousAppConfig = createMaliciousAppConfig(veryLongPath);
+
+      expect(
+        () => new FileServiceV2(mockStorageAdapter, maliciousAppConfig)
       ).toThrow(FileValidationError);
     });
   });

@@ -31,8 +31,6 @@ import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
 import { usersPg } from './users.js';
-import { placesPg, placesSqlite } from './places.js';
-import { speakersPg, speakersSqlite } from './speakers.js';
 
 // Media URL validation schema
 export const MediaUrlSchema = z.string().url('Invalid media URL format');
@@ -42,23 +40,12 @@ export const storiesPg = pgTable('stories', {
   id: serial('id').primaryKey(),
   title: pgText('title').notNull(),
   description: pgText('description'),
-  slug: pgText('slug').notNull(),
   communityId: pgInteger('community_id').notNull(),
   createdBy: pgInteger('created_by').notNull(),
   isRestricted: boolean('is_restricted').notNull().default(false),
-  privacyLevel: pgText('privacy_level').notNull().default('public'),
   mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
-  // Direct file URL columns for dual-read capability (Issue #89)
-  imageUrl: pgText('image_url'),
-  audioUrl: pgText('audio_url'),
   language: pgText('language').notNull().default('en'),
   tags: jsonb('tags').$type<string[]>().default([]),
-  // Interview metadata fields for Indigenous storytelling context
-  dateInterviewed: timestamp('date_interviewed'),
-  interviewLocationId: pgInteger('interview_location_id').references(
-    () => placesPg.id
-  ),
-  interviewerId: pgInteger('interviewer_id').references(() => speakersPg.id),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -68,7 +55,6 @@ export const storiesSqlite = sqliteTable('stories', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   title: sqliteText('title').notNull(),
   description: sqliteText('description'),
-  slug: sqliteText('slug').notNull(),
   communityId: integer('community_id')
     .notNull()
     .references(() => communitiesSqlite.id),
@@ -76,21 +62,11 @@ export const storiesSqlite = sqliteTable('stories', {
   isRestricted: integer('is_restricted', { mode: 'boolean' })
     .notNull()
     .default(false),
-  privacyLevel: sqliteText('privacy_level').notNull().default('public'),
   mediaUrls: sqliteText('media_urls', { mode: 'json' })
     .$type<string[]>()
     .default([]),
-  // Direct file URL columns for dual-read capability (Issue #89)
-  imageUrl: sqliteText('image_url'),
-  audioUrl: sqliteText('audio_url'),
   language: sqliteText('language').notNull().default('en'),
   tags: sqliteText('tags', { mode: 'json' }).$type<string[]>().default([]),
-  // Interview metadata fields for Indigenous storytelling context
-  dateInterviewed: integer('date_interviewed', { mode: 'timestamp' }),
-  interviewLocationId: integer('interview_location_id').references(
-    () => placesSqlite.id
-  ),
-  interviewerId: integer('interviewer_id').references(() => speakersSqlite.id),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -124,15 +100,6 @@ export const storiesRelations = relations(
       fields: [storiesPg.createdBy],
       references: [usersPg.id],
     }),
-    // Interview metadata relations
-    interviewLocation: one(placesPg, {
-      fields: [storiesPg.interviewLocationId],
-      references: [placesPg.id],
-    }),
-    interviewer: one(speakersPg, {
-      fields: [storiesPg.interviewerId],
-      references: [speakersPg.id],
-    }),
     // Many-to-many relations through join tables (will be available after join tables are created)
     // storyPlaces: many(storyPlaces),
     // storySpeakers: many(storySpeakers),
@@ -151,15 +118,6 @@ export const storiesSqliteRelations = relations(
       fields: [storiesSqlite.createdBy],
       references: [usersPg.id],
     }),
-    // Interview metadata relations
-    interviewLocation: one(placesSqlite, {
-      fields: [storiesSqlite.interviewLocationId],
-      references: [placesSqlite.id],
-    }),
-    interviewer: one(speakersSqlite, {
-      fields: [storiesSqlite.interviewerId],
-      references: [speakersSqlite.id],
-    }),
     // Many-to-many relations through join tables (will be available after join tables are created)
     // storyPlaces: many(storyPlaces),
     // storySpeakers: many(storySpeakers),
@@ -170,27 +128,10 @@ export const storiesSqliteRelations = relations(
 export const insertStorySchema = createInsertSchema(storiesPg, {
   title: z.string().min(1, 'Title is required').max(500, 'Title too long'),
   description: z.string().max(5000, 'Description too long').optional(),
-  slug: z
-    .string()
-    .min(1, 'Slug is required')
-    .max(100, 'Slug too long')
-    .regex(/^[a-z0-9-]+$/, 'Slug must be lowercase alphanumeric with hyphens'),
   mediaUrls: z.array(MediaUrlSchema).default([]),
   language: z.string().min(2).max(5).default('en'),
   tags: z.array(z.string().min(1).max(50)).default([]),
   isRestricted: z.boolean().default(false),
-  // Interview metadata validation with cultural protocol considerations
-  dateInterviewed: z.coerce.date().optional(),
-  interviewLocationId: z
-    .number()
-    .int()
-    .positive('Interview location ID must be positive')
-    .optional(),
-  interviewerId: z
-    .number()
-    .int()
-    .positive('Interviewer ID must be positive')
-    .optional(),
 });
 
 export const selectStorySchema = createSelectSchema(storiesPg);
@@ -200,20 +141,11 @@ export type Story = typeof storiesSqlite.$inferSelect;
 export type NewStory = typeof storiesSqlite.$inferInsert;
 
 // Additional validation schemas for specific use cases
-export const createStorySchema = insertStorySchema
-  .omit({
-    id: true,
-    createdAt: true,
-    updatedAt: true,
-  })
-  .extend({
-    slug: z
-      .string()
-      .min(1)
-      .max(100)
-      .regex(/^[a-z0-9-]+$/)
-      .optional(), // Optional for create, auto-generated from title
-  });
+export const createStorySchema = insertStorySchema.omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
 
 export const updateStorySchema = insertStorySchema.partial().omit({
   id: true,

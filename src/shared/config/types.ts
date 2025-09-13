@@ -138,6 +138,24 @@ export interface FileUploadConfig {
 }
 
 /**
+ * File service configuration for FileServiceV2
+ */
+export interface FileServiceConfig {
+  /** Maximum file size in megabytes (converted to bytes internally) */
+  maxSizeMB: number;
+  /** Enable video file upload support */
+  enableVideo: boolean;
+  /** Enable encryption at rest (placeholder for future feature) */
+  encryptAtRest: boolean;
+  /** Upload rate limit per user per minute */
+  uploadRateLimit: number;
+  /** Base path for file uploads */
+  baseUploadPath: string;
+  /** Enable cultural protocol validation for Indigenous data sovereignty */
+  enableCulturalProtocols: boolean;
+}
+
+/**
  * Feature flags for environment-specific capabilities
  */
 export interface FeatureConfig {
@@ -176,4 +194,6 @@ export interface AppConfig {
   features: FeatureConfig;
   /** File upload configuration */
   fileUpload: FileUploadConfig;
+  /** File service configuration (FileServiceV2) */
+  fileService: FileServiceConfig;
 }

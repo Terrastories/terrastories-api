@@ -21,8 +21,6 @@
     "prepare": "npx husky",
     "validate": "npm run type-check && npm run lint && npm test",
     "compare:api": "node scripts/api-comparison.js",
-    "migrate:activestorage": "tsx scripts/migrate-activestorage.ts",
-    "test:migration": "vitest tests/migration/",
     "test:compatibility": "vitest run tests/compatibility/comprehensive-compatibility.test.ts",
     "compatibility:report": "node scripts/generate-compatibility-report.js",
     "compatibility:full": "npm run test:compatibility && npm run compatibility:report"

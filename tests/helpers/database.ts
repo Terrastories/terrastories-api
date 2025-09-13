@@ -293,6 +293,57 @@ export class TestDatabaseManager {
         }
       }
 
+      // Add direct file URL columns for dual-read capability (Issue #89)
+      // Check places table for photo_url column
+      const placesTableInfo = this.sqlite
+        .prepare('PRAGMA table_info(places)')
+        .all() as any[];
+      const hasPhotoUrl = placesTableInfo.some(
+        (col: any) => col.name === 'photo_url'
+      );
+
+      if (!hasPhotoUrl) {
+        this.sqlite.exec(`
+          ALTER TABLE places ADD COLUMN photo_url TEXT;
+        `);
+        console.log('✅ Added photo_url column to places');
+      }
+
+      // Check stories table for image_url and audio_url columns
+      const hasImageUrl = storiesTableInfo.some(
+        (col: any) => col.name === 'image_url'
+      );
+      const hasAudioUrl = storiesTableInfo.some(
+        (col: any) => col.name === 'audio_url'
+      );
+
+      if (!hasImageUrl || !hasAudioUrl) {
+        const urlCommands = [];
+        if (!hasImageUrl) {
+          urlCommands.push('ALTER TABLE stories ADD COLUMN image_url TEXT;');
+        }
+        if (!hasAudioUrl) {
+          urlCommands.push('ALTER TABLE stories ADD COLUMN audio_url TEXT;');
+        }
+        this.sqlite.exec(urlCommands.join('\n'));
+        console.log('✅ Added direct URL columns to stories');
+      }
+
+      // Check speakers table for bio_audio_url column
+      const speakersTableInfo = this.sqlite
+        .prepare('PRAGMA table_info(speakers)')
+        .all() as any[];
+      const hasBioAudioUrl = speakersTableInfo.some(
+        (col: any) => col.name === 'bio_audio_url'
+      );
+
+      if (!hasBioAudioUrl) {
+        this.sqlite.exec(`
+          ALTER TABLE speakers ADD COLUMN bio_audio_url TEXT;
+        `);
+        console.log('✅ Added bio_audio_url column to speakers');
+      }
+
       // Add missing columns to join tables for story associations
       try {
         const storyPlacesInfo = this.sqlite
@@ -442,10 +493,43 @@ export class TestDatabaseManager {
   }
 
   /**
+   * Ensure all schema modifications are applied (extracted from setup for reuse)
+   */
+  private async ensureSchemaUpdated(): Promise<void> {
+    if (!this.sqlite) {
+      throw new Error('Database not initialized');
+    }
+
+    // Add missing columns and tables that are not in migrations yet
+    try {
+      // Add direct file URL columns for dual-read capability (Issue #89)
+      // Check places table for photo_url column
+      const placesTableInfo = this.sqlite
+        .prepare('PRAGMA table_info(places)')
+        .all() as any[];
+      const hasPhotoUrl = placesTableInfo.some(
+        (col: any) => col.name === 'photo_url'
+      );
+
+      if (!hasPhotoUrl) {
+        this.sqlite.exec(`
+          ALTER TABLE places ADD COLUMN photo_url TEXT;
+        `);
+        console.log('✅ Added photo_url column to places');
+      }
+    } catch (error: any) {
+      console.warn('⚠️ Error ensuring schema updates:', error.message);
+    }
+  }
+
+  /**
    * Seed database with test fixture data
    */
   async seedTestData(): Promise<TestFixtures> {
     const db = await this.getDb();
+
+    // Ensure all schema modifications are applied before seeding
+    await this.ensureSchemaUpdated();
 
     // Insert test communities with unique slugs per test run
     const timestamp = Date.now();
@@ -498,6 +582,7 @@ export class TestDatabaseManager {
           longitude: -123.1234,
           region: 'Vancouver',
           mediaUrls: [],
+          photoUrl: null, // Add the new column
           culturalSignificance: null,
           isRestricted: false,
           communityId: testCommunities[0].id,
@@ -509,6 +594,7 @@ export class TestDatabaseManager {
           longitude: -79.3832,
           region: 'Toronto',
           mediaUrls: [],
+          photoUrl: null, // Add the new column
           culturalSignificance: null,
           communityId: testCommunities[0].id,
         },
@@ -519,6 +605,7 @@ export class TestDatabaseManager {
           longitude: -74.006,
           region: 'New York',
           mediaUrls: [],
+          photoUrl: null, // Add the new column
           culturalSignificance: null,
           isRestricted: false,
           communityId: testCommunities[2].id,
@@ -835,6 +922,7 @@ export async function createTestData() {
       {
         name: 'Elder Maria Stonebear',
         bio: 'Traditional knowledge keeper',
+        bioAudioUrl: null, // Add the new column
         elderStatus: true,
         communityId: fixtures.communities[0].id,
         culturalRole: 'Knowledge Keeper',
@@ -843,6 +931,7 @@ export async function createTestData() {
       {
         name: 'John Rivercrossing',
         bio: 'Community storyteller',
+        bioAudioUrl: null, // Add the new column
         elderStatus: false,
         communityId: fixtures.communities[0].id,
         culturalRole: 'Storyteller',

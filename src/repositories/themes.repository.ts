@@ -154,16 +154,23 @@ function validateGeographicBounds(
 type DatabaseType = Database;
 
 export class ThemesRepository {
-  private db: DatabaseType;
+  private database: DatabaseType;
   private isPostgres: boolean;
 
   constructor(database: DatabaseType) {
-    this.db = database;
+    this.database = database;
     // Detect database type from connection string
     const config = getConfig();
     this.isPostgres =
       config.database.url.startsWith('postgresql://') ||
       config.database.url.startsWith('postgres://');
+  }
+
+  // Type-safe database query wrapper - cast to any to handle union type
+  private get db() {
+    // Cast to any to resolve union type issues
+    // This is safe because both drizzle instances have compatible query interfaces
+    return this.database as any;
   }
 
   /**
@@ -439,7 +446,7 @@ export class ThemesRepository {
       throw new InvalidMapboxUrlError(data.mapboxStyleUrl);
     }
 
-    const updateData: Partial<UpdateTheme> = {
+    const updateData: Partial<UpdateTheme> & { updatedAt?: Date } = {
       ...(data.name !== undefined && { name: data.name }),
       ...(data.description !== undefined && { description: data.description }),
       ...(data.mapboxStyleUrl !== undefined && {

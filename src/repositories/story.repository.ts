@@ -550,10 +550,13 @@ export class StoryRepository {
         storyId: number;
         placeId: number;
         name: string;
+        description: string | null;
         latitude: number;
         longitude: number;
+        region: string | null;
+        culturalSignificance: string | null;
         culturalContext: string | null;
-        sortOrder: number;
+        sortOrder: number | null;
       }> = [];
       try {
         allPlaceAssociations = await this.db
@@ -587,6 +590,8 @@ export class StoryRepository {
               longitude: placesTable.longitude,
               region: placesTable.region,
               culturalSignificance: placesTable.culturalSignificance,
+              culturalContext: sql<string | null>`NULL`,
+              sortOrder: sql<number | null>`NULL`,
             })
             .from(storyPlacesTable)
             .innerJoin(
@@ -609,8 +614,11 @@ export class StoryRepository {
         name: string;
         bio: string | null;
         photoUrl: string | null;
+        birthYear: number | null;
+        elderStatus: boolean;
+        culturalRole: string | null;
         storyRole: string | null;
-        sortOrder: number;
+        sortOrder: number | null;
       }> = [];
       try {
         allSpeakerAssociations = await this.db
@@ -647,6 +655,8 @@ export class StoryRepository {
               birthYear: speakersTable.birthYear,
               elderStatus: speakersTable.elderStatus,
               culturalRole: speakersTable.culturalRole,
+              storyRole: sql<string | null>`NULL`,
+              sortOrder: sql<number | null>`NULL`,
             })
             .from(storySpeakersTable)
             .innerJoin(
@@ -666,10 +676,13 @@ export class StoryRepository {
           storyId: number;
           placeId: number;
           name: string;
+          description: string | null;
           latitude: number;
           longitude: number;
+          region: string | null;
+          culturalSignificance: string | null;
           culturalContext: string | null;
-          sortOrder: number;
+          sortOrder: number | null;
         }>
       >();
       const speakersByStory = new Map<
@@ -680,8 +693,11 @@ export class StoryRepository {
           name: string;
           bio: string | null;
           photoUrl: string | null;
+          birthYear: number | null;
+          elderStatus: boolean;
+          culturalRole: string | null;
           storyRole: string | null;
-          sortOrder: number;
+          sortOrder: number | null;
         }>
       >();
 

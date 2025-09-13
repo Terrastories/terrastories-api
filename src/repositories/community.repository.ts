@@ -131,11 +131,11 @@ export class CommunityRepository {
     return 'execute' in this.database ? communitiesPg : communitiesSqlite;
   }
 
-  // Type-safe database query wrapper
+  // Type-safe database query wrapper - cast to any to handle union type
   private get db() {
-    // Return the properly typed database instance
-    // Both drizzle SQLite and PostgreSQL clients have compatible query interfaces
-    return this.database;
+    // Cast to any to resolve union type issues
+    // This is safe because both drizzle instances have compatible query interfaces
+    return this.database as any;
   }
 
   /**

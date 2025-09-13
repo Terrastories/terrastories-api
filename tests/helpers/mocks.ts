@@ -416,6 +416,13 @@ export async function createMockUser(
 ) {
   const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
+  // Require explicit communityId to ensure proper data isolation in tests
+  if (data.communityId === undefined) {
+    throw new Error(
+      'createMockUser requires a valid communityId to ensure isolation'
+    );
+  }
+
   const userData = {
     email: data.email || `test-${uniqueId}@example.com`,
     passwordHash:
@@ -423,7 +430,7 @@ export async function createMockUser(
     firstName: data.firstName || 'Test',
     lastName: data.lastName || 'User',
     role: data.role || 'viewer',
-    communityId: data.communityId || 1, // Default community ID
+    communityId: data.communityId,
     isActive: true,
   };
 

@@ -104,11 +104,12 @@ async function main(): Promise<void> {
         } catch (error: unknown) {
           const msg =
             error && typeof error === 'object' && 'message' in error
-              ? String((error as any).message)
+              ? String((error as { message?: string }).message)
               : '';
           if (msg.includes('Community not found')) {
             console.error('❌ Community not found');
-            process.exit(1);
+            // Re-throw a domain error and let the CLI entrypoint decide exit behavior
+            throw new Error('Community not found');
           }
           throw error;
         } finally {
@@ -157,11 +158,12 @@ async function main(): Promise<void> {
         } catch (error: unknown) {
           const msg =
             error && typeof error === 'object' && 'message' in error
-              ? String((error as any).message)
+              ? String((error as { message?: string }).message)
               : '';
           if (msg.includes('Community not found')) {
             console.error('❌ Community not found');
-            process.exit(1);
+            // Re-throw a domain error and let the CLI entrypoint decide exit behavior
+            throw new Error('Community not found');
           }
           throw error;
         } finally {
@@ -211,11 +213,12 @@ async function main(): Promise<void> {
           } catch (error: unknown) {
             const msg =
               error && typeof error === 'object' && 'message' in error
-                ? String((error as any).message)
+                ? String((error as { message?: string }).message)
                 : '';
             if (msg.includes('Community not found')) {
               console.error('❌ Community not found');
-              process.exit(1);
+              // Re-throw a domain error and let the CLI entrypoint decide exit behavior
+              throw new Error('Community not found');
             }
             console.error('❌ Migration failed');
             throw error;

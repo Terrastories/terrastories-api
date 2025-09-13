@@ -143,6 +143,24 @@ export const FileUploadConfigSchema = z.object({
   enableAuditLogging: booleanFromEnv(true),
 });
 
+// File service configuration schema
+export const FileServiceConfigSchema = z.object({
+  maxSizeMB: z.coerce
+    .number()
+    .positive('maxSizeMB must be positive')
+    .default(25),
+  enableVideo: booleanFromEnv(false),
+  encryptAtRest: booleanFromEnv(false), // Placeholder for future encryption
+  uploadRateLimit: z.coerce
+    .number()
+    .positive('uploadRateLimit must be positive')
+    .default(10),
+  baseUploadPath: z
+    .string()
+    .min(1, 'baseUploadPath cannot be empty')
+    .default('uploads'),
+});
+
 // Feature configuration schema
 export const FeatureConfigSchema = z.object({
   offlineMode: z.boolean().default(false),
@@ -162,6 +180,7 @@ export const AppConfigSchema = z.object({
   logging: LoggingConfigSchema,
   features: FeatureConfigSchema,
   fileUpload: FileUploadConfigSchema,
+  fileService: FileServiceConfigSchema,
 });
 
 // Environment-specific schemas

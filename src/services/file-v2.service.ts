@@ -17,6 +17,7 @@ import { createHash } from 'crypto';
 import { extname, basename } from 'path';
 import type { MultipartFile } from '@fastify/multipart';
 import type { StorageAdapter } from './storage/storage-adapter.interface.js';
+import type { AppConfig } from '../shared/config/types.js';
 
 // Entity types supported by the service
 export type FileServiceV2Entity = 'stories' | 'places' | 'speakers';
@@ -101,16 +102,22 @@ export class FileServiceV2 {
 
   constructor(
     private readonly storage: StorageAdapter,
-    config?: FileServiceV2Config
+    config?: FileServiceV2Config | AppConfig
   ) {
-    // Set default configuration
-    this.config = {
-      maxSizeBytes: config?.maxSizeBytes || 25 * 1024 * 1024, // 25MB
-      allowedMimeTypes: config?.allowedMimeTypes || ['image/*', 'audio/*'],
-      enableVideo: config?.enableVideo || false,
-      uploadRateLimit: config?.uploadRateLimit || 10,
-      baseUploadPath: config?.baseUploadPath || 'uploads',
-    };
+    // Determine if config is AppConfig or FileServiceV2Config
+    if (this.isAppConfig(config)) {
+      // Convert AppConfig to internal format
+      this.config = this.convertAppConfigToInternal(config);
+    } else {
+      // Handle legacy FileServiceV2Config format
+      this.config = {
+        maxSizeBytes: config?.maxSizeBytes || 25 * 1024 * 1024, // 25MB
+        allowedMimeTypes: config?.allowedMimeTypes || ['image/*', 'audio/*'],
+        enableVideo: config?.enableVideo || false,
+        uploadRateLimit: config?.uploadRateLimit || 10,
+        baseUploadPath: config?.baseUploadPath || 'uploads',
+      };
+    }
 
     // Add video support if enabled
     if (
@@ -489,5 +496,49 @@ export class FileServiceV2 {
       .slice(0, 8);
 
     return `${nameWithoutExt}-${uniqueSuffix}${extension}`;
+  }
+
+  /**
+   * Type guard to detect if config is AppConfig
+   */
+  private isAppConfig(
+    config?: FileServiceV2Config | AppConfig
+  ): config is AppConfig {
+    if (!config) return false;
+
+    // AppConfig has 'fileService' property with the expected structure
+    // Legacy config has properties like 'maxSizeBytes', 'allowedMimeTypes', etc.
+    const hasFileService =
+      'fileService' in config &&
+      config.fileService &&
+      typeof config.fileService === 'object';
+
+    const hasLegacyProps =
+      'maxSizeBytes' in config || 'allowedMimeTypes' in config;
+
+    return hasFileService && !hasLegacyProps;
+  }
+
+  /**
+   * Convert AppConfig to internal FileServiceV2Config format
+   */
+  private convertAppConfigToInternal(
+    appConfig: AppConfig
+  ): Required<FileServiceV2Config> {
+    const fileServiceConfig = appConfig.fileService;
+
+    // Build MIME types array based on enableVideo flag
+    const allowedMimeTypes = ['image/*', 'audio/*'];
+    if (fileServiceConfig.enableVideo) {
+      allowedMimeTypes.push('video/*');
+    }
+
+    return {
+      maxSizeBytes: fileServiceConfig.maxSizeMB * 1024 * 1024, // Convert MB to bytes
+      allowedMimeTypes,
+      enableVideo: fileServiceConfig.enableVideo,
+      uploadRateLimit: fileServiceConfig.uploadRateLimit,
+      baseUploadPath: fileServiceConfig.baseUploadPath,
+    };
   }
 }

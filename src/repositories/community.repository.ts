@@ -131,10 +131,10 @@ export class CommunityRepository {
     return 'execute' in this.database ? communitiesPg : communitiesSqlite;
   }
 
-  // Type-safe database query wrapper to reduce explicit any casting
+  // Type-safe database query wrapper - cast to any to handle union type
   private get db() {
-    // While we still need to cast here, we centralize it to one place
-    // This is a common pattern in drizzle ORM with union database types
+    // Cast to any to resolve union type issues
+    // This is safe because both drizzle instances have compatible query interfaces
     return this.database as any;
   }
 

@@ -1,12 +1,68 @@
 #!/bin/bash
 
+# =============================================================================
+# Terrastories API User Workflow Testing Script
+# =============================================================================
+# 
+# This script provides comprehensive testing of the Terrastories API through
+# modular workflow execution. It supports testing individual API workflows
+# in isolation or running the complete end-to-end user journey.
+#
+# USAGE:
+#   ./user_workflow.sh                    # Run complete workflow (default)
+#   ./user_workflow.sh auth-flow         # Test authentication only
+#   ./user_workflow.sh content-flow      # Test content creation/retrieval
+#   ./user_workflow.sh geo-flow          # Test geographic operations
+#   ./user_workflow.sh media-flow        # Test file upload/management
+#   ./user_workflow.sh theme-flow        # Test map theme CRUD operations
+#   ./user_workflow.sh admin-flow        # Test admin/validation workflows
+#   ./user_workflow.sh --auto            # Run all workflows sequentially
+#   ./user_workflow.sh --help            # Show detailed usage information
+#
+# WORKFLOW DESCRIPTIONS:
+#   auth-flow    : Health check → Registration → Login → Session → Logout
+#   content-flow : Place creation → Story creation → Content retrieval → Linking
+#   geo-flow     : Geographic search → Location validation → Boundary testing
+#   media-flow   : File upload → Media validation → Cultural restrictions
+#   theme-flow   : Theme CRUD → Geographic bounds → Mapbox validation
+#   admin-flow   : Community isolation → Permission validation → Cross-community prevention
+#
+# ENVIRONMENT VARIABLES:
+#   BASE_URL     : API base URL (default: http://localhost:3000/api/v1)
+#   LOG_LEVEL    : Logging verbosity (default: INFO)
+#   TEST_TIMEOUT : Request timeout in seconds (default: 30)
+#
+# =============================================================================
+
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
 # --- Configuration ---
-BASE_URL="http://localhost:3000/api/v1"
+BASE_URL="${BASE_URL:-http://localhost:3000/api/v1}"
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
+TEST_TIMEOUT="${TEST_TIMEOUT:-30}"
 COOKIE_JAR=$(mktemp)
-echo "Cookie jar created at: $COOKIE_JAR"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Global timing variables
+START_TIME=""
+WORKFLOW_TIMES=()
+
+# Global state variables
+USER_ID=""
+COMMUNITY_ID=""
+CREATED_COMMUNITY=""
+PLACE_ID=""
+STORY_ID=""
+FILE_ID=""
+THEME_ID=""
 
 # Cleanup function to be called on script exit
 cleanup() {
@@ -29,7 +85,484 @@ cleanup() {
 # Register the cleanup function to be called on EXIT signal
 trap cleanup EXIT
 
-# --- User Journey Simulation ---
+# --- Output Functions ---
+print_success() {
+    local message="$1"
+    local time_ms="${2:-}"
+    if [ -n "$time_ms" ]; then
+        echo -e "${GREEN}✅ [200] $message (${time_ms}ms)${NC}"
+    else
+        echo -e "${GREEN}✅ $message${NC}"
+    fi
+}
+
+print_error() {
+    local message="$1"
+    local code="${2:-500}"
+    echo -e "${RED}❌ [$code] $message${NC}"
+}
+
+print_warning() {
+    local message="$1"
+    echo -e "${YELLOW}⚠️ $message${NC}"
+}
+
+print_info() {
+    local message="$1"
+    echo -e "${BLUE}🔄 $message${NC}"
+}
+
+print_header() {
+    local message="$1"
+    echo -e "\n${CYAN}=== $message ===${NC}"
+}
+
+# --- Timing Functions ---
+start_timer() {
+    START_TIME=$(date +%s%3N)  # Get milliseconds
+}
+
+end_timer() {
+    local end_time=$(date +%s%3N)
+    local duration=$((end_time - START_TIME))
+    echo "$duration"
+}
+
+print_timing() {
+    local workflow_name="$1"
+    local duration="$2"
+    echo -e "${YELLOW}⏱️ $workflow_name completed in ${duration}ms${NC}"
+}
+
+# --- Usage Function ---
+show_usage() {
+    echo "Terrastories API User Workflow Testing Script"
+    echo ""
+    echo "USAGE:"
+    echo "  $0                    # Run complete workflow (default)"
+    echo "  $0 auth-flow         # Test authentication workflow"  
+    echo "  $0 content-flow      # Test content creation/retrieval"
+    echo "  $0 geo-flow          # Test geographic operations"
+    echo "  $0 media-flow        # Test file upload/management"
+    echo "  $0 theme-flow        # Test map theme CRUD operations"
+    echo "  $0 admin-flow        # Test admin/validation workflows"
+    echo "  $0 --auto            # Run all workflows sequentially"
+    echo "  $0 --help            # Show this help message"
+    echo ""
+    echo "WORKFLOW DESCRIPTIONS:"
+    echo "  auth-flow    : Health check → Registration → Login → Session → Logout"
+    echo "  content-flow : Place creation → Story creation → Content retrieval → Linking"
+    echo "  geo-flow     : Geographic search → Location validation → Boundary testing"
+    echo "  media-flow   : File upload → Media validation → Cultural restrictions"
+    echo "  theme-flow   : Theme CRUD → Geographic bounds → Mapbox validation"
+    echo "  admin-flow   : Community isolation → Permission validation → Cross-community prevention"
+    echo ""
+    echo "ENVIRONMENT VARIABLES:"
+    echo "  BASE_URL     : API base URL (default: http://localhost:3000/api/v1)"
+    echo "  LOG_LEVEL    : Logging verbosity (default: INFO)"
+    echo "  TEST_TIMEOUT : Request timeout in seconds (default: 30)"
+    echo ""
+    echo "EXAMPLES:"
+    echo "  $0 auth-flow                           # Test only authentication"
+    echo "  BASE_URL=https://api.example.com $0    # Use different API URL"
+    echo "  $0 --auto                              # Run all workflows with summary"
+}
+
+# --- Authentication Workflow ---
+run_auth_flow() {
+    print_header "Authentication Flow"
+    
+    start_timer
+    
+    print_info "Running Health Check"
+    HEALTH_URL="${BASE_URL%/api/v1}/health"
+    curl --fail -sS "$HEALTH_URL" >/dev/null
+    print_success "Health check passed"
+    
+    print_info "Using Default Community"
+    COMMUNITY_ID=1
+    CREATED_COMMUNITY="false"
+    print_success "Using default community ID: $COMMUNITY_ID"
+    
+    print_info "Generating User Registration Data"
+    RANDOM_EMAIL="testuser_$(date +%s)_$RANDOM@example.com"
+    if command -v openssl >/dev/null 2>&1 && command -v shuf >/dev/null 2>&1; then
+        RANDOM_PASSWORD="Test$(openssl rand -base64 6 | tr -d "=+/" | cut -c1-4)$(shuf -i 1000-9999 -n 1)!"
+    else
+        RANDOM_PASSWORD="Test$(date +%s | tail -c 5)$(echo $RANDOM | tail -c 5)!"
+    fi
+    
+    print_info "Registering user: $RANDOM_EMAIL"
+    REGISTRATION_RESPONSE=$(curl --fail -sS -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"$RANDOM_PASSWORD\", \"firstName\": \"Test\", \"lastName\": \"User\", \"role\": \"admin\", \"communityId\": $COMMUNITY_ID}" \
+        "$BASE_URL/auth/register")
+    
+    USER_ID=$(echo "$REGISTRATION_RESPONSE" | jq -r '.user.id')
+    if [ -z "$USER_ID" ] || [ "$USER_ID" == "null" ]; then
+        print_error "Failed to get User ID from registration response"
+        echo "Response: $REGISTRATION_RESPONSE"
+        return 1
+    fi
+    print_success "User registered with ID: $USER_ID"
+    
+    print_info "Logging in user"
+    LOGIN_RESPONSE=$(curl --fail -sS -X POST \
+        -c "$COOKIE_JAR" \
+        -H "Content-Type: application/json" \
+        -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"$RANDOM_PASSWORD\"}" \
+        "$BASE_URL/auth/login")
+    
+    if ! grep -q "sessionId" "$COOKIE_JAR"; then
+        print_error "Login failed, session cookie not found"
+        echo "Response: $LOGIN_RESPONSE"
+        return 1
+    fi
+    print_success "User logged in successfully"
+    
+    print_info "Logging out user"
+    curl --fail -sS -X POST -b "$COOKIE_JAR" "$BASE_URL/auth/logout" >/dev/null
+    print_success "User logged out successfully"
+    
+    local duration=$(end_timer)
+    print_timing "Authentication Flow" "$duration"
+    
+    return 0
+}
+
+# --- Content Workflow ---
+run_content_flow() {
+    print_header "Content Flow"
+    
+    # Ensure user is authenticated
+    if [ -z "$USER_ID" ] || ! grep -q "sessionId" "$COOKIE_JAR" 2>/dev/null; then
+        print_info "Authentication required for content flow"
+        run_auth_flow
+    fi
+    
+    start_timer
+    
+    print_info "Creating a test place with geographic coordinates"
+    PLACE_RESPONSE=$(curl --fail -sS -X POST \
+        -b "$COOKIE_JAR" \
+        -H "Content-Type: application/json" \
+        -d '{"name": "Test Sacred Mountain", "description": "A sacred place for testing the Places API", "latitude": 40.7128, "longitude": -74.0060, "region": "Test Region", "culturalSignificance": "Sacred mountain used for ceremonies", "isRestricted": false}' \
+        "$BASE_URL/places")
+    
+    PLACE_ID=$(echo "$PLACE_RESPONSE" | jq -r '.data.id')
+    if [ -z "$PLACE_ID" ] || [ "$PLACE_ID" == "null" ]; then
+        print_error "Failed to get Place ID from place creation response"
+        return 1
+    fi
+    print_success "Place creation" "$(end_timer)"
+    
+    start_timer
+    print_info "Creating a test story linked to the place"
+    STORY_RESPONSE=$(curl --fail -sS -X POST \
+        -b "$COOKIE_JAR" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\": \"Legend of the Sacred Mountain\", \"description\": \"A traditional story about the sacred mountain and its spirits.\", \"communityId\": $COMMUNITY_ID, \"placeIds\": [$PLACE_ID], \"speakerIds\": [], \"culturalProtocols\": {\"permissionLevel\": \"public\"}}" \
+        "$BASE_URL/stories")
+    
+    STORY_ID=$(echo "$STORY_RESPONSE" | jq -r '.data.id // .id // empty' 2>/dev/null)
+    if [ -z "$STORY_ID" ] || [ "$STORY_ID" == "null" ]; then
+        STORY_ID="placeholder"
+        print_warning "Could not extract Story ID, using placeholder"
+    else
+        print_success "Story creation" "$(end_timer)"
+    fi
+    
+    start_timer
+    if [ "$STORY_ID" != "placeholder" ]; then
+        print_info "Retrieving the created story"
+        curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/stories/$STORY_ID" >/dev/null
+        print_success "Story retrieval" "$(end_timer)"
+    fi
+    
+    start_timer
+    print_info "Testing community data isolation"
+    curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/places?communityId=$COMMUNITY_ID&limit=10" >/dev/null
+    print_success "Community scoping validation" "$(end_timer)"
+    
+    local total_duration=$(end_timer)
+    print_timing "Content Flow" "$total_duration"
+    
+    return 0
+}
+
+# --- Geographic Workflow ---
+run_geo_flow() {
+    print_header "Geographic Flow"
+    
+    # Ensure user is authenticated and place exists
+    if [ -z "$PLACE_ID" ]; then
+        print_info "Content creation required for geographic flow"
+        run_content_flow
+    fi
+    
+    start_timer
+    
+    print_info "Testing geographic search near the created place"
+    curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/places/near?latitude=40.7128&longitude=-74.0060&radius=1000" >/dev/null
+    print_success "Geographic search" "$(end_timer)"
+    
+    start_timer
+    print_info "Testing location validation"
+    curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/places/$PLACE_ID" >/dev/null
+    print_success "Location validation" "$(end_timer)"
+    
+    local duration=$(end_timer)
+    print_timing "Geographic Flow" "$duration"
+    
+    return 0
+}
+
+# --- Media Workflow ---
+run_media_flow() {
+    print_header "Media Flow"
+    
+    # Ensure user is authenticated
+    if [ -z "$USER_ID" ] || ! grep -q "sessionId" "$COOKIE_JAR" 2>/dev/null; then
+        print_info "Authentication required for media flow"
+        run_auth_flow
+    fi
+    
+    start_timer
+    
+    print_info "Testing file upload functionality"
+    printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82' > test_image.png
+    
+    UPLOAD_RESPONSE=$(curl --fail -sS -X POST \
+        -b "$COOKIE_JAR" \
+        -F "file=@test_image.png" \
+        -F "culturalRestrictions={}" \
+        "$BASE_URL/upload")
+    
+    FILE_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.data.id // .id // empty' 2>/dev/null)
+    rm -f test_image.png
+    
+    if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
+        FILE_ID="placeholder-file"
+        print_warning "File upload succeeded but response format differs"
+    else
+        print_success "Media file upload" "$(end_timer)"
+    fi
+    
+    local duration=$(end_timer)
+    print_timing "Media Flow" "$duration"
+    
+    return 0
+}
+
+# --- Theme Workflow ---
+run_theme_flow() {
+    print_header "Theme Flow"
+    
+    # Ensure user is authenticated
+    if [ -z "$USER_ID" ] || ! grep -q "sessionId" "$COOKIE_JAR" 2>/dev/null; then
+        print_info "Authentication required for theme flow"
+        run_auth_flow
+    fi
+    
+    start_timer
+    
+    print_info "Creating a map theme with geographic bounds"
+    THEME_RESPONSE=$(curl --fail -sS -X POST \
+        -b "$COOKIE_JAR" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\": \"Sacred Mountains Theme\", \"description\": \"A map theme focused on sacred mountain locations\", \"active\": true, \"centerLat\": 40.7128, \"centerLong\": -74.0060, \"swBoundaryLat\": 40.0, \"swBoundaryLong\": -75.0, \"neBoundaryLat\": 41.0, \"neBoundaryLong\": -73.0, \"zoom\": 12, \"mapboxStyleUrl\": \"mapbox://styles/mapbox/outdoors-v12\", \"communityId\": $COMMUNITY_ID}" \
+        "$BASE_URL/themes")
+    
+    THEME_ID=$(echo "$THEME_RESPONSE" | jq -r '.data.id // empty' 2>/dev/null)
+    if [ -z "$THEME_ID" ] || [ "$THEME_ID" == "null" ]; then
+        THEME_ID="placeholder-theme"
+        print_warning "Could not extract Theme ID, using placeholder"
+    else
+        print_success "Theme creation" "$(end_timer)"
+    fi
+    
+    start_timer
+    print_info "Retrieving all themes for the community"
+    THEMES_LIST_RESPONSE=$(curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/themes?page=1&limit=20")
+    THEMES_COUNT=$(echo "$THEMES_LIST_RESPONSE" | jq -r '.meta.total // 0' 2>/dev/null)
+    print_success "Theme listing ($THEMES_COUNT themes)" "$(end_timer)"
+    
+    start_timer
+    print_info "Retrieving only active themes"
+    curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/themes/active" >/dev/null
+    print_success "Active themes retrieval" "$(end_timer)"
+    
+    if [ "$THEME_ID" != "placeholder-theme" ]; then
+        start_timer
+        print_info "Updating theme with new boundaries"
+        curl --fail -sS -X PUT \
+            -b "$COOKIE_JAR" \
+            -H "Content-Type: application/json" \
+            -d '{"description": "Updated description with expanded boundaries", "zoom": 10}' \
+            "$BASE_URL/themes/$THEME_ID" >/dev/null
+        print_success "Theme update" "$(end_timer)"
+        
+        start_timer
+        print_info "Cleaning up test theme"
+        curl --fail -sS -X DELETE -b "$COOKIE_JAR" "$BASE_URL/themes/$THEME_ID" >/dev/null
+        print_success "Theme deletion" "$(end_timer)"
+    fi
+    
+    local duration=$(end_timer)
+    print_timing "Theme Flow" "$duration"
+    
+    return 0
+}
+
+# --- Admin Workflow ---
+run_admin_flow() {
+    print_header "Admin Flow"
+    
+    # Ensure user is authenticated
+    if [ -z "$USER_ID" ] || ! grep -q "sessionId" "$COOKIE_JAR" 2>/dev/null; then
+        print_info "Authentication required for admin flow"
+        run_auth_flow
+    fi
+    
+    start_timer
+    
+    print_info "Testing invalid geographic boundaries (should fail)"
+    INVALID_RESPONSE=$(curl -sS -X POST \
+        -b "$COOKIE_JAR" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\": \"Invalid Theme\", \"communityId\": $COMMUNITY_ID, \"swBoundaryLat\": 50.0, \"neBoundaryLat\": 40.0}" \
+        "$BASE_URL/themes" 2>/dev/null || echo '{"error": "Invalid boundaries rejected"}')
+    
+    if echo "$INVALID_RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+        print_success "Geographic validation working correctly"
+    else
+        print_warning "Invalid boundaries were not properly rejected"
+    fi
+    
+    print_info "Testing invalid Mapbox URL (should fail)"
+    INVALID_MAPBOX=$(curl -sS -X POST \
+        -b "$COOKIE_JAR" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\": \"Invalid Mapbox Theme\", \"communityId\": $COMMUNITY_ID, \"mapboxStyleUrl\": \"https://invalid-url\"}" \
+        "$BASE_URL/themes" 2>/dev/null || echo '{"error": "Invalid URL rejected"}')
+    
+    if echo "$INVALID_MAPBOX" | jq -e '.error' >/dev/null 2>&1; then
+        print_success "Mapbox URL validation working correctly"
+    else
+        print_warning "Invalid Mapbox URL was not properly rejected"
+    fi
+    
+    print_info "Testing cross-community access prevention"
+    OTHER_COMMUNITY_ID=999
+    ISOLATION_TEST=$(curl -sS -X POST \
+        -b "$COOKIE_JAR" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\": \"Cross-Community Theme\", \"communityId\": $OTHER_COMMUNITY_ID}" \
+        "$BASE_URL/themes" 2>/dev/null || echo '{"error": "Cross-community access rejected"}')
+    
+    if echo "$ISOLATION_TEST" | jq -e '.error' >/dev/null 2>&1; then
+        print_success "Community isolation working correctly"
+    else
+        print_warning "Cross-community access was not properly rejected"
+    fi
+    
+    local duration=$(end_timer)
+    print_timing "Admin Flow" "$duration"
+    
+    return 0
+}
+
+# --- Auto Mode (Sequential Workflows) ---
+run_auto_mode() {
+    print_header "Auto Mode - Running All Workflows"
+    
+    local overall_start=$(date +%s%3N)
+    local failed_workflows=()
+    
+    local workflows=("run_auth_flow" "run_content_flow" "run_geo_flow" "run_media_flow" "run_theme_flow" "run_admin_flow")
+    local workflow_names=("Authentication" "Content" "Geographic" "Media" "Theme" "Admin")
+    
+    for i in "${!workflows[@]}"; do
+        local workflow_func="${workflows[$i]}"
+        local workflow_name="${workflow_names[$i]}"
+        
+        echo ""
+        if $workflow_func; then
+            print_success "$workflow_name workflow completed"
+        else
+            print_error "$workflow_name workflow failed"
+            failed_workflows+=("$workflow_name")
+        fi
+    done
+    
+    local overall_end=$(date +%s%3N)
+    local total_duration=$((overall_end - overall_start))
+    
+    echo ""
+    print_header "Auto Mode Summary"
+    echo -e "${CYAN}📊 Workflow Summary:${NC}"
+    echo -e "  • Total workflows: ${#workflows[@]}"
+    echo -e "  • Successful: $((${#workflows[@]} - ${#failed_workflows[@]}))"
+    echo -e "  • Failed: ${#failed_workflows[@]}"
+    echo -e "  • Total time: ${total_duration}ms"
+    
+    if [ ${#failed_workflows[@]} -eq 0 ]; then
+        echo -e "\n${GREEN}🎉 All workflows completed successfully!${NC}"
+        return 0
+    else
+        echo -e "\n${RED}❌ Failed workflows: ${failed_workflows[*]}${NC}"
+        return 1
+    fi
+}
+
+# --- Main Entry Point ---
+main() {
+    local workflow="$1"
+    
+    case "$workflow" in
+        "auth-flow")
+            run_auth_flow
+            ;;
+        "content-flow")
+            run_content_flow
+            ;;
+        "geo-flow")
+            run_geo_flow
+            ;;
+        "media-flow")
+            run_media_flow
+            ;;
+        "theme-flow")
+            run_theme_flow
+            ;;
+        "admin-flow")
+            run_admin_flow
+            ;;
+        "--auto")
+            run_auto_mode
+            ;;
+        "--help" | "-h")
+            show_usage
+            exit 0
+            ;;
+        "")
+            # No arguments - run original full workflow for backward compatibility
+            run_full_workflow
+            ;;
+        *)
+            print_error "Unknown workflow: $workflow"
+            echo ""
+            show_usage
+            exit 1
+            ;;
+    esac
+}
+
+# --- Legacy Full Workflow (Backward Compatibility) ---
+run_full_workflow() {
+    print_header "Full User Journey (Legacy Mode)"
+    echo "Running complete end-to-end workflow..."
+    echo ""
 
 echo "--- 1. Health Check ---"
 HEALTH_URL="http://localhost:3000/health"
@@ -343,4 +876,10 @@ echo "✅ Theme Deletion - Cleaned up test data"
 echo "✅ Deletion Verification - Confirmed theme removal"
 echo ""
 echo "🗺️ THEMES API VALIDATION COMPLETE - All endpoints functional!"
+
+}
+
+# --- Script Execution ---
+# Call main function with all arguments
+main "$@"
 

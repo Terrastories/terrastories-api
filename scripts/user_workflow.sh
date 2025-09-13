@@ -64,6 +64,52 @@ STORY_ID=""
 FILE_ID=""
 THEME_ID=""
 
+# --- Dependency Validation ---
+validate_dependencies() {
+    local missing_deps=()
+    local required_tools=("curl" "jq" "timeout")
+
+    print_info "Validating required dependencies"
+
+    for tool in "${required_tools[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing_deps+=("$tool")
+        fi
+    done
+
+    # Check if Python is available for cross-platform timing fallback
+    if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+        # Only warn if GNU date %3N is also not available
+        if ! date +%s%3N >/dev/null 2>&1; then
+            print_warning "Neither Python nor GNU date available - timing precision may be reduced"
+        fi
+    fi
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        print_error "Missing required dependencies: ${missing_deps[*]}"
+        echo ""
+        echo "Please install the following tools:"
+        for dep in "${missing_deps[@]}"; do
+            case "$dep" in
+                "curl")
+                    echo "  - curl: For API requests (apt-get install curl / brew install curl)"
+                    ;;
+                "jq")
+                    echo "  - jq: For JSON processing (apt-get install jq / brew install jq)"
+                    ;;
+                "timeout")
+                    echo "  - timeout: For command timeouts (usually in coreutils package)"
+                    ;;
+            esac
+        done
+        echo ""
+        return 1
+    fi
+
+    print_success "All required dependencies are available"
+    return 0
+}
+
 # Cleanup function to be called on script exit
 cleanup() {
   echo "Cleaning up..."
@@ -118,12 +164,28 @@ print_header() {
 }
 
 # --- Timing Functions ---
+# Get milliseconds since epoch (portable across OS)
+get_milliseconds() {
+    # Try GNU date first (Linux)
+    if date +%s%3N >/dev/null 2>&1; then
+        date +%s%3N
+    # Fallback for macOS/BSD - use Python if available
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import time; print(int(time.time() * 1000))"
+    elif command -v python >/dev/null 2>&1; then
+        python -c "import time; print(int(time.time() * 1000))"
+    # Last resort - use seconds precision
+    else
+        echo "$(($(date +%s) * 1000))"
+    fi
+}
+
 start_timer() {
-    START_TIME=$(date +%s%3N)  # Get milliseconds
+    START_TIME=$(get_milliseconds)
 }
 
 end_timer() {
-    local end_time=$(date +%s%3N)
+    local end_time=$(get_milliseconds)
     local duration=$((end_time - START_TIME))
     echo "$duration"
 }
@@ -176,8 +238,14 @@ run_auth_flow() {
     
     print_info "Running Health Check"
     HEALTH_URL="${BASE_URL%/api/v1}/health"
-    curl --fail -sS "$HEALTH_URL" >/dev/null
-    print_success "Health check passed"
+    if curl --fail -sS --max-time "$TEST_TIMEOUT" "$HEALTH_URL" >/dev/null; then
+        print_success "Health check passed"
+    else
+        local exit_code=$?
+        print_error "Health check failed at $HEALTH_URL" "$exit_code"
+        echo "Please ensure the API server is running and accessible"
+        return $exit_code
+    fi
     
     print_info "Using Default Community"
     COMMUNITY_ID=1
@@ -193,7 +261,7 @@ run_auth_flow() {
     fi
     
     print_info "Registering user: $RANDOM_EMAIL"
-    REGISTRATION_RESPONSE=$(curl --fail -sS -X POST \
+    REGISTRATION_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
         -H "Content-Type: application/json" \
         -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"$RANDOM_PASSWORD\", \"firstName\": \"Test\", \"lastName\": \"User\", \"role\": \"admin\", \"communityId\": $COMMUNITY_ID}" \
         "$BASE_URL/auth/register")
@@ -207,7 +275,7 @@ run_auth_flow() {
     print_success "User registered with ID: $USER_ID"
     
     print_info "Logging in user"
-    LOGIN_RESPONSE=$(curl --fail -sS -X POST \
+    LOGIN_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
         -c "$COOKIE_JAR" \
         -H "Content-Type: application/json" \
         -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"$RANDOM_PASSWORD\"}" \
@@ -221,7 +289,7 @@ run_auth_flow() {
     print_success "User logged in successfully"
     
     print_info "Logging out user"
-    curl --fail -sS -X POST -b "$COOKIE_JAR" "$BASE_URL/auth/logout" >/dev/null
+    curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST -b "$COOKIE_JAR" "$BASE_URL/auth/logout" >/dev/null
     print_success "User logged out successfully"
     
     local duration=$(end_timer)
@@ -243,7 +311,7 @@ run_content_flow() {
     start_timer
     
     print_info "Creating a test place with geographic coordinates"
-    PLACE_RESPONSE=$(curl --fail -sS -X POST \
+    PLACE_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
         -b "$COOKIE_JAR" \
         -H "Content-Type: application/json" \
         -d '{"name": "Test Sacred Mountain", "description": "A sacred place for testing the Places API", "latitude": 40.7128, "longitude": -74.0060, "region": "Test Region", "culturalSignificance": "Sacred mountain used for ceremonies", "isRestricted": false}' \
@@ -258,7 +326,7 @@ run_content_flow() {
     
     start_timer
     print_info "Creating a test story linked to the place"
-    STORY_RESPONSE=$(curl --fail -sS -X POST \
+    STORY_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
         -b "$COOKIE_JAR" \
         -H "Content-Type: application/json" \
         -d "{\"title\": \"Legend of the Sacred Mountain\", \"description\": \"A traditional story about the sacred mountain and its spirits.\", \"communityId\": $COMMUNITY_ID, \"placeIds\": [$PLACE_ID], \"speakerIds\": [], \"culturalProtocols\": {\"permissionLevel\": \"public\"}}" \
@@ -275,13 +343,13 @@ run_content_flow() {
     start_timer
     if [ "$STORY_ID" != "placeholder" ]; then
         print_info "Retrieving the created story"
-        curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/stories/$STORY_ID" >/dev/null
+        curl --fail -sS --max-time "$TEST_TIMEOUT" -b "$COOKIE_JAR" "$BASE_URL/stories/$STORY_ID" >/dev/null
         print_success "Story retrieval" "$(end_timer)"
     fi
     
     start_timer
     print_info "Testing community data isolation"
-    curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/places?communityId=$COMMUNITY_ID&limit=10" >/dev/null
+    curl --fail -sS --max-time "$TEST_TIMEOUT" -b "$COOKIE_JAR" "$BASE_URL/places?communityId=$COMMUNITY_ID&limit=10" >/dev/null
     print_success "Community scoping validation" "$(end_timer)"
     
     local total_duration=$(end_timer)
@@ -303,12 +371,12 @@ run_geo_flow() {
     start_timer
     
     print_info "Testing geographic search near the created place"
-    curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/places/near?latitude=40.7128&longitude=-74.0060&radius=1000" >/dev/null
+    curl --fail -sS --max-time "$TEST_TIMEOUT" -b "$COOKIE_JAR" "$BASE_URL/places/near?latitude=40.7128&longitude=-74.0060&radius=1000" >/dev/null
     print_success "Geographic search" "$(end_timer)"
     
     start_timer
     print_info "Testing location validation"
-    curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/places/$PLACE_ID" >/dev/null
+    curl --fail -sS --max-time "$TEST_TIMEOUT" -b "$COOKIE_JAR" "$BASE_URL/places/$PLACE_ID" >/dev/null
     print_success "Location validation" "$(end_timer)"
     
     local duration=$(end_timer)
@@ -332,7 +400,7 @@ run_media_flow() {
     print_info "Testing file upload functionality"
     printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82' > test_image.png
     
-    UPLOAD_RESPONSE=$(curl --fail -sS -X POST \
+    UPLOAD_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
         -b "$COOKIE_JAR" \
         -F "file=@test_image.png" \
         -F "culturalRestrictions={}" \
@@ -367,7 +435,7 @@ run_theme_flow() {
     start_timer
     
     print_info "Creating a map theme with geographic bounds"
-    THEME_RESPONSE=$(curl --fail -sS -X POST \
+    THEME_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
         -b "$COOKIE_JAR" \
         -H "Content-Type: application/json" \
         -d "{\"name\": \"Sacred Mountains Theme\", \"description\": \"A map theme focused on sacred mountain locations\", \"active\": true, \"centerLat\": 40.7128, \"centerLong\": -74.0060, \"swBoundaryLat\": 40.0, \"swBoundaryLong\": -75.0, \"neBoundaryLat\": 41.0, \"neBoundaryLong\": -73.0, \"zoom\": 12, \"mapboxStyleUrl\": \"mapbox://styles/mapbox/outdoors-v12\", \"communityId\": $COMMUNITY_ID}" \
@@ -383,19 +451,19 @@ run_theme_flow() {
     
     start_timer
     print_info "Retrieving all themes for the community"
-    THEMES_LIST_RESPONSE=$(curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/themes?page=1&limit=20")
+    THEMES_LIST_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -b "$COOKIE_JAR" "$BASE_URL/themes?page=1&limit=20")
     THEMES_COUNT=$(echo "$THEMES_LIST_RESPONSE" | jq -r '.meta.total // 0' 2>/dev/null)
     print_success "Theme listing ($THEMES_COUNT themes)" "$(end_timer)"
     
     start_timer
     print_info "Retrieving only active themes"
-    curl --fail -sS -b "$COOKIE_JAR" "$BASE_URL/themes/active" >/dev/null
+    curl --fail -sS --max-time "$TEST_TIMEOUT" -b "$COOKIE_JAR" "$BASE_URL/themes/active" >/dev/null
     print_success "Active themes retrieval" "$(end_timer)"
     
     if [ "$THEME_ID" != "placeholder-theme" ]; then
         start_timer
         print_info "Updating theme with new boundaries"
-        curl --fail -sS -X PUT \
+        curl --fail -sS --max-time "$TEST_TIMEOUT" -X PUT \
             -b "$COOKIE_JAR" \
             -H "Content-Type: application/json" \
             -d '{"description": "Updated description with expanded boundaries", "zoom": 10}' \
@@ -404,7 +472,7 @@ run_theme_flow() {
         
         start_timer
         print_info "Cleaning up test theme"
-        curl --fail -sS -X DELETE -b "$COOKIE_JAR" "$BASE_URL/themes/$THEME_ID" >/dev/null
+        curl --fail -sS --max-time "$TEST_TIMEOUT" -X DELETE -b "$COOKIE_JAR" "$BASE_URL/themes/$THEME_ID" >/dev/null
         print_success "Theme deletion" "$(end_timer)"
     fi
     
@@ -518,7 +586,15 @@ run_auto_mode() {
 # --- Main Entry Point ---
 main() {
     local workflow="$1"
-    
+
+    # Skip dependency validation for help
+    if [ "$workflow" != "--help" ] && [ "$workflow" != "-h" ]; then
+        if ! validate_dependencies; then
+            exit 1
+        fi
+        echo ""  # Add spacing after dependency validation
+    fi
+
     case "$workflow" in
         "auth-flow")
             run_auth_flow
@@ -566,8 +642,14 @@ run_full_workflow() {
 
 echo "--- 1. Health Check ---"
 HEALTH_URL="http://localhost:3000/health"
-curl --fail -sS "$HEALTH_URL"
-echo -e "\nHealth check passed."
+if curl --fail -sS --max-time "$TEST_TIMEOUT" "$HEALTH_URL"; then
+    echo -e "\nHealth check passed."
+else
+    exit_code=$?
+    echo -e "\n❌ Health check failed at $HEALTH_URL (exit code: $exit_code)"
+    echo "Please ensure the API server is running and accessible"
+    exit $exit_code
+fi
 
 echo "--- 2a. Use Default Community ---"
 # Community creation requires authentication, so use default community ID 1
@@ -589,7 +671,7 @@ else
 fi
 echo "Generated secure password for testing"
 echo "Registering user: $RANDOM_EMAIL"
-REGISTRATION_RESPONSE=$(curl --fail -sS -X POST \
+REGISTRATION_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
   -H "Content-Type: application/json" \
   -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"$RANDOM_PASSWORD\", \"firstName\": \"Test\", \"lastName\": \"User\", \"role\": \"admin\", \"communityId\": $COMMUNITY_ID}" \
   "$BASE_URL/auth/register")
@@ -605,7 +687,7 @@ fi
 echo "User registered with ID: $USER_ID in Community ID: $COMMUNITY_ID"
 
 echo "--- 3. User Login ---"
-LOGIN_RESPONSE=$(curl --fail -sS -X POST \
+LOGIN_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
   -c "$COOKIE_JAR" \
   -H "Content-Type: application/json" \
   -d "{\"email\": \"$RANDOM_EMAIL\", \"password\": \"$RANDOM_PASSWORD\"}" \
@@ -621,7 +703,7 @@ fi
 
 echo "--- 4. Create a Place ---"
 echo "Creating a test place with geographic coordinates..."
-PLACE_RESPONSE=$(curl --fail -sS -X POST \
+PLACE_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
   -b "$COOKIE_JAR" \
   -H "Content-Type: application/json" \
   -d '{"name": "Test Sacred Mountain", "description": "A sacred place for testing the Places API", "latitude": 40.7128, "longitude": -74.0060, "region": "Test Region", "culturalSignificance": "Sacred mountain used for ceremonies", "isRestricted": false}' \
@@ -639,14 +721,14 @@ echo "Place created with ID: $PLACE_ID"
 echo "--- 5. Test Geographic Search ---"
 echo "Testing geographic search near the created place..."
 # Search within 1000 meters (1km) radius of the created place
-SEARCH_RESPONSE=$(curl --fail -sS \
+SEARCH_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" \
   -b "$COOKIE_JAR" \
   "$BASE_URL/places/near?latitude=40.7128&longitude=-74.0060&radius=1000")
 echo "Geographic search completed. Found places near coordinates."
 
 echo "--- 6. Create a Story ---"
 echo "Creating a test story linked to the place..."
-STORY_RESPONSE=$(curl --fail -sS -X POST \
+STORY_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
   -b "$COOKIE_JAR" \
   -H "Content-Type: application/json" \
   -d "{\"title\": \"Legend of the Sacred Mountain\", \"description\": \"A traditional story about the sacred mountain and its spirits.\", \"communityId\": $COMMUNITY_ID, \"placeIds\": [$PLACE_ID], \"speakerIds\": [], \"culturalProtocols\": {\"permissionLevel\": \"public\"}}" \
@@ -674,7 +756,7 @@ echo "--- 7. Upload Media File ---"
 echo "Testing file upload functionality..."
 # Create a simple 1x1 PNG file (tiny valid image)
 printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82' > test_image.png
-UPLOAD_RESPONSE=$(curl --fail -sS -X POST \
+UPLOAD_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
   -b "$COOKIE_JAR" \
   -F "file=@test_image.png" \
   -F "culturalRestrictions={}" \
@@ -695,7 +777,7 @@ fi
 echo "--- 8. View Created Content ---"
 if [ "$STORY_ID" != "placeholder" ]; then
   echo "Retrieving the created story..."
-  STORY_VIEW_RESPONSE=$(curl --fail -sS \
+  STORY_VIEW_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" \
     -b "$COOKIE_JAR" \
     "$BASE_URL/stories/$STORY_ID")
   echo "Story retrieved successfully."
@@ -704,21 +786,21 @@ else
 fi
 
 echo "Retrieving the created place..."
-PLACE_VIEW_RESPONSE=$(curl --fail -sS \
+PLACE_VIEW_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" \
   -b "$COOKIE_JAR" \
   "$BASE_URL/places/$PLACE_ID")
 echo "Place retrieved successfully."
 
 echo "--- 9. Test Community Scoping ---"
 echo "Testing community data isolation by listing community places..."
-COMMUNITY_PLACES_RESPONSE=$(curl --fail -sS \
+COMMUNITY_PLACES_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" \
   -b "$COOKIE_JAR" \
   "$BASE_URL/places?communityId=$COMMUNITY_ID&limit=10")
 echo "Community places listed successfully."
 
 echo "--- 10. Create Map Theme ---"
 echo "Creating a map theme with geographic bounds and Mapbox styling..."
-THEME_RESPONSE=$(curl --fail -sS -X POST \
+THEME_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST \
   -b "$COOKIE_JAR" \
   -H "Content-Type: application/json" \
   -d "{\"name\": \"Sacred Mountains Theme\", \"description\": \"A map theme focused on sacred mountain locations with traditional boundaries\", \"active\": true, \"centerLat\": 40.7128, \"centerLong\": -74.0060, \"swBoundaryLat\": 40.0, \"swBoundaryLong\": -75.0, \"neBoundaryLat\": 41.0, \"neBoundaryLong\": -73.0, \"zoom\": 12, \"mapboxStyleUrl\": \"mapbox://styles/mapbox/outdoors-v12\", \"communityId\": $COMMUNITY_ID}" \
@@ -736,7 +818,7 @@ fi
 
 echo "--- 11. List Community Themes ---"
 echo "Retrieving all themes for the community..."
-THEMES_LIST_RESPONSE=$(curl --fail -sS \
+THEMES_LIST_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" \
   -b "$COOKIE_JAR" \
   "$BASE_URL/themes?page=1&limit=20")
 
@@ -745,7 +827,7 @@ echo "Found $THEMES_COUNT theme(s) in the community."
 
 echo "--- 12. Get Active Themes ---"
 echo "Retrieving only active themes for map display..."
-ACTIVE_THEMES_RESPONSE=$(curl --fail -sS \
+ACTIVE_THEMES_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" \
   -b "$COOKIE_JAR" \
   "$BASE_URL/themes/active")
 
@@ -755,7 +837,7 @@ echo "Found $ACTIVE_THEMES_COUNT active theme(s) ready for map display."
 echo "--- 13. Get Specific Theme ---"
 if [ "$THEME_ID" != "placeholder-theme" ]; then
   echo "Retrieving the created theme by ID..."
-  THEME_DETAIL_RESPONSE=$(curl --fail -sS \
+  THEME_DETAIL_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" \
     -b "$COOKIE_JAR" \
     "$BASE_URL/themes/$THEME_ID")
   echo "Theme details retrieved successfully."
@@ -766,7 +848,7 @@ fi
 echo "--- 14. Update Theme Settings ---"
 if [ "$THEME_ID" != "placeholder-theme" ]; then
   echo "Updating theme with new geographic bounds..."
-  THEME_UPDATE_RESPONSE=$(curl --fail -sS -X PUT \
+  THEME_UPDATE_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" -X PUT \
     -b "$COOKIE_JAR" \
     -H "Content-Type: application/json" \
     -d "{\"description\": \"Updated description: Sacred Mountains Theme with expanded boundaries for storytelling\", \"zoom\": 10, \"swBoundaryLat\": 39.5, \"swBoundaryLong\": -75.5, \"neBoundaryLat\": 41.5, \"neBoundaryLong\": -72.5}" \
@@ -778,7 +860,7 @@ fi
 
 echo "--- 15. Search Themes ---"
 echo "Testing theme search functionality..."
-THEME_SEARCH_RESPONSE=$(curl --fail -sS \
+THEME_SEARCH_RESPONSE=$(curl --fail -sS --max-time "$TEST_TIMEOUT" \
   -b "$COOKIE_JAR" \
   "$BASE_URL/themes?search=Sacred&active=true&sortBy=name&sortOrder=asc")
 echo "Theme search completed. Found themes matching 'Sacred'."
@@ -832,7 +914,7 @@ fi
 echo "--- 19. Delete Test Theme (Cleanup) ---"
 if [ "$THEME_ID" != "placeholder-theme" ]; then
   echo "Cleaning up test theme..."
-  curl --fail -sS -X DELETE \
+  curl --fail -sS --max-time "$TEST_TIMEOUT" -X DELETE \
     -b "$COOKIE_JAR" \
     "$BASE_URL/themes/$THEME_ID"
   echo "Test theme deleted successfully."
@@ -857,7 +939,7 @@ else
 fi
 
 echo "--- 21. User Logout ---"
-curl --fail -sS -X POST -b "$COOKIE_JAR" "$BASE_URL/auth/logout"
+curl --fail -sS --max-time "$TEST_TIMEOUT" -X POST -b "$COOKIE_JAR" "$BASE_URL/auth/logout"
 echo -e "\nUser logged out."
 
 echo "--- Extended User Journey with Themes Completed Successfully ---"

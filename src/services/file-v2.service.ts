@@ -11,6 +11,20 @@
  * - File size limits and filename sanitization
  * - Community data sovereignty enforcement
  * - No database integration (service layer only)
+ * - Security validation for upload paths (prevents path traversal)
+ *
+ * Indigenous Data Sovereignty Considerations:
+ * - Community-scoped file paths ensure data isolation
+ * - Cultural protocol hooks can be added via middleware or service decoration
+ * - Future: Elder-only content restrictions, cultural metadata, viewing permissions
+ * - Future: Integration with cultural protocol validation system
+ *
+ * Cultural Protocol Integration (Future Enhancement):
+ * The service is designed to support cultural protocols through:
+ * 1. Middleware decorators for cultural validation
+ * 2. Metadata attachment for cultural context
+ * 3. Access control integration with Elder/cultural roles
+ * 4. Community-specific upload policies
  */
 
 import { createHash } from 'crypto';
@@ -110,12 +124,17 @@ export class FileServiceV2 {
       this.config = this.convertAppConfigToInternal(config);
     } else {
       // Handle legacy FileServiceV2Config format
+      const baseUploadPath = config?.baseUploadPath || 'uploads';
+
+      // Validate baseUploadPath for security (even in legacy mode)
+      this.validateUploadPath(baseUploadPath);
+
       this.config = {
         maxSizeBytes: config?.maxSizeBytes || 25 * 1024 * 1024, // 25MB
         allowedMimeTypes: config?.allowedMimeTypes || ['image/*', 'audio/*'],
         enableVideo: config?.enableVideo || false,
         uploadRateLimit: config?.uploadRateLimit || 10,
-        baseUploadPath: config?.baseUploadPath || 'uploads',
+        baseUploadPath,
       };
     }
 
@@ -500,23 +519,39 @@ export class FileServiceV2 {
 
   /**
    * Type guard to detect if config is AppConfig
+   *
+   * Validates that the config object has a properly structured fileService
+   * property with all required fields for FileServiceV2 configuration.
+   *
+   * Uses positive identification rather than exclusion to be more resilient
+   * to future config schema evolution.
    */
   private isAppConfig(
     config?: FileServiceV2Config | AppConfig
   ): config is AppConfig {
-    if (!config) return false;
+    if (!config || typeof config !== 'object') return false;
 
-    // AppConfig has 'fileService' property with the expected structure
-    // Legacy config has properties like 'maxSizeBytes', 'allowedMimeTypes', etc.
+    // Check for fileService property with proper structure
     const hasFileService =
       'fileService' in config &&
-      config.fileService &&
-      typeof config.fileService === 'object';
+      config.fileService != null &&
+      typeof (config as Record<string, unknown>).fileService === 'object';
 
-    const hasLegacyProps =
-      'maxSizeBytes' in config || 'allowedMimeTypes' in config;
+    if (!hasFileService) return false;
 
-    return hasFileService && !hasLegacyProps;
+    // Validate that fileService has the expected structure
+    const fileService = (config as Record<string, unknown>)
+      .fileService as Record<string, unknown>;
+    const hasRequiredProps =
+      typeof fileService.maxSizeMB === 'number' &&
+      typeof fileService.enableVideo === 'boolean' &&
+      typeof fileService.encryptAtRest === 'boolean' &&
+      typeof fileService.uploadRateLimit === 'number' &&
+      typeof fileService.baseUploadPath === 'string';
+
+    // Additional check: if it has legacy props but also valid fileService,
+    // it might be a test fixture or hybrid object - trust the fileService structure
+    return hasRequiredProps;
   }
 
   /**
@@ -526,6 +561,9 @@ export class FileServiceV2 {
     appConfig: AppConfig
   ): Required<FileServiceV2Config> {
     const fileServiceConfig = appConfig.fileService;
+
+    // Validate baseUploadPath for security
+    this.validateUploadPath(fileServiceConfig.baseUploadPath);
 
     // Build MIME types array based on enableVideo flag
     const allowedMimeTypes = ['image/*', 'audio/*'];
@@ -540,5 +578,59 @@ export class FileServiceV2 {
       uploadRateLimit: fileServiceConfig.uploadRateLimit,
       baseUploadPath: fileServiceConfig.baseUploadPath,
     };
+  }
+
+  /**
+   * Validate upload path to prevent security issues
+   *
+   * Checks for path traversal attempts and ensures the path is safe
+   * for use as a base upload directory.
+   */
+  private validateUploadPath(uploadPath: string): void {
+    if (!uploadPath || uploadPath.trim() === '') {
+      throw new FileValidationError(
+        'Upload path is required',
+        'baseUploadPath'
+      );
+    }
+
+    // Check for path traversal attempts
+    if (
+      uploadPath.includes('..') ||
+      uploadPath.includes('//') ||
+      uploadPath.startsWith('/') ||
+      uploadPath.includes('\\') ||
+      uploadPath.includes('\0')
+    ) {
+      throw new FileValidationError(
+        'Invalid upload path: contains path traversal or dangerous characters',
+        'baseUploadPath'
+      );
+    }
+
+    // Ensure path doesn't contain dangerous patterns
+    const dangerousPatterns = [
+      /\.\./, // Path traversal
+      /\/\//, // Double slashes
+      /[<>:"|?*]/, // Windows invalid characters
+      /[\x00-\x1f]/, // Control characters
+    ];
+
+    for (const pattern of dangerousPatterns) {
+      if (pattern.test(uploadPath)) {
+        throw new FileValidationError(
+          `Invalid upload path: contains dangerous pattern`,
+          'baseUploadPath'
+        );
+      }
+    }
+
+    // Basic format validation - should be relative path
+    if (!/^[a-zA-Z0-9._\-\/]+$/.test(uploadPath)) {
+      throw new FileValidationError(
+        'Upload path contains invalid characters',
+        'baseUploadPath'
+      );
+    }
   }
 }

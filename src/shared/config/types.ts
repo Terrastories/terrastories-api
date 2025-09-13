@@ -151,6 +151,8 @@ export interface FileServiceConfig {
   uploadRateLimit: number;
   /** Base path for file uploads */
   baseUploadPath: string;
+  /** Enable cultural protocol validation for Indigenous data sovereignty */
+  enableCulturalProtocols: boolean;
 }
 
 /**

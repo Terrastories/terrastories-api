@@ -144,6 +144,7 @@ function createConfigFromEnv(
       encryptAtRest: process.env.FILES_ENCRYPT_AT_REST,
       uploadRateLimit: process.env.FILES_UPLOAD_RATE_LIMIT,
       baseUploadPath: process.env.FILES_BASE_UPLOAD_PATH,
+      enableCulturalProtocols: process.env.FILES_ENABLE_CULTURAL_PROTOCOLS,
     },
   };
 }

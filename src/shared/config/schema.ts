@@ -123,13 +123,26 @@ export const LoggingConfigSchema = z.object({
   level: LogLevelSchema,
 });
 
-// File upload configuration schema
+/**
+ * File Upload Configuration (Legacy Middleware System)
+ *
+ * Used by Fastify multipart middleware and general upload handling.
+ * This is the legacy system that handles:
+ * - General upload directory configuration
+ * - MIME type validation by specific type arrays
+ * - Size limits in bytes (fine-grained per media type)
+ * - Metadata extraction and audit logging
+ * - Streaming thresholds for large files
+ *
+ * Environment Variables: UPLOAD_DIR, MAX_*_SIZE, ALLOWED_*_TYPES, etc.
+ * Used by: Fastify middleware, general upload routes
+ */
 export const FileUploadConfigSchema = z.object({
   uploadDir: z.string().default('./uploads'),
   maxFileSizes: z.object({
-    image: z.coerce.number().default(10 * 1024 * 1024), // 10MB
-    audio: z.coerce.number().default(50 * 1024 * 1024), // 50MB
-    video: z.coerce.number().default(100 * 1024 * 1024), // 100MB
+    image: z.coerce.number().default(10 * 1024 * 1024), // 10MB in bytes
+    audio: z.coerce.number().default(50 * 1024 * 1024), // 50MB in bytes
+    video: z.coerce.number().default(100 * 1024 * 1024), // 100MB in bytes
   }),
   allowedImageTypes: z
     .array(z.string())
@@ -143,7 +156,26 @@ export const FileUploadConfigSchema = z.object({
   enableAuditLogging: booleanFromEnv(true),
 });
 
-// File service configuration schema
+/**
+ * File Service Configuration (FileServiceV2 System)
+ *
+ * Used specifically by FileServiceV2 class for entity-based file operations.
+ * This is the new system that handles:
+ * - Community-scoped file storage with data sovereignty
+ * - Entity-based path structure (stories/places/speakers)
+ * - Pattern-based MIME type validation (image/*, video/*)
+ * - Size limits in MB (user-friendly configuration)
+ * - Upload rate limiting per user
+ * - Configurable base paths for different deployment scenarios
+ *
+ * Environment Variables: FILES_MAX_SIZE_MB, FILES_ENABLE_VIDEO, etc.
+ * Used by: FileServiceV2 class, entity-specific operations
+ *
+ * NOTE: This system is separate from FileUploadConfig to allow:
+ * - Different configuration approaches (MB vs bytes, patterns vs arrays)
+ * - Independent evolution of legacy vs new systems
+ * - Clear separation of concerns between middleware and service layers
+ */
 export const FileServiceConfigSchema = z.object({
   maxSizeMB: z.coerce
     .number()
@@ -159,6 +191,7 @@ export const FileServiceConfigSchema = z.object({
     .string()
     .min(1, 'baseUploadPath cannot be empty')
     .default('uploads'),
+  enableCulturalProtocols: booleanFromEnv(false), // Placeholder for Indigenous data sovereignty
 });
 
 // Feature configuration schema

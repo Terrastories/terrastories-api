@@ -34,6 +34,7 @@ describe('File Service Configuration', () => {
         encryptAtRest: false,
         uploadRateLimit: 10,
         baseUploadPath: 'uploads',
+        enableCulturalProtocols: false,
       });
     });
 
@@ -142,6 +143,7 @@ describe('File Service Configuration', () => {
         encryptAtRest: false,
         uploadRateLimit: 10,
         baseUploadPath: 'uploads',
+        enableCulturalProtocols: false,
       });
     });
 
@@ -184,6 +186,7 @@ describe('File Service Configuration', () => {
       expect(typeof config.fileService.encryptAtRest).toBe('boolean');
       expect(typeof config.fileService.uploadRateLimit).toBe('number');
       expect(typeof config.fileService.baseUploadPath).toBe('string');
+      expect(typeof config.fileService.enableCulturalProtocols).toBe('boolean');
     });
 
     it('should properly validate all file service configuration fields', () => {

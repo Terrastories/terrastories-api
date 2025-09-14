@@ -705,7 +705,7 @@ run_complete_workflow() {
         log ""
         log "▶️  Starting: $workflow_desc"
 
-        if "$workflow_name"_flow; then
+        if "${workflow_name//-/_}"_flow; then
             ((completed++))
             success "✅ Completed: $workflow_desc"
         else

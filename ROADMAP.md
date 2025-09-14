@@ -40,6 +40,7 @@ With backend migration complete, we now transition to frontend modernization:
 - **Data Sovereignty Validation**: Added to Phase 2 (cannot be assumed)
 - **Offline-First Design**: Integrated from Phase 1 (affects all decisions)
 - **ActiveStorage Migration**: ✅ **COMPLETED** - Successfully migrated to native TypeScript file service
+- **File Service Configuration**: ✅ **COMPLETED** - Environment variable integration complete (PR #103)
 
 ### Phase B: Frontend Separation (Future)
 

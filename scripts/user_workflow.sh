@@ -160,7 +160,7 @@ super_admin_setup_flow() {
         "password": "superpass"
     }'
 
-    if make_request "POST" "/sessions" "$login_data" "$SUPER_ADMIN_COOKIES" "Super-admin authentication"; then
+    if make_request "POST" "/api/v1/auth/login" "$login_data" "$SUPER_ADMIN_COOKIES" "Super-admin authentication"; then
         success "Super-admin authenticated successfully"
     else
         error "Super-admin authentication failed"
@@ -178,7 +178,7 @@ super_admin_setup_flow() {
     }'
 
     local community_response
-    if community_response=$(make_request "POST" "/communities" "$community_data" "$SUPER_ADMIN_COOKIES" "Community creation"); then
+    if community_response=$(make_request "POST" "/api/v1/communities" "$community_data" "$SUPER_ADMIN_COOKIES" "Community creation"); then
         local community_id
         community_id=$(echo "$community_response" | jq -r '.data.id // .id // 1')
         echo "$community_id" > /tmp/test_community_id
@@ -199,7 +199,7 @@ super_admin_setup_flow() {
         "communityId": '$(cat /tmp/test_community_id || echo "1")'
     }'
 
-    if make_request "POST" "/users" "$admin_data" "$SUPER_ADMIN_COOKIES" "Community admin creation"; then
+    if make_request "POST" "/api/v1/users" "$admin_data" "$SUPER_ADMIN_COOKIES" "Community admin creation"; then
         success "Community admin Maria Thunderbird created successfully"
     else
         error "Failed to create community admin"
@@ -225,7 +225,7 @@ community_admin_content_flow() {
         "password": "CulturalAdmin2024!"
     }'
 
-    if make_request "POST" "/sessions" "$login_data" "$ADMIN_COOKIES" "Community admin authentication"; then
+    if make_request "POST" "/api/v1/auth/login" "$login_data" "$ADMIN_COOKIES" "Community admin authentication"; then
         success "Community admin authenticated successfully"
     else
         error "Community admin authentication failed"
@@ -247,7 +247,7 @@ community_admin_content_flow() {
     }'
 
     local speaker_response
-    if speaker_response=$(make_request "POST" "/speakers" "$speaker_data" "$ADMIN_COOKIES" "Elder speaker creation"); then
+    if speaker_response=$(make_request "POST" "/api/v1/speakers" "$speaker_data" "$ADMIN_COOKIES" "Elder speaker creation"); then
         local speaker_id
         speaker_id=$(echo "$speaker_response" | jq -r '.data.id // .id // 1')
         echo "$speaker_id" > /tmp/test_speaker_id
@@ -271,7 +271,7 @@ community_admin_content_flow() {
     }'
 
     local place_response
-    if place_response=$(make_request "POST" "/places" "$place_data" "$ADMIN_COOKIES" "Sacred place creation"); then
+    if place_response=$(make_request "POST" "/api/v1/places" "$place_data" "$ADMIN_COOKIES" "Sacred place creation"); then
         local place_id
         place_id=$(echo "$place_response" | jq -r '.data.id // .id // 1')
         echo "$place_id" > /tmp/test_place_id
@@ -301,7 +301,7 @@ community_admin_content_flow() {
     }'
 
     local story_response
-    if story_response=$(make_request "POST" "/stories" "$story_data" "$ADMIN_COOKIES" "Traditional story creation"); then
+    if story_response=$(make_request "POST" "/api/v1/stories" "$story_data" "$ADMIN_COOKIES" "Traditional story creation"); then
         local story_id
         story_id=$(echo "$story_response" | jq -r '.data.id // .id // 1')
         echo "$story_id" > /tmp/test_story_id
@@ -337,7 +337,7 @@ community_viewer_access_flow() {
         "communityId": '$community_id'
     }'
 
-    if make_request "POST" "/users" "$viewer_data" "$ADMIN_COOKIES" "Community viewer creation"; then
+    if make_request "POST" "/api/v1/users" "$viewer_data" "$ADMIN_COOKIES" "Community viewer creation"; then
         success "Community member Sarah Whitecloud account created"
     else
         error "Failed to create community viewer account"
@@ -351,7 +351,7 @@ community_viewer_access_flow() {
         "password": "ViewerAccess2024!"
     }'
 
-    if make_request "POST" "/sessions" "$login_data" "$VIEWER_COOKIES" "Community viewer authentication"; then
+    if make_request "POST" "/api/v1/auth/login" "$login_data" "$VIEWER_COOKIES" "Community viewer authentication"; then
         success "Community member authenticated successfully"
     else
         error "Community viewer authentication failed"
@@ -360,7 +360,7 @@ community_viewer_access_flow() {
 
     # Discover community stories
     step "Discovering available stories in community"
-    if make_request "GET" "/stories?communityId=$community_id" "" "$VIEWER_COOKIES" "Community stories discovery"; then
+    if make_request "GET" "/api/v1/stories?communityId=$community_id" "" "$VIEWER_COOKIES" "Community stories discovery"; then
         success "Community stories discovered successfully"
     else
         error "Failed to discover community stories"
@@ -372,7 +372,7 @@ community_viewer_access_flow() {
     story_id=$(cat /tmp/test_story_id 2>/dev/null || echo "1")
     step "Accessing traditional story details and cultural context"
 
-    if make_request "GET" "/stories/$story_id" "" "$VIEWER_COOKIES" "Story details access"; then
+    if make_request "GET" "/api/v1/stories/$story_id" "" "$VIEWER_COOKIES" "Story details access"; then
         success "Traditional story accessed with full cultural context"
     else
         error "Failed to access story details"
@@ -384,7 +384,7 @@ community_viewer_access_flow() {
     place_id=$(cat /tmp/test_place_id 2>/dev/null || echo "1")
     step "Exploring sacred places connected to stories"
 
-    if make_request "GET" "/places/$place_id" "" "$VIEWER_COOKIES" "Connected places exploration"; then
+    if make_request "GET" "/api/v1/places/$place_id" "" "$VIEWER_COOKIES" "Connected places exploration"; then
         success "Sacred place details accessed successfully"
     else
         error "Failed to explore connected places"
@@ -410,7 +410,7 @@ interactive_map_experience_flow() {
     step "Searching for stories within traditional territory boundaries"
     local bounds="?bbox=-76.0,45.0,-75.0,46.0&communityId=$community_id"
 
-    if make_request "GET" "/stories$bounds" "" "$VIEWER_COOKIES" "Geographic story search"; then
+    if make_request "GET" "/api/v1/stories$bounds" "" "$VIEWER_COOKIES" "Geographic story search"; then
         success "Stories within territorial boundaries discovered"
     else
         error "Failed to search stories geographically"
@@ -421,7 +421,7 @@ interactive_map_experience_flow() {
     step "Exploring sacred places within cultural region"
     local place_bounds="?bbox=-76.0,45.0,-75.0,46.0&communityId=$community_id"
 
-    if make_request "GET" "/places$place_bounds" "" "$VIEWER_COOKIES" "Geographic places exploration"; then
+    if make_request "GET" "/api/v1/places$place_bounds" "" "$VIEWER_COOKIES" "Geographic places exploration"; then
         success "Sacred places within region mapped successfully"
     else
         error "Failed to explore places geographically"
@@ -433,7 +433,7 @@ interactive_map_experience_flow() {
     story_id=$(cat /tmp/test_story_id 2>/dev/null || echo "1")
     step "Loading story-place relationships for map visualization"
 
-    if make_request "GET" "/stories/$story_id/places" "" "$VIEWER_COOKIES" "Story-place relationships"; then
+    if make_request "GET" "/api/v1/stories/$story_id/places" "" "$VIEWER_COOKIES" "Story-place relationships"; then
         success "Story-place connections loaded for mapping"
     else
         warn "Story-place relationships endpoint may not be implemented yet"
@@ -443,7 +443,7 @@ interactive_map_experience_flow() {
     step "Validating geographic story clustering for map display"
     local cluster_params="?cluster=true&zoom=8&communityId=$community_id"
 
-    if make_request "GET" "/places$cluster_params" "" "$VIEWER_COOKIES" "Geographic clustering validation"; then
+    if make_request "GET" "/api/v1/places$cluster_params" "" "$VIEWER_COOKIES" "Geographic clustering validation"; then
         success "Story clustering validated for map interaction"
     else
         warn "Geographic clustering may not be implemented yet"
@@ -480,7 +480,7 @@ content_management_flow() {
         }
     }'
 
-    if make_request "PATCH" "/stories/$story_id" "$update_data" "$ADMIN_COOKIES" "Story cultural metadata update"; then
+    if make_request "PATCH" "/api/v1/stories/$story_id" "$update_data" "$ADMIN_COOKIES" "Story cultural metadata update"; then
         success "Story updated with enhanced cultural protocols"
     else
         warn "Story update may require different API structure"
@@ -498,7 +498,7 @@ content_management_flow() {
         "communityRecognition": "Council-Approved-2024"
     }'
 
-    if make_request "PATCH" "/speakers/$speaker_id" "$speaker_update" "$ADMIN_COOKIES" "Speaker cultural role update"; then
+    if make_request "PATCH" "/api/v1/speakers/$speaker_id" "$speaker_update" "$ADMIN_COOKIES" "Speaker cultural role update"; then
         success "Elder speaker recognition updated"
     else
         warn "Speaker update may require different API structure"
@@ -507,7 +507,7 @@ content_management_flow() {
     # Cultural content validation
     step "Validating cultural content meets community protocols"
 
-    if make_request "GET" "/stories?communityId=$community_id&culturalReview=pending" "" "$ADMIN_COOKIES" "Cultural content validation"; then
+    if make_request "GET" "/api/v1/stories?communityId=$community_id&culturalReview=pending" "" "$ADMIN_COOKIES" "Cultural content validation"; then
         success "Cultural content validation completed"
     else
         warn "Cultural validation workflow may not be implemented yet"
@@ -539,7 +539,7 @@ data_sovereignty_validation_flow() {
     }'
 
     local community2_response
-    if community2_response=$(make_request "POST" "/communities" "$community2_data" "$SUPER_ADMIN_COOKIES" "Second community creation"); then
+    if community2_response=$(make_request "POST" "/api/v1/communities" "$community2_data" "$SUPER_ADMIN_COOKIES" "Second community creation"); then
         local community2_id
         community2_id=$(echo "$community2_response" | jq -r '.data.id // .id // 2')
         echo "$community2_id" > /tmp/test_community2_id
@@ -565,7 +565,7 @@ data_sovereignty_validation_flow() {
 
     local admin2_cookies=$(mktemp -t admin2-cookies.XXXXXX)
 
-    if make_request "POST" "/users" "$admin2_data" "$SUPER_ADMIN_COOKIES" "Second community admin creation"; then
+    if make_request "POST" "/api/v1/users" "$admin2_data" "$SUPER_ADMIN_COOKIES" "Second community admin creation"; then
         success "Second community admin created"
     else
         warn "Second admin creation failed - using existing credentials for testing"
@@ -579,7 +579,7 @@ data_sovereignty_validation_flow() {
     }'
 
     # Login as second community admin
-    if make_request "POST" "/sessions" "$login2_data" "$admin2_cookies" "Second admin authentication"; then
+    if make_request "POST" "/api/v1/auth/login" "$login2_data" "$admin2_cookies" "Second admin authentication"; then
         success "Second community admin authenticated"
 
         # Attempt to access first community's stories (should be blocked)
@@ -587,7 +587,7 @@ data_sovereignty_validation_flow() {
         local story_id
         story_id=$(cat /tmp/test_story_id 2>/dev/null || echo "1")
 
-        if make_request "GET" "/stories/$story_id" "" "$admin2_cookies" "Unauthorized story access attempt" 2>/dev/null; then
+        if make_request "GET" "/api/v1/stories/$story_id" "" "$admin2_cookies" "Unauthorized story access attempt" 2>/dev/null; then
             error "🚨 DATA SOVEREIGNTY VIOLATION: Second community admin accessed first community's story!"
             return 1
         else
@@ -596,7 +596,7 @@ data_sovereignty_validation_flow() {
 
         # Test community-scoped story listing
         step "Validating community-scoped story listing"
-        if make_request "GET" "/stories?communityId=$community_id" "" "$admin2_cookies" "Community-scoped story access attempt" 2>/dev/null; then
+        if make_request "GET" "/api/v1/stories?communityId=$community_id" "" "$admin2_cookies" "Community-scoped story access attempt" 2>/dev/null; then
             warn "Community-scoped filtering may need additional validation"
         else
             success "Community-scoped access properly restricted"
@@ -614,7 +614,7 @@ data_sovereignty_validation_flow() {
     local story_id
     story_id=$(cat /tmp/test_story_id 2>/dev/null || echo "1")
 
-    if make_request "GET" "/stories/$story_id" "" "$SUPER_ADMIN_COOKIES" "Super-admin story access attempt" 2>/dev/null; then
+    if make_request "GET" "/api/v1/stories/$story_id" "" "$SUPER_ADMIN_COOKIES" "Super-admin story access attempt" 2>/dev/null; then
         warn "⚠️  Super-admin has direct access to community stories - review data sovereignty policies"
     else
         success "✅ Super-admin properly restricted from direct cultural content access"

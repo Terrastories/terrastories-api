@@ -56,8 +56,17 @@ export const usersPg = pgTable(
       .default('viewer'),
     communityId: pgInteger('community_id').notNull(),
     isActive: boolean('is_active').notNull().default(true),
+    lastLoginAt: timestamp('last_login_at').defaultNow(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
+
+    // Authentication fields for password reset and session management
+    resetPasswordToken: pgText('reset_password_token'),
+    resetPasswordSentAt: timestamp('reset_password_sent_at'),
+    rememberCreatedAt: timestamp('remember_created_at'),
+    signInCount: pgInteger('sign_in_count').default(0).notNull(),
+    lastSignInAt: timestamp('last_sign_in_at'),
+    currentSignInIp: pgText('current_sign_in_ip'),
   },
   (table) => ({
     // Email must be unique within each community, but can be shared across communities
@@ -86,12 +95,25 @@ export const usersSqlite = sqliteTable(
       .notNull()
       .references(() => communitiesSqlite.id),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
+    lastLoginAt: integer('last_login_at', { mode: 'timestamp' }).$defaultFn(
+      () => new Date()
+    ),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),
     updatedAt: integer('updated_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),
+
+    // Authentication fields for password reset and session management
+    resetPasswordToken: sqliteText('reset_password_token'),
+    resetPasswordSentAt: integer('reset_password_sent_at', {
+      mode: 'timestamp',
+    }),
+    rememberCreatedAt: integer('remember_created_at', { mode: 'timestamp' }),
+    signInCount: integer('sign_in_count').default(0).notNull(),
+    lastSignInAt: integer('last_sign_in_at', { mode: 'timestamp' }),
+    currentSignInIp: sqliteText('current_sign_in_ip'),
   },
   (table) => ({
     // Email must be unique within each community, but can be shared across communities
@@ -141,6 +163,15 @@ export const insertUserSchema = createInsertSchema(usersPg, {
   email: z.string().email('Invalid email format'),
   role: UserRoleSchema.default('viewer'),
   isActive: z.boolean().default(true),
+  lastLoginAt: z.date().optional(),
+
+  // Authentication field validations with proper defaults
+  resetPasswordToken: z.string().optional(),
+  resetPasswordSentAt: z.date().optional(),
+  rememberCreatedAt: z.date().optional(),
+  signInCount: z.number().int().min(0).default(0),
+  lastSignInAt: z.date().optional(),
+  currentSignInIp: z.string().optional(),
 });
 
 export const selectUserSchema = createSelectSchema(usersPg);

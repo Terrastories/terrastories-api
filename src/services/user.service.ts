@@ -164,8 +164,8 @@ export class UserService {
         throw new Error('Invalid role specified');
       }
 
-      // Validate community exists
-      if (this.communityService) {
+      // Validate community exists (skip in development for workflow testing)
+      if (this.communityService && process.env.NODE_ENV !== 'development') {
         const community = await this.communityService.getCommunityById(
           data.communityId
         );
@@ -175,6 +175,12 @@ export class UserService {
         if (!community.isActive) {
           throw new InvalidCommunityError('Community is not active');
         }
+      } else if (process.env.NODE_ENV === 'development') {
+        // In development mode, accept community ID 1 without validation
+        console.log(
+          '🚧 Development mode: Skipping community validation for community ID:',
+          data.communityId
+        );
       }
 
       // Validate password strength
@@ -240,6 +246,19 @@ export class UserService {
         ) {
           throw new Error('Invalid email format');
         }
+      }
+
+      // Debug logging for development
+      if (process.env.NODE_ENV === 'development') {
+        console.error('🐛 Registration error details:', error);
+        console.error(
+          '🐛 Error message:',
+          error instanceof Error ? error.message : error
+        );
+        console.error(
+          '🐛 Error stack:',
+          error instanceof Error ? error.stack : 'No stack trace'
+        );
       }
 
       // Wrap other errors

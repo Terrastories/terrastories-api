@@ -26,13 +26,6 @@ import {
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 
-// Country code validation schema (ISO 3166-1 alpha-2 format)
-export const CountryCodeSchema = z
-  .string()
-  .length(2, 'Country code must be 2 characters')
-  .regex(/^[A-Z]{2}$/, 'Country code must be uppercase letters')
-  .optional();
-
 // PostgreSQL table for production
 export const communitiesPg = pgTable('communities', {
   id: serial('id').primaryKey(),
@@ -43,9 +36,6 @@ export const communitiesPg = pgTable('communities', {
   locale: pgText('locale').notNull().default('en'),
   culturalSettings: pgText('cultural_settings'),
   isActive: boolean('is_active').notNull().default(true),
-  // Rails compatibility fields
-  country: pgText('country'),
-  beta: boolean('beta').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -62,9 +52,6 @@ export const communitiesSqlite = sqliteTable('communities', {
   locale: sqliteText('locale').notNull().default('en'),
   culturalSettings: sqliteText('cultural_settings'),
   isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
-  // Rails compatibility fields
-  country: sqliteText('country'),
-  beta: integer('beta', { mode: 'boolean' }).notNull().default(false),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -98,9 +85,6 @@ export const insertCommunitySchema = createInsertSchema(communitiesPg, {
     .optional(),
   publicStories: z.boolean().default(false),
   isActive: z.boolean().default(true),
-  // Rails compatibility field validation
-  country: CountryCodeSchema,
-  beta: z.boolean().default(false),
 });
 
 export const selectCommunitySchema = createSelectSchema(communitiesPg);

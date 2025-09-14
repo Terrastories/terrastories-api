@@ -10,6 +10,7 @@ import { themesRoutes } from './themes.js';
 import { publicApiRoutes } from './public-api.js';
 import { memberRoutes } from './member/index.js';
 import { superAdminRoutes } from './super_admin.js';
+import { devSeedRoutes } from './dev-seed.js';
 
 export interface RegisterRoutesOptions {
   database?: unknown;
@@ -44,4 +45,7 @@ export async function registerRoutes(
     prefix: '/api/v1/super_admin',
     ...opts,
   });
+
+  // Development seeding route (development only)
+  await app.register(devSeedRoutes, opts);
 }

@@ -229,6 +229,35 @@ export async function speakerRoutes(
   });
 
   /**
+   * PATCH /api/v1/speakers/:id - Partially update speaker
+   */
+  fastify.patch('/speakers/:id', {
+    preHandler: [requireAuth, requireRole(['admin', 'editor'])],
+    handler: async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const { id } = SpeakerIdSchema.parse(request.params);
+        const data = UpdateSpeakerSchema.parse(request.body);
+        const { user } = request as AuthenticatedRequest;
+
+        const speaker = await service.updateSpeaker(
+          id,
+          data,
+          user.communityId,
+          user.id,
+          user.role
+        );
+
+        return reply.send({
+          data: speaker,
+          meta: { message: 'Speaker updated successfully' },
+        });
+      } catch (error) {
+        return handleRouteError(error, reply, request);
+      }
+    },
+  });
+
+  /**
    * DELETE /api/v1/speakers/:id - Delete speaker
    */
   fastify.delete('/speakers/:id', {

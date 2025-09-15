@@ -114,24 +114,10 @@ export class UserService {
 
   constructor(
     private userRepository: UserRepository,
-    communityRepository?: CommunityRepository
+    communityRepository: CommunityRepository
   ) {
-    // If community repository is provided, use it; otherwise we need to create one
-    // This allows for dependency injection in tests while maintaining backwards compatibility
-    if (communityRepository) {
-      this.communityService = new CommunityService(communityRepository);
-    } else {
-      // We'll handle this in the routes where we have access to the database
-      // For now, we'll add the validation logic inline
-      this.communityService = null as unknown as CommunityService; // Temporary - will be set by routes
-    }
-  }
-
-  /**
-   * Set the community service (for backwards compatibility)
-   */
-  setCommunityService(communityService: CommunityService): void {
-    this.communityService = communityService;
+    // Always require community repository for proper validation
+    this.communityService = new CommunityService(communityRepository);
   }
 
   /**
@@ -164,23 +150,15 @@ export class UserService {
         throw new Error('Invalid role specified');
       }
 
-      // Validate community exists (skip in development for workflow testing)
-      if (this.communityService && process.env.NODE_ENV !== 'development') {
-        const community = await this.communityService.getCommunityById(
-          data.communityId
-        );
-        if (!community) {
-          throw new InvalidCommunityError('Community not found');
-        }
-        if (!community.isActive) {
-          throw new InvalidCommunityError('Community is not active');
-        }
-      } else if (process.env.NODE_ENV === 'development') {
-        // In development mode, accept community ID 1 without validation
-        console.log(
-          '🚧 Development mode: Skipping community validation for community ID:',
-          data.communityId
-        );
+      // Validate community exists
+      const community = await this.communityService.getCommunityById(
+        data.communityId
+      );
+      if (!community) {
+        throw new InvalidCommunityError('Community not found');
+      }
+      if (!community.isActive) {
+        throw new InvalidCommunityError('Community is not active');
       }
 
       // Validate password strength
@@ -246,19 +224,6 @@ export class UserService {
         ) {
           throw new Error('Invalid email format');
         }
-      }
-
-      // Debug logging for development
-      if (process.env.NODE_ENV === 'development') {
-        console.error('🐛 Registration error details:', error);
-        console.error(
-          '🐛 Error message:',
-          error instanceof Error ? error.message : error
-        );
-        console.error(
-          '🐛 Error stack:',
-          error instanceof Error ? error.stack : 'No stack trace'
-        );
       }
 
       // Wrap other errors

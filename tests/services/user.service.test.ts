@@ -20,6 +20,7 @@ import {
   type CreateUserRequest,
 } from '../../src/services/user.service.js';
 import { UserRepository } from '../../src/repositories/user.repository.js';
+import { CommunityRepository } from '../../src/repositories/community.repository.js';
 import * as passwordService from '../../src/services/password.service.js';
 
 // Mock the password service
@@ -44,7 +45,8 @@ describe('User Service', () => {
   beforeEach(async () => {
     const db = await testDb.setup();
     userRepository = new UserRepository(db);
-    userService = new UserService(userRepository);
+    const communityRepository = new CommunityRepository(db);
+    userService = new UserService(userRepository, communityRepository);
 
     // Clear and seed test data
     await testDb.clearData();
@@ -206,7 +208,7 @@ describe('User Service', () => {
         InvalidCommunityError
       );
       await expect(userService.registerUser(registrationData)).rejects.toThrow(
-        'Invalid community ID'
+        'Community not found'
       );
     });
 

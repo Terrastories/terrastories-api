@@ -69,12 +69,8 @@ export const storyPlacesSqlite = sqliteTable(
       .references(() => placesSqlite.id, { onDelete: 'cascade' }),
     culturalContext: sqliteText('cultural_context'),
     sortOrder: integer('sort_order').default(0),
-    createdAt: integer('created_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
   },
   (table) => ({
     // Composite unique constraint to prevent duplicate relationships

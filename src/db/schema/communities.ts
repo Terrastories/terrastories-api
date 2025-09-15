@@ -65,12 +65,8 @@ export const communitiesSqlite = sqliteTable('communities', {
   // Rails compatibility fields
   country: sqliteText('country'),
   beta: integer('beta', { mode: 'boolean' }).notNull().default(false),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
 // Dynamic table selection based on database type (for runtime use)

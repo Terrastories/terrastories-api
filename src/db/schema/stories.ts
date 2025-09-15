@@ -110,12 +110,8 @@ export const storiesSqlite = sqliteTable(
     interviewerId: integer('interviewer_id').references(
       () => speakersSqlite.id
     ),
-    createdAt: integer('created_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
   },
   (table) => ({
     // Standard indexes for filtering and searching

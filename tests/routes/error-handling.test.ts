@@ -40,11 +40,18 @@ describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
     };
 
     // Register admin
-    await app.inject({
+    const registerResponse = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
       payload: adminUser,
     });
+
+    if (registerResponse.statusCode !== 201) {
+      console.error('Registration failed:', registerResponse.body);
+      throw new Error(
+        `Registration failed with status ${registerResponse.statusCode}`
+      );
+    }
 
     // Login as admin
     const loginResponse = await app.inject({
@@ -57,17 +64,31 @@ describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
       },
     });
 
+    if (loginResponse.statusCode !== 200) {
+      console.error('Login failed:', loginResponse.body);
+      throw new Error(`Login failed with status ${loginResponse.statusCode}`);
+    }
+
     const cookieHeader = loginResponse.headers['set-cookie'];
     if (Array.isArray(cookieHeader)) {
       adminSessionId = cookieHeader[0];
     } else {
       adminSessionId = cookieHeader || '';
     }
+
+    if (!adminSessionId) {
+      throw new Error('No session cookie received after login');
+    }
   });
 
   afterEach(async () => {
+    if (app) {
+      await app.close();
+    }
+  });
+
+  afterAll(async () => {
     await testDb.cleanup();
-    await app.close();
   });
 
   describe('GET /api/v1/speakers/:id - Error Scenarios', () => {
@@ -103,8 +124,8 @@ describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
           name: 'Other Community Speaker',
           bio: 'From another community',
           communityId: otherCommunityId,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
         })
         .returning();
 
@@ -219,8 +240,8 @@ describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
           communityId: otherCommunityId,
           latitude: 50.0,
           longitude: -120.0,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
         })
         .returning();
 

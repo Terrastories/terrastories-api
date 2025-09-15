@@ -95,16 +95,9 @@ export const usersSqlite = sqliteTable(
       .notNull()
       .references(() => communitiesSqlite.id),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
-    lastLoginAt: integer('last_login_at', { mode: 'timestamp' }).$defaultFn(
-      () => new Date()
-    ),
-    createdAt: integer('created_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
-
+    lastLoginAt: integer('last_login_at', { mode: 'timestamp' }),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
     // Authentication fields for password reset and session management
     resetPasswordToken: sqliteText('reset_password_token'),
     resetPasswordSentAt: integer('reset_password_sent_at', {

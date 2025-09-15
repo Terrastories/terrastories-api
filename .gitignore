@@ -136,3 +136,14 @@ sqlite::memory:
 
 # Work session files (temporary)
 .claude/work-sessions/
+
+# Temporary test and debug files
+test_*.js
+test_*.ts
+test_session_*.js
+test_cookies.js
+scripts/check_db.ts
+scripts/fix_database.ts
+
+# Production environment backups
+.env.production.backup

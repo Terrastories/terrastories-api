@@ -32,7 +32,7 @@ import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
-import { usersPg } from './users.js';
+import { usersPg, usersSqlite } from './users.js';
 import { placesPg, placesSqlite } from './places.js';
 import { speakersPg, speakersSqlite } from './speakers.js';
 
@@ -179,9 +179,9 @@ export const storiesSqliteRelations = relations(
       fields: [storiesSqlite.communityId],
       references: [communitiesSqlite.id],
     }),
-    author: one(usersPg, {
+    author: one(usersSqlite, {
       fields: [storiesSqlite.createdBy],
-      references: [usersPg.id],
+      references: [usersSqlite.id],
     }),
     // Interview metadata relations
     interviewLocation: one(placesSqlite, {

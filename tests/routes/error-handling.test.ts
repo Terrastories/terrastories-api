@@ -103,6 +103,8 @@ describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
           name: 'Other Community Speaker',
           bio: 'From another community',
           communityId: otherCommunityId,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         })
         .returning();
 
@@ -217,6 +219,8 @@ describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
           communityId: otherCommunityId,
           latitude: 50.0,
           longitude: -120.0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         })
         .returning();
 

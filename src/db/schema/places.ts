@@ -28,6 +28,7 @@ import {
   integer,
   text as sqliteText,
   real,
+  index as sqliteIndex,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
@@ -68,37 +69,48 @@ export const placesPg = pgTable(
   (table) => ({
     // Standard indexes for filtering
     communityIdx: index('places_community_id_idx').on(table.communityId),
+    // Index for photo URL queries (for media management)
+    photoUrlIdx: index('places_photo_url_idx').on(table.photoUrl),
     // Note: PostGIS geometry index will be added in migration
   })
 );
 
 // SQLite table for development/testing
-export const placesSqlite = sqliteTable('places', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  name: sqliteText('name').notNull(),
-  description: sqliteText('description'),
-  communityId: integer('community_id')
-    .notNull()
-    .references(() => communitiesSqlite.id),
-  latitude: real('latitude').notNull(),
-  longitude: real('longitude').notNull(),
-  region: sqliteText('region'),
-  mediaUrls: sqliteText('media_urls', { mode: 'json' })
-    .$type<string[]>()
-    .default([]),
-  // Direct file URL column for dual-read capability (Issue #89)
-  photoUrl: sqliteText('photo_url'),
-  culturalSignificance: sqliteText('cultural_significance'),
-  isRestricted: integer('is_restricted', { mode: 'boolean' })
-    .notNull()
-    .default(false),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
+export const placesSqlite = sqliteTable(
+  'places',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: sqliteText('name').notNull(),
+    description: sqliteText('description'),
+    communityId: integer('community_id')
+      .notNull()
+      .references(() => communitiesSqlite.id),
+    latitude: real('latitude').notNull(),
+    longitude: real('longitude').notNull(),
+    region: sqliteText('region'),
+    mediaUrls: sqliteText('media_urls', { mode: 'json' })
+      .$type<string[]>()
+      .default([]),
+    // Direct file URL column for dual-read capability (Issue #89)
+    photoUrl: sqliteText('photo_url'),
+    culturalSignificance: sqliteText('cultural_significance'),
+    isRestricted: integer('is_restricted', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer('updated_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    // Standard indexes for filtering
+    communityIdx: sqliteIndex('places_community_id_idx').on(table.communityId),
+    // Index for photo URL queries (for media management)
+    photoUrlIdx: sqliteIndex('places_photo_url_idx').on(table.photoUrl),
+  })
+);
 
 // Dynamic table selection based on database type (for runtime use)
 // Note: This function imports getConfig at runtime to avoid circular dependencies during migration

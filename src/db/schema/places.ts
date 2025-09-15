@@ -169,15 +169,66 @@ export const updatePlaceSchema = insertPlaceSchema.partial().omit({
   communityId: true, // Don't allow changing community
 });
 
-// PostGIS spatial utility functions (PostgreSQL only)
+/**
+ * Validates and sanitizes coordinate values to prevent SQL injection
+ */
+function validateCoordinate(
+  value: number,
+  type: 'latitude' | 'longitude'
+): number {
+  if (typeof value !== 'number' || !isFinite(value)) {
+    throw new Error(`Invalid ${type}: must be a finite number`);
+  }
+
+  if (type === 'latitude' && (value < -90 || value > 90)) {
+    throw new Error(
+      `Invalid latitude: must be between -90 and 90, got ${value}`
+    );
+  }
+
+  if (type === 'longitude' && (value < -180 || value > 180)) {
+    throw new Error(
+      `Invalid longitude: must be between -180 and 180, got ${value}`
+    );
+  }
+
+  return value;
+}
+
+/**
+ * Validates radius parameter
+ */
+function validateRadius(radius: number): number {
+  if (typeof radius !== 'number' || !isFinite(radius) || radius < 0) {
+    throw new Error(
+      `Invalid radius: must be a positive finite number, got ${radius}`
+    );
+  }
+
+  // Reasonable maximum radius (half Earth's circumference)
+  if (radius > 20037508) {
+    throw new Error(`Invalid radius: too large, got ${radius}`);
+  }
+
+  return radius;
+}
+
+// PostGIS spatial utility functions (PostgreSQL only) with input validation
 export const spatialHelpers = {
   // Create PostGIS POINT from latitude and longitude
-  createPoint: (lat: number, lng: number) =>
-    `ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)`,
+  createPoint: (lat: number, lng: number) => {
+    const validLat = validateCoordinate(lat, 'latitude');
+    const validLng = validateCoordinate(lng, 'longitude');
+    return `ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)`;
+  },
 
   // Find places within radius (in meters) using latitude/longitude columns
-  findWithinRadius: (lat: number, lng: number, radiusMeters: number) =>
-    `ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${radiusMeters})`,
+  findWithinRadius: (lat: number, lng: number, radiusMeters: number) => {
+    const validLat = validateCoordinate(lat, 'latitude');
+    const validLng = validateCoordinate(lng, 'longitude');
+    const validRadius = validateRadius(radiusMeters);
+    return `ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)::geography, ${validRadius})`;
+  },
 
   // Find places within bounding box using latitude/longitude columns
   findInBoundingBox: (bounds: {
@@ -185,12 +236,27 @@ export const spatialHelpers = {
     south: number;
     east: number;
     west: number;
-  }) =>
-    `latitude BETWEEN ${bounds.south} AND ${bounds.north} AND longitude BETWEEN ${bounds.west} AND ${bounds.east}`,
+  }) => {
+    const validNorth = validateCoordinate(bounds.north, 'latitude');
+    const validSouth = validateCoordinate(bounds.south, 'latitude');
+    const validEast = validateCoordinate(bounds.east, 'longitude');
+    const validWest = validateCoordinate(bounds.west, 'longitude');
+
+    if (validSouth > validNorth) {
+      throw new Error(
+        'Invalid bounding box: south latitude must be less than north latitude'
+      );
+    }
+
+    return `latitude BETWEEN ${validSouth} AND ${validNorth} AND longitude BETWEEN ${validWest} AND ${validEast}`;
+  },
 
   // Calculate distance between two points (in meters) using latitude/longitude columns
-  calculateDistance: (fromLat: number, fromLng: number) =>
-    `ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${fromLng}, ${fromLat}), 4326)::geography)`,
+  calculateDistance: (fromLat: number, fromLng: number) => {
+    const validFromLat = validateCoordinate(fromLat, 'latitude');
+    const validFromLng = validateCoordinate(fromLng, 'longitude');
+    return `ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validFromLng}, ${validFromLat}), 4326)::geography)`;
+  },
 };
 
 // Export table variants for migration generation

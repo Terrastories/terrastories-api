@@ -543,8 +543,8 @@ export class TestDatabaseManager {
           slug: `system-${timestamp}`,
           publicStories: false,
           locale: 'en',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
       ])
       .returning();
@@ -557,24 +557,24 @@ export class TestDatabaseManager {
           description: 'A test community for unit tests',
           slug: `test-community-${timestamp}`,
           publicStories: true,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
         {
           name: 'Demo Community',
           description: 'A demo community for integration tests',
           slug: `demo-community-${timestamp}`,
           publicStories: false,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
         {
           name: 'Isolated Test Community',
           description: 'Community for isolated test scenarios',
           slug: `isolated-test-${timestamp}`,
           publicStories: true,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
       ])
       .returning();
@@ -594,8 +594,8 @@ export class TestDatabaseManager {
           culturalSignificance: null,
           isRestricted: false,
           communityId: testCommunities[0].id,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
         {
           name: 'Test Place 2',
@@ -607,8 +607,8 @@ export class TestDatabaseManager {
           photoUrl: null, // Add the new column
           culturalSignificance: null,
           communityId: testCommunities[0].id,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
         {
           name: 'Isolated Test Place',
@@ -621,8 +621,8 @@ export class TestDatabaseManager {
           culturalSignificance: null,
           isRestricted: false,
           communityId: testCommunities[2].id,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
       ])
       .returning();
@@ -875,8 +875,8 @@ export async function createTestData() {
         role: 'admin',
         communityId: fixtures.communities[0].id,
         isActive: true,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
       {
         email: 'editor@test.com',
@@ -887,8 +887,8 @@ export async function createTestData() {
         role: 'editor',
         communityId: fixtures.communities[0].id,
         isActive: true,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
       {
         email: 'elder@test.com',
@@ -899,8 +899,8 @@ export async function createTestData() {
         role: 'elder',
         communityId: fixtures.communities[0].id,
         isActive: true,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
       {
         email: 'viewer@test.com',
@@ -911,8 +911,8 @@ export async function createTestData() {
         role: 'viewer',
         communityId: fixtures.communities[0].id,
         isActive: true,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
       {
         email: 'superadmin@test.com',
@@ -923,8 +923,8 @@ export async function createTestData() {
         role: 'super_admin',
         communityId: fixtures.systemCommunity.id,
         isActive: true,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
       {
         email: 'other@test.com',

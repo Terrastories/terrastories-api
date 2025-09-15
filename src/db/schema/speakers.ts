@@ -130,9 +130,9 @@ export const speakersRelations = relations(speakersPg, ({ one }) => ({
 
 // SQLite relations (same structure)
 export const speakersSqliteRelations = relations(speakersSqlite, ({ one }) => ({
-  community: one(communitiesPg, {
+  community: one(communitiesSqlite, {
     fields: [speakersSqlite.communityId],
-    references: [communitiesPg.id],
+    references: [communitiesSqlite.id],
   }),
 }));
 

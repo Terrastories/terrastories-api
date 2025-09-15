@@ -131,9 +131,9 @@ export const placesRelations = relations(placesPg, ({ one }) => ({
 
 // SQLite relations (same structure)
 export const placesSqliteRelations = relations(placesSqlite, ({ one }) => ({
-  community: one(communitiesPg, {
+  community: one(communitiesSqlite, {
     fields: [placesSqlite.communityId],
-    references: [communitiesPg.id],
+    references: [communitiesSqlite.id],
   }),
 }));
 

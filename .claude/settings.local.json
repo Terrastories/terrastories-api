@@ -1,6 +1,6 @@
 {
   "permissions": {
-    "allow": ["Bash(tmux:*)"],
+    "allow": ["Bash(tmux:*)", "Bash(./scripts/user_workflow.sh:*)"],
     "deny": [],
     "ask": []
   }

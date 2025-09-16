@@ -168,8 +168,9 @@ export class ThemesRepository {
 
   // Type-safe database query wrapper - cast to any to handle union type
   private get db() {
-    // Cast to resolve union type issues - both drizzle instances have compatible query interfaces
-    return this.database as Database;
+    // Cast to any to resolve union type issues - both drizzle instances have compatible query interfaces
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return this.database as any;
   }
 
   /**

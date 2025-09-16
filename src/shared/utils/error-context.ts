@@ -42,7 +42,7 @@ export const DatabaseOperations = {
 /**
  * Standard context builder for database errors
  */
-export interface ErrorContext {
+export interface ErrorContext extends Record<string, unknown> {
   operation: string;
   resourceType: string;
   resourceId?: number | string;

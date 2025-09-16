@@ -232,7 +232,7 @@ export class SpeakerRepository {
               operation: DatabaseOperations.CREATE_SPEAKER,
               resourceType: ResourceTypes.SPEAKER,
               communityId: data.communityId,
-              originalError: error,
+              originalError: error instanceof Error ? error : String(error),
             })
           );
         }
@@ -265,7 +265,7 @@ export class SpeakerRepository {
           operation: DatabaseOperations.CREATE_SPEAKER,
           resourceType: ResourceTypes.SPEAKER,
           communityId: data.communityId,
-          originalError: error,
+          originalError: error instanceof Error ? error : String(error),
         })
       );
     }
@@ -320,7 +320,7 @@ export class SpeakerRepository {
               resourceType: ResourceTypes.SPEAKER,
               resourceId: id,
               communityId,
-              originalError: error,
+              originalError: error instanceof Error ? error : String(error),
             })
           );
         }

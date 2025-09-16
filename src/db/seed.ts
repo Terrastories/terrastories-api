@@ -92,6 +92,7 @@ async function seedDatabase(): Promise<SeedData> {
     // Create communities
     console.log('🏘️ Creating test communities...');
     const timestamp = Date.now();
+    const now = new Date();
     const testCommunities = await db
       .insert(communitiesSqlite)
       .values([
@@ -111,6 +112,8 @@ async function seedDatabase(): Promise<SeedData> {
             accessRestrictions: [],
           }),
           isActive: true,
+          createdAt: now,
+          updatedAt: now,
         },
         {
           name: 'Test Indigenous Community',
@@ -129,6 +132,8 @@ async function seedDatabase(): Promise<SeedData> {
             accessRestrictions: ['elder-only', 'community-member-only'],
           }),
           isActive: true,
+          createdAt: now,
+          updatedAt: now,
         },
       ])
       .returning();
@@ -152,6 +157,8 @@ async function seedDatabase(): Promise<SeedData> {
           role: 'super_admin',
           communityId: testCommunities[0].id,
           isActive: true,
+          createdAt: now,
+          updatedAt: now,
         },
         {
           firstName: 'Admin',
@@ -161,6 +168,8 @@ async function seedDatabase(): Promise<SeedData> {
           role: 'admin',
           communityId: testCommunities[0].id,
           isActive: true,
+          createdAt: now,
+          updatedAt: now,
         },
         {
           firstName: 'Editor',
@@ -170,6 +179,8 @@ async function seedDatabase(): Promise<SeedData> {
           role: 'editor',
           communityId: testCommunities[0].id,
           isActive: true,
+          createdAt: now,
+          updatedAt: now,
         },
         {
           firstName: 'Elder',
@@ -179,6 +190,8 @@ async function seedDatabase(): Promise<SeedData> {
           role: 'admin',
           communityId: testCommunities[1].id,
           isActive: true,
+          createdAt: now,
+          updatedAt: now,
         },
         {
           firstName: 'Community',
@@ -188,6 +201,8 @@ async function seedDatabase(): Promise<SeedData> {
           role: 'viewer',
           communityId: testCommunities[1].id,
           isActive: true,
+          createdAt: now,
+          updatedAt: now,
         },
       ])
       .returning();
@@ -211,6 +226,8 @@ async function seedDatabase(): Promise<SeedData> {
           isRestricted: false,
           communityId: testCommunities[0].id,
           mediaUrls: [],
+          createdAt: now,
+          updatedAt: now,
         },
         {
           name: 'Traditional Gathering Place',
@@ -222,6 +239,8 @@ async function seedDatabase(): Promise<SeedData> {
           isRestricted: true,
           communityId: testCommunities[1].id,
           mediaUrls: [],
+          createdAt: now,
+          updatedAt: now,
         },
         {
           name: 'Storytelling Circle',
@@ -233,6 +252,8 @@ async function seedDatabase(): Promise<SeedData> {
           isRestricted: false,
           communityId: testCommunities[0].id,
           mediaUrls: [],
+          createdAt: now,
+          updatedAt: now,
         },
       ])
       .returning();
@@ -251,6 +272,8 @@ async function seedDatabase(): Promise<SeedData> {
           communityId: testCommunities[1].id,
           culturalRole: 'Traditional storyteller and knowledge keeper',
           elderStatus: true,
+          createdAt: now,
+          updatedAt: now,
         },
         {
           name: 'David Wilson',
@@ -259,6 +282,8 @@ async function seedDatabase(): Promise<SeedData> {
           communityId: testCommunities[0].id,
           culturalRole: 'Community historian',
           elderStatus: false,
+          createdAt: now,
+          updatedAt: now,
         },
         {
           name: 'Maria Rodriguez',
@@ -267,6 +292,8 @@ async function seedDatabase(): Promise<SeedData> {
           communityId: testCommunities[0].id,
           culturalRole: 'Cultural educator',
           elderStatus: false,
+          createdAt: now,
+          updatedAt: now,
         },
       ])
       .returning();

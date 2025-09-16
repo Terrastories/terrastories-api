@@ -847,4 +847,328 @@ export class UserService {
       );
     }
   }
+
+  /**
+   * Community-Scoped User Management Methods
+   *
+   * These methods provide community-scoped user management for regular admins
+   * within their community boundaries to ensure data sovereignty compliance.
+   */
+
+  /**
+   * Get all users in a specific community with pagination and filtering
+   * Used by community admins to manage users within their community
+   */
+  async getAllUsersByCommunity(options: {
+    communityId: number;
+    page?: number;
+    limit?: number;
+    search?: string;
+    role?: UserRole;
+    active?: boolean;
+  }): Promise<{
+    data: User[];
+    meta: {
+      page: number;
+      limit: number;
+      total: number;
+      totalPages: number;
+    };
+  }> {
+    try {
+      const {
+        communityId,
+        page = 1,
+        limit = 20,
+        search,
+        role,
+        active,
+      } = options;
+
+      // Validate community ID
+      if (!Number.isInteger(communityId) || communityId <= 0) {
+        throw new Error('Invalid community ID');
+      }
+
+      // Validate pagination
+      if (!Number.isInteger(page) || page < 1) {
+        throw new Error('Page must be a positive integer');
+      }
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        throw new Error('Limit must be between 1 and 100');
+      }
+
+      const result = await this.userRepository.findByCommunity(communityId, {
+        page,
+        limit,
+        search,
+        role,
+        active,
+      });
+
+      return result;
+    } catch (error) {
+      throw new Error(
+        `Failed to get users for community: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Get a user by ID within a specific community
+   * Ensures community data isolation - users can only access users in their community
+   */
+  async getUserByIdInCommunity(
+    userId: number,
+    communityId: number
+  ): Promise<User | null> {
+    try {
+      // Validate IDs
+      if (!Number.isInteger(userId) || userId <= 0) {
+        throw new Error('Invalid user ID');
+      }
+      if (!Number.isInteger(communityId) || communityId <= 0) {
+        throw new Error('Invalid community ID');
+      }
+
+      // Get user in the specified community
+      const user = await this.userRepository.findById(userId, communityId);
+      return user;
+    } catch (error) {
+      throw new Error(
+        `Failed to get user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Create a new user within a specific community
+   * Enforces community boundary - user will be created in the admin's community
+   */
+  async createUserInCommunity(
+    data: Omit<CreateUserRequest, 'communityId'> & { communityId: number }
+  ): Promise<User> {
+    try {
+      const { communityId, ...userData } = data;
+
+      // Validate community ID
+      if (!Number.isInteger(communityId) || communityId <= 0) {
+        throw new InvalidCommunityError('Invalid community ID');
+      }
+
+      // Community validation will be handled by the database constraint
+      // If the community doesn't exist, the foreign key constraint will fail
+
+      // Block super_admin role creation (community admins can't create super admins)
+      if (userData.role === 'super_admin') {
+        throw new Error(
+          'Cannot create super admin users through community endpoints'
+        );
+      }
+
+      // Check for duplicate email within the same community
+      const existingUser = await this.userRepository.findByEmailInCommunity(
+        userData.email,
+        communityId
+      );
+      if (existingUser) {
+        throw new DuplicateEmailError(
+          'User with this email already exists in this community'
+        );
+      }
+
+      // Validate password strength
+      if (userData.password.length < 8) {
+        throw new WeakPasswordError(
+          'Password must be at least 8 characters long'
+        );
+      }
+
+      // Hash password
+      const hashedPassword = await passwordService.hashPassword(
+        userData.password
+      );
+
+      // Create user data
+      const createData: CreateUserData = {
+        email: userData.email,
+        passwordHash: hashedPassword,
+        firstName: userData.firstName,
+        lastName: userData.lastName,
+        role: userData.role || 'viewer',
+        communityId,
+        isActive: userData.isActive ?? true,
+      };
+
+      // Create user
+      const user = await this.userRepository.create(createData);
+      return user;
+    } catch (error) {
+      // Re-throw known error types
+      if (
+        error instanceof DuplicateEmailError ||
+        error instanceof WeakPasswordError ||
+        error instanceof InvalidCommunityError
+      ) {
+        throw error;
+      }
+      throw new Error(
+        `Failed to create user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Update a user within a specific community
+   * Ensures community data isolation - users can only update users in their community
+   */
+  async updateUserInCommunity(
+    userId: number,
+    data: Omit<UpdateUserRequest, 'communityId'>,
+    communityId: number
+  ): Promise<User> {
+    try {
+      // Validate IDs
+      if (!Number.isInteger(userId) || userId <= 0) {
+        throw new Error('Invalid user ID');
+      }
+      if (!Number.isInteger(communityId) || communityId <= 0) {
+        throw new Error('Invalid community ID');
+      }
+
+      // Check if user exists in the same community
+      const existingUser = await this.getUserByIdInCommunity(
+        userId,
+        communityId
+      );
+      if (!existingUser) {
+        throw new UserNotFoundError('User not found');
+      }
+
+      // Block super_admin role assignment (community admins can't promote to super admin)
+      if (data.role === 'super_admin') {
+        throw new Error(
+          'Cannot assign super admin role through community endpoints'
+        );
+      }
+
+      // Check for duplicate email if email is being updated
+      if (data.email && data.email !== existingUser.email) {
+        const duplicateUser = await this.userRepository.findByEmailInCommunity(
+          data.email,
+          communityId
+        );
+        if (duplicateUser && duplicateUser.id !== userId) {
+          throw new DuplicateEmailError(
+            'User with this email already exists in this community'
+          );
+        }
+      }
+
+      // Create update data
+      const updateData: UpdateUserData = {
+        email: data.email,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        role: data.role,
+        isActive: data.isActive,
+      };
+
+      // Remove undefined values
+      Object.keys(updateData).forEach((key) => {
+        if (updateData[key as keyof UpdateUserData] === undefined) {
+          delete updateData[key as keyof UpdateUserData];
+        }
+      });
+
+      // Update user
+      const updatedUser = await this.userRepository.update(
+        userId,
+        updateData,
+        communityId
+      );
+      if (!updatedUser) {
+        throw new UserNotFoundError('User not found');
+      }
+      return updatedUser;
+    } catch (error) {
+      // Re-throw known error types
+      if (
+        error instanceof UserNotFoundError ||
+        error instanceof DuplicateEmailError
+      ) {
+        throw error;
+      }
+      throw new Error(
+        `Failed to update user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
+
+  /**
+   * Delete/deactivate a user within a specific community
+   * Ensures community data isolation - users can only delete users in their community
+   */
+  async deleteUserInCommunity(
+    userId: number,
+    communityId: number,
+    actingUserId: number
+  ): Promise<{ message: string; id: number }> {
+    try {
+      // Validate IDs
+      if (!Number.isInteger(userId) || userId <= 0) {
+        throw new Error('Invalid user ID');
+      }
+      if (!Number.isInteger(communityId) || communityId <= 0) {
+        throw new Error('Invalid community ID');
+      }
+      if (!Number.isInteger(actingUserId) || actingUserId <= 0) {
+        throw new Error('Invalid acting user ID');
+      }
+
+      // Prevent self-deletion
+      if (userId === actingUserId) {
+        throw new Error('Users cannot delete themselves');
+      }
+
+      // Check if user exists in the same community
+      const existingUser = await this.getUserByIdInCommunity(
+        userId,
+        communityId
+      );
+      if (!existingUser) {
+        throw new UserNotFoundError('User not found');
+      }
+
+      // Deactivate the user (soft delete)
+      await this.userRepository.update(
+        userId,
+        { isActive: false },
+        communityId
+      );
+
+      return {
+        message: 'User deleted successfully',
+        id: userId,
+      };
+    } catch (error) {
+      // Re-throw known error types
+      if (error instanceof UserNotFoundError) {
+        throw error;
+      }
+      throw new Error(
+        `Failed to delete user: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`
+      );
+    }
+  }
 }

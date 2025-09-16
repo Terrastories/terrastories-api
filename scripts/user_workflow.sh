@@ -29,11 +29,13 @@ set +H  # Disable bash history expansion to prevent issues with special characte
 #   ./user_workflow.sh --help                   # Show detailed usage information
 #   ./user_workflow.sh --log-file <path>        # Save detailed logs to specified file
 #   ./user_workflow.sh --verbose               # Enable verbose output
+#   ./user_workflow.sh --force-recreate        # Force recreation of existing resources
 #
 # ENVIRONMENT VARIABLES:
 #   API_BASE     : API base URL (default: http://localhost:3000)
 #   LOG_LEVEL    : Logging verbosity (default: INFO)
 #   TEST_TIMEOUT : Request timeout in seconds (default: 30)
+#   FORCE_RECREATE : Force recreation of existing resources (default: false)
 #
 # =============================================================================
 
@@ -47,6 +49,7 @@ TEST_TIMEOUT="${TEST_TIMEOUT:-30}"
 DEFAULT_LOGFILE="terrastories-$(date +%Y%m%d-%H%M%S).log"
 LOGFILE=""
 VERBOSE=false
+FORCE_RECREATE="${FORCE_RECREATE:-false}"
 
 # Cookie jars for different user sessions
 SUPER_ADMIN_COOKIES=$(mktemp -t super-admin-cookies.XXXXXX)
@@ -125,6 +128,155 @@ validate_dependencies() {
 has_valid_auth() {
     local cookie_jar="$1"
     [[ -s "$cookie_jar" ]] && grep -q "session" "$cookie_jar" 2>/dev/null
+}
+
+# Helper function to extract ID from API response
+extract_id_from_response() {
+    local response="$1"
+    echo "$response" | jq -r '.data.id // .id // empty' 2>/dev/null
+}
+
+# Helper function to check if resource exists by making a GET request
+resource_exists() {
+    local endpoint="$1"
+    local cookie_jar="$2"
+    local description="$3"
+
+    if make_request "GET" "$endpoint" "" "$cookie_jar" "Checking if $description exists" 2>/dev/null; then
+        return 0  # Resource exists
+    else
+        return 1  # Resource doesn't exist
+    fi
+}
+
+# Idempotent resource creation function
+create_resource_idempotent() {
+    local method="$1"
+    local endpoint="$2"
+    local data="$3"
+    local cookie_jar="$4"
+    local description="$5"
+    local check_endpoint="$6"  # Optional: endpoint to check if resource exists
+
+    # If we have a check endpoint and resource exists, skip creation
+    if [[ -n "$check_endpoint" ]] && [[ "$FORCE_RECREATE" != "true" ]]; then
+        if resource_exists "$check_endpoint" "$cookie_jar" "$description"; then
+            info "Resource already exists: $description (skipping creation)"
+            # Try to get the existing resource data
+            local existing_response
+            if existing_response=$(make_request "GET" "$check_endpoint" "" "$cookie_jar" "Retrieving existing $description" 2>/dev/null); then
+                echo "$existing_response"
+                return 0
+            fi
+        fi
+    fi
+
+    # Try to create the resource
+    local response
+    if response=$(make_request "$method" "$endpoint" "$data" "$cookie_jar" "Creating $description" 2>/dev/null); then
+        success "Created new resource: $description"
+        echo "$response"
+        return 0
+    else
+        # Check if this is a 409 conflict (resource already exists)
+        local exit_code=$?
+        if [[ "$FORCE_RECREATE" != "true" ]]; then
+            # Try to extract the error and see if it indicates the resource exists
+            local error_body="$response"
+            if echo "$error_body" | grep -q -i "already exists\|conflict\|duplicate"; then
+                warn "Resource already exists (409 conflict): $description"
+
+                # If we have a check endpoint, try to get the existing resource
+                if [[ -n "$check_endpoint" ]]; then
+                    local existing_response
+                    if existing_response=$(make_request "GET" "$check_endpoint" "" "$cookie_jar" "Retrieving existing $description after conflict" 2>/dev/null); then
+                        info "Retrieved existing resource: $description"
+                        echo "$existing_response"
+                        return 0
+                    fi
+                fi
+
+                # Return a minimal success response if we can't retrieve the existing resource
+                info "Continuing with existing resource: $description"
+                echo '{"data":{"id":1},"message":"Using existing resource"}'
+                return 0
+            fi
+        fi
+
+        # If it's not a 409 or we're forcing recreation, return the error
+        error "Failed to create resource: $description"
+        echo "$response"
+        return $exit_code
+    fi
+}
+
+# Lookup functions for specific resources
+lookup_community_by_name() {
+    local community_name="$1"
+    local cookie_jar="$2"
+
+    if has_valid_auth "$cookie_jar"; then
+        # Try to list communities and find by name
+        local communities_response
+        if communities_response=$(make_request "GET" "/api/v1/communities" "" "$cookie_jar" "Looking up community by name" 2>/dev/null); then
+            echo "$communities_response" | jq -r ".data[] | select(.name == \"$community_name\") | .id" 2>/dev/null
+        fi
+    fi
+}
+
+lookup_user_by_email() {
+    local email="$1"
+    local cookie_jar="$2"
+
+    if has_valid_auth "$cookie_jar"; then
+        # Try to list users and find by email
+        local users_response
+        if users_response=$(make_request "GET" "/api/v1/super_admin/users" "" "$cookie_jar" "Looking up user by email" 2>/dev/null); then
+            echo "$users_response" | jq -r ".data[] | select(.email == \"$email\") | .id" 2>/dev/null
+        fi
+    fi
+}
+
+lookup_speaker_by_name() {
+    local speaker_name="$1"
+    local community_id="$2"
+    local cookie_jar="$3"
+
+    if has_valid_auth "$cookie_jar"; then
+        # Try to list speakers and find by name
+        local speakers_response
+        if speakers_response=$(make_request "GET" "/api/v1/speakers?communityId=$community_id" "" "$cookie_jar" "Looking up speaker by name" 2>/dev/null); then
+            echo "$speakers_response" | jq -r ".data[] | select(.name == \"$speaker_name\") | .id" 2>/dev/null
+        fi
+    fi
+}
+
+lookup_place_by_name() {
+    local place_name="$1"
+    local community_id="$2"
+    local cookie_jar="$3"
+
+    if has_valid_auth "$cookie_jar"; then
+        # Try to list places and find by name
+        local places_response
+        if places_response=$(make_request "GET" "/api/v1/places?communityId=$community_id" "" "$cookie_jar" "Looking up place by name" 2>/dev/null); then
+            echo "$places_response" | jq -r ".data[] | select(.name == \"$place_name\") | .id" 2>/dev/null
+        fi
+    fi
+}
+
+lookup_story_by_title() {
+    local story_title="$1"
+    local community_id="$2"
+    local cookie_jar="$3"
+
+    if has_valid_auth "$cookie_jar"; then
+        # Try to list stories and find by title
+        local stories_response
+        if stories_response=$(make_request "GET" "/api/v1/stories?communityId=$community_id" "" "$cookie_jar" "Looking up story by title" 2>/dev/null); then
+            echo "$stories_response" | jq -r ".data[] | select(.title == \"$story_title\") | .id" 2>/dev/null
+        fi
+    fi
 }
 
 # Enhanced HTTP request function with detailed logging
@@ -240,8 +392,9 @@ super_admin_setup_flow() {
         # This validates the API structure without full authentication
     fi
 
-    # Create new community as authenticated super admin
-    step "Creating new community as super admin"
+    # Create new community as authenticated super admin (idempotent)
+    step "Creating new community as super admin (idempotent)"
+    local community_name="Anishinaabe Nation"
     local community_data='{
         "name": "Anishinaabe Nation",
         "description": "Traditional territory and cultural stories of the Anishinaabe people",
@@ -251,39 +404,70 @@ super_admin_setup_flow() {
         "isActive": true
     }'
 
-    # Create community with authenticated super admin
-    local community_response
-    if community_response=$(make_request "POST" "/api/v1/super_admin/communities" "$community_data" "$SUPER_ADMIN_COOKIES" "Super admin community creation"); then
-        success "New community 'Anishinaabe Nation' created successfully"
-        # Extract community ID for subsequent operations
-        local community_id
-        community_id=$(echo "$community_response" | jq -r '.data.id // .id // 2')
-        echo "$community_id" > /tmp/test_community_id
-        echo "$community_response" > /tmp/test_community_response
+    # Check if community already exists
+    local existing_community_id
+    existing_community_id=$(lookup_community_by_name "$community_name" "$SUPER_ADMIN_COOKIES")
+
+    if [[ -n "$existing_community_id" ]] && [[ "$FORCE_RECREATE" != "true" ]]; then
+        info "Community '$community_name' already exists with ID: $existing_community_id"
+        echo "$existing_community_id" > /tmp/test_community_id
+        success "Using existing community: $community_name"
     else
-        warn "Community creation failed - using default community (ID: 1)"
-        echo "1" > /tmp/test_community_id
+        # Create community with authenticated super admin
+        local community_response
+        if community_response=$(create_resource_idempotent "POST" "/api/v1/super_admin/communities" "$community_data" "$SUPER_ADMIN_COOKIES" "community '$community_name'"); then
+            # Extract community ID for subsequent operations
+            local community_id
+            community_id=$(extract_id_from_response "$community_response")
+            if [[ -n "$community_id" ]]; then
+                echo "$community_id" > /tmp/test_community_id
+                echo "$community_response" > /tmp/test_community_response
+                success "Community '$community_name' ready with ID: $community_id"
+            else
+                warn "Could not extract community ID - using default (ID: 1)"
+                echo "1" > /tmp/test_community_id
+            fi
+        else
+            warn "Community creation failed - using default community (ID: 1)"
+            echo "1" > /tmp/test_community_id
+        fi
     fi
 
-    # Create community admin user as authenticated super admin
-    step "Creating community admin user for new community"
+    # Create community admin user as authenticated super admin (idempotent)
+    step "Creating community admin user for new community (idempotent)"
     local community_id=$(cat /tmp/test_community_id || echo "1")
+    local admin_email="cultural.admin@anishinaabe.ca"
     local admin_data=$(cat <<EOF
 {"email": "cultural.admin@anishinaabe.ca", "password": "CulturalAdmin2024!", "firstName": "Maria", "lastName": "Thunderbird", "role": "admin", "communityId": $community_id}
 EOF
 )
 
-    # Create admin user with authenticated super admin
-    local admin_response
-    if admin_response=$(make_request "POST" "/api/v1/super_admin/users" "$admin_data" "$SUPER_ADMIN_COOKIES" "Community admin user creation"); then
-        success "Community admin 'Maria Thunderbird' created successfully"
-        # Store admin user info for subsequent workflows
-        local admin_user_id
-        admin_user_id=$(echo "$admin_response" | jq -r '.data.id // .id // 2')
-        echo "$admin_user_id" > /tmp/test_admin_user_id
+    # Check if admin user already exists
+    local existing_admin_id
+    existing_admin_id=$(lookup_user_by_email "$admin_email" "$SUPER_ADMIN_COOKIES")
+
+    if [[ -n "$existing_admin_id" ]] && [[ "$FORCE_RECREATE" != "true" ]]; then
+        info "Community admin user '$admin_email' already exists with ID: $existing_admin_id"
+        echo "$existing_admin_id" > /tmp/test_admin_user_id
+        success "Using existing admin user: Maria Thunderbird"
     else
-        warn "Community admin creation failed - workflows will use existing seeded admin"
-        echo "2" > /tmp/test_admin_user_id
+        # Create admin user with authenticated super admin
+        local admin_response
+        if admin_response=$(create_resource_idempotent "POST" "/api/v1/super_admin/users" "$admin_data" "$SUPER_ADMIN_COOKIES" "community admin user 'Maria Thunderbird'"); then
+            # Store admin user info for subsequent workflows
+            local admin_user_id
+            admin_user_id=$(extract_id_from_response "$admin_response")
+            if [[ -n "$admin_user_id" ]]; then
+                echo "$admin_user_id" > /tmp/test_admin_user_id
+                success "Community admin 'Maria Thunderbird' ready with ID: $admin_user_id"
+            else
+                warn "Could not extract admin user ID - workflows will use existing seeded admin"
+                echo "2" > /tmp/test_admin_user_id
+            fi
+        else
+            warn "Community admin creation failed - workflows will use existing seeded admin"
+            echo "2" > /tmp/test_admin_user_id
+        fi
     fi
 
     success "🏛️  Super-Admin Community Setup Flow completed successfully"
@@ -331,8 +515,9 @@ EOF
     local community_id
     community_id=$(cat /tmp/test_community_id 2>/dev/null || echo "1")
 
-    # Create elder speaker profile
-    step "Creating elder speaker profile for storytelling"
+    # Create elder speaker profile (idempotent)
+    step "Creating elder speaker profile for storytelling (idempotent)"
+    local speaker_name="Elder Joseph Crow Feather"
     local speaker_data='{
         "name": "Elder Joseph Crow Feather",
         "bio": "Traditional knowledge keeper and storyteller of the Anishinaabe Nation. Guardian of ancient stories passed down through seven generations.",
@@ -343,23 +528,39 @@ EOF
     }'
 
     if has_valid_auth "$ADMIN_COOKIES"; then
-        local speaker_response
-        if speaker_response=$(make_request "POST" "/api/v1/speakers" "$speaker_data" "$ADMIN_COOKIES" "Elder speaker creation"); then
-            local speaker_id
-            speaker_id=$(echo "$speaker_response" | jq -r '.data.id // .id // 1')
-            echo "$speaker_id" > /tmp/test_speaker_id
-            success "Elder Joseph Crow Feather profile created with ID: $speaker_id"
+        # Check if speaker already exists
+        local existing_speaker_id
+        existing_speaker_id=$(lookup_speaker_by_name "$speaker_name" "$community_id" "$ADMIN_COOKIES")
+
+        if [[ -n "$existing_speaker_id" ]] && [[ "$FORCE_RECREATE" != "true" ]]; then
+            info "Speaker '$speaker_name' already exists with ID: $existing_speaker_id"
+            echo "$existing_speaker_id" > /tmp/test_speaker_id
+            success "Using existing speaker: $speaker_name"
         else
-            warn "Elder speaker creation failed - continuing in demonstration mode"
-            echo "1" > /tmp/test_speaker_id
+            local speaker_response
+            if speaker_response=$(create_resource_idempotent "POST" "/api/v1/speakers" "$speaker_data" "$ADMIN_COOKIES" "elder speaker '$speaker_name'"); then
+                local speaker_id
+                speaker_id=$(extract_id_from_response "$speaker_response")
+                if [[ -n "$speaker_id" ]]; then
+                    echo "$speaker_id" > /tmp/test_speaker_id
+                    success "Elder speaker '$speaker_name' ready with ID: $speaker_id"
+                else
+                    warn "Could not extract speaker ID - continuing in demonstration mode"
+                    echo "1" > /tmp/test_speaker_id
+                fi
+            else
+                warn "Elder speaker creation failed - continuing in demonstration mode"
+                echo "1" > /tmp/test_speaker_id
+            fi
         fi
     else
         success "✓ API endpoint /api/v1/speakers validated (demonstration mode)"
         echo "1" > /tmp/test_speaker_id
     fi
 
-    # Create sacred place
-    step "Creating sacred place for geographic story connection"
+    # Create sacred place (idempotent)
+    step "Creating sacred place for geographic story connection (idempotent)"
+    local place_name="Grandmother Turtle Rock"
     local place_data='{
         "name": "Grandmother Turtle Rock",
         "description": "Sacred teaching site where creation stories are shared during full moon ceremonies. Traditional gathering place for seven generations.",
@@ -372,23 +573,39 @@ EOF
     }'
 
     if has_valid_auth "$ADMIN_COOKIES"; then
-        local place_response
-        if place_response=$(make_request "POST" "/api/v1/places" "$place_data" "$ADMIN_COOKIES" "Sacred place creation"); then
-            local place_id
-            place_id=$(echo "$place_response" | jq -r '.data.id // .id // 1')
-            echo "$place_id" > /tmp/test_place_id
-            success "Grandmother Turtle Rock created with ID: $place_id"
+        # Check if place already exists
+        local existing_place_id
+        existing_place_id=$(lookup_place_by_name "$place_name" "$community_id" "$ADMIN_COOKIES")
+
+        if [[ -n "$existing_place_id" ]] && [[ "$FORCE_RECREATE" != "true" ]]; then
+            info "Place '$place_name' already exists with ID: $existing_place_id"
+            echo "$existing_place_id" > /tmp/test_place_id
+            success "Using existing place: $place_name"
         else
-            warn "Sacred place creation failed - continuing in demonstration mode"
-            echo "1" > /tmp/test_place_id
+            local place_response
+            if place_response=$(create_resource_idempotent "POST" "/api/v1/places" "$place_data" "$ADMIN_COOKIES" "sacred place '$place_name'"); then
+                local place_id
+                place_id=$(extract_id_from_response "$place_response")
+                if [[ -n "$place_id" ]]; then
+                    echo "$place_id" > /tmp/test_place_id
+                    success "Sacred place '$place_name' ready with ID: $place_id"
+                else
+                    warn "Could not extract place ID - continuing in demonstration mode"
+                    echo "1" > /tmp/test_place_id
+                fi
+            else
+                warn "Sacred place creation failed - continuing in demonstration mode"
+                echo "1" > /tmp/test_place_id
+            fi
         fi
     else
         success "✓ API endpoint /api/v1/places validated (demonstration mode)"
         echo "1" > /tmp/test_place_id
     fi
 
-    # Create traditional story
-    step "Creating traditional story with cultural protocols"
+    # Create traditional story (idempotent)
+    step "Creating traditional story with cultural protocols (idempotent)"
+    local story_title="The Teaching of the Seven Fires"
     local story_data='{
         "title": "The Teaching of the Seven Fires",
         "description": "Ancient prophecy story about the spiritual journey of the Anishinaabe people, told at Grandmother Turtle Rock during ceremonial gatherings. This story carries teachings about balance, respect, and our relationship with Mother Earth.",
@@ -407,15 +624,30 @@ EOF
     }'
 
     if has_valid_auth "$ADMIN_COOKIES"; then
-        local story_response
-        if story_response=$(make_request "POST" "/api/v1/stories" "$story_data" "$ADMIN_COOKIES" "Traditional story creation"); then
-            local story_id
-            story_id=$(echo "$story_response" | jq -r '.data.id // .id // 1')
-            echo "$story_id" > /tmp/test_story_id
-            success "Traditional story 'The Teaching of the Seven Fires' created with ID: $story_id"
+        # Check if story already exists
+        local existing_story_id
+        existing_story_id=$(lookup_story_by_title "$story_title" "$community_id" "$ADMIN_COOKIES")
+
+        if [[ -n "$existing_story_id" ]] && [[ "$FORCE_RECREATE" != "true" ]]; then
+            info "Story '$story_title' already exists with ID: $existing_story_id"
+            echo "$existing_story_id" > /tmp/test_story_id
+            success "Using existing story: $story_title"
         else
-            warn "Traditional story creation failed - continuing in demonstration mode"
-            echo "1" > /tmp/test_story_id
+            local story_response
+            if story_response=$(create_resource_idempotent "POST" "/api/v1/stories" "$story_data" "$ADMIN_COOKIES" "traditional story '$story_title'"); then
+                local story_id
+                story_id=$(extract_id_from_response "$story_response")
+                if [[ -n "$story_id" ]]; then
+                    echo "$story_id" > /tmp/test_story_id
+                    success "Traditional story '$story_title' ready with ID: $story_id"
+                else
+                    warn "Could not extract story ID - continuing in demonstration mode"
+                    echo "1" > /tmp/test_story_id
+                fi
+            else
+                warn "Traditional story creation failed - continuing in demonstration mode"
+                echo "1" > /tmp/test_story_id
+            fi
         fi
     else
         success "✓ API endpoint /api/v1/stories validated (demonstration mode)"
@@ -616,18 +848,28 @@ community_viewer_access_flow() {
     local community_id
     community_id=$(cat /tmp/test_community_id 2>/dev/null || echo "1")
 
-    # Create viewer user (as community admin)
-    step "Community admin creating viewer account for community member"
+    # Create viewer user (as community admin) (idempotent)
+    step "Community admin creating viewer account for community member (idempotent)"
+    local viewer_email="community.member@anishinaabe.ca"
     local viewer_data=$(cat <<EOF
 {"email": "community.member@anishinaabe.ca", "password": "ViewerAccess2024!", "firstName": "Sarah", "lastName": "Whitecloud", "role": "viewer", "communityId": $community_id}
 EOF
 )
 
     if has_valid_auth "$ADMIN_COOKIES"; then
-        if make_request "POST" "/api/v1/super_admin/users" "$viewer_data" "$ADMIN_COOKIES" "Community viewer creation"; then
-            success "Community member Sarah Whitecloud account created"
+        # Check if viewer user already exists
+        local existing_viewer_id
+        existing_viewer_id=$(lookup_user_by_email "$viewer_email" "$ADMIN_COOKIES")
+
+        if [[ -n "$existing_viewer_id" ]] && [[ "$FORCE_RECREATE" != "true" ]]; then
+            info "Viewer user '$viewer_email' already exists with ID: $existing_viewer_id"
+            success "Using existing viewer account: Sarah Whitecloud"
         else
-            warn "Community viewer creation failed - continuing in demonstration mode"
+            if create_resource_idempotent "POST" "/api/v1/super_admin/users" "$viewer_data" "$ADMIN_COOKIES" "community viewer account for Sarah Whitecloud"; then
+                success "Community viewer account ready: Sarah Whitecloud"
+            else
+                warn "Community viewer creation failed - continuing in demonstration mode"
+            fi
         fi
     else
         success "✓ API endpoint /api/v1/super_admin/users (viewer creation) validated (demonstration mode)"
@@ -1039,6 +1281,7 @@ USAGE:
   $0 content-management       # Test community content curation
   $0 data-sovereignty         # Test community isolation validation
   $0 --all                    # Run all workflows with detailed reporting
+  $0 --force-recreate         # Force recreation of existing resources
   $0 --help                   # Show this help message
 
 AUTHENTIC WORKFLOW DESCRIPTIONS:
@@ -1056,8 +1299,10 @@ ENVIRONMENT VARIABLES:
 
 EXAMPLES:
   $0 super-admin-setup                                    # Test community setup only
+  $0 --force-recreate super-admin-setup                   # Force recreation of all resources
   API_BASE=https://api.terrastories.ca $0 --all          # Test against production API
   LOG_LEVEL=DEBUG $0 data-sovereignty                     # Verbose sovereignty testing
+  FORCE_RECREATE=true $0 community-admin-flow            # Force recreation via environment
 
 CULTURAL CONSIDERATIONS:
   - All workflows respect Indigenous data sovereignty principles
@@ -1223,6 +1468,10 @@ parse_arguments() {
                 ;;
             --verbose)
                 VERBOSE=true
+                shift
+                ;;
+            --force-recreate)
+                FORCE_RECREATE=true
                 shift
                 ;;
             --help|-h)

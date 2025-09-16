@@ -114,24 +114,10 @@ export class UserService {
 
   constructor(
     private userRepository: UserRepository,
-    communityRepository?: CommunityRepository
+    communityRepository: CommunityRepository
   ) {
-    // If community repository is provided, use it; otherwise we need to create one
-    // This allows for dependency injection in tests while maintaining backwards compatibility
-    if (communityRepository) {
-      this.communityService = new CommunityService(communityRepository);
-    } else {
-      // We'll handle this in the routes where we have access to the database
-      // For now, we'll add the validation logic inline
-      this.communityService = null as unknown as CommunityService; // Temporary - will be set by routes
-    }
-  }
-
-  /**
-   * Set the community service (for backwards compatibility)
-   */
-  setCommunityService(communityService: CommunityService): void {
-    this.communityService = communityService;
+    // Always require community repository for proper validation
+    this.communityService = new CommunityService(communityRepository);
   }
 
   /**
@@ -165,16 +151,14 @@ export class UserService {
       }
 
       // Validate community exists
-      if (this.communityService) {
-        const community = await this.communityService.getCommunityById(
-          data.communityId
-        );
-        if (!community) {
-          throw new InvalidCommunityError('Community not found');
-        }
-        if (!community.isActive) {
-          throw new InvalidCommunityError('Community is not active');
-        }
+      const community = await this.communityService.getCommunityById(
+        data.communityId
+      );
+      if (!community) {
+        throw new InvalidCommunityError('Community not found');
+      }
+      if (!community.isActive) {
+        throw new InvalidCommunityError('Community is not active');
       }
 
       // Validate password strength

@@ -36,8 +36,12 @@ export const storyPlacesPg = pgTable(
   'story_places',
   {
     id: serial('id').primaryKey(),
-    storyId: pgInteger('story_id').notNull(),
-    placeId: pgInteger('place_id').notNull(),
+    storyId: pgInteger('story_id')
+      .notNull()
+      .references(() => storiesPg.id, { onDelete: 'cascade' }),
+    placeId: pgInteger('place_id')
+      .notNull()
+      .references(() => placesPg.id, { onDelete: 'cascade' }),
     culturalContext: text('cultural_context'),
     sortOrder: pgInteger('sort_order').default(0),
     createdAt: timestamp('created_at').notNull().defaultNow(),
@@ -57,16 +61,16 @@ export const storyPlacesSqlite = sqliteTable(
   'story_places',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
-    storyId: integer('story_id').notNull(),
-    placeId: integer('place_id').notNull(),
+    storyId: integer('story_id')
+      .notNull()
+      .references(() => storiesSqlite.id, { onDelete: 'cascade' }),
+    placeId: integer('place_id')
+      .notNull()
+      .references(() => placesSqlite.id, { onDelete: 'cascade' }),
     culturalContext: sqliteText('cultural_context'),
     sortOrder: integer('sort_order').default(0),
-    createdAt: integer('created_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
   },
   (table) => ({
     // Composite unique constraint to prevent duplicate relationships
@@ -121,9 +125,9 @@ export const storyPlacesSqliteRelations = relations(
 export const insertStoryPlaceSchema = createInsertSchema(storyPlacesPg);
 export const selectStoryPlaceSchema = createSelectSchema(storyPlacesPg);
 
-// TypeScript types
-export type StoryPlace = typeof storyPlacesPg.$inferSelect;
-export type NewStoryPlace = typeof storyPlacesPg.$inferInsert;
+// TypeScript types - Use SQLite for consistency with current deployment
+export type StoryPlace = typeof storyPlacesSqlite.$inferSelect;
+export type NewStoryPlace = typeof storyPlacesSqlite.$inferInsert;
 
 // Additional validation schemas for specific use cases
 export const createStoryPlaceSchema = insertStoryPlaceSchema.omit({

@@ -5,6 +5,11 @@
  */
 
 import { vi } from 'vitest';
+import type { TestDatabase } from './database.js';
+import {
+  communitiesSqlite as communities,
+  usersSqlite as users,
+} from '../../src/db/schema/index.js';
 
 /**
  * File system mock utilities
@@ -93,7 +98,7 @@ export class StorageMock {
       getMetadata: vi.fn().mockResolvedValue({
         size: 1024,
         contentType: 'image/jpeg',
-        lastModified: new Date(),
+        lastModified: Date.now(),
       }),
     };
   }
@@ -355,3 +360,80 @@ export const CommonMocks = {
     };
   },
 };
+
+/**
+ * Database record creation helpers for tests
+ */
+
+export interface MockCommunityData {
+  name?: string;
+  description?: string;
+  slug?: string;
+  publicStories?: boolean;
+  locale?: string;
+}
+
+export interface MockUserData {
+  email?: string;
+  role?: 'super_admin' | 'admin' | 'editor' | 'elder' | 'viewer';
+  communityId?: number;
+  firstName?: string;
+  lastName?: string;
+}
+
+/**
+ * Create a mock community in the test database
+ */
+export async function createMockCommunity(
+  db: TestDatabase,
+  data: MockCommunityData = {}
+) {
+  const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+  const communityData = {
+    name: data.name || 'Test Community',
+    description: data.description || 'A community for testing',
+    slug: data.slug || `test-community-${uniqueId}`,
+    publicStories: data.publicStories ?? true,
+    locale: data.locale || 'en',
+    culturalSettings: null,
+    isActive: true,
+  };
+
+  const [community] = await db
+    .insert(communities)
+    .values([communityData])
+    .returning();
+  return community;
+}
+
+/**
+ * Create a mock user in the test database
+ */
+export async function createMockUser(
+  db: TestDatabase,
+  data: MockUserData = {}
+) {
+  const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+  // Require explicit communityId to ensure proper data isolation in tests
+  if (data.communityId === undefined) {
+    throw new Error(
+      'createMockUser requires a valid communityId to ensure isolation'
+    );
+  }
+
+  const userData = {
+    email: data.email || `test-${uniqueId}@example.com`,
+    passwordHash:
+      '$argon2id$v=19$m=65536,t=3,p=4$tCxyO6RAN/yxOKo7TkGnXg$3kM2t3GUmirQtHwtkPp/Pwu7fvbNwYoqWNvr/HLaGCE',
+    firstName: data.firstName || 'Test',
+    lastName: data.lastName || 'User',
+    role: data.role || 'viewer',
+    communityId: data.communityId,
+    isActive: true,
+  };
+
+  const [user] = await db.insert(users).values([userData]).returning();
+  return user;
+}

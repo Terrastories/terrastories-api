@@ -65,12 +65,8 @@ export const communitiesSqlite = sqliteTable('communities', {
   // Rails compatibility fields
   country: sqliteText('country'),
   beta: integer('beta', { mode: 'boolean' }).notNull().default(false),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
 // Dynamic table selection based on database type (for runtime use)
@@ -105,9 +101,9 @@ export const insertCommunitySchema = createInsertSchema(communitiesPg, {
 
 export const selectCommunitySchema = createSelectSchema(communitiesPg);
 
-// TypeScript types
-export type Community = typeof communitiesPg.$inferSelect;
-export type NewCommunity = typeof communitiesPg.$inferInsert;
+// TypeScript types - Use SQLite for consistency with current deployment
+export type Community = typeof communitiesSqlite.$inferSelect;
+export type NewCommunity = typeof communitiesSqlite.$inferInsert;
 
 // Additional validation schemas for specific use cases
 export const createCommunitySchema = insertCommunitySchema.omit({

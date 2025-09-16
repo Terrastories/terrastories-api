@@ -154,16 +154,23 @@ function validateGeographicBounds(
 type DatabaseType = Database;
 
 export class ThemesRepository {
-  private db: DatabaseType;
+  private database: DatabaseType;
   private isPostgres: boolean;
 
   constructor(database: DatabaseType) {
-    this.db = database;
+    this.database = database;
     // Detect database type from connection string
     const config = getConfig();
     this.isPostgres =
       config.database.url.startsWith('postgresql://') ||
       config.database.url.startsWith('postgres://');
+  }
+
+  // Type-safe database query wrapper - cast to any to handle union type
+  private get db() {
+    // Cast to any to resolve union type issues - both drizzle instances have compatible query interfaces
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return this.database as any;
   }
 
   /**
@@ -178,6 +185,7 @@ export class ThemesRepository {
       throw new InvalidMapboxUrlError(data.mapboxStyleUrl);
     }
 
+    const now = new Date();
     const themeData: NewTheme = {
       name: data.name,
       description: data.description || null,
@@ -191,11 +199,13 @@ export class ThemesRepository {
       neBoundaryLong: data.neBoundaryLong || null,
       active: data.active || false,
       communityId: data.communityId,
+      createdAt: now,
+      updatedAt: now,
     };
 
     try {
       // Check if community exists first
-      const [existingCommunity] = await (this.db as any)
+      const [existingCommunity] = await this.db
         .select({ id: communities.id })
         .from(communities)
         .where(eq(communities.id, data.communityId))
@@ -205,7 +215,7 @@ export class ThemesRepository {
         throw new CommunityNotFoundError(data.communityId);
       }
 
-      const [theme] = await (this.db as any)
+      const [theme] = await this.db
         .insert(themes)
         .values(themeData)
         .returning();
@@ -227,7 +237,7 @@ export class ThemesRepository {
    * Get theme by ID without community check (internal use)
    */
   async findById(id: number): Promise<Theme | null> {
-    const [theme] = await (this.db as any)
+    const [theme] = await this.db
       .select()
       .from(themes)
       .where(eq(themes.id, id))
@@ -243,7 +253,7 @@ export class ThemesRepository {
     id: number,
     communityId: number
   ): Promise<Theme | null> {
-    const [theme] = await (this.db as any)
+    const [theme] = await this.db
       .select()
       .from(themes)
       .where(and(eq(themes.id, id), eq(themes.communityId, communityId)))
@@ -276,7 +286,7 @@ export class ThemesRepository {
   ): Promise<Theme[] | PaginatedResponse<Theme>> {
     if (!params) {
       // Simple version - return all themes for community
-      return await (this.db as any)
+      return await this.db
         .select()
         .from(themes)
         .where(eq(themes.communityId, communityId))
@@ -300,13 +310,13 @@ export class ThemesRepository {
     const orderBy = sortOrder === 'desc' ? desc(sortColumn) : sortColumn;
 
     // Get total count
-    const [{ count: total }] = await (this.db as any)
+    const [{ count: total }] = await this.db
       .select({ count: count() })
       .from(themes)
       .where(whereCondition);
 
     // Get paginated data
-    const themesList = await (this.db as any)
+    const themesList = await this.db
       .select()
       .from(themes)
       .where(whereCondition)
@@ -327,7 +337,7 @@ export class ThemesRepository {
    * Get active themes for a community
    */
   async findActiveThemes(communityId: number): Promise<Theme[]> {
-    return await (this.db as any)
+    return await this.db
       .select()
       .from(themes)
       .where(and(eq(themes.communityId, communityId), eq(themes.active, true)))
@@ -339,7 +349,7 @@ export class ThemesRepository {
    */
   async searchByName(communityId: number, query: string): Promise<Theme[]> {
     const searchCondition = sql`${themes.name} LIKE ${'%' + query + '%'}`;
-    return await (this.db as any)
+    return await this.db
       .select()
       .from(themes)
       .where(and(eq(themes.communityId, communityId), searchCondition))
@@ -354,7 +364,7 @@ export class ThemesRepository {
     query: string
   ): Promise<Theme[]> {
     const searchCondition = sql`${themes.description} LIKE ${'%' + query + '%'}`;
-    return await (this.db as any)
+    return await this.db
       .select()
       .from(themes)
       .where(and(eq(themes.communityId, communityId), searchCondition))
@@ -388,13 +398,13 @@ export class ThemesRepository {
     const orderBy = sortOrder === 'desc' ? desc(sortColumn) : sortColumn;
 
     // Get total count
-    const [{ count: total }] = await (this.db as any)
+    const [{ count: total }] = await this.db
       .select({ count: count() })
       .from(themes)
       .where(whereCondition);
 
     // Get paginated data
-    const themesList = await (this.db as any)
+    const themesList = await this.db
       .select()
       .from(themes)
       .where(whereCondition)
@@ -439,7 +449,7 @@ export class ThemesRepository {
       throw new InvalidMapboxUrlError(data.mapboxStyleUrl);
     }
 
-    const updateData: any = {
+    const updateData: Partial<UpdateTheme> & { updatedAt?: Date } = {
       ...(data.name !== undefined && { name: data.name }),
       ...(data.description !== undefined && { description: data.description }),
       ...(data.mapboxStyleUrl !== undefined && {
@@ -466,7 +476,7 @@ export class ThemesRepository {
       updatedAt: new Date(Date.now() + 100), // Ensure it's different from creation time
     };
 
-    const [updated] = await (this.db as any)
+    const [updated] = await this.db
       .update(themes)
       .set(updateData)
       .where(eq(themes.id, id))
@@ -497,7 +507,7 @@ export class ThemesRepository {
    */
   async delete(id: number): Promise<boolean> {
     try {
-      const [deleted] = await (this.db as any)
+      const [deleted] = await this.db
         .delete(themes)
         .where(eq(themes.id, id))
         .returning({ id: themes.id });
@@ -513,7 +523,7 @@ export class ThemesRepository {
    */
   async deleteByCommunity(id: number, communityId: number): Promise<boolean> {
     try {
-      const [deleted] = await (this.db as any)
+      const [deleted] = await this.db
         .delete(themes)
         .where(and(eq(themes.id, id), eq(themes.communityId, communityId)))
         .returning({ id: themes.id });
@@ -528,7 +538,7 @@ export class ThemesRepository {
    * Check if theme exists and belongs to community
    */
   async existsInCommunity(id: number, communityId: number): Promise<boolean> {
-    const [theme] = await (this.db as any)
+    const [theme] = await this.db
       .select({ id: themes.id })
       .from(themes)
       .where(and(eq(themes.id, id), eq(themes.communityId, communityId)))
@@ -547,17 +557,17 @@ export class ThemesRepository {
     withMapbox: number;
     withBounds: number;
   }> {
-    const [totalResult] = await (this.db as any)
+    const [totalResult] = await this.db
       .select({ count: count() })
       .from(themes)
       .where(eq(themes.communityId, communityId));
 
-    const [activeResult] = await (this.db as any)
+    const [activeResult] = await this.db
       .select({ count: count() })
       .from(themes)
       .where(and(eq(themes.communityId, communityId), eq(themes.active, true)));
 
-    const [withMapboxResult] = await (this.db as any)
+    const [withMapboxResult] = await this.db
       .select({ count: count() })
       .from(themes)
       .where(
@@ -567,7 +577,7 @@ export class ThemesRepository {
         )
       );
 
-    const [withBoundsResult] = await (this.db as any)
+    const [withBoundsResult] = await this.db
       .select({ count: count() })
       .from(themes)
       .where(
@@ -619,7 +629,7 @@ export class ThemesRepository {
     query: string
   ): Promise<Theme[]> {
     const searchCondition = sql`(${themes.name} LIKE ${'%' + query + '%'} OR ${themes.description} LIKE ${'%' + query + '%'})`;
-    return await (this.db as any)
+    return await this.db
       .select()
       .from(themes)
       .where(
@@ -762,7 +772,7 @@ export class ThemesRepository {
     communityId: number,
     options?: { activeOnly?: boolean; searchTerm?: string }
   ): Promise<number> {
-    let query = (this.db as any)
+    let query = this.db
       .select({ count: sql`count(*)` })
       .from(themes)
       .where(eq(themes.communityId, communityId));

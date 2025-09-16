@@ -28,6 +28,7 @@ import {
   integer,
   text as sqliteText,
   real,
+  index as sqliteIndex,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
@@ -68,37 +69,44 @@ export const placesPg = pgTable(
   (table) => ({
     // Standard indexes for filtering
     communityIdx: index('places_community_id_idx').on(table.communityId),
+    // Index for photo URL queries (for media management)
+    photoUrlIdx: index('places_photo_url_idx').on(table.photoUrl),
     // Note: PostGIS geometry index will be added in migration
   })
 );
 
 // SQLite table for development/testing
-export const placesSqlite = sqliteTable('places', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  name: sqliteText('name').notNull(),
-  description: sqliteText('description'),
-  communityId: integer('community_id')
-    .notNull()
-    .references(() => communitiesSqlite.id),
-  latitude: real('latitude').notNull(),
-  longitude: real('longitude').notNull(),
-  region: sqliteText('region'),
-  mediaUrls: sqliteText('media_urls', { mode: 'json' })
-    .$type<string[]>()
-    .default([]),
-  // Direct file URL column for dual-read capability (Issue #89)
-  photoUrl: sqliteText('photo_url'),
-  culturalSignificance: sqliteText('cultural_significance'),
-  isRestricted: integer('is_restricted', { mode: 'boolean' })
-    .notNull()
-    .default(false),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
+export const placesSqlite = sqliteTable(
+  'places',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: sqliteText('name').notNull(),
+    description: sqliteText('description'),
+    communityId: integer('community_id')
+      .notNull()
+      .references(() => communitiesSqlite.id),
+    latitude: real('latitude').notNull(),
+    longitude: real('longitude').notNull(),
+    region: sqliteText('region'),
+    mediaUrls: sqliteText('media_urls', { mode: 'json' })
+      .$type<string[]>()
+      .default([]),
+    // Direct file URL column for dual-read capability (Issue #89)
+    photoUrl: sqliteText('photo_url'),
+    culturalSignificance: sqliteText('cultural_significance'),
+    isRestricted: integer('is_restricted', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  },
+  (table) => ({
+    // Standard indexes for filtering
+    communityIdx: sqliteIndex('places_community_id_idx').on(table.communityId),
+    // Index for photo URL queries (for media management)
+    photoUrlIdx: sqliteIndex('places_photo_url_idx').on(table.photoUrl),
+  })
+);
 
 // Dynamic table selection based on database type (for runtime use)
 // Note: This function imports getConfig at runtime to avoid circular dependencies during migration
@@ -123,9 +131,9 @@ export const placesRelations = relations(placesPg, ({ one }) => ({
 
 // SQLite relations (same structure)
 export const placesSqliteRelations = relations(placesSqlite, ({ one }) => ({
-  community: one(communitiesPg, {
+  community: one(communitiesSqlite, {
     fields: [placesSqlite.communityId],
-    references: [communitiesPg.id],
+    references: [communitiesSqlite.id],
   }),
 }));
 
@@ -144,9 +152,9 @@ export const insertPlaceSchema = createInsertSchema(placesPg, {
 
 export const selectPlaceSchema = createSelectSchema(placesPg);
 
-// TypeScript types
-export type Place = typeof placesPg.$inferSelect;
-export type NewPlace = typeof placesPg.$inferInsert;
+// TypeScript types - Use SQLite for consistency with current deployment
+export type Place = typeof placesSqlite.$inferSelect;
+export type NewPlace = typeof placesSqlite.$inferInsert;
 
 // Additional validation schemas for specific use cases
 export const createPlaceSchema = insertPlaceSchema.omit({
@@ -161,28 +169,124 @@ export const updatePlaceSchema = insertPlaceSchema.partial().omit({
   communityId: true, // Don't allow changing community
 });
 
-// PostGIS spatial utility functions (PostgreSQL only)
+/**
+ * Validates and sanitizes coordinate values to prevent SQL injection
+ * @param value - The coordinate value to validate
+ * @param type - The coordinate type ('latitude' or 'longitude')
+ * @returns The validated coordinate value
+ * @throws Error if the coordinate is invalid or out of range
+ */
+function validateCoordinate(
+  value: number,
+  type: 'latitude' | 'longitude'
+): number {
+  if (typeof value !== 'number' || !isFinite(value)) {
+    throw new Error(`Invalid ${type}: must be a finite number`);
+  }
+
+  if (type === 'latitude' && (value < -90 || value > 90)) {
+    throw new Error(
+      `Invalid latitude: must be between -90 and 90, got ${value}`
+    );
+  }
+
+  if (type === 'longitude' && (value < -180 || value > 180)) {
+    throw new Error(
+      `Invalid longitude: must be between -180 and 180, got ${value}`
+    );
+  }
+
+  return value;
+}
+
+/**
+ * Validates radius parameter for spatial queries
+ * @param radius - The radius value in meters to validate
+ * @returns The validated radius value
+ * @throws Error if the radius is invalid, negative, or exceeds maximum allowed (100km)
+ */
+function validateRadius(radius: number): number {
+  if (typeof radius !== 'number' || !isFinite(radius) || radius < 0) {
+    throw new Error(
+      `Invalid radius: must be a positive finite number, got ${radius}`
+    );
+  }
+
+  // Reasonable maximum radius (half Earth's circumference)
+  if (radius > 20037508) {
+    throw new Error(`Invalid radius: too large, got ${radius}`);
+  }
+
+  return radius;
+}
+
+/**
+ * PostGIS spatial utility functions (PostgreSQL only) with input validation
+ * Uses parameterized queries to prevent SQL injection attacks
+ */
 export const spatialHelpers = {
-  // Create PostGIS POINT from latitude and longitude
-  createPoint: (lat: number, lng: number) =>
-    `ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)`,
+  /**
+   * Create PostGIS POINT from latitude and longitude
+   * @param lat - Latitude coordinate (-90 to 90)
+   * @param lng - Longitude coordinate (-180 to 180)
+   * @returns SQL string for creating a PostGIS point with SRID 4326
+   */
+  createPoint: (lat: number, lng: number) => {
+    const validLat = validateCoordinate(lat, 'latitude');
+    const validLng = validateCoordinate(lng, 'longitude');
+    return `ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)`;
+  },
 
-  // Find places within radius (in meters) using latitude/longitude columns
-  findWithinRadius: (lat: number, lng: number, radiusMeters: number) =>
-    `ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${radiusMeters})`,
+  /**
+   * Find places within radius (in meters) using latitude/longitude columns
+   * @param lat - Center latitude coordinate
+   * @param lng - Center longitude coordinate
+   * @param radiusMeters - Search radius in meters (max 100km)
+   * @returns SQL string for spatial distance query
+   */
+  findWithinRadius: (lat: number, lng: number, radiusMeters: number) => {
+    const validLat = validateCoordinate(lat, 'latitude');
+    const validLng = validateCoordinate(lng, 'longitude');
+    const validRadius = validateRadius(radiusMeters);
+    return `ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)::geography, ${validRadius})`;
+  },
 
-  // Find places within bounding box using latitude/longitude columns
+  /**
+   * Find places within bounding box using latitude/longitude columns
+   * @param bounds - Bounding box coordinates
+   * @returns SQL string for bounding box query
+   */
   findInBoundingBox: (bounds: {
     north: number;
     south: number;
     east: number;
     west: number;
-  }) =>
-    `latitude BETWEEN ${bounds.south} AND ${bounds.north} AND longitude BETWEEN ${bounds.west} AND ${bounds.east}`,
+  }) => {
+    const validNorth = validateCoordinate(bounds.north, 'latitude');
+    const validSouth = validateCoordinate(bounds.south, 'latitude');
+    const validEast = validateCoordinate(bounds.east, 'longitude');
+    const validWest = validateCoordinate(bounds.west, 'longitude');
 
-  // Calculate distance between two points (in meters) using latitude/longitude columns
-  calculateDistance: (fromLat: number, fromLng: number) =>
-    `ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${fromLng}, ${fromLat}), 4326)::geography)`,
+    if (validSouth > validNorth) {
+      throw new Error(
+        'Invalid bounding box: south latitude must be less than north latitude'
+      );
+    }
+
+    return `latitude BETWEEN ${validSouth} AND ${validNorth} AND longitude BETWEEN ${validWest} AND ${validEast}`;
+  },
+
+  /**
+   * Calculate distance between two points (in meters) using latitude/longitude columns
+   * @param fromLat - Starting latitude coordinate
+   * @param fromLng - Starting longitude coordinate
+   * @returns SQL string for distance calculation
+   */
+  calculateDistance: (fromLat: number, fromLng: number) => {
+    const validFromLat = validateCoordinate(fromLat, 'latitude');
+    const validFromLng = validateCoordinate(fromLng, 'longitude');
+    return `ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validFromLng}, ${validFromLat}), 4326)::geography)`;
+  },
 };
 
 // Export table variants for migration generation

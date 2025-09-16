@@ -23,14 +23,22 @@ import {
   type NewSpeaker,
   getSpeakersTable,
 } from '../db/schema/speakers.js';
-import { getCommunitiesTable } from '../db/schema/communities.js';
 import { getConfig } from '../shared/config/index.js';
 import type { Database } from '../db/index.js';
 import {
+  AppError,
   CommunityNotFoundError,
+  DatabaseError,
   RequiredFieldError,
   InvalidFieldLengthError,
 } from '../shared/errors/index.js';
+import {
+  createErrorContext,
+  DatabaseOperations,
+  ErrorMessages,
+  ResourceTypes,
+} from '../shared/utils/error-context.js';
+import { validateCommunityExists } from '../shared/utils/community-validation.js';
 
 // Re-export Speaker type for other modules
 export type { Speaker } from '../db/schema/speakers.js';
@@ -177,6 +185,7 @@ export class SpeakerRepository {
 
     const speakersTable = await getSpeakersTable();
 
+    const now = new Date();
     const speakerData: NewSpeaker = {
       name: data.name.trim(),
       bio: data.bio || null,
@@ -186,21 +195,13 @@ export class SpeakerRepository {
       elderStatus: data.elderStatus || false,
       culturalRole: data.culturalRole || null,
       isActive: data.isActive !== undefined ? data.isActive : true,
+      createdAt: now,
+      updatedAt: now,
     };
 
     try {
-      // Check if community exists first
-      const communityTable = await getCommunitiesTable();
-
-      const [existingCommunity] = await (this.db as any)
-        .select({ id: communityTable.id })
-        .from(communityTable)
-        .where(eq(communityTable.id, data.communityId))
-        .limit(1);
-
-      if (!existingCommunity) {
-        throw new CommunityNotFoundError(data.communityId);
-      }
+      // Validate community exists using shared utility
+      await validateCommunityExists(this.db, data.communityId);
 
       const [speaker] = await (this.db as any)
         .insert(speakersTable)
@@ -209,14 +210,64 @@ export class SpeakerRepository {
 
       return speaker;
     } catch (error) {
-      if (
-        error instanceof Error &&
-        (error.message.includes('foreign key') ||
-          error.message.includes('Invalid community ID'))
-      ) {
-        throw new CommunityNotFoundError();
+      // Handle specific database errors first
+      if (error instanceof AppError) {
+        throw error; // Re-throw AppErrors as-is
       }
-      throw error;
+
+      if (error instanceof Error) {
+        // Handle foreign key constraint violations
+        if (
+          error.message.includes('foreign key') ||
+          error.message.includes('Invalid community ID')
+        ) {
+          throw new CommunityNotFoundError();
+        }
+
+        // Handle SQLite function errors (like "no such function: now")
+        if (error.message.includes('no such function')) {
+          throw new DatabaseError(
+            ErrorMessages.DATABASE_COMPATIBILITY(error.message),
+            createErrorContext({
+              operation: DatabaseOperations.CREATE_SPEAKER,
+              resourceType: ResourceTypes.SPEAKER,
+              communityId: data.communityId,
+              originalError: error instanceof Error ? error : String(error),
+            })
+          );
+        }
+
+        // Handle constraint violations
+        if (
+          error.message.includes('constraint') ||
+          error.message.includes('UNIQUE constraint failed')
+        ) {
+          throw new DatabaseError(
+            'Speaker data conflicts with existing records: ' + error.message,
+            { originalError: error.message, operation: 'insert_speaker' }
+          );
+        }
+
+        // Handle any other database errors
+        throw new DatabaseError(
+          'Failed to create speaker due to database error',
+          { originalError: error.message, operation: 'insert_speaker' }
+        );
+      }
+
+      // Handle unknown errors
+      throw new DatabaseError(
+        ErrorMessages.UNKNOWN_ERROR(
+          DatabaseOperations.CREATE_SPEAKER,
+          ResourceTypes.SPEAKER
+        ),
+        createErrorContext({
+          operation: DatabaseOperations.CREATE_SPEAKER,
+          resourceType: ResourceTypes.SPEAKER,
+          communityId: data.communityId,
+          originalError: error instanceof Error ? error : String(error),
+        })
+      );
     }
   }
 
@@ -242,20 +293,61 @@ export class SpeakerRepository {
     id: number,
     communityId: number
   ): Promise<Speaker | null> {
-    const speakersTable = await getSpeakersTable();
+    try {
+      const speakersTable = await getSpeakersTable();
 
-    const [speaker] = await (this.db as any)
-      .select()
-      .from(speakersTable)
-      .where(
-        and(
-          eq(speakersTable.id, id),
-          eq(speakersTable.communityId, communityId)
+      const [speaker] = await (this.db as any)
+        .select()
+        .from(speakersTable)
+        .where(
+          and(
+            eq(speakersTable.id, id),
+            eq(speakersTable.communityId, communityId)
+          )
         )
-      )
-      .limit(1);
+        .limit(1);
 
-    return speaker || null;
+      return speaker || null;
+    } catch (error) {
+      // Handle database errors gracefully
+      if (error instanceof Error) {
+        // Handle SQLite function errors (like "no such function: now")
+        if (error.message.includes('no such function')) {
+          throw new DatabaseError(
+            ErrorMessages.DATABASE_COMPATIBILITY('during speaker lookup'),
+            createErrorContext({
+              operation: DatabaseOperations.GET_BY_ID_WITH_COMMUNITY,
+              resourceType: ResourceTypes.SPEAKER,
+              resourceId: id,
+              communityId,
+              originalError: error instanceof Error ? error : String(error),
+            })
+          );
+        }
+
+        // Handle other database errors
+        throw new DatabaseError(
+          'Failed to retrieve speaker due to database error',
+          {
+            originalError: error.message,
+            operation: 'get_speaker_by_id',
+            speakerId: id,
+            communityId,
+          }
+        );
+      }
+
+      // Handle unknown errors
+      throw new DatabaseError(
+        'Unknown error occurred while retrieving speaker',
+        {
+          originalError: String(error),
+          operation: 'get_speaker_by_id',
+          speakerId: id,
+          communityId,
+        }
+      );
+    }
   }
 
   /**

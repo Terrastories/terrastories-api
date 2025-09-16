@@ -266,6 +266,7 @@ export class StoryRepository {
       (await this.generateUniqueSlug(data.title, data.communityId));
 
     // Insert story into database
+    const now = new Date();
     const insertData = {
       title: data.title,
       description: data.description,
@@ -280,6 +281,8 @@ export class StoryRepository {
       dateInterviewed: data.dateInterviewed,
       interviewLocationId: data.interviewLocationId,
       interviewerId: data.interviewerId,
+      createdAt: now,
+      updatedAt: now,
     };
 
     const [story] = await this.db
@@ -290,11 +293,14 @@ export class StoryRepository {
     // Create place associations using proper join table
     if (data.placeIds?.length) {
       const storyPlacesTable = this.getStoryPlacesTable();
+      const associationTimestamp = new Date();
       const placeAssociations = data.placeIds.map((placeId, index) => ({
         storyId: story.id,
         placeId,
         culturalContext: data.placeContexts?.[index] || undefined,
         sortOrder: index,
+        createdAt: associationTimestamp,
+        updatedAt: associationTimestamp,
       }));
 
       await this.db.insert(storyPlacesTable).values(placeAssociations);
@@ -303,11 +309,14 @@ export class StoryRepository {
     // Create speaker associations using proper join table
     if (data.speakerIds?.length) {
       const storySpeakersTable = this.getStorySpeakersTable();
+      const speakerTimestamp = new Date();
       const speakerAssociations = data.speakerIds.map((speakerId, index) => ({
         storyId: story.id,
         speakerId,
         storyRole: data.speakerRoles?.[index] || undefined,
         sortOrder: index,
+        createdAt: speakerTimestamp,
+        updatedAt: speakerTimestamp,
       }));
 
       await this.db.insert(storySpeakersTable).values(speakerAssociations);
@@ -546,7 +555,18 @@ export class StoryRepository {
       const placesTable = this.getPlacesTable();
 
       // Get all place associations for these stories
-      let allPlaceAssociations: any[] = [];
+      let allPlaceAssociations: Array<{
+        storyId: number;
+        placeId: number;
+        name: string;
+        description: string | null;
+        latitude: number;
+        longitude: number;
+        region: string | null;
+        culturalSignificance: string | null;
+        culturalContext: string | null;
+        sortOrder: number | null;
+      }> = [];
       try {
         allPlaceAssociations = await this.db
           .select({
@@ -579,6 +599,8 @@ export class StoryRepository {
               longitude: placesTable.longitude,
               region: placesTable.region,
               culturalSignificance: placesTable.culturalSignificance,
+              culturalContext: sql<string | null>`NULL`,
+              sortOrder: sql<number | null>`NULL`,
             })
             .from(storyPlacesTable)
             .innerJoin(
@@ -595,7 +617,18 @@ export class StoryRepository {
       const speakersTable = this.getSpeakersTable();
 
       // Get all speaker associations for these stories
-      let allSpeakerAssociations: any[] = [];
+      let allSpeakerAssociations: Array<{
+        storyId: number;
+        speakerId: number;
+        name: string;
+        bio: string | null;
+        photoUrl: string | null;
+        birthYear: number | null;
+        elderStatus: boolean;
+        culturalRole: string | null;
+        storyRole: string | null;
+        sortOrder: number | null;
+      }> = [];
       try {
         allSpeakerAssociations = await this.db
           .select({
@@ -631,6 +664,8 @@ export class StoryRepository {
               birthYear: speakersTable.birthYear,
               elderStatus: speakersTable.elderStatus,
               culturalRole: speakersTable.culturalRole,
+              storyRole: sql<string | null>`NULL`,
+              sortOrder: sql<number | null>`NULL`,
             })
             .from(storySpeakersTable)
             .innerJoin(
@@ -644,8 +679,36 @@ export class StoryRepository {
       }
 
       // Create lookup maps for associations
-      const placesByStory = new Map<number, any[]>();
-      const speakersByStory = new Map<number, any[]>();
+      const placesByStory = new Map<
+        number,
+        Array<{
+          storyId: number;
+          placeId: number;
+          name: string;
+          description: string | null;
+          latitude: number;
+          longitude: number;
+          region: string | null;
+          culturalSignificance: string | null;
+          culturalContext: string | null;
+          sortOrder: number | null;
+        }>
+      >();
+      const speakersByStory = new Map<
+        number,
+        Array<{
+          storyId: number;
+          speakerId: number;
+          name: string;
+          bio: string | null;
+          photoUrl: string | null;
+          birthYear: number | null;
+          elderStatus: boolean;
+          culturalRole: string | null;
+          storyRole: string | null;
+          sortOrder: number | null;
+        }>
+      >();
 
       allPlaceAssociations.forEach((place) => {
         if (!placesByStory.has(place.storyId)) {
@@ -792,11 +855,14 @@ export class StoryRepository {
 
       // Add new place associations
       if (data.placeIds.length > 0) {
+        const updateTimestamp = new Date();
         const placeAssociations = data.placeIds.map((placeId, index) => ({
           storyId: id,
           placeId,
           culturalContext: data.placeContexts?.[index] || undefined,
           sortOrder: index,
+          createdAt: updateTimestamp,
+          updatedAt: updateTimestamp,
         }));
         await this.db.insert(storyPlacesTable).values(placeAssociations);
       }
@@ -813,11 +879,14 @@ export class StoryRepository {
 
       // Add new speaker associations
       if (data.speakerIds.length > 0) {
+        const speakerUpdateTimestamp = new Date();
         const speakerAssociations = data.speakerIds.map((speakerId, index) => ({
           storyId: id,
           speakerId,
           storyRole: data.speakerRoles?.[index] || undefined,
           sortOrder: index,
+          createdAt: speakerUpdateTimestamp,
+          updatedAt: speakerUpdateTimestamp,
         }));
         await this.db.insert(storySpeakersTable).values(speakerAssociations);
       }

@@ -40,9 +40,7 @@ export const attachmentsSqlite = sqliteTable('attachments', {
   filename: sqliteText('filename').notNull(),
   contentType: sqliteText('content_type'),
   fileSize: integer('file_size'),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
 
 // Dynamic table selection
@@ -56,17 +54,20 @@ export async function getAttachmentsTable() {
 }
 
 // Zod schemas
-export const insertAttachmentSchema = createInsertSchema(attachmentsPg, {
+export const insertAttachmentSchema = createInsertSchema(attachmentsSqlite, {
   url: z.string().url('Invalid URL format'),
-  attachableId: z.number().int().positive('Attachable ID must be a positive integer'),
+  attachableId: z
+    .number()
+    .int()
+    .positive('Attachable ID must be a positive integer'),
   attachableType: z.string().min(1, 'Attachable type cannot be empty'),
 });
 
-export const selectAttachmentSchema = createSelectSchema(attachmentsPg);
+export const selectAttachmentSchema = createSelectSchema(attachmentsSqlite);
 
-// TypeScript types
-export type Attachment = typeof attachmentsPg.$inferSelect;
-export type NewAttachment = typeof attachmentsPg.$inferInsert;
+// TypeScript types - Use SQLite for consistency with current deployment
+export type Attachment = typeof attachmentsSqlite.$inferSelect;
+export type NewAttachment = typeof attachmentsSqlite.$inferInsert;
 
 // Use SQLite table for Drizzle Kit
 export const attachments = attachmentsSqlite;

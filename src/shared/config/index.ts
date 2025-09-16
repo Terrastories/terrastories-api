@@ -138,6 +138,14 @@ function createConfigFromEnv(
       streamingThreshold: process.env.STREAMING_THRESHOLD,
       enableAuditLogging: process.env.ENABLE_AUDIT_LOGGING,
     },
+    fileService: {
+      maxSizeMB: process.env.FILES_MAX_SIZE_MB,
+      enableVideo: process.env.FILES_ENABLE_VIDEO,
+      encryptAtRest: process.env.FILES_ENCRYPT_AT_REST,
+      uploadRateLimit: process.env.FILES_UPLOAD_RATE_LIMIT,
+      baseUploadPath: process.env.FILES_BASE_UPLOAD_PATH,
+      enableCulturalProtocols: process.env.FILES_ENABLE_CULTURAL_PROTOCOLS,
+    },
   };
 }
 

@@ -217,7 +217,7 @@ export async function superAdminRoutes(
   const communityRepository = new CommunityRepository(db);
   const userRepository = new UserRepository(db);
   const communityService = new CommunityService(communityRepository);
-  const userService = new UserService(userRepository);
+  const userService = new UserService(userRepository, communityRepository);
 
   // Initialize audit logger for Indigenous oversight
   const auditLogger = getAuditLogger();

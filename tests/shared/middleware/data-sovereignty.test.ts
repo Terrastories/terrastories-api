@@ -85,9 +85,10 @@ describe('Data Sovereignty Enforcement', () => {
 
       expect(mockReply.status).toHaveBeenCalledWith(403);
       expect(mockReply.send).toHaveBeenCalledWith({
-        error: 'Super administrators cannot access community data',
+        error: {
+          message: 'Super administrators cannot access community data',
+        },
         reason: 'Indigenous data sovereignty protection',
-        statusCode: 403,
       });
 
       expect(mockLog.warn).toHaveBeenCalledWith(
@@ -110,7 +111,9 @@ describe('Data Sovereignty Enforcement', () => {
 
       expect(mockReply.status).toHaveBeenCalledWith(401);
       expect(mockReply.send).toHaveBeenCalledWith({
-        error: 'Authentication required',
+        error: {
+          message: 'Authentication required',
+        },
       });
     });
 
@@ -187,8 +190,9 @@ describe('Data Sovereignty Enforcement', () => {
 
       expect(mockReply.status).toHaveBeenCalledWith(403);
       expect(mockReply.send).toHaveBeenCalledWith({
-        error: 'Access denied - community data isolation',
-        statusCode: 403,
+        error: {
+          message: 'Access denied - community data isolation',
+        },
       });
 
       expect(mockLog.warn).toHaveBeenCalledWith(
@@ -225,9 +229,10 @@ describe('Data Sovereignty Enforcement', () => {
       // Should be blocked by enforceDataSovereignty first
       expect(mockReply.status).toHaveBeenCalledWith(403);
       expect(mockReply.send).toHaveBeenCalledWith({
-        error: 'Super administrators cannot access community data',
+        error: {
+          message: 'Super administrators cannot access community data',
+        },
         reason: 'Indigenous data sovereignty protection',
-        statusCode: 403,
       });
     });
 
@@ -278,8 +283,9 @@ describe('Data Sovereignty Enforcement', () => {
 
       expect(mockReply.status).toHaveBeenCalledWith(403);
       expect(mockReply.send).toHaveBeenCalledWith({
-        error: 'Access denied - community data isolation',
-        statusCode: 403,
+        error: {
+          message: 'Access denied - community data isolation',
+        },
       });
     });
   });

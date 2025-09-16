@@ -149,6 +149,32 @@ resource_exists() {
     fi
 }
 
+# Retry helper for handling race conditions
+retry_with_backoff() {
+    local max_attempts="$1"
+    local delay="$2"
+    local description="$3"
+    shift 3
+
+    local attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        if "$@"; then
+            return 0
+        fi
+
+        if [ $attempt -lt $max_attempts ]; then
+            warn "Attempt $attempt failed for $description, retrying in ${delay}s..."
+            sleep "$delay"
+            delay=$((delay * 2))  # Exponential backoff
+        fi
+
+        attempt=$((attempt + 1))
+    done
+
+    error "All $max_attempts attempts failed for $description"
+    return 1
+}
+
 # Idempotent resource creation function
 create_resource_idempotent() {
     local method="$1"
@@ -198,7 +224,8 @@ create_resource_idempotent() {
 
                 # Return a minimal success response if we can't retrieve the existing resource
                 info "Continuing with existing resource: $description"
-                echo '{"data":{"id":1},"message":"Using existing resource"}'
+                # Use a more descriptive fallback that won't be confused with real data
+                echo '{"data":{"id":"EXISTING_RESOURCE"},"message":"Resource exists but ID unavailable","status":"conflict_resolved"}'
                 return 0
             fi
         fi

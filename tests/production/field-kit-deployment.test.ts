@@ -965,6 +965,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     );
 
     // Insert test community using Drizzle ORM
+    const now = new Date();
     await db.db
       .insert(communitiesSqlite)
       .values({
@@ -974,6 +975,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         description: 'Test community',
         theme: '{}',
         publicStories: true,
+        createdAt: now,
+        updatedAt: now,
       })
       .onConflictDoNothing();
 
@@ -990,6 +993,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
         role: 'admin',
         communityId: 1,
         isActive: true,
+        createdAt: now,
+        updatedAt: now,
       })
       .onConflictDoNothing();
 

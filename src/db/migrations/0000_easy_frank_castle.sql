@@ -24,7 +24,8 @@ CREATE TABLE `places` (
 	`cultural_significance` text,
 	`is_restricted` integer DEFAULT false NOT NULL,
 	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL
+	`updated_at` integer NOT NULL,
+	`photo_url` text
 );
 --> statement-breakpoint
 CREATE TABLE `speakers` (
@@ -38,7 +39,8 @@ CREATE TABLE `speakers` (
 	`cultural_role` text,
 	`is_active` integer DEFAULT true NOT NULL,
 	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL
+	`updated_at` integer NOT NULL,
+	`bio_audio_url` text
 );
 --> statement-breakpoint
 CREATE TABLE `stories` (
@@ -52,7 +54,9 @@ CREATE TABLE `stories` (
 	`language` text DEFAULT 'en' NOT NULL,
 	`tags` text DEFAULT '[]',
 	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL
+	`updated_at` integer NOT NULL,
+	`image_url` text,
+	`audio_url` text
 );
 --> statement-breakpoint
 CREATE TABLE `story_places` (

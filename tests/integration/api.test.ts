@@ -92,9 +92,14 @@ async function createTestApp(): Promise<FastifyInstance> {
       );
 
       try {
+        const now = new Date();
         const [newCommunity] = await database
           .insert(communitiesSqlite)
-          .values(request.body)
+          .values({
+            ...request.body,
+            createdAt: now,
+            updatedAt: now,
+          })
           .returning();
 
         return { data: newCommunity };
@@ -155,6 +160,7 @@ describe('API Integration Tests', () => {
     const testPasswordHash =
       '$argon2id$v=19$m=65536,t=3,p=4$lqO13Fqx46nTW2lUiZJWLw$VIpjVVTVn3OVLoLgN+ZcGBmGqCeHZjK2FwayYOWm3OQ';
 
+    const now = new Date();
     await db.insert(usersSqlite).values([
       {
         email: 'admin@test.com',
@@ -164,6 +170,8 @@ describe('API Integration Tests', () => {
         role: 'admin',
         communityId: fixtures.communities[0].id,
         isActive: true,
+        createdAt: now,
+        updatedAt: now,
       },
       {
         email: 'editor@test.com',
@@ -173,6 +181,8 @@ describe('API Integration Tests', () => {
         role: 'editor',
         communityId: fixtures.communities[0].id,
         isActive: true,
+        createdAt: now,
+        updatedAt: now,
       },
       {
         email: 'viewer@test.com',
@@ -182,6 +192,8 @@ describe('API Integration Tests', () => {
         role: 'viewer',
         communityId: fixtures.communities[0].id,
         isActive: true,
+        createdAt: now,
+        updatedAt: now,
       },
       {
         email: 'superadmin@test.com',
@@ -191,6 +203,8 @@ describe('API Integration Tests', () => {
         role: 'super_admin',
         communityId: fixtures.systemCommunity.id,
         isActive: true,
+        createdAt: now,
+        updatedAt: now,
       },
       // Additional admin user for anotherCommunity test scenario
       {
@@ -201,6 +215,8 @@ describe('API Integration Tests', () => {
         role: 'admin',
         communityId: fixtures.communities[1].id,
         isActive: true,
+        createdAt: now,
+        updatedAt: now,
       },
     ]);
 

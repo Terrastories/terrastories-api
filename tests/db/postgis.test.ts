@@ -86,6 +86,8 @@ describe('PostGIS Spatial Database Tests', () => {
               ],
             ]),
             communityId: 1,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           }
         : {
             name: 'PostGIS Test Place',
@@ -94,6 +96,8 @@ describe('PostGIS Spatial Database Tests', () => {
             longitude: -123.1207,
             region: 'Vancouver',
             communityId: 1,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           };
 
       const result = await database
@@ -131,16 +135,22 @@ describe('PostGIS Spatial Database Tests', () => {
               name: 'Vancouver Place',
               location: SpatialUtils.createPoint(49.2827, -123.1207),
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
             {
               name: 'Toronto Place',
               location: SpatialUtils.createPoint(43.6532, -79.3832),
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
             {
               name: 'Montreal Place',
               location: SpatialUtils.createPoint(45.5017, -73.5673),
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
           ]
         : [
@@ -149,18 +159,24 @@ describe('PostGIS Spatial Database Tests', () => {
               latitude: 49.2827,
               longitude: -123.1207,
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
             {
               name: 'Toronto Place',
               latitude: 43.6532,
               longitude: -79.3832,
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
             {
               name: 'Montreal Place',
               latitude: 45.5017,
               longitude: -73.5673,
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
           ];
 
@@ -259,12 +275,16 @@ describe('PostGIS Spatial Database Tests', () => {
                 name: test.name,
                 location: test.location,
                 communityId: 1,
+                createdAt: new Date(),
+                updatedAt: new Date(),
               }
             : {
                 name: test.name,
                 latitude: test.latitude,
                 longitude: test.longitude,
                 communityId: 1,
+                createdAt: new Date(),
+                updatedAt: new Date(),
               };
 
           const result = await database
@@ -299,6 +319,8 @@ describe('PostGIS Spatial Database Tests', () => {
             description: 'Testing cross-database schema compatibility',
             location: SpatialUtils.createPoint(45.0, -75.0), // Ottawa coordinates
             communityId: 1,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           }
         : {
             name: 'Schema Compatibility Test',
@@ -306,6 +328,8 @@ describe('PostGIS Spatial Database Tests', () => {
             latitude: 45.0, // Ottawa coordinates
             longitude: -75.0,
             communityId: 1,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           };
 
       const result = await database
@@ -358,12 +382,16 @@ describe('PostGIS Spatial Database Tests', () => {
             name: `Index Test Place ${i}`,
             location: SpatialUtils.createPoint(45 + i * 0.1, -75 + i * 0.1),
             communityId: 1,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           }))
         : Array.from({ length: 10 }, (_, i) => ({
             name: `Index Test Place ${i}`,
             latitude: 45 + i * 0.1,
             longitude: -75 + i * 0.1,
             communityId: 1,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           }));
 
       await database.insert(places).values(testPlaces);

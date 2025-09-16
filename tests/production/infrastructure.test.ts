@@ -250,13 +250,14 @@ describe('Production Infrastructure Validation - Phase 1', () => {
 
   describe('Environment Variables and Security', () => {
     test('production environment file template exists', async () => {
-      const envProdExists = await fs
-        .access('.env.production')
+      const envProdTemplateExists = await fs
+        .access('.env.production.template')
         .then(() => true)
         .catch(() => false);
-      expect(envProdExists, 'Production environment file should exist').toBe(
-        true
-      );
+      expect(
+        envProdTemplateExists,
+        'Production environment template file should exist'
+      ).toBe(true);
     });
 
     test('sensitive variables are properly configured', async () => {

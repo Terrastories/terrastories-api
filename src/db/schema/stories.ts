@@ -20,17 +20,19 @@ import {
   boolean,
   integer as pgInteger,
   jsonb,
+  index,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
+  index as sqliteIndex,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
-import { usersPg } from './users.js';
+import { usersPg, usersSqlite } from './users.js';
 import { placesPg, placesSqlite } from './places.js';
 import { speakersPg, speakersSqlite } from './speakers.js';
 
@@ -38,66 +40,92 @@ import { speakersPg, speakersSqlite } from './speakers.js';
 export const MediaUrlSchema = z.string().url('Invalid media URL format');
 
 // PostgreSQL table for production
-export const storiesPg = pgTable('stories', {
-  id: serial('id').primaryKey(),
-  title: pgText('title').notNull(),
-  description: pgText('description'),
-  slug: pgText('slug').notNull(),
-  communityId: pgInteger('community_id').notNull(),
-  createdBy: pgInteger('created_by').notNull(),
-  isRestricted: boolean('is_restricted').notNull().default(false),
-  privacyLevel: pgText('privacy_level').notNull().default('public'),
-  mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
-  // Direct file URL columns for dual-read capability (Issue #89)
-  imageUrl: pgText('image_url'),
-  audioUrl: pgText('audio_url'),
-  language: pgText('language').notNull().default('en'),
-  tags: jsonb('tags').$type<string[]>().default([]),
-  // Interview metadata fields for Indigenous storytelling context
-  dateInterviewed: timestamp('date_interviewed'),
-  interviewLocationId: pgInteger('interview_location_id').references(
-    () => placesPg.id
-  ),
-  interviewerId: pgInteger('interviewer_id').references(() => speakersPg.id),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+export const storiesPg = pgTable(
+  'stories',
+  {
+    id: serial('id').primaryKey(),
+    title: pgText('title').notNull(),
+    description: pgText('description'),
+    slug: pgText('slug').notNull(),
+    communityId: pgInteger('community_id').notNull(),
+    createdBy: pgInteger('created_by').notNull(),
+    isRestricted: boolean('is_restricted').notNull().default(false),
+    privacyLevel: pgText('privacy_level').notNull().default('public'),
+    mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
+    // Direct file URL columns for dual-read capability (Issue #89)
+    imageUrl: pgText('image_url'),
+    audioUrl: pgText('audio_url'),
+    language: pgText('language').notNull().default('en'),
+    tags: jsonb('tags').$type<string[]>().default([]),
+    // Interview metadata fields for Indigenous storytelling context
+    dateInterviewed: timestamp('date_interviewed'),
+    interviewLocationId: pgInteger('interview_location_id').references(
+      () => placesPg.id
+    ),
+    interviewerId: pgInteger('interviewer_id').references(() => speakersPg.id),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    // Standard indexes for filtering and searching
+    communityIdx: index('stories_community_id_idx').on(table.communityId),
+    slugIdx: index('stories_slug_idx').on(table.slug),
+    // Indexes for media URL queries
+    imageUrlIdx: index('stories_image_url_idx').on(table.imageUrl),
+    audioUrlIdx: index('stories_audio_url_idx').on(table.audioUrl),
+    // Privacy and access control indexes
+    privacyLevelIdx: index('stories_privacy_level_idx').on(table.privacyLevel),
+  })
+);
 
 // SQLite table for development/testing
-export const storiesSqlite = sqliteTable('stories', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  title: sqliteText('title').notNull(),
-  description: sqliteText('description'),
-  slug: sqliteText('slug').notNull(),
-  communityId: integer('community_id')
-    .notNull()
-    .references(() => communitiesSqlite.id),
-  createdBy: integer('created_by').notNull(),
-  isRestricted: integer('is_restricted', { mode: 'boolean' })
-    .notNull()
-    .default(false),
-  privacyLevel: sqliteText('privacy_level').notNull().default('public'),
-  mediaUrls: sqliteText('media_urls', { mode: 'json' })
-    .$type<string[]>()
-    .default([]),
-  // Direct file URL columns for dual-read capability (Issue #89)
-  imageUrl: sqliteText('image_url'),
-  audioUrl: sqliteText('audio_url'),
-  language: sqliteText('language').notNull().default('en'),
-  tags: sqliteText('tags', { mode: 'json' }).$type<string[]>().default([]),
-  // Interview metadata fields for Indigenous storytelling context
-  dateInterviewed: integer('date_interviewed', { mode: 'timestamp' }),
-  interviewLocationId: integer('interview_location_id').references(
-    () => placesSqlite.id
-  ),
-  interviewerId: integer('interviewer_id').references(() => speakersSqlite.id),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
+export const storiesSqlite = sqliteTable(
+  'stories',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    title: sqliteText('title').notNull(),
+    description: sqliteText('description'),
+    slug: sqliteText('slug').notNull(),
+    communityId: integer('community_id')
+      .notNull()
+      .references(() => communitiesSqlite.id),
+    createdBy: integer('created_by').notNull(),
+    isRestricted: integer('is_restricted', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    privacyLevel: sqliteText('privacy_level').notNull().default('public'),
+    mediaUrls: sqliteText('media_urls', { mode: 'json' })
+      .$type<string[]>()
+      .default([]),
+    // Direct file URL columns for dual-read capability (Issue #89)
+    imageUrl: sqliteText('image_url'),
+    audioUrl: sqliteText('audio_url'),
+    language: sqliteText('language').notNull().default('en'),
+    tags: sqliteText('tags', { mode: 'json' }).$type<string[]>().default([]),
+    // Interview metadata fields for Indigenous storytelling context
+    dateInterviewed: integer('date_interviewed', { mode: 'timestamp' }),
+    interviewLocationId: integer('interview_location_id').references(
+      () => placesSqlite.id
+    ),
+    interviewerId: integer('interviewer_id').references(
+      () => speakersSqlite.id
+    ),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  },
+  (table) => ({
+    // Standard indexes for filtering and searching
+    communityIdx: sqliteIndex('stories_community_id_idx').on(table.communityId),
+    slugIdx: sqliteIndex('stories_slug_idx').on(table.slug),
+    // Indexes for media URL queries
+    imageUrlIdx: sqliteIndex('stories_image_url_idx').on(table.imageUrl),
+    audioUrlIdx: sqliteIndex('stories_audio_url_idx').on(table.audioUrl),
+    // Privacy and access control indexes
+    privacyLevelIdx: sqliteIndex('stories_privacy_level_idx').on(
+      table.privacyLevel
+    ),
+  })
+);
 
 // Dynamic table selection based on database type (for runtime use)
 // Note: This function imports getConfig at runtime to avoid circular dependencies during migration
@@ -147,9 +175,9 @@ export const storiesSqliteRelations = relations(
       fields: [storiesSqlite.communityId],
       references: [communitiesSqlite.id],
     }),
-    author: one(usersPg, {
+    author: one(usersSqlite, {
       fields: [storiesSqlite.createdBy],
-      references: [usersPg.id],
+      references: [usersSqlite.id],
     }),
     // Interview metadata relations
     interviewLocation: one(placesSqlite, {

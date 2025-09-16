@@ -93,9 +93,11 @@ export class FileRepository {
   ): Promise<File> {
     const filesTable = await getFilesTable();
 
+    const now = new Date();
     const newFile: NewFile = {
       ...fileData,
-      // Let schema defaults handle timestamps
+      createdAt: now,
+      updatedAt: now,
     };
 
     try {

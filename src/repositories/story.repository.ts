@@ -266,6 +266,7 @@ export class StoryRepository {
       (await this.generateUniqueSlug(data.title, data.communityId));
 
     // Insert story into database
+    const now = new Date();
     const insertData = {
       title: data.title,
       description: data.description,
@@ -280,6 +281,8 @@ export class StoryRepository {
       dateInterviewed: data.dateInterviewed,
       interviewLocationId: data.interviewLocationId,
       interviewerId: data.interviewerId,
+      createdAt: now,
+      updatedAt: now,
     };
 
     const [story] = await this.db
@@ -290,11 +293,14 @@ export class StoryRepository {
     // Create place associations using proper join table
     if (data.placeIds?.length) {
       const storyPlacesTable = this.getStoryPlacesTable();
+      const associationTimestamp = new Date();
       const placeAssociations = data.placeIds.map((placeId, index) => ({
         storyId: story.id,
         placeId,
         culturalContext: data.placeContexts?.[index] || undefined,
         sortOrder: index,
+        createdAt: associationTimestamp,
+        updatedAt: associationTimestamp,
       }));
 
       await this.db.insert(storyPlacesTable).values(placeAssociations);
@@ -303,11 +309,14 @@ export class StoryRepository {
     // Create speaker associations using proper join table
     if (data.speakerIds?.length) {
       const storySpeakersTable = this.getStorySpeakersTable();
+      const speakerTimestamp = new Date();
       const speakerAssociations = data.speakerIds.map((speakerId, index) => ({
         storyId: story.id,
         speakerId,
         storyRole: data.speakerRoles?.[index] || undefined,
         sortOrder: index,
+        createdAt: speakerTimestamp,
+        updatedAt: speakerTimestamp,
       }));
 
       await this.db.insert(storySpeakersTable).values(speakerAssociations);
@@ -846,11 +855,14 @@ export class StoryRepository {
 
       // Add new place associations
       if (data.placeIds.length > 0) {
+        const updateTimestamp = new Date();
         const placeAssociations = data.placeIds.map((placeId, index) => ({
           storyId: id,
           placeId,
           culturalContext: data.placeContexts?.[index] || undefined,
           sortOrder: index,
+          createdAt: updateTimestamp,
+          updatedAt: updateTimestamp,
         }));
         await this.db.insert(storyPlacesTable).values(placeAssociations);
       }
@@ -867,11 +879,14 @@ export class StoryRepository {
 
       // Add new speaker associations
       if (data.speakerIds.length > 0) {
+        const speakerUpdateTimestamp = new Date();
         const speakerAssociations = data.speakerIds.map((speakerId, index) => ({
           storyId: id,
           speakerId,
           storyRole: data.speakerRoles?.[index] || undefined,
           sortOrder: index,
+          createdAt: speakerUpdateTimestamp,
+          updatedAt: speakerUpdateTimestamp,
         }));
         await this.db.insert(storySpeakersTable).values(speakerAssociations);
       }

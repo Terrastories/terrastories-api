@@ -58,12 +58,11 @@ async function seedDatabase(): Promise<SeedData> {
     config.database.url.startsWith('postgresql://') ||
     config.database.url.startsWith('postgres://')
   ) {
-    // PostgreSQL connection would go here
-    console.error('❌ PostgreSQL seeding not yet implemented');
-    console.log(
-      '💡 For now, please use SQLite for development (DATABASE_URL=./data.db)'
+    const err = new Error(
+      'PostgreSQL seeding not implemented. Use SQLite (DATABASE_URL=./data.db) for now.'
     );
-    process.exit(1);
+    console.error('❌', err.message);
+    throw err;
   } else {
     // SQLite connection
     const sqlite = new Database(

@@ -152,6 +152,7 @@ export class PlaceRepository {
 
     const placesTable = await getPlacesTable();
 
+    const now = new Date();
     const placeData: NewPlace = {
       name: data.name,
       description: data.description || null,
@@ -162,6 +163,8 @@ export class PlaceRepository {
       mediaUrls: data.mediaUrls || [],
       culturalSignificance: data.culturalSignificance || null,
       isRestricted: data.isRestricted || false,
+      createdAt: now,
+      updatedAt: now,
     };
 
     try {

@@ -168,9 +168,8 @@ export class ThemesRepository {
 
   // Type-safe database query wrapper - cast to any to handle union type
   private get db() {
-    // Cast to any to resolve union type issues
-    // This is safe because both drizzle instances have compatible query interfaces
-    return this.database as any;
+    // Cast to resolve union type issues - both drizzle instances have compatible query interfaces
+    return this.database as Database;
   }
 
   /**
@@ -185,6 +184,7 @@ export class ThemesRepository {
       throw new InvalidMapboxUrlError(data.mapboxStyleUrl);
     }
 
+    const now = new Date();
     const themeData: NewTheme = {
       name: data.name,
       description: data.description || null,
@@ -198,6 +198,8 @@ export class ThemesRepository {
       neBoundaryLong: data.neBoundaryLong || null,
       active: data.active || false,
       communityId: data.communityId,
+      createdAt: now,
+      updatedAt: now,
     };
 
     try {

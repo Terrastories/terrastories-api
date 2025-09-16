@@ -28,7 +28,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import {
   requireAuth,
-  requireRole,
+  AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
 import {
   UserService,
@@ -36,6 +36,8 @@ import {
   WeakPasswordError,
   InvalidCommunityError,
   UserNotFoundError,
+  SuperAdminRoleError,
+  SelfDeletionError,
 } from '../services/user.service.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
@@ -147,7 +149,33 @@ export async function userRoutes(
 
   // Apply authentication and role requirement to all routes
   app.addHook('preHandler', requireAuth);
-  app.addHook('preHandler', requireRole(['admin']));
+  app.addHook('preHandler', async (request, reply) => {
+    // Allow only community admins and explicitly block super admins for data sovereignty
+    const authRequest = request as AuthenticatedRequest;
+    const user = authRequest.user;
+
+    if (!user) {
+      return reply.status(401).send({
+        error: 'Authentication required',
+        statusCode: 401,
+      });
+    }
+
+    if (user.role === 'super_admin') {
+      return reply.status(403).send({
+        error: 'Access blocked on community endpoints for data sovereignty',
+        statusCode: 403,
+      });
+    }
+
+    // Require admin role for remaining users
+    if (user.role !== 'admin') {
+      return reply.status(403).send({
+        error: 'Insufficient permissions. Admin role required.',
+        statusCode: 403,
+      });
+    }
+  });
 
   // GET /api/v1/users - List users in authenticated user's community
   app.get('/', {
@@ -201,7 +229,7 @@ export async function userRoutes(
       reply: FastifyReply
     ) => {
       try {
-        const authRequest = request as any;
+        const authRequest = request as AuthenticatedRequest;
         const currentUser = authRequest.user;
 
         if (!currentUser) {
@@ -292,7 +320,7 @@ export async function userRoutes(
       reply: FastifyReply
     ) => {
       try {
-        const authRequest = request as any;
+        const authRequest = request as AuthenticatedRequest;
         const currentUser = authRequest.user;
 
         if (!currentUser) {
@@ -389,7 +417,7 @@ export async function userRoutes(
       reply: FastifyReply
     ) => {
       try {
-        const authRequest = request as any;
+        const authRequest = request as AuthenticatedRequest;
         const currentUser = authRequest.user;
 
         if (!currentUser) {
@@ -449,9 +477,9 @@ export async function userRoutes(
           });
         }
 
-        if (errorMessage.includes('Cannot create super admin')) {
+        if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
-            error: errorMessage,
+            error: error.message,
             statusCode: 403,
           });
         }
@@ -488,6 +516,7 @@ export async function userRoutes(
           },
           isActive: { type: 'boolean' },
         },
+        required: ['firstName', 'lastName', 'role', 'isActive'],
         additionalProperties: false,
       },
       response: {
@@ -513,7 +542,7 @@ export async function userRoutes(
       reply: FastifyReply
     ) => {
       try {
-        const authRequest = request as any;
+        const authRequest = request as AuthenticatedRequest;
         const currentUser = authRequest.user;
 
         if (!currentUser) {
@@ -572,9 +601,9 @@ export async function userRoutes(
           });
         }
 
-        if (errorMessage.includes('Cannot assign super admin')) {
+        if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
-            error: errorMessage,
+            error: error.message,
             statusCode: 403,
           });
         }
@@ -636,7 +665,7 @@ export async function userRoutes(
       reply: FastifyReply
     ) => {
       try {
-        const authRequest = request as any;
+        const authRequest = request as AuthenticatedRequest;
         const currentUser = authRequest.user;
 
         if (!currentUser) {
@@ -695,9 +724,9 @@ export async function userRoutes(
           });
         }
 
-        if (errorMessage.includes('Cannot assign super admin')) {
+        if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
-            error: errorMessage,
+            error: error.message,
             statusCode: 403,
           });
         }
@@ -750,7 +779,7 @@ export async function userRoutes(
       reply: FastifyReply
     ) => {
       try {
-        const authRequest = request as any;
+        const authRequest = request as AuthenticatedRequest;
         const currentUser = authRequest.user;
 
         if (!currentUser) {
@@ -786,9 +815,9 @@ export async function userRoutes(
           });
         }
 
-        if (errorMessage.includes('cannot delete themselves')) {
+        if (error instanceof SelfDeletionError) {
           return reply.status(403).send({
-            error: errorMessage,
+            error: error.message,
             statusCode: 403,
           });
         }

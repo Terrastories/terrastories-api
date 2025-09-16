@@ -107,6 +107,28 @@ export class UserNotFoundError extends Error {
 }
 
 /**
+ * Custom error for super admin role violations
+ */
+export class SuperAdminRoleError extends Error {
+  constructor(
+    message = 'Super admin role operations not allowed through community endpoints'
+  ) {
+    super(message);
+    this.name = 'SuperAdminRoleError';
+  }
+}
+
+/**
+ * Custom error for self-deletion attempts
+ */
+export class SelfDeletionError extends Error {
+  constructor(message = 'Users cannot delete themselves') {
+    super(message);
+    this.name = 'SelfDeletionError';
+  }
+}
+
+/**
  * User Service class providing business logic for user operations
  */
 export class UserService {
@@ -949,7 +971,7 @@ export class UserService {
 
       // Block super_admin role creation (community admins can't create super admins)
       if (userData.role === 'super_admin') {
-        throw new Error(
+        throw new SuperAdminRoleError(
           'Cannot create super admin users through community endpoints'
         );
       }
@@ -1040,7 +1062,7 @@ export class UserService {
 
       // Block super_admin role assignment (community admins can't promote to super admin)
       if (data.role === 'super_admin') {
-        throw new Error(
+        throw new SuperAdminRoleError(
           'Cannot assign super admin role through community endpoints'
         );
       }
@@ -1123,7 +1145,7 @@ export class UserService {
 
       // Prevent self-deletion
       if (userId === actingUserId) {
-        throw new Error('Users cannot delete themselves');
+        throw new SelfDeletionError('Users cannot delete themselves');
       }
 
       // Check if user exists in the same community

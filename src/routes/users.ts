@@ -38,6 +38,7 @@ import {
   UserNotFoundError,
 } from '../services/user.service.js';
 import { UserRepository } from '../repositories/user.repository.js';
+import { CommunityRepository } from '../repositories/community.repository.js';
 import { getDb, type Database } from '../db/index.js';
 import { toISOString } from '../shared/utils/date-transforms.js';
 
@@ -141,7 +142,8 @@ export async function userRoutes(
   // Initialize services
   const db = options?.database || (await getDb());
   const userRepository = new UserRepository(db);
-  const userService = new UserService(userRepository);
+  const communityRepository = new CommunityRepository(db);
+  const userService = new UserService(userRepository, communityRepository);
 
   // Apply authentication and role requirement to all routes
   app.addHook('preHandler', requireAuth);

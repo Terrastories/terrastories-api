@@ -978,6 +978,7 @@ export class UserService {
       );
 
       // Create user data
+      const now = new Date();
       const createData: CreateUserData = {
         email: userData.email,
         passwordHash: hashedPassword,
@@ -986,6 +987,8 @@ export class UserService {
         role: userData.role || 'viewer',
         communityId,
         isActive: userData.isActive ?? true,
+        createdAt: now,
+        updatedAt: now,
       };
 
       // Create user

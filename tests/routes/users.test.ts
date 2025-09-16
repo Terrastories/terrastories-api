@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
+import { usersSqlite } from '../../src/db/schema/users.js';
 
 describe('Community-Scoped User Management Routes', () => {
   let app: FastifyInstance;
@@ -25,6 +26,61 @@ describe('Community-Scoped User Management Routes', () => {
     const fixtures = await testDb.seedTestData();
     testCommunityId = fixtures.communities[0].id;
 
+    // Create test users
+    const testPasswordHash =
+      '$argon2id$v=19$m=65536,t=3,p=4$lqO13Fqx46nTW2lUiZJWLw$VIpjVVTVn3OVLoLgN+ZcGBmGqCeHZjK2FwayYOWm3OQ';
+    const now = new Date();
+
+    const testUsers = await db
+      .insert(usersSqlite)
+      .values([
+        {
+          email: 'admin1@test.com',
+          passwordHash: testPasswordHash,
+          firstName: 'Admin',
+          lastName: 'One',
+          role: 'admin',
+          communityId: fixtures.communities[0].id,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          email: 'admin2@test.com',
+          passwordHash: testPasswordHash,
+          firstName: 'Admin',
+          lastName: 'Two',
+          role: 'admin',
+          communityId: fixtures.communities[1].id,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          email: 'editor1@test.com',
+          passwordHash: testPasswordHash,
+          firstName: 'Editor',
+          lastName: 'One',
+          role: 'editor',
+          communityId: fixtures.communities[0].id,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          email: 'superadmin@test.com',
+          passwordHash: testPasswordHash,
+          firstName: 'Super',
+          lastName: 'Admin',
+          role: 'super_admin',
+          communityId: fixtures.systemCommunity.id,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ])
+      .returning();
+
     // Create test app
     app = await createTestApp(db);
 
@@ -33,19 +89,10 @@ describe('Community-Scoped User Management Routes', () => {
       community1: fixtures.communities[0],
       community2: fixtures.communities[1],
       users: {
-        admin1: fixtures.users.find(
-          (u: any) =>
-            u.role === 'admin' && u.communityId === fixtures.communities[0].id
-        ),
-        admin2: fixtures.users.find(
-          (u: any) =>
-            u.role === 'admin' && u.communityId === fixtures.communities[1].id
-        ),
-        editor1: fixtures.users.find(
-          (u: any) =>
-            u.role === 'editor' && u.communityId === fixtures.communities[0].id
-        ),
-        superAdmin: fixtures.users.find((u: any) => u.role === 'super_admin'),
+        admin1: testUsers[0],
+        admin2: testUsers[1],
+        editor1: testUsers[2],
+        superAdmin: testUsers[3],
       },
     };
   });
@@ -62,7 +109,7 @@ describe('Community-Scoped User Management Routes', () => {
       url: '/api/v1/auth/login',
       payload: {
         email: user.email,
-        password: 'TestPassword123!', // Default test password
+        password: 'testPassword123', // Default test password
         communityId: user.communityId,
       },
     });

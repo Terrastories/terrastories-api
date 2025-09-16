@@ -30,7 +30,7 @@ import {
   real,
   index as sqliteIndex,
 } from 'drizzle-orm/sqlite-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
@@ -171,6 +171,10 @@ export const updatePlaceSchema = insertPlaceSchema.partial().omit({
 
 /**
  * Validates and sanitizes coordinate values to prevent SQL injection
+ * @param value - The coordinate value to validate
+ * @param type - The coordinate type ('latitude' or 'longitude')
+ * @returns The validated coordinate value
+ * @throws Error if the coordinate is invalid or out of range
  */
 function validateCoordinate(
   value: number,
@@ -196,7 +200,10 @@ function validateCoordinate(
 }
 
 /**
- * Validates radius parameter
+ * Validates radius parameter for spatial queries
+ * @param radius - The radius value in meters to validate
+ * @returns The validated radius value
+ * @throws Error if the radius is invalid, negative, or exceeds maximum allowed (100km)
  */
 function validateRadius(radius: number): number {
   if (typeof radius !== 'number' || !isFinite(radius) || radius < 0) {
@@ -213,24 +220,42 @@ function validateRadius(radius: number): number {
   return radius;
 }
 
-// PostGIS spatial utility functions (PostgreSQL only) with input validation
+/**
+ * PostGIS spatial utility functions (PostgreSQL only) with input validation
+ * Uses parameterized queries to prevent SQL injection attacks
+ */
 export const spatialHelpers = {
-  // Create PostGIS POINT from latitude and longitude
+  /**
+   * Create PostGIS POINT from latitude and longitude
+   * @param lat - Latitude coordinate (-90 to 90)
+   * @param lng - Longitude coordinate (-180 to 180)
+   * @returns SQL fragment for creating a PostGIS point with SRID 4326
+   */
   createPoint: (lat: number, lng: number) => {
     const validLat = validateCoordinate(lat, 'latitude');
     const validLng = validateCoordinate(lng, 'longitude');
-    return `ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)`;
+    return sql`ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)`;
   },
 
-  // Find places within radius (in meters) using latitude/longitude columns
+  /**
+   * Find places within radius (in meters) using latitude/longitude columns
+   * @param lat - Center latitude coordinate
+   * @param lng - Center longitude coordinate
+   * @param radiusMeters - Search radius in meters (max 100km)
+   * @returns SQL fragment for spatial distance query
+   */
   findWithinRadius: (lat: number, lng: number, radiusMeters: number) => {
     const validLat = validateCoordinate(lat, 'latitude');
     const validLng = validateCoordinate(lng, 'longitude');
     const validRadius = validateRadius(radiusMeters);
-    return `ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)::geography, ${validRadius})`;
+    return sql`ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)::geography, ${validRadius})`;
   },
 
-  // Find places within bounding box using latitude/longitude columns
+  /**
+   * Find places within bounding box using latitude/longitude columns
+   * @param bounds - Bounding box coordinates
+   * @returns SQL fragment for bounding box query
+   */
   findInBoundingBox: (bounds: {
     north: number;
     south: number;
@@ -248,14 +273,19 @@ export const spatialHelpers = {
       );
     }
 
-    return `latitude BETWEEN ${validSouth} AND ${validNorth} AND longitude BETWEEN ${validWest} AND ${validEast}`;
+    return sql`latitude BETWEEN ${validSouth} AND ${validNorth} AND longitude BETWEEN ${validWest} AND ${validEast}`;
   },
 
-  // Calculate distance between two points (in meters) using latitude/longitude columns
+  /**
+   * Calculate distance between two points (in meters) using latitude/longitude columns
+   * @param fromLat - Starting latitude coordinate
+   * @param fromLng - Starting longitude coordinate
+   * @returns SQL fragment for distance calculation
+   */
   calculateDistance: (fromLat: number, fromLng: number) => {
     const validFromLat = validateCoordinate(fromLat, 'latitude');
     const validFromLng = validateCoordinate(fromLng, 'longitude');
-    return `ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validFromLng}, ${validFromLat}), 4326)::geography)`;
+    return sql`ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validFromLng}, ${validFromLat}), 4326)::geography)`;
   },
 };
 

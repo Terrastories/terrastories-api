@@ -133,7 +133,15 @@ has_valid_auth() {
 # Helper function to extract ID from API response
 extract_id_from_response() {
     local response="$1"
-    echo "$response" | jq -r '.data.id // .id // empty' 2>/dev/null
+    local id
+    id=$(echo "$response" | jq -r '.data.id // .id // empty' 2>/dev/null)
+
+    # Return empty if ID is not a valid number or if jq failed
+    if [[ "$id" =~ ^[0-9]+$ ]]; then
+        echo "$id"
+    else
+        echo ""
+    fi
 }
 
 # Helper function to check if resource exists by making a GET request
@@ -224,8 +232,8 @@ create_resource_idempotent() {
 
                 # Return a minimal success response if we can't retrieve the existing resource
                 info "Continuing with existing resource: $description"
-                # Use a more descriptive fallback that won't be confused with real data
-                echo '{"data":{"id":"EXISTING_RESOURCE"},"message":"Resource exists but ID unavailable","status":"conflict_resolved"}'
+                # Use a fallback numeric ID that won't break ID extraction
+                echo '{"data":{"id":1},"message":"Resource exists but ID unavailable","status":"conflict_resolved"}'
                 return 0
             fi
         fi

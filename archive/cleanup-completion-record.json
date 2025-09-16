@@ -15,9 +15,7 @@
       "tests/migration/activestorage-migration.test.ts",
       "tests/helpers/activestorage-test-adapter.ts"
     ],
-    "filesArchived": [
-      "scripts/migrate-activestorage.ts"
-    ]
+    "filesArchived": ["scripts/migrate-activestorage.ts"]
   },
   "validationPeriod": "30+ days (as per issue requirements)",
   "rollbackProcedure": "Restore from backup taken before cleanup",

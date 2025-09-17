@@ -7,8 +7,8 @@ CREATE TABLE `communities` (
 	`locale` text DEFAULT 'en' NOT NULL,
 	`cultural_settings` text,
 	`is_active` integer DEFAULT true NOT NULL,
-	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL
+	`created_at` integer NOT NULL DEFAULT (strftime('%s','now')),
+	`updated_at` integer NOT NULL DEFAULT (strftime('%s','now'))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `communities_slug_unique` ON `communities` (`slug`);--> statement-breakpoint
@@ -23,8 +23,8 @@ CREATE TABLE `places` (
 	`media_urls` text DEFAULT '[]',
 	`cultural_significance` text,
 	`is_restricted` integer DEFAULT false NOT NULL,
-	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL,
+	`created_at` integer NOT NULL DEFAULT (strftime('%s','now')),
+	`updated_at` integer NOT NULL DEFAULT (strftime('%s','now')),
 	`photo_url` text
 );
 --> statement-breakpoint
@@ -38,8 +38,8 @@ CREATE TABLE `speakers` (
 	`elder_status` integer DEFAULT false NOT NULL,
 	`cultural_role` text,
 	`is_active` integer DEFAULT true NOT NULL,
-	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL,
+	`created_at` integer NOT NULL DEFAULT (strftime('%s','now')),
+	`updated_at` integer NOT NULL DEFAULT (strftime('%s','now')),
 	`bio_audio_url` text
 );
 --> statement-breakpoint
@@ -53,8 +53,8 @@ CREATE TABLE `stories` (
 	`media_urls` text DEFAULT '[]',
 	`language` text DEFAULT 'en' NOT NULL,
 	`tags` text DEFAULT '[]',
-	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL,
+	`created_at` integer NOT NULL DEFAULT (strftime('%s','now')),
+	`updated_at` integer NOT NULL DEFAULT (strftime('%s','now')),
 	`image_url` text,
 	`audio_url` text
 );
@@ -63,8 +63,8 @@ CREATE TABLE `story_places` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`story_id` integer NOT NULL,
 	`place_id` integer NOT NULL,
-	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL
+	`created_at` integer NOT NULL DEFAULT (strftime('%s','now')),
+	`updated_at` integer NOT NULL DEFAULT (strftime('%s','now'))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `story_place_unique` ON `story_places` (`story_id`,`place_id`);--> statement-breakpoint
@@ -72,8 +72,8 @@ CREATE TABLE `story_speakers` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`story_id` integer NOT NULL,
 	`speaker_id` integer NOT NULL,
-	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL
+	`created_at` integer NOT NULL DEFAULT (strftime('%s','now')),
+	`updated_at` integer NOT NULL DEFAULT (strftime('%s','now'))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `story_speaker_unique` ON `story_speakers` (`story_id`,`speaker_id`);--> statement-breakpoint
@@ -86,8 +86,8 @@ CREATE TABLE `users` (
 	`role` text DEFAULT 'viewer' NOT NULL,
 	`community_id` integer NOT NULL,
 	`is_active` integer DEFAULT true NOT NULL,
-	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL
+	`created_at` integer NOT NULL DEFAULT (strftime('%s','now')),
+	`updated_at` integer NOT NULL DEFAULT (strftime('%s','now'))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `users_email_community_unique` ON `users` (`email`,`community_id`);

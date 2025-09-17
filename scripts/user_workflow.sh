@@ -97,9 +97,7 @@ step() {
 
 # Cleanup function
 cleanup() {
-    step "Cleaning up temporary files..."
     rm -f "$SUPER_ADMIN_COOKIES" "$ADMIN_COOKIES" "$VIEWER_COOKIES" 2>/dev/null || true
-    success "Cleanup complete."
 }
 trap cleanup EXIT
 
@@ -109,7 +107,7 @@ validate_dependencies() {
     local missing_deps=()
 
     for cmd in curl jq date mktemp; do
-        if ! command -v "$cmd" &> /dev/null; then
+        if ! command -v "$cmd" >/dev/null 2>&1; then
             missing_deps+=("$cmd")
         fi
     done

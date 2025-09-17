@@ -105,7 +105,10 @@ export const CreatePlaceSchema = z.object({
   culturalSignificance: z
     .enum(['general', 'significant', 'sacred', 'restricted'])
     .default('general'),
-  photoUrl: z.string().url().optional(),
+  photoUrl: z
+    .string()
+    .transform((val) => (val === '' ? undefined : val))
+    .pipe(z.string().url().optional()),
   nameAudioUrl: z.string().url().optional(),
   region: z.string().max(100).optional(),
   isRestricted: z.boolean().optional().default(false),
@@ -119,7 +122,10 @@ export const UpdatePlaceSchema = z.object({
   culturalSignificance: z
     .enum(['general', 'significant', 'sacred', 'restricted'])
     .optional(),
-  photoUrl: z.string().url().optional(),
+  photoUrl: z
+    .string()
+    .transform((val) => (val === '' ? undefined : val))
+    .pipe(z.string().url().optional()),
   nameAudioUrl: z.string().url().optional(),
   region: z.string().max(100).optional(),
   isRestricted: z.boolean().optional(),
@@ -167,7 +173,10 @@ export const CreateSpeakerSchema = z.object({
     .min(1850)
     .max(new Date().getFullYear())
     .optional(),
-  photoUrl: z.string().url().optional(),
+  photoUrl: z
+    .string()
+    .transform((val) => (val === '' ? undefined : val))
+    .pipe(z.string().url().optional()),
   culturalRole: z
     .enum([
       'storyteller',
@@ -190,7 +199,10 @@ export const UpdateSpeakerSchema = z.object({
     .min(1850)
     .max(new Date().getFullYear())
     .optional(),
-  photoUrl: z.string().url().optional(),
+  photoUrl: z
+    .string()
+    .transform((val) => (val === '' ? undefined : val))
+    .pipe(z.string().url().optional()),
   culturalRole: z
     .enum([
       'storyteller',

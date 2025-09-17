@@ -1,9 +1,75 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "beac80fd-8c27-4eb9-933f-f871bf2ae40f",
+  "id": "2585adbd-41f0-47b9-92d0-33326bc0cfea",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
+    "attachments": {
+      "name": "attachments",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "attachable_id": {
+          "name": "attachable_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "attachable_type": {
+          "name": "attachable_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "url": {
+          "name": "url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "filename": {
+          "name": "filename",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "content_type": {
+          "name": "content_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "file_size": {
+          "name": "file_size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "communities": {
       "name": "communities",
       "columns": {
@@ -84,13 +150,139 @@
       "indexes": {
         "communities_slug_unique": {
           "name": "communities_slug_unique",
-          "columns": [
-            "slug"
-          ],
+          "columns": ["slug"],
           "isUnique": true
         }
       },
       "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "files": {
+      "name": "files",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "filename": {
+          "name": "filename",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "original_name": {
+          "name": "original_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "path": {
+          "name": "path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "url": {
+          "name": "url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mime_type": {
+          "name": "mime_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "size": {
+          "name": "size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "community_id": {
+          "name": "community_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "uploaded_by": {
+          "name": "uploaded_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "cultural_restrictions": {
+          "name": "cultural_restrictions",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "files_community_id_communities_id_fk": {
+          "name": "files_community_id_communities_id_fk",
+          "tableFrom": "files",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "files_uploaded_by_users_id_fk": {
+          "name": "files_uploaded_by_users_id_fk",
+          "tableFrom": "files",
+          "tableTo": "users",
+          "columnsFrom": ["uploaded_by"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -155,6 +347,13 @@
           "autoincrement": false,
           "default": "'[]'"
         },
+        "photo_url": {
+          "name": "photo_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "cultural_significance": {
           "name": "cultural_significance",
           "type": "text",
@@ -185,8 +384,29 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
-      "foreignKeys": {},
+      "indexes": {
+        "places_community_id_idx": {
+          "name": "places_community_id_idx",
+          "columns": ["community_id"],
+          "isUnique": false
+        },
+        "places_photo_url_idx": {
+          "name": "places_photo_url_idx",
+          "columns": ["photo_url"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "places_community_id_communities_id_fk": {
+          "name": "places_community_id_communities_id_fk",
+          "tableFrom": "places",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -224,6 +444,13 @@
         },
         "photo_url": {
           "name": "photo_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "bio_audio_url": {
+          "name": "bio_audio_url",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -274,8 +501,44 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
-      "foreignKeys": {},
+      "indexes": {
+        "speakers_community_id_idx": {
+          "name": "speakers_community_id_idx",
+          "columns": ["community_id"],
+          "isUnique": false
+        },
+        "speakers_bio_audio_url_idx": {
+          "name": "speakers_bio_audio_url_idx",
+          "columns": ["bio_audio_url"],
+          "isUnique": false
+        },
+        "speakers_elder_status_idx": {
+          "name": "speakers_elder_status_idx",
+          "columns": ["elder_status"],
+          "isUnique": false
+        },
+        "speakers_cultural_role_idx": {
+          "name": "speakers_cultural_role_idx",
+          "columns": ["cultural_role"],
+          "isUnique": false
+        },
+        "speakers_is_active_idx": {
+          "name": "speakers_is_active_idx",
+          "columns": ["is_active"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "speakers_community_id_communities_id_fk": {
+          "name": "speakers_community_id_communities_id_fk",
+          "tableFrom": "speakers",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -304,6 +567,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "community_id": {
           "name": "community_id",
           "type": "integer",
@@ -326,6 +596,14 @@
           "autoincrement": false,
           "default": false
         },
+        "privacy_level": {
+          "name": "privacy_level",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'public'"
+        },
         "media_urls": {
           "name": "media_urls",
           "type": "text",
@@ -333,6 +611,20 @@
           "notNull": false,
           "autoincrement": false,
           "default": "'[]'"
+        },
+        "image_url": {
+          "name": "image_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "audio_url": {
+          "name": "audio_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "language": {
           "name": "language",
@@ -350,6 +642,27 @@
           "autoincrement": false,
           "default": "'[]'"
         },
+        "date_interviewed": {
+          "name": "date_interviewed",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "interview_location_id": {
+          "name": "interview_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "interviewer_id": {
+          "name": "interviewer_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -365,8 +678,62 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
-      "foreignKeys": {},
+      "indexes": {
+        "stories_community_id_idx": {
+          "name": "stories_community_id_idx",
+          "columns": ["community_id"],
+          "isUnique": false
+        },
+        "stories_slug_idx": {
+          "name": "stories_slug_idx",
+          "columns": ["slug"],
+          "isUnique": false
+        },
+        "stories_image_url_idx": {
+          "name": "stories_image_url_idx",
+          "columns": ["image_url"],
+          "isUnique": false
+        },
+        "stories_audio_url_idx": {
+          "name": "stories_audio_url_idx",
+          "columns": ["audio_url"],
+          "isUnique": false
+        },
+        "stories_privacy_level_idx": {
+          "name": "stories_privacy_level_idx",
+          "columns": ["privacy_level"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "stories_community_id_communities_id_fk": {
+          "name": "stories_community_id_communities_id_fk",
+          "tableFrom": "stories",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "stories_interview_location_id_places_id_fk": {
+          "name": "stories_interview_location_id_places_id_fk",
+          "tableFrom": "stories",
+          "tableTo": "places",
+          "columnsFrom": ["interview_location_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "stories_interviewer_id_speakers_id_fk": {
+          "name": "stories_interviewer_id_speakers_id_fk",
+          "tableFrom": "stories",
+          "tableTo": "speakers",
+          "columnsFrom": ["interviewer_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -395,6 +762,21 @@
           "notNull": true,
           "autoincrement": false
         },
+        "cultural_context": {
+          "name": "cultural_context",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "sort_order": {
+          "name": "sort_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "default": 0
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -413,14 +795,30 @@
       "indexes": {
         "story_place_unique": {
           "name": "story_place_unique",
-          "columns": [
-            "story_id",
-            "place_id"
-          ],
+          "columns": ["story_id", "place_id"],
           "isUnique": true
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "story_places_story_id_stories_id_fk": {
+          "name": "story_places_story_id_stories_id_fk",
+          "tableFrom": "story_places",
+          "tableTo": "stories",
+          "columnsFrom": ["story_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "story_places_place_id_places_id_fk": {
+          "name": "story_places_place_id_places_id_fk",
+          "tableFrom": "story_places",
+          "tableTo": "places",
+          "columnsFrom": ["place_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -449,6 +847,21 @@
           "notNull": true,
           "autoincrement": false
         },
+        "story_role": {
+          "name": "story_role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "sort_order": {
+          "name": "sort_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "default": 0
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -467,14 +880,156 @@
       "indexes": {
         "story_speaker_unique": {
           "name": "story_speaker_unique",
-          "columns": [
-            "story_id",
-            "speaker_id"
-          ],
+          "columns": ["story_id", "speaker_id"],
           "isUnique": true
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "story_speakers_story_id_stories_id_fk": {
+          "name": "story_speakers_story_id_stories_id_fk",
+          "tableFrom": "story_speakers",
+          "tableTo": "stories",
+          "columnsFrom": ["story_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "story_speakers_speaker_id_speakers_id_fk": {
+          "name": "story_speakers_speaker_id_speakers_id_fk",
+          "tableFrom": "story_speakers",
+          "tableTo": "speakers",
+          "columnsFrom": ["speaker_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "themes": {
+      "name": "themes",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "mapbox_style_url": {
+          "name": "mapbox_style_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "mapbox_access_token": {
+          "name": "mapbox_access_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "center_lat": {
+          "name": "center_lat",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "center_long": {
+          "name": "center_long",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "sw_boundary_lat": {
+          "name": "sw_boundary_lat",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "sw_boundary_long": {
+          "name": "sw_boundary_long",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "ne_boundary_lat": {
+          "name": "ne_boundary_lat",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "ne_boundary_long": {
+          "name": "ne_boundary_long",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "active": {
+          "name": "active",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "community_id": {
+          "name": "community_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "themes_community_id_communities_id_fk": {
+          "name": "themes_community_id_communities_id_fk",
+          "tableFrom": "themes",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -540,6 +1095,13 @@
           "autoincrement": false,
           "default": true
         },
+        "last_login_at": {
+          "name": "last_login_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -558,14 +1120,21 @@
       "indexes": {
         "users_email_community_unique": {
           "name": "users_email_community_unique",
-          "columns": [
-            "email",
-            "community_id"
-          ],
+          "columns": ["email", "community_id"],
           "isUnique": true
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "users_community_id_communities_id_fk": {
+          "name": "users_community_id_communities_id_fk",
+          "tableFrom": "users",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}

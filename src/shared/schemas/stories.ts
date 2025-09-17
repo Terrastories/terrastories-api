@@ -237,7 +237,10 @@ export const StoryWithRelationsResponseSchema = StoryResponseSchema.extend({
       id: z.number().int().positive(),
       name: z.string(),
       bio: z.string().optional(),
-      photoUrl: z.string().url().optional(),
+      photoUrl: z
+        .string()
+        .transform((val) => (val === '' ? undefined : val))
+        .pipe(z.string().url().optional()),
       birthYear: z.number().int().optional(),
       elderStatus: z.boolean(),
       culturalRole: z.string().optional(),

@@ -397,7 +397,7 @@ super_admin_setup_flow() {
 
     # Authenticate as super admin with seeded credentials
     step "Testing super admin authentication endpoint"
-    local login_data='{"email": "super@example.com", "password": "superpass"}'
+    local login_data='{"email": "super@example.com", "password": "SuperPass123!"}'
 
     # Test the authentication endpoint with real credentials
     if make_request "POST" "/api/v1/auth/login" "$login_data" "$SUPER_ADMIN_COOKIES" "Super admin authentication" 2>/dev/null; then
@@ -632,7 +632,7 @@ EOF
         "description": "Ancient prophecy story about the spiritual journey of the Anishinaabe people, told at Grandmother Turtle Rock during ceremonial gatherings. This story carries teachings about balance, respect, and our relationship with Mother Earth.",
         "communityId": '$community_id',
         "createdBy": 1,
-        "isRestricted": false,
+        "privacyLevel": "public",
         "language": "en",
         "tags": ["prophecy", "ceremony", "traditional-teaching", "seven-fires"],
         "culturalProtocols": {
@@ -718,7 +718,7 @@ EOF
         "description": "Ancient prophecy story about the spiritual journey of the Anishinaabe people, told at Grandmother Turtle Rock during ceremonial gatherings. This story carries teachings about balance, respect, and our relationship with Mother Earth. Now includes additional teachings from recent elder council.",
         "communityId": '$community_id',
         "createdBy": 1,
-        "isRestricted": false,
+        "privacyLevel": "public",
         "language": "en",
         "tags": ["prophecy", "ceremony", "traditional-teaching", "seven-fires", "elder-council"],
         "culturalProtocols": {
@@ -731,7 +731,7 @@ EOF
         "placeIds": ['$place_id']
     }'
 
-    if make_request "PUT" "/api/v1/stories/$story_id" "$updated_story_data" "$ADMIN_COOKIES" "Traditional story update"; then
+    if make_request "PATCH" "/api/v1/stories/$story_id" "$updated_story_data" "$ADMIN_COOKIES" "Traditional story update"; then
         success "Traditional story updated with enhanced teachings and elder approval"
     fi
 
@@ -761,12 +761,12 @@ EOF
 
     # Patch place access level
     local place_patch_data='{"accessLevel": "restricted"}'
-    if make_request "PATCH" "/api/v1/places/$place_id" "$place_patch_data" "$ADMIN_COOKIES" "Place access patch"; then
+    if make_request "PUT" "/api/v1/places/$place_id" "$place_patch_data" "$ADMIN_COOKIES" "Place access patch"; then
         success "Sacred place access level updated via PATCH operation"
     fi
 
     # Patch story restriction status
-    local story_patch_data='{"isRestricted": true}'
+    local story_patch_data='{"privacyLevel": "restricted"}'
     if make_request "PATCH" "/api/v1/stories/$story_id" "$story_patch_data" "$ADMIN_COOKIES" "Story restriction patch"; then
         success "Traditional story restriction updated via PATCH operation"
     fi
@@ -833,7 +833,7 @@ EOF
         "description": "Test story for deletion testing only.",
         "communityId": '$community_id',
         "createdBy": 1,
-        "isRestricted": false,
+        "privacyLevel": "public",
         "language": "en",
         "tags": ["test"],
         "speakerIds": [],

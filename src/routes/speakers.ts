@@ -29,7 +29,11 @@ import { handleRouteError } from '../shared/middleware/error.middleware.js';
 const CreateSpeakerSchema = z.object({
   name: z.string().min(1).max(200).describe('Speaker name'),
   bio: z.string().max(2000).optional().describe('Speaker biography'),
-  photoUrl: z.string().url().optional().describe('Speaker photo URL'),
+  photoUrl: z
+    .string()
+    .transform((val) => (val === '' ? undefined : val))
+    .pipe(z.string().url().optional())
+    .describe('Speaker photo URL'),
   birthYear: z
     .number()
     .int()
@@ -50,7 +54,11 @@ const CreateSpeakerSchema = z.object({
 const UpdateSpeakerSchema = z.object({
   name: z.string().min(1).max(200).optional().describe('Speaker name'),
   bio: z.string().max(2000).optional().describe('Speaker biography'),
-  photoUrl: z.string().url().optional().describe('Speaker photo URL'),
+  photoUrl: z
+    .union([z.string().url(), z.literal(''), z.undefined()])
+    .optional()
+    .transform((val) => (val === '' ? undefined : val))
+    .describe('Speaker photo URL'),
   birthYear: z
     .number()
     .int()

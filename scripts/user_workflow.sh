@@ -254,7 +254,7 @@ lookup_community_by_name() {
         # Try to list communities and find by name
         local communities_response
         if communities_response=$(make_request "GET" "/api/v1/communities" "" "$cookie_jar" "Looking up community by name" 2>/dev/null); then
-            echo "$communities_response" | jq -r ".data[] | select(.name == \"$community_name\") | .id" 2>/dev/null
+            echo "$communities_response" | jq -r --arg name "$community_name" '.data[] | select(.name == $name) | .id' 2>/dev/null
         fi
     fi
 }
@@ -267,7 +267,7 @@ lookup_user_by_email() {
         # Try to list users and find by email
         local users_response
         if users_response=$(make_request "GET" "/api/v1/super_admin/users" "" "$cookie_jar" "Looking up user by email" 2>/dev/null); then
-            echo "$users_response" | jq -r ".data[] | select(.email == \"$email\") | .id" 2>/dev/null
+            echo "$users_response" | jq -r --arg email "$email" '.data[] | select(.email == $email) | .id' 2>/dev/null
         fi
     fi
 }
@@ -281,7 +281,7 @@ lookup_speaker_by_name() {
         # Try to list speakers and find by name
         local speakers_response
         if speakers_response=$(make_request "GET" "/api/v1/speakers?communityId=$community_id" "" "$cookie_jar" "Looking up speaker by name" 2>/dev/null); then
-            echo "$speakers_response" | jq -r ".data[] | select(.name == \"$speaker_name\") | .id" 2>/dev/null
+            echo "$speakers_response" | jq -r --arg name "$speaker_name" '.data[] | select(.name == $name) | .id' 2>/dev/null
         fi
     fi
 }
@@ -295,7 +295,7 @@ lookup_place_by_name() {
         # Try to list places and find by name
         local places_response
         if places_response=$(make_request "GET" "/api/v1/places?communityId=$community_id" "" "$cookie_jar" "Looking up place by name" 2>/dev/null); then
-            echo "$places_response" | jq -r ".data[] | select(.name == \"$place_name\") | .id" 2>/dev/null
+            echo "$places_response" | jq -r --arg name "$place_name" '.data[] | select(.name == $name) | .id' 2>/dev/null
         fi
     fi
 }
@@ -309,7 +309,7 @@ lookup_story_by_title() {
         # Try to list stories and find by title
         local stories_response
         if stories_response=$(make_request "GET" "/api/v1/stories?communityId=$community_id" "" "$cookie_jar" "Looking up story by title" 2>/dev/null); then
-            echo "$stories_response" | jq -r ".data[] | select(.title == \"$story_title\") | .id" 2>/dev/null
+            echo "$stories_response" | jq -r --arg title "$story_title" '.data[] | select(.title == $title) | .id' 2>/dev/null
         fi
     fi
 }
@@ -324,48 +324,32 @@ make_request() {
 
     step "$description"
 
+    local tmp_headers
+    tmp_headers="$(mktemp -t curl-headers.XXXXXX)"
+
     local curl_args=(
-        -s -S
+        -sS
         --max-time "$TEST_TIMEOUT"
         -X "$method"
         -H "Content-Type: application/json"
-        -w "HTTP_STATUS:%{http_code}\n"
+        --dump-header "$tmp_headers"
     )
 
-    if [[ -n "$cookie_jar" ]]; then
-        curl_args+=(-b "$cookie_jar" -c "$cookie_jar")
-    fi
+    [[ -n "$cookie_jar" ]] && curl_args+=(-b "$cookie_jar" -c "$cookie_jar")
+    [[ -n "$data" ]] && curl_args+=(-d "$data")
 
-    if [[ -n "$data" ]]; then
-        curl_args+=(-d "$data")
-    fi
-
-    local response
-    response=$(curl "${curl_args[@]}" "$API_BASE$endpoint" 2>&1)
-
-    # Extract HTTP status and body correctly
-    local http_status
+    # Capture only stdout as body, leave stderr for logging
     local body
-
-    if echo "$response" | grep -q "HTTP_STATUS:"; then
-        http_status=$(echo "$response" | grep "HTTP_STATUS:" | sed 's/.*HTTP_STATUS://')
-        body=$(echo "$response" | sed '/HTTP_STATUS:/d')
-    else
-        # Fallback: check if response looks like valid JSON
-        if echo "$response" | jq . > /dev/null 2>&1; then
-            http_status="200"
-            body="$response"
-        else
-            http_status="500"
-            body="$response"
-        fi
-    fi
-
-    # Clean up any curl error messages from body
-    if [[ "$body" == *"curl: (7)"* ]] || [[ "$body" == *"Failed to connect"* ]]; then
-        error "Cannot connect to server at $API_BASE$endpoint"
+    if ! body=$(curl "${curl_args[@]}" "$API_BASE$endpoint"); then
+        error "$description failed to execute request"
+        rm -f "$tmp_headers"
         return 1
     fi
+
+    # Parse HTTP status from headers (last status wins in case of redirects)
+    local http_status
+    http_status=$(tac "$tmp_headers" | awk '/^HTTP\/[0-9.]+ [0-9]{3}/ {print $2; exit}')
+    rm -f "$tmp_headers"
 
     log "→ $method $endpoint"
     [[ -n "$data" ]] && log "  Data: $data"

@@ -28,8 +28,8 @@ import {
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
-import { storiesPg, storiesSqlite } from './stories.js';
-import { speakersPg, speakersSqlite } from './speakers.js';
+import { storiesPg, storiesSqlite } from './stories';
+import { speakersPg, speakersSqlite } from './speakers';
 
 // PostgreSQL table for production
 export const storySpeakersPg = pgTable(

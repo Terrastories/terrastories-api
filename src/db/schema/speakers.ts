@@ -30,7 +30,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg, communitiesSqlite } from './communities.js';
+import { communitiesPg, communitiesSqlite } from './communities';
 
 // Cultural role validation schema
 export const CulturalRoleSchema = z.string().min(1).max(100);

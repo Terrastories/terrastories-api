@@ -33,8 +33,8 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg, communitiesSqlite } from './communities.js';
-import { SpatialUtils } from '../../shared/utils/spatial.js';
+import { communitiesPg, communitiesSqlite } from './communities';
+import { SpatialUtils } from '../../shared/utils/spatial';
 
 // Coordinate validation schemas
 export const CoordinateSchema = z.object({

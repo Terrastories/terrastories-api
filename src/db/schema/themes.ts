@@ -32,7 +32,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg, communitiesSqlite } from './communities.js';
+import { communitiesPg, communitiesSqlite } from './communities';
 
 // Geographic boundary validation schema
 export const GeographicBoundsSchema = z

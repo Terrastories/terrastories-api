@@ -36,6 +36,13 @@
       "when": 1756211905066,
       "tag": "0004_married_krista_starr",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1726580000000,
+      "tag": "0005_add_missing_fields",
+      "breakpoints": true
     }
   ]
 }

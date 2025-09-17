@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9f3aae1a-c4c3-49ca-932f-039effa31456",
-  "prevId": "4ae75b70-a30f-49a2-813b-d580ab71247b",
+  "id": "e77d71fa-6a80-47a1-b7f6-da98be451832",
+  "prevId": "9f3aae1a-c4c3-49ca-932f-039effa31456",
   "tables": {
     "attachments": {
       "name": "attachments",
@@ -399,7 +399,18 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "places_community_id_idx": {
+          "name": "places_community_id_idx",
+          "columns": ["community_id"],
+          "isUnique": false
+        },
+        "places_photo_url_idx": {
+          "name": "places_photo_url_idx",
+          "columns": ["photo_url"],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {
         "places_community_id_communities_id_fk": {
           "name": "places_community_id_communities_id_fk",
@@ -505,7 +516,33 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "speakers_community_id_idx": {
+          "name": "speakers_community_id_idx",
+          "columns": ["community_id"],
+          "isUnique": false
+        },
+        "speakers_bio_audio_url_idx": {
+          "name": "speakers_bio_audio_url_idx",
+          "columns": ["bio_audio_url"],
+          "isUnique": false
+        },
+        "speakers_elder_status_idx": {
+          "name": "speakers_elder_status_idx",
+          "columns": ["elder_status"],
+          "isUnique": false
+        },
+        "speakers_cultural_role_idx": {
+          "name": "speakers_cultural_role_idx",
+          "columns": ["cultural_role"],
+          "isUnique": false
+        },
+        "speakers_is_active_idx": {
+          "name": "speakers_is_active_idx",
+          "columns": ["is_active"],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {
         "speakers_community_id_communities_id_fk": {
           "name": "speakers_community_id_communities_id_fk",
@@ -656,7 +693,33 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "stories_community_id_idx": {
+          "name": "stories_community_id_idx",
+          "columns": ["community_id"],
+          "isUnique": false
+        },
+        "stories_slug_idx": {
+          "name": "stories_slug_idx",
+          "columns": ["slug"],
+          "isUnique": false
+        },
+        "stories_image_url_idx": {
+          "name": "stories_image_url_idx",
+          "columns": ["image_url"],
+          "isUnique": false
+        },
+        "stories_audio_url_idx": {
+          "name": "stories_audio_url_idx",
+          "columns": ["audio_url"],
+          "isUnique": false
+        },
+        "stories_privacy_level_idx": {
+          "name": "stories_privacy_level_idx",
+          "columns": ["privacy_level"],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {
         "stories_community_id_communities_id_fk": {
           "name": "stories_community_id_communities_id_fk",
@@ -751,7 +814,26 @@
           "isUnique": true
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "story_places_story_id_stories_id_fk": {
+          "name": "story_places_story_id_stories_id_fk",
+          "tableFrom": "story_places",
+          "tableTo": "stories",
+          "columnsFrom": ["story_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "story_places_place_id_places_id_fk": {
+          "name": "story_places_place_id_places_id_fk",
+          "tableFrom": "story_places",
+          "tableTo": "places",
+          "columnsFrom": ["place_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -817,7 +899,26 @@
           "isUnique": true
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "story_speakers_story_id_stories_id_fk": {
+          "name": "story_speakers_story_id_stories_id_fk",
+          "tableFrom": "story_speakers",
+          "tableTo": "stories",
+          "columnsFrom": ["story_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "story_speakers_speaker_id_speakers_id_fk": {
+          "name": "story_speakers_speaker_id_speakers_id_fk",
+          "tableFrom": "story_speakers",
+          "tableTo": "speakers",
+          "columnsFrom": ["speaker_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}

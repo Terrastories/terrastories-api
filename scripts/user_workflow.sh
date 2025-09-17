@@ -42,7 +42,7 @@ set +H  # Disable bash history expansion to prevent issues with special characte
 # =============================================================================
 
 # Exit immediately if a command exits with a non-zero status.
-set -e
+set +e
 
 # --- Configuration ---
 API_BASE="${API_BASE:-http://localhost:3000}"
@@ -350,7 +350,7 @@ make_request() {
 
     # Parse HTTP status from headers (last status wins in case of redirects)
     local http_status
-    http_status=$(tac "$tmp_headers" | awk '/^HTTP\/[0-9.]+ [0-9]{3}/ {print $2; exit}')
+    http_status=$(grep "^HTTP/" "$tmp_headers" | tail -1 | awk '{print $2}')
     rm -f "$tmp_headers"
 
     log "→ $method $endpoint"

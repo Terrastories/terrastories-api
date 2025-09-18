@@ -32,7 +32,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg, communitiesSqlite } from './communities.js';
+import { communitiesPg, communitiesSqlite } from './communities';
 
 // Geographic boundary validation schema
 export const GeographicBoundsSchema = z
@@ -113,12 +113,8 @@ export const themesSqlite = sqliteTable('themes', {
   communityId: integer('community_id')
     .notNull()
     .references(() => communitiesSqlite.id),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
 // Relations for PostgreSQL

@@ -100,7 +100,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing cultural admin user expected by workflow script
         let culturalAdmin;
         try {
-          culturalAdmin = await userService.registerUser({
+          culturalAdmin = await userService.createUserInCommunity({
             email: 'cultural.admin@anishinaabe.ca',
             password: 'CulturalAdmin2024!',
             firstName: 'Maria',
@@ -124,10 +124,11 @@ export async function devRoutes(fastify: FastifyInstance) {
               ).UserRepository(db);
 
               // Try to find user in the target community first
-              const userInTargetCommunity = await userRepo.findByEmail(
-                'cultural.admin@anishinaabe.ca',
-                community.id
-              );
+              const userInTargetCommunity =
+                await userRepo.findByEmailInCommunity(
+                  'cultural.admin@anishinaabe.ca',
+                  community.id
+                );
 
               if (userInTargetCommunity) {
                 // User already exists in target community, use them
@@ -166,7 +167,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing fallback admin user (for backwards compatibility)
         let fallbackAdmin;
         try {
-          fallbackAdmin = await userService.registerUser({
+          fallbackAdmin = await userService.createUserInCommunity({
             email: 'admin@demo.com',
             password: 'TestPassword123!',
             firstName: 'Admin',
@@ -190,10 +191,11 @@ export async function devRoutes(fastify: FastifyInstance) {
               ).UserRepository(db);
 
               // Try to find user in the target community first
-              const userInTargetCommunity = await userRepo.findByEmail(
-                'admin@demo.com',
-                community.id
-              );
+              const userInTargetCommunity =
+                await userRepo.findByEmailInCommunity(
+                  'admin@demo.com',
+                  community.id
+                );
 
               if (userInTargetCommunity) {
                 // User already exists in target community, use them
@@ -232,7 +234,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing editor user expected by workflow
         let editor;
         try {
-          editor = await userService.registerUser({
+          editor = await userService.createUserInCommunity({
             email: 'editor.test@anishinaabe.ca',
             password: 'EditorTest2024!',
             firstName: 'Alex',
@@ -257,7 +259,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing viewer user expected by workflow
         let viewer;
         try {
-          viewer = await userService.registerUser({
+          viewer = await userService.createUserInCommunity({
             email: 'community.member@anishinaabe.ca',
             password: 'ViewerAccess2024!',
             firstName: 'Sarah',
@@ -282,7 +284,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing second community admin for data sovereignty testing
         let admin2;
         try {
-          admin2 = await userService.registerUser({
+          admin2 = await userService.createUserInCommunity({
             email: 'admin2@metis.ca',
             password: 'MetisAdmin2024!',
             firstName: 'Louis',
@@ -324,7 +326,7 @@ export async function devRoutes(fastify: FastifyInstance) {
           communityId: community.id,
           region: 'Traditional Territory',
           culturalSignificance: 'Sacred Teaching Site',
-          isRestricted: false,
+          accessLevel: 'community',
         });
 
         // Create test story (in primary community)
@@ -334,7 +336,7 @@ export async function devRoutes(fastify: FastifyInstance) {
             'Ancient prophecy story about the spiritual journey of the Anishinaabe people.',
           communityId: community.id,
           createdBy: culturalAdmin.id,
-          isRestricted: false,
+          privacyLevel: 'public',
           language: 'en',
           tags: ['prophecy', 'ceremony', 'traditional-teaching'],
           speakerIds: [speaker.id],

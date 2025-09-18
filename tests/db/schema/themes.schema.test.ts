@@ -27,12 +27,15 @@ describe('Themes Schema', () => {
     db = await testDb.getDb();
 
     // Create test community
+    const now = new Date();
     const testCommunity = await db
       .insert(communities)
       .values({
         name: 'Test Community',
         slug: 'test-themes-community',
         description: 'Community for testing themes schema',
+        createdAt: now,
+        updatedAt: now,
       })
       .returning({ id: communities.id });
 
@@ -53,12 +56,15 @@ describe('Themes Schema', () => {
 
       if (existingCommunity.length === 0) {
         // Recreate test community if it was deleted
+        const now = new Date();
         const testCommunity = await db
           .insert(communities)
           .values({
             name: 'Test Community',
             slug: `test-themes-community-${Date.now()}`,
             description: 'Community for testing themes schema',
+            createdAt: now,
+            updatedAt: now,
           })
           .returning({ id: communities.id });
 
@@ -90,7 +96,11 @@ describe('Themes Schema', () => {
         communityId: testCommunityId,
       };
 
-      const result = await db.insert(themes).values(themeData).returning();
+      const now = new Date();
+      const result = await db
+        .insert(themes)
+        .values({ ...themeData, createdAt: now, updatedAt: now })
+        .returning();
       expect(result).toHaveLength(1);
 
       const theme = result[0];
@@ -116,7 +126,11 @@ describe('Themes Schema', () => {
         communityId: testCommunityId,
       };
 
-      const result = await db.insert(themes).values(themeData).returning();
+      const now = new Date();
+      const result = await db
+        .insert(themes)
+        .values({ ...themeData, createdAt: now, updatedAt: now })
+        .returning();
       expect(result).toHaveLength(1);
 
       const theme = result[0];
@@ -138,7 +152,11 @@ describe('Themes Schema', () => {
         communityId: testCommunityId,
       };
 
-      const result = await db.insert(themes).values(themeData).returning();
+      const now = new Date();
+      const result = await db
+        .insert(themes)
+        .values({ ...themeData, createdAt: now, updatedAt: now })
+        .returning();
       const theme = result[0];
 
       // Test 6 decimal places precision (as per Rails schema)
@@ -189,7 +207,11 @@ describe('Themes Schema', () => {
         communityId: testCommunityId,
       };
 
-      const result = await db.insert(themes).values(themeData).returning();
+      const now = new Date();
+      const result = await db
+        .insert(themes)
+        .values({ ...themeData, createdAt: now, updatedAt: now })
+        .returning();
       const theme = result[0];
 
       expect(theme.active).toBe(false); // default false
@@ -317,6 +339,7 @@ describe('Themes Schema', () => {
 
   describe('Community Data Isolation', () => {
     it('should allow multiple themes per community', async () => {
+      const now = new Date();
       const theme1: CreateTheme = {
         name: 'Theme 1',
         communityId: testCommunityId,
@@ -326,7 +349,10 @@ describe('Themes Schema', () => {
         communityId: testCommunityId,
       };
 
-      await db.insert(themes).values([theme1, theme2]);
+      await db.insert(themes).values([
+        { ...theme1, createdAt: now, updatedAt: now },
+        { ...theme2, createdAt: now, updatedAt: now },
+      ]);
 
       const communityThemes = await db
         .select()
@@ -342,21 +368,35 @@ describe('Themes Schema', () => {
 
     it('should isolate themes by community', async () => {
       // Create another test community
+      const now = new Date();
       const otherCommunity = await db
         .insert(communities)
         .values({
           name: 'Other Community',
           slug: 'other-themes-community',
           description: 'Other community for isolation testing',
+          createdAt: now,
+          updatedAt: now,
         })
         .returning({ id: communities.id });
 
       const otherCommunityId = otherCommunity[0].id;
 
       // Create themes in both communities
+      const themeNow = new Date();
       await db.insert(themes).values([
-        { name: 'Theme 1', communityId: testCommunityId },
-        { name: 'Theme 2', communityId: otherCommunityId },
+        {
+          name: 'Theme 1',
+          communityId: testCommunityId,
+          createdAt: themeNow,
+          updatedAt: themeNow,
+        },
+        {
+          name: 'Theme 2',
+          communityId: otherCommunityId,
+          createdAt: themeNow,
+          updatedAt: themeNow,
+        },
       ]);
 
       // Verify isolation
@@ -444,9 +484,12 @@ describe('Themes Schema', () => {
   describe('Performance & Indexing', () => {
     it('should support querying by communityId efficiently', async () => {
       // Create multiple themes across different communities
+      const now = new Date();
       const themes1 = Array.from({ length: 10 }, (_, i) => ({
         name: `Community 1 Theme ${i}`,
         communityId: testCommunityId,
+        createdAt: now,
+        updatedAt: now,
       }));
 
       await db.insert(themes).values(themes1);
@@ -465,18 +508,35 @@ describe('Themes Schema', () => {
 
     it('should support querying active themes efficiently', async () => {
       // Create mix of active and inactive themes
+      const now2 = new Date();
       await db.insert(themes).values([
-        { name: 'Active Theme 1', active: true, communityId: testCommunityId },
-        { name: 'Active Theme 2', active: true, communityId: testCommunityId },
+        {
+          name: 'Active Theme 1',
+          active: true,
+          communityId: testCommunityId,
+          createdAt: now2,
+          updatedAt: now2,
+        },
+        {
+          name: 'Active Theme 2',
+          active: true,
+          communityId: testCommunityId,
+          createdAt: now2,
+          updatedAt: now2,
+        },
         {
           name: 'Inactive Theme 1',
           active: false,
           communityId: testCommunityId,
+          createdAt: now2,
+          updatedAt: now2,
         },
         {
           name: 'Inactive Theme 2',
           active: false,
           communityId: testCommunityId,
+          createdAt: now2,
+          updatedAt: now2,
         },
       ]);
 
@@ -491,16 +551,21 @@ describe('Themes Schema', () => {
 
     it('should support compound queries (community + active) efficiently', async () => {
       // Create themes in different states
+      const now3 = new Date();
       await db.insert(themes).values([
         {
           name: 'Community Active',
           active: true,
           communityId: testCommunityId,
+          createdAt: now3,
+          updatedAt: now3,
         },
         {
           name: 'Community Inactive',
           active: false,
           communityId: testCommunityId,
+          createdAt: now3,
+          updatedAt: now3,
         },
       ]);
 

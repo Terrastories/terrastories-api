@@ -118,3 +118,32 @@ rails-source/
 # Development artifacts
 test-output.log
 *.tsbuildinfo
+
+# Development seeding scripts (temporary)
+quick-seed.cjs
+reset-and-seed.cjs
+src/db/development-seed.ts
+src/routes/dev-seed.ts
+
+# Test directories (temporary)
+test-uploads-integration/
+
+# Database artifacts
+sqlite::memory:
+
+# Environment backups (temporary)
+.env.backup
+
+# Work session files (temporary)
+.claude/work-sessions/
+
+# Temporary test and debug files
+test_*.js
+test_*.ts
+test_session_*.js
+test_cookies.js
+scripts/check_db.ts
+scripts/fix_database.ts
+
+# Production environment backups
+.env.production.backup

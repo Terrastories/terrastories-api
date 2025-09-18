@@ -98,7 +98,7 @@ export class StorageMock {
       getMetadata: vi.fn().mockResolvedValue({
         size: 1024,
         contentType: 'image/jpeg',
-        lastModified: new Date(),
+        lastModified: Date.now(),
       }),
     };
   }

@@ -29,7 +29,11 @@ import { handleRouteError } from '../shared/middleware/error.middleware.js';
 const CreateSpeakerSchema = z.object({
   name: z.string().min(1).max(200).describe('Speaker name'),
   bio: z.string().max(2000).optional().describe('Speaker biography'),
-  photoUrl: z.string().url().optional().describe('Speaker photo URL'),
+  photoUrl: z
+    .string()
+    .transform((val) => (val === '' ? undefined : val))
+    .pipe(z.string().url().optional())
+    .describe('Speaker photo URL'),
   birthYear: z
     .number()
     .int()
@@ -50,7 +54,11 @@ const CreateSpeakerSchema = z.object({
 const UpdateSpeakerSchema = z.object({
   name: z.string().min(1).max(200).optional().describe('Speaker name'),
   bio: z.string().max(2000).optional().describe('Speaker biography'),
-  photoUrl: z.string().url().optional().describe('Speaker photo URL'),
+  photoUrl: z
+    .union([z.string().url(), z.literal(''), z.undefined()])
+    .optional()
+    .transform((val) => (val === '' ? undefined : val))
+    .describe('Speaker photo URL'),
   birthYear: z
     .number()
     .int()
@@ -203,6 +211,35 @@ export async function speakerRoutes(
    * PUT /api/v1/speakers/:id - Update speaker
    */
   fastify.put('/speakers/:id', {
+    preHandler: [requireAuth, requireRole(['admin', 'editor'])],
+    handler: async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const { id } = SpeakerIdSchema.parse(request.params);
+        const data = UpdateSpeakerSchema.parse(request.body);
+        const { user } = request as AuthenticatedRequest;
+
+        const speaker = await service.updateSpeaker(
+          id,
+          data,
+          user.communityId,
+          user.id,
+          user.role
+        );
+
+        return reply.send({
+          data: speaker,
+          meta: { message: 'Speaker updated successfully' },
+        });
+      } catch (error) {
+        return handleRouteError(error, reply, request);
+      }
+    },
+  });
+
+  /**
+   * PATCH /api/v1/speakers/:id - Partially update speaker
+   */
+  fastify.patch('/speakers/:id', {
     preHandler: [requireAuth, requireRole(['admin', 'editor'])],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {

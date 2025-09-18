@@ -415,7 +415,7 @@ describe('Authentication Integration Tests', () => {
 
       expect(response.statusCode).toBe(401);
       const body = JSON.parse(response.body);
-      expect(body.error).toBe('Authentication required');
+      expect(body.error.message).toBe('Authentication required');
     });
 
     it('should allow access with valid session', async () => {
@@ -507,7 +507,7 @@ describe('Authentication Integration Tests', () => {
 
       expect(adminResponse.statusCode).toBe(403);
       const body = JSON.parse(adminResponse.body);
-      expect(body.error).toBe('Insufficient permissions');
+      expect(body.error.message).toBe('Insufficient permissions');
     });
   });
 });

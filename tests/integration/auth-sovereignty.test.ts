@@ -62,9 +62,9 @@ describe('Authentication Data Sovereignty Tests', () => {
       expect(loginResponse.statusCode).toBe(200); // Ensure login succeeded
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      // Use the signed cookie (second one) instead of the unsigned cookie (first one)  
-      const signedCookie = Array.isArray(setCookieHeader) 
-        ? setCookieHeader[1] 
+      // Use the signed cookie (second one) instead of the unsigned cookie (first one)
+      const signedCookie = Array.isArray(setCookieHeader)
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookie = signedCookie!.split(';')[0];
 
@@ -79,7 +79,7 @@ describe('Authentication Data Sovereignty Tests', () => {
 
       expect(response.statusCode).toBe(403);
       const body = JSON.parse(response.body);
-      expect(body.error).toContain(
+      expect(body.error.message).toContain(
         'Super administrators cannot access community data'
       );
     });
@@ -112,8 +112,8 @@ describe('Authentication Data Sovereignty Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const signedCookie = Array.isArray(setCookieHeader) 
-        ? setCookieHeader[1] 
+      const signedCookie = Array.isArray(setCookieHeader)
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookie = signedCookie!.split(';')[0];
 
@@ -161,8 +161,8 @@ describe('Authentication Data Sovereignty Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const signedCookie = Array.isArray(setCookieHeader) 
-        ? setCookieHeader[1] 
+      const signedCookie = Array.isArray(setCookieHeader)
+        ? setCookieHeader[1]
         : setCookieHeader;
       const sessionCookie = signedCookie!.split(';')[0];
 

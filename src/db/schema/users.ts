@@ -28,7 +28,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg, communitiesSqlite } from './communities.js';
+import { communitiesPg, communitiesSqlite } from './communities';
 
 // Role enum validation with cultural roles
 export const UserRoleSchema = z.enum([
@@ -60,13 +60,13 @@ export const usersPg = pgTable(
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
 
-    // Authentication fields for password reset and session management
-    resetPasswordToken: pgText('reset_password_token'),
-    resetPasswordSentAt: timestamp('reset_password_sent_at'),
-    rememberCreatedAt: timestamp('remember_created_at'),
-    signInCount: pgInteger('sign_in_count').default(0).notNull(),
-    lastSignInAt: timestamp('last_sign_in_at'),
-    currentSignInIp: pgText('current_sign_in_ip'),
+    // Authentication fields for password reset and session management - commented out temporarily for database sync issues
+    // resetPasswordToken: pgText('reset_password_token'),
+    // resetPasswordSentAt: timestamp('reset_password_sent_at'),
+    // rememberCreatedAt: timestamp('remember_created_at'),
+    // signInCount: pgInteger('sign_in_count').default(0).notNull(),
+    // lastSignInAt: timestamp('last_sign_in_at'),
+    // currentSignInIp: pgText('current_sign_in_ip'),
   },
   (table) => ({
     // Email must be unique within each community, but can be shared across communities
@@ -95,25 +95,18 @@ export const usersSqlite = sqliteTable(
       .notNull()
       .references(() => communitiesSqlite.id),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
-    lastLoginAt: integer('last_login_at', { mode: 'timestamp' }).$defaultFn(
-      () => new Date()
-    ),
-    createdAt: integer('created_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
-
-    // Authentication fields for password reset and session management
-    resetPasswordToken: sqliteText('reset_password_token'),
-    resetPasswordSentAt: integer('reset_password_sent_at', {
-      mode: 'timestamp',
-    }),
-    rememberCreatedAt: integer('remember_created_at', { mode: 'timestamp' }),
-    signInCount: integer('sign_in_count').default(0).notNull(),
-    lastSignInAt: integer('last_sign_in_at', { mode: 'timestamp' }),
-    currentSignInIp: sqliteText('current_sign_in_ip'),
+    lastLoginAt: integer('last_login_at', { mode: 'timestamp' }),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+    // Authentication fields for password reset and session management - commented out temporarily for database sync issues
+    // resetPasswordToken: sqliteText('reset_password_token'),
+    // resetPasswordSentAt: integer('reset_password_sent_at', {
+    //   mode: 'timestamp',
+    // }),
+    // rememberCreatedAt: integer('remember_created_at', { mode: 'timestamp' }),
+    // signInCount: integer('sign_in_count').default(0).notNull(),
+    // lastSignInAt: integer('last_sign_at', { mode: 'timestamp' }),
+    // currentSignInIp: sqliteText('current_sign_in_ip'),
   },
   (table) => ({
     // Email must be unique within each community, but can be shared across communities

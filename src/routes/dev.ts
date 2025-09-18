@@ -100,7 +100,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing cultural admin user expected by workflow script
         let culturalAdmin;
         try {
-          culturalAdmin = await userService.createUserInCommunity({
+          culturalAdmin = await userService.registerUser({
             email: 'cultural.admin@anishinaabe.ca',
             password: 'CulturalAdmin2024!',
             firstName: 'Maria',
@@ -124,11 +124,10 @@ export async function devRoutes(fastify: FastifyInstance) {
               ).UserRepository(db);
 
               // Try to find user in the target community first
-              const userInTargetCommunity =
-                await userRepo.findByEmailInCommunity(
-                  'cultural.admin@anishinaabe.ca',
-                  community.id
-                );
+              const userInTargetCommunity = await userRepo.findByEmail(
+                'cultural.admin@anishinaabe.ca',
+                community.id
+              );
 
               if (userInTargetCommunity) {
                 // User already exists in target community, use them
@@ -167,7 +166,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing fallback admin user (for backwards compatibility)
         let fallbackAdmin;
         try {
-          fallbackAdmin = await userService.createUserInCommunity({
+          fallbackAdmin = await userService.registerUser({
             email: 'admin@demo.com',
             password: 'TestPassword123!',
             firstName: 'Admin',
@@ -191,11 +190,10 @@ export async function devRoutes(fastify: FastifyInstance) {
               ).UserRepository(db);
 
               // Try to find user in the target community first
-              const userInTargetCommunity =
-                await userRepo.findByEmailInCommunity(
-                  'admin@demo.com',
-                  community.id
-                );
+              const userInTargetCommunity = await userRepo.findByEmail(
+                'admin@demo.com',
+                community.id
+              );
 
               if (userInTargetCommunity) {
                 // User already exists in target community, use them
@@ -234,7 +232,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing editor user expected by workflow
         let editor;
         try {
-          editor = await userService.createUserInCommunity({
+          editor = await userService.registerUser({
             email: 'editor.test@anishinaabe.ca',
             password: 'EditorTest2024!',
             firstName: 'Alex',
@@ -259,7 +257,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing viewer user expected by workflow
         let viewer;
         try {
-          viewer = await userService.createUserInCommunity({
+          viewer = await userService.registerUser({
             email: 'community.member@anishinaabe.ca',
             password: 'ViewerAccess2024!',
             firstName: 'Sarah',
@@ -284,7 +282,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         // Create or get existing second community admin for data sovereignty testing
         let admin2;
         try {
-          admin2 = await userService.createUserInCommunity({
+          admin2 = await userService.registerUser({
             email: 'admin2@metis.ca',
             password: 'MetisAdmin2024!',
             firstName: 'Louis',

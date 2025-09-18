@@ -211,33 +211,34 @@ export class UserRepository {
 
   /**
    * Find user by reset password token within a specific community
+   * TEMPORARILY COMMENTED OUT - waiting for database migration completion
    * @param resetToken - Password reset token
    * @param communityId - Community ID to scope the search
    * @returns User with matching reset token within community, or null if not found
    */
-  async findByResetToken(
-    resetToken: string,
-    communityId: number
-  ): Promise<User | null> {
-    const usersTable = await getUsersTable();
+  // async findByResetToken(
+  //   resetToken: string,
+  //   communityId: number
+  // ): Promise<User | null> {
+  //   const usersTable = await getUsersTable();
 
-    try {
-      const [result] = await this.database
-        .select()
-        .from(usersTable)
-        .where(
-          and(
-            eq(usersTable.resetPasswordToken, resetToken),
-            eq(usersTable.communityId, communityId)
-          )
-        )
-        .limit(1);
+  //   try {
+  //     const [result] = await this.database
+  //       .select()
+  //       .from(usersTable)
+  //       .where(
+  //         and(
+  //           eq(usersTable.resetPasswordToken, resetToken),
+  //           eq(usersTable.communityId, communityId)
+  //         )
+  //       )
+  //       .limit(1);
 
-      return result ? result : null;
-    } catch (error) {
-      throw new Error(`Failed to find user by reset token: ${error}`);
-    }
-  }
+  //     return result ? result : null;
+  //   } catch (error) {
+  //     throw new Error(`Failed to find user by reset token: ${error}`);
+  //   }
+  // }
 
   /**
    * Update user within a specific community

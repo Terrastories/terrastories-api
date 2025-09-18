@@ -134,11 +134,9 @@ export default async function storiesRoutes(
 ) {
   const db = options?.database || (await getDb());
 
-  // Type-safe repository instantiation with proper casting
-  // StoryRepository requires BetterSQLite3Database, others accept Database union
-  // Using unknown intermediate to satisfy TypeScript safety requirements
+  // StoryRepository requires BetterSQLite3Database, using type casting
   const storyRepository = new StoryRepository(
-    db as unknown as BetterSQLite3Database<Record<string, never>>
+    db as unknown as BetterSQLite3Database<Record<string, unknown>>
   );
   const fileRepository = new FileRepository(db);
   const userRepository = new UserRepository(db);

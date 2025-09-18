@@ -337,9 +337,9 @@ export const communityResponseSchema = z.object({
   locale: z.string(),
   culturalSettings: z.string().nullable(),
   isActive: z.boolean(),
-  // Rails compatibility fields
-  country: z.string().nullable(),
-  beta: z.boolean(),
+  // Rails compatibility fields - commented out until database migration is complete
+  // country: z.string().nullable(),
+  // beta: z.boolean(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 

@@ -218,12 +218,11 @@ export interface PaginatedResult<T> {
  */
 export class StoryRepository {
   constructor(
-    private readonly db: BetterSQLite3Database<Record<string, never>>
+    private readonly db: BetterSQLite3Database<Record<string, unknown>>
   ) {}
 
   // Helper method to get the appropriate table based on database type
   private getStoriesTable() {
-    // For now, we'll use SQLite tables since that's what tests use
     return storiesSqlite;
   }
 
@@ -289,28 +288,36 @@ export class StoryRepository {
 
     // Create place associations using proper join table
     if (data.placeIds?.length) {
-      const storyPlacesTable = this.getStoryPlacesTable();
+      const associationTimestamp = new Date();
       const placeAssociations = data.placeIds.map((placeId, index) => ({
         storyId: story.id,
         placeId,
         culturalContext: data.placeContexts?.[index] || undefined,
         sortOrder: index,
+        createdAt: associationTimestamp,
+        updatedAt: associationTimestamp,
       }));
 
-      await this.db.insert(storyPlacesTable).values(placeAssociations);
+      await this.db
+        .insert(this.getStoryPlacesTable())
+        .values(placeAssociations);
     }
 
     // Create speaker associations using proper join table
     if (data.speakerIds?.length) {
-      const storySpeakersTable = this.getStorySpeakersTable();
+      const speakerTimestamp = new Date();
       const speakerAssociations = data.speakerIds.map((speakerId, index) => ({
         storyId: story.id,
         speakerId,
         storyRole: data.speakerRoles?.[index] || undefined,
         sortOrder: index,
+        createdAt: speakerTimestamp,
+        updatedAt: speakerTimestamp,
       }));
 
-      await this.db.insert(storySpeakersTable).values(speakerAssociations);
+      await this.db
+        .insert(this.getStorySpeakersTable())
+        .values(speakerAssociations);
     }
 
     // Return with populated associations

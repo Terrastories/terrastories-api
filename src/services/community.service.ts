@@ -361,9 +361,9 @@ export class CommunityService {
         locale: community.locale,
         culturalSettings: community.culturalSettings,
         isActive: community.isActive,
-        // Rails compatibility fields
-        country: community.country,
-        beta: community.beta,
+        // Rails compatibility fields - commented out until database migration is complete
+        // country: community.country,
+        // beta: community.beta,
         createdAt: toISOString(community.createdAt),
         updatedAt: toISOString(community.updatedAt),
       };
@@ -861,9 +861,9 @@ export class CommunityService {
           publicStories: community.publicStories,
           isActive: community.isActive,
           userCount: 0, // Actual count added at route level
-          // Rails compatibility fields
-          country: community.country,
-          beta: community.beta,
+          // Rails compatibility fields - commented out until database migration is complete
+          // country: community.country,
+          // beta: community.beta,
           createdAt: toISOString(community.createdAt),
           updatedAt: toISOString(community.updatedAt),
         };

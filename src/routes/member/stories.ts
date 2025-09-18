@@ -50,10 +50,9 @@ export async function memberStoriesRoutes(
   options?: MemberStoriesRoutesOptions
 ) {
   const db = options?.database || (await getDb());
-  // Type-safe repository instantiation with proper casting
-  // StoryRepository requires BetterSQLite3Database, using unknown intermediate for type safety
+  // StoryRepository requires BetterSQLite3Database, using type casting
   const storyRepository = new StoryRepository(
-    db as unknown as BetterSQLite3Database<Record<string, never>>
+    db as unknown as BetterSQLite3Database<Record<string, unknown>>
   );
   const fileRepository = new FileRepository(db);
   const userRepository = new UserRepository(db);

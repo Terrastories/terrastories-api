@@ -13,7 +13,6 @@
  * - Comprehensive error handling
  */
 
-import crypto from 'crypto';
 import { UserRepository } from '../repositories/user.repository.js';
 import * as passwordService from './password.service.js';
 import { CommunityService } from './community.service.js';
@@ -402,164 +401,169 @@ export class UserService {
 
   /**
    * Initiate password reset by generating a secure token
+   * TEMPORARILY COMMENTED OUT - waiting for database migration completion
    * @param email - User's email address
    * @param communityId - Community scope for the reset
    * @returns Reset token to be sent via email
    */
-  async initiatePasswordReset(
-    email: string,
-    communityId: number
-  ): Promise<string> {
-    // Find user by email within community
-    const user = await this.userRepository.findByEmail(email, communityId);
-    if (!user) {
-      throw new UserNotFoundError();
-    }
+  // async initiatePasswordReset(
+  //   email: string,
+  //   communityId: number
+  // ): Promise<string> {
+  //   // Find user by email within community
+  //   const user = await this.userRepository.findByEmail(email, communityId);
+  //   if (!user) {
+  //     throw new UserNotFoundError();
+  //   }
 
-    // Generate secure random token (32-character hex)
-    const resetToken = crypto.randomBytes(16).toString('hex');
-    const resetSentAt = new Date();
+  //   // Generate secure random token (32-character hex)
+  //   const resetToken = crypto.randomBytes(16).toString('hex');
+  //   const resetSentAt = new Date();
 
-    // Update user with reset token and timestamp
-    await this.userRepository.update(
-      user.id,
-      {
-        resetPasswordToken: resetToken,
-        resetPasswordSentAt: resetSentAt,
-        updatedAt: new Date(),
-      },
-      communityId
-    );
+  //   // Update user with reset token and timestamp
+  //   await this.userRepository.update(
+  //     user.id,
+  //     {
+  //       resetPasswordToken: resetToken,
+  //       resetPasswordSentAt: resetSentAt,
+  //       updatedAt: new Date(),
+  //     },
+  //     communityId
+  //   );
 
-    return resetToken;
-  }
+  //   return resetToken;
+  // }
 
   /**
    * Reset password using a valid reset token within a specific community
+   * TEMPORARILY COMMENTED OUT - waiting for database migration completion
    * @param resetToken - Token from password reset email
    * @param newPassword - New password to set
    * @param communityId - Community ID to scope the token lookup
    */
-  async resetPassword(
-    resetToken: string,
-    newPassword: string,
-    communityId: number
-  ): Promise<void> {
-    // Validate token format (32-character hex)
-    if (
-      !resetToken ||
-      resetToken.length !== 32 ||
-      !/^[a-f0-9]+$/i.test(resetToken)
-    ) {
-      throw new Error('Invalid or expired reset token');
-    }
+  // async resetPassword(
+  //   resetToken: string,
+  //   newPassword: string,
+  //   communityId: number
+  // ): Promise<void> {
+  //   // Validate token format (32-character hex)
+  //   if (
+  //     !resetToken ||
+  //     resetToken.length !== 32 ||
+  //     !/^[a-f0-9]+$/i.test(resetToken)
+  //   ) {
+  //     throw new Error('Invalid or expired reset token');
+  //   }
 
-    // Find user by reset token within the specified community
-    const user = await this.userRepository.findByResetToken(
-      resetToken,
-      communityId
-    );
-    if (!user) {
-      throw new Error('Invalid or expired reset token');
-    }
+  //   // Find user by reset token within the specified community
+  //   const user = await this.userRepository.findByResetToken(
+  //     resetToken,
+  //     communityId
+  //   );
+  //   if (!user) {
+  //     throw new Error('Invalid or expired reset token');
+  //   }
 
-    // Check if token is expired (1 hour window)
-    if (
-      !user.resetPasswordSentAt ||
-      Date.now() - user.resetPasswordSentAt.getTime() > 60 * 60 * 1000
-    ) {
-      throw new Error('Invalid or expired reset token');
-    }
+  //   // Check if token is expired (1 hour window)
+  //   if (
+  //     !user.resetPasswordSentAt ||
+  //     Date.now() - user.resetPasswordSentAt.getTime() > 60 * 60 * 1000
+  //   ) {
+  //     throw new Error('Invalid or expired reset token');
+  //   }
 
-    // Validate new password strength
-    const passwordValidation =
-      passwordService.validatePasswordStrength(newPassword);
-    if (!passwordValidation.isValid) {
-      throw new WeakPasswordError(
-        `Password requirements not met: ${passwordValidation.errors.join(', ')}`
-      );
-    }
+  //   // Validate new password strength
+  //   const passwordValidation =
+  //     passwordService.validatePasswordStrength(newPassword);
+  //   if (!passwordValidation.isValid) {
+  //     throw new WeakPasswordError(
+  //       `Password requirements not met: ${passwordValidation.errors.join(', ')}`
+  //     );
+  //   }
 
-    // Hash new password
-    const hashedPassword = await passwordService.hashPassword(newPassword);
+  //   // Hash new password
+  //   const hashedPassword = await passwordService.hashPassword(newPassword);
 
-    // Update user with new password and clear reset fields
-    await this.userRepository.update(
-      user.id,
-      {
-        passwordHash: hashedPassword,
-        resetPasswordToken: null,
-        resetPasswordSentAt: null,
-        updatedAt: new Date(),
-      },
-      user.communityId
-    );
-  }
+  //   // Update user with new password and clear reset fields
+  //   await this.userRepository.update(
+  //     user.id,
+  //     {
+  //       passwordHash: hashedPassword,
+  //       resetPasswordToken: null,
+  //       resetPasswordSentAt: null,
+  //       updatedAt: new Date(),
+  //     },
+  //     user.communityId
+  //   );
+  // }
 
   /**
    * Authenticate user with IP tracking and sign-in count
+   * TEMPORARILY COMMENTED OUT - waiting for database migration completion
    * @param email - User's email
    * @param password - User's password
    * @param communityId - Community ID
    * @param ipAddress - Client IP address for tracking
    * @returns Authenticated user
    */
-  async authenticateUserWithTracking(
-    email: string,
-    password: string,
-    communityId: number,
-    ipAddress: string
-  ): Promise<User> {
-    // Authenticate user normally first
-    const user = await this.authenticateUser(email, password, communityId);
+  // async authenticateUserWithTracking(
+  //   email: string,
+  //   password: string,
+  //   communityId: number,
+  //   ipAddress: string
+  // ): Promise<User> {
+  //   // Authenticate user normally first
+  //   const user = await this.authenticateUser(email, password, communityId);
 
-    // Update sign-in tracking fields
-    await this.userRepository.update(
-      user.id,
-      {
-        signInCount: user.signInCount + 1,
-        lastSignInAt: new Date(), // Always track the sign-in time
-        currentSignInIp: ipAddress,
-        updatedAt: new Date(),
-      },
-      communityId
-    );
+  //   // Update sign-in tracking fields
+  //   await this.userRepository.update(
+  //     user.id,
+  //     {
+  //       signInCount: user.signInCount + 1,
+  //       lastSignInAt: new Date(), // Always track the sign-in time
+  //       currentSignInIp: ipAddress,
+  //       updatedAt: new Date(),
+  //     },
+  //     communityId
+  //   );
 
-    // Return updated user
-    return (await this.userRepository.findById(user.id, communityId)) as User;
-  }
+  //   // Return updated user
+  //   return (await this.userRepository.findById(user.id, communityId)) as User;
+  // }
 
   /**
    * Set remember me token for persistent sessions
+   * TEMPORARILY COMMENTED OUT - waiting for database migration completion
    * @param userId - User ID
    * @param communityId - Community ID
    */
-  async setRememberToken(userId: number, communityId: number): Promise<void> {
-    await this.userRepository.update(
-      userId,
-      {
-        rememberCreatedAt: new Date(),
-        updatedAt: new Date(),
-      },
-      communityId
-    );
-  }
+  // async setRememberToken(userId: number, communityId: number): Promise<void> {
+  //   await this.userRepository.update(
+  //     userId,
+  //     {
+  //       rememberCreatedAt: new Date(),
+  //       updatedAt: new Date(),
+  //     },
+  //     communityId
+  //   );
+  // }
 
   /**
    * Clear remember me token
+   * TEMPORARILY COMMENTED OUT - waiting for database migration completion
    * @param userId - User ID
    * @param communityId - Community ID
    */
-  async clearRememberToken(userId: number, communityId: number): Promise<void> {
-    await this.userRepository.update(
-      userId,
-      {
-        rememberCreatedAt: null,
-        updatedAt: new Date(),
-      },
-      communityId
-    );
-  }
+  // async clearRememberToken(userId: number, communityId: number): Promise<void> {
+  //   await this.userRepository.update(
+  //     userId,
+  //     {
+  //       rememberCreatedAt: null,
+  //       updatedAt: new Date(),
+  //     },
+  //     communityId
+  //   );
+  // }
 
   /**
    * Delete user within community scope

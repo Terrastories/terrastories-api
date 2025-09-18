@@ -98,9 +98,9 @@ export const insertCommunitySchema = createInsertSchema(communitiesPg, {
     .optional(),
   publicStories: z.boolean().default(false),
   isActive: z.boolean().default(true),
-  // Rails compatibility field validation
-  country: CountryCodeSchema,
-  beta: z.boolean().default(false),
+  // Rails compatibility field validation - commented out until database migration is complete
+  // country: CountryCodeSchema,
+  // beta: z.boolean().default(false),
 });
 
 export const selectCommunitySchema = createSelectSchema(communitiesPg);

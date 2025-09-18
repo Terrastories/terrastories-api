@@ -165,13 +165,13 @@ export const insertUserSchema = createInsertSchema(usersPg, {
   isActive: z.boolean().default(true),
   lastLoginAt: z.date().optional(),
 
-  // Authentication field validations with proper defaults
-  resetPasswordToken: z.string().optional(),
-  resetPasswordSentAt: z.date().optional(),
-  rememberCreatedAt: z.date().optional(),
-  signInCount: z.number().int().min(0).default(0),
-  lastSignInAt: z.date().optional(),
-  currentSignInIp: z.string().optional(),
+  // Authentication field validations - commented out until database migration is complete
+  // resetPasswordToken: z.string().optional(),
+  // resetPasswordSentAt: z.date().optional(),
+  // rememberCreatedAt: z.date().optional(),
+  // signInCount: z.number().int().min(0).default(0),
+  // lastSignInAt: z.date().optional(),
+  // currentSignInIp: z.string().optional(),
 });
 
 export const selectUserSchema = createSelectSchema(usersPg);

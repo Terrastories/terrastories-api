@@ -298,9 +298,9 @@ export const communityResponseSchema = z.object({
   publicStories: z.boolean(),
   isActive: z.boolean(),
   userCount: z.number().int().nonnegative(),
-  // Rails compatibility fields
-  country: z.string().nullable(),
-  beta: z.boolean(),
+  // Rails compatibility fields - commented out until database migration is complete
+  // country: z.string().nullable(),
+  // beta: z.boolean(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });

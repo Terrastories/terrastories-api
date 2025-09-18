@@ -43,9 +43,9 @@ export const communitiesPg = pgTable('communities', {
   locale: pgText('locale').notNull().default('en'),
   culturalSettings: pgText('cultural_settings'),
   isActive: boolean('is_active').notNull().default(true),
-  // Rails compatibility fields
-  country: pgText('country'),
-  beta: boolean('beta').notNull().default(false),
+  // Rails compatibility fields - commented out temporarily for database sync issues
+  // country: pgText('country'),
+  // beta: boolean('beta').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -62,15 +62,11 @@ export const communitiesSqlite = sqliteTable('communities', {
   locale: sqliteText('locale').notNull().default('en'),
   culturalSettings: sqliteText('cultural_settings'),
   isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
-  // Rails compatibility fields
-  country: sqliteText('country'),
-  beta: integer('beta', { mode: 'boolean' }).notNull().default(false),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  // Rails compatibility fields - commented out temporarily for database sync issues
+  // country: sqliteText('country'),
+  // beta: integer('beta', { mode: 'boolean' }).notNull().default(false),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
 // Dynamic table selection based on database type (for runtime use)

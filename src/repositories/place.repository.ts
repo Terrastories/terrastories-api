@@ -31,6 +31,7 @@ import { getCommunitiesTable } from '../db/schema/communities.js';
 import { getConfig } from '../shared/config/index.js';
 import type { Database } from '../db/index.js';
 import {
+  DatabaseError,
   InvalidCoordinatesError,
   InvalidBoundsError,
   CommunityNotFoundError,
@@ -151,6 +152,7 @@ export class PlaceRepository {
 
     const placesTable = await getPlacesTable();
 
+    const now = new Date();
     const placeData: NewPlace = {
       name: data.name,
       description: data.description || null,
@@ -161,6 +163,8 @@ export class PlaceRepository {
       mediaUrls: data.mediaUrls || [],
       culturalSignificance: data.culturalSignificance || null,
       isRestricted: data.isRestricted || false,
+      createdAt: now,
+      updatedAt: now,
     };
 
     try {
@@ -217,17 +221,54 @@ export class PlaceRepository {
     id: number,
     communityId: number
   ): Promise<Place | null> {
-    const placesTable = await getPlacesTable();
+    try {
+      const placesTable = await getPlacesTable();
 
-    const [place] = await (this.db as any)
-      .select()
-      .from(placesTable)
-      .where(
-        and(eq(placesTable.id, id), eq(placesTable.communityId, communityId))
-      )
-      .limit(1);
+      const [place] = await (this.db as any)
+        .select()
+        .from(placesTable)
+        .where(
+          and(eq(placesTable.id, id), eq(placesTable.communityId, communityId))
+        )
+        .limit(1);
 
-    return place || null;
+      return place || null;
+    } catch (error) {
+      // Handle database errors gracefully
+      if (error instanceof Error) {
+        // Handle SQLite function errors (like "no such function: now")
+        if (error.message.includes('no such function')) {
+          throw new DatabaseError(
+            'Database compatibility error during place lookup',
+            {
+              originalError: error.message,
+              operation: 'get_place_by_id',
+              placeId: id,
+              communityId,
+            }
+          );
+        }
+
+        // Handle other database errors
+        throw new DatabaseError(
+          'Failed to retrieve place due to database error',
+          {
+            originalError: error.message,
+            operation: 'get_place_by_id',
+            placeId: id,
+            communityId,
+          }
+        );
+      }
+
+      // Handle unknown errors
+      throw new DatabaseError('Unknown error occurred while retrieving place', {
+        originalError: String(error),
+        operation: 'get_place_by_id',
+        placeId: id,
+        communityId,
+      });
+    }
   }
 
   /**

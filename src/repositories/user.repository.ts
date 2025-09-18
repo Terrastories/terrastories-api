@@ -739,4 +739,120 @@ export class UserRepository {
       );
     }
   }
+
+  /**
+   * Community-Scoped Repository Methods
+   *
+   * These methods provide community-scoped database operations for regular admins
+   * to ensure data sovereignty compliance.
+   */
+
+  /**
+   * Find all users in a specific community with pagination and filtering
+   */
+  async findByCommunity(
+    communityId: number,
+    options: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      role?: UserRole;
+      active?: boolean;
+    } = {}
+  ): Promise<{
+    data: User[];
+    meta: { page: number; limit: number; total: number; totalPages: number };
+  }> {
+    try {
+      const { page = 1, limit = 20, search, role, active } = options;
+      const offset = (page - 1) * limit;
+
+      const usersTable = await getUsersTable();
+
+      // Build where conditions
+      const conditions = [eq(usersTable.communityId, communityId)];
+
+      if (search) {
+        conditions.push(
+          or(
+            like(usersTable.firstName, `%${search}%`),
+            like(usersTable.lastName, `%${search}%`),
+            like(usersTable.email, `%${search}%`)
+          )!
+        );
+      }
+
+      if (role) {
+        conditions.push(eq(usersTable.role, role));
+      }
+
+      if (active !== undefined) {
+        conditions.push(eq(usersTable.isActive, active));
+      }
+
+      // Get total count
+      const totalResult = await this.database
+        .select({ count: count() })
+        .from(usersTable)
+        .where(and(...conditions));
+
+      const total = totalResult[0]?.count || 0;
+      const totalPages = Math.ceil(total / limit);
+
+      // Get paginated data
+      const users = await this.database
+        .select()
+        .from(usersTable)
+        .where(and(...conditions))
+        .orderBy(desc(usersTable.createdAt))
+        .limit(limit)
+        .offset(offset);
+
+      return {
+        data: users,
+        meta: {
+          page,
+          limit,
+          total,
+          totalPages,
+        },
+      };
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to find users by community: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Find a user by email within a specific community
+   * Used for checking email uniqueness within community boundaries
+   */
+  async findByEmailInCommunity(
+    email: string,
+    communityId: number
+  ): Promise<User | null> {
+    try {
+      const usersTable = await getUsersTable();
+
+      const users = await this.database
+        .select()
+        .from(usersTable)
+        .where(
+          and(
+            eq(usersTable.email, email.toLowerCase()),
+            eq(usersTable.communityId, communityId)
+          )
+        )
+        .limit(1);
+
+      return users[0] || null;
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(
+        `Failed to find user by email in community: ${errorMessage}`
+      );
+    }
+  }
 }

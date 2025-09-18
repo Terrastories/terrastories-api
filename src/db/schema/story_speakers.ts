@@ -28,16 +28,20 @@ import {
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
-import { storiesPg, storiesSqlite } from './stories.js';
-import { speakersPg, speakersSqlite } from './speakers.js';
+import { storiesPg, storiesSqlite } from './stories';
+import { speakersPg, speakersSqlite } from './speakers';
 
 // PostgreSQL table for production
 export const storySpeakersPg = pgTable(
   'story_speakers',
   {
     id: serial('id').primaryKey(),
-    storyId: pgInteger('story_id').notNull(),
-    speakerId: pgInteger('speaker_id').notNull(),
+    storyId: pgInteger('story_id')
+      .notNull()
+      .references(() => storiesPg.id, { onDelete: 'cascade' }),
+    speakerId: pgInteger('speaker_id')
+      .notNull()
+      .references(() => speakersPg.id, { onDelete: 'cascade' }),
     storyRole: text('story_role'),
     sortOrder: pgInteger('sort_order').default(0),
     createdAt: timestamp('created_at').notNull().defaultNow(),
@@ -57,16 +61,16 @@ export const storySpeakersSqlite = sqliteTable(
   'story_speakers',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
-    storyId: integer('story_id').notNull(),
-    speakerId: integer('speaker_id').notNull(),
+    storyId: integer('story_id')
+      .notNull()
+      .references(() => storiesSqlite.id, { onDelete: 'cascade' }),
+    speakerId: integer('speaker_id')
+      .notNull()
+      .references(() => speakersSqlite.id, { onDelete: 'cascade' }),
     storyRole: sqliteText('story_role'),
     sortOrder: integer('sort_order').default(0),
-    createdAt: integer('created_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
-      .notNull()
-      .$defaultFn(() => new Date()),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
   },
   (table) => ({
     // Composite unique constraint to prevent duplicate relationships

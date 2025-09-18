@@ -122,6 +122,8 @@ describe('Spatial Database Operations', () => {
             description: 'A test place for spatial operations',
             location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
             communityId: 1,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           }
         : {
             name: 'Test Location',
@@ -129,6 +131,8 @@ describe('Spatial Database Operations', () => {
             latitude: 40.7128, // NYC
             longitude: -74.006,
             communityId: 1,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           };
 
       const result = await database.insert(places).values(newPlace).returning();
@@ -163,11 +167,15 @@ describe('Spatial Database Operations', () => {
               name: 'Place A',
               location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
             {
               name: 'Place B',
               location: SpatialUtils.createPoint(34.0522, -118.2437), // LA
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
           ]
         : [
@@ -176,12 +184,16 @@ describe('Spatial Database Operations', () => {
               latitude: 40.7128, // NYC
               longitude: -74.006,
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
             {
               name: 'Place B',
               latitude: 34.0522, // LA
               longitude: -118.2437,
               communityId: 1,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             },
           ];
 
@@ -223,6 +235,8 @@ describe('Spatial Database Operations', () => {
           name: 'No Location Place',
           description: 'Place without spatial data',
           communityId: 1,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         };
 
         const result = await database
@@ -241,6 +255,8 @@ describe('Spatial Database Operations', () => {
           latitude: 0, // Default to null island
           longitude: 0,
           communityId: 1,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         };
 
         const result = await database
@@ -318,12 +334,16 @@ describe('Spatial Database Operations', () => {
             name: 'Compatibility Test Place',
             location: SpatialUtils.createPoint(0, 0),
             communityId: 999,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           }
         : {
             name: 'Compatibility Test Place',
             latitude: 0,
             longitude: 0,
             communityId: 999,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           };
 
       const result = await database

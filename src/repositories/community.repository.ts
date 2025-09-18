@@ -15,7 +15,7 @@
 
 import { eq, and, like, desc, or, sql, count } from 'drizzle-orm';
 import { communitiesSqlite, communitiesPg } from '../db/schema/index.js';
-import type { Community, NewCommunity } from '../db/schema/communities.js';
+import type { Community } from '../db/schema/communities.js';
 import type { Database } from '../db/index.js';
 
 // Re-export Community type for other modules
@@ -229,8 +229,8 @@ export class CommunityRepository {
 
       // Country validation handled by Zod schema at service layer
 
-      // Prepare community data
-      const communityData: NewCommunity = {
+      // Prepare community data - exclude optional fields that may not exist in database yet
+      const communityData: any = {
         name: data.name.trim(),
         description: data.description?.trim() || null,
         slug,
@@ -238,12 +238,17 @@ export class CommunityRepository {
         locale: data.locale || 'en',
         culturalSettings: data.culturalSettings || null,
         isActive: data.isActive ?? true,
-        // Rails compatibility fields
-        country: data.country || null,
-        beta: data.beta ?? false,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
+
+      // Add Rails compatibility fields only if they exist in the schema
+      if (data.country !== undefined) {
+        communityData.country = data.country;
+      }
+      if (data.beta !== undefined) {
+        communityData.beta = data.beta;
+      }
 
       // Create community
       const result = await this.db

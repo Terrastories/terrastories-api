@@ -40,9 +40,7 @@ export const attachmentsSqlite = sqliteTable('attachments', {
   filename: sqliteText('filename').notNull(),
   contentType: sqliteText('content_type'),
   fileSize: integer('file_size'),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
 
 // Dynamic table selection

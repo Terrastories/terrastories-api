@@ -17,6 +17,7 @@ import {
   setupTestDatabase,
   teardownTestDatabase,
   clearTestData,
+  testDb,
 } from '../helpers/database.js';
 import { like, sql } from 'drizzle-orm';
 
@@ -24,6 +25,7 @@ describe('PostGIS Spatial Database Tests', () => {
   let database: Awaited<ReturnType<typeof getDb>>;
   let places: Awaited<ReturnType<typeof getPlacesTable>>;
   let isPostgres: boolean;
+  let testCommunityId: number;
 
   beforeAll(async () => {
     database = await setupTestDatabase();
@@ -44,6 +46,12 @@ describe('PostGIS Spatial Database Tests', () => {
   });
 
   describe('PostGIS Extension Support', () => {
+    beforeEach(async () => {
+      // Seed test data including communities for tests that insert places
+      const fixtures = await testDb.seedTestData();
+      testCommunityId = fixtures.communities[0].id;
+    });
+
     it('should detect PostGIS capabilities', async () => {
       const result = await testConnection();
 
@@ -85,7 +93,7 @@ describe('PostGIS Spatial Database Tests', () => {
                 [-123.13, 49.28],
               ],
             ]),
-            communityId: 1,
+            communityId: testCommunityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }
@@ -95,7 +103,7 @@ describe('PostGIS Spatial Database Tests', () => {
             latitude: 49.2827, // Vancouver, BC
             longitude: -123.1207,
             region: 'Vancouver',
-            communityId: 1,
+            communityId: testCommunityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           };
@@ -109,7 +117,7 @@ describe('PostGIS Spatial Database Tests', () => {
       expect(result[0]).toMatchObject({
         name: 'PostGIS Test Place',
         description: 'Testing PostGIS spatial column types',
-        communityId: 1,
+        communityId: testCommunityId,
       });
 
       // Verify spatial data was stored correctly
@@ -127,6 +135,12 @@ describe('PostGIS Spatial Database Tests', () => {
   });
 
   describe('Spatial Query Functionality', () => {
+    beforeEach(async () => {
+      // Seed test data including communities for tests that insert places
+      const fixtures = await testDb.seedTestData();
+      testCommunityId = fixtures.communities[0].id;
+    });
+
     it('should support basic spatial operations', async () => {
       // Insert test places with known coordinates
       const testPlaces: NewPlace[] = isPostgres
@@ -134,21 +148,21 @@ describe('PostGIS Spatial Database Tests', () => {
             {
               name: 'Vancouver Place',
               location: SpatialUtils.createPoint(49.2827, -123.1207),
-              communityId: 1,
+              communityId: testCommunityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
             {
               name: 'Toronto Place',
               location: SpatialUtils.createPoint(43.6532, -79.3832),
-              communityId: 1,
+              communityId: testCommunityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
             {
               name: 'Montreal Place',
               location: SpatialUtils.createPoint(45.5017, -73.5673),
-              communityId: 1,
+              communityId: testCommunityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -158,7 +172,7 @@ describe('PostGIS Spatial Database Tests', () => {
               name: 'Vancouver Place',
               latitude: 49.2827,
               longitude: -123.1207,
-              communityId: 1,
+              communityId: testCommunityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -166,7 +180,7 @@ describe('PostGIS Spatial Database Tests', () => {
               name: 'Toronto Place',
               latitude: 43.6532,
               longitude: -79.3832,
-              communityId: 1,
+              communityId: testCommunityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -174,7 +188,7 @@ describe('PostGIS Spatial Database Tests', () => {
               name: 'Montreal Place',
               latitude: 45.5017,
               longitude: -73.5673,
-              communityId: 1,
+              communityId: testCommunityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -274,7 +288,7 @@ describe('PostGIS Spatial Database Tests', () => {
             ? {
                 name: test.name,
                 location: test.location,
-                communityId: 1,
+                communityId: testCommunityId,
                 createdAt: new Date(),
                 updatedAt: new Date(),
               }
@@ -282,7 +296,7 @@ describe('PostGIS Spatial Database Tests', () => {
                 name: test.name,
                 latitude: test.latitude,
                 longitude: test.longitude,
-                communityId: 1,
+                communityId: testCommunityId,
                 createdAt: new Date(),
                 updatedAt: new Date(),
               };
@@ -303,6 +317,12 @@ describe('PostGIS Spatial Database Tests', () => {
   });
 
   describe('Database Schema Compatibility', () => {
+    beforeEach(async () => {
+      // Seed test data including communities for tests that insert places
+      const fixtures = await testDb.seedTestData();
+      testCommunityId = fixtures.communities[0].id;
+    });
+
     it('should work with both PostgreSQL and SQLite schemas', async () => {
       console.log(
         `📊 Testing schema compatibility with ${isPostgres ? 'PostgreSQL' : 'SQLite'}`
@@ -318,7 +338,7 @@ describe('PostGIS Spatial Database Tests', () => {
             name: 'Schema Compatibility Test',
             description: 'Testing cross-database schema compatibility',
             location: SpatialUtils.createPoint(45.0, -75.0), // Ottawa coordinates
-            communityId: 1,
+            communityId: testCommunityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }
@@ -327,7 +347,7 @@ describe('PostGIS Spatial Database Tests', () => {
             description: 'Testing cross-database schema compatibility',
             latitude: 45.0, // Ottawa coordinates
             longitude: -75.0,
-            communityId: 1,
+            communityId: testCommunityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           };
@@ -381,7 +401,7 @@ describe('PostGIS Spatial Database Tests', () => {
         ? Array.from({ length: 10 }, (_, i) => ({
             name: `Index Test Place ${i}`,
             location: SpatialUtils.createPoint(45 + i * 0.1, -75 + i * 0.1),
-            communityId: 1,
+            communityId: testCommunityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }))
@@ -389,7 +409,7 @@ describe('PostGIS Spatial Database Tests', () => {
             name: `Index Test Place ${i}`,
             latitude: 45 + i * 0.1,
             longitude: -75 + i * 0.1,
-            communityId: 1,
+            communityId: testCommunityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }));

@@ -28,7 +28,7 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg, communitiesSqlite } from './communities';
+import { communitiesPg, communitiesSqlite } from './communities.js';
 
 // Role enum validation with cultural roles
 export const UserRoleSchema = z.enum([

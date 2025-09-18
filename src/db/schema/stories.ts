@@ -31,10 +31,10 @@ import {
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg, communitiesSqlite } from './communities';
-import { usersPg, usersSqlite } from './users';
-import { placesPg, placesSqlite } from './places';
-import { speakersPg, speakersSqlite } from './speakers';
+import { communitiesPg, communitiesSqlite } from './communities.js';
+import { usersPg, usersSqlite } from './users.js';
+import { placesPg, placesSqlite } from './places.js';
+import { speakersPg, speakersSqlite } from './speakers.js';
 
 // Media URL validation schema
 export const MediaUrlSchema = z.string().url('Invalid media URL format');

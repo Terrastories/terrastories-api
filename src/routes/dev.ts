@@ -326,7 +326,7 @@ export async function devRoutes(fastify: FastifyInstance) {
           communityId: community.id,
           region: 'Traditional Territory',
           culturalSignificance: 'Sacred Teaching Site',
-          accessLevel: 'community',
+          isRestricted: false,
         });
 
         // Create test story (in primary community)
@@ -336,7 +336,7 @@ export async function devRoutes(fastify: FastifyInstance) {
             'Ancient prophecy story about the spiritual journey of the Anishinaabe people.',
           communityId: community.id,
           createdBy: culturalAdmin.id,
-          privacyLevel: 'public',
+          isRestricted: false,
           language: 'en',
           tags: ['prophecy', 'ceremony', 'traditional-teaching'],
           speakerIds: [speaker.id],

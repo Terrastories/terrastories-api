@@ -23,8 +23,8 @@ import {
 } from 'drizzle-orm/sqlite-core';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
-import { communitiesPg, communitiesSqlite } from './communities';
-import { usersPg, usersSqlite } from './users';
+import { communitiesPg, communitiesSqlite } from './communities.js';
+import { usersPg, usersSqlite } from './users.js';
 
 // PostgreSQL table for production
 export const filesPg = pgTable(

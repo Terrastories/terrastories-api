@@ -138,7 +138,8 @@ export async function requireAuth(
 
   if (!authRequest.session?.user) {
     return reply.status(401).send({
-      error: { message: 'Authentication required' },
+      error: 'Authentication required',
+      statusCode: 401,
     });
   }
 
@@ -159,13 +160,15 @@ export function requireRole(roles: string[]) {
     const sessionUser = authRequest.session?.user;
     if (!sessionUser) {
       return reply.status(401).send({
-        error: { message: 'Authentication required' },
+        error: 'Authentication required',
+        statusCode: 401,
       });
     }
     const hasRole = roles.includes(sessionUser.role);
     if (!hasRole) {
       return reply.status(403).send({
-        error: { message: 'Insufficient permissions' },
+        error: 'Insufficient permissions',
+        statusCode: 403,
       });
     }
     authRequest.user = sessionUser;
@@ -215,7 +218,8 @@ export async function enforceDataSovereignty(
 
   if (!user) {
     return reply.status(401).send({
-      error: { message: 'Authentication required' },
+      error: 'Authentication required',
+      statusCode: 401,
     });
   }
 
@@ -231,8 +235,9 @@ export async function enforceDataSovereignty(
     );
 
     return reply.status(403).send({
-      error: { message: 'Super administrators cannot access community data' },
+      error: 'Super administrators cannot access community data',
       reason: 'Indigenous data sovereignty protection',
+      statusCode: 403,
     });
   }
 }
@@ -277,7 +282,8 @@ export function requireCommunityAccess(options: CommunityAccessOptions = {}) {
       );
 
       return reply.status(403).send({
-        error: { message: 'Access denied - community data isolation' },
+        error: 'Access denied - community data isolation',
+        statusCode: 403,
       });
     }
 
@@ -382,7 +388,8 @@ export function requireRoleHierarchy(
 
     if (!authRequest.session?.user) {
       return reply.status(401).send({
-        error: { message: 'Authentication required' },
+        error: 'Authentication required',
+        statusCode: 401,
       });
     }
 
@@ -391,9 +398,8 @@ export function requireRoleHierarchy(
 
     if (!hasPermission) {
       return reply.status(403).send({
-        error: {
-          message: `Insufficient permissions - requires ${requiredRole} level or higher`,
-        },
+        error: `Insufficient permissions - requires ${requiredRole} level or higher`,
+        statusCode: 403,
         required: requiredRole,
         current: user.role,
       });
@@ -431,7 +437,8 @@ export function requirePermission(
 
     if (!authRequest.session?.user) {
       return reply.status(401).send({
-        error: { message: 'Authentication required' },
+        error: 'Authentication required',
+        statusCode: 401,
       });
     }
 
@@ -440,7 +447,8 @@ export function requirePermission(
 
     if (!hasPermissions) {
       return reply.status(403).send({
-        error: { message: 'Insufficient permissions' },
+        error: 'Insufficient permissions',
+        statusCode: 403,
         required: permissions,
         current: user.role,
       });

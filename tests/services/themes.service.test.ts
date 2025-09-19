@@ -12,7 +12,7 @@
  * - Indigenous data sovereignty compliance
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   ThemesService,
   type ThemeCreateInput,

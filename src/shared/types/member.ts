@@ -106,9 +106,9 @@ export const CreatePlaceSchema = z.object({
     .enum(['general', 'significant', 'sacred', 'restricted'])
     .default('general'),
   photoUrl: z
-    .string()
-    .transform((val) => (val === '' ? undefined : val))
-    .pipe(z.string().url().optional()),
+    .union([z.string().url(), z.literal(''), z.undefined()])
+    .optional()
+    .transform((val) => (val === '' ? undefined : val)),
   nameAudioUrl: z.string().url().optional(),
   region: z.string().max(100).optional(),
   isRestricted: z.boolean().optional().default(false),
@@ -123,9 +123,9 @@ export const UpdatePlaceSchema = z.object({
     .enum(['general', 'significant', 'sacred', 'restricted'])
     .optional(),
   photoUrl: z
-    .string()
-    .transform((val) => (val === '' ? undefined : val))
-    .pipe(z.string().url().optional()),
+    .union([z.string().url(), z.literal(''), z.undefined()])
+    .optional()
+    .transform((val) => (val === '' ? undefined : val)),
   nameAudioUrl: z.string().url().optional(),
   region: z.string().max(100).optional(),
   isRestricted: z.boolean().optional(),
@@ -174,9 +174,9 @@ export const CreateSpeakerSchema = z.object({
     .max(new Date().getFullYear())
     .optional(),
   photoUrl: z
-    .string()
-    .transform((val) => (val === '' ? undefined : val))
-    .pipe(z.string().url().optional()),
+    .union([z.string().url(), z.literal(''), z.undefined()])
+    .optional()
+    .transform((val) => (val === '' ? undefined : val)),
   culturalRole: z
     .enum([
       'storyteller',
@@ -200,9 +200,9 @@ export const UpdateSpeakerSchema = z.object({
     .max(new Date().getFullYear())
     .optional(),
   photoUrl: z
-    .string()
-    .transform((val) => (val === '' ? undefined : val))
-    .pipe(z.string().url().optional()),
+    .union([z.string().url(), z.literal(''), z.undefined()])
+    .optional()
+    .transform((val) => (val === '' ? undefined : val)),
   culturalRole: z
     .enum([
       'storyteller',

@@ -724,7 +724,7 @@ export interface TestFixtures {
 export class TestDataFactory {
   static createCommunity(
     overrides: Partial<Community> = {}
-  ): Omit<Community, 'id' | 'createdAt' | 'updatedAt'> {
+  ): Omit<Community, 'id'> {
     const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     return {
       name: 'Factory Community',
@@ -734,6 +734,8 @@ export class TestDataFactory {
       locale: 'en',
       culturalSettings: null,
       isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
       ...overrides,
     };
   }
@@ -741,7 +743,7 @@ export class TestDataFactory {
   static createPlace(
     communityId: number,
     overrides: Partial<Place> = {}
-  ): Omit<Place, 'id' | 'createdAt' | 'updatedAt'> {
+  ): Omit<Place, 'id'> {
     return {
       name: 'Factory Place',
       description: 'A place created by the test factory',
@@ -752,6 +754,8 @@ export class TestDataFactory {
       culturalSignificance: null,
       isRestricted: false,
       communityId: communityId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
       ...overrides,
     };
   }
@@ -759,7 +763,7 @@ export class TestDataFactory {
   static createUser(
     communityId: number,
     overrides: Partial<User> = {}
-  ): Omit<User, 'id' | 'createdAt' | 'updatedAt'> {
+  ): Omit<User, 'id'> {
     const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     return {
       email: `user-${uniqueId}@factory.test`,
@@ -769,6 +773,8 @@ export class TestDataFactory {
       role: 'viewer' as const,
       communityId: communityId,
       isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
       ...overrides,
     };
   }
@@ -777,6 +783,7 @@ export class TestDataFactory {
    * Create test data with spatial variety
    */
   static createSpatialTestData(communityId: number) {
+    const now = new Date();
     return [
       {
         name: 'Vancouver Point',
@@ -787,6 +794,8 @@ export class TestDataFactory {
         culturalSignificance: null,
         isRestricted: false,
         communityId: communityId,
+        createdAt: now,
+        updatedAt: now,
       },
       {
         name: 'Toronto Point',
@@ -797,6 +806,8 @@ export class TestDataFactory {
         culturalSignificance: null,
         isRestricted: false,
         communityId: communityId,
+        createdAt: now,
+        updatedAt: now,
       },
       {
         name: 'Montreal Point',
@@ -807,6 +818,8 @@ export class TestDataFactory {
         culturalSignificance: null,
         isRestricted: false,
         communityId: communityId,
+        createdAt: now,
+        updatedAt: now,
       },
     ];
   }
@@ -935,6 +948,8 @@ export async function createTestData() {
         role: 'editor',
         communityId: fixtures.communities[1].id,
         isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
     ])
     .returning();
@@ -951,6 +966,8 @@ export async function createTestData() {
         communityId: fixtures.communities[0].id,
         culturalRole: 'Knowledge Keeper',
         isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
       {
         name: 'John Rivercrossing',
@@ -960,6 +977,8 @@ export async function createTestData() {
         communityId: fixtures.communities[0].id,
         culturalRole: 'Storyteller',
         isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
     ])
     .returning();

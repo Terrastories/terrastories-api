@@ -214,10 +214,6 @@ describe('Speakers API Routes - Integration Tests', () => {
     };
 
     test('should create speaker with valid data as admin', async () => {
-      console.log(
-        '🔍 DEBUG: Making authenticated request with cookie:',
-        `"${adminSessionId}"`
-      );
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/speakers',

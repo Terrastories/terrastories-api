@@ -398,6 +398,8 @@ export async function createMockCommunity(
     locale: data.locale || 'en',
     culturalSettings: null,
     isActive: true,
+    createdAt: new Date(),
+    updatedAt: new Date(),
   };
 
   const [community] = await db
@@ -432,6 +434,8 @@ export async function createMockUser(
     role: data.role || 'viewer',
     communityId: data.communityId,
     isActive: true,
+    createdAt: new Date(),
+    updatedAt: new Date(),
   };
 
   const [user] = await db.insert(users).values([userData]).returning();

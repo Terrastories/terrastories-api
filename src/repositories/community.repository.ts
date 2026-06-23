@@ -335,8 +335,8 @@ export class CommunityRepository {
         query,
         locale,
         isActive,
-        country: _country,
-        beta: _beta,
+        country,
+        beta,
         limit = 50,
         offset = 0,
       } = params;
@@ -365,15 +365,15 @@ export class CommunityRepository {
         conditions.push(eq(this.communities.isActive, isActive));
       }
 
-      // Filter by country - commented out until database migration is complete
-      // if (country) {
-      //   conditions.push(eq(this.communities.country, country));
-      // }
+      // Filter by country
+      if (country) {
+        conditions.push(eq(this.communities.country, country));
+      }
 
-      // Filter by beta status - commented out until database migration is complete
-      // if (beta !== undefined) {
-      //   conditions.push(eq(this.communities.beta, beta));
-      // }
+      // Filter by beta status
+      if (beta !== undefined) {
+        conditions.push(eq(this.communities.beta, beta));
+      }
 
       // Execute query with pagination
       const whereClause =

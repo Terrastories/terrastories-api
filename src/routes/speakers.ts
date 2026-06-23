@@ -30,9 +30,9 @@ const CreateSpeakerSchema = z.object({
   name: z.string().min(1).max(200).describe('Speaker name'),
   bio: z.string().max(2000).optional().describe('Speaker biography'),
   photoUrl: z
-    .string()
+    .union([z.string().url(), z.literal(''), z.undefined()])
+    .optional()
     .transform((val) => (val === '' ? undefined : val))
-    .pipe(z.string().url().optional())
     .describe('Speaker photo URL'),
   birthYear: z
     .number()

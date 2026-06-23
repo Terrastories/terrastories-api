@@ -1451,6 +1451,9 @@ describe('Authentication Routes', () => {
     });
 
     test('Should respect community isolation for password reset', async () => {
+      // Get seeded test communities
+      const fixtures = await testDb.seedTestData();
+
       // Register user in first community
       const user1Data = {
         email: 'isolation@example.com',
@@ -1467,26 +1470,9 @@ describe('Authentication Routes', () => {
         payload: user1Data,
       });
 
-      // Create second community for isolation test
-      const community2Response = await app.inject({
-        method: 'POST',
-        url: '/api/v1/super_admin/communities',
-        payload: {
-          name: 'Test Community 2',
-          description: 'Second community for isolation test',
-        },
-      });
-
-      const community2Body = JSON.parse(community2Response.body);
-      // Check if community creation was successful
-      let testCommunity2Id: number;
-      if (!community2Body.data || !community2Body.data.id) {
-        console.error('Community 2 creation failed:', community2Body);
-        // Use testCommunityId + 1 as fallback for test isolation
-        testCommunity2Id = testCommunityId + 1;
-      } else {
-        testCommunity2Id = community2Body.data.id;
-      }
+      // Use second seeded community for isolation test
+      const community2 = fixtures.communities[1];
+      const testCommunity2Id = community2.id;
 
       // Try to reset password using email from community 1 but specifying community 2
       const resetResponse = await app.inject({

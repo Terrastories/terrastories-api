@@ -572,17 +572,28 @@ export async function authRoutes(
     },
     async (request, reply) => {
       try {
-        const { email: _email, communityId: _communityId } = request.body as {
+        const { email, communityId } = request.body as {
           email: string;
           communityId: number;
         };
 
-        // Initiate password reset - TEMPORARILY DISABLED
-        // const resetToken = await userService.initiatePasswordReset(
-        //   email,
-        //   communityId
-        // );
-        const resetToken = 'temporarily-disabled-token';
+        // Check if user exists first
+        const existingUser = await userRepository.findByEmail(
+          email,
+          communityId
+        );
+        if (!existingUser) {
+          return reply.status(404).send({
+            error: 'User not found',
+            statusCode: 404,
+          });
+        }
+
+        // Initiate password reset
+        const resetToken = await userService.initiatePasswordReset(
+          email,
+          communityId
+        );
 
         // In production, the reset token would be sent via email
         // For testing purposes, we return it in the response
@@ -683,21 +694,14 @@ export async function authRoutes(
     },
     async (request, reply) => {
       try {
-        const {
-          resetToken: _resetToken,
-          newPassword: _newPassword,
-          communityId: _communityId,
-        } = request.body as {
+        const { resetToken, newPassword, communityId } = request.body as {
           resetToken: string;
           newPassword: string;
           communityId: number;
         };
 
-        // Reset the password within the specified community - TEMPORARILY DISABLED
-        // await userService.resetPassword(resetToken, newPassword, communityId);
-        throw new Error(
-          'Password reset temporarily disabled - database migration in progress'
-        );
+        // Reset the password using the user service
+        await userService.resetPassword(resetToken, newPassword, communityId);
 
         return reply.code(200).send({
           message:

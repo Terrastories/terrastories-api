@@ -106,5 +106,13 @@
     "node": ">=20.0.0",
     "npm": ">=9.0.0"
   },
-  "engineStrict": false
+  "engineStrict": false,
+  "allowScripts": {
+    "argon2@0.44.0": true,
+    "bcrypt@6.0.0": true,
+    "better-sqlite3@12.2.0": true,
+    "esbuild@0.25.9": true,
+    "sharp@0.34.3": true,
+    "sqlite3@5.1.7": true
+  }
 }

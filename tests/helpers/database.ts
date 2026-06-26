@@ -935,6 +935,8 @@ export async function createTestData() {
         role: 'editor',
         communityId: fixtures.communities[1].id,
         isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
     ])
     .returning();
@@ -951,6 +953,8 @@ export async function createTestData() {
         communityId: fixtures.communities[0].id,
         culturalRole: 'Knowledge Keeper',
         isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
       {
         name: 'John Rivercrossing',
@@ -960,6 +964,8 @@ export async function createTestData() {
         communityId: fixtures.communities[0].id,
         culturalRole: 'Storyteller',
         isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
     ])
     .returning();

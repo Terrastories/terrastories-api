@@ -390,6 +390,7 @@ export async function createMockCommunity(
 ) {
   const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
+  const now = new Date();
   const communityData = {
     name: data.name || 'Test Community',
     description: data.description || 'A community for testing',
@@ -398,6 +399,8 @@ export async function createMockCommunity(
     locale: data.locale || 'en',
     culturalSettings: null,
     isActive: true,
+    createdAt: now,
+    updatedAt: now,
   };
 
   const [community] = await db
@@ -423,6 +426,7 @@ export async function createMockUser(
     );
   }
 
+  const now = new Date();
   const userData = {
     email: data.email || `test-${uniqueId}@example.com`,
     passwordHash:
@@ -432,6 +436,8 @@ export async function createMockUser(
     role: data.role || 'viewer',
     communityId: data.communityId,
     isActive: true,
+    createdAt: now,
+    updatedAt: now,
   };
 
   const [user] = await db.insert(users).values([userData]).returning();

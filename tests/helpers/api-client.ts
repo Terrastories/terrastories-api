@@ -43,12 +43,15 @@ export class ApiTestClient {
       method: method.toUpperCase(),
       url,
       headers: {
-        'Content-Type': 'application/json',
         cookie: session,
       },
     };
 
     if (data && ['POST', 'PUT', 'PATCH'].includes(method.toUpperCase())) {
+      options.headers = {
+        ...(options.headers as Record<string, string>),
+        'Content-Type': 'application/json',
+      };
       options.payload = JSON.stringify(data);
     }
 
@@ -71,12 +74,14 @@ export class ApiTestClient {
     const options: InjectOptions = {
       method: method.toUpperCase(),
       url,
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: {},
     };
 
     if (data && ['POST', 'PUT', 'PATCH'].includes(method.toUpperCase())) {
+      options.headers = {
+        ...(options.headers as Record<string, string>),
+        'Content-Type': 'application/json',
+      };
       options.payload = JSON.stringify(data);
     }
 
@@ -202,11 +207,14 @@ export class ApiTestClient {
       const sessionCookies = setCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      
+
       // Use the signed cookie (longer one with signature) if available
-      sessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      sessionCookie =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      sessionCookie = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+      sessionCookie = setCookieHeader.startsWith('sessionId=')
+        ? setCookieHeader
+        : '';
     }
 
     if (!sessionCookie) {

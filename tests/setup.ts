@@ -1,4 +1,4 @@
-import { beforeAll, afterAll, beforeEach } from 'vitest';
+import { beforeAll, afterAll, beforeEach, expect } from 'vitest';
 import * as dotenv from 'dotenv';
 import { testDb } from './helpers/database.js';
 
@@ -26,8 +26,15 @@ afterAll(async () => {
   console.log('✅ Test environment cleaned up');
 }, 30000);
 
-// Reset database state between tests for isolation
+// Reset database state between tests for isolation.
+// Comparison tests own their lifecycle and seed once per file so cross-request
+// state (sessions, created records) can be asserted across related tests.
 beforeEach(async () => {
+  const testPath = expect.getState().testPath || '';
+  if (testPath.includes('/tests/comparison/')) {
+    return;
+  }
+
   // For unit tests, don't auto-seed to avoid conflicts
   await testDb.clearData();
 }, 10000);

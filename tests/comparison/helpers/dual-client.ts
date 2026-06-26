@@ -196,7 +196,6 @@ export class DualApiClient {
       method: method.toUpperCase() as 'GET' | 'POST' | 'PUT' | 'DELETE',
       url: endpoint,
       headers: {
-        'Content-Type': 'application/json',
         ...options.headers,
       },
     } as any;
@@ -211,6 +210,7 @@ export class DualApiClient {
       options.data &&
       ['POST', 'PUT', 'PATCH'].includes(method.toUpperCase())
     ) {
+      requestOptions.headers['Content-Type'] = 'application/json';
       requestOptions.payload = JSON.stringify(options.data);
     }
 

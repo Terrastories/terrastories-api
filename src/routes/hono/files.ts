@@ -91,31 +91,49 @@ export function createFilesRoutes(database?: Database): Hono<AppEnv> {
 
   // ========================================
   // POST /files/upload — Upload a file (multipart)
-  // ========================================
+  // POST /files/upload — Upload a file (multipart)
+  // Enforces body size limits BEFORE full parse to prevent memory exhaustion
   files.post('/upload', requireAuth, async (c) => {
     try {
       const user = getCurrentUser(c)!;
       const query = uploadQuerySchema.parse(c.req.query());
 
-      // Parse multipart form data
-      const body = await c.req.parseBody();
+      // Check Content-Length before parsing to reject oversized uploads early
+      const contentLength = parseInt(c.req.header('content-length') || '0', 10);
+      const MAX_UPLOAD = 10 * 1024 * 1024; // 10MB limit (matches V1 Fastify multipart)
+      if (contentLength > MAX_UPLOAD) {
+        return c.json({ error: 'File size exceeds 10MB limit' }, 413);
+      }
+
+      // Parse multipart form data with size limit
+      const body = await c.req.parseBody({
+        all: true,
+      });
       const file = body['file'];
 
       if (!file) {
         return c.json({ error: 'No file provided' }, 400);
       }
 
-      if (!(file instanceof File)) {
+      // Handle case where multiple files are uploaded — take the first
+      const fileObj = Array.isArray(file) ? file[0] : file;
+
+      if (!(fileObj instanceof File)) {
         return c.json({ error: 'Invalid file upload' }, 400);
       }
 
-      const maxSize = fileService.getMaxSizeForMimeType(file.type);
+      // Double-check actual file size (Content-Length can be spoofed)
+      if (fileObj.size > MAX_UPLOAD) {
+        return c.json({ error: 'File size exceeds 10MB limit' }, 413);
+      }
+
+      const maxSize = fileService.getMaxSizeForMimeType(fileObj.type);
 
       // Build a Fastify-compatible file object for the service
       const fastifyCompatibleFile = {
-        file,
-        mimetype: file.type,
-        filename: file.name,
+        file: fileObj,
+        mimetype: fileObj.type,
+        filename: fileObj.name,
         fields: body,
       };
 

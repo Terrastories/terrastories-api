@@ -320,6 +320,13 @@ export async function createStoriesRoutes(
         user.role
       );
 
+      // Enforce community isolation: verify the story belongs to user's community
+      if ((story as { communityId?: number }).communityId !== undefined &&
+          (story as { communityId: number }).communityId !== user.communityId &&
+          user.role !== 'super_admin') {
+        return c.json({ error: 'Access denied - community data isolation' }, 403);
+      }
+
       const warnings = addDeprecationWarnings();
       return c.json({
         data: story,
@@ -337,6 +344,11 @@ export async function createStoriesRoutes(
       const user = getCurrentUser(c)!;
       const { id } = storyParamsSchema.parse({ id: c.req.param('id') });
 
+      // Verify story belongs to user's community before deleting
+      const existing = await storyService.getStoryById(id, user.id, user.role, user.communityId);
+      if (!existing) {
+        return c.json({ error: 'Story not found' }, 404);
+      }
       await storyService.deleteStory(id, user.id, user.role);
 
       return c.body(null, 204);

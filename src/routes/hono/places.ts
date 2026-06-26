@@ -255,12 +255,11 @@ export function createPlacesRoutes(database?: Database): Hono<AppEnv> {
     }
   });
 
-  // GET /places — List with pagination
+  // GET /places — List with pagination (always scoped to user's community)
   places.get('/', requireAuth, async (c) => {
     try {
       const user = getCurrentUser(c)!;
       const params = PaginationSchema.parse(c.req.query());
-      const communityIdQuery = c.req.query('community_id');
 
       // Convert page-based params to offset-based for database queries
       const offset = (params.page - 1) * params.limit;
@@ -270,22 +269,12 @@ export function createPlacesRoutes(database?: Database): Hono<AppEnv> {
         page: params.page,
       };
 
-      let result;
-      if (communityIdQuery) {
-        // If community_id is specified, filter by that community
-        result = await placeService.getPlacesByCommunity(
-          parseInt(communityIdQuery, 10),
-          repositoryParams,
-          'viewer' // Use minimal permissions for public access
-        );
-      } else {
-        // Use the authenticated user's community ID as default
-        result = await placeService.getPlacesByCommunity(
-          user.communityId,
-          repositoryParams,
-          user.role
-        );
-      }
+      // Always use the authenticated user's community ID — no cross-community access
+      const result = await placeService.getPlacesByCommunity(
+        user.communityId,
+        repositoryParams,
+        user.role
+      );
 
       return c.json({
         data: result.data,
@@ -295,9 +284,7 @@ export function createPlacesRoutes(database?: Database): Hono<AppEnv> {
           limit: result.limit,
           pages: result.pages,
           filters: {
-            communityId: communityIdQuery
-              ? parseInt(communityIdQuery, 10)
-              : user.communityId,
+            communityId: user.communityId,
           },
         },
       });

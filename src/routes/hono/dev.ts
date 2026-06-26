@@ -11,7 +11,7 @@
 
 import { Hono } from 'hono';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import type { Database } from '../../db/index.js';
+import { getDb, type Database } from '../../db/index.js';
 import { CommunityRepository } from '../../repositories/community.repository.js';
 import { UserRepository } from '../../repositories/user.repository.js';
 import { UserService } from '../../services/user.service.js';
@@ -20,11 +20,15 @@ import { PlaceRepository } from '../../repositories/place.repository.js';
 import { StoryRepository } from '../../repositories/story.repository.js';
 import type { AppEnv } from '../../hono-app.js';
 
-export function createDevRoutes(database?: Database): Hono<AppEnv> {
+export async function createDevRoutes(database?: Database): Promise<Hono<AppEnv>> {
   const dev = new Hono<AppEnv>();
 
-  const db = database;
-  if (!db) return dev;
+  // Gate: dev routes must NEVER be enabled in production
+  if (process.env.NODE_ENV === 'production') {
+    return dev;
+  }
+
+  const db: Database = database ?? (await getDb());
 
   // ========================================
   // GET /dev/seed — Seed development test data

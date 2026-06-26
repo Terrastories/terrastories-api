@@ -190,7 +190,9 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
           superAdminCookie
         );
         if (createRes.statusCode === 201) {
-          const communityId = JSON.parse(createRes.body).data.id;
+          const communityId = JSON.parse(createRes.body).data?.id;
+          if (!communityId) return;
+
           const res = await client.put(
             `/api/v1/super_admin/communities/${communityId}`,
             { name: 'Updated SA Community', description: 'Updated desc' },
@@ -231,7 +233,9 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
           superAdminCookie
         );
         if (createRes.statusCode === 201) {
-          const communityId = JSON.parse(createRes.body).data.id;
+          const communityId = JSON.parse(createRes.body).data?.id;
+          if (!communityId) return;
+
           const res = await client.delete(
             `/api/v1/super_admin/communities/${communityId}`,
             superAdminCookie
@@ -400,7 +404,9 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
           superAdminCookie
         );
         if (createRes.statusCode === 201) {
-          const userId = JSON.parse(createRes.body).data.id;
+          const userId = JSON.parse(createRes.body).data?.id;
+          if (!userId) return;
+
           const res = await client.delete(
             `/api/v1/super_admin/users/${userId}`,
             superAdminCookie

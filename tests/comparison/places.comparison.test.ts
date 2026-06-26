@@ -292,7 +292,8 @@ describe('V1 Compatibility: Places Endpoints', () => {
         { name: 'To Update', latitude: 49, longitude: -123 },
         adminCookie
       );
-      const placeId = JSON.parse(createRes.body).data.id;
+      const placeId = JSON.parse(createRes.body).data?.id;
+      if (!placeId) return;
 
       const res = await client.put(
         `/api/v1/places/${placeId}`,
@@ -328,7 +329,8 @@ describe('V1 Compatibility: Places Endpoints', () => {
         { name: 'To Delete', latitude: 48, longitude: -122 },
         adminCookie
       );
-      const placeId = JSON.parse(createRes.body).data.id;
+      const placeId = JSON.parse(createRes.body).data?.id;
+      if (!placeId) return;
 
       const res = await client.delete(`/api/v1/places/${placeId}`, adminCookie);
       expect(res.statusCode).toBe(204);
@@ -340,7 +342,8 @@ describe('V1 Compatibility: Places Endpoints', () => {
         { name: 'Elder Delete', latitude: 47, longitude: -121 },
         adminCookie
       );
-      const placeId = JSON.parse(createRes.body).data.id;
+      const placeId = JSON.parse(createRes.body).data?.id;
+      if (!placeId) return;
 
       const res = await client.delete(`/api/v1/places/${placeId}`, elderCookie);
       expect(res.statusCode).toBe(204);

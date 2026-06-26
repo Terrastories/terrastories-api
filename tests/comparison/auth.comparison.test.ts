@@ -16,6 +16,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { FastifyInstance } from 'fastify';
 import { DualApiClient } from './helpers/dual-client';
 import { createTestApp } from '../helpers/api-client';
 import { testDb, createTestData } from '../helpers/database';
@@ -25,7 +26,7 @@ describe('V1 Compatibility: Auth', () => {
   let viewerToken: string;
   let adminToken: string;
   let communityId: number;
-  let app: any;
+  let app: FastifyInstance;
 
   beforeAll(async () => {
     const db = await testDb.setup();

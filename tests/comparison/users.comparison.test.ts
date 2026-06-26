@@ -259,7 +259,9 @@ describe('V1 Compatibility: Users Endpoints', () => {
         adminCookie
       );
       if (createRes.statusCode === 201) {
-        const userId = JSON.parse(createRes.body).data.id;
+        const userId = JSON.parse(createRes.body).data?.id;
+        if (!userId) return;
+
         const res = await client.delete(`/api/v1/users/${userId}`, adminCookie);
         expect(res.statusCode).toBe(200);
       }

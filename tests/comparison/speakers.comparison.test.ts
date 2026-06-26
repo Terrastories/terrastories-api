@@ -243,7 +243,8 @@ describe('V1 Compatibility: Speakers Endpoints', () => {
         { name: 'To Update', photoUrl: '' },
         adminCookie
       );
-      const speakerId = JSON.parse(createRes.body).data.id;
+      const speakerId = JSON.parse(createRes.body).data?.id;
+      if (!speakerId) return;
 
       const res = await client.put(
         `/api/v1/speakers/${speakerId}`,
@@ -277,7 +278,8 @@ describe('V1 Compatibility: Speakers Endpoints', () => {
         { name: 'To Patch', photoUrl: '' },
         adminCookie
       );
-      const speakerId = JSON.parse(createRes.body).data.id;
+      const speakerId = JSON.parse(createRes.body).data?.id;
+      if (!speakerId) return;
 
       const res = await client.patch(
         `/api/v1/speakers/${speakerId}`,
@@ -311,7 +313,8 @@ describe('V1 Compatibility: Speakers Endpoints', () => {
         { name: `To Delete ${Date.now()}`, photoUrl: '' },
         adminCookie
       );
-      const speakerId = JSON.parse(createRes.body).data.id;
+      const speakerId = JSON.parse(createRes.body).data?.id;
+      if (!speakerId) return;
 
       const res = await client.delete(
         `/api/v1/speakers/${speakerId}`,

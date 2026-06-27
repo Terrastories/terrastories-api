@@ -10,7 +10,7 @@
  * - Session via custom SessionStore instead of @fastify/session
  */
 
-import type { Context, Next } from 'hono';
+import type { Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { createMiddleware } from 'hono/factory';
 import {
@@ -83,7 +83,10 @@ export async function createSession(
   await store.set(sessionId, sessionData, ttl);
 
   // Set signed cookie
-  const signedValue = createSessionCookie(sessionId, config.auth.session.secret);
+  const signedValue = createSessionCookie(
+    sessionId,
+    config.auth.session.secret
+  );
   setCookie(c, 'sessionId', signedValue, {
     httpOnly: config.auth.session.httpOnly,
     secure: config.auth.session.secure,
@@ -103,7 +106,6 @@ export async function createSession(
  * Destroy current session and clear cookie.
  */
 export async function destroySession(c: Context): Promise<void> {
-  const config = getConfig();
   const sessionId = c.get('sessionId' as never) as string | undefined;
   if (sessionId) {
     const store = getSessionStore();
@@ -153,28 +155,19 @@ export const requireAuth = createMiddleware<{
   const cookieValue = getCookie(c, 'sessionId');
 
   if (!cookieValue) {
-    return c.json(
-      { error: { message: 'Authentication required' } },
-      401
-    );
+    return c.json({ error: { message: 'Authentication required' } }, 401);
   }
 
   const sessionId = parseSessionCookie(cookieValue, config.auth.session.secret);
   if (!sessionId) {
-    return c.json(
-      { error: { message: 'Authentication required' } },
-      401
-    );
+    return c.json({ error: { message: 'Authentication required' } }, 401);
   }
 
   const store = getSessionStore();
   const session = await store.get(sessionId);
 
   if (!session) {
-    return c.json(
-      { error: { message: 'Authentication required' } },
-      401
-    );
+    return c.json({ error: { message: 'Authentication required' } }, 401);
   }
 
   c.set('user', session.user as SessionUser);
@@ -186,21 +179,16 @@ export const requireAuth = createMiddleware<{
  * Require specific role(s). Must be used after requireAuth.
  */
 export function requireRole(roles: string[]) {
-  return createMiddleware<{ Variables: AppAuthVariables }>(
-    async (c, next) => {
-      const user = c.get('user' as never) as SessionUser | undefined;
-      if (!user) {
-        return c.json({ error: { message: 'Authentication required' } }, 401);
-      }
-      if (!roles.includes(user.role)) {
-        return c.json(
-          { error: { message: 'Insufficient permissions' } },
-          403
-        );
-      }
-      await next();
+  return createMiddleware<{ Variables: AppAuthVariables }>(async (c, next) => {
+    const user = c.get('user' as never) as SessionUser | undefined;
+    if (!user) {
+      return c.json({ error: { message: 'Authentication required' } }, 401);
     }
-  );
+    if (!roles.includes(user.role)) {
+      return c.json({ error: { message: 'Insufficient permissions' } }, 403);
+    }
+    await next();
+  });
 }
 
 /**
@@ -214,10 +202,7 @@ export const requireAdmin = createMiddleware<{
     return c.json({ error: { message: 'Authentication required' } }, 401);
   }
   if (!['admin', 'super_admin'].includes(user.role)) {
-    return c.json(
-      { error: { message: 'Insufficient permissions' } },
-      403
-    );
+    return c.json({ error: { message: 'Insufficient permissions' } }, 403);
   }
   await next();
 });
@@ -233,10 +218,7 @@ export const requireSuperAdmin = createMiddleware<{
     return c.json({ error: { message: 'Authentication required' } }, 401);
   }
   if (user.role !== 'super_admin') {
-    return c.json(
-      { error: { message: 'Insufficient permissions' } },
-      403
-    );
+    return c.json({ error: { message: 'Insufficient permissions' } }, 403);
   }
   await next();
 });
@@ -278,57 +260,48 @@ export const enforceDataSovereignty = createMiddleware<{
  * Enforces data sovereignty + community isolation.
  */
 export function requireCommunityAccess() {
-  return createMiddleware<{ Variables: AppAuthVariables }>(
-    async (c, next) => {
-      const user = c.get('user' as never) as SessionUser | undefined;
-      if (!user) {
-        return c.json(
-          { error: { message: 'Authentication required' } },
-          401
-        );
-      }
-
-      // Data sovereignty: super_admin cannot access community data
-      if (user.role === 'super_admin') {
-        return c.json(
-          {
-            error: {
-              message:
-                'Super administrators cannot access community data',
-            },
-            reason: 'Indigenous data sovereignty protection',
-          },
-          403
-        );
-      }
-
-      // Community isolation check
-      const requestedCommunityId = extractCommunityId(c);
-      if (
-        requestedCommunityId &&
-        requestedCommunityId !== user.communityId
-      ) {
-        console.warn(
-          JSON.stringify({
-            userId: user.id,
-            userCommunityId: user.communityId,
-            requestedCommunityId,
-            userRole: user.role,
-          })
-        );
-        return c.json(
-          {
-            error: {
-              message: 'Access denied - community data isolation',
-            },
-          },
-          403
-        );
-      }
-
-      await next();
+  return createMiddleware<{ Variables: AppAuthVariables }>(async (c, next) => {
+    const user = c.get('user' as never) as SessionUser | undefined;
+    if (!user) {
+      return c.json({ error: { message: 'Authentication required' } }, 401);
     }
-  );
+
+    // Data sovereignty: super_admin cannot access community data
+    if (user.role === 'super_admin') {
+      return c.json(
+        {
+          error: {
+            message: 'Super administrators cannot access community data',
+          },
+          reason: 'Indigenous data sovereignty protection',
+        },
+        403
+      );
+    }
+
+    // Community isolation check
+    const requestedCommunityId = extractCommunityId(c);
+    if (requestedCommunityId && requestedCommunityId !== user.communityId) {
+      console.warn(
+        JSON.stringify({
+          userId: user.id,
+          userCommunityId: user.communityId,
+          requestedCommunityId,
+          userRole: user.role,
+        })
+      );
+      return c.json(
+        {
+          error: {
+            message: 'Access denied - community data isolation',
+          },
+        },
+        403
+      );
+    }
+
+    await next();
+  });
 }
 
 // ========================================

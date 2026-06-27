@@ -7,10 +7,7 @@
 
 import type { Context } from 'hono';
 import { ZodError } from 'zod';
-import {
-  AppError,
-  mapErrorToHttpResponse,
-} from '../errors/index.js';
+import { mapErrorToHttpResponse } from '../errors/index.js';
 
 /**
  * Handle errors in Hono route handlers consistently.
@@ -25,10 +22,7 @@ export function handleHonoError(c: Context, error: unknown): Response {
  * ZodError-specific handler for validation errors.
  * Matches V1 format: { error: string, statusCode: 400 }
  */
-export function handleZodError(
-  c: Context,
-  error: ZodError
-): Response {
+export function handleZodError(c: Context, error: ZodError): Response {
   const firstError = error.issues[0];
   return c.json(
     {

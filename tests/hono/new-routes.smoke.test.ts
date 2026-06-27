@@ -13,8 +13,9 @@ import {
   createHonoTestApp,
   honoRequest,
   honoLogin,
+  type HonoTestApp,
 } from '../helpers/hono-client';
-import { testDb, createTestData } from '../helpers/database';
+import { testDb, createTestData, type TestDatabase } from '../helpers/database';
 import {
   setSessionStore,
   MemorySessionStore,
@@ -22,8 +23,6 @@ import {
 import { createPlacesRoutes } from '../../src/routes/hono/places.js';
 import { createSpeakersRoutes } from '../../src/routes/hono/speakers.js';
 import { createPublicApiRoutes } from '../../src/routes/hono/public-api.js';
-import type { HonoTestApp } from '../helpers/hono-client';
-import type { TestDatabase } from '../helpers/database';
 
 /**
  * Build a Hono app that has the V2 auth routes (for login) PLUS the three new
@@ -35,9 +34,7 @@ import type { TestDatabase } from '../helpers/database';
  * GET /communities list endpoint. The public-api route factory itself defines
  * routes relative to /communities/* — only the mount prefix differs here.
  */
-async function buildAppWithNewRoutes(
-  db: TestDatabase
-): Promise<HonoTestApp> {
+async function buildAppWithNewRoutes(db: TestDatabase): Promise<HonoTestApp> {
   const base = await createHonoTestApp(db);
   const app = new Hono();
   // Mount the full built app (which has /v2/auth, /v2/themes, /v2/health) ...
@@ -138,7 +135,10 @@ describe('Hono V2: Places endpoints (new route factory)', () => {
       },
     });
     expect(res.status).toBe(201);
-    const body = res.body as { data: Record<string, unknown>; meta: Record<string, unknown> };
+    const body = res.body as {
+      data: Record<string, unknown>;
+      meta: Record<string, unknown>;
+    };
     expect(body.data).toHaveProperty('id');
     expect(body.data).toHaveProperty('name', 'Admin Created Place');
     expect(body.meta).toHaveProperty('message');
@@ -212,9 +212,14 @@ describe('Hono V2: Places endpoints (new route factory)', () => {
   });
 
   it('should delete a place as admin (204)', async () => {
-    const res = await honoRequest(app, 'DELETE', `/v2/places/${createdPlaceId}`, {
-      cookie: adminCookie,
-    });
+    const res = await honoRequest(
+      app,
+      'DELETE',
+      `/v2/places/${createdPlaceId}`,
+      {
+        cookie: adminCookie,
+      }
+    );
     expect(res.status).toBe(204);
   });
 });
@@ -301,7 +306,10 @@ describe('Hono V2: Speakers endpoints (new route factory)', () => {
       },
     });
     expect(res.status).toBe(201);
-    const body = res.body as { data: Record<string, unknown>; meta: Record<string, unknown> };
+    const body = res.body as {
+      data: Record<string, unknown>;
+      meta: Record<string, unknown>;
+    };
     expect(body.data).toHaveProperty('id');
     expect(body.data).toHaveProperty('name', 'Smoke Test Speaker');
     createdSpeakerId = body.data.id as number;
@@ -319,9 +327,14 @@ describe('Hono V2: Speakers endpoints (new route factory)', () => {
   });
 
   it('should get a speaker by id (200)', async () => {
-    const res = await honoRequest(app, 'GET', `/v2/speakers/${createdSpeakerId}`, {
-      cookie: adminCookie,
-    });
+    const res = await honoRequest(
+      app,
+      'GET',
+      `/v2/speakers/${createdSpeakerId}`,
+      {
+        cookie: adminCookie,
+      }
+    );
     expect(res.status).toBe(200);
     const body = res.body as { data: Record<string, unknown> };
     expect(body.data).toHaveProperty('id', createdSpeakerId);
@@ -337,31 +350,38 @@ describe('Hono V2: Speakers endpoints (new route factory)', () => {
   });
 
   it('should hit /search (static route before /:id) (200)', async () => {
-    const res = await honoRequest(
-      app,
-      'GET',
-      '/v2/speakers/search?q=Smoke',
-      { cookie: adminCookie }
-    );
+    const res = await honoRequest(app, 'GET', '/v2/speakers/search?q=Smoke', {
+      cookie: adminCookie,
+    });
     expect(res.status).toBe(200);
     const body = res.body as { data: unknown[]; meta: Record<string, unknown> };
     expect(Array.isArray(body.data)).toBe(true);
   });
 
   it('should update a speaker via PATCH as admin (200)', async () => {
-    const res = await honoRequest(app, 'PATCH', `/v2/speakers/${createdSpeakerId}`, {
-      cookie: adminCookie,
-      body: { bio: 'patched bio' },
-    });
+    const res = await honoRequest(
+      app,
+      'PATCH',
+      `/v2/speakers/${createdSpeakerId}`,
+      {
+        cookie: adminCookie,
+        body: { bio: 'patched bio' },
+      }
+    );
     expect(res.status).toBe(200);
     const body = res.body as { data: Record<string, unknown> };
     expect(body.data).toHaveProperty('bio', 'patched bio');
   });
 
   it('should delete a speaker as admin (204)', async () => {
-    const res = await honoRequest(app, 'DELETE', `/v2/speakers/${createdSpeakerId}`, {
-      cookie: adminCookie,
-    });
+    const res = await honoRequest(
+      app,
+      'DELETE',
+      `/v2/speakers/${createdSpeakerId}`,
+      {
+        cookie: adminCookie,
+      }
+    );
     expect(res.status).toBe(204);
   });
 });

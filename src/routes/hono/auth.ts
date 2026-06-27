@@ -68,7 +68,9 @@ const loginSchema = z.object({
 // ROUTE SETUP
 // ========================================
 
-export async function createAuthRoutes(database?: Database): Promise<Hono<AppEnv>> {
+export async function createAuthRoutes(
+  database?: Database
+): Promise<Hono<AppEnv>> {
   const authRoutes = new Hono<AppEnv>();
 
   // Initialize services
@@ -211,10 +213,7 @@ export async function createAuthRoutes(database?: Database): Promise<Hono<AppEnv
         }
       }
 
-      return c.json(
-        { error: 'Internal server error', statusCode: 500 },
-        500
-      );
+      return c.json({ error: 'Internal server error', statusCode: 500 }, 500);
     }
   });
 
@@ -225,11 +224,8 @@ export async function createAuthRoutes(database?: Database): Promise<Hono<AppEnv
     try {
       await destroySession(c);
       return c.json({ message: 'Successfully logged out' });
-    } catch (error) {
-      return c.json(
-        { error: 'Internal server error', statusCode: 500 },
-        500
-      );
+    } catch {
+      return c.json({ error: 'Internal server error', statusCode: 500 }, 500);
     }
   });
 
@@ -239,10 +235,7 @@ export async function createAuthRoutes(database?: Database): Promise<Hono<AppEnv
   authRoutes.get('/auth/me', requireAuth, async (c) => {
     const currentUser = getCurrentUser(c);
     if (!currentUser) {
-      return c.json(
-        { error: 'Authentication required', statusCode: 401 },
-        401
-      );
+      return c.json({ error: 'Authentication required', statusCode: 401 }, 401);
     }
 
     return c.json({

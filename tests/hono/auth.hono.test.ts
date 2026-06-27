@@ -6,10 +6,17 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createHonoTestApp, honoRequest, honoLogin } from '../helpers/hono-client';
+import {
+  createHonoTestApp,
+  honoRequest,
+  honoLogin,
+  type HonoTestApp,
+} from '../helpers/hono-client';
 import { testDb, createTestData, type TestDatabase } from '../helpers/database';
-import { setSessionStore, MemorySessionStore } from '../../src/shared/session/session-store';
-import type { HonoTestApp } from '../helpers/hono-client';
+import {
+  setSessionStore,
+  MemorySessionStore,
+} from '../../src/shared/session/session-store';
 
 describe('Hono V2: Auth endpoints', () => {
   let app: HonoTestApp;
@@ -108,7 +115,10 @@ describe('Hono V2: Auth endpoints', () => {
       });
 
       expect(response.status).toBe(200);
-      const body = response.body as { user: Record<string, unknown>; sessionId: string };
+      const body = response.body as {
+        user: Record<string, unknown>;
+        sessionId: string;
+      };
       expect(body.user).toHaveProperty('email', 'hono-test@example.com');
       expect(body).toHaveProperty('sessionId');
       expect(typeof body.sessionId).toBe('string');

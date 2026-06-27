@@ -5,10 +5,17 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createHonoTestApp, honoRequest, honoLogin } from '../helpers/hono-client';
+import {
+  createHonoTestApp,
+  honoRequest,
+  honoLogin,
+  type HonoTestApp,
+} from '../helpers/hono-client';
 import { testDb, createTestData, type TestDatabase } from '../helpers/database';
-import { setSessionStore, MemorySessionStore } from '../../src/shared/session/session-store';
-import type { HonoTestApp } from '../helpers/hono-client';
+import {
+  setSessionStore,
+  MemorySessionStore,
+} from '../../src/shared/session/session-store';
 
 describe('Hono V2: Themes endpoints', () => {
   let app: HonoTestApp;
@@ -38,7 +45,12 @@ describe('Hono V2: Themes endpoints', () => {
         communityId,
       },
     });
-    adminCookie = await honoLogin(app, 'themes-admin@test.com', 'TestPass123!', communityId);
+    adminCookie = await honoLogin(
+      app,
+      'themes-admin@test.com',
+      'TestPass123!',
+      communityId
+    );
 
     // Register and login a viewer
     await honoRequest(app, 'POST', '/v2/auth/register', {
@@ -51,7 +63,12 @@ describe('Hono V2: Themes endpoints', () => {
         communityId,
       },
     });
-    viewerCookie = await honoLogin(app, 'themes-viewer@test.com', 'TestPass123!', communityId);
+    viewerCookie = await honoLogin(
+      app,
+      'themes-viewer@test.com',
+      'TestPass123!',
+      communityId
+    );
   });
 
   afterAll(async () => {
@@ -107,7 +124,10 @@ describe('Hono V2: Themes endpoints', () => {
       });
 
       expect(response.status).toBe(200);
-      const body = response.body as { data: unknown[]; meta: Record<string, unknown> };
+      const body = response.body as {
+        data: unknown[];
+        meta: Record<string, unknown>;
+      };
       expect(Array.isArray(body.data)).toBe(true);
       expect(body.meta).toHaveProperty('total');
       expect(body.meta).toHaveProperty('page');
@@ -121,9 +141,14 @@ describe('Hono V2: Themes endpoints', () => {
 
   describe('GET /v2/themes/:id', () => {
     it('should get theme by id', async () => {
-      const response = await honoRequest(app, 'GET', `/v2/themes/${createdThemeId}`, {
-        cookie: adminCookie,
-      });
+      const response = await honoRequest(
+        app,
+        'GET',
+        `/v2/themes/${createdThemeId}`,
+        {
+          cookie: adminCookie,
+        }
+      );
 
       expect(response.status).toBe(200);
       const body = response.body as { data: Record<string, unknown> };
@@ -141,16 +166,21 @@ describe('Hono V2: Themes endpoints', () => {
 
   describe('PUT /v2/themes/:id', () => {
     it('should update theme as admin', async () => {
-      const response = await honoRequest(app, 'PUT', `/v2/themes/${createdThemeId}`, {
-        cookie: adminCookie,
-        body: {
-          name: 'Updated Theme',
-          description: 'Updated description',
-          active: true,
-          centerLat: 49.2827,
-          centerLong: -123.1234,
-        },
-      });
+      const response = await honoRequest(
+        app,
+        'PUT',
+        `/v2/themes/${createdThemeId}`,
+        {
+          cookie: adminCookie,
+          body: {
+            name: 'Updated Theme',
+            description: 'Updated description',
+            active: true,
+            centerLat: 49.2827,
+            centerLong: -123.1234,
+          },
+        }
+      );
 
       expect(response.status).toBe(200);
       const body = response.body as { data: Record<string, unknown> };
@@ -160,9 +190,14 @@ describe('Hono V2: Themes endpoints', () => {
 
   describe('DELETE /v2/themes/:id', () => {
     it('should delete theme as admin', async () => {
-      const response = await honoRequest(app, 'DELETE', `/v2/themes/${createdThemeId}`, {
-        cookie: adminCookie,
-      });
+      const response = await honoRequest(
+        app,
+        'DELETE',
+        `/v2/themes/${createdThemeId}`,
+        {
+          cookie: adminCookie,
+        }
+      );
 
       expect(response.status).toBe(204);
     });

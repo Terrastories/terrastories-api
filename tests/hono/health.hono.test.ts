@@ -5,9 +5,12 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createHonoTestApp, honoRequest } from '../helpers/hono-client';
+import {
+  createHonoTestApp,
+  honoRequest,
+  type HonoTestApp,
+} from '../helpers/hono-client';
 import { testDb } from '../helpers/database';
-import type { HonoTestApp } from '../helpers/hono-client';
 
 describe('Hono V2: GET /v2/health', () => {
   let app: HonoTestApp;

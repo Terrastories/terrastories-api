@@ -7,7 +7,6 @@
 
 import { Hono } from 'hono';
 import { getConfig, validateConfig } from '../../shared/config/index.js';
-import { testConnection } from '../../db/index.js';
 import type { AppEnv } from '../../hono-app.js';
 
 export const healthRoutes = new Hono<AppEnv>();
@@ -16,7 +15,11 @@ healthRoutes.get('/health', (c) => {
   const config = getConfig();
   const configValidation = validateConfig();
   // Don't block the health check on DB connection during tests
-  let databaseStatus: { connected: boolean; spatialSupport: boolean; version: string | null };
+  let databaseStatus: {
+    connected: boolean;
+    spatialSupport: boolean;
+    version: string | null;
+  };
   try {
     databaseStatus = {
       connected: true,

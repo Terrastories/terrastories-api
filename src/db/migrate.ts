@@ -25,39 +25,32 @@ async function runMigrations() {
       config.database.url.startsWith('postgresql://') ||
       config.database.url.startsWith('postgres://');
 
-    const migrationsFolder = path.join(__dirname, 'migrations');
+    const sqliteMigrationsFolder = path.join(__dirname, 'migrations');
+    const postgresMigrationsFolder = path.join(
+      __dirname,
+      'migrations',
+      'postgres'
+    );
 
     if (isPostgres) {
       console.log('📊 Running PostgreSQL migrations...');
 
-      // Ensure PostGIS extension is enabled before running migrations
+      // Production spatial support is fail-closed. Continuing without PostGIS
+      // would make a successful startup hide a broken production capability.
       if (config.database.spatialSupport) {
         console.log('🌍 Setting up PostGIS extension...');
-        try {
-          const pgDatabase = database as ReturnType<
-            typeof import('drizzle-orm/postgres-js').drizzle
-          >;
-          await pgDatabase.execute('CREATE EXTENSION IF NOT EXISTS postgis;');
-          await pgDatabase.execute(
-            'CREATE EXTENSION IF NOT EXISTS postgis_topology;'
-          );
-
-          console.log('✅ PostGIS extensions enabled');
-        } catch (error: unknown) {
-          const errorMessage =
-            error instanceof Error ? error.message : 'Unknown error';
-
-          console.warn('⚠️ Could not enable PostGIS extensions:', errorMessage);
-
-          console.warn('   Please ensure PostgreSQL has PostGIS installed');
-        }
+        const pgDatabase = database as ReturnType<
+          typeof import('drizzle-orm/postgres-js').drizzle
+        >;
+        await pgDatabase.execute('CREATE EXTENSION IF NOT EXISTS postgis;');
+        console.log('✅ PostGIS extension enabled');
       }
 
       await migratePostgres(
         database as ReturnType<
           typeof import('drizzle-orm/postgres-js').drizzle
         >,
-        { migrationsFolder }
+        { migrationsFolder: postgresMigrationsFolder }
       );
     } else {
       console.log('📊 Running SQLite migrations...');
@@ -65,7 +58,7 @@ async function runMigrations() {
         database as ReturnType<
           typeof import('drizzle-orm/better-sqlite3').drizzle
         >,
-        { migrationsFolder }
+        { migrationsFolder: sqliteMigrationsFolder }
       );
     }
 
@@ -84,6 +77,18 @@ async function runMigrations() {
     );
     if (connectionTest.version) {
       console.log(`  Spatial Version: ${connectionTest.version}`);
+    }
+
+    if (!connectionTest.connected) {
+      throw new Error('Database connection check failed after migration');
+    }
+
+    if (
+      isPostgres &&
+      config.database.spatialSupport &&
+      !connectionTest.spatialSupport
+    ) {
+      throw new Error('PostGIS verification failed after migration');
     }
 
     process.exit(0);

@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "test": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:postgres": "tsx scripts/test-postgres-ci.ts",
     "test:ci": "node scripts/test-ci.js",
     "lint": "eslint .",
     "format": "prettier --write .",

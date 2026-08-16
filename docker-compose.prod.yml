@@ -54,7 +54,7 @@ services:
       start_period: 30s
     restart: unless-stopped
     # Security: run database migrations on startup
-    command: sh -c "npm run db:migrate && npm start"
+    command: sh -c "node dist/db/migrate.js && npm start"
 
   # =============================================================================
   # DATABASE SERVICE - Production Configuration

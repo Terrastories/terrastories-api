@@ -413,7 +413,9 @@ export class PlaceRepository {
 
     if (this.isPostgres) {
       // Use PostGIS for PostgreSQL
-      const distanceCondition = sql`${spatialHelpers.findWithinRadius(latitude, longitude, radiusMeters)}`;
+      const distanceCondition = sql.raw(
+        spatialHelpers.findWithinRadius(latitude, longitude, radiusMeters)
+      );
 
       let whereCondition = and(
         eq(placesTable.communityId, communityId),
@@ -443,10 +445,9 @@ export class PlaceRepository {
                 'function'
             )
           ) as { [K in keyof Place]: any }),
-          distance:
-            sql<number>`${spatialHelpers.calculateDistance(latitude, longitude)}`.as(
-              'distance'
-            ),
+          distance: sql
+            .raw(spatialHelpers.calculateDistance(latitude, longitude))
+            .as('distance'),
         })
         .from(placesTable)
         .where(whereCondition)

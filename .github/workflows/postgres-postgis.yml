@@ -1,0 +1,53 @@
+name: PostgreSQL / PostGIS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: postgres-postgis-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgres-postgis:
+    name: PostgreSQL 13 / PostGIS integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgis/postgis:13-master
+        env:
+          POSTGRES_DB: terrastories_test
+          POSTGRES_USER: terrastories
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U terrastories -d terrastories_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://terrastories@127.0.0.1:5432/terrastories_test
+      ALLOW_POSTGRES_TEST_RESET: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run PostgreSQL/PostGIS production gate
+        run: npm run test:postgres

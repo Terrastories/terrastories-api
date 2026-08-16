@@ -91,7 +91,9 @@ export async function testConnection(): Promise<{
           database as ReturnType<typeof drizzlePostgres>
         ).execute('SELECT PostGIS_Version() as version');
 
-        version = (result as any).rows[0]?.version || null;
+        const postgresResult = result as any;
+        const firstRow = postgresResult.rows?.[0] ?? postgresResult[0];
+        version = firstRow?.version || null;
         spatialSupport = !!version;
       } catch {
         spatialSupport = false;

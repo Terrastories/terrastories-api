@@ -248,7 +248,7 @@ export const spatialHelpers = {
     const validLat = validateCoordinate(lat, 'latitude');
     const validLng = validateCoordinate(lng, 'longitude');
     const validRadius = validateRadius(radiusMeters);
-    return `ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)::geography, ${validRadius})`;
+    return `ST_DWithin(location::geography, ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)::geography, ${validRadius})`;
   },
 
   /**
@@ -285,7 +285,7 @@ export const spatialHelpers = {
   calculateDistance: (fromLat: number, fromLng: number) => {
     const validFromLat = validateCoordinate(fromLat, 'latitude');
     const validFromLng = validateCoordinate(fromLng, 'longitude');
-    return `ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validFromLng}, ${validFromLat}), 4326)::geography)`;
+    return `ST_Distance(location::geography, ST_SetSRID(ST_MakePoint(${validFromLng}, ${validFromLat}), 4326)::geography)`;
   },
 };
 

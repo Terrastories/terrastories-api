@@ -78,8 +78,9 @@ WORKDIR /app
 # Create uploads directory with proper permissions
 RUN mkdir -p uploads && chown -R terrastories:nodejs uploads
 
-# Copy built application from builder stage
+# Copy built application and runtime migration assets from builder stage
 COPY --from=builder --chown=terrastories:nodejs /app/dist ./dist
+COPY --from=builder --chown=terrastories:nodejs /app/src/db/migrations ./dist/db/migrations
 COPY --from=builder --chown=terrastories:nodejs /app/node_modules ./node_modules
 COPY --chown=terrastories:nodejs package*.json ./
 

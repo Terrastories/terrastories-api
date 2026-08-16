@@ -28,6 +28,11 @@ import type {
   UserRole,
 } from '../db/schema/index.js';
 
+// Valid Argon2id hash using production cost parameters. Missing-account logins
+// verify against it so account existence is not exposed by an early return.
+const MISSING_USER_PASSWORD_HASH =
+  '$argon2id$v=19$m=65536,t=3,p=4$zmrpwWjd/22YAdNLqekLcQ$xIWwLze3LPYg0mfkGGHY4dvtc/d68Bx4PeE1hEFnxik';
+
 /**
  * Request data for user registration
  */
@@ -271,16 +276,14 @@ export class UserService {
     try {
       // Find user by email in community
       const user = await this.userRepository.findByEmail(email, communityId);
-      if (!user) {
-        throw new AuthenticationError();
-      }
 
-      // Verify password using timing-safe comparison
+      // Always perform an Argon2 verification, even when the user does not exist,
+      // to avoid exposing account existence through response timing.
       const isValidPassword = await passwordService.comparePassword(
         password,
-        user.passwordHash
+        user?.passwordHash ?? MISSING_USER_PASSWORD_HASH
       );
-      if (!isValidPassword) {
+      if (!user || !isValidPassword) {
         throw new AuthenticationError();
       }
 
@@ -311,16 +314,13 @@ export class UserService {
     try {
       // Find user by email globally (across all communities)
       const user = await this.userRepository.findByEmailGlobal(email);
-      if (!user) {
-        throw new AuthenticationError();
-      }
 
-      // Verify password using timing-safe comparison
+      // Keep missing-account and wrong-password paths computationally equivalent.
       const isValidPassword = await passwordService.comparePassword(
         password,
-        user.passwordHash
+        user?.passwordHash ?? MISSING_USER_PASSWORD_HASH
       );
-      if (!isValidPassword) {
+      if (!user || !isValidPassword) {
         throw new AuthenticationError();
       }
 
@@ -607,7 +607,19 @@ export class UserService {
       active?: boolean;
     } = {}
   ): Promise<{
-    data: any[]; // UserResponse type - will define properly
+    data: Array<{
+      id: number;
+      email: string;
+      firstName: string;
+      lastName: string;
+      role: UserRole;
+      communityId: number;
+      communityName: string;
+      isActive: boolean;
+      createdAt: string;
+      updatedAt: string;
+      lastLoginAt: string | null;
+    }>;
     meta: {
       page: number;
       limit: number;
@@ -672,7 +684,7 @@ export class UserService {
       ]);
 
       // Transform users to response format
-      const data = users.map((user: any) => ({
+      const data = users.map((user) => ({
         id: user.id,
         email: user.email,
         firstName: user.firstName,
@@ -717,7 +729,7 @@ export class UserService {
     role: string;
     communityId: number;
     isActive?: boolean;
-  }): Promise<any> {
+  }): Promise<User> {
     try {
       // Super admin can create users in any community
       // Use the existing registerUser method but bypass community restrictions
@@ -764,7 +776,7 @@ export class UserService {
       communityId?: number;
       isActive?: boolean;
     }
-  ): Promise<any> {
+  ): Promise<User> {
     try {
       // Super admin can update any user including cross-community changes
       const updateData: Partial<UpdateUserData> = {
@@ -1174,7 +1186,10 @@ export class UserService {
       };
     } catch (error) {
       // Re-throw known error types
-      if (error instanceof UserNotFoundError) {
+      if (
+        error instanceof UserNotFoundError ||
+        error instanceof SelfDeletionError
+      ) {
         throw error;
       }
       throw new Error(

@@ -87,9 +87,17 @@ describe('Database Integration Tests', () => {
 
     it('should delete communities', async () => {
       const database = await testDb.getDb();
-      const testCommunity = fixtures.communities[2]; // Use isolated test community
+      const [testCommunity] = await database
+        .insert(communities)
+        .values(
+          TestDataFactory.createCommunity({
+            name: 'Deletion Test Community',
+            slug: 'deletion-test-community',
+          })
+        )
+        .returning();
 
-      // Delete community
+      // Delete an isolated community with no child records.
       await database
         .delete(communities)
         .where(eq(communities.id, testCommunity.id));

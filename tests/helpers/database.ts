@@ -724,8 +724,9 @@ export interface TestFixtures {
 export class TestDataFactory {
   static createCommunity(
     overrides: Partial<Community> = {}
-  ): Omit<Community, 'id' | 'createdAt' | 'updatedAt'> {
+  ): Omit<Community, 'id'> {
     const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const now = new Date();
     return {
       name: 'Factory Community',
       description: 'A community created by the test factory',
@@ -734,6 +735,8 @@ export class TestDataFactory {
       locale: 'en',
       culturalSettings: null,
       isActive: true,
+      createdAt: now,
+      updatedAt: now,
       ...overrides,
     };
   }
@@ -741,7 +744,8 @@ export class TestDataFactory {
   static createPlace(
     communityId: number,
     overrides: Partial<Place> = {}
-  ): Omit<Place, 'id' | 'createdAt' | 'updatedAt'> {
+  ): Omit<Place, 'id'> {
+    const now = new Date();
     return {
       name: 'Factory Place',
       description: 'A place created by the test factory',
@@ -752,6 +756,8 @@ export class TestDataFactory {
       culturalSignificance: null,
       isRestricted: false,
       communityId: communityId,
+      createdAt: now,
+      updatedAt: now,
       ...overrides,
     };
   }

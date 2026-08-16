@@ -5,7 +5,15 @@
  * Falls back gracefully when PostgreSQL is not available.
  */
 
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  afterEach,
+} from 'vitest';
 import { getDb, testConnection } from '../../src/db/index.js';
 import {
   getPlacesTable,
@@ -17,13 +25,15 @@ import {
   setupTestDatabase,
   teardownTestDatabase,
   clearTestData,
+  testDb,
 } from '../helpers/database.js';
-import { like, sql } from 'drizzle-orm';
+import { eq, like, sql } from 'drizzle-orm';
 
 describe('PostGIS Spatial Database Tests', () => {
   let database: Awaited<ReturnType<typeof getDb>>;
   let places: Awaited<ReturnType<typeof getPlacesTable>>;
   let isPostgres: boolean;
+  let communityId: number;
 
   beforeAll(async () => {
     database = await setupTestDatabase();
@@ -37,6 +47,12 @@ describe('PostGIS Spatial Database Tests', () => {
 
   afterAll(async () => {
     await teardownTestDatabase();
+  });
+
+  beforeEach(async () => {
+    await clearTestData();
+    const fixtures = await testDb.seedTestData();
+    communityId = fixtures.communities[0].id;
   });
 
   afterEach(async () => {
@@ -85,7 +101,7 @@ describe('PostGIS Spatial Database Tests', () => {
                 [-123.13, 49.28],
               ],
             ]),
-            communityId: 1,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }
@@ -95,7 +111,7 @@ describe('PostGIS Spatial Database Tests', () => {
             latitude: 49.2827, // Vancouver, BC
             longitude: -123.1207,
             region: 'Vancouver',
-            communityId: 1,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           };
@@ -109,7 +125,7 @@ describe('PostGIS Spatial Database Tests', () => {
       expect(result[0]).toMatchObject({
         name: 'PostGIS Test Place',
         description: 'Testing PostGIS spatial column types',
-        communityId: 1,
+        communityId,
       });
 
       // Verify spatial data was stored correctly
@@ -134,21 +150,21 @@ describe('PostGIS Spatial Database Tests', () => {
             {
               name: 'Vancouver Place',
               location: SpatialUtils.createPoint(49.2827, -123.1207),
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
             {
               name: 'Toronto Place',
               location: SpatialUtils.createPoint(43.6532, -79.3832),
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
             {
               name: 'Montreal Place',
               location: SpatialUtils.createPoint(45.5017, -73.5673),
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -158,7 +174,7 @@ describe('PostGIS Spatial Database Tests', () => {
               name: 'Vancouver Place',
               latitude: 49.2827,
               longitude: -123.1207,
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -166,7 +182,7 @@ describe('PostGIS Spatial Database Tests', () => {
               name: 'Toronto Place',
               latitude: 43.6532,
               longitude: -79.3832,
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -174,7 +190,7 @@ describe('PostGIS Spatial Database Tests', () => {
               name: 'Montreal Place',
               latitude: 45.5017,
               longitude: -73.5673,
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -274,7 +290,7 @@ describe('PostGIS Spatial Database Tests', () => {
             ? {
                 name: test.name,
                 location: test.location,
-                communityId: 1,
+                communityId,
                 createdAt: new Date(),
                 updatedAt: new Date(),
               }
@@ -282,7 +298,7 @@ describe('PostGIS Spatial Database Tests', () => {
                 name: test.name,
                 latitude: test.latitude,
                 longitude: test.longitude,
-                communityId: 1,
+                communityId,
                 createdAt: new Date(),
                 updatedAt: new Date(),
               };
@@ -318,7 +334,7 @@ describe('PostGIS Spatial Database Tests', () => {
             name: 'Schema Compatibility Test',
             description: 'Testing cross-database schema compatibility',
             location: SpatialUtils.createPoint(45.0, -75.0), // Ottawa coordinates
-            communityId: 1,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }
@@ -327,7 +343,7 @@ describe('PostGIS Spatial Database Tests', () => {
             description: 'Testing cross-database schema compatibility',
             latitude: 45.0, // Ottawa coordinates
             longitude: -75.0,
-            communityId: 1,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           };
@@ -351,7 +367,7 @@ describe('PostGIS Spatial Database Tests', () => {
       const retrieved = await database
         .select()
         .from(selectedPlaces)
-        .where((table) => table.name === 'Schema Compatibility Test');
+        .where(eq(selectedPlaces.name, 'Schema Compatibility Test'));
 
       expect(retrieved).toHaveLength(1);
       expect(retrieved[0]).toMatchObject(result[0]);
@@ -381,7 +397,7 @@ describe('PostGIS Spatial Database Tests', () => {
         ? Array.from({ length: 10 }, (_, i) => ({
             name: `Index Test Place ${i}`,
             location: SpatialUtils.createPoint(45 + i * 0.1, -75 + i * 0.1),
-            communityId: 1,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }))
@@ -389,7 +405,7 @@ describe('PostGIS Spatial Database Tests', () => {
             name: `Index Test Place ${i}`,
             latitude: 45 + i * 0.1,
             longitude: -75 + i * 0.1,
-            communityId: 1,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }));

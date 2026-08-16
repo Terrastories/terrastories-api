@@ -335,7 +335,7 @@ describe('Production Database Cleanup', () => {
       // This test should fail initially - database state not properly reset
 
       // First test - create some data
-      await productionTestDb.seedTestData();
+      const fixtures = await productionTestDb.seedTestData();
       const db = await productionTestDb.getDb();
 
       await db.insert(usersSqlite).values({
@@ -344,7 +344,7 @@ describe('Production Database Cleanup', () => {
         firstName: 'Performance',
         lastName: 'Test1',
         role: 'admin',
-        communityId: 1,
+        communityId: fixtures.communities[0].id,
         isActive: true,
       });
 

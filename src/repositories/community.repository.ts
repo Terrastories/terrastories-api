@@ -135,6 +135,7 @@ export class CommunityRepository {
   private get db() {
     // Cast to any to resolve union type issues
     // This is safe because both drizzle instances have compatible query interfaces
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- #135 will replace this cross-dialect Drizzle union cast with backend-specific integration typing.
     return this.database as any;
   }
 
@@ -229,8 +230,9 @@ export class CommunityRepository {
 
       // Country validation handled by Zod schema at service layer
 
-      // Prepare community data - exclude optional fields that may not exist in database yet
-      const communityData: any = {
+      // Rails country/beta persistence is intentionally deferred to #135.
+      // Keep the current insert shape limited to columns present in both schemas.
+      const communityData = {
         name: data.name.trim(),
         description: data.description?.trim() || null,
         slug,
@@ -241,14 +243,6 @@ export class CommunityRepository {
         createdAt: new Date(),
         updatedAt: new Date(),
       };
-
-      // Add Rails compatibility fields only if they exist in the schema
-      if (data.country !== undefined) {
-        communityData.country = data.country;
-      }
-      if (data.beta !== undefined) {
-        communityData.beta = data.beta;
-      }
 
       // Create community
       const result = await this.db

@@ -65,11 +65,14 @@ describe('Super Admin API', () => {
       const sessionCookies = setCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      
+
       // Use the signed cookie (longer one with signature) if available
-      superAdminSessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      superAdminSessionCookie =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      superAdminSessionCookie = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+      superAdminSessionCookie = setCookieHeader.startsWith('sessionId=')
+        ? setCookieHeader
+        : '';
     }
 
     superAdminSessionId = superAdminSessionCookie;
@@ -107,9 +110,15 @@ describe('Super Admin API', () => {
       const sessionCookies = adminSetCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      adminSessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-    } else if (adminSetCookieHeader && typeof adminSetCookieHeader === 'string') {
-      adminSessionCookie = adminSetCookieHeader.startsWith('sessionId=') ? adminSetCookieHeader : '';
+      adminSessionCookie =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (
+      adminSetCookieHeader &&
+      typeof adminSetCookieHeader === 'string'
+    ) {
+      adminSessionCookie = adminSetCookieHeader.startsWith('sessionId=')
+        ? adminSetCookieHeader
+        : '';
     }
 
     adminSessionId = adminSessionCookie;
@@ -147,9 +156,15 @@ describe('Super Admin API', () => {
       const sessionCookies = editorSetCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      editorSessionCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-    } else if (editorSetCookieHeader && typeof editorSetCookieHeader === 'string') {
-      editorSessionCookie = editorSetCookieHeader.startsWith('sessionId=') ? editorSetCookieHeader : '';
+      editorSessionCookie =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (
+      editorSetCookieHeader &&
+      typeof editorSetCookieHeader === 'string'
+    ) {
+      editorSessionCookie = editorSetCookieHeader.startsWith('sessionId=')
+        ? editorSetCookieHeader
+        : '';
     }
 
     editorSessionId = editorSessionCookie;
@@ -220,8 +235,7 @@ describe('Super Admin API', () => {
 
         expect(response.statusCode).toBe(403);
         expect(response.json()).toMatchObject({
-          error: 'Insufficient permissions',
-          statusCode: 403,
+          error: { message: 'Insufficient permissions' },
         });
       });
 
@@ -289,7 +303,7 @@ describe('Super Admin API', () => {
         const response = await app.inject({
           method: 'POST',
           url: '/api/v1/super_admin/communities',
-          headers: { 
+          headers: {
             cookie: superAdminSessionId,
             'content-type': 'application/json',
           },
@@ -773,10 +787,11 @@ describe('Super Admin API', () => {
 
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
-        error: expect.stringContaining(
-          'Super administrators cannot access community data'
-        ),
-        statusCode: 403,
+        error: {
+          message: expect.stringContaining(
+            'Super administrators cannot access community data'
+          ),
+        },
       });
     });
 
@@ -789,10 +804,11 @@ describe('Super Admin API', () => {
 
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
-        error: expect.stringContaining(
-          'Super administrators cannot access community data'
-        ),
-        statusCode: 403,
+        error: {
+          message: expect.stringContaining(
+            'Super administrators cannot access community data'
+          ),
+        },
       });
     });
 
@@ -805,10 +821,11 @@ describe('Super Admin API', () => {
 
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
-        error: expect.stringContaining(
-          'Super administrators cannot access community data'
-        ),
-        statusCode: 403,
+        error: {
+          message: expect.stringContaining(
+            'Super administrators cannot access community data'
+          ),
+        },
       });
     });
   });

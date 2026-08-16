@@ -83,19 +83,29 @@ const ERROR_SCHEMAS = {
     properties: {
       error: { type: 'string' },
       statusCode: { type: 'number', const: 400 },
+      code: { type: 'string' },
+      message: { type: 'string' },
     },
   },
   401: {
     type: 'object',
     properties: {
-      error: { type: 'string' },
+      error: {
+        type: 'object',
+        properties: { message: { type: 'string' } },
+        required: ['message'],
+      },
       statusCode: { type: 'number', const: 401 },
     },
   },
   403: {
     type: 'object',
     properties: {
-      error: { type: 'string' },
+      error: {
+        type: 'object',
+        properties: { message: { type: 'string' } },
+        required: ['message'],
+      },
       statusCode: { type: 'number', const: 403 },
     },
   },
@@ -156,23 +166,22 @@ export async function userRoutes(
 
     if (!user) {
       return reply.status(401).send({
-        error: 'Authentication required',
-        statusCode: 401,
+        error: { message: 'Authentication required' },
       });
     }
 
     if (user.role === 'super_admin') {
       return reply.status(403).send({
-        error: 'Access blocked on community endpoints for data sovereignty',
-        statusCode: 403,
+        error: {
+          message: 'Access blocked on community endpoints for data sovereignty',
+        },
       });
     }
 
     // Require admin role for remaining users
     if (user.role !== 'admin') {
       return reply.status(403).send({
-        error: 'Insufficient permissions. Admin role required.',
-        statusCode: 403,
+        error: { message: 'Insufficient permissions. Admin role required.' },
       });
     }
   });
@@ -479,8 +488,7 @@ export async function userRoutes(
 
         if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
-            error: error.message,
-            statusCode: 403,
+            error: { message: error.message },
           });
         }
 
@@ -603,8 +611,7 @@ export async function userRoutes(
 
         if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
-            error: error.message,
-            statusCode: 403,
+            error: { message: error.message },
           });
         }
 
@@ -726,8 +733,7 @@ export async function userRoutes(
 
         if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
-            error: error.message,
-            statusCode: 403,
+            error: { message: error.message },
           });
         }
 
@@ -817,8 +823,7 @@ export async function userRoutes(
 
         if (error instanceof SelfDeletionError) {
           return reply.status(403).send({
-            error: error.message,
-            statusCode: 403,
+            error: { message: error.message },
           });
         }
 

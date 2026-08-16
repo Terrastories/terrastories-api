@@ -183,30 +183,4 @@ describe('Story Speakers Schema', () => {
       // Unique constraints are defined in table creation
     });
   });
-
-  describe('Database Integration', () => {
-    it.skip('should be able to insert story speaker relationship', async () => {
-      // This test will be implemented when relationship features are added (Phase 4)
-      // Skip for now to allow other features to proceed
-      expect(true).toBe(true);
-    });
-
-    it.skip('should prevent duplicate story-speaker relationships', async () => {
-      // This test will be implemented when relationship features are added (Phase 4)
-      // Skip for now to allow other features to proceed
-      expect(true).toBe(true);
-    });
-
-    it.skip('should cascade delete when story is deleted', async () => {
-      // This test will be implemented when relationship features are added (Phase 4)
-      // Skip for now to allow other features to proceed
-      expect(true).toBe(true);
-    });
-
-    it.skip('should cascade delete when speaker is deleted', async () => {
-      // This test will be implemented when relationship features are added (Phase 4)
-      // Skip for now to allow other features to proceed
-      expect(true).toBe(true);
-    });
-  });
 });

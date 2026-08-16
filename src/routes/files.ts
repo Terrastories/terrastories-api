@@ -134,8 +134,11 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
           413: {
@@ -257,8 +260,11 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
           404: {
@@ -382,8 +388,11 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
           403: {
@@ -533,8 +542,11 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
           403: {
@@ -639,8 +651,11 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
           403: {
@@ -791,8 +806,11 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
         },

@@ -206,7 +206,7 @@ describe('Community-Scoped User Management Routes', () => {
 
       expect(response.statusCode).toBe(401);
       const body = JSON.parse(response.body);
-      expect(body.error).toContain('Authentication required');
+      expect(body.error.message).toContain('Authentication required');
     });
 
     it('should require admin role', async () => {
@@ -220,7 +220,7 @@ describe('Community-Scoped User Management Routes', () => {
 
       expect(response.statusCode).toBe(403);
       const body = JSON.parse(response.body);
-      expect(body.error).toContain('Insufficient permissions');
+      expect(body.error.message).toContain('Insufficient permissions');
     });
 
     it('should only show users from same community (data sovereignty)', async () => {
@@ -444,7 +444,7 @@ describe('Community-Scoped User Management Routes', () => {
 
       expect(response.statusCode).toBe(400);
       const body = JSON.parse(response.body);
-      expect(body.error).toContain('password');
+      expect(body.message).toContain('password');
     });
 
     it('should validate role values', async () => {
@@ -751,7 +751,10 @@ describe('Community-Scoped User Management Routes', () => {
         url: `/api/v1/users/${createdUser.id}`,
         headers: { Cookie: sessionCookie },
       });
-      expect(getResponse.statusCode).toBe(404);
+      expect(getResponse.statusCode).toBe(200);
+      const deactivatedUser = JSON.parse(getResponse.body).data;
+      expect(deactivatedUser.id).toBe(createdUser.id);
+      expect(deactivatedUser.isActive).toBe(false);
     });
 
     it('should return 404 when user is in different community', async () => {
@@ -811,7 +814,7 @@ describe('Community-Scoped User Management Routes', () => {
 
       expect([400, 403].includes(response.statusCode)).toBe(true);
       const body = JSON.parse(response.body);
-      expect(body.error).toContain('cannot delete');
+      expect(body.error.message).toContain('cannot delete');
     });
   });
 
@@ -846,12 +849,25 @@ describe('Community-Scoped User Management Routes', () => {
                   lastName: 'User',
                   role: 'editor',
                 })
-              : undefined,
+              : method === 'PUT'
+                ? JSON.stringify({
+                    firstName: 'Test',
+                    lastName: 'User',
+                    role: 'editor',
+                    isActive: true,
+                  })
+                : method === 'PATCH'
+                  ? JSON.stringify({
+                      firstName: 'Test',
+                    })
+                  : method === 'DELETE'
+                    ? JSON.stringify({})
+                    : undefined,
         });
 
-        expect(response.statusCode).toBe(403);
+        expect(response.statusCode, endpoint).toBe(403);
         const body = JSON.parse(response.body);
-        expect(body.error).toContain('data sovereignty');
+        expect(body.error.message).toContain('data sovereignty');
       }
     });
 

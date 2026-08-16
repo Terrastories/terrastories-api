@@ -20,10 +20,12 @@ export async function buildApp(options?: BuildAppOptions) {
 
   const app = Fastify({
     logger: {
-      level: config.logging.level,
+      level: config.environment === 'test' ? 'silent' : config.logging.level,
     },
-    ignoreTrailingSlash: true,
-    caseSensitive: false,
+    routerOptions: {
+      ignoreTrailingSlash: true,
+      caseSensitive: false,
+    },
     disableRequestLogging: config.environment === 'test',
   });
 

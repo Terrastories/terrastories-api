@@ -59,6 +59,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     // Initialize app in offline-compatible mode
     process.env.NODE_ENV = 'field-kit';
     process.env.OFFLINE_MODE = 'true';
+    process.env.DATABASE_URL = ':memory:';
 
     console.log('🔄 Initializing Field Kit app...');
 

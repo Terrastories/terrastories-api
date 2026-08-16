@@ -33,6 +33,7 @@ const CreateSpeakerSchema = z.object({
     .string()
     .transform((val) => (val === '' ? undefined : val))
     .pipe(z.string().url().optional())
+    .optional()
     .describe('Speaker photo URL'),
   birthYear: z
     .number()

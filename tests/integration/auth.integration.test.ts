@@ -274,19 +274,19 @@ describe('Authentication Integration Tests', () => {
     });
   });
 
-  describe.skip('Rate Limiting', () => {
+  describe('Rate Limiting', () => {
     it('should enforce rate limits on registration endpoint', async () => {
       const userData = {
         email: 'rate@test.com',
         password: 'SecurePassword123!',
         firstName: 'Rate',
         lastName: 'Test',
-        communityId: 1,
+        communityId: testCommunityId,
         role: 'viewer',
       };
 
       // Make multiple rapid requests
-      const requests = Array.from({ length: 10 }, (_, i) =>
+      const requests = Array.from({ length: 11 }, (_, i) =>
         app.inject({
           method: 'POST',
           url: '/api/v1/auth/register',
@@ -328,7 +328,7 @@ describe('Authentication Integration Tests', () => {
         communityId: 1,
       };
 
-      const requests = Array.from({ length: 10 }, () =>
+      const requests = Array.from({ length: 11 }, () =>
         app.inject({
           method: 'POST',
           url: '/api/v1/auth/login',

@@ -377,7 +377,6 @@ export async function devRoutes(fastify: FastifyInstance) {
           },
         });
       } catch (error) {
-        // eslint-disable-next-line no-console
         console.error('Seeding error:', error);
 
         return reply.status(500).send({

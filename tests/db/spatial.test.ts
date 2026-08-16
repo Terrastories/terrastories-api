@@ -4,7 +4,15 @@
  * Tests PostGIS/SpatiaLite functionality and spatial data operations
  */
 
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  afterEach,
+} from 'vitest';
 import { getDb, testConnection } from '../../src/db/index.js';
 import {
   getPlacesTable,
@@ -16,12 +24,14 @@ import {
   setupTestDatabase,
   teardownTestDatabase,
   clearTestData,
+  testDb,
 } from '../helpers/database.js';
 
 describe('Spatial Database Operations', () => {
   let database: Awaited<ReturnType<typeof getDb>>;
   let places: Awaited<ReturnType<typeof getPlacesTable>>;
   let isPostgres: boolean;
+  let communityId: number;
 
   beforeAll(async () => {
     database = await setupTestDatabase();
@@ -35,6 +45,12 @@ describe('Spatial Database Operations', () => {
 
   afterAll(async () => {
     await teardownTestDatabase();
+  });
+
+  beforeEach(async () => {
+    await clearTestData();
+    const fixtures = await testDb.seedTestData();
+    communityId = fixtures.communities[0].id;
   });
 
   afterEach(async () => {
@@ -121,7 +137,7 @@ describe('Spatial Database Operations', () => {
             name: 'Test Location',
             description: 'A test place for spatial operations',
             location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
-            communityId: 1,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }
@@ -130,7 +146,7 @@ describe('Spatial Database Operations', () => {
             description: 'A test place for spatial operations',
             latitude: 40.7128, // NYC
             longitude: -74.006,
-            communityId: 1,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           };
@@ -141,7 +157,7 @@ describe('Spatial Database Operations', () => {
       expect(result[0]).toMatchObject({
         name: 'Test Location',
         description: 'A test place for spatial operations',
-        communityId: 1,
+        communityId,
       });
 
       if (isPostgres) {
@@ -166,14 +182,14 @@ describe('Spatial Database Operations', () => {
             {
               name: 'Place A',
               location: SpatialUtils.createPoint(40.7128, -74.006), // NYC
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
             {
               name: 'Place B',
               location: SpatialUtils.createPoint(34.0522, -118.2437), // LA
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -183,7 +199,7 @@ describe('Spatial Database Operations', () => {
               name: 'Place A',
               latitude: 40.7128, // NYC
               longitude: -74.006,
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -191,7 +207,7 @@ describe('Spatial Database Operations', () => {
               name: 'Place B',
               latitude: 34.0522, // LA
               longitude: -118.2437,
-              communityId: 1,
+              communityId,
               createdAt: new Date(),
               updatedAt: new Date(),
             },
@@ -234,7 +250,7 @@ describe('Spatial Database Operations', () => {
         const placeWithoutLocation: NewPlace = {
           name: 'No Location Place',
           description: 'Place without spatial data',
-          communityId: 1,
+          communityId,
           createdAt: new Date(),
           updatedAt: new Date(),
         };
@@ -254,7 +270,7 @@ describe('Spatial Database Operations', () => {
           description: 'Place without specific spatial data',
           latitude: 0, // Default to null island
           longitude: 0,
-          communityId: 1,
+          communityId,
           createdAt: new Date(),
           updatedAt: new Date(),
         };
@@ -333,7 +349,7 @@ describe('Spatial Database Operations', () => {
         ? {
             name: 'Compatibility Test Place',
             location: SpatialUtils.createPoint(0, 0),
-            communityId: 999,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           }
@@ -341,7 +357,7 @@ describe('Spatial Database Operations', () => {
             name: 'Compatibility Test Place',
             latitude: 0,
             longitude: 0,
-            communityId: 999,
+            communityId,
             createdAt: new Date(),
             updatedAt: new Date(),
           };

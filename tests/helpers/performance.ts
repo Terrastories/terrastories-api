@@ -173,11 +173,14 @@ export class PerformanceTester {
       `insert_${recordCount}_communities`,
       async () => {
         const database = await this.db.getDb();
+        const now = new Date();
         const testData = Array.from({ length: recordCount }, (_, i) => ({
           name: `Performance Test Community ${i}`,
           description: `Generated for performance testing iteration ${i}`,
           slug: `perf-test-${i}-${Date.now()}`,
           publicStories: i % 2 === 0,
+          createdAt: now,
+          updatedAt: now,
         }));
 
         return database.insert(communities).values(testData);
@@ -192,11 +195,14 @@ export class PerformanceTester {
   async benchmarkQueries(recordCount = 1000): Promise<BenchmarkResult> {
     // First, seed the database with test data
     const database = await this.db.getDb();
+    const now = new Date();
     const seedData = Array.from({ length: recordCount }, (_, i) => ({
       name: `Query Test Community ${i}`,
       description: `Generated for query performance testing ${i}`,
       slug: `query-test-${i}`,
       publicStories: true,
+      createdAt: now,
+      updatedAt: now,
     }));
 
     await database.insert(communities).values(seedData);
@@ -218,12 +224,15 @@ export class PerformanceTester {
     const database = await this.db.getDb();
 
     // First create a community
+    const now = new Date();
     const [community] = await database
       .insert(communities)
       .values({
         name: 'Spatial Test Community',
         slug: 'spatial-test',
         publicStories: true,
+        createdAt: now,
+        updatedAt: now,
       })
       .returning();
 

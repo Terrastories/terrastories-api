@@ -40,7 +40,9 @@ export const attachmentsSqlite = sqliteTable('attachments', {
   filename: sqliteText('filename').notNull(),
   contentType: sqliteText('content_type'),
   fileSize: integer('file_size'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
 });
 
 // Dynamic table selection
@@ -54,7 +56,7 @@ export async function getAttachmentsTable() {
 }
 
 // Zod schemas
-export const insertAttachmentSchema = createInsertSchema(attachmentsSqlite, {
+export const insertAttachmentSchema = createInsertSchema(attachmentsPg, {
   url: z.string().url('Invalid URL format'),
   attachableId: z
     .number()

@@ -62,13 +62,17 @@ describe('Users Schema', () => {
       expect(columns).toContain('createdAt');
       expect(columns).toContain('updatedAt');
 
-      // New authentication fields for password reset and session management
-      expect(columns).toContain('resetPasswordToken');
-      expect(columns).toContain('resetPasswordSentAt');
-      expect(columns).toContain('rememberCreatedAt');
-      expect(columns).toContain('signInCount');
-      expect(columns).toContain('lastSignInAt');
-      expect(columns).toContain('currentSignInIp');
+      // Password-reset/session columns remain deferred until #126 restores the migration.
+      for (const field of [
+        'resetPasswordToken',
+        'resetPasswordSentAt',
+        'rememberCreatedAt',
+        'signInCount',
+        'lastSignInAt',
+        'currentSignInIp',
+      ]) {
+        expect(columns).not.toContain(field);
+      }
     });
 
     it('should validate required fields through schema', () => {
@@ -290,143 +294,37 @@ describe('Users Schema', () => {
     });
   });
 
-  describe('Authentication Fields', () => {
-    it('should have resetPasswordToken field as optional text', () => {
-      const userWithoutToken = {
-        email: 'test@example.com',
-        passwordHash: 'hashedpassword',
-        firstName: 'Test',
-        lastName: 'User',
-        communityId: 1,
-        // resetPasswordToken is optional
-      };
+  describe('Temporarily disabled authentication fields (#126)', () => {
+    const deferredFields = [
+      'resetPasswordToken',
+      'resetPasswordSentAt',
+      'rememberCreatedAt',
+      'signInCount',
+      'lastSignInAt',
+      'currentSignInIp',
+    ] as const;
 
-      expect(() => {
-        insertUserSchema.parse(userWithoutToken);
-      }).not.toThrow();
+    it('should keep deferred columns out of the active table schema', async () => {
+      const columns = Object.keys(await getUsersTable());
+      for (const field of deferredFields) {
+        expect(columns).not.toContain(field);
+      }
     });
 
-    it('should accept resetPasswordToken when provided', () => {
-      const userWithToken = {
-        email: 'test@example.com',
-        passwordHash: 'hashedpassword',
-        firstName: 'Test',
-        lastName: 'User',
+    it('should strip deferred fields from insert validation until migration is restored', () => {
+      const parsed = insertUserSchema.parse({
+        email: 'reset-deferred@example.com',
+        passwordHash: 'test-password-hash',
+        firstName: 'Reset',
+        lastName: 'Deferred',
         communityId: 1,
-        resetPasswordToken: 'abc123def456',
-      };
-
-      expect(() => {
-        insertUserSchema.parse(userWithToken);
-      }).not.toThrow();
-    });
-
-    it('should have resetPasswordSentAt as optional timestamp', () => {
-      const userWithResetTime = {
-        email: 'test@example.com',
-        passwordHash: 'hashedpassword',
-        firstName: 'Test',
-        lastName: 'User',
-        communityId: 1,
-        resetPasswordSentAt: new Date(),
-      };
-
-      expect(() => {
-        insertUserSchema.parse(userWithResetTime);
-      }).not.toThrow();
-    });
-
-    it('should have rememberCreatedAt as optional timestamp', () => {
-      const userWithRememberTime = {
-        email: 'test@example.com',
-        passwordHash: 'hashedpassword',
-        firstName: 'Test',
-        lastName: 'User',
-        communityId: 1,
-        rememberCreatedAt: new Date(),
-      };
-
-      expect(() => {
-        insertUserSchema.parse(userWithRememberTime);
-      }).not.toThrow();
-    });
-
-    it('should have signInCount with default value of 0', () => {
-      const user = insertUserSchema.parse({
-        email: 'test@example.com',
-        passwordHash: 'hashedpassword',
-        firstName: 'Test',
-        lastName: 'User',
-        communityId: 1,
+        resetPasswordToken: 'temporary-token',
+        signInCount: 5,
       });
 
-      expect(user.signInCount).toBe(0);
-    });
-
-    it('should accept custom signInCount values', () => {
-      const userWithSignInCount = {
-        email: 'test@example.com',
-        passwordHash: 'hashedpassword',
-        firstName: 'Test',
-        lastName: 'User',
-        communityId: 1,
-        signInCount: 5,
-      };
-
-      const parsed = insertUserSchema.parse(userWithSignInCount);
-      expect(parsed.signInCount).toBe(5);
-    });
-
-    it('should have lastSignInAt as optional timestamp', () => {
-      const userWithLastSignIn = {
-        email: 'test@example.com',
-        passwordHash: 'hashedpassword',
-        firstName: 'Test',
-        lastName: 'User',
-        communityId: 1,
-        lastSignInAt: new Date(),
-      };
-
-      expect(() => {
-        insertUserSchema.parse(userWithLastSignIn);
-      }).not.toThrow();
-    });
-
-    it('should have currentSignInIp as optional text', () => {
-      const userWithIp = {
-        email: 'test@example.com',
-        passwordHash: 'hashedpassword',
-        firstName: 'Test',
-        lastName: 'User',
-        communityId: 1,
-        currentSignInIp: '192.168.1.100',
-      };
-
-      expect(() => {
-        insertUserSchema.parse(userWithIp);
-      }).not.toThrow();
-    });
-
-    it('should validate complete user with all authentication fields', () => {
-      const completeUser = {
-        email: 'test@example.com',
-        passwordHash: 'hashedpassword',
-        firstName: 'Test',
-        lastName: 'User',
-        role: 'editor' as const,
-        communityId: 1,
-        isActive: true,
-        resetPasswordToken: 'abc123def456',
-        resetPasswordSentAt: new Date(),
-        rememberCreatedAt: new Date(),
-        signInCount: 3,
-        lastSignInAt: new Date(),
-        currentSignInIp: '192.168.1.100',
-      };
-
-      expect(() => {
-        insertUserSchema.parse(completeUser);
-      }).not.toThrow();
+      for (const field of deferredFields) {
+        expect(parsed).not.toHaveProperty(field);
+      }
     });
   });
 

@@ -164,11 +164,14 @@ describe('File Routes Integration', () => {
       const sessionCookies = setCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      
+
       // Use the signed cookie (longer one with signature) if available
-      authCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      authCookie =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      authCookie = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+      authCookie = setCookieHeader.startsWith('sessionId=')
+        ? setCookieHeader
+        : '';
     }
 
     // Create test JPEG file for multipart uploads
@@ -246,7 +249,7 @@ describe('File Routes Integration', () => {
       expect(response.statusCode).toBe(401);
 
       const result = JSON.parse(response.body);
-      expect(result.error).toContain('Authentication required');
+      expect(result.error.message).toContain('Authentication required');
     });
 
     it('should handle multipart form data with cultural restrictions', async () => {

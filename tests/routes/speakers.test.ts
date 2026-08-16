@@ -98,11 +98,14 @@ describe('Speakers API Routes - Integration Tests', () => {
       const sessionCookies = setCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      
+
       // Use the signed cookie (longer one with signature) if available
-      adminSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      adminSessionId =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      adminSessionId = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
+      adminSessionId = setCookieHeader.startsWith('sessionId=')
+        ? setCookieHeader
+        : '';
     }
 
     // Register editor user
@@ -131,9 +134,15 @@ describe('Speakers API Routes - Integration Tests', () => {
       const sessionCookies = editorSetCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      editorSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-    } else if (editorSetCookieHeader && typeof editorSetCookieHeader === 'string') {
-      editorSessionId = editorSetCookieHeader.startsWith('sessionId=') ? editorSetCookieHeader : '';
+      editorSessionId =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (
+      editorSetCookieHeader &&
+      typeof editorSetCookieHeader === 'string'
+    ) {
+      editorSessionId = editorSetCookieHeader.startsWith('sessionId=')
+        ? editorSetCookieHeader
+        : '';
     }
 
     // Register viewer user
@@ -162,9 +171,15 @@ describe('Speakers API Routes - Integration Tests', () => {
       const sessionCookies = viewerSetCookieHeader.filter((cookie) =>
         cookie.startsWith('sessionId=')
       );
-      viewerSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-    } else if (viewerSetCookieHeader && typeof viewerSetCookieHeader === 'string') {
-      viewerSessionId = viewerSetCookieHeader.startsWith('sessionId=') ? viewerSetCookieHeader : '';
+      viewerSessionId =
+        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+    } else if (
+      viewerSetCookieHeader &&
+      typeof viewerSetCookieHeader === 'string'
+    ) {
+      viewerSessionId = viewerSetCookieHeader.startsWith('sessionId=')
+        ? viewerSetCookieHeader
+        : '';
     }
 
     const elderRegisterRes = await app.inject({
@@ -192,7 +207,10 @@ describe('Speakers API Routes - Integration Tests', () => {
     };
 
     test('should create speaker with valid data as admin', async () => {
-      console.log('🔍 DEBUG: Making authenticated request with cookie:', `"${adminSessionId}"`);
+      console.log(
+        '🔍 DEBUG: Making authenticated request with cookie:',
+        `"${adminSessionId}"`
+      );
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/speakers',

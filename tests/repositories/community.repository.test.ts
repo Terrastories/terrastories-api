@@ -130,58 +130,16 @@ describe('CommunityRepository', () => {
       expect(result.slug).toBe('second-community');
     });
 
-    it('should create community with Rails compatibility fields (country and beta)', async () => {
-      // Arrange
-      const communityData: CreateCommunityData = {
-        name: 'Canadian Test Community',
-        description: 'Community in Canada for testing',
+    it('should keep Rails country/beta persistence deferred to #135', async () => {
+      const result = await communityRepository.create({
+        name: 'Deferred Rails Fields Community',
         country: 'CA',
         beta: true,
-      };
+      });
 
-      // Act
-      const result = await communityRepository.create(communityData);
-
-      // Assert
-      expect(result).toBeDefined();
-      expect(result.name).toBe('Canadian Test Community');
-      expect(result.country).toBe('CA');
-      expect(result.beta).toBe(true);
-      expect(result.slug).toMatch(/^canadian-test-community/);
-    });
-
-    it('should create community with null country and default beta=false', async () => {
-      // Arrange
-      const communityData: CreateCommunityData = {
-        name: 'Default Fields Community',
-        description: 'Community with default Rails compatibility fields',
-        // country and beta not provided - should use defaults
-      };
-
-      // Act
-      const result = await communityRepository.create(communityData);
-
-      // Assert
-      expect(result).toBeDefined();
-      expect(result.name).toBe('Default Fields Community');
-      expect(result.country).toBeNull();
-      expect(result.beta).toBe(false);
-    });
-
-    it('should store country codes as provided (validation handled at service layer)', async () => {
-      // Arrange - Repository accepts data as provided, relying on service layer validation
-      const dataWithValidCountry: CreateCommunityData = {
-        name: 'Repository Test Community',
-        country: 'US', // Valid country code
-      };
-
-      // Act
-      const result = await communityRepository.create(dataWithValidCountry);
-
-      // Assert - Valid country code is stored correctly
-      expect(result).toBeDefined();
-      expect(result.country).toBe('US');
-      expect(result.name).toBe('Repository Test Community');
+      expect(result.name).toBe('Deferred Rails Fields Community');
+      expect(result).not.toHaveProperty('country');
+      expect(result).not.toHaveProperty('beta');
     });
 
     it('should throw error for invalid community data', async () => {
@@ -409,97 +367,21 @@ describe('CommunityRepository', () => {
       expect(results.length).toBeGreaterThanOrEqual(4); // Updated count for new test data
     });
 
-    it('should filter communities by country', async () => {
-      // Arrange
-      const searchParams: CommunitySearchParams = {
+    it('should keep country/beta search filters deferred to #135', async () => {
+      const unfiltered = await communityRepository.search();
+      const countryFiltered = await communityRepository.search({
         country: 'CA',
-      };
-
-      // Act
-      const results = await communityRepository.search(searchParams);
-
-      // Assert
-      expect(results).toHaveLength(1);
-      expect(results[0].name).toBe('Inuit Arctic Community');
-      expect(results[0].country).toBe('CA');
-    });
-
-    it('should filter communities by beta status (beta=true)', async () => {
-      // Arrange
-      const searchParams: CommunitySearchParams = {
-        beta: true,
-      };
-
-      // Act
-      const results = await communityRepository.search(searchParams);
-
-      // Assert
-      expect(results).toHaveLength(2);
-      const betaCommunities = results.map((r) => r.name).sort();
-      expect(betaCommunities).toEqual([
-        'Inuit Arctic Community',
-        'Mexican Beta Community',
-      ]);
-      results.forEach((community) => {
-        expect(community.beta).toBe(true);
       });
-    });
+      const betaFiltered = await communityRepository.search({ beta: true });
 
-    it('should filter communities by beta status (beta=false)', async () => {
-      // Arrange
-      const searchParams: CommunitySearchParams = {
-        beta: false,
-      };
-
-      // Act
-      const results = await communityRepository.search(searchParams);
-
-      // Assert
-      expect(results).toHaveLength(2);
-      const nonBetaCommunities = results.map((r) => r.name).sort();
-      expect(nonBetaCommunities).toEqual([
-        'Inactive Test Community',
-        'Indigenous Heritage Community',
-      ]);
-      results.forEach((community) => {
-        expect(community.beta).toBe(false);
-      });
-    });
-
-    it('should filter communities by country and beta status combined', async () => {
-      // Arrange
-      const searchParams: CommunitySearchParams = {
-        country: 'US',
-        beta: false,
-      };
-
-      // Act
-      const results = await communityRepository.search(searchParams);
-
-      // Assert
-      expect(results).toHaveLength(2);
-      const usBetaFalseCommunities = results.map((r) => r.name).sort();
-      expect(usBetaFalseCommunities).toEqual([
-        'Inactive Test Community',
-        'Indigenous Heritage Community',
-      ]);
-      results.forEach((community) => {
-        expect(community.country).toBe('US');
-        expect(community.beta).toBe(false);
-      });
-    });
-
-    it('should return empty results for non-existent country', async () => {
-      // Arrange
-      const searchParams: CommunitySearchParams = {
-        country: 'FR', // France - not in our test data
-      };
-
-      // Act
-      const results = await communityRepository.search(searchParams);
-
-      // Assert
-      expect(results).toHaveLength(0);
+      expect(countryFiltered).toEqual(unfiltered);
+      expect(betaFiltered).toEqual(unfiltered);
+      expect(unfiltered.every((community) => !('country' in community))).toBe(
+        true
+      );
+      expect(unfiltered.every((community) => !('beta' in community))).toBe(
+        true
+      );
     });
   });
 
@@ -603,68 +485,20 @@ describe('CommunityRepository', () => {
       );
     });
 
-    it('should update Rails compatibility fields (country and beta)', async () => {
-      // Arrange
+    it('should keep Rails country/beta updates deferred to #135', async () => {
       const original = await communityRepository.create({
-        name: 'Test Community',
-        country: 'US',
-        beta: false,
+        name: 'Deferred Update Community',
       });
 
-      const updates: UpdateCommunityData = {
+      const result = await communityRepository.update(original.id, {
         country: 'CA',
         beta: true,
-      };
-
-      // Act
-      const result = await communityRepository.update(original.id, updates);
-
-      // Assert
-      expect(result).toBeDefined();
-      expect(result!.country).toBe('CA');
-      expect(result!.beta).toBe(true);
-      expect(result!.name).toBe('Test Community'); // Should remain unchanged
-    });
-
-    it('should update country to null', async () => {
-      // Arrange
-      const original = await communityRepository.create({
-        name: 'Test Community',
-        country: 'US',
       });
 
-      const updates: UpdateCommunityData = {
-        country: null,
-      };
-
-      // Act
-      const result = await communityRepository.update(original.id, updates);
-
-      // Assert
       expect(result).toBeDefined();
-      expect(result!.country).toBeNull();
-    });
-
-    it('should update country codes as provided (validation handled at service layer)', async () => {
-      // Arrange
-      const original = await communityRepository.create({
-        name: 'Test Community',
-      });
-
-      const updatesWithValidCountry: UpdateCommunityData = {
-        country: 'CA', // Valid country code
-      };
-
-      // Act
-      const result = await communityRepository.update(
-        original.id,
-        updatesWithValidCountry
-      );
-
-      // Assert - Valid country code is updated correctly
-      expect(result).toBeDefined();
-      expect(result!.country).toBe('CA');
-      expect(result!.name).toBe('Test Community');
+      expect(result!.name).toBe('Deferred Update Community');
+      expect(result).not.toHaveProperty('country');
+      expect(result).not.toHaveProperty('beta');
     });
 
     it('should throw error for invalid update data', async () => {

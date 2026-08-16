@@ -437,7 +437,11 @@ export async function authRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
               statusCode: { type: 'number' },
             },
           },
@@ -586,7 +590,7 @@ export async function authRoutes(
 
         // In production, the reset token would be sent via email
         // For testing purposes, we return it in the response
-        const response: any = {
+        const response: { message: string; resetToken?: typeof resetToken } = {
           message: 'Password reset instructions sent to your email',
         };
 
@@ -766,8 +770,11 @@ export async function authRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
         },
@@ -840,16 +847,22 @@ export async function authRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
           403: {
             description: 'Forbidden - insufficient permissions',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
         },
@@ -910,16 +923,22 @@ export async function authRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
           403: {
             description: 'Forbidden - super admin blocked from community data',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
             },
           },
         },

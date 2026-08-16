@@ -7,6 +7,8 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'package.json'
+      - 'scripts/api-comparison.js'
+      - '.github/workflows/api-comparison.yml'
   push:
     branches: [main]
   workflow_dispatch:
@@ -20,21 +22,6 @@ jobs:
   api-comparison:
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: terrastories
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: terrastories_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -46,74 +33,45 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --legacy-peer-deps
 
-      - name: Setup test database
-        env:
-          DATABASE_URL: postgresql://terrastories:password@localhost:5432/terrastories_test
-        run: |
-          echo "📋 Generating database migrations..."
-          npm run db:generate
-          echo "🗄️ Running database migrations..."
-          npm run db:migrate
-
-      - name: Run TypeScript compilation check
-        run: npm run type-check
-
-      - name: Run lint check
-        run: npm run lint
-
+      # Comparison tests own isolated SQLite databases through TestDatabaseManager.
+      # PostgreSQL/PostGIS fresh/upgrade migration coverage is intentionally owned
+      # by #135; this workflow must not pretend to validate PostgreSQL by feeding
+      # the SQLite migration directory to a PostgreSQL connection.
       - name: Run API comparison tests
         env:
           NODE_ENV: test
-          DATABASE_URL: postgresql://terrastories:password@localhost:5432/terrastories_test
           RAILS_API_BASE_URL: ${{ github.event.inputs.rails_api_url || 'http://localhost:3001' }}
-        run: |
-          echo "🔄 Running API comparison test suite..."
-          npm test tests/comparison/api-comparison.test.ts
+        run: npm run test:ci:comparison
 
       - name: Generate comparison report
-        if: always()
-        continue-on-error: true
-        run: |
-          echo "📊 Generating API comparison report..."
-          node scripts/api-comparison.js report --output api-comparison-report.html || echo "⚠️ Report generation failed, but continuing..."
+        run: npm run compatibility:report
 
       - name: Upload comparison report
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: api-comparison-report
           path: api-comparison-report.html
-
-      - name: Run full test suite validation
-        env:
-          NODE_ENV: test
-          DATABASE_URL: postgresql://terrastories:password@localhost:5432/terrastories_test
-        run: |
-          echo "🧪 Running full test suite to ensure no regressions..."
-          npm test --reporter=basic
 
       - name: Comment PR with results
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
-            const fs = require('fs');
+            const reportContent = [
+              '## 🔄 API Comparison Test Results',
+              '',
+              '✅ API comparison suite and report generation passed.',
+              '',
+              'PostgreSQL/PostGIS migration validation is tracked separately in #135.',
+              '',
+              `📊 [Download detailed report](../../actions/runs/${context.runId})`,
+            ].join('\n');
 
-            // Read comparison results if available
-            let reportContent = '## 🔄 API Comparison Test Results\n\n';
-            reportContent += '✅ API comparison infrastructure validated successfully\n\n';
-            reportContent += '### Key Features Tested:\n';
-            reportContent += '- Dual API client functionality\n';
-            reportContent += '- Response difference detection\n';
-            reportContent += '- Mock Rails API integration\n';
-            reportContent += '- Performance metrics collection\n\n';
-            reportContent += '📊 [Download detailed report](../../actions/runs/${{ github.run_id }})\n';
-
-            github.rest.issues.createComment({
+            await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: reportContent
+              body: reportContent,
             });

@@ -1,32 +1,12 @@
 name: Claude Automatic Code Review
 
+# Temporarily manual-only: the repository's CLAUDE_CODE_OAUTH_TOKEN is rejected
+# by the Anthropic organization with oauth_not_allowed_for_organization.
+# Keep the workflow available for credential verification without making every PR
+# fail for an external authentication configuration problem. Credential repair and
+# automatic re-enablement are tracked by #153; other reviewer workflows remain active.
 on:
-  pull_request:
-    types: [opened, synchronize]
-    paths:
-      - "src/**/*.ts"
-      - "src/**/*.tsx" 
-      - "src/**/*.js"
-      - "src/**/*.jsx"
-      - "src/**/*.json"
-      - "server/**/*.ts"
-      - "server/**/*.js"
-      - "api/**/*.ts"
-      - "api/**/*.js"
-      - "db/**/*.ts"
-      - "db/**/*.js"
-      - "db/**/*.sql"
-      - "migrations/**/*.sql"
-      - "scripts/**/*.ts"
-      - "scripts/**/*.js"
-      - "tests/**/*" # Added test files - critical for review
-      - "docs/**/*" # Added docs - important for cultural sensitivity
-      - "*.ts" # Added root-level TypeScript config files
-      - "*.config.*" # Added config files
-      - "*.md"
-      - "package.json"
-      - "package-lock.json"
-      - "drizzle.config.ts"
+  workflow_dispatch:
 
 jobs:
   claude-review:
@@ -36,7 +16,7 @@ jobs:
       pull-requests: write
       issues: read
       id-token: write
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -46,22 +26,13 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
-          allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run type-check),Bash(git log),Bash(git diff),Edit,Write,Read"
+          allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run type-check),Bash(git log),Bash(git diff),Read"
           direct_prompt: |
             You are reviewing code for Terrastories, an Indigenous community geostorytelling platform.
-            
-            IMPORTANT: First check for and address any relevant automated review suggestions from GitHub bots, CodeCov, or other automated tools. Implement any security, performance, or critical configuration improvements they suggest.
-            
-            Then review this pull request focusing on:
-            - Code quality and TypeScript best practices
-            - Security vulnerabilities and data sovereignty compliance
-            - Test coverage and edge cases
-            - Performance considerations (especially PostGIS queries)
-            - PostGIS spatial functionality (if applicable)
-            - Cultural protocol compliance and Indigenous community sensitivity
-            - Automated tool suggestions that should be implemented
-            
-            Provide constructive feedback prioritized by severity (CRITICAL > MAJOR > MINOR).
-            
-            For automated suggestions: If GitHub Actions bots, security scanners, or other tools have provided relevant suggestions, implement the important ones automatically before providing your review.
+
+            Review the current branch against main. Focus on correctness, security,
+            data sovereignty, test integrity, performance, and maintainability.
+            Do not modify files. Report findings prioritized by severity
+            (CRITICAL > MAJOR > MINOR), and explicitly state when there are no
+            blocker or should-fix findings.
           use_sticky_comment: true

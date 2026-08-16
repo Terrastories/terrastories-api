@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "test": "vitest",
     "test:coverage": "vitest run --coverage --reporter=dot --silent=true",
+    "test:ci:contracts": "bash tests/scripts/user_workflow.test.sh && vitest run tests/scripts --reporter=dot --silent=true",
     "test:ci:core": "vitest run tests/config tests/db tests/helpers tests/integration --reporter=dot --silent=true",
     "test:ci:routes": "vitest run tests/routes --reporter=dot --silent=true",
     "test:ci:services": "vitest run tests/repositories tests/services tests/shared tests/security tests/unit tests/app.test.ts tests/config.test.ts --reporter=dot --silent=true",

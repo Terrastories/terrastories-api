@@ -27,11 +27,15 @@ afterAll(async () => {
 }, 30000);
 
 // Reset database state between tests for isolation.
-// Comparison tests own their lifecycle and seed once per file so cross-request
-// state (sessions, created records) can be asserted across related tests.
+// Comparison tests and Hono tests own their lifecycle and seed once per file
+// so cross-request state (sessions, created records) can be asserted across
+// related tests.
 beforeEach(async () => {
   const testPath = expect.getState().testPath || '';
-  if (testPath.includes('/tests/comparison/')) {
+  if (
+    testPath.includes('/tests/comparison/') ||
+    testPath.includes('/tests/hono/')
+  ) {
     return;
   }
 

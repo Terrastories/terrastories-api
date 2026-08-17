@@ -1,115 +1,88 @@
-# Phase 1: Fastify → Hono Migration Plan (Codex-Reviewed)
+# Phase 1 — Fastify → Hono Migration
+
+**Status:** Active foundation in PR #132  
+**Authority:** Execution plan subordinate to `docs/SPEC-V2.md`  
+**Last reviewed:** 2026-08-17
 
 ## Goal
 
-Migrate the Terrastories API from Fastify 5 to Hono while keeping PostgreSQL + local filesystem.
-The API must remain functionally identical — the V1 compatibility suite (195 tests across 12 domains) must pass against the new Hono implementation.
+Move the HTTP transport from Fastify to Hono on Node.js first, without changing the approved V2 product contract. Fastify V1 remains available during coexistence while Hono V2 proves behavioral parity for in-scope legacy Rails capabilities.
+
+Phase 1 is a transport migration, not the Cloudflare deployment phase and not permission to preserve V1 scope that `SPEC-V2.md` explicitly removes.
 
 ## Constraints
 
-- **Dual coexistence**: V1 (Fastify) routes stay at `/api/v1/` while V2 (Hono) routes go to `/v2/`. Both work during migration.
-- **No source behavior changes**: Rewriting the transport layer, not business logic. Services, repositories, schemas stay as-is.
-- **Compatibility suite is the gate**: The existing 195-test suite must pass against Hono, not just Fastify.
-- **Node.js first**: Hono runs on `@hono/node-server`. No Workers code yet (Phase 3).
+- Fastify V1 remains under `/api/v1/` during coexistence.
+- Hono V2 uses the `/v2/` namespaces defined by `SPEC-V2.md`.
+- Existing service/repository/domain behavior should be reused rather than duplicated in transport handlers.
+- Hono migration must not introduce PostgreSQL-only behavior; the V2 destination remains portable to D1/SQLite and PostgreSQL.
+- No PostGIS dependency or removed elder/cultural-metadata scope may be preserved merely because old V1 code/tests contain it.
+- Node.js + `@hono/node-server` is the Phase 1 runtime. Workers/D1/R2 adaptation follows after the Hono contract is proven.
 
-## Architecture Decisions
+## Architecture
 
-### 1. Coexistence Strategy
-Both apps coexist during migration. Fastify `/api/v1` stays running. Hono `/v2` routes built incrementally. Final gate: Hono passes the same compatibility suite.
-
-### 2. App Structure
-```
+```text
 src/
-  app.ts              → re-exports active app (Fastify during migration, Hono after cutover)
-  fastify-app.ts      → existing Fastify buildApp(), renamed
-  hono-app.ts         → new: Hono app builder
-  server.ts           → serves active app
-  routes/
-    index.ts          → existing Fastify route registration (unchanged)
-    hono/             → Hono route files
-      index.ts
-      ...
-  shared/
-    middleware/
-      hono-auth.middleware.ts  → Hono-compatible auth middleware
-      auth.middleware.ts       → existing Fastify middleware (unchanged)
+├── routes/              Fastify V1 routes
+│   └── hono/            Hono V2 routes
+├── services/            shared business logic
+├── repositories/        shared data access
+├── shared/              shared schemas/auth/session abstractions
+├── hono-app.ts           Hono application builder
+└── server.ts             coexistence runtime
 ```
 
-### 3. Hono Auth Middleware (Codex-corrected)
-Use Hono `Variables` for typed context state:
-```ts
-type AppVariables = {
-  user: SessionUser;
-  sessionId: string;
-};
-const app = new Hono<{ Variables: AppVariables }>();
-// c.set('user', user) — NOT request mutation
-```
+Hono state uses typed context variables rather than request mutation. Session handling uses an abstraction: development/test may use memory, but production session backends are owned by the production-readiness auth work.
 
-### 4. Session Management (Codex-corrected)
-- Opaque signed session ID cookie (HMAC with existing session secret)
-- Server-side session store: in-memory for dev/test, interface ready for KV later
-- `HttpOnly`, `SameSite`, `Secure` per current config
-- Multiple concurrent sessions per user supported
-- Logout deletes only current session ID
-- NOT a full user object in a cookie
+## Contract-testing rule
 
-### 5. OpenAPI (Codex-corrected — deferred)
-Use plain Hono routes with manual `schema.safeParse()` first. Add `@hono/zod-openapi` after 2-3 domains are stable and behavior is proven.
+The decisive gate is a **transport-neutral contract suite**:
 
-### 6. Parameterized Tests (Codex-corrected)
-Do NOT fork into `tests/comparison-v2/`. Parameterize existing suite so same assertions run against both Fastify and Hono with different app factories/prefixes.
+- the same normative behavioral assertions run against Fastify and Hono;
+- intentional V1/V2 namespace/shape differences are explicitly mapped;
+- V1 behavior removed by the canonical V2 spec is explicitly marked out of scope rather than copied into Hono;
+- unexpected status/body/error/header/cookie/pagination/content-type differences fail the test;
+- a real HTTP smoke test exercises the Hono Node server in addition to in-process requests.
 
-## Implementation Steps (Codex-corrected order)
+Diagnostic comparison code that only prints mismatches is not parity evidence. Issue #134 owns turning this into a fail-closed shared harness; #145/#146 own domain-complete parity after that foundation.
 
-### Step 1: Install Dependencies + Setup
-- `npm install hono @hono/node-server`
-- Create `src/hono-app.ts` skeleton
+## Migration domains
 
-### Step 2: Health + Error Handling + Test Harness
-- Health route (trivial, no auth)
-- `app.onError()` + `app.notFound()`
-- Hono test helper (createHonoTestApp)
-- Parameterized compatibility harness
+PR #132 establishes Hono routing patterns across the current route families, including:
 
-### Step 3: Session Store + Auth Routes + Auth Middleware
-- SessionStore interface + MemoryStore implementation
-- Signed cookie helper
-- Hono auth middleware: requireAuth, requireRole, requireAdmin, requireSuperAdmin
-- requireCommunityAccess, enforceDataSovereignty
-- Auth routes: register, login, logout, me
+- health/error handling;
+- auth/session middleware and auth routes;
+- themes;
+- public API;
+- places;
+- stories;
+- speakers;
+- communities;
+- users;
+- files/media;
+- member routes;
+- super-admin routes;
+- dev/test-only routes with production gating.
 
-### Step 4: One Protected CRUD Domain (Themes)
-- Establishes the CRUD pattern for all remaining routes
-- Tests validate against V1 behavior
+## Hono-specific invariants
 
-### Step 5: Public API
-### Step 6: Places (CRUD + spatial)
-### Step 7: Stories (CRUD + complex relations)
-### Step 8: Speakers (CRUD + search)
-### Step 9: Communities
-### Step 10: Users + role management
-### Step 11: Files (upload/serve/delete — multipart)
-### Step 12: Member routes
-### Step 13: Super Admin
-### Step 14: Dev routes (gated/test-only)
+- Register static routes such as `/search`, `/stats`, and `/near` before `/:id` routes.
+- Parse a request body once and validate the parsed value once.
+- Cookie signing/session semantics must be explicit and contract-tested.
+- Web `Request`/`Response` and multipart behavior must not accidentally change V1-compatible semantics.
+- Dev/test routes must be impossible to expose unintentionally in production.
 
-## Hono-Specific Gotchas (from Codex)
+## Phase 1 exit gate
 
-1. **Route order**: Register static routes (`/search`, `/stats`, `/near`) before `/:id`
-2. **`c.req.json()` consumed once**: Parse once, validate once
-3. **Cookie signing not automatic**: Need explicit HMAC compatibility code
-4. **File responses**: Web `Request`/`Response` differ from Fastify reply streams
-5. **`c.req.parseBody()` buffers multipart**: Acceptable for Phase 1 with limits enforced
-6. **Middleware via route groups**: `app.use('/v2/*', middleware)` or route groups, not per-route
+Phase 1 is complete only when, on the exact merge candidate:
 
-## Success Criteria (Codex-corrected)
+1. The deterministic baseline owned by #133 is trustworthy.
+2. The fail-closed shared contract harness owned by #134 proves both transports.
+3. All in-scope migrated domains have normative Hono parity; removed V1 scope is explicitly mapped rather than reproduced.
+4. Auth/data-sovereignty and file negative paths are covered.
+5. Hono real-HTTP startup/request behavior passes.
+6. Required type, lint, format, test/coverage, and build gates are green without masked failures.
+7. `/api/v1` remains intact for coexistence until an explicitly approved cutover.
+8. The merge candidate remains consistent with `SPEC-V2.md` and the production-readiness roadmap.
 
-1. Same compatibility suite runs against both Fastify and Hono
-2. Hono passes all 195 compatibility tests
-3. Auth/session tests cover login, logout, invalid cookie, concurrent sessions, role gates, data sovereignty
-4. Multipart upload/download/delete tests pass on Hono
-5. `npm test`, `npm run build`, `npm run lint`, and `npm run test:coverage` pass
-6. Hono Node server smoke test passes through real HTTP
-7. `/api/v1` behavior remains available during migration
-8. `/v2` namespace matches spec: `/v2/api`, `/v2/member`, `/v2/admin`
+After Phase 1 merges, Hono-specific production hardening proceeds through the dependency/readiness ordering in GitHub rather than growing this foundation PR into a production mega-PR.

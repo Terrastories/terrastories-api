@@ -386,6 +386,7 @@ Two low-priority items flagged in the automated review remain as notes for devel
 | 2026-06-07 | Terrastories Team | Addressed DeepSeek review (9 risks). Added: native dep replacements, presigned R2 uploads, single-schema, D1 consistency, phased plan, error envelope, hash migration, field-kit support. Removed elder role and scope-creep features. |
 | 2026-06-08 | Terrastories Team | Restructured per spec best practices. Added numbered requirement IDs (FR-001 through FR-025, NFR-001 through NFR-009). Added risk IDs (R-1 through R-7). Reorganized sections for clarity. Added stack comparison table.               |
 | 2026-06-23 | Terrastories Team | Fixed D1 consistency terminology: replaced non-existent `withSessionBinding` with D1 transactions + same-request session reads.                                                                                                        |
+| 2026-08-17 | Terrastories Team | Reaffirmed the canonical V2 contract during repository context cleanup: Hono; first-class Workers+D1+R2, Node+PostgreSQL, and offline Node+SQLite profiles; portable spatial behavior with no PostGIS dependency; removed V1 scope remains out. |
 
 ---
 

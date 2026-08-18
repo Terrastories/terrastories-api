@@ -105,7 +105,7 @@ npm test -- --run
 npm run test:coverage
 ```
 
-Run the smallest affected test set first, then the broader required suite. `npm run validate` currently exists, but issue #133 owns making the aggregate validation path deterministic and CI-safe; do not treat a configured script as proof unless it actually completes successfully.
+Run the smallest affected test set first, then the broader required suite. `npm run validate` is currently unsafe for unattended use because it ends in bare Vitest watch mode; issue #133 owns making the aggregate validation path deterministic and CI-safe. Use terminating commands such as `npm test -- --run` until that lands, and do not treat a configured script as proof unless it actually completes successfully.
 
 ### API migration/parity
 

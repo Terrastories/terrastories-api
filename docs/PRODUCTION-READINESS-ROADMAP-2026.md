@@ -88,7 +88,9 @@ A Terrastories API revision is production-ready only when all of the following a
 ### Work
 
 - Add required PostgreSQL CI and a D1/SQLite-compatible CI path; shared database behavior must pass on both first-class targets.
-- Run schema/repository/portable-spatial integration tests against both backends. Do not add PostGIS-specific application behavior.
+- Run schema/repository/portable-spatial integration tests against both backends. Remove the legacy PostGIS bootstrap/verification/query branch and its dedicated test (`src/db/migrate.ts`, `src/db/index.ts`, `src/repositories/place.repository.ts`, `tests/db/postgis.test.ts`); V2 spatial behavior must remain portable application-level latitude/longitude logic.
+- Converge the duplicated `pgTable`/`sqliteTable` schema definitions to the single portable schema required by FR-003, with backend-specific adapters only where the canonical spec permits them.
+- Replace Worker-incompatible native dependencies used on shared V2 paths (including native `bcrypt`; `bcryptjs` is the canonical password-hashing dependency) and verify the resulting dependency graph on Workers and Node.
 - Add migration tests for:
   - empty database -> latest;
   - previous release -> latest;
@@ -112,7 +114,7 @@ A Terrastories API revision is production-ready only when all of the following a
 
 ### Work
 
-- Replace Hono `MemorySessionStore` with a production session backend appropriate to deployment (PostgreSQL/Redis/KV), with TTL and revocation semantics.
+- Replace Hono `MemorySessionStore` with a production session backend appropriate to deployment (PostgreSQL/KV), with TTL and revocation semantics.
 - Add tests for process restart, multi-instance access, concurrent sessions, logout-one-session, expiry, tampered cookies, key rotation, disabled users, and role/community changes during an active session.
 - Define session-secret rotation with overlap and emergency revocation procedures.
 - Review cookie flags for production (`Secure`, `HttpOnly`, `SameSite`, domain/path, lifetime).

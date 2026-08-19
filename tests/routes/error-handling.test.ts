@@ -13,6 +13,7 @@ import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
   let app: FastifyInstance;
@@ -72,11 +73,7 @@ describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
     // Extract SIGNED session cookie (same logic as working places.test.ts)
     const adminSetCookie = loginResponse.headers['set-cookie'];
     if (Array.isArray(adminSetCookie)) {
-      const sessionCookies = adminSetCookie.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-      adminSessionId =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      adminSessionId = extractSignedSessionCookie(adminSetCookie);
     } else {
       adminSessionId = adminSetCookie || '';
     }

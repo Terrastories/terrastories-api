@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FastifyInstance } from 'fastify';
 import { testDb } from '../../helpers/database.js';
 import { createTestApp } from '../../helpers/api-client.js';
+import { extractSignedSessionCookie } from '../../helpers/session-cookie.js';
 
 describe('Member Places API - GET Endpoints', () => {
   let app: FastifyInstance;
@@ -53,20 +54,7 @@ describe('Member Places API - GET Endpoints', () => {
     // Extract SIGNED session cookie from Set-Cookie header
     // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
     const setCookieHeader = editorLogin.headers['set-cookie'];
-    if (Array.isArray(setCookieHeader)) {
-      // Find all sessionId cookies
-      const sessionCookies = setCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-
-      // Use the signed cookie (longer one with signature) if available
-      editorSessionId =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      editorSessionId = setCookieHeader.startsWith('sessionId=')
-        ? setCookieHeader
-        : '';
-    }
+    editorSessionId = extractSignedSessionCookie(setCookieHeader);
   });
 
   afterEach(async () => {

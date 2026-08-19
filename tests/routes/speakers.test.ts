@@ -15,6 +15,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'vitest';
 import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 describe('Speakers API Routes - Integration Tests', () => {
   let app: FastifyInstance;
@@ -93,20 +94,7 @@ describe('Speakers API Routes - Integration Tests', () => {
     // Extract SIGNED session cookie from Set-Cookie header
     // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
     const setCookieHeader = adminLoginRes.headers['set-cookie'];
-    if (Array.isArray(setCookieHeader)) {
-      // Find all sessionId cookies
-      const sessionCookies = setCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-
-      // Use the signed cookie (longer one with signature) if available
-      adminSessionId =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      adminSessionId = setCookieHeader.startsWith('sessionId=')
-        ? setCookieHeader
-        : '';
-    }
+    adminSessionId = extractSignedSessionCookie(setCookieHeader);
 
     // Register editor user
     const editorRegisterRes = await app.inject({
@@ -131,11 +119,7 @@ describe('Speakers API Routes - Integration Tests', () => {
     const editorSetCookieHeader = editorLoginRes.headers['set-cookie'];
     if (Array.isArray(editorSetCookieHeader)) {
       // Use the signed session cookie (longer one with signature)
-      const sessionCookies = editorSetCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-      editorSessionId =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      editorSessionId = extractSignedSessionCookie(editorSetCookieHeader);
     } else if (
       editorSetCookieHeader &&
       typeof editorSetCookieHeader === 'string'
@@ -168,11 +152,7 @@ describe('Speakers API Routes - Integration Tests', () => {
     const viewerSetCookieHeader = viewerLoginRes.headers['set-cookie'];
     if (Array.isArray(viewerSetCookieHeader)) {
       // Use the signed session cookie (longer one with signature)
-      const sessionCookies = viewerSetCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-      viewerSessionId =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      viewerSessionId = extractSignedSessionCookie(viewerSetCookieHeader);
     } else if (
       viewerSetCookieHeader &&
       typeof viewerSetCookieHeader === 'string'

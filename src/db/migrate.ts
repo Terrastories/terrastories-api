@@ -1,91 +1,85 @@
 /**
  * Database Migration Runner
  *
- * Runs all pending migrations for the configured database
+ * Runs pending migrations for the configured database without crossing dialects.
+ * SQLite/D1-compatible and PostgreSQL migration histories are intentionally kept
+ * separate because Drizzle migration SQL is dialect-specific.
  */
 
-import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { migrate as migratePostgres } from 'drizzle-orm/postgres-js/migrator';
-import { getDb } from './index.js';
-import { getConfig } from '../shared/config/index.js';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { migrate as migrateSqlite } from 'drizzle-orm/better-sqlite3/migrator';
+import { migrate as migratePostgres } from 'drizzle-orm/postgres-js/migrator';
+import { getDb, testConnection } from './index.js';
+import { getConfig } from '../shared/config/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+export type MigrationDialect = 'sqlite' | 'postgresql';
+
+export function getMigrationPlan(databaseUrl: string): {
+  dialect: MigrationDialect;
+  migrationsFolder: string;
+} {
+  const isPostgres =
+    databaseUrl.startsWith('postgresql://') ||
+    databaseUrl.startsWith('postgres://');
+
+  if (isPostgres) {
+    const migrationsFolder = path.join(__dirname, 'migrations', 'postgres');
+    const journalPath = path.join(migrationsFolder, 'meta', '_journal.json');
+
+    if (!existsSync(journalPath)) {
+      throw new Error(
+        'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL. ' +
+          'PostgreSQL migration parity is tracked by #135.'
+      );
+    }
+
+    return { dialect: 'postgresql', migrationsFolder };
+  }
+
+  return {
+    dialect: 'sqlite',
+    migrationsFolder: path.join(__dirname, 'migrations'),
+  };
+}
 
 async function runMigrations() {
   try {
     console.log('🔄 Running database migrations...');
 
     const config = getConfig();
+    const plan = getMigrationPlan(config.database.url);
     const database = await getDb();
 
-    const isPostgres =
-      config.database.url.startsWith('postgresql://') ||
-      config.database.url.startsWith('postgres://');
-
-    const migrationsFolder = path.join(__dirname, 'migrations');
-
-    if (isPostgres) {
+    if (plan.dialect === 'postgresql') {
       console.log('📊 Running PostgreSQL migrations...');
-
-      // Ensure PostGIS extension is enabled before running migrations
-      if (config.database.spatialSupport) {
-        console.log('🌍 Setting up PostGIS extension...');
-        try {
-          const pgDatabase = database as ReturnType<
-            typeof import('drizzle-orm/postgres-js').drizzle
-          >;
-          await pgDatabase.execute('CREATE EXTENSION IF NOT EXISTS postgis;');
-          await pgDatabase.execute(
-            'CREATE EXTENSION IF NOT EXISTS postgis_topology;'
-          );
-
-          console.log('✅ PostGIS extensions enabled');
-        } catch (error: unknown) {
-          const errorMessage =
-            error instanceof Error ? error.message : 'Unknown error';
-
-          console.warn('⚠️ Could not enable PostGIS extensions:', errorMessage);
-
-          console.warn('   Please ensure PostgreSQL has PostGIS installed');
-        }
-      }
-
       await migratePostgres(
         database as ReturnType<
           typeof import('drizzle-orm/postgres-js').drizzle
         >,
-        { migrationsFolder }
+        { migrationsFolder: plan.migrationsFolder }
       );
     } else {
-      console.log('📊 Running SQLite migrations...');
-      await migrate(
+      console.log('📊 Running SQLite/D1-compatible migrations...');
+      await migrateSqlite(
         database as ReturnType<
           typeof import('drizzle-orm/better-sqlite3').drizzle
         >,
-        { migrationsFolder }
+        { migrationsFolder: plan.migrationsFolder }
       );
     }
 
-    console.log('✅ Migrations completed successfully!');
-
-    // Test the connection after migration
-    const { testConnection } = await import('./index.js');
     const connectionTest = await testConnection();
-
-    console.log('🔍 Database connection test:');
-
-    console.log(`  Connected: ${connectionTest.connected ? '✅' : '❌'}`);
-
-    console.log(
-      `  Spatial Support: ${connectionTest.spatialSupport ? '✅' : '❌'}`
-    );
-    if (connectionTest.version) {
-      console.log(`  Spatial Version: ${connectionTest.version}`);
+    if (!connectionTest.connected) {
+      throw new Error('Database connection test failed after migrations');
     }
 
+    console.log('✅ Migrations completed successfully!');
+    console.log('🔍 Database connection test: ✅');
     process.exit(0);
   } catch (error) {
     console.error('❌ Migration failed:', error);
@@ -93,4 +87,6 @@ async function runMigrations() {
   }
 }
 
-runMigrations();
+if (import.meta.url === `file://${process.argv[1]}`) {
+  void runMigrations();
+}

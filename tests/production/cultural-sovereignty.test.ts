@@ -23,6 +23,7 @@ import {
 } from '../../src/db/schema/index.js';
 
 import { randomUUID } from 'crypto';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 interface TestUser {
   id: string;
@@ -756,11 +757,7 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
     let sessionCookie = '';
 
     if (Array.isArray(setCookieHeader)) {
-      const sessionCookies = setCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-      sessionCookie =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      sessionCookie = extractSignedSessionCookie(setCookieHeader);
     } else if (setCookieHeader && typeof setCookieHeader === 'string') {
       sessionCookie = setCookieHeader.startsWith('sessionId=')
         ? setCookieHeader

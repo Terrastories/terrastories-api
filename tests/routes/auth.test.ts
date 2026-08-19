@@ -17,6 +17,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'vitest';
 import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 describe('Authentication Routes', () => {
   let app: FastifyInstance;
@@ -765,9 +766,7 @@ describe('Authentication Routes', () => {
       // Extract signed session cookie for logout request
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const signedCookie = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const signedCookie = extractSignedSessionCookie(setCookieHeader);
       const sessionCookie = signedCookie!.split(';')[0];
 
       // Now logout using the signed session cookie
@@ -825,9 +824,7 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookie from headers
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const signedCookie = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const signedCookie = extractSignedSessionCookie(setCookieHeader);
       const sessionCookieValue = signedCookie!.split(';')[0];
 
       const logoutResponse = await app.inject({
@@ -892,9 +889,7 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookie from headers
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const signedCookie = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const signedCookie = extractSignedSessionCookie(setCookieHeader);
       const sessionCookieValue = signedCookie!.split(';')[0];
 
       // Normal logout should work (can't easily mock session.destroy() error)
@@ -950,9 +945,7 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookie from headers
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const signedCookie = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const signedCookie = extractSignedSessionCookie(setCookieHeader);
       const sessionCookieValue = signedCookie!.split(';')[0];
       expect(sessionCookieValue).toBeDefined();
 
@@ -1010,9 +1003,7 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookie from headers
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const signedCookie = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const signedCookie = extractSignedSessionCookie(setCookieHeader);
       const sessionCookieValue = signedCookie!.split(';')[0];
 
       // Verify session works before logout
@@ -1099,15 +1090,11 @@ describe('Authentication Routes', () => {
 
       // Extract signed session cookies from headers
       const setCookieHeader1 = login1.headers['set-cookie'];
-      const signedCookie1 = Array.isArray(setCookieHeader1)
-        ? setCookieHeader1[1]
-        : setCookieHeader1;
+      const signedCookie1 = extractSignedSessionCookie(setCookieHeader1);
       const session1Value = signedCookie1!.split(';')[0];
 
       const setCookieHeader2 = login2.headers['set-cookie'];
-      const signedCookie2 = Array.isArray(setCookieHeader2)
-        ? setCookieHeader2[1]
-        : setCookieHeader2;
+      const signedCookie2 = extractSignedSessionCookie(setCookieHeader2);
       const session2Value = signedCookie2!.split(';')[0];
 
       // Both sessions should be different

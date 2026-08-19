@@ -463,7 +463,7 @@ export async function authRoutes(
 
         if (!currentUser) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -775,6 +775,7 @@ export async function authRoutes(
                 properties: { message: { type: 'string' } },
                 required: ['message'],
               },
+              statusCode: { type: 'number', const: 401 },
             },
           },
         },
@@ -786,7 +787,7 @@ export async function authRoutes(
 
         if (!currentUser) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -928,6 +929,7 @@ export async function authRoutes(
                 properties: { message: { type: 'string' } },
                 required: ['message'],
               },
+              statusCode: { type: 'number', const: 401 },
             },
           },
           403: {
@@ -939,6 +941,7 @@ export async function authRoutes(
                 properties: { message: { type: 'string' } },
                 required: ['message'],
               },
+              statusCode: { type: 'number', const: 403 },
             },
           },
         },
@@ -950,7 +953,7 @@ export async function authRoutes(
 
         if (!currentUser) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }

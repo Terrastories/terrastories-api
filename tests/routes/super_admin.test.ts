@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 describe('Super Admin API', () => {
   let app: FastifyInstance;
@@ -55,25 +56,9 @@ describe('Super Admin API', () => {
         communityId: testCommunityId,
       },
     });
-    // Extract SIGNED session cookie from Set-Cookie header
-    // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
+    // Extract the signed session cookie without relying on Set-Cookie ordering.
     const setCookieHeader = superAdminLogin.headers['set-cookie'];
-    let superAdminSessionCookie = '';
-
-    if (Array.isArray(setCookieHeader)) {
-      // Find all sessionId cookies
-      const sessionCookies = setCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-
-      // Use the signed cookie (longer one with signature) if available
-      superAdminSessionCookie =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      superAdminSessionCookie = setCookieHeader.startsWith('sessionId=')
-        ? setCookieHeader
-        : '';
-    }
+    const superAdminSessionCookie = extractSignedSessionCookie(setCookieHeader);
 
     superAdminSessionId = superAdminSessionCookie;
 
@@ -107,11 +92,7 @@ describe('Super Admin API', () => {
     let adminSessionCookie = '';
 
     if (Array.isArray(adminSetCookieHeader)) {
-      const sessionCookies = adminSetCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-      adminSessionCookie =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      adminSessionCookie = extractSignedSessionCookie(adminSetCookieHeader);
     } else if (
       adminSetCookieHeader &&
       typeof adminSetCookieHeader === 'string'
@@ -153,11 +134,7 @@ describe('Super Admin API', () => {
     let editorSessionCookie = '';
 
     if (Array.isArray(editorSetCookieHeader)) {
-      const sessionCookies = editorSetCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-      editorSessionCookie =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      editorSessionCookie = extractSignedSessionCookie(editorSetCookieHeader);
     } else if (
       editorSetCookieHeader &&
       typeof editorSetCookieHeader === 'string'

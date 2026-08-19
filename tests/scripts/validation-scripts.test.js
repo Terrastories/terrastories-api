@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   collectAdvisories,
   parseAuditReport,
@@ -72,5 +73,30 @@ describe('bounded test shard runner', () => {
         stdio: 'ignore',
       })
     ).rejects.toThrow('hung-command exceeded 100ms and was terminated');
+  });
+});
+
+describe('deterministic Vitest worker configuration', () => {
+  it('pins worker bounds for every CI test shard', () => {
+    const packageJson = JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
+    );
+    const shardScripts = Object.entries(packageJson.scripts).filter(([name]) =>
+      name.startsWith('test:ci:')
+    );
+
+    expect(shardScripts.length).toBeGreaterThan(0);
+    for (const [name, command] of shardScripts) {
+      // Performance tests generate their own 100+ request concurrency and must
+      // run without unrelated test-file contention. Other shards use a fixed
+      // four-worker production-like CI configuration.
+      const expectedWorkers = name === 'test:ci:production' ? 1 : 4;
+      expect(command, `${name} must pin max workers`).toContain(
+        `--maxWorkers=${expectedWorkers}`
+      );
+      expect(command, `${name} must pin min workers`).toContain(
+        `--minWorkers=${expectedWorkers}`
+      );
+    }
   });
 });

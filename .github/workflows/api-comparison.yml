@@ -36,9 +36,10 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       # Comparison tests own isolated SQLite databases through TestDatabaseManager.
-      # PostgreSQL/PostGIS fresh/upgrade migration coverage is intentionally owned
-      # by #135; this workflow must not pretend to validate PostgreSQL by feeding
-      # the SQLite migration directory to a PostgreSQL connection.
+      # PostgreSQL fresh/upgrade migration coverage is intentionally owned by #135.
+      # This workflow must not pretend to validate PostgreSQL by feeding the SQLite
+      # migration directory to a PostgreSQL connection. V2 spatial behavior remains
+      # database-neutral and does not depend on PostGIS.
       - name: Run API comparison tests
         env:
           NODE_ENV: test
@@ -64,7 +65,7 @@ jobs:
               '',
               '✅ API comparison suite and report generation passed.',
               '',
-              'PostgreSQL/PostGIS migration validation is tracked separately in #135.',
+              'PostgreSQL migration validation is tracked separately in #135; V2 does not depend on PostGIS.',
               '',
               `📊 [Download detailed report](../../actions/runs/${context.runId})`,
             ].join('\n');

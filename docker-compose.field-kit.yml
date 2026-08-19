@@ -4,8 +4,6 @@
 # Usage: docker-compose -f docker-compose.yml -f docker-compose.field-kit.yml up -d
 # =============================================================================
 
-version: '3.8'
-
 services:
   # =============================================================================
   # API SERVICE - Field Kit Configuration

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildApp } from '../../src/app.js';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 describe('Authentication Security Tests', () => {
   let app: FastifyInstance;
@@ -410,10 +411,8 @@ describe('Authentication Security Tests', () => {
       });
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1] || setCookieHeader[0]
-        : setCookieHeader;
-      const sessionCookie = cookieString!.split(';')[0];
+      const sessionCookie =
+        extractSignedSessionCookie(setCookieHeader).split(';')[0];
 
       // Logout should invalidate the signed session cookie
       const logoutResponse = await app.inject({

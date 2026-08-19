@@ -4,8 +4,6 @@
 # Use with environment-specific override files
 # =============================================================================
 
-version: '3.8'
-
 services:
   # =============================================================================
   # API SERVICE - Terrastories TypeScript/Fastify API

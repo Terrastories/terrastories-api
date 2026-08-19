@@ -13,6 +13,7 @@ import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 describe('Community-Scoped User Management Routes', () => {
   let app: FastifyInstance;
@@ -117,9 +118,7 @@ describe('Community-Scoped User Management Routes', () => {
     expect(loginResponse.statusCode).toBe(200);
 
     const setCookieHeader = loginResponse.headers['set-cookie'];
-    const signedCookie = Array.isArray(setCookieHeader)
-      ? setCookieHeader[1]
-      : setCookieHeader;
+    const signedCookie = extractSignedSessionCookie(setCookieHeader);
     return signedCookie?.split(';')[0] || '';
   }
 
@@ -207,6 +206,7 @@ describe('Community-Scoped User Management Routes', () => {
       expect(response.statusCode).toBe(401);
       const body = JSON.parse(response.body);
       expect(body.error.message).toContain('Authentication required');
+      expect(body.statusCode).toBe(401);
     });
 
     it('should require admin role', async () => {
@@ -221,6 +221,7 @@ describe('Community-Scoped User Management Routes', () => {
       expect(response.statusCode).toBe(403);
       const body = JSON.parse(response.body);
       expect(body.error.message).toContain('Insufficient permissions');
+      expect(body.statusCode).toBe(403);
     });
 
     it('should only show users from same community (data sovereignty)', async () => {

@@ -56,7 +56,7 @@ export async function getAttachmentsTable() {
 }
 
 // Zod schemas
-export const insertAttachmentSchema = createInsertSchema(attachmentsPg, {
+export const insertAttachmentSchema = createInsertSchema(attachmentsSqlite, {
   url: z.string().url('Invalid URL format'),
   attachableId: z
     .number()

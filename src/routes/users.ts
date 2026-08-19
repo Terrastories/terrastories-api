@@ -167,6 +167,7 @@ export async function userRoutes(
     if (!user) {
       return reply.status(401).send({
         error: { message: 'Authentication required' },
+        statusCode: 401,
       });
     }
 
@@ -175,6 +176,7 @@ export async function userRoutes(
         error: {
           message: 'Access blocked on community endpoints for data sovereignty',
         },
+        statusCode: 403,
       });
     }
 
@@ -182,6 +184,7 @@ export async function userRoutes(
     if (user.role !== 'admin') {
       return reply.status(403).send({
         error: { message: 'Insufficient permissions. Admin role required.' },
+        statusCode: 403,
       });
     }
   });
@@ -243,7 +246,7 @@ export async function userRoutes(
 
         if (!currentUser) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -334,7 +337,7 @@ export async function userRoutes(
 
         if (!currentUser) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -431,7 +434,7 @@ export async function userRoutes(
 
         if (!currentUser) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -489,6 +492,7 @@ export async function userRoutes(
         if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
             error: { message: error.message },
+            statusCode: 403,
           });
         }
 
@@ -555,7 +559,7 @@ export async function userRoutes(
 
         if (!currentUser) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -612,6 +616,7 @@ export async function userRoutes(
         if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
             error: { message: error.message },
+            statusCode: 403,
           });
         }
 
@@ -677,7 +682,7 @@ export async function userRoutes(
 
         if (!currentUser) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -734,6 +739,7 @@ export async function userRoutes(
         if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
             error: { message: error.message },
+            statusCode: 403,
           });
         }
 
@@ -790,7 +796,7 @@ export async function userRoutes(
 
         if (!currentUser) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -824,6 +830,7 @@ export async function userRoutes(
         if (error instanceof SelfDeletionError) {
           return reply.status(403).send({
             error: { message: error.message },
+            statusCode: 403,
           });
         }
 

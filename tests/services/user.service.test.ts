@@ -502,7 +502,7 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(registrationData);
 
       // Configure mock to return false for wrong password
       mockComparePassword.mockResolvedValue(false);
@@ -514,6 +514,62 @@ describe('User Service', () => {
           testCommunityId
         )
       ).rejects.toThrow('Invalid email or password');
+
+      expect(mockHashPassword).toHaveBeenCalledWith(
+        'terrastories-missing-user-password-equalizer'
+      );
+      expect(mockComparePassword).toHaveBeenCalledTimes(1);
+      expect(mockComparePassword).toHaveBeenCalledWith(
+        'wrongpassword',
+        registeredUser.passwordHash
+      );
+    });
+
+    test('should verify missing scoped accounts with the configured fallback hash', async () => {
+      const password = 'missing-account-password';
+      mockHashPassword.mockResolvedValueOnce('configured-equalizer-hash');
+      mockComparePassword.mockResolvedValue(false);
+
+      await expect(
+        userService.authenticateUser(
+          'missing-scoped@example.com',
+          password,
+          testCommunityId
+        )
+      ).rejects.toThrow('Invalid email or password');
+
+      expect(mockHashPassword).toHaveBeenCalledWith(
+        'terrastories-missing-user-password-equalizer'
+      );
+      expect(mockComparePassword).toHaveBeenCalledTimes(1);
+      expect(mockComparePassword).toHaveBeenCalledWith(
+        password,
+        'configured-equalizer-hash'
+      );
+    });
+
+    test('should verify missing global accounts with the configured fallback hash', async () => {
+      const password = 'missing-global-password';
+      mockHashPassword.mockResolvedValueOnce(
+        'configured-global-equalizer-hash'
+      );
+      mockComparePassword.mockResolvedValue(false);
+
+      await expect(
+        userService.authenticateUserGlobal(
+          'missing-global@example.com',
+          password
+        )
+      ).rejects.toThrow('Invalid email or password');
+
+      expect(mockHashPassword).toHaveBeenCalledWith(
+        'terrastories-missing-user-password-equalizer'
+      );
+      expect(mockComparePassword).toHaveBeenCalledTimes(1);
+      expect(mockComparePassword).toHaveBeenCalledWith(
+        password,
+        'configured-global-equalizer-hash'
+      );
     });
   });
 

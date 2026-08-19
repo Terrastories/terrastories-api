@@ -28,10 +28,8 @@ import type {
   UserRole,
 } from '../db/schema/index.js';
 
-// Valid Argon2id hash using production cost parameters. Missing-account logins
-// verify against it so account existence is not exposed by an early return.
-const MISSING_USER_PASSWORD_HASH =
-  '$argon2id$v=19$m=65536,t=3,p=4$zmrpwWjd/22YAdNLqekLcQ$xIWwLze3LPYg0mfkGGHY4dvtc/d68Bx4PeE1hEFnxik';
+const MISSING_USER_PASSWORD_EQUALIZER =
+  'terrastories-missing-user-password-equalizer';
 
 /**
  * Request data for user registration
@@ -137,6 +135,7 @@ export class SelfDeletionError extends Error {
  */
 export class UserService {
   private communityService: CommunityService;
+  private missingUserPasswordHashPromise: Promise<string> | undefined;
 
   constructor(
     private userRepository: UserRepository,
@@ -144,6 +143,13 @@ export class UserService {
   ) {
     // Always require community repository for proper validation
     this.communityService = new CommunityService(communityRepository);
+  }
+
+  private getMissingUserPasswordHash(): Promise<string> {
+    this.missingUserPasswordHashPromise ??= passwordService.hashPassword(
+      MISSING_USER_PASSWORD_EQUALIZER
+    );
+    return this.missingUserPasswordHashPromise;
   }
 
   /**
@@ -277,11 +283,13 @@ export class UserService {
       // Find user by email in community
       const user = await this.userRepository.findByEmail(email, communityId);
 
-      // Always perform an Argon2 verification, even when the user does not exist,
-      // to avoid exposing account existence through response timing.
+      // Always perform an Argon2 verification, even when the user does not exist.
+      // The fallback hash is generated once with the deployment's configured
+      // Argon2 cost, and both paths await the same cached promise.
+      const missingUserPasswordHash = await this.getMissingUserPasswordHash();
       const isValidPassword = await passwordService.comparePassword(
         password,
-        user?.passwordHash ?? MISSING_USER_PASSWORD_HASH
+        user?.passwordHash ?? missingUserPasswordHash
       );
       if (!user || !isValidPassword) {
         throw new AuthenticationError();
@@ -316,9 +324,10 @@ export class UserService {
       const user = await this.userRepository.findByEmailGlobal(email);
 
       // Keep missing-account and wrong-password paths computationally equivalent.
+      const missingUserPasswordHash = await this.getMissingUserPasswordHash();
       const isValidPassword = await passwordService.comparePassword(
         password,
-        user?.passwordHash ?? MISSING_USER_PASSWORD_HASH
+        user?.passwordHash ?? missingUserPasswordHash
       );
       if (!user || !isValidPassword) {
         throw new AuthenticationError();

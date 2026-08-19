@@ -9,7 +9,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "vitest",
-    "test:coverage": "vitest run --coverage --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
+    "test:coverage": "vitest run --coverage --exclude tests/production/performance.test.ts --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
     "test:ci:contracts": "bash tests/scripts/user_workflow.test.sh && vitest run tests/scripts --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
     "test:ci:core": "vitest run tests/config tests/db tests/helpers tests/integration --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
     "test:ci:routes": "vitest run tests/routes --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",

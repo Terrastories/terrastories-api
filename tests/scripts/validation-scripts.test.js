@@ -140,10 +140,11 @@ describe('bounded test shard runner', () => {
 });
 
 describe('deterministic Vitest worker configuration', () => {
+  const packageJson = JSON.parse(
+    readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
+  );
+
   it('pins worker bounds for every CI test shard', () => {
-    const packageJson = JSON.parse(
-      readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
-    );
     const shardScripts = Object.entries(packageJson.scripts).filter(([name]) =>
       name.startsWith('test:ci:')
     );
@@ -161,5 +162,22 @@ describe('deterministic Vitest worker configuration', () => {
         `--minWorkers=${expectedWorkers}`
       );
     }
+  });
+
+  it('keeps measurement-sensitive performance tests out of coverage instrumentation', () => {
+    const coverageCommand = packageJson.scripts['test:coverage'];
+    const productionCommand = packageJson.scripts['test:ci:production'];
+
+    expect(coverageCommand).toContain(
+      '--exclude tests/production/performance.test.ts'
+    );
+    expect(coverageCommand).toContain('--maxWorkers=4');
+    expect(coverageCommand).toContain('--minWorkers=4');
+
+    // The performance suite is still required by the canonical CI suite; only
+    // V8 instrumentation is excluded because it perturbs memory measurements.
+    expect(productionCommand).toContain('tests/production');
+    expect(productionCommand).toContain('--maxWorkers=1');
+    expect(productionCommand).toContain('--minWorkers=1');
   });
 });

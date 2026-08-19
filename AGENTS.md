@@ -18,7 +18,7 @@
 - `npm run build`: compile TypeScript to `dist/`.
 - `npm start`: run production build.
 - `npm test`: interactive Vitest for local development; `npm run test:ci` is the terminating full-suite command split into deterministic bounded shards.
-- `npm run test:coverage`: run the complete coverage gate separately; CI runs it after the bounded full-suite validation so coverage cannot be hidden by shard failures.
+- `npm run test:coverage`: run the source-coverage gate separately; CI runs it after the bounded full-suite validation so coverage cannot hide shard failures. The memory/timing-sensitive production performance file is required in `test:ci:production` and excluded only from V8 coverage instrumentation.
 - `npm run validate:ci`: canonical terminating validation gate (format, type-check, lint, bounded full suite, build); `npm run validate` is an alias.
 - `npm run test:compatibility`: run the terminating API comparison suite; `npm run compatibility:full` also generates the comparison report.
 - `npm run lint` / `npm run format`: lint and format sources.
@@ -197,7 +197,7 @@ gh pr view <number> --json files --jq '.files[].filename'
 ```bash
 # Automated quality checks
 npm run validate  # canonical format + type-check + zero-warning lint + bounded full suite + build
-npm run test:coverage  # separate complete coverage gate used by CI
+npm run test:coverage  # separate source-coverage gate used by CI; performance benchmark stays in test:ci:production
 
 # Security scanning (known debt is explicitly baselined and tracked by #141)
 npm run audit:baseline

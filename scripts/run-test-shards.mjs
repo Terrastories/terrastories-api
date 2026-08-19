@@ -20,6 +20,28 @@ function positiveTimeout(value) {
   return parsed;
 }
 
+function forceKillProcessTree(child) {
+  if (!child.pid) {
+    return;
+  }
+
+  if (process.platform !== 'win32') {
+    try {
+      // The child is started as its own process-group leader, so a negative PID
+      // kills npm plus any shell/Vitest descendants in the same group.
+      process.kill(-child.pid, 'SIGKILL');
+      return;
+    } catch (error) {
+      if (error?.code !== 'ESRCH') {
+        throw error;
+      }
+      return;
+    }
+  }
+
+  child.kill('SIGKILL');
+}
+
 export function runCommand(
   command,
   args,
@@ -33,44 +55,55 @@ export function runCommand(
   const deadline = positiveTimeout(timeoutMs);
 
   return new Promise((resolve, reject) => {
-    let exceededDeadline = false;
+    let settled = false;
     const child = spawn(command, args, {
       stdio,
       env,
       shell: process.platform === 'win32',
-      // Node terminates the spawned command if it exceeds this deadline.
-      // The small grace ensures our marker is set before the exit event arrives.
-      timeout: deadline + 25,
-      killSignal: 'SIGTERM',
+      detached: process.platform !== 'win32',
     });
 
-    const deadlineMarker = setTimeout(() => {
-      exceededDeadline = true;
+    const finish = (callback) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(deadlineTimer);
+      callback();
+    };
+
+    const deadlineTimer = setTimeout(() => {
+      try {
+        forceKillProcessTree(child);
+      } catch (error) {
+        finish(() => reject(error));
+        return;
+      }
+
+      // Reject immediately after the uncatchable kill signal so validation is
+      // bounded even if the OS delays emitting the child's exit event.
+      finish(() =>
+        reject(new Error(`${label} exceeded ${deadline}ms and was terminated`))
+      );
     }, deadline);
 
     child.on('error', (error) => {
-      clearTimeout(deadlineMarker);
-      reject(error);
+      finish(() => reject(error));
     });
 
     child.on('exit', (code, signal) => {
-      clearTimeout(deadlineMarker);
+      finish(() => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
 
-      if (exceededDeadline) {
-        reject(new Error(`${label} exceeded ${deadline}ms and was terminated`));
-        return;
-      }
-
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      reject(
-        new Error(
-          `${label} failed${signal ? ` with signal ${signal}` : ` with exit code ${code}`}`
-        )
-      );
+        reject(
+          new Error(
+            `${label} failed${signal ? ` with signal ${signal}` : ` with exit code ${code}`}`
+          )
+        );
+      });
     });
   });
 }

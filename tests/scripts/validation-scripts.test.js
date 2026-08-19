@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   collectAdvisories,
   parseAuditReport,
@@ -65,14 +67,75 @@ describe('bounded test shard runner', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('terminates and rejects a command that exceeds its deadline', async () => {
+  it('hard-kills and rejects a command that ignores SIGTERM', async () => {
+    const startedAt = performance.now();
+
     await expect(
-      runCommand(process.execPath, ['-e', 'setTimeout(() => {}, 10_000)'], {
-        label: 'hung-command',
-        timeoutMs: 100,
-        stdio: 'ignore',
-      })
+      runCommand(
+        process.execPath,
+        [
+          '-e',
+          "process.on('SIGTERM', () => {}); setInterval(() => {}, 10_000);",
+        ],
+        {
+          label: 'hung-command',
+          timeoutMs: 100,
+          stdio: 'ignore',
+        }
+      )
     ).rejects.toThrow('hung-command exceeded 100ms and was terminated');
+
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it('kills descendant processes when a shard exceeds its deadline', async () => {
+    if (process.platform === 'win32') {
+      // Windows does not expose Unix process groups; the bounded-command test
+      // above still verifies the hard deadline on that platform.
+      return;
+    }
+
+    const tempDir = mkdtempSync(join(tmpdir(), 'terrastories-shard-timeout-'));
+    const pidPath = join(tempDir, 'grandchild.pid');
+    const grandchildCode =
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 10_000);";
+    const parentCode = `
+      const { spawn } = require('node:child_process');
+      const { writeFileSync } = require('node:fs');
+      const child = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildCode)}], { stdio: 'ignore' });
+      writeFileSync(${JSON.stringify(pidPath)}, String(child.pid));
+      process.on('SIGTERM', () => {});
+      setInterval(() => {}, 10_000);
+    `;
+
+    try {
+      await expect(
+        runCommand(process.execPath, ['-e', parentCode], {
+          label: 'process-tree',
+          timeoutMs: 500,
+          stdio: 'ignore',
+        })
+      ).rejects.toThrow('process-tree exceeded 500ms and was terminated');
+
+      const grandchildPid = Number(readFileSync(pidPath, 'utf8'));
+      let grandchildAlive = true;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        try {
+          process.kill(grandchildPid, 0);
+        } catch (error) {
+          if (error?.code === 'ESRCH') {
+            grandchildAlive = false;
+            break;
+          }
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      expect(grandchildAlive).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

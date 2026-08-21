@@ -78,7 +78,6 @@
     "husky": "^9.1.7",
     "lint-staged": "^16.1.5",
     "prettier": "^3.6.2",
-    "sqlite3": "^5.1.7",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.42.0",
@@ -120,7 +119,6 @@
     "bcrypt@6.0.0": true,
     "better-sqlite3@12.2.0": true,
     "esbuild@0.25.9": true,
-    "sharp@0.34.3": true,
-    "sqlite3@5.1.7": true
+    "sharp@0.34.3": true
   }
 }

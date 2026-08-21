@@ -84,6 +84,15 @@ describe('Configuration System', () => {
       });
     });
 
+    it('should preserve explicit runtime environment values over dotenv files', () => {
+      process.env.NODE_ENV = 'development';
+      process.env.DATABASE_URL = './runtime-explicit.db';
+
+      const config = loadConfig(true, false);
+
+      expect(config.database.url).toBe('./runtime-explicit.db');
+    });
+
     it('should load valid production configuration', () => {
       process.env.NODE_ENV = 'production';
       process.env.PORT = '80';

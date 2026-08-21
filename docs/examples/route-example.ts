@@ -55,7 +55,9 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
           return reply.status(404).send({ error: error.message });
         }
         // Fallback for unexpected errors
-        return reply.status(500).send({ error: 'An unexpected error occurred' });
+        return reply
+          .status(500)
+          .send({ error: 'An unexpected error occurred' });
       }
     }
   );

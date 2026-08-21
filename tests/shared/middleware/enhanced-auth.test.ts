@@ -106,10 +106,11 @@ describe('Enhanced Authorization Middleware', () => {
 
       expect(mockReply.status).toHaveBeenCalledWith(403);
       expect(mockReply.send).toHaveBeenCalledWith({
-        error: 'Insufficient permissions - requires editor level or higher',
+        error: {
+          message: 'Insufficient permissions - requires editor level or higher',
+        },
         required: 'editor',
         current: 'viewer',
-        statusCode: 403,
       });
     });
 
@@ -147,10 +148,11 @@ describe('Enhanced Authorization Middleware', () => {
 
       expect(mockReply.status).toHaveBeenCalledWith(403);
       expect(mockReply.send).toHaveBeenCalledWith({
-        error: 'Insufficient permissions - requires editor level or higher',
+        error: {
+          message: 'Insufficient permissions - requires editor level or higher',
+        },
         required: 'editor',
         current: 'elder',
-        statusCode: 403,
       });
     });
   });
@@ -198,10 +200,9 @@ describe('Enhanced Authorization Middleware', () => {
 
       expect(mockReply.status).toHaveBeenCalledWith(403);
       expect(mockReply.send).toHaveBeenCalledWith({
-        error: 'Insufficient permissions',
+        error: { message: 'Insufficient permissions' },
         required: ['stories:write'],
         current: 'viewer',
-        statusCode: 403,
       });
     });
 

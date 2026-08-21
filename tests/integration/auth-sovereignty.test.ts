@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildApp } from '../../src/app.js';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 describe('Authentication Data Sovereignty Tests', () => {
   let app: FastifyInstance;
@@ -63,9 +64,7 @@ describe('Authentication Data Sovereignty Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const signedCookie = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const signedCookie = extractSignedSessionCookie(setCookieHeader);
       const sessionCookie = signedCookie!.split(';')[0];
 
       // Try to access community data - should be blocked
@@ -112,9 +111,7 @@ describe('Authentication Data Sovereignty Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const signedCookie = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const signedCookie = extractSignedSessionCookie(setCookieHeader);
       const sessionCookie = signedCookie!.split(';')[0];
 
       // Access community data - should be allowed
@@ -161,9 +158,7 @@ describe('Authentication Data Sovereignty Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const signedCookie = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const signedCookie = extractSignedSessionCookie(setCookieHeader);
       const sessionCookie = signedCookie!.split(';')[0];
 
       // Access community data - should be allowed

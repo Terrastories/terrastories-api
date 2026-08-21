@@ -17,7 +17,10 @@
 - `npm run dev`: start Fastify server with hot reload.
 - `npm run build`: compile TypeScript to `dist/`.
 - `npm start`: run production build.
-- `npm test`: run tests; `npm run test:coverage` enforces 80% coverage.
+- `npm test`: interactive Vitest for local development; `npm run test:ci` is the terminating full-suite command split into deterministic bounded shards.
+- `npm run test:coverage`: run the source-coverage gate separately; CI runs it after the bounded full-suite validation so coverage cannot hide shard failures. The memory/timing-sensitive production performance file is required in `test:ci:production` and excluded only from V8 coverage instrumentation.
+- `npm run validate:ci`: canonical terminating validation gate (format, type-check, lint, bounded full suite, build); `npm run validate` is an alias.
+- `npm run test:compatibility`: run the terminating API comparison suite; `npm run compatibility:full` also generates the comparison report.
 - `npm run lint` / `npm run format`: lint and format sources.
 - Database: `npm run db:generate` (migrations), `npm run db:migrate` (apply), `npm run db:seed` (sample data).
 
@@ -46,11 +49,18 @@ import { UserService } from '@/services/user.service';
 - Coverage: global 80% min; coverage reports in `coverage/`.
 - Database tests use isolated in-memory SQLite helpers (`tests/helpers/database.ts`).
 
-Run specific tests:
+Run specific tests with a terminating command:
 
 ```
-npm test tests/routes/health.test.ts
+npx vitest run tests/routes/health.test.ts
 ```
+
+### Flaky Test Quarantine
+
+- Quarantine only when a deterministic fix cannot land immediately, and link a tracking issue that names an owner, rationale, and explicit expiry date.
+- Quarantines are temporary, time-bounded exceptions; review or remove them before expiry.
+- Retries are not a substitute for fixing or quarantining a flaky test. Required CI validation runs with zero automatic test retries.
+- Never skip or weaken a production-relevant failing test solely to make CI green.
 
 ## Commit & Pull Request Guidelines
 
@@ -186,10 +196,11 @@ gh pr view <number> --json files --jq '.files[].filename'
 
 ```bash
 # Automated quality checks
-npm run validate  # runs lint + type-check + test
+npm run validate  # canonical format + type-check + zero-warning lint + bounded full suite + build
+npm run test:coverage  # separate source-coverage gate used by CI; performance benchmark stays in test:ci:production
 
-# Security scanning
-npm audit --audit-level moderate
+# Security scanning (known debt is explicitly baselined and tracked by #141)
+npm run audit:baseline
 
 # Test coverage validation
 npm run test:coverage

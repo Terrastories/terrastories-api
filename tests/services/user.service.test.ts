@@ -502,7 +502,7 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(registrationData);
 
       // Configure mock to return false for wrong password
       mockComparePassword.mockResolvedValue(false);
@@ -514,6 +514,62 @@ describe('User Service', () => {
           testCommunityId
         )
       ).rejects.toThrow('Invalid email or password');
+
+      expect(mockHashPassword).toHaveBeenCalledWith(
+        'terrastories-missing-user-password-equalizer'
+      );
+      expect(mockComparePassword).toHaveBeenCalledTimes(1);
+      expect(mockComparePassword).toHaveBeenCalledWith(
+        'wrongpassword',
+        registeredUser.passwordHash
+      );
+    });
+
+    test('should verify missing scoped accounts with the configured fallback hash', async () => {
+      const password = 'missing-account-password';
+      mockHashPassword.mockResolvedValueOnce('configured-equalizer-hash');
+      mockComparePassword.mockResolvedValue(false);
+
+      await expect(
+        userService.authenticateUser(
+          'missing-scoped@example.com',
+          password,
+          testCommunityId
+        )
+      ).rejects.toThrow('Invalid email or password');
+
+      expect(mockHashPassword).toHaveBeenCalledWith(
+        'terrastories-missing-user-password-equalizer'
+      );
+      expect(mockComparePassword).toHaveBeenCalledTimes(1);
+      expect(mockComparePassword).toHaveBeenCalledWith(
+        password,
+        'configured-equalizer-hash'
+      );
+    });
+
+    test('should verify missing global accounts with the configured fallback hash', async () => {
+      const password = 'missing-global-password';
+      mockHashPassword.mockResolvedValueOnce(
+        'configured-global-equalizer-hash'
+      );
+      mockComparePassword.mockResolvedValue(false);
+
+      await expect(
+        userService.authenticateUserGlobal(
+          'missing-global@example.com',
+          password
+        )
+      ).rejects.toThrow('Invalid email or password');
+
+      expect(mockHashPassword).toHaveBeenCalledWith(
+        'terrastories-missing-user-password-equalizer'
+      );
+      expect(mockComparePassword).toHaveBeenCalledTimes(1);
+      expect(mockComparePassword).toHaveBeenCalledWith(
+        password,
+        'configured-global-equalizer-hash'
+      );
     });
   });
 
@@ -582,383 +638,46 @@ describe('User Service', () => {
     });
   });
 
-  describe('Password Reset Functionality', () => {
-    test('should initiate password reset with valid email and community', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'resettest@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Reset',
-        lastName: 'Test',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
+  describe('Temporarily disabled authentication features (#126)', () => {
+    test('should not expose deferred reset or session-management service methods', () => {
+      const deferredMethods = [
+        'initiatePasswordReset',
+        'resetPassword',
+        'authenticateUserWithTracking',
+        'setRememberToken',
+        'clearRememberToken',
+      ] as const;
 
-      const registeredUser = await userService.registerUser(registrationData);
-
-      const resetToken = await userService.initiatePasswordReset(
-        registrationData.email,
-        testCommunityId
-      );
-
-      expect(resetToken).toBeDefined();
-      expect(typeof resetToken).toBe('string');
-      expect(resetToken.length).toBe(32); // Expecting 32-character hex token
-
-      // Verify user has reset token and timestamp
-      const user = await userService.getUserById(
-        registeredUser.id,
-        testCommunityId
-      );
-      expect(user.resetPasswordToken).toBe(resetToken);
-      expect(user.resetPasswordSentAt).toBeDefined();
-      expect(user.resetPasswordSentAt).toBeInstanceOf(Date);
+      for (const method of deferredMethods) {
+        expect(
+          (userService as unknown as Record<string, unknown>)[method]
+        ).toBeUndefined();
+      }
     });
 
-    test('should throw error when initiating reset for non-existent email', async () => {
-      await expect(
-        userService.initiatePasswordReset(
-          'nonexistent@example.com',
-          testCommunityId
-        )
-      ).rejects.toThrow('User not found');
-    });
-
-    test('should throw error when initiating reset with wrong community', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'wrongcommunity@example.com',
+    test('should omit deferred authentication fields from current user records', async () => {
+      const registeredUser = await userService.registerUser({
+        email: 'deferred-auth-fields@example.com',
         password: 'StrongPassword123@',
-        firstName: 'Wrong',
-        lastName: 'Community',
+        firstName: 'Deferred',
+        lastName: 'Auth',
         role: 'viewer',
         communityId: testCommunityId,
-      };
-
-      await userService.registerUser(registrationData);
-
-      await expect(
-        userService.initiatePasswordReset(
-          registrationData.email,
-          otherCommunityId
-        )
-      ).rejects.toThrow('User not found');
-    });
-
-    test('should reset password with valid token', async () => {
-      mockHashPassword.mockResolvedValue('newhashedpassword123');
-
-      const registrationData: CreateUserRequest = {
-        email: 'validreset@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Valid',
-        lastName: 'Reset',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(registrationData);
-      const resetToken = await userService.initiatePasswordReset(
-        registrationData.email,
-        testCommunityId
-      );
-
-      const newPassword = 'NewStrongPassword456@';
-      mockValidatePasswordStrength.mockReturnValue({
-        isValid: true,
-        errors: [],
-        score: 5,
       });
-
-      await userService.resetPassword(resetToken, newPassword, testCommunityId);
-
-      // Verify password was hashed and user was updated
-      expect(mockHashPassword).toHaveBeenCalledWith(newPassword);
-
-      // Verify reset token and timestamp were cleared
-      const updatedUser = await userService.getUserById(
-        registeredUser.id,
-        testCommunityId
-      );
-      expect(updatedUser.resetPasswordToken).toBeNull();
-      expect(updatedUser.resetPasswordSentAt).toBeNull();
-      expect(updatedUser.passwordHash).toBe('newhashedpassword123');
-    });
-
-    test('should throw error for invalid reset token', async () => {
-      await expect(
-        userService.resetPassword(
-          'invalidtoken',
-          'NewPassword123@',
-          testCommunityId
-        )
-      ).rejects.toThrow('Invalid or expired reset token');
-    });
-
-    test('should throw error for expired reset token', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'expiredtest@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Expired',
-        lastName: 'Test',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(registrationData);
-      const resetToken = await userService.initiatePasswordReset(
-        registrationData.email,
-        testCommunityId
-      );
-
-      // Manually set an expired timestamp (more than 1 hour ago)
-      const expiredTime = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hours ago
-      await userRepository.update(
-        registeredUser.id,
-        {
-          resetPasswordSentAt: expiredTime,
-        },
-        testCommunityId
-      );
-
-      await expect(
-        userService.resetPassword(
-          resetToken,
-          'NewPassword123@',
-          testCommunityId
-        )
-      ).rejects.toThrow('Invalid or expired reset token');
-    });
-
-    test('should throw WeakPasswordError for weak password in reset', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'weakreset@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Weak',
-        lastName: 'Reset',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      await userService.registerUser(registrationData);
-      const resetToken = await userService.initiatePasswordReset(
-        registrationData.email,
-        testCommunityId
-      );
-
-      mockValidatePasswordStrength.mockReturnValue({
-        isValid: false,
-        errors: ['Password too weak'],
-        score: 0,
-      });
-
-      await expect(
-        userService.resetPassword(resetToken, 'weak', testCommunityId)
-      ).rejects.toThrow(WeakPasswordError);
-    });
-  });
-
-  describe('Session Management Fields', () => {
-    test('should update sign-in count and IP on authentication', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'signin@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Sign',
-        lastName: 'In',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(registrationData);
-
-      mockComparePassword.mockResolvedValue(true);
-
-      // Test authentication with IP tracking
-      const ipAddress = '192.168.1.100';
-      await userService.authenticateUserWithTracking(
-        registrationData.email,
-        registrationData.password,
-        testCommunityId,
-        ipAddress
-      );
-
       const user = await userService.getUserById(
         registeredUser.id,
         testCommunityId
       );
 
-      expect(user.signInCount).toBe(1);
-      expect(user.currentSignInIp).toBe(ipAddress);
-      expect(user.lastSignInAt).toBeDefined();
-      expect(user.lastSignInAt).toBeInstanceOf(Date);
-    });
-
-    test('should increment sign-in count on repeated authentications', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'repeat@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Repeat',
-        lastName: 'User',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(registrationData);
-      mockComparePassword.mockResolvedValue(true);
-
-      // First sign-in
-      await userService.authenticateUserWithTracking(
-        registrationData.email,
-        registrationData.password,
-        testCommunityId,
-        '192.168.1.100'
-      );
-
-      // Second sign-in
-      await userService.authenticateUserWithTracking(
-        registrationData.email,
-        registrationData.password,
-        testCommunityId,
-        '192.168.1.101'
-      );
-
-      const user = await userService.getUserById(
-        registeredUser.id,
-        testCommunityId
-      );
-
-      expect(user.signInCount).toBe(2);
-      expect(user.currentSignInIp).toBe('192.168.1.101');
-    });
-
-    test('should handle remember me functionality', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'remember@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Remember',
-        lastName: 'Me',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(registrationData);
-
-      await userService.setRememberToken(registeredUser.id, testCommunityId);
-
-      const user = await userService.getUserById(
-        registeredUser.id,
-        testCommunityId
-      );
-
-      expect(user.rememberCreatedAt).toBeDefined();
-      expect(user.rememberCreatedAt).toBeInstanceOf(Date);
-    });
-
-    test('should clear remember me token', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'clearremember@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Clear',
-        lastName: 'Remember',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(registrationData);
-
-      // Set remember token
-      await userService.setRememberToken(registeredUser.id, testCommunityId);
-
-      // Clear remember token
-      await userService.clearRememberToken(registeredUser.id, testCommunityId);
-
-      const user = await userService.getUserById(
-        registeredUser.id,
-        testCommunityId
-      );
-
-      expect(user.rememberCreatedAt).toBeNull();
-    });
-  });
-
-  describe('Authentication Field Edge Cases', () => {
-    test('should handle null authentication fields gracefully', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'nullfields@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Null',
-        lastName: 'Fields',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(registrationData);
-      const user = await userService.getUserById(
-        registeredUser.id,
-        testCommunityId
-      );
-
-      // New users should have null optional fields and proper defaults
-      expect(user.resetPasswordToken).toBeNull();
-      expect(user.resetPasswordSentAt).toBeNull();
-      expect(user.rememberCreatedAt).toBeNull();
-      expect(user.signInCount).toBe(0);
-      expect(user.lastSignInAt).toBeNull();
-      expect(user.currentSignInIp).toBeNull();
-    });
-
-    test('should validate reset token format', async () => {
-      // Test with various invalid token formats
-      await expect(
-        userService.resetPassword('', 'Password123@', testCommunityId)
-      ).rejects.toThrow('Invalid or expired reset token');
-
-      await expect(
-        userService.resetPassword('short', 'Password123@', testCommunityId)
-      ).rejects.toThrow('Invalid or expired reset token');
-
-      await expect(
-        userService.resetPassword(
-          'invalidcharacters!@#',
-          'Password123@',
-          testCommunityId
-        )
-      ).rejects.toThrow('Invalid or expired reset token');
-    });
-
-    test('should handle IP address validation', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'iptest@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'IP',
-        lastName: 'Test',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(registrationData);
-      mockComparePassword.mockResolvedValue(true);
-
-      // Test with various IP formats
-      const testIps = [
-        '192.168.1.1',
-        '10.0.0.1',
-        '127.0.0.1',
-        '2001:0db8:85a3:0000:0000:8a2e:0370:7334', // IPv6
-      ];
-
-      for (const ip of testIps) {
-        await userService.authenticateUserWithTracking(
-          registrationData.email,
-          registrationData.password,
-          testCommunityId,
-          ip
-        );
-
-        const user = await userService.getUserById(
-          registeredUser.id,
-          testCommunityId
-        );
-
-        expect(user.currentSignInIp).toBe(ip);
+      for (const field of [
+        'resetPasswordToken',
+        'resetPasswordSentAt',
+        'rememberCreatedAt',
+        'signInCount',
+        'lastSignInAt',
+        'currentSignInIp',
+      ]) {
+        expect(user).not.toHaveProperty(field);
       }
     });
   });

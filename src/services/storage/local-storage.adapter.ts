@@ -19,6 +19,19 @@ import {
   StoragePermissionError,
 } from './storage-adapter.interface.js';
 
+function getErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return undefined;
+  }
+
+  const { code } = error as { code?: unknown };
+  return typeof code === 'string' ? code : undefined;
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 export class LocalStorageAdapter implements StorageAdapter {
   private readonly basePath: string;
   private readonly metadataMap = new Map<string, { contentType?: string }>();
@@ -44,7 +57,7 @@ export class LocalStorageAdapter implements StorageAdapter {
           throw new StorageConflictError(safePath);
         } catch (error) {
           // File doesn't exist, which is what we want
-          if ((error as any).code !== 'ENOENT') {
+          if (getErrorCode(error) !== 'ENOENT') {
             throw error;
           }
         }
@@ -75,11 +88,11 @@ export class LocalStorageAdapter implements StorageAdapter {
         throw error;
       }
 
-      if ((error as any).code === 'EACCES') {
-        throw new StoragePermissionError(path, error as Error);
+      if (getErrorCode(error) === 'EACCES') {
+        throw new StoragePermissionError(path, asError(error));
       }
 
-      throw new StorageError(`Failed to upload file: ${path}`, error as Error);
+      throw new StorageError(`Failed to upload file: ${path}`, asError(error));
     }
   }
 
@@ -90,17 +103,17 @@ export class LocalStorageAdapter implements StorageAdapter {
 
       return await fs.readFile(fullPath);
     } catch (error) {
-      if ((error as any).code === 'ENOENT') {
-        throw new StorageNotFoundError(path, error as Error);
+      if (getErrorCode(error) === 'ENOENT') {
+        throw new StorageNotFoundError(path, asError(error));
       }
 
-      if ((error as any).code === 'EACCES') {
-        throw new StoragePermissionError(path, error as Error);
+      if (getErrorCode(error) === 'EACCES') {
+        throw new StoragePermissionError(path, asError(error));
       }
 
       throw new StorageError(
         `Failed to download file: ${path}`,
-        error as Error
+        asError(error)
       );
     }
   }
@@ -115,15 +128,15 @@ export class LocalStorageAdapter implements StorageAdapter {
       // Clean up metadata
       this.metadataMap.delete(safePath);
     } catch (error) {
-      if ((error as any).code === 'ENOENT') {
-        throw new StorageNotFoundError(path, error as Error);
+      if (getErrorCode(error) === 'ENOENT') {
+        throw new StorageNotFoundError(path, asError(error));
       }
 
-      if ((error as any).code === 'EACCES') {
-        throw new StoragePermissionError(path, error as Error);
+      if (getErrorCode(error) === 'EACCES') {
+        throw new StoragePermissionError(path, asError(error));
       }
 
-      throw new StorageError(`Failed to delete file: ${path}`, error as Error);
+      throw new StorageError(`Failed to delete file: ${path}`, asError(error));
     }
   }
 
@@ -135,14 +148,14 @@ export class LocalStorageAdapter implements StorageAdapter {
       await fs.access(fullPath);
       return true;
     } catch (error) {
-      if ((error as any).code === 'ENOENT') {
+      if (getErrorCode(error) === 'ENOENT') {
         return false;
       }
 
       // Re-throw other errors (permissions, etc.)
       throw new StorageError(
         `Failed to check file existence: ${path}`,
-        error as Error
+        asError(error)
       );
     }
   }
@@ -166,17 +179,17 @@ export class LocalStorageAdapter implements StorageAdapter {
         contentType: storedMetadata?.contentType,
       };
     } catch (error) {
-      if ((error as any).code === 'ENOENT') {
-        throw new StorageNotFoundError(path, error as Error);
+      if (getErrorCode(error) === 'ENOENT') {
+        throw new StorageNotFoundError(path, asError(error));
       }
 
-      if ((error as any).code === 'EACCES') {
-        throw new StoragePermissionError(path, error as Error);
+      if (getErrorCode(error) === 'EACCES') {
+        throw new StoragePermissionError(path, asError(error));
       }
 
       throw new StorageError(
         `Failed to get file metadata: ${path}`,
-        error as Error
+        asError(error)
       );
     }
   }
@@ -193,7 +206,7 @@ export class LocalStorageAdapter implements StorageAdapter {
           return [];
         }
       } catch (error) {
-        if ((error as any).code === 'ENOENT') {
+        if (getErrorCode(error) === 'ENOENT') {
           return [];
         }
         throw error;
@@ -205,11 +218,11 @@ export class LocalStorageAdapter implements StorageAdapter {
 
       return files;
     } catch (error) {
-      if ((error as any).code === 'ENOENT') {
+      if (getErrorCode(error) === 'ENOENT') {
         return [];
       }
 
-      throw new StorageError(`Failed to list files: ${prefix}`, error as Error);
+      throw new StorageError(`Failed to list files: ${prefix}`, asError(error));
     }
   }
 

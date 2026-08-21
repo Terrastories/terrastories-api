@@ -33,6 +33,13 @@ import type { MultipartFile } from '@fastify/multipart';
 import type { StorageAdapter } from './storage/storage-adapter.interface.js';
 import type { AppConfig } from '../shared/config/types.js';
 
+interface ReadableUploadStream {
+  on(event: 'data', listener: (chunk: Buffer) => void): ReadableUploadStream;
+  on(event: 'end', listener: () => void): ReadableUploadStream;
+  on(event: 'error', listener: (error: Error) => void): ReadableUploadStream;
+  destroy?: () => void;
+}
+
 // Entity types supported by the service
 export type FileServiceV2Entity = 'stories' | 'places' | 'speakers';
 
@@ -180,17 +187,18 @@ export class FileServiceV2 {
 
     // Convert to buffer (support stream and buffer)
     let fileBuffer: Buffer;
+    const stream = file.file as unknown as ReadableUploadStream;
     if (Buffer.isBuffer(file.file)) {
       fileBuffer = file.file;
-    } else if (typeof (file.file as any).on === 'function') {
+    } else if (typeof stream.on === 'function') {
       const chunks: Buffer[] = [];
       let total = 0;
       await new Promise<void>((resolve, reject) => {
-        (file.file as any)
+        stream
           .on('data', (chunk: Buffer) => {
             total += chunk.length;
             if (total > this.config.maxSizeBytes) {
-              (file.file as any).destroy?.();
+              stream.destroy?.();
               reject(new FileSizeError(total, this.config.maxSizeBytes));
               return;
             }

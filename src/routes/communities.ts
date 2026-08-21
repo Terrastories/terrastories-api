@@ -579,6 +579,7 @@ export async function communityRoutes(
           conditions.push(eq(storiesTable.isRestricted, false));
         }
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- #135 owns backend-specific Drizzle query typing.
         const stories = await (database as any)
           .select()
           .from(storiesTable)
@@ -689,6 +690,7 @@ export async function communityRoutes(
         }
 
         const storiesTable = getStoriesTable();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- #135 owns backend-specific Drizzle query typing.
         const storyResult = await (database as any)
           .select()
           .from(storiesTable)
@@ -718,20 +720,20 @@ export async function communityRoutes(
         // Elder access control: Check if story is restricted and requires elder access
         // For now, using isRestricted flag + title/description patterns to identify elder content
         // TODO: Add proper privacy_level and cultural_restrictions fields to schema in future
-        const isElderContent = story.isRestricted && (
-          story.title.toLowerCase().includes('elder') ||
-          story.title.toLowerCase().includes('sacred') ||
-          story.description?.toLowerCase().includes('elder') ||
-          story.description?.toLowerCase().includes('traditional knowledge')
-        );
-        
+        const isElderContent =
+          story.isRestricted &&
+          (story.title.toLowerCase().includes('elder') ||
+            story.title.toLowerCase().includes('sacred') ||
+            story.description?.toLowerCase().includes('elder') ||
+            story.description?.toLowerCase().includes('traditional knowledge'));
+
         if (isElderContent) {
           // @ts-ignore
           if (!user || user.role !== 'elder') {
-            return reply.status(403).send({ 
+            return reply.status(403).send({
               error: 'elder access required',
               statusCode: 403,
-              culturalProtocol: 'elder_restriction_enforced'
+              culturalProtocol: 'elder_restriction_enforced',
             });
           }
         }
@@ -739,20 +741,20 @@ export async function communityRoutes(
         // Enhance story response with cultural metadata for testing
         // TODO: These fields should be stored in database schema in future
         const traditional_knowledge = Boolean(
-          story.description?.includes('traditional knowledge') || 
-          story.title?.toLowerCase().includes('elder') ||
-          story.title?.toLowerCase().includes('traditional') ||
-          story.title?.toLowerCase().includes('knowledge') ||
-          story.title?.toLowerCase().includes('sacred')
+          story.description?.includes('traditional knowledge') ||
+            story.title?.toLowerCase().includes('elder') ||
+            story.title?.toLowerCase().includes('traditional') ||
+            story.title?.toLowerCase().includes('knowledge') ||
+            story.title?.toLowerCase().includes('sacred')
         );
-        
+
         return reply.status(200).send({
           data: {
             ...story,
             traditional_knowledge,
             cultural_significance: story.isRestricted ? 'high' : 'low',
-            privacy_level: story.isRestricted ? 'restricted' : 'public'
-          }
+            privacy_level: story.isRestricted ? 'restricted' : 'public',
+          },
         });
       } catch (error) {
         fastify.log.error(

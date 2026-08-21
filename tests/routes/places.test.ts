@@ -23,6 +23,7 @@ import {
 import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 describe('Places API Routes - Integration Tests', () => {
   let app: FastifyInstance;
@@ -113,8 +114,7 @@ describe('Places API Routes - Integration Tests', () => {
     // Extract SIGNED session cookie
     const adminSetCookie = adminLogin.headers['set-cookie'];
     if (Array.isArray(adminSetCookie)) {
-      const sessionCookies = adminSetCookie.filter((cookie) => cookie.startsWith('sessionId='));
-      adminSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      adminSessionId = extractSignedSessionCookie(adminSetCookie);
     }
 
     const editorLogin = await app.inject({
@@ -125,8 +125,7 @@ describe('Places API Routes - Integration Tests', () => {
     // Extract SIGNED session cookie
     const editorSetCookie = editorLogin.headers['set-cookie'];
     if (Array.isArray(editorSetCookie)) {
-      const sessionCookies = editorSetCookie.filter((cookie) => cookie.startsWith('sessionId='));
-      editorSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      editorSessionId = extractSignedSessionCookie(editorSetCookie);
     }
 
     const viewerLogin = await app.inject({
@@ -137,8 +136,7 @@ describe('Places API Routes - Integration Tests', () => {
     // Extract SIGNED session cookie
     const viewerSetCookie = viewerLogin.headers['set-cookie'];
     if (Array.isArray(viewerSetCookie)) {
-      const sessionCookies = viewerSetCookie.filter((cookie) => cookie.startsWith('sessionId='));
-      viewerSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      viewerSessionId = extractSignedSessionCookie(viewerSetCookie);
     }
 
     const elderLogin = await app.inject({
@@ -149,8 +147,7 @@ describe('Places API Routes - Integration Tests', () => {
     // Extract SIGNED session cookie
     const elderSetCookie = elderLogin.headers['set-cookie'];
     if (Array.isArray(elderSetCookie)) {
-      const sessionCookies = elderSetCookie.filter((cookie) => cookie.startsWith('sessionId='));
-      elderSessionId = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
+      elderSessionId = extractSignedSessionCookie(elderSetCookie);
     }
   });
 

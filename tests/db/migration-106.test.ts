@@ -47,6 +47,31 @@ describe('Issue #106 - Database Migration Completeness', () => {
 
     await migrate(drizzleDb, { migrationsFolder });
 
+    // Seed parent records required by foreign-key constrained migration checks.
+    const parentNow = Date.now();
+    db.prepare(
+      `INSERT INTO communities
+       (id, name, slug, public_stories, locale, is_active, created_at, updated_at)
+       VALUES (1, ?, ?, 0, 'en', 1, ?, ?)`
+    ).run(
+      'Migration Test Community',
+      'migration-test-community',
+      parentNow,
+      parentNow
+    );
+    db.prepare(
+      `INSERT INTO users
+       (id, email, password_hash, first_name, last_name, role, community_id, is_active, created_at, updated_at)
+       VALUES (1, ?, ?, ?, ?, 'admin', 1, 1, ?, ?)`
+    ).run(
+      'migration-test@example.com',
+      'migration-test-password-hash',
+      'Migration',
+      'Tester',
+      parentNow,
+      parentNow
+    );
+
     // Debug: Check what tables exist
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table'")

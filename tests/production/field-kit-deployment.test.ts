@@ -23,6 +23,7 @@ import path from 'path';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 const exec = promisify(execCb);
 
@@ -59,6 +60,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     // Initialize app in offline-compatible mode
     process.env.NODE_ENV = 'field-kit';
     process.env.OFFLINE_MODE = 'true';
+    process.env.DATABASE_URL = ':memory:';
 
     console.log('🔄 Initializing Field Kit app...');
 
@@ -1016,23 +1018,10 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       );
     }
 
-    // Extract session cookie
+    // Extract the signed session cookie without relying on Set-Cookie ordering.
     const setCookieHeader = loginResponse.headers['set-cookie'];
-    let sessionCookie = '';
-
-    if (Array.isArray(setCookieHeader)) {
-      const sessionCookies = setCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-      const fullCookie =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-      // Extract just the sessionId=value part, not the whole cookie with expiration etc.
-      sessionCookie = fullCookie.split(';')[0] || '';
-    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      sessionCookie = setCookieHeader.startsWith('sessionId=')
-        ? setCookieHeader.split(';')[0]
-        : '';
-    }
+    const sessionCookie =
+      extractSignedSessionCookie(setCookieHeader).split(';')[0];
 
     // Use the real session data from login response
     const responseData = JSON.parse(loginResponse.body);

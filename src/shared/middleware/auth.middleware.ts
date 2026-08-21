@@ -139,6 +139,7 @@ export async function requireAuth(
   if (!authRequest.session?.user) {
     return reply.status(401).send({
       error: { message: 'Authentication required' },
+      statusCode: 401,
     });
   }
 
@@ -160,6 +161,7 @@ export function requireRole(roles: string[]) {
     if (!sessionUser) {
       return reply.status(401).send({
         error: { message: 'Authentication required' },
+        statusCode: 401,
       });
     }
     const hasRole = roles.includes(sessionUser.role);
@@ -216,6 +218,7 @@ export async function enforceDataSovereignty(
   if (!user) {
     return reply.status(401).send({
       error: { message: 'Authentication required' },
+      statusCode: 401,
     });
   }
 
@@ -383,6 +386,7 @@ export function requireRoleHierarchy(
     if (!authRequest.session?.user) {
       return reply.status(401).send({
         error: { message: 'Authentication required' },
+        statusCode: 401,
       });
     }
 
@@ -432,6 +436,7 @@ export function requirePermission(
     if (!authRequest.session?.user) {
       return reply.status(401).send({
         error: { message: 'Authentication required' },
+        statusCode: 401,
       });
     }
 

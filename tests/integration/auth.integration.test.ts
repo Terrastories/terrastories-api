@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildApp } from '../../src/app.js';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 describe('Authentication Integration Tests', () => {
   let app: FastifyInstance;
@@ -80,9 +81,9 @@ describe('Authentication Integration Tests', () => {
       // Should have session cookie
       const setCookieHeader = loginResponse.headers['set-cookie'];
       expect(setCookieHeader).toBeDefined();
-      expect(
-        Array.isArray(setCookieHeader) ? setCookieHeader[1] : setCookieHeader
-      ).toContain('sessionId');
+      expect(extractSignedSessionCookie(setCookieHeader)).toContain(
+        'sessionId'
+      );
     });
 
     it('should logout user through HTTP POST /api/v1/auth/logout', async () => {
@@ -111,9 +112,8 @@ describe('Authentication Integration Tests', () => {
       });
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
-      const sessionCookie = (
-        Array.isArray(setCookieHeader) ? setCookieHeader[1] : setCookieHeader
-      )!.split(';')[0];
+      const sessionCookie =
+        extractSignedSessionCookie(setCookieHeader)!.split(';')[0];
 
       // Now logout with session
       const response = await app.inject({
@@ -163,9 +163,7 @@ describe('Authentication Integration Tests', () => {
       const setCookieHeader = loginResponse.headers['set-cookie'];
       expect(setCookieHeader).toBeDefined();
 
-      const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const cookieString = extractSignedSessionCookie(setCookieHeader);
       expect(cookieString).toContain('sessionId');
       expect(cookieString).toContain('HttpOnly');
       expect(cookieString).toContain('SameSite');
@@ -198,9 +196,7 @@ describe('Authentication Integration Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const cookieString = extractSignedSessionCookie(setCookieHeader);
 
       // Extract session cookie
       const sessionCookie = cookieString!.split(';')[0];
@@ -247,9 +243,7 @@ describe('Authentication Integration Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const cookieString = extractSignedSessionCookie(setCookieHeader);
       const sessionCookie = cookieString!.split(';')[0];
 
       // Logout
@@ -274,19 +268,19 @@ describe('Authentication Integration Tests', () => {
     });
   });
 
-  describe.skip('Rate Limiting', () => {
+  describe('Rate Limiting', () => {
     it('should enforce rate limits on registration endpoint', async () => {
       const userData = {
         email: 'rate@test.com',
         password: 'SecurePassword123!',
         firstName: 'Rate',
         lastName: 'Test',
-        communityId: 1,
+        communityId: testCommunityId,
         role: 'viewer',
       };
 
       // Make multiple rapid requests
-      const requests = Array.from({ length: 10 }, (_, i) =>
+      const requests = Array.from({ length: 11 }, (_, i) =>
         app.inject({
           method: 'POST',
           url: '/api/v1/auth/register',
@@ -328,7 +322,7 @@ describe('Authentication Integration Tests', () => {
         communityId: 1,
       };
 
-      const requests = Array.from({ length: 10 }, () =>
+      const requests = Array.from({ length: 11 }, () =>
         app.inject({
           method: 'POST',
           url: '/api/v1/auth/login',
@@ -445,9 +439,7 @@ describe('Authentication Integration Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const cookieString = extractSignedSessionCookie(setCookieHeader);
       const sessionCookie = cookieString!.split(';')[0];
 
       // Access protected route
@@ -491,9 +483,7 @@ describe('Authentication Integration Tests', () => {
 
       const setCookieHeader = loginResponse.headers['set-cookie'];
       // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-      const cookieString = Array.isArray(setCookieHeader)
-        ? setCookieHeader[1]
-        : setCookieHeader;
+      const cookieString = extractSignedSessionCookie(setCookieHeader);
       const sessionCookie = cookieString!.split(';')[0];
 
       // Try to access admin-only route

@@ -8,7 +8,10 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 // import { zodToJsonSchema } from 'zod-to-json-schema'; // Replaced with manual schemas
-import { requireRole } from '../shared/middleware/auth.middleware.js';
+import {
+  requireRole,
+  type AuthenticatedRequest,
+} from '../shared/middleware/auth.middleware.js';
 import {
   toISOString,
   toISOStringOrNull,
@@ -79,14 +82,22 @@ const ERROR_SCHEMAS = {
   401: {
     type: 'object',
     properties: {
-      error: { type: 'string' },
+      error: {
+        type: 'object',
+        properties: { message: { type: 'string' } },
+        required: ['message'],
+      },
       statusCode: { type: 'number', const: 401 },
     },
   },
   403: {
     type: 'object',
     properties: {
-      error: { type: 'string' },
+      error: {
+        type: 'object',
+        properties: { message: { type: 'string' } },
+        required: ['message'],
+      },
       statusCode: { type: 'number', const: 403 },
     },
   },
@@ -491,7 +502,7 @@ export async function superAdminRoutes(
       reply: FastifyReply
     ) => {
       try {
-        const authRequest = request as any; // Cast to access user
+        const authRequest = request as AuthenticatedRequest;
         const community = await communityService.createCommunityAsSuperAdmin(
           request.body
         );
@@ -628,7 +639,7 @@ export async function superAdminRoutes(
         );
 
         // Audit log the community update
-        const authRequest = request as any; // Cast to access user
+        const authRequest = request as AuthenticatedRequest;
         if (authRequest.user) {
           const auditEntry = SuperAdminAuditLogger.createCommunityEntry(
             'community_update',
@@ -1011,7 +1022,7 @@ export async function superAdminRoutes(
         const user = await userService.createUserAsSuperAdmin(request.body);
 
         // Audit log the user creation
-        const authRequest = request as any; // Cast to access user
+        const authRequest = request as AuthenticatedRequest;
         if (authRequest.user) {
           const auditEntry = SuperAdminAuditLogger.createUserEntry(
             'user_create',

@@ -6,6 +6,7 @@
 
 import { FastifyInstance } from 'fastify';
 import { InjectOptions, LightMyRequestResponse } from 'light-my-request';
+import { extractSignedSessionCookie } from './session-cookie.js';
 
 export interface ApiResponse<T = any> {
   data?: T;
@@ -197,29 +198,9 @@ export class ApiTestClient {
       throw new Error(`Failed to login test user: ${loginResponse.body}`);
     }
 
-    // Extract SIGNED session cookie from Set-Cookie header
-    // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
+    // Extract the signed session cookie without relying on Set-Cookie ordering.
     const setCookieHeader = loginResponse.headers['set-cookie'];
-    let sessionCookie = '';
-
-    if (Array.isArray(setCookieHeader)) {
-      // Find all sessionId cookies
-      const sessionCookies = setCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-
-      // Use the signed cookie (longer one with signature) if available
-      sessionCookie =
-        sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      sessionCookie = setCookieHeader.startsWith('sessionId=')
-        ? setCookieHeader
-        : '';
-    }
-
-    if (!sessionCookie) {
-      throw new Error('Failed to extract session cookie from login response');
-    }
+    const sessionCookie = extractSignedSessionCookie(setCookieHeader);
 
     return sessionCookie;
   }

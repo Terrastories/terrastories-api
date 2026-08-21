@@ -93,8 +93,12 @@ export const filesSqlite = sqliteTable('files', {
   metadata: sqliteText('metadata'), // JSON string for SQLite
   culturalRestrictions: sqliteText('cultural_restrictions'), // JSON string
   isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
 });
 
 // Dynamic table selection based on database type

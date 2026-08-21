@@ -46,9 +46,10 @@ function detectEnvironment(): Environment {
 /**
  * Loads environment variables from .env files
  *
- * Follows a two-tier loading strategy:
- * 1. Base .env file (if exists)
- * 2. Environment-specific .env.{environment} file (overrides base)
+ * Follows a three-tier precedence strategy:
+ * 1. Explicit process environment (CI/runtime) wins
+ * 2. Environment-specific .env.{environment} fills missing values
+ * 3. Base .env fills any remaining missing values
  *
  * @param {Environment} environment - The target environment
  * @param {boolean} skipEnvFiles - Skip .env loading (useful for testing)
@@ -61,12 +62,14 @@ function loadEnvironmentFile(
     return; // Skip loading .env files (useful for testing)
   }
 
-  // Load base .env file first (if exists)
-  dotenv.config();
-
-  // Load environment-specific file with override (takes precedence)
+  // Explicit process.env values must win over dotenv files so CI/runtime
+  // configuration cannot be silently replaced by local development defaults.
   const envFile = `.env.${environment}`;
-  dotenv.config({ path: envFile, override: true });
+  dotenv.config({ path: envFile });
+
+  // Base .env only fills values that remain unset after the environment-specific
+  // file, preserving precedence: process.env > .env.{environment} > .env.
+  dotenv.config();
 }
 
 /**

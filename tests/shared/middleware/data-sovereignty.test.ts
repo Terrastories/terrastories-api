@@ -114,6 +114,7 @@ describe('Data Sovereignty Enforcement', () => {
         error: {
           message: 'Authentication required',
         },
+        statusCode: 401,
       });
     });
 

@@ -76,6 +76,7 @@ jspm_packages/
 # Build outputs
 dist
 build
+*.tsbuildinfo
 
 # Database files
 *.db

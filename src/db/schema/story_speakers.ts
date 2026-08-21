@@ -69,8 +69,12 @@ export const storySpeakersSqlite = sqliteTable(
       .references(() => speakersSqlite.id, { onDelete: 'cascade' }),
     storyRole: sqliteText('story_role'),
     sortOrder: integer('sort_order').default(0),
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer('updated_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
   },
   (table) => ({
     // Composite unique constraint to prevent duplicate relationships

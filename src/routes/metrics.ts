@@ -23,7 +23,7 @@ export default async function metricsRoutes(fastify: FastifyInstance) {
     Querystring: z.infer<typeof metricsQuerySchema>;
     Reply: {
       200: {
-        data: Record<string, any>;
+        data: Record<string, unknown>;
         timestamp: string;
         message?: string;
       };

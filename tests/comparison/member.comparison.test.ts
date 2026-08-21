@@ -30,6 +30,9 @@ describe('V1 Compatibility: Member Endpoints', () => {
     const fixtures = await createTestData();
     testCommunityId = fixtures.community.id;
     testPlaceId = fixtures.places[0].id;
+    // V1-ONLY SCOPE CREEP accommodation: pick a non-elder fixture so this
+    // unrelated member-path test is not intercepted by V1 elder restrictions.
+    // SPEC-V2 removes elder status; the restriction itself is not V2 parity.
     testSpeakerId =
       fixtures.speakers.find((speaker) => !speaker.elderStatus)?.id ??
       fixtures.speakers[0].id;

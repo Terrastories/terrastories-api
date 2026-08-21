@@ -84,6 +84,9 @@ test_results.log
 test-report.junit.xml
 test-results.json
 validation-results.json
+comparison-config.json
+comparison-results.json
+api-comparison-report.html
 
 # Test fixtures (automatically generated)
 tests/fixtures/activestorage/storage/

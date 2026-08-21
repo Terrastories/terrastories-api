@@ -12,7 +12,10 @@ const isPostgres =
 export default defineConfig({
   dialect: isPostgres ? 'postgresql' : 'sqlite',
   schema: './src/db/schema/*.ts',
-  out: './src/db/migrations',
+  // Keep dialect-specific migration histories separate. SQLite/D1 is the
+  // existing baseline; PostgreSQL migrations live under their own folder so
+  // Drizzle can never overwrite or execute SQLite SQL for PostgreSQL.
+  out: isPostgres ? './src/db/migrations/postgres' : './src/db/migrations',
   dbCredentials: isPostgres
     ? {
         url: databaseUrl,

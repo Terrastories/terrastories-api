@@ -255,7 +255,7 @@ describe('V1 Compatibility: Communities Endpoints', () => {
   });
 
   describe('GET /api/v1/communities/:id/stories/:storyId', () => {
-    it('should return 200 with enriched story data', async () => {
+    it('should return 200 with story data', async () => {
       const storiesRes = await client.get(
         `/api/v1/communities/${testCommunityId}/stories`,
         undefined,
@@ -273,7 +273,24 @@ describe('V1 Compatibility: Communities Endpoints', () => {
         expect(body).toHaveProperty('data');
         expect(body.data).toHaveProperty('id');
         expect(body.data).toHaveProperty('title');
-        // Enriched fields
+      }
+    });
+
+    it('[V1-ONLY SCOPE CREEP] exposes legacy cultural metadata', async () => {
+      const storiesRes = await client.get(
+        `/api/v1/communities/${testCommunityId}/stories`,
+        undefined,
+        adminCookie
+      );
+      const stories = JSON.parse(storiesRes.body).data;
+      if (stories.length > 0) {
+        const res = await client.get(
+          `/api/v1/communities/${testCommunityId}/stories/${stories[0].id}`,
+          undefined,
+          adminCookie
+        );
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
         expect(body.data).toHaveProperty('traditional_knowledge');
         expect(body.data).toHaveProperty('cultural_significance');
         expect(body.data).toHaveProperty('privacy_level');

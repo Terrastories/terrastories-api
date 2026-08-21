@@ -101,12 +101,12 @@ describe('Database Test Helpers', () => {
         description: expect.any(String),
         slug: expect.any(String),
         publicStories: expect.any(Boolean),
+        createdAt: expect.any(Date),
+        updatedAt: expect.any(Date),
       });
 
-      // Should not include ID fields
+      // Factories omit generated IDs but include SQLite-required timestamps.
       expect(communityData).not.toHaveProperty('id');
-      expect(communityData).not.toHaveProperty('createdAt');
-      expect(communityData).not.toHaveProperty('updatedAt');
     });
 
     it('should create place data', () => {

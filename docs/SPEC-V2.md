@@ -213,17 +213,17 @@ interface ApiError {
 
 ### 6.3 Non-Functional Requirements
 
-| ID      | Category      | Requirement                                                           | Target                                       |
-| ------- | ------------- | --------------------------------------------------------------------- | -------------------------------------------- |
-| NFR-001 | Performance   | API response times at edge                                            | p95 < 200ms at 100 RPS                       |
-| NFR-002 | Performance   | Workers bundle size                                                   | < 10MB (CI-enforced)                         |
-| NFR-003 | Performance   | Password hashing on Workers                                           | < 5s CPU time (bcryptjs)                     |
-| NFR-004 | Reliability   | Zero data loss during migration                                       | Record count validation post-migration       |
-| NFR-005 | Security      | Community data isolation verified                                     | 100% of content queries include communityId  |
-| NFR-006 | Security      | Session tokens expire                                                 | Configurable TTL in KV                       |
-| NFR-007 | Scalability   | D1 database size monitored                                            | Alert at 80% of 10GB limit                   |
-| NFR-008 | Portability   | Same codebase runs on Workers, Node.js+PostgreSQL, and Node.js+SQLite | All three modes tested in CI                 |
-| NFR-009 | Observability | Structured JSON logging on all requests                               | Logpush (Cloudflare) / console (self-hosted) |
+| ID      | Category      | Requirement                                                           | Target                                         |
+| ------- | ------------- | --------------------------------------------------------------------- | ---------------------------------------------- |
+| NFR-001 | Performance   | API response times at edge                                            | p95 < 200ms at 100 RPS                         |
+| NFR-002 | Performance   | Workers bundle size                                                   | < 10MB (CI-enforced)                           |
+| NFR-003 | Performance   | Password hashing on Workers                                           | < 5s CPU time (bcryptjs)                       |
+| NFR-004 | Reliability   | Zero data loss during migration                                       | Record count validation post-migration         |
+| NFR-005 | Security      | Community data isolation verified                                     | 100% of content queries include communityId    |
+| NFR-006 | Security      | Session tokens expire                                                 | Configurable expiry for KV and cookie sessions |
+| NFR-007 | Scalability   | D1 database size monitored                                            | Alert at 80% of 10GB limit                     |
+| NFR-008 | Portability   | Same codebase runs on Workers, Node.js+PostgreSQL, and Node.js+SQLite | All three modes tested in CI                   |
+| NFR-009 | Observability | Structured JSON logging on all requests                               | Logpush (Cloudflare) / console (self-hosted)   |
 
 ---
 
@@ -387,7 +387,7 @@ Two low-priority items flagged in the automated review remain as notes for devel
 | 2026-06-08 | Terrastories Team | Restructured per spec best practices. Added numbered requirement IDs (FR-001 through FR-025, NFR-001 through NFR-009). Added risk IDs (R-1 through R-7). Reorganized sections for clarity. Added stack comparison table.                        |
 | 2026-06-23 | Terrastories Team | Fixed D1 consistency terminology: replaced non-existent `withSessionBinding` with D1 transactions + same-request session reads.                                                                                                                 |
 | 2026-08-17 | Terrastories Team | Reaffirmed the canonical V2 contract during repository context cleanup: Hono; first-class Workers+D1+R2, Node+PostgreSQL, and offline Node+SQLite profiles; portable spatial behavior with no PostGIS dependency; removed V1 scope remains out. |
-| 2026-08-22 | Terrastories Team | Reconciled canonical wording: field kits use Node.js + SQLite, and D1 consistency mitigation uses transactions plus same-request reads rather than the nonexistent `withSessionBinding`.                                                        |
+| 2026-08-22 | Terrastories Team | Reconciled canonical wording: field kits use Node.js + SQLite; D1 consistency uses transactions plus same-request reads rather than nonexistent `withSessionBinding`; session expiry applies to both KV and cookie-session profiles.            |
 
 ---
 

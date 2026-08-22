@@ -1,6 +1,6 @@
 # Terrastories API Source of Truth
 
-**Status:** Canonical navigation and change-control contract  
+**Status:** Canonical navigation and change-control contract
 **Last reviewed:** 2026-08-17
 
 Read this immediately after `AGENTS.md`. Its purpose is to stop issues, roadmaps, tests, or current implementation details from silently redefining API V2.

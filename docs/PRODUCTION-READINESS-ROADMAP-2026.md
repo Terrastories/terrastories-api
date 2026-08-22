@@ -31,11 +31,11 @@ A Terrastories API revision is production-ready only when all of the following a
 9. Logs, metrics, traces, and alerts are sufficient to diagnose failures without exposing secrets or sensitive cultural data.
 10. A staged/canary deployment passes automated smoke, migration, security, and rollback checks before broad rollout.
 
-## Phase 0 — Stabilize the development baseline (P0) — complete
+## Phase 0 — Stabilize the deterministic validation baseline (P0) — complete
 
-**Goal:** make the test and CI signals trustworthy before adding more migration surface.
+**Goal:** make the canonical format/type/lint/test/build validation signal trustworthy before adding more migration surface.
 
-**Status:** Completed by issue #133 / PR #152 on 2026-08-21. Reopen this phase only if the deterministic baseline regresses.
+**Status:** Completed by issue #133 / PR #152 on 2026-08-21 for the canonical deterministic validation baseline. Other CI hardening remains owned by later phases; in particular, Phase 6 still owns removing soft-fail masking from production-container startup and other required deployment/security checks.
 
 ### Work
 
@@ -49,7 +49,7 @@ A Terrastories API revision is production-ready only when all of the following a
 
 ### Exit gate
 
-- Three consecutive full CI runs on the same revision are green without retries.
+- Three consecutive canonical validation workflow runs on the same revision are green without retries.
 - No stale/broken validation scripts.
 - No unowned quarantined production tests.
 

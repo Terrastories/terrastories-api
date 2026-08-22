@@ -1,7 +1,7 @@
 # Phase 1 — Fastify → Hono Migration
 
-**Status:** Active foundation in PR #132  
-**Authority:** Execution plan subordinate to `docs/SPEC-V2.md`  
+**Status:** Active foundation in PR #132
+**Authority:** Execution plan subordinate to `docs/SPEC-V2.md`
 **Last reviewed:** 2026-08-22
 
 ## Goal

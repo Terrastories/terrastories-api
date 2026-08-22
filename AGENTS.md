@@ -145,11 +145,15 @@ At minimum consider:
 
 Required gates fail closed. A check masked by `continue-on-error`, `|| true`, `|| echo`, retries-only behavior, or a diagnostic that merely prints mismatches is not green evidence.
 
+Dependency-audit baselines are inventories of explicitly accepted debt, not a place to absorb newly published advisories for convenience. A new advisory must fail closed. Trace the exact dependency path and prefer, in order: removing an unused dependency, applying a compatible fixed version, or performing a justified upgrade. Do not widen the baseline for a fixable advisory merely to restore green CI.
+
 For a full PR lifecycle use `.agents/skills/pr-cycle/SKILL.md`.
 
 Merge readiness is bound to an exact PR head SHA and current base-tip SHA. Any new push or base movement invalidates prior review/readiness evidence.
 
 Never merge unless the user explicitly authorizes merge. A request for a PR cycle authorizes fixes/reviews/pushes, not merge by itself.
+
+An authorized merge is not the end of validation when the target branch runs post-merge checks. Verify the exact resulting target-branch commit and its required workflows. If `main` becomes red, pause the merge queue and repair the failure before advancing another PR; first determine whether the failure is a code regression or a newly changed external condition such as a dependency advisory.
 
 ## 8. Documentation/change control
 

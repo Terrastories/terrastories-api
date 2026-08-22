@@ -72,7 +72,7 @@ Choose gates by risk, but never weaken them to make a PR pass.
 - Run the shared API contract suite against every transport touched by the change.
 - During the Fastify -> Hono migration, a Hono change is not merge-ready merely because `tests/hono` smoke tests pass. The same behavioral contract assertions must execute against both Fastify V1 and Hono V2, with intentionally documented namespace differences only.
 - A comparison test that merely detects or logs mismatches does not count as parity. Unexpected response/status/header mismatches must fail the gate.
-- Preserve error envelopes, auth semantics, pagination, multipart behavior, cultural restrictions, and data-sovereignty rules unless an explicit API change is approved and documented.
+- Preserve error envelopes, auth semantics, pagination, multipart behavior, community isolation, and data-sovereignty rules unless an explicit API change is approved and documented. Preserve cultural behavior only when it is still required by canonical V2; never reintroduce removed V1 elder/cultural-metadata restrictions merely because legacy tests or reviews expect them.
 
 ### Database/schema/migration changes
 
@@ -93,7 +93,7 @@ Treat these as high-risk. Require negative tests as well as success paths:
 
 - unauthenticated and unauthorized access;
 - cross-community access attempts;
-- super-admin cultural-data restrictions;
+- super-admin boundaries around protected community content and metadata;
 - session creation, expiry, revocation, concurrent sessions, and restart behavior;
 - upload MIME/size/path traversal checks and cross-community file access;
 - logs/errors must not expose secrets, session tokens, sensitive cultural content, or unnecessary personal data.
@@ -142,12 +142,15 @@ If merge is not authorized, stop here and report the exact reviewed revision pai
 Only after explicit authorization:
 
 1. Re-read live PR state immediately before merging.
-2. Confirm head and base-tip still equal the reviewed merge-ready pair; otherwise return to review/CI.
-3. Reconfirm green CI, review-thread state, and mergeability.
-4. Merge with an exact-head guard when tooling supports it. Never use an admin bypass unless the user explicitly authorizes that separate override.
-5. Verify the PR is merged and record the merge commit SHA.
-6. Clean only the PR's own remote branch, isolated worktree, and local branch after proving there are no unpushed commits or untracked work worth preserving.
-7. Verify unrelated worktrees and their pre-existing changes remain untouched.
+2. If the user mentions merge order, a queue, prerequisites, or multiple pending PRs, inspect the open PR set and explicit dependency/base relationships. A PR being merge-ready does not prove it is logically next.
+3. Confirm head and base-tip still equal the reviewed merge-ready pair; otherwise return to review/CI.
+4. Reconfirm green CI, review-thread state, and mergeability.
+5. Merge with an exact-head guard when tooling supports it. Never use an admin bypass unless the user explicitly authorizes that separate override.
+6. Verify the PR is merged and record the merge commit SHA.
+7. Observe required workflows triggered on the exact resulting target-branch commit. Do not advance the merge queue while the target branch is red or still has unresolved required checks.
+8. If a post-merge target-branch failure appears, distinguish a regression from a newly changed external condition. For a new dependency advisory, trace the source and prefer removing unused dependencies or applying a compatible fix over widening an audit baseline. Put any necessary minimal repair ahead of unrelated queued work.
+9. Clean only the PR's own remote branch, isolated worktree, and local branch after proving there are no unpushed commits or untracked work worth preserving.
+10. Verify unrelated worktrees and their pre-existing changes remain untouched.
 
 ## 8. Session lessons checkpoint
 

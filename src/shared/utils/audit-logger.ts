@@ -23,7 +23,7 @@ export interface SuperAdminAuditLog {
   resourceId?: number;
   adminUserId: number;
   adminEmail: string;
-  details?: Record<string, any>;
+  details?: Record<string, unknown>;
   success: boolean;
   reason?: string;
   timestamp: Date;
@@ -79,7 +79,7 @@ export class SuperAdminAuditLogger {
     adminEmail: string,
     success: boolean,
     resourceId?: number,
-    details?: Record<string, any>,
+    details?: Record<string, unknown>,
     reason?: string
   ): SuperAdminAuditLog {
     return {
@@ -104,7 +104,7 @@ export class SuperAdminAuditLogger {
     adminEmail: string,
     success: boolean,
     resourceId?: number,
-    details?: Record<string, any>,
+    details?: Record<string, unknown>,
     reason?: string
   ): SuperAdminAuditLog {
     return {

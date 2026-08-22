@@ -52,9 +52,8 @@ Do not implement source changes under `SPEC DECISION REQUIRED`.
 
 ## 3. Repository structure
 
-- `src/routes/`: Fastify V1 routes and Hono V2 migration routes under `routes/hono/`.
-- `src/hono-app.ts`: Hono app builder.
-- `src/server.ts`: current runtime entrypoint during coexistence.
+- `src/routes/`: current Fastify V1 routes on `main`; Phase 1 Hono V2 transport work is pending in PR #132.
+- `src/server.ts`: current Fastify runtime entrypoint on `main`; Hono coexistence begins only when PR #132 lands.
 - `src/services/`: business logic.
 - `src/repositories/`: data access.
 - `src/db/`: Drizzle database setup, schemas, migrations, seeds.
@@ -97,15 +96,12 @@ Autonomous/CI work must use terminating test commands, not Vitest watch mode.
 Typical gates:
 
 ```bash
-npm run type-check
-npm run lint
-npm run format:check
-npm run build
-npm test -- --run
+npm run validate:ci
 npm run test:coverage
+npm run test:compatibility
 ```
 
-Run the smallest affected test set first, then the broader required suite. `npm run validate` is currently unsafe for unattended use because it ends in bare Vitest watch mode; issue #133 owns making the aggregate validation path deterministic and CI-safe. Use terminating commands such as `npm test -- --run` until that lands, and do not treat a configured script as proof unless it actually completes successfully.
+Run the smallest affected terminating test set first, then the broader required suite. Issue #133 landed in PR #152: `npm run validate:ci` is the canonical terminating aggregate gate, `npm run validate` is its alias, and `npm run test:ci` executes the bounded deterministic full-suite shards. Coverage and API compatibility remain separate gates so neither can hide full-suite failures. Do not treat a configured script as proof unless it actually completes successfully on the revision being reviewed.
 
 ### API migration/parity
 

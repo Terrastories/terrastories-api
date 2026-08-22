@@ -181,30 +181,4 @@ describe('Story Places Schema', () => {
       // Unique constraints are defined in table creation
     });
   });
-
-  describe('Database Integration', () => {
-    it.skip('should be able to insert story place relationship', async () => {
-      // This test will be implemented when relationship features are added (Phase 4)
-      // Skip for now to allow other features to proceed
-      expect(true).toBe(true);
-    });
-
-    it.skip('should prevent duplicate story-place relationships', async () => {
-      // This test will be implemented when relationship features are added (Phase 4)
-      // Skip for now to allow other features to proceed
-      expect(true).toBe(true);
-    });
-
-    it.skip('should cascade delete when story is deleted', async () => {
-      // This test will be implemented when relationship features are added (Phase 4)
-      // Skip for now to allow other features to proceed
-      expect(true).toBe(true);
-    });
-
-    it.skip('should cascade delete when place is deleted', async () => {
-      // This test will be implemented when relationship features are added (Phase 4)
-      // Skip for now to allow other features to proceed
-      expect(true).toBe(true);
-    });
-  });
 });

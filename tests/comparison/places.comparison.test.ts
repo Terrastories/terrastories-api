@@ -310,7 +310,9 @@ describe('V1 Compatibility: Places Endpoints', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════════
-  // DELETE /api/v1/places/:id — Delete (requires admin/elder)
+  // DELETE /api/v1/places/:id — Delete
+  // V1-ONLY SCOPE CREEP: V1 also allows the elder role below. SPEC-V2 removes
+  // the elder role, so that assertion is a V1 regression snapshot, not V2 parity.
   // ═══════════════════════════════════════════════════════════════════
   describe('DELETE /api/v1/places/:id', () => {
     it('should return 401 without auth', async () => {
@@ -336,7 +338,7 @@ describe('V1 Compatibility: Places Endpoints', () => {
       expect(res.statusCode).toBe(204);
     });
 
-    it('should return 204 for elder', async () => {
+    it('[V1-ONLY SCOPE CREEP] should return 204 for elder', async () => {
       const createRes = await client.post(
         '/api/v1/places',
         { name: 'Elder Delete', latitude: 47, longitude: -121 },

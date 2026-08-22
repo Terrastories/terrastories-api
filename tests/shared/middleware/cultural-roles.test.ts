@@ -118,8 +118,7 @@ describe('Cultural Role Support', () => {
       // Elder should still respect community boundaries
       expect(mockReply.status).toHaveBeenCalledWith(403);
       expect(mockReply.send).toHaveBeenCalledWith({
-        error: 'Access denied - community data isolation',
-        statusCode: 403,
+        error: { message: 'Access denied - community data isolation' },
       });
     });
 

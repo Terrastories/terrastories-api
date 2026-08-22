@@ -134,8 +134,12 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
+              statusCode: { type: 'number', const: 401 },
             },
           },
           413: {
@@ -179,7 +183,7 @@ export async function fileRoutes(
         // Upload file with community scoping
         if (!authRequest.session?.user) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -257,8 +261,12 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
+              statusCode: { type: 'number', const: 401 },
             },
           },
           404: {
@@ -278,7 +286,7 @@ export async function fileRoutes(
       try {
         if (!authRequest.session?.user) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -382,8 +390,12 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
+              statusCode: { type: 'number', const: 401 },
             },
           },
           403: {
@@ -412,7 +424,7 @@ export async function fileRoutes(
       try {
         if (!authRequest.session?.user) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -533,8 +545,12 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
+              statusCode: { type: 'number', const: 401 },
             },
           },
           403: {
@@ -563,7 +579,7 @@ export async function fileRoutes(
       try {
         if (!authRequest.session?.user) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -639,8 +655,12 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
+              statusCode: { type: 'number', const: 401 },
             },
           },
           403: {
@@ -670,7 +690,7 @@ export async function fileRoutes(
       try {
         if (!authRequest.session?.user) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }
@@ -791,8 +811,12 @@ export async function fileRoutes(
             description: 'Unauthorized - authentication required',
             type: 'object',
             properties: {
-              error: { type: 'string' },
-              statusCode: { type: 'number' },
+              error: {
+                type: 'object',
+                properties: { message: { type: 'string' } },
+                required: ['message'],
+              },
+              statusCode: { type: 'number', const: 401 },
             },
           },
         },
@@ -805,7 +829,7 @@ export async function fileRoutes(
       try {
         if (!authRequest.session?.user) {
           return reply.status(401).send({
-            error: 'Authentication required',
+            error: { message: 'Authentication required' },
             statusCode: 401,
           });
         }

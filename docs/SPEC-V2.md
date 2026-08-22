@@ -4,7 +4,7 @@
 | ------------- | -------------------------------------------------------- |
 | **Status**    | Canonical — implementation source of truth               |
 | **Created**   | 2026-06-07                                               |
-| **Updated**   | 2026-08-17                                               |
+| **Updated**   | 2026-08-22                                               |
 | **Authors**   | Terrastories Team                                        |
 | **Reviewers** | DeepSeek (automated -- 9 risks identified and addressed) |
 | **Repo**      | `terrastories-api`                                       |
@@ -24,15 +24,15 @@ Terrastories is an offline-first geostorytelling platform used by Indigenous and
 
 ### Goals
 
-| ID  | Goal                                                                                                      |
-| --- | --------------------------------------------------------------------------------------------------------- |
-| G-1 | API runs on Cloudflare Workers with D1 (SQLite) and R2 in production                                      |
-| G-2 | API continues to run on Node.js + PostgreSQL for self-hosted and field-kit deployments                    |
-| G-3 | All data and operations from the legacy Rails V1 are available in V2 (feature parity)                     |
-| G-4 | Existing V1 data migrates cleanly via a one-time CLI tool with zero data loss                             |
-| G-5 | Field-kit (offline) deployment on resource-constrained hardware remains supported                         |
-| G-6 | API surface may use improved URL patterns and response shapes; a mapping document ensures nothing is lost |
-| G-7 | Scope creep from V1 (elder role, cultural metadata, etc.) is removed                                      |
+| ID  | Goal                                                                                                                 |
+| --- | -------------------------------------------------------------------------------------------------------------------- |
+| G-1 | API runs on Cloudflare Workers with D1 (SQLite) and R2 in production                                                 |
+| G-2 | API continues to run on Node.js + PostgreSQL for self-hosted deployments and Node.js + SQLite for offline field kits |
+| G-3 | All data and operations from the legacy Rails V1 are available in V2 (feature parity)                                |
+| G-4 | Existing V1 data migrates cleanly via a one-time CLI tool with zero data loss                                        |
+| G-5 | Field-kit (offline) deployment on resource-constrained hardware remains supported                                    |
+| G-6 | API surface may use improved URL patterns and response shapes; a mapping document ensures nothing is lost            |
+| G-7 | Scope creep from V1 (elder role, cultural metadata, etc.) is removed                                                 |
 
 ### Non-Goals
 
@@ -339,15 +339,15 @@ Create a V1 behavior test suite **before** V2 development begins:
 
 ## 11. Risks & Mitigations
 
-| ID  | Risk                                     | Severity | Mitigation                                                                         |
-| --- | ---------------------------------------- | -------- | ---------------------------------------------------------------------------------- |
-| R-1 | Argon2 not portable to Workers           | High     | Migrate to bcryptjs. Rehash on first login via CLI.                                |
-| R-2 | Large file uploads exceed Workers memory | High     | Presigned R2 uploads for files >=10MB.                                             |
-| R-3 | Migration scope underestimated           | Medium   | Phased plan. Compatibility test suite before dev starts.                           |
-| R-4 | D1 eventual consistency                  | Medium   | `withSessionBinding` for permission changes and deletions.                         |
-| R-5 | Bundle size exceeds 10MB Workers limit   | Medium   | Monitor in CI. Tree-shake unused code.                                             |
-| R-6 | Dual backend diverges in behaviour       | Medium   | Integration tests against both D1 and PostgreSQL. Single schema removes one class. |
-| R-7 | `better-sqlite3` type coupling in repos  | Low      | Refactor repository layer to use generic database type.                            |
+| ID  | Risk                                     | Severity | Mitigation                                                                                   |
+| --- | ---------------------------------------- | -------- | -------------------------------------------------------------------------------------------- |
+| R-1 | Argon2 not portable to Workers           | High     | Migrate to bcryptjs. Rehash on first login via CLI.                                          |
+| R-2 | Large file uploads exceed Workers memory | High     | Presigned R2 uploads for files >=10MB.                                                       |
+| R-3 | Migration scope underestimated           | Medium   | Phased plan. Compatibility test suite before dev starts.                                     |
+| R-4 | D1 eventual consistency                  | Medium   | D1 transactions + same-request session reads for permission changes and sensitive deletions. |
+| R-5 | Bundle size exceeds 10MB Workers limit   | Medium   | Monitor in CI. Tree-shake unused code.                                                       |
+| R-6 | Dual backend diverges in behaviour       | Medium   | Integration tests against both D1 and PostgreSQL. Single schema removes one class.           |
+| R-7 | `better-sqlite3` type coupling in repos  | Low      | Refactor repository layer to use generic database type.                                      |
 
 ---
 
@@ -379,14 +379,15 @@ Two low-priority items flagged in the automated review remain as notes for devel
 
 ## 13. Change Log
 
-| Date       | Author            | Changes                                                                                                                                                                                                                                |
-| ---------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-06-07 | Terrastories Team | Initial draft -- fundamental requirements                                                                                                                                                                                              |
-| 2026-06-07 | Terrastories Team | Resolved all open questions. Hono chosen. No PostGIS. API shapes may evolve.                                                                                                                                                           |
-| 2026-06-07 | Terrastories Team | Addressed DeepSeek review (9 risks). Added: native dep replacements, presigned R2 uploads, single-schema, D1 consistency, phased plan, error envelope, hash migration, field-kit support. Removed elder role and scope-creep features. |
-| 2026-06-08 | Terrastories Team | Restructured per spec best practices. Added numbered requirement IDs (FR-001 through FR-025, NFR-001 through NFR-009). Added risk IDs (R-1 through R-7). Reorganized sections for clarity. Added stack comparison table.               |
-| 2026-06-23 | Terrastories Team | Fixed D1 consistency terminology: replaced non-existent `withSessionBinding` with D1 transactions + same-request session reads.                                                                                                        |
+| Date       | Author            | Changes                                                                                                                                                                                                                                         |
+| ---------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-06-07 | Terrastories Team | Initial draft -- fundamental requirements                                                                                                                                                                                                       |
+| 2026-06-07 | Terrastories Team | Resolved all open questions. Hono chosen. No PostGIS. API shapes may evolve.                                                                                                                                                                    |
+| 2026-06-07 | Terrastories Team | Addressed DeepSeek review (9 risks). Added: native dep replacements, presigned R2 uploads, single-schema, D1 consistency, phased plan, error envelope, hash migration, field-kit support. Removed elder role and scope-creep features.          |
+| 2026-06-08 | Terrastories Team | Restructured per spec best practices. Added numbered requirement IDs (FR-001 through FR-025, NFR-001 through NFR-009). Added risk IDs (R-1 through R-7). Reorganized sections for clarity. Added stack comparison table.                        |
+| 2026-06-23 | Terrastories Team | Fixed D1 consistency terminology: replaced non-existent `withSessionBinding` with D1 transactions + same-request session reads.                                                                                                                 |
 | 2026-08-17 | Terrastories Team | Reaffirmed the canonical V2 contract during repository context cleanup: Hono; first-class Workers+D1+R2, Node+PostgreSQL, and offline Node+SQLite profiles; portable spatial behavior with no PostGIS dependency; removed V1 scope remains out. |
+| 2026-08-22 | Terrastories Team | Reconciled canonical wording: field kits use Node.js + SQLite, and D1 consistency mitigation uses transactions plus same-request reads rather than the nonexistent `withSessionBinding`.                                                        |
 
 ---
 

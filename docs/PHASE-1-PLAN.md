@@ -2,7 +2,7 @@
 
 **Status:** Active foundation in PR #132  
 **Authority:** Execution plan subordinate to `docs/SPEC-V2.md`  
-**Last reviewed:** 2026-08-17
+**Last reviewed:** 2026-08-22
 
 ## Goal
 
@@ -20,6 +20,8 @@ Phase 1 is a transport migration, not the Cloudflare deployment phase and not pe
 - Node.js + `@hono/node-server` is the Phase 1 runtime. Workers/D1/R2 adaptation follows after the Hono contract is proven.
 
 ## Architecture
+
+The following is the Phase 1 coexistence layout implemented by PR #132, not the current tree on `main` while that PR remains open.
 
 ```text
 src/

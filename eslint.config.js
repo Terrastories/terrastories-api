@@ -40,6 +40,14 @@ export default [
       '@typescript-eslint/no-explicit-any': 'warn',
     },
   },
+  // Development-only diagnostic routes intentionally write directly to the console.
+  // Keep this explicit so production route logging remains subject to no-console.
+  {
+    files: ['src/routes/dev.ts'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
   // Configuration for test files without TypeScript project (standalone parsing)
   {
     files: ['tests/**/*.ts', '**/*.test.ts'],
@@ -93,7 +101,7 @@ export default [
       // Basic JavaScript rules
       'prefer-const': 'error',
       'no-var': 'error',
-      'no-console': 'off', // Allow console in db setup files  
+      'no-console': 'off', // Allow console in db setup files
       'no-debugger': 'error',
       'no-duplicate-imports': 'error',
       'no-unused-vars': 'off',

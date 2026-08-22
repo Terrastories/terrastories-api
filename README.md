@@ -28,7 +28,7 @@ Shared behavior must remain portable across these targets. **PostGIS is not a V2
 
 ## Current migration state
 
-Fastify V1 and Hono V2 coexist during Phase 1. Hono is the target framework. Production readiness must be proven by the active roadmap; historical “production ready” reports are intentionally not retained in this repository.
+`main` currently runs Fastify V1. Hono is the target framework, and the Phase 1 Hono foundation is pending in PR #132; Hono-specific follow-up work must use that documented dependency rather than assume Hono is already present on `main`. Production readiness must be proven by the active roadmap; historical “production ready” reports are intentionally not retained in this repository.
 
 The production-readiness backlog is organized in GitHub with:
 
@@ -48,12 +48,9 @@ npm run dev
 Common terminating validation commands:
 
 ```bash
-npm run type-check
-npm run lint
-npm run format:check
-npm run build
-npm test -- --run
+npm run validate:ci
 npm run test:coverage
+npm run test:compatibility
 ```
 
 Database commands:
@@ -64,20 +61,21 @@ npm run db:migrate
 npm run db:seed
 ```
 
-See `package.json` for the exact current scripts. Issue #133 owns repairing stale aggregate/compatibility scripts and making the full validation signal deterministic; a configured command is not evidence until it successfully runs.
+See `package.json` for the exact current scripts. Issue #133 landed in PR #152: `validate:ci` is the canonical terminating aggregate gate, with the deterministic bounded full suite in `test:ci`; coverage and compatibility remain separate explicit gates. A configured command is not evidence until it successfully runs on the revision being reviewed.
 
 ## Core architecture
 
 ```text
 src/
-├── routes/          Fastify V1 + Hono V2 transport handlers
+├── routes/          current Fastify V1 transport handlers on main
 ├── services/        business logic
 ├── repositories/    data access
 ├── db/              Drizzle schema/migrations/adapters
 ├── shared/          config, middleware, sessions, schemas, types
-├── hono-app.ts      Hono application builder
-└── server.ts        runtime entrypoint during coexistence
+└── server.ts        current Fastify runtime entrypoint on main
 ```
+
+PR #132 introduces the Phase 1 Hono application builder and Hono transport routes; those paths become current repository structure only after that PR lands.
 
 The intended dependency direction is Route → Service → Repository → Database.
 

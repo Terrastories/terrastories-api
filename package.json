@@ -9,9 +9,16 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "test:ci": "node scripts/test-ci.js",
-    "lint": "eslint .",
+    "test:coverage": "vitest run --coverage --exclude tests/production/performance.test.ts --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
+    "test:ci:contracts": "bash tests/scripts/user_workflow.test.sh && vitest run tests/scripts --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
+    "test:ci:core": "vitest run tests/config tests/db tests/helpers tests/integration --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
+    "test:ci:routes": "vitest run tests/routes --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
+    "test:ci:services": "vitest run tests/repositories tests/services tests/shared tests/security tests/unit tests/app.test.ts tests/config.test.ts --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
+    "test:ci:production": "vitest run tests/production tests/docker --reporter=dot --silent=true --maxWorkers=1 --minWorkers=1",
+    "test:ci:comparison": "vitest run tests/comparison --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
+    "test:ci": "node scripts/run-test-shards.mjs",
+    "lint": "eslint . --max-warnings 0",
+    "audit:baseline": "node scripts/check-audit-baseline.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "type-check": "tsc --noEmit",
@@ -19,10 +26,11 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "prepare": "npx husky",
-    "validate": "npm run type-check && npm run lint && npm test",
+    "validate": "npm run validate:ci",
+    "validate:ci": "npm run format:check && npm run type-check && npm run lint && npm run test:ci && npm run build",
     "compare:api": "node scripts/api-comparison.js",
-    "test:compatibility": "vitest run tests/compatibility/comprehensive-compatibility.test.ts",
-    "compatibility:report": "node scripts/generate-compatibility-report.js",
+    "test:compatibility": "vitest run tests/comparison --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
+    "compatibility:report": "node scripts/api-comparison.js report --output api-comparison-report.html",
     "compatibility:full": "npm run test:compatibility && npm run compatibility:report"
   },
   "dependencies": {
@@ -70,7 +78,6 @@
     "husky": "^9.1.7",
     "lint-staged": "^16.1.5",
     "prettier": "^3.6.2",
-    "sqlite3": "^5.1.7",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.42.0",
@@ -112,7 +119,6 @@
     "bcrypt@6.0.0": true,
     "better-sqlite3@12.2.0": true,
     "esbuild@0.25.9": true,
-    "sharp@0.34.3": true,
-    "sqlite3@5.1.7": true
+    "sharp@0.34.3": true
   }
 }

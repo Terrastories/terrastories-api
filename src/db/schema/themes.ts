@@ -113,8 +113,12 @@ export const themesSqlite = sqliteTable('themes', {
   communityId: integer('community_id')
     .notNull()
     .references(() => communitiesSqlite.id),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
 });
 
 // Relations for PostgreSQL

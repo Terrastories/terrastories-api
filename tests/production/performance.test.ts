@@ -14,6 +14,7 @@ import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
 import { performance } from 'perf_hooks';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 interface PerformanceMetrics {
   responseTime: number;
@@ -893,9 +894,7 @@ describe('Production Performance Validation - Phase 1', () => {
     const setCookieHeader = loginResponse.headers['set-cookie'];
 
     // Use the signed cookie (second one) instead of the unsigned cookie (first one)
-    const cookieString = Array.isArray(setCookieHeader)
-      ? setCookieHeader[1]
-      : setCookieHeader;
+    const cookieString = extractSignedSessionCookie(setCookieHeader);
     const cookie = cookieString!.split(';')[0];
     return { cookie };
   }

@@ -4,24 +4,17 @@
 
 **Current assessment: active migration / pre-production.**
 
-Historical 2025 documents describe the Fastify TypeScript API as production-ready, but the current branch has since introduced a Fastify-to-Hono migration and therefore needs a new production-readiness proof. Production readiness is a property of a specific revision and deployment configuration, not a permanent repository label.
+Historical 2025 documents describe the Fastify TypeScript API as production-ready, but V2 introduces a Fastify-to-Hono migration and therefore needs a new production-readiness proof. Production readiness is a property of a specific revision and deployment configuration, not a permanent repository label.
 
-Audit evidence from 2026-08-15:
+Current baseline as of 2026-08-22:
 
-- TypeScript type-check passes.
-- Production build passes.
-- ESLint exits successfully but reports 69 warnings, including `any` and console use in Hono/auth/data paths.
-- Hono-focused suite: 51/51 tests pass.
-- V1 comparison/compatibility-behavior suite: 202/202 tests pass.
-- The API comparison machinery can report explicit Rails/TypeScript mismatches while the test still passes; therefore it is not a parity gate today.
-- `tests/comparison` does not exercise the Hono transport, so the Phase 1 requirement to run the same contract suite against Fastify and Hono is not yet satisfied.
-- A full coverage run produced route/auth/super-admin/speaker failures before the bounded execution was terminated. A one-worker rerun still reproduced failures, so the full suite is not currently a clean production signal.
-- `test:ci`, `test:compatibility`, and `compatibility:report` in `package.json` reference files that are absent from the repository.
-- Main CI treats `npm audit --audit-level moderate` as non-blocking.
-- Docker CI masks production container startup failure with soft-fail shell logic.
-- Hono currently uses an in-memory session store. That is acceptable for development/migration but not for a multi-instance or restart-safe production deployment.
-- Hono CORS is currently configured as wildcard origin with credentials enabled and needs a production-specific policy before cutover.
-- Existing uncommitted schema changes and staged workflow deletions were present during this audit and were deliberately left untouched.
+- `main` still runs Fastify V1; the Phase 1 Hono foundation is pending in PR #132. Hono-specific audit evidence must therefore be bound to that PR's exact head rather than described as current `main` state.
+- Issue #133 landed in PR #152 on 2026-08-21, restoring `validate:ci` as a terminating fail-closed aggregate gate, bounded deterministic test shards, zero-warning lint, separate source coverage, repaired compatibility scripts, and an expiring fail-closed dependency-audit baseline.
+- PR #152's final candidate passed five consecutive complete CI workflows on one SHA without retries; the latest three satisfied #133's deterministic-baseline exit criterion. Its local evidence included 1,682/1,682 Vitest tests plus 18/18 workflow shell contracts.
+- On that same candidate, API comparison passed 203/203 plus report generation, and Docker development/production builds, Compose base/dev/prod/field-kit validation, Docker integration, and user-workflow/data-sovereignty scenarios were green.
+- PostgreSQL fresh/upgrade migration parity remains separately owned by #135. V2 does not depend on PostGIS, and SQLite migrations must not be run against PostgreSQL.
+- Existing dependency debt remains tracked by #141; the audit baseline is explicitly expiring rather than silently accepting new advisories.
+- Hono transport parity, production session storage, CORS, and other Hono-specific readiness claims must be re-audited against the exact PR #132 revision before Phase 1 can exit.
 
 ## Production definition of done
 
@@ -38,9 +31,11 @@ A Terrastories API revision is production-ready only when all of the following a
 9. Logs, metrics, traces, and alerts are sufficient to diagnose failures without exposing secrets or sensitive cultural data.
 10. A staged/canary deployment passes automated smoke, migration, security, and rollback checks before broad rollout.
 
-## Phase 0 — Stabilize the development baseline (P0)
+## Phase 0 — Stabilize the development baseline (P0) — complete
 
 **Goal:** make the test and CI signals trustworthy before adding more migration surface.
+
+**Status:** Completed by issue #133 / PR #152 on 2026-08-21. Reopen this phase only if the deterministic baseline regresses.
 
 ### Work
 
@@ -71,7 +66,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Create an explicit route/namespace mapping for intentional V1/V2 differences.
 - Make unexpected status, response-body, error-envelope, pagination, header/cookie, and content-type differences fail tests.
 - Convert the Rails/TypeScript response differ from an informational detector into a fail-closed parity gate for endpoints where Rails compatibility is still required.
-- Add contract coverage for all Hono domains already registered: health, auth, public API, themes, places, speakers, communities, stories, users, files, member, admin, and dev/test-only routes.
+- Add contract coverage for all Hono domains implemented by PR #132: health, auth, public API, themes, places, speakers, communities, stories, users, files, member, admin, and dev/test-only routes.
 - Test route ordering for static routes vs `/:id` across every affected resource.
 - Add real HTTP smoke tests against `@hono/node-server`, not only in-process `app.request()` calls.
 

@@ -108,7 +108,8 @@ export const CreatePlaceSchema = z.object({
   photoUrl: z
     .string()
     .transform((val) => (val === '' ? undefined : val))
-    .pipe(z.string().url().optional()),
+    .pipe(z.string().url().optional())
+    .optional(),
   nameAudioUrl: z.string().url().optional(),
   region: z.string().max(100).optional(),
   isRestricted: z.boolean().optional().default(false),
@@ -125,7 +126,8 @@ export const UpdatePlaceSchema = z.object({
   photoUrl: z
     .string()
     .transform((val) => (val === '' ? undefined : val))
-    .pipe(z.string().url().optional()),
+    .pipe(z.string().url().optional())
+    .optional(),
   nameAudioUrl: z.string().url().optional(),
   region: z.string().max(100).optional(),
   isRestricted: z.boolean().optional(),
@@ -176,7 +178,8 @@ export const CreateSpeakerSchema = z.object({
   photoUrl: z
     .string()
     .transform((val) => (val === '' ? undefined : val))
-    .pipe(z.string().url().optional()),
+    .pipe(z.string().url().optional())
+    .optional(),
   culturalRole: z
     .enum([
       'storyteller',
@@ -202,7 +205,8 @@ export const UpdateSpeakerSchema = z.object({
   photoUrl: z
     .string()
     .transform((val) => (val === '' ? undefined : val))
-    .pipe(z.string().url().optional()),
+    .pipe(z.string().url().optional())
+    .optional(),
   culturalRole: z
     .enum([
       'storyteller',

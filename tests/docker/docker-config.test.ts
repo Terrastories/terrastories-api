@@ -41,6 +41,15 @@ describe('Docker Configuration Tests', () => {
     });
   });
 
+  describe('Docker Build Context', () => {
+    it('should exclude TypeScript incremental build metadata', async () => {
+      const dockerignorePath = path.join(projectRoot, '.dockerignore');
+      const content = await fs.readFile(dockerignorePath, 'utf-8');
+
+      expect(content).toContain('*.tsbuildinfo');
+    });
+  });
+
   describe('Configuration Files Exist', () => {
     it('should have nginx production config', async () => {
       const nginxPath = path.join(projectRoot, 'config/nginx/nginx.conf');
@@ -214,9 +223,9 @@ describe('Docker Configuration Tests', () => {
       const dockerfilePath = path.join(projectRoot, 'Dockerfile');
       const content = await fs.readFile(dockerfilePath, 'utf-8');
 
-      expect(content).toContain('FROM node:20.18.0-alpine AS development');
-      expect(content).toContain('FROM node:20.18.0-alpine AS builder');
-      expect(content).toContain('FROM node:20.18.0-alpine AS production');
+      expect(content).toContain('FROM node:20.19.0-alpine AS development');
+      expect(content).toContain('FROM node:20.19.0-alpine AS builder');
+      expect(content).toContain('FROM node:20.19.0-alpine AS production');
     });
 
     it('should use non-root user in production stage', async () => {
@@ -252,11 +261,15 @@ describe('Docker Configuration Tests', () => {
       expect(content).toContain('nginx:');
     });
 
-    it('should have PostGIS database configuration', async () => {
+    it('should have PostgreSQL database configuration', async () => {
       const composePath = path.join(projectRoot, 'docker-compose.yml');
       const content = await fs.readFile(composePath, 'utf-8');
 
-      expect(content).toContain('postgis/postgis:13-master');
+      // V2 requires PostgreSQL as a first-class backend, but SPEC-V2 explicitly
+      // excludes PostGIS/database-specific spatial extensions as dependencies.
+      expect(content).toContain('POSTGRES_DB: terrastories');
+      expect(content).toContain('POSTGRES_USER: terrastories');
+      expect(content).toContain('pg_isready -U terrastories -d terrastories');
     });
   });
 

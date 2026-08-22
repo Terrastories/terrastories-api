@@ -26,6 +26,7 @@ import { createReadStream as createReadStreamSync } from 'fs';
 
 import { TestDataFactory, testDb } from '../helpers/database.js';
 import { getCommunitiesTable } from '../../src/db/schema/communities.js';
+import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
 // Mock Sharp to avoid needing real image data
 vi.mock('sharp', () => ({
@@ -159,17 +160,7 @@ describe('File Routes Integration', () => {
     // Extract SIGNED session cookie from Set-Cookie header
     // @fastify/session creates multiple cookies - we need the signed one (longer with signature)
     const setCookieHeader = loginResponse.headers['set-cookie'];
-    if (Array.isArray(setCookieHeader)) {
-      // Find all sessionId cookies
-      const sessionCookies = setCookieHeader.filter((cookie) =>
-        cookie.startsWith('sessionId=')
-      );
-      
-      // Use the signed cookie (longer one with signature) if available
-      authCookie = sessionCookies.length > 1 ? sessionCookies[1] : sessionCookies[0] || '';
-    } else if (setCookieHeader && typeof setCookieHeader === 'string') {
-      authCookie = setCookieHeader.startsWith('sessionId=') ? setCookieHeader : '';
-    }
+    authCookie = extractSignedSessionCookie(setCookieHeader);
 
     // Create test JPEG file for multipart uploads
     const jpegBuffer = createTestJpegBuffer();
@@ -246,7 +237,8 @@ describe('File Routes Integration', () => {
       expect(response.statusCode).toBe(401);
 
       const result = JSON.parse(response.body);
-      expect(result.error).toContain('Authentication required');
+      expect(result.error.message).toContain('Authentication required');
+      expect(result.statusCode).toBe(401);
     });
 
     it('should handle multipart form data with cultural restrictions', async () => {

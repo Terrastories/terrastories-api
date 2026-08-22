@@ -261,7 +261,7 @@ Keep changes reviewable and independently verifiable. A practical sequence is:
 4. Hono contract parity domain-by-domain.
 5. Mandatory dual-backend CI for D1/SQLite-compatible behavior and PostgreSQL.
 6. Migration/restore test harness.
-7. Persistent Hono session store + restart/multi-instance tests.
+7. Production Hono session handling + cookie-session hardening and restart/multi-instance tests.
 8. CORS/cookie/CSRF/rate-limit hardening.
 9. Sovereignty authorization matrix + adversarial tests.
 10. File/media hardening.

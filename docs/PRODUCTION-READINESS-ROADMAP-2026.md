@@ -109,8 +109,8 @@ A Terrastories API revision is production-ready only when all of the following a
 
 ### Work
 
-- Replace Hono `MemorySessionStore` with a persistent production session backend appropriate to each deployment: KV for Cloudflare, PostgreSQL-backed storage for self-hosted Node.js, and local SQLite-backed storage for offline field kits. Every profile must support TTL and revocation semantics; the field-kit backend must require no runtime cloud service.
-- Add tests for process restart, multi-instance access where applicable, concurrent sessions, logout-one-session, expiry, tampered cookies, key rotation, disabled users, and role/community changes during an active session. Explicitly prove field-kit session persistence and revocation across local process restarts while fully offline.
+- Replace Hono `MemorySessionStore` with production session handling that preserves `SPEC-V2.md` FR-010: KV-backed sessions on Cloudflare and secure cookie-backed sessions on self-hosted Node.js and offline field kits. If server-side revocation/version metadata is needed for Node profiles, keep it in the deployment's local database (PostgreSQL for self-hosted, SQLite for field kits) without changing the canonical cookie-session contract or adding a runtime cloud dependency.
+- Add tests for process restart, multi-instance access where applicable, concurrent sessions, logout-one-session, expiry, tampered cookies, key rotation, disabled users, and role/community changes during an active session. Explicitly prove field-kit cookie-session behavior, local revocation semantics, and restart behavior while fully offline.
 - Define session-secret rotation with overlap and emergency revocation procedures.
 - Review cookie flags for production (`Secure`, `HttpOnly`, `SameSite`, domain/path, lifetime).
 - Replace wildcard CORS with an environment-validated allowlist. Never combine permissive wildcard behavior with credentialed production requests.

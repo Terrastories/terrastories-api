@@ -36,47 +36,40 @@ jobs:
           github_action_config.auto_improve: 'true'
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review"]'
 
-          # Terrastories-specific review instructions aligned with CLAUDE.md
+          # Terrastories-specific review instructions. The canonical product/architecture
+          # contract lives in docs/SPEC-V2.md; AGENTS.md and docs/SOURCE-OF-TRUTH.md
+          # define how reviewers must apply it.
           pr_reviewer.extra_instructions: |
-            Focus on the following areas for Terrastories API (Rails→TypeScript migration for Indigenous storytelling):
+            Review against the repository's canonical context, in this authority order:
+            1. docs/SPEC-V2.md and explicitly approved product decisions/amendments
+            2. docs/SOURCE-OF-TRUTH.md and AGENTS.md execution rules
+            3. Active subordinate plans, then issues, then current code/tests as implementation evidence
 
-            🔴 CRITICAL REQUIREMENTS:
-            1. Indigenous data sovereignty - ensure community data isolation and cultural protocols
-            2. TypeScript best practices and type safety (no 'any' types)
-            3. Database query performance and N+1 query prevention
-            4. Security vulnerabilities, especially authentication and authorization
-            5. PostGIS spatial data handling and geographic query optimization
+            CRITICAL TERRASTORIES INVARIANTS:
+            - Preserve Indigenous data sovereignty and strict community-scoped isolation, including super-admin boundaries.
+            - V2 must remain portable across Workers + D1 + R2, Node.js + PostgreSQL + local storage, and fully offline Node.js + SQLite + local filesystem field kits.
+            - Shared database/spatial behavior must remain SQLite-compatible. PostGIS and other database-specific spatial extensions are V2 non-goals unless the canonical spec is explicitly amended.
+            - Hono is the V2 target framework, but do not describe Hono paths as current on main until the relevant migration PR has landed.
+            - Do not reintroduce V1 scope explicitly removed by V2, including elder roles/restrictions, elder speaker status, cultural-significance metadata, community cultural settings, story-place cultural context, or the removed cultural-restriction schema.
+            - Field kits must work with no runtime cloud dependency.
 
-            🟡 IMPORTANT PATTERNS:
-            6. Repository Pattern compliance (Route → Service → Repository → Database)
-            7. Zod validation schemas with cultural protocol validation
-            8. Multi-tenancy community-scoped data isolation
-            9. Test coverage >80% with edge cases and cultural protocol tests
-            10. Error handling with proper status codes (never log sensitive cultural info)
-
-            🟢 QUALITY CHECKS:
-            11. File upload security and media handling
-            12. API endpoint consistency (/api/v1/[resource] pattern)
-            13. Cultural sensitivity and elder content restrictions
-            14. Offline-first design considerations and sync metadata
-            15. Field Kit deployment compatibility
-
-            Pay special attention to data sovereignty requirements and ensure 
-            community data cannot be accessed across boundaries.
+            REVIEW QUALITY:
+            - Check Route → Service → Repository → Database separation, strict TypeScript, Zod boundary validation, auth/security, file/media safety, and N+1/query regressions.
+            - Require terminating, fail-closed validation evidence appropriate to the changed surface. Shared DB changes require both SQLite/D1-compatible and PostgreSQL evidence.
+            - Treat `/api/v1` behavior as legacy/coexistence evidence, not as the canonical V2 URL contract; intentional V1/V2 differences must map to SPEC-V2.md.
+            - Never recommend preserving stale behavior merely because historical code/tests/docs contain it.
 
           # Code suggestions configuration
           pr_code_suggestions.num_code_suggestions: '6'
           pr_code_suggestions.suggestions_score_threshold: '7'
           pr_code_suggestions.extra_instructions: |
-            Prioritize suggestions aligned with CLAUDE.md patterns:
-            - Repository Pattern compliance and proper service layer separation
-            - Performance improvements (especially database queries and PostGIS optimization)
-            - Type safety improvements (eliminate 'any' types, enhance Zod schemas)
-            - Security enhancements (auth, data sovereignty, cultural protocol validation)
-            - Multi-tenancy and community data isolation improvements
-            - Test coverage improvements (unit, integration, edge cases)
-            - Cultural protocol compliance and Indigenous data sensitivity
-            - Offline-first design patterns and sync metadata
+            Prioritize suggestions that strengthen the canonical V2 contract:
+            - Community isolation, data sovereignty, auth/session, and file-security correctness
+            - D1/SQLite + PostgreSQL portability and offline field-kit compatibility
+            - Portable application-level spatial behavior; never introduce PostGIS as a V2 requirement
+            - Route → Service → Repository → Database separation and strict type safety
+            - Fail-closed tests/CI and meaningful edge/adversarial coverage
+            - Explicit mapping of intentional V1/V2 differences without restoring removed elder/cultural-metadata scope
 
           # Review configuration for TypeScript/Node.js project
           pr_reviewer.require_tests_review: 'true'

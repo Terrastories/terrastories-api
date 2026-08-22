@@ -45,35 +45,54 @@ jobs:
           PROMPT=$(cat <<'EOF'
           You are Codex running in CI to revise a newly opened GitHub issue for this repository.
 
+          Canonical preflight — do this before rewriting the issue:
+          - Read AGENTS.md, docs/SOURCE-OF-TRUTH.md, and the governing sections of docs/SPEC-V2.md.
+          - Treat the canonical spec as authoritative over historical code/tests/issues.
+          - Check whether the request is approved parity/hardening or a new product decision. Do not silently turn an issue into a spec amendment.
+
           Goal:
-          - Improve the issue to meet repository "Issue Review & Analysis Guidelines": ensure sections exist and are high quality.
-          - Keep author intent; clarify ambiguities; propose acceptance criteria and a concrete technical/testing plan.
-          - If scope increased >50%, note and suggest splitting.
+          - Preserve the author's intent while making the issue implementation-ready under the repository's Issue Readiness Contract.
+          - Clarify ambiguities, define measurable acceptance criteria, explicit non-goals, dependencies/base relationships, portability/offline impact, sovereignty/security evidence, migration implications, and terminating validation gates.
+          - If scope increases materially or contains separable dependency lanes, propose splitting rather than creating a mega-issue.
 
           What to do (execute commands as needed):
-          1) Fetch current issue JSON and body:
+          1) Fetch current issue JSON/body and available readiness labels:
              gh issue view "$ISSUE_NUMBER" --json number,title,body,labels,assignees,milestone,comments > current-issue.json
-          2) Produce a revised issue body in Markdown at revised-issue.md with these sections:
-             - Overview
+             gh label list --limit 200 > available-labels.txt
+          2) Produce revised-issue.md with these sections:
+             - Overview / Problem
+             - Governing Spec (exact SPEC-V2.md sections/requirement IDs)
+             - Goal
+             - Non-Goals
              - Acceptance Criteria (SMART checklist)
              - Technical Plan
-             - Testing Strategy
-             - Dependencies
-             - Estimation
-             - Notes/Questions (for missing info)
-          3) Preserve original context; move unclear content under Notes/Questions.
-          4) Validate consistency: acceptance criteria align with technical plan; warn if scope increase >50%.
-          5) Update the GitHub issue body with the new Markdown:
+             - Portability & Deployment Impact (Workers/D1, Node/PostgreSQL, Node/SQLite field kit as applicable)
+             - Offline / Field-Kit Impact
+             - Security & Data Sovereignty (including negative/adversarial tests where applicable)
+             - Migration / Rollback / Restore Impact
+             - Dependencies & Required Base / Stacking Relationship
+             - Validation Gates (terminating/fail-closed commands and concrete evidence)
+             - Estimation / Suggested Slicing
+             - Notes / Decisions Needed
+          3) Preserve original context. If the request conflicts with SPEC-V2.md or requires a new product/architecture decision, state the exact conflict under Notes / Decisions Needed and do not write acceptance criteria that normalize the conflict.
+          4) Validate that acceptance criteria, technical plan, dependencies, portability, security, and validation evidence are mutually consistent. Call out any material scope increase and propose child issues where appropriate.
+          5) Update the issue body:
              gh issue edit "$ISSUE_NUMBER" --body-file revised-issue.md
-          6) Add a comment summarizing changes:
-             gh issue comment "$ISSUE_NUMBER" --body "📝 Issue revised to include Overview, Acceptance Criteria, Technical Plan, Testing Strategy, Dependencies, and Estimation. Please review and adjust as needed."
-          7) Exit successfully.
+          6) Apply exactly one readiness label only if that label exists in available-labels.txt:
+             - status:needs-decision when a spec/product decision is unresolved;
+             - status:blocked when intent is clear but a prerequisite/base dependency is not satisfied;
+             - status:ready only when the issue is spec-aligned, dependencies/base are satisfied, and acceptance/validation evidence is implementable.
+             Preserve unrelated labels.
+          7) Add a concise comment summarizing what changed, the governing spec, and the resulting readiness status/reason.
+          8) Exit successfully.
 
           Constraints:
-          - Use concise, actionable wording.
-          - Follow repository coding/testing guidelines and naming conventions where relevant.
-          - Avoid changing scope without calling it out.
-          - Prefer SMART acceptance criteria and measurable tests.
+          - Use concise, actionable wording and preserve author intent.
+          - Never introduce PostGIS/database-specific spatial behavior as a V2 requirement unless the canonical spec is explicitly amended.
+          - Never reintroduce removed V1 elder/cultural-metadata scope merely because historical implementation contains it.
+          - Preserve community isolation/data sovereignty and fully offline field-kit operation.
+          - Shared database behavior must consider both D1/SQLite-compatible and PostgreSQL evidence.
+          - Do not invent readiness. Fail closed into status:needs-decision or status:blocked when the evidence is incomplete.
           EOF
           )
 

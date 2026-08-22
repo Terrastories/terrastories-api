@@ -109,8 +109,8 @@ A Terrastories API revision is production-ready only when all of the following a
 
 ### Work
 
-- Replace Hono `MemorySessionStore` with a production session backend appropriate to deployment (PostgreSQL/KV), with TTL and revocation semantics.
-- Add tests for process restart, multi-instance access, concurrent sessions, logout-one-session, expiry, tampered cookies, key rotation, disabled users, and role/community changes during an active session.
+- Replace Hono `MemorySessionStore` with a persistent production session backend appropriate to each deployment: KV for Cloudflare, PostgreSQL-backed storage for self-hosted Node.js, and local SQLite-backed storage for offline field kits. Every profile must support TTL and revocation semantics; the field-kit backend must require no runtime cloud service.
+- Add tests for process restart, multi-instance access where applicable, concurrent sessions, logout-one-session, expiry, tampered cookies, key rotation, disabled users, and role/community changes during an active session. Explicitly prove field-kit session persistence and revocation across local process restarts while fully offline.
 - Define session-secret rotation with overlap and emergency revocation procedures.
 - Review cookie flags for production (`Secure`, `HttpOnly`, `SameSite`, domain/path, lifetime).
 - Replace wildcard CORS with an environment-validated allowlist. Never combine permissive wildcard behavior with credentialed production requests.
@@ -154,7 +154,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Ensure community ownership is checked on metadata, download, transformed variants, and deletion.
 - Test interrupted writes and cleanup of partial/orphan files.
 - Define production storage durability, backup, retention, and migration semantics.
-- If local filesystem remains supported, document single-host constraints and restore procedures; for multi-instance deployment, use shared/durable object storage or equivalent.
+- Keep local filesystem storage mandatory for the offline field-kit profile and supported for the canonical self-hosted Node.js profile; document its single-host constraints, durability expectations, and restore procedures. Any separately approved multi-instance self-hosted topology must use shared/durable storage without weakening field-kit local-filesystem support.
 
 ### Exit gate
 

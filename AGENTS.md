@@ -151,6 +151,14 @@ Never merge unless the user explicitly authorizes merge. A request for a PR cycl
 
 An authorized merge is not the end of validation when the target branch runs post-merge checks. Verify the exact resulting target-branch commit and its required workflows. If `main` becomes red, pause the merge queue and repair the failure before advancing another PR; first determine whether the failure is a code regression or a newly changed external condition such as a dependency advisory.
 
+### Operator notifications
+
+Important autonomous PR lifecycle transitions must be surfaced out of band through the configured Terrastories Hermes/Signal profile, not only reported inside the coding session. The PR-cycle skill owns the exact destination, invocation, message, deduplication, and failure-handling mechanics.
+
+Notify on merge readiness, confirmed authorized merge, genuine human intervention that blocks autonomous progress, and important regressions that invalidate readiness or make the target branch red. Ordinary merge authorization already represented by a `MERGE-READY` alert is not a second human-action event.
+
+Notification transport failure does not change the engineering truth of CI, review, or merge readiness and must never be hidden by weakening those gates. Record failures visibly and never claim delivery without a successful Hermes result.
+
 ## 8. Documentation/change control
 
 Keep durable context small and single-owned:

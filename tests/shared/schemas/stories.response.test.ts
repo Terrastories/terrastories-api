@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { StoryWithRelationsResponseSchema } from '../../../src/shared/schemas/stories.js';
+import { StoryWithRelationsResponseSchema } from '@/shared/schemas/stories.js';
 
 function createStoryResponse(speaker: Record<string, unknown>) {
   return {

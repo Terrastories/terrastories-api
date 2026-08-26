@@ -1,299 +1,180 @@
-# Repository Guidelines
+# Terrastories API — Agent Guidelines
 
-## Project Structure & Module Organization
+This file is the repository-wide execution contract for coding agents. Provider-specific entrypoints such as `CLAUDE.md` must point here rather than duplicate these rules.
 
-- `src/`: application code
-  - `routes/`: Fastify routes (e.g., `auth.ts`, `communities.ts`)
-  - `services/`: business logic (e.g., `user.service.ts`)
-  - `repositories/`: data access (e.g., `story.repository.ts`)
-  - `db/`: Drizzle setup, migrations, and seeds
-  - `shared/`: types, helpers, middleware
-- `tests/`: unit, integration, and helpers (Vitest)
-- `dist/`: compiled output (build)
-- `docs/`: architecture, setup, and roadmap
+## 1. Read the source of truth first
 
-## Build, Test, and Development Commands
+Before planning, editing, reviewing, or implementing an issue:
 
-- `npm run dev`: start Fastify server with hot reload.
-- `npm run build`: compile TypeScript to `dist/`.
-- `npm start`: run production build.
-- `npm test`: interactive Vitest for local development; `npm run test:ci` is the terminating full-suite command split into deterministic bounded shards.
-- `npm run test:coverage`: run the source-coverage gate separately; CI runs it after the bounded full-suite validation so coverage cannot hide shard failures. The memory/timing-sensitive production performance file is required in `test:ci:production` and excluded only from V8 coverage instrumentation.
-- `npm run validate:ci`: canonical terminating validation gate (format, type-check, lint, bounded full suite, build); `npm run validate` is an alias.
-- `npm run test:compatibility`: run the terminating API comparison suite; `npm run compatibility:full` also generates the comparison report.
-- `npm run lint` / `npm run format`: lint and format sources.
-- Database: `npm run db:generate` (migrations), `npm run db:migrate` (apply), `npm run db:seed` (sample data).
+1. Read `docs/SOURCE-OF-TRUTH.md`.
+2. Read the governing sections of `docs/SPEC-V2.md`.
+3. For Hono migration work, read the relevant part of `docs/PHASE-1-PLAN.md`.
+4. For production-hardening/release work, read the relevant part of `docs/PRODUCTION-READINESS-ROADMAP-2026.md`.
+5. Read the complete GitHub issue/PR and current code/tests.
 
-Examples:
+The canonical product/architecture specification outranks roadmaps, issues, code, and tests. If they conflict, do not silently normalize the conflict: resolve the spec relationship before implementation.
 
-```
-cp .env.example .env && npm run db:migrate && npm run dev
-```
+### Non-negotiable V2 invariants
 
-## Coding Style & Naming Conventions
+- Hono is the target HTTP framework for Cloudflare Workers and Node.js.
+- The same application must support three first-class deployment modes:
+  - Cloudflare Workers + D1 + R2;
+  - Node.js + PostgreSQL + local/self-hosted storage;
+  - Node.js + SQLite + local filesystem for offline field kits.
+- D1/SQLite and PostgreSQL are equal first-class database targets for shared behavior.
+- Shared schema/query behavior must remain SQLite-compatible. PostgreSQL-specific behavior must not become the product contract.
+- PostGIS/database-specific spatial extensions are a V2 non-goal. Spatial behavior uses portable latitude/longitude logic unless the canonical spec is explicitly amended.
+- V2 targets legacy Rails feature parity, with intentional URL/shape differences explicitly mapped.
+- New product features beyond approved parity are out of scope unless separately approved.
+- V1 scope creep removed by V2 must not be reintroduced indirectly: no elder role/elder-only restrictions, elder speaker status, cultural-significance metadata, community cultural settings, story-place cultural context, or removed cultural-restriction schema unless the spec is deliberately amended.
+- Community data isolation and Indigenous data sovereignty are mandatory. Super admins may manage system-level users/communities but cannot gain access to protected community content merely because they are privileged administrators.
+- Field-kit functionality must remain fully usable offline without runtime cloud dependencies.
 
-- Language: TypeScript (ESM). Prefer strict types; avoid `any` (enforced in src).
-- Formatting: Prettier (2 spaces, semicolons, single quotes, width 80).
-- Linting: ESLint with `typescript-eslint`. Key rules: `no-var`, `prefer-const`, no unused vars (prefix `_` to ignore).
-- File naming: kebab-case with role suffixes, e.g. `user.service.ts`, `story.repository.ts`.
-- Imports: use aliases `@` for `src` and `~tests` for `tests`.
+## 2. Spec-drift preflight
 
-```ts
-import { UserService } from '@/services/user.service';
-```
+For every non-trivial task, record:
 
-## Testing Guidelines
+1. Governing spec section(s).
+2. Whether the issue/plan/code conflicts with them.
+3. Impact on D1/SQLite, PostgreSQL, and field-kit portability.
+4. Whether the task is parity/hardening or an unapproved new feature.
+5. The observable tests/evidence required to prove completion.
 
-- Framework: Vitest with Node env and global setup (`tests/setup.ts`).
-- Location/patterns: `tests/**/*.{test,spec}.ts` or colocated in `src/**`.
-- Coverage: global 80% min; coverage reports in `coverage/`.
-- Database tests use isolated in-memory SQLite helpers (`tests/helpers/database.ts`).
+Use `.agents/skills/spec-guard/SKILL.md` when the task touches architecture, deployment, database behavior, sovereignty, scope, or when any conflict is suspected.
 
-Run specific tests with a terminating command:
+Verdicts are:
 
-```
-npx vitest run tests/routes/health.test.ts
-```
+- `ALIGNED — READY`
+- `ALIGNED — BLOCKED`
+- `SPEC DECISION REQUIRED`
 
-### Flaky Test Quarantine
+Do not implement source changes under `SPEC DECISION REQUIRED`.
 
-- Quarantine only when a deterministic fix cannot land immediately, and link a tracking issue that names an owner, rationale, and explicit expiry date.
-- Quarantines are temporary, time-bounded exceptions; review or remove them before expiry.
-- Retries are not a substitute for fixing or quarantining a flaky test. Required CI validation runs with zero automatic test retries.
-- Never skip or weaken a production-relevant failing test solely to make CI green.
+## 3. Repository structure
 
-## Commit & Pull Request Guidelines
+- `src/routes/`: current Fastify V1 routes on `main`; Phase 1 Hono V2 transport work is pending in PR #132.
+- `src/server.ts`: current Fastify runtime entrypoint on `main`; Hono coexistence begins only when PR #132 lands.
+- `src/services/`: business logic.
+- `src/repositories/`: data access.
+- `src/db/`: Drizzle database setup, schemas, migrations, seeds.
+- `src/shared/`: middleware, schemas, session/config utilities, types.
+- `tests/`: unit, integration, comparison/contract, security, production, and DB tests.
+- `.agents/skills/`: repository-owned repeatable agent workflows.
+- `docs/`: only canonical/current project context and active plans.
 
-- Commits: follow Conventional Commits where possible:
-  - `feat: add community slug validation`
-  - `fix: handle invalid JWT in auth route`
-- Pre-commit runs lint-staged (ESLint + Prettier). Ensure `npm run validate` passes.
-- PRs: include description, linked issues, test coverage (new/changed code), and any API examples (e.g., cURL) when relevant. Screenshots optional for docs.
+Keep Route → Service → Repository → Database separation. Avoid business logic in transport handlers and direct ad-hoc DB access from routes.
 
-## GitHub Workflow (gh CLI)
+## 4. Work safely in a multi-agent repository
 
-- Auth: `gh auth status` (login if needed: `gh auth login`).
-- Find work: `gh issue list -L 20 --state open --label "good first issue"`.
-- Inspect: `gh issue view <num> -w` and `gh pr view <num> -w`.
-- Branch: `git checkout -b feat/<topic>`.
-- Create PR: `gh pr create -f -t "feat: <title>" -b "<summary>\nCloses #<issue>" -B main`.
-- Review PRs: `gh pr list -L 20`, checkout with `gh pr checkout <num>`.
-- Leave feedback: `gh pr review <num> -c "<comment>"` | approve: `-a` | request changes: `-r`.
-- Status and CI: `gh pr status` and `gh run watch`.
+- Inspect the current branch/worktree and existing changes before editing.
+- Never overwrite, reset, stash, clean, stage, commit, or delete unrelated user/agent work.
+- Prefer an isolated worktree/branch for each implementation issue.
+- Respect issue readiness labels:
+  - `status:ready`: safe to start from its documented base;
+  - `status:blocked`: prerequisite/base dependency must be satisfied first;
+  - `status:needs-decision`: no implementation until the decision is resolved.
+- Hono-specific follow-up work must not independently recreate PR #132 from `main`; follow the issue's documented base/stacking dependency.
+- Stage intentional files explicitly. Do not use broad staging that captures unrelated work.
 
-## Issue Review & Analysis Guidelines
+## 5. Development loop
 
-When reviewing or revising GitHub issues, follow this systematic approach:
+For non-trivial code changes use TDD where practical:
 
-### Issue Information Gathering
+1. Reproduce/encode the expected behavior in a focused failing test.
+2. Implement the smallest correct change.
+3. Run the focused test in terminating mode.
+4. Refactor without changing behavior.
+5. Run broader relevant gates.
+6. Re-read the issue/spec acceptance criteria before declaring completion.
 
-```bash
-# Fetch complete issue details
-gh issue view <number> --json title,body,labels,assignees,milestone,comments
+Do not weaken, skip, exclude, or convert a production-relevant failing test into retries just to obtain green CI. Temporary quarantine requires a tracked issue, owner, rationale, and expiry.
 
-# Check related issues and dependencies
-gh issue list --search "in:body #<number>"
-```
+## 6. Validation commands
 
-### Issue Quality Assessment
+Autonomous/CI work must use terminating test commands, not Vitest watch mode.
 
-**Required Sections to Validate:**
-
-- **Overview**: Clear problem statement with context
-- **Acceptance Criteria**: Specific, measurable, testable requirements
-- **Technical Plan**: Implementation approach and constraints
-- **Testing Strategy**: How to validate the solution
-- **Estimation**: Size/complexity with reasoning
-
-**Quality Checklist:**
-
-- [ ] Title clearly describes the issue
-- [ ] Problem statement is unambiguous
-- [ ] Acceptance criteria are SMART (Specific, Measurable, Achievable, Relevant, Time-bound)
-- [ ] Technical approach is feasible and documented
-- [ ] Dependencies are identified
-- [ ] Testing approach is defined
-- [ ] Estimation reflects actual scope
-
-### Issue Revision Process
-
-When revising issues based on feedback:
-
-1. **Analyze Current Structure**: Parse existing sections and identify gaps
-2. **Apply Revision Instructions**: Implement specific feedback systematically
-3. **Validate Consistency**: Ensure acceptance criteria align with technical plan
-4. **Check Scope Alignment**: Warn if scope increases >50% (potential split needed)
-5. **Update Estimation**: Recalculate based on scope changes
+Typical gates:
 
 ```bash
-# Update issue after revision
-gh issue edit <number> --title "New Title" --body "$(cat revised-issue.md)"
-
-# Add revision comment
-gh issue comment <number> --body "📝 Issue revised: [summary of changes]"
-```
-
-## Pull Request Review Guidelines
-
-Comprehensive PR review process focusing on multi-source feedback aggregation:
-
-### PR Information Gathering
-
-```bash
-# Complete PR context
-gh pr view <number> --json title,body,author,files,additions,deletions,commits
-
-# Get full diff with context
-gh pr diff <number>
-
-# Review existing feedback
-gh pr view <number> --json comments,reviews
-
-# Check CI/CD status
-gh pr checks <number>
-
-# List all PR files for focused review
-gh pr view <number> --json files --jq '.files[].filename'
-```
-
-### Multi-Source Review Collection
-
-**Review Sources to Aggregate:**
-
-1. **GitHub Native Reviews**: Human reviewer feedback and approval status
-2. **AI Reviewers**: CodeRabbit, Qodo, DeepCode comments and suggestions
-3. **CI/CD Checks**: Test results, linting, security scans, build status
-4. **Security Scanning**: Vulnerability assessments and compliance checks
-5. **Performance Analysis**: Bundle size, load time, runtime performance
-
-### Review Categorization Framework
-
-**🔴 Blocking Issues** (Must Fix Before Merge):
-
-- Security vulnerabilities or flaws
-- Breaking changes without migration path
-- Failing tests or critical functionality breaks
-- TypeScript compilation errors
-- Major architectural violations
-
-**🟡 Important Issues** (Should Fix):
-
-- Performance concerns or bottlenecks
-- Poor error handling or edge case gaps
-- Missing documentation or unclear code
-- Accessibility violations
-- Significant code quality issues
-
-**🔵 Suggestions & Nitpicks** (Consider):
-
-- Code style and formatting preferences
-- Refactoring opportunities for clarity
-- Naming convention improvements
-- Comment clarity and documentation style
-- Minor optimizations
-
-### Review Analysis Process
-
-```bash
-# Automated quality checks
-npm run validate  # canonical format + type-check + zero-warning lint + bounded full suite + build
-npm run test:coverage  # separate source-coverage gate used by CI; performance benchmark stays in test:ci:production
-
-# Security scanning (known debt is explicitly baselined and tracked by #141)
-npm run audit:baseline
-
-# Test coverage validation
+npm run validate:ci
 npm run test:coverage
-
-# Build verification
-npm run build
+npm run test:compatibility
 ```
 
-### PR Review Output Format
+Run the smallest affected terminating test set first, then the broader required suite. Issue #133 landed in PR #152: `npm run validate:ci` is the canonical terminating aggregate gate, `npm run validate` is its alias, and `npm run test:ci` executes the bounded deterministic full-suite shards. Coverage and API compatibility remain separate gates so neither can hide full-suite failures. Do not treat a configured script as proof unless it actually completes successfully on the revision being reviewed.
 
-Structure feedback using this template:
+### API migration/parity
 
-```markdown
-## 📊 PR Review for #<number>
+- Hono smoke tests are necessary but not sufficient.
+- Migrated behavior must run through the same transport-neutral contract assertions against Fastify V1 and Hono V2.
+- Unexpected status/body/error/header/cookie/pagination/content-type differences must fail.
+- Intentional V1/V2 differences and removed V1 scope must map explicitly to `SPEC-V2.md`; do not preserve stale behavior simply because an old test expects it.
 
-**Status:** [NEEDS WORK | READY FOR REVIEW | APPROVED]
+### Database/schema/migrations
 
-### Summary
+For shared DB behavior, evidence from only one backend is insufficient.
 
-Brief assessment of changes and overall quality.
+Require appropriate D1/SQLite-compatible **and** PostgreSQL evidence for:
 
-### 🔴 Blocking Issues
+- shared repository/query semantics;
+- fresh/upgrade migrations;
+- constraints, indexes, defaults, foreign keys, transactions, timestamps, ordering/pagination, null/unique behavior;
+- data preservation;
+- portable spatial behavior.
 
-- `src/file.ts:42`: [Critical issue description with specific fix needed]
+Never add PostGIS to satisfy an old test or historical document. Risky/destructive migrations require expand-contract or an explicit tested backup/restore/forward-fix strategy.
 
-### 🟡 Important Issues
+### High-risk surfaces
 
-- `src/another.ts:15`: [Important issue with suggested improvement]
+Auth, sessions, files/media, migrations, community isolation, public/private visibility, exports, and super-admin boundaries require negative/adversarial tests as well as success paths.
 
-### 🔵 Suggestions
+At minimum consider:
 
-- `src/component.ts:28`: [Enhancement suggestion for consideration]
+- unauthenticated/unauthorized requests;
+- cross-community access and indirect leaks via lists/counts/metadata/files;
+- session expiry/revocation/tampering/restart behavior;
+- file MIME/size/path/content hazards and ownership;
+- secrets/session IDs/protected content absent from logs/errors;
+- dependency outage/failure behavior where relevant.
 
-### ✅ Positive Feedback
+## 7. CI and PR evidence
 
-- [Highlight what was implemented well]
+Required gates fail closed. A check masked by `continue-on-error`, `|| true`, `|| echo`, retries-only behavior, or a diagnostic that merely prints mismatches is not green evidence.
 
-### 📋 Checklist
+Dependency-audit baselines are inventories of explicitly accepted debt, not a place to absorb newly published advisories for convenience. A new advisory must fail closed. Trace the exact dependency path and prefer, in order: removing an unused dependency, applying a compatible fixed version, or performing a justified upgrade. Do not widen the baseline for a fixable advisory merely to restore green CI.
 
-- [ ] All tests passing
-- [ ] TypeScript compilation clean
-- [ ] Linting issues resolved
-- [ ] Security scan clean
-- [ ] Documentation updated
-- [ ] Breaking changes documented
-```
+For a full PR lifecycle use `.agents/skills/pr-cycle/SKILL.md`.
 
-### Automated Fix Strategies
+Merge readiness is bound to an exact PR head SHA and current base-tip SHA. Any new push or base movement invalidates prior review/readiness evidence.
 
-**Fixable Issues (Auto-apply when safe):**
+Never merge unless the user explicitly authorizes merge. A request for a PR cycle authorizes fixes/reviews/pushes, not merge by itself.
 
-- TypeScript type errors with clear solutions
-- ESLint rule violations
-- Import/export organization
-- Simple test updates
-- Documentation additions
+An authorized merge is not the end of validation when the target branch runs post-merge checks. Verify the exact resulting target-branch commit and its required workflows. If `main` becomes red, pause the merge queue and repair the failure before advancing another PR; first determine whether the failure is a code regression or a newly changed external condition such as a dependency advisory.
 
-**Manual Review Required:**
+## 8. Documentation/change control
 
-- Complex refactoring suggestions
-- Architecture decisions
-- Business logic changes
-- Database schema modifications
-- Security-sensitive code
+Keep durable context small and single-owned:
 
-### Final Validation Before Merge
+- `docs/SPEC-V2.md`: canonical product/architecture contract.
+- `docs/SOURCE-OF-TRUTH.md`: authority/navigation/change-control rules.
+- `docs/PHASE-1-PLAN.md`: active Fastify → Hono migration plan.
+- `docs/PRODUCTION-READINESS-ROADMAP-2026.md`: current hardening/release plan.
+- `AGENTS.md`: repository execution rules.
+- repository skills: narrow repeatable workflows.
+- `README.md` / `CONTRIBUTING.md`: human-facing orientation only.
 
-```bash
-# Comprehensive validation suite
-gh pr checks <number>  # All CI green
-npm run validate       # Local checks pass
-npm test              # Full test suite
-npm run build         # Production build success
+Do not add completion reports, session diaries, duplicate roadmaps, provider-specific instruction copies, or historical review summaries to the repository. Git history and GitHub issues/PRs already preserve that history.
 
-# Verify no unresolved review threads
-gh pr view <number> --json reviews --jq '.reviews[] | select(.state == "CHANGES_REQUESTED")'
-```
+If a canonical product decision changes, update `SPEC-V2.md` (or an explicitly accepted amendment/ADR) and downstream active plans/issues in the same change. An issue alone is not a spec amendment.
 
-### PR Comment Integration
+## 9. Learning capture
 
-```bash
-# Post comprehensive review
-gh pr comment <number> --body-file review-summary.md
+At the end of substantial implementation/PR work, capture only durable recurring lessons in the smallest appropriate owner:
 
-# Request specific changes
-gh pr review <number> --request-changes --body "Changes needed: [details]"
+- architecture/product intent → canonical spec/approved ADR;
+- repository-wide execution invariant → `AGENTS.md`;
+- repeatable workflow → narrow `.agents/skills/*` skill;
+- deterministic mechanics → script/test/config;
+- feature-specific context → issue/PR, not permanent project instructions.
 
-# Approve after fixes
-gh pr review <number> --approve --body "All issues addressed. Ready to merge!"
-```
-
-## Security & Configuration Tips
-
-- Never commit secrets; start from `.env.example`.
-- Required vars: `DATABASE_URL`, `JWT_SECRET`. PostgreSQL + PostGIS in production; tests default to in-memory SQLite.
-- Prefer parameterized queries via Drizzle and validate inputs with Zod.
+Configured mechanisms prove only that they exist. Claim a guardrail is effective only when task-linked evidence shows it ran and passed.

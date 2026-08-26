@@ -36,6 +36,7 @@ Before changing code, collect:
 - complete CI/check rollup, including pending, skipped, neutral, and soft-failed jobs;
 - review decision and all reviews;
 - thread-aware unresolved review comments;
+- latest reviewer activity outside threads, including general PR comments or summary reviews posted after the most recent review request;
 - current worktree cleanliness.
 
 Fail closed when required state cannot be read. Never call a PR merge-ready from partial GitHub state.
@@ -145,27 +146,37 @@ Only after explicit authorization:
 2. If the user mentions merge order, a queue, prerequisites, or multiple pending PRs, inspect the open PR set and explicit dependency/base relationships. A PR being merge-ready does not prove it is logically next.
 3. Confirm head and base-tip still equal the reviewed merge-ready pair; otherwise return to review/CI.
 4. Reconfirm green CI, review-thread state, and mergeability.
-5. Merge with an exact-head guard when tooling supports it. Never use an admin bypass unless the user explicitly authorizes that separate override.
-6. Verify the PR is merged and record the merge commit SHA.
-7. Observe required workflows triggered on the exact resulting target-branch commit. Do not advance the merge queue while the target branch is red or still has unresolved required checks.
-8. If a post-merge target-branch failure appears, distinguish a regression from a newly changed external condition. For a new dependency advisory, trace the source and prefer removing unused dependencies or applying a compatible fix over widening an audit baseline. Put any necessary minimal repair ahead of unrelated queued work.
-9. Clean only the PR's own remote branch, isolated worktree, and local branch after proving there are no unpushed commits or untracked work worth preserving.
-10. Verify unrelated worktrees and their pre-existing changes remain untouched.
+5. Merge with an exact-head guard when tooling supports it. Never use an admin bypass unless the user explicitly authorizes that separate override. Prefer explicit repository context when merging from a detached review worktree; branch-deletion helpers may assume a checked-out branch.
+6. Treat a nonzero or otherwise ambiguous merge command as **unknown state**, not proof that the merge failed. Re-read the remote PR before retrying: a client can complete the remote merge and then fail during local branch cleanup.
+7. Verify the PR is merged and record the merge commit SHA.
+8. Observe required workflows triggered on the exact resulting target-branch commit. Do not advance the merge queue while the target branch is red or still has unresolved required checks.
+9. If a post-merge target-branch failure appears, distinguish a regression from a newly changed external condition. For a new dependency advisory, trace the source and prefer removing unused dependencies or applying a compatible fix over widening an audit baseline. Put any necessary minimal repair ahead of unrelated queued work.
+10. Clean only the PR's own remote branch, isolated worktree, and local branch after proving there are no unpushed commits or untracked work worth preserving. Prefer explicit remote/local cleanup after verifying the merge rather than relying on a merge command's branch-cleanup side effect.
+11. Verify unrelated worktrees and their pre-existing changes remain untouched.
 
-## 8. Session lessons checkpoint
+## 8. Required self-improvement checkpoint
 
-Before concluding every PR cycle, review the session for durable lessons: recurring CI blind spots, flaky/isolation hazards, migration risks, tool timeouts, reviewer limitations, cleanup hazards, or repository-wide conventions.
+Before concluding every substantial PR cycle, explicitly review the session for durable lessons: recurring CI blind spots, flaky/isolation hazards, migration risks, tool timeouts, reviewer limitations, cleanup hazards, or repository-wide conventions. The checkpoint may conclude `no durable lesson`; do not manufacture process churn.
 
-Document reusable lessons in the canonical location:
+When a reusable lesson exists, improve the smallest canonical owner:
 
 - `.agents/skills/pr-cycle/` for PR-cycle mechanics and safeguards;
 - `AGENTS.md` for Terrastories-specific coding, architecture, testing, or repository conventions;
+- deterministic script/test/config when the lesson can be enforced mechanically;
 - `README.md` only for contributor/user-facing setup or workflows.
 
-Do not document transient provider outages or feature-specific details that belong in an issue/spec/ADR. Any documentation push invalidates prior exact-SHA review and CI evidence.
+Self-improvement must not invalidate the original PR's verified state:
+
+1. Do not append meta-process edits to a PR merely because it reached `MERGE-READY`.
+2. If the original PR is not authorized to merge, report the durable lesson and leave the verified PR unchanged unless the lesson is directly in scope.
+3. After an authorized merge and cleanup, make durable process improvements in a separate isolated branch/change based on the resulting target branch.
+4. Validate that follow-up proportionally, review it independently when meaningful, and use the normal authorization rules for any separate merge unless the user explicitly included the self-improvement change in their merge instruction.
+5. Keep the learning itself concise and general. Do not add session diaries, provider outage notes, or feature-specific history that belongs in an issue/spec/ADR.
+
+For reviewer/tool lessons, preserve evidence without coupling the skill to one provider: bind reviews to exact SHAs, use bounded/quiet execution when verbose traces threaten timeouts, and never count timeout/error/needs-input output as approval.
 
 ## Status reporting
 
 During long cycles, report meaningful milestones: first substantive finding, fixes pushed/new SHA, CI state, independent reviewer verdict, merge completion, and cleanup completion.
 
-A final readiness report should include the PR, exact final head/base-tip pair, CI state, unresolved actionable thread count, reviewer verdicts, mergeability, production-specific gate status when relevant, and whether merge authorization is still required.
+A final report should include the PR, exact final head/base-tip pair, CI state, unresolved actionable thread count, reviewer verdicts, mergeability, production-specific gate status when relevant, merge/cleanup state when authorized, and the self-improvement checkpoint outcome (`no durable lesson`, documented follow-up, or merged follow-up).

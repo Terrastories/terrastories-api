@@ -169,12 +169,16 @@ If a canonical product decision changes, update `SPEC-V2.md` (or an explicitly a
 
 ## 9. Learning capture
 
-At the end of substantial implementation/PR work, capture only durable recurring lessons in the smallest appropriate owner:
+At the end of substantial implementation/PR work, run an explicit self-improvement checkpoint and capture only durable recurring lessons in the smallest appropriate owner:
 
 - architecture/product intent → canonical spec/approved ADR;
 - repository-wide execution invariant → `AGENTS.md`;
 - repeatable workflow → narrow `.agents/skills/*` skill;
 - deterministic mechanics → script/test/config;
 - feature-specific context → issue/PR, not permanent project instructions.
+
+A completed PR must not be destabilized merely to record meta-process learning. If a durable lesson appears only after merge-readiness, preserve the verified PR unchanged; after an authorized merge and cleanup, apply the learning in a separate isolated follow-up change based on the resulting target branch. A checkpoint may legitimately produce no change when there is no reusable lesson.
+
+Final PR evidence must include both thread-aware review state and any newer unthreaded reviewer summaries/comments. Treat an ambiguous merge-command failure as unknown remote state and verify the PR before retrying; tooling may complete the remote merge and fail later during local branch cleanup.
 
 Configured mechanisms prove only that they exist. Claim a guardrail is effective only when task-linked evidence shows it ran and passed.

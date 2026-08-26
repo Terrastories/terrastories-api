@@ -240,7 +240,8 @@ export const StoryWithRelationsResponseSchema = StoryResponseSchema.extend({
       photoUrl: z
         .string()
         .transform((val) => (val === '' ? undefined : val))
-        .pipe(z.string().url().optional()),
+        .pipe(z.string().url().optional())
+        .optional(),
       birthYear: z.number().int().optional(),
       elderStatus: z.boolean(),
       culturalRole: z.string().optional(),

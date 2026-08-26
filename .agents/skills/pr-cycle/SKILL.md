@@ -205,7 +205,9 @@ Examples of shape, not literal fixed text:
 
 ### Deduplication and failure behavior
 
-- During one uninterrupted agent run, suppress retries of the same event using a fingerprint of PR + transition + relevant revision + concise reason/next-action identity. For `MERGE-READY`, the head/base pair is sufficient; for `MERGED`, use the authoritative resulting commit SHA; for `HUMAN-ACTION-REQUIRED` and `IMPORTANT-FAILURE`, include the blocking/failure reason so distinct events on the same revision are not collapsed.
+- Build an event fingerprint from PR + transition + relevant revision + concise reason/next-action identity. For `MERGE-READY`, the head/base pair is sufficient; for `MERGED`, use the authoritative resulting commit SHA; for `HUMAN-ACTION-REQUIRED` and `IMPORTANT-FAILURE`, include the blocking/failure reason so distinct events on the same revision are not collapsed.
+- During one uninterrupted agent run, mark that fingerprint as delivered and suppress later repeats only after Hermes exits 0. A failed or unavailable delivery attempt must not consume the fingerprint.
+- For a failed delivery while the same event remains current, make at most three total attempts in that uninterrupted run. Retry at a later natural cycle checkpoint rather than tight-looping solely on the messaging transport, and preserve each failed attempt in status/final reporting. Stop retrying immediately after one attempt succeeds.
 - A resumed or new session has no durable notification ledger by default. Do not invent prior-delivery state and do not suppress an alert merely because the same transition might have been sent by an earlier session. Prefer at-least-once delivery across session boundaries, accepting a possible duplicate rather than risking a missed important notification. If a future durable ledger is explicitly added, it may tighten this behavior.
 - If readiness is invalidated and later becomes true on a different head/base pair, that is a new `MERGE-READY` event and should be sent.
 - Treat Hermes exit code 0 as delivery success. Do not claim delivery from command construction alone.

@@ -45,12 +45,12 @@ Fail closed when required state cannot be read. Never call a PR merge-ready from
 
 Repeat until no actionable findings remain on the current head:
 
-1. Verify each review finding against the exact current head. Resolve stale, duplicate, already-fixed, or false-positive comments with evidence instead of creating churn.
+1. Verify each threaded or unthreaded review finding against the exact current head. Resolve stale, duplicate, already-fixed, or false-positive feedback with evidence instead of creating churn. General PR comments and summary reviews with actionable findings must be adjudicated exactly like threaded findings even when the platform provides no resolve control.
 2. Inspect failed CI logs and fix failures caused by the PR. Never change unrelated code simply to mask unrelated infrastructure failures.
 3. Follow Terrastories TDD and validation requirements from `AGENTS.md`.
 4. Run narrow affected tests first, then broader gates. Use terminating Vitest invocations (`vitest run` or `npm test -- --run`) for autonomous/CI work.
 5. Commit and push only intentional PR changes.
-6. Reply to and resolve addressed review threads only after the requested change is fully satisfied.
+6. Reply to and resolve addressed review threads only after the requested change is fully satisfied; for actionable unthreaded feedback, reply or otherwise record the disposition/evidence so the final gate can prove it was cleared.
 7. Record the new pushed head SHA. All earlier readiness and reviewer verdicts are stale after a push.
 
 Do not stop after green CI if unresolved actionable feedback remains.
@@ -132,11 +132,12 @@ Declare `MERGE-READY` only when all are true simultaneously for one exact head/b
 - no relevant failure is hidden by `continue-on-error`, `|| true`, `|| echo`, or equivalent soft-fail logic;
 - review decision is not blocking;
 - no unresolved actionable review threads remain;
+- no actionable unthreaded reviewer feedback remains without an explicit disposition/evidence;
 - no independent-review blocker or should-fix finding remains;
 - the PR worktree is clean after the final push;
 - all Terrastories-specific gates above are satisfied.
 
-If merge is not authorized, stop here and report the exact reviewed revision pair.
+Before stopping at `MERGE-READY` for any reason, execute the required self-improvement checkpoint in §8. If merge is not authorized, leave the verified PR unchanged solely for meta-learning, then report the checkpoint outcome and exact reviewed revision pair.
 
 ## 7. Authorized merge and cleanup
 
@@ -145,7 +146,7 @@ Only after explicit authorization:
 1. Re-read live PR state immediately before merging.
 2. If the user mentions merge order, a queue, prerequisites, or multiple pending PRs, inspect the open PR set and explicit dependency/base relationships. A PR being merge-ready does not prove it is logically next.
 3. Confirm head and base-tip still equal the reviewed merge-ready pair; otherwise return to review/CI.
-4. Reconfirm green CI, review-thread state, and mergeability.
+4. Reconfirm green CI, threaded and unthreaded reviewer state, and mergeability.
 5. Merge with an exact-head guard when tooling supports it. Never use an admin bypass unless the user explicitly authorizes that separate override. Prefer explicit repository context when merging from a detached review worktree; branch-deletion helpers may assume a checked-out branch.
 6. Treat a nonzero or otherwise ambiguous merge command as **unknown state**, not proof that the merge failed. Re-read the remote PR before retrying: a client can complete the remote merge and then fail during local branch cleanup.
 7. Verify the PR is merged and record the merge commit SHA.
@@ -179,4 +180,4 @@ For reviewer/tool lessons, preserve evidence without coupling the skill to one p
 
 During long cycles, report meaningful milestones: first substantive finding, fixes pushed/new SHA, CI state, independent reviewer verdict, merge completion, and cleanup completion.
 
-A final report should include the PR, exact final head/base-tip pair, CI state, unresolved actionable thread count, reviewer verdicts, mergeability, production-specific gate status when relevant, merge/cleanup state when authorized, and the self-improvement checkpoint outcome (`no durable lesson`, documented follow-up, or merged follow-up).
+A final report should include the PR, exact final head/base-tip pair, CI state, unresolved actionable threaded and unthreaded feedback counts/dispositions, reviewer verdicts, mergeability, production-specific gate status when relevant, merge/cleanup state when authorized, and the self-improvement checkpoint outcome (`no durable lesson`, documented follow-up, or merged follow-up).

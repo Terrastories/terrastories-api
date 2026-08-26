@@ -36,7 +36,7 @@ Before changing code, collect:
 - complete CI/check rollup, including pending, skipped, neutral, and soft-failed jobs;
 - review decision and all reviews;
 - thread-aware unresolved review comments;
-- latest reviewer activity outside threads, including general PR comments or summary reviews posted after the most recent review request;
+- complete reviewer activity outside threads, including the full general PR comment history plus all summary reviews; when deciding whether a finding is still current, compare it against the exact head/base pair rather than excluding it merely because it predates the most recent review request;
 - current worktree cleanliness.
 
 Fail closed when required state cannot be read. Never call a PR merge-ready from partial GitHub state.

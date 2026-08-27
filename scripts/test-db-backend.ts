@@ -66,14 +66,16 @@ async function verifyStaticPortabilityContract(): Promise<void> {
     );
   }
 
-  validateMigrationText(
-    'postgresql',
-    await readFile(
-      path.join(postgresMigrations, '0000_portable_v2_baseline.sql'),
-      'utf8'
-    ),
-    'PostgreSQL migration history'
-  );
+  for (const file of [
+    '0000_current_compat_baseline.sql',
+    '0001_theme_ownership_fk.sql',
+  ]) {
+    validateMigrationText(
+      'postgresql',
+      await readFile(path.join(postgresMigrations, file), 'utf8'),
+      file
+    );
+  }
 
   for (const file of [
     'src/db/index.ts',
@@ -380,7 +382,7 @@ async function seedPreviousReleasePostgres(
          cultural_significance, is_restricted, created_at, updated_at)
       VALUES
         (${place.id}, ${place.name}, ${place.description}, ${c.id}, ${place.latitude}, ${place.longitude},
-         ${place.region}, ${client.json(place.mediaUrls)}, ${place.photoUrl}, ${place.culturalSignificance},
+         ${place.region}, ${JSON.stringify(place.mediaUrls)}, ${place.photoUrl}, ${place.culturalSignificance},
          ${place.isRestricted}, ${'2024-02-01T10:00:00.000Z'},
          ${'2025-06-01T10:00:00.000Z'})
     `;
@@ -405,8 +407,8 @@ async function seedPreviousReleasePostgres(
        media_urls, image_url, audio_url, language, tags, created_at, updated_at)
     VALUES
       (${story.id}, ${story.title}, ${story.description}, ${story.slug}, ${story.communityId},
-       ${story.createdBy}, ${story.isRestricted}, ${story.privacyLevel}, ${client.json(story.mediaUrls)},
-       ${story.imageUrl}, ${story.audioUrl}, ${story.language}, ${client.json(story.tags)},
+       ${story.createdBy}, ${story.isRestricted}, ${story.privacyLevel}, ${JSON.stringify(story.mediaUrls)},
+       ${story.imageUrl}, ${story.audioUrl}, ${story.language}, ${JSON.stringify(story.tags)},
        ${'2024-04-01T10:00:00.000Z'}, ${'2025-06-05T10:00:00.000Z'})
   `;
 
@@ -417,8 +419,8 @@ async function seedPreviousReleasePostgres(
        metadata, cultural_restrictions, is_active, created_at, updated_at)
     VALUES
       (${file.id}, ${file.filename}, ${file.originalName}, ${file.path}, ${file.url}, ${file.mimeType},
-       ${file.size}, ${file.communityId}, ${file.uploadedBy}, ${client.json(file.metadata)},
-       ${client.json(file.culturalRestrictions)}, ${file.isActive},
+       ${file.size}, ${file.communityId}, ${file.uploadedBy}, ${JSON.stringify(file.metadata)},
+       ${JSON.stringify(file.culturalRestrictions)}, ${file.isActive},
        ${'2024-04-02T10:00:00.000Z'}, ${'2025-06-06T10:00:00.000Z'})
   `;
 
@@ -489,62 +491,103 @@ function verifySqliteSchema(sqlite: Database.Database): void {
   const userFks = sqlite
     .prepare('PRAGMA foreign_key_list(users)')
     .all() as any[];
+  const themeFks = sqlite
+    .prepare('PRAGMA foreign_key_list(themes)')
+    .all() as any[];
   assert.ok(placeFks.some((row) => row.table === 'communities'));
   assert.ok(userFks.some((row) => row.table === 'communities'));
+  assert.ok(themeFks.some((row) => row.table === 'communities'));
 }
 
 function verifySqlitePreservation(sqlite: Database.Database): void {
   const community = sqlite
-    .prepare('SELECT id, name, country, beta FROM communities WHERE id = 1')
+    .prepare(
+      'SELECT id, name, country, beta, created_at, updated_at FROM communities WHERE id = 1'
+    )
     .get() as any;
-  assert.deepEqual(community, {
-    id: 1,
-    name: fixture.community.name,
-    country: null,
-    beta: 0,
-  });
+  assert.equal(community.id, fixture.community.id);
+  assert.equal(community.name, fixture.community.name);
+  assert.equal(community.country, null);
+  assert.equal(community.beta, 0);
+  assert.equal(community.created_at, timestamp(fixture.community.createdAt));
+  assert.equal(community.updated_at, timestamp(fixture.community.updatedAt));
 
   const user = sqlite
     .prepare(
-      'SELECT id, email, reset_password_token, sign_in_count FROM users WHERE id = 1'
+      'SELECT id, email, community_id, reset_password_token, sign_in_count, created_at, updated_at FROM users WHERE id = 1'
     )
     .get() as any;
+  assert.equal(user.id, fixture.user.id);
   assert.equal(user.email, fixture.user.email);
+  assert.equal(user.community_id, fixture.user.communityId);
   assert.equal(user.reset_password_token, null);
   assert.equal(user.sign_in_count, 0);
+  assert.equal(user.created_at, timestamp(fixture.user.createdAt));
+  assert.equal(user.updated_at, timestamp(fixture.user.updatedAt));
 
   const place = sqlite
     .prepare(
-      'SELECT latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1'
+      'SELECT id, community_id, latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1'
     )
     .get() as any;
+  assert.equal(place.id, fixture.places[0].id);
+  assert.equal(place.community_id, fixture.community.id);
   assert.equal(place.latitude, fixture.places[0].latitude);
   assert.equal(place.longitude, fixture.places[0].longitude);
   assert.deepEqual(JSON.parse(place.media_urls), fixture.places[0].mediaUrls);
   assert.equal(place.is_restricted, 1);
 
+  const story = sqlite
+    .prepare(
+      'SELECT id, community_id, created_by, is_restricted FROM stories WHERE id = 1'
+    )
+    .get() as any;
+  assert.equal(story.id, fixture.story.id);
+  assert.equal(story.community_id, fixture.story.communityId);
+  assert.equal(story.created_by, fixture.story.createdBy);
+  assert.equal(story.is_restricted, 1);
+
+  const speaker = sqlite
+    .prepare('SELECT id, community_id FROM speakers WHERE id = 1')
+    .get() as any;
+  assert.equal(speaker.id, fixture.speaker.id);
+  assert.equal(speaker.community_id, fixture.speaker.communityId);
+
   const file = sqlite
-    .prepare('SELECT metadata, cultural_restrictions FROM files WHERE id = ?')
+    .prepare(
+      'SELECT id, community_id, uploaded_by, metadata, is_active FROM files WHERE id = ?'
+    )
     .get(fixture.file.id) as any;
+  assert.equal(file.id, fixture.file.id);
+  assert.equal(file.community_id, fixture.file.communityId);
+  assert.equal(file.uploaded_by, fixture.file.uploadedBy);
   assert.deepEqual(JSON.parse(file.metadata), fixture.file.metadata);
-  assert.deepEqual(
-    JSON.parse(file.cultural_restrictions),
-    fixture.file.culturalRestrictions
-  );
+  assert.equal(file.is_active, 1);
 
   const storyPlace = sqlite
     .prepare(
-      'SELECT cultural_context, sort_order FROM story_places WHERE id = 1'
+      'SELECT id, story_id, place_id, sort_order FROM story_places WHERE id = 1'
     )
     .get() as any;
   assert.deepEqual(storyPlace, {
-    cultural_context: 'restricted-context',
+    id: fixture.storyPlace.id,
+    story_id: fixture.storyPlace.storyId,
+    place_id: fixture.storyPlace.placeId,
     sort_order: 0,
   });
+
   const storySpeaker = sqlite
-    .prepare('SELECT story_role, sort_order FROM story_speakers WHERE id = 1')
+    .prepare(
+      'SELECT id, story_id, speaker_id, story_role, sort_order FROM story_speakers WHERE id = 1'
+    )
     .get() as any;
-  assert.deepEqual(storySpeaker, { story_role: 'narrator', sort_order: 0 });
+  assert.deepEqual(storySpeaker, {
+    id: fixture.storySpeaker.id,
+    story_id: fixture.storySpeaker.storyId,
+    speaker_id: fixture.storySpeaker.speakerId,
+    story_role: 'narrator',
+    sort_order: 0,
+  });
 }
 
 async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
@@ -601,6 +644,7 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     'story_places_place_id_fkey',
     'story_speakers_story_id_fkey',
     'story_speakers_speaker_id_fkey',
+    'themes_community_id_fkey',
   ]) {
     assert.ok(
       constraints.has(constraint),
@@ -613,55 +657,107 @@ async function verifyPostgresPreservation(
   client: PostgresClient
 ): Promise<void> {
   const [community] = await client.unsafe(
-    'SELECT id, name, country, beta FROM communities WHERE id = 1'
+    'SELECT id, name, country, beta, created_at, updated_at FROM communities WHERE id = 1'
   );
+  assert.equal(community.id, fixture.community.id);
   assert.equal(community.name, fixture.community.name);
   assert.equal(community.country, null);
   assert.equal(community.beta, false);
+  assert.equal(
+    new Date(community.created_at).getTime(),
+    timestamp(fixture.community.createdAt)
+  );
+  assert.equal(
+    new Date(community.updated_at).getTime(),
+    timestamp(fixture.community.updatedAt)
+  );
 
   const [user] = await client.unsafe(
-    'SELECT email, reset_password_token, sign_in_count FROM users WHERE id = 1'
+    'SELECT id, email, community_id, reset_password_token, sign_in_count, created_at, updated_at FROM users WHERE id = 1'
   );
+  assert.equal(user.id, fixture.user.id);
   assert.equal(user.email, fixture.user.email);
+  assert.equal(user.community_id, fixture.user.communityId);
   assert.equal(user.reset_password_token, null);
   assert.equal(user.sign_in_count, 0);
+  assert.equal(
+    new Date(user.created_at).getTime(),
+    timestamp(fixture.user.createdAt)
+  );
+  assert.equal(
+    new Date(user.updated_at).getTime(),
+    timestamp(fixture.user.updatedAt)
+  );
 
   const [place] = await client.unsafe(
-    'SELECT latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1'
+    'SELECT id, community_id, latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1'
   );
+  assert.equal(place.id, fixture.places[0].id);
+  assert.equal(place.community_id, fixture.community.id);
   assert.equal(place.latitude, fixture.places[0].latitude);
   assert.equal(place.longitude, fixture.places[0].longitude);
   assert.deepEqual(place.media_urls, fixture.places[0].mediaUrls);
   assert.equal(place.is_restricted, true);
 
+  const [story] = await client.unsafe(
+    'SELECT id, community_id, created_by, is_restricted FROM stories WHERE id = 1'
+  );
+  assert.equal(story.id, fixture.story.id);
+  assert.equal(story.community_id, fixture.story.communityId);
+  assert.equal(story.created_by, fixture.story.createdBy);
+  assert.equal(story.is_restricted, true);
+
+  const [speaker] = await client.unsafe(
+    'SELECT id, community_id FROM speakers WHERE id = 1'
+  );
+  assert.equal(speaker.id, fixture.speaker.id);
+  assert.equal(speaker.community_id, fixture.speaker.communityId);
+
   const [file] = await client.unsafe(
-    `SELECT metadata, cultural_restrictions FROM files WHERE id = '${fixture.file.id}'`
+    `SELECT id, community_id, uploaded_by, metadata, is_active FROM files WHERE id = '${fixture.file.id}'`
   );
+  assert.equal(file.id, fixture.file.id);
+  assert.equal(file.community_id, fixture.file.communityId);
+  assert.equal(file.uploaded_by, fixture.file.uploadedBy);
   assert.deepEqual(file.metadata, fixture.file.metadata);
-  assert.deepEqual(
-    file.cultural_restrictions,
-    fixture.file.culturalRestrictions
-  );
+  assert.equal(file.is_active, true);
 
   const [storyPlace] = await client.unsafe(
-    'SELECT cultural_context, sort_order FROM story_places WHERE id = 1'
+    'SELECT id, story_id, place_id, sort_order FROM story_places WHERE id = 1'
   );
   assert.deepEqual(
     {
-      cultural_context: storyPlace.cultural_context,
+      id: storyPlace.id,
+      story_id: storyPlace.story_id,
+      place_id: storyPlace.place_id,
       sort_order: storyPlace.sort_order,
     },
-    { cultural_context: 'restricted-context', sort_order: 0 }
+    {
+      id: fixture.storyPlace.id,
+      story_id: fixture.storyPlace.storyId,
+      place_id: fixture.storyPlace.placeId,
+      sort_order: 0,
+    }
   );
+
   const [storySpeaker] = await client.unsafe(
-    'SELECT story_role, sort_order FROM story_speakers WHERE id = 1'
+    'SELECT id, story_id, speaker_id, story_role, sort_order FROM story_speakers WHERE id = 1'
   );
   assert.deepEqual(
     {
+      id: storySpeaker.id,
+      story_id: storySpeaker.story_id,
+      speaker_id: storySpeaker.speaker_id,
       story_role: storySpeaker.story_role,
       sort_order: storySpeaker.sort_order,
     },
-    { story_role: 'narrator', sort_order: 0 }
+    {
+      id: fixture.storySpeaker.id,
+      story_id: fixture.storySpeaker.storyId,
+      speaker_id: fixture.storySpeaker.speakerId,
+      story_role: 'narrator',
+      sort_order: 0,
+    }
   );
 }
 
@@ -773,11 +869,100 @@ async function runRepositoryContract(database: unknown): Promise<void> {
     ['A Nearby Public', 'B Nearby Restricted', 'C Far Public']
   );
 
+  const firstPage = await places.getByCommunity(community.id, {
+    page: 1,
+    limit: 2,
+    includeRestricted: true,
+    sortBy: 'name',
+    sortOrder: 'asc',
+  });
+  const secondPage = await places.getByCommunity(community.id, {
+    page: 2,
+    limit: 2,
+    includeRestricted: true,
+    sortBy: 'name',
+    sortOrder: 'asc',
+  });
+  assert.equal(firstPage.total, 3);
+  assert.equal(firstPage.pages, 2);
+  assert.deepEqual(
+    firstPage.data.map((place) => place.name),
+    ['A Nearby Public', 'B Nearby Restricted']
+  );
+  assert.deepEqual(
+    secondPage.data.map((place) => place.name),
+    ['C Far Public']
+  );
+
   const countryResults = await communities.search({
     country: 'BR',
     beta: true,
   });
   assert.ok(countryResults.some((row) => row.id === community.id));
+
+  const datelineCommunity = await communities.create({
+    name: 'Dateline Radius Community',
+  });
+  const datelineEast = await places.create({
+    name: 'Dateline East',
+    communityId: datelineCommunity.id,
+    latitude: 0,
+    longitude: 179.9,
+  });
+  const datelineWest = await places.create({
+    name: 'Dateline West',
+    communityId: datelineCommunity.id,
+    latitude: 0,
+    longitude: -179.9,
+  });
+  await places.create({
+    name: 'Dateline Far',
+    communityId: datelineCommunity.id,
+    latitude: 0,
+    longitude: 170,
+  });
+  const datelineResults = await places.searchNear({
+    communityId: datelineCommunity.id,
+    latitude: 0,
+    longitude: 179.95,
+    radiusKm: 30,
+    page: 1,
+    limit: 10,
+    includeRestricted: true,
+  });
+  assert.deepEqual(
+    new Set(datelineResults.data.map((place) => place.id)),
+    new Set([datelineEast.id, datelineWest.id])
+  );
+
+  const polarCommunity = await communities.create({
+    name: 'Polar Radius Community',
+  });
+  const polarNear = await places.create({
+    name: 'Polar Near',
+    communityId: polarCommunity.id,
+    latitude: 89.9,
+    longitude: 120,
+  });
+  await places.create({
+    name: 'Polar Far',
+    communityId: polarCommunity.id,
+    latitude: 88,
+    longitude: 0,
+  });
+  const polarResults = await places.searchNear({
+    communityId: polarCommunity.id,
+    latitude: 89.9,
+    longitude: 0,
+    radiusKm: 30,
+    page: 1,
+    limit: 10,
+    includeRestricted: true,
+  });
+  assert.deepEqual(
+    polarResults.data.map((place) => place.id),
+    [polarNear.id]
+  );
 }
 
 function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {
@@ -808,6 +993,16 @@ function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {
       )
       .run(Date.now(), Date.now())
   );
+
+  sqlite.exec('CREATE TEMP TABLE null_unique_probe (value TEXT UNIQUE)');
+  const nullableProbe = sqlite.prepare(
+    'INSERT INTO null_unique_probe (value) VALUES (?)'
+  );
+  nullableProbe.run(null);
+  nullableProbe.run(null);
+  nullableProbe.run('duplicate');
+  assert.throws(() => nullableProbe.run('duplicate'));
+  sqlite.exec('DROP TABLE null_unique_probe');
 }
 
 async function verifyPostgresTransactionAndForeignKey(
@@ -839,6 +1034,20 @@ async function verifyPostgresTransactionAndForeignKey(
         ('orphan@example.test', 'hash', 'Orphan', 'User', 999999)
     `
   );
+
+  await client.unsafe(
+    'CREATE TEMP TABLE null_unique_probe (value text UNIQUE)'
+  );
+  await client.unsafe(
+    'INSERT INTO null_unique_probe (value) VALUES (NULL), (NULL)'
+  );
+  await client.unsafe(
+    "INSERT INTO null_unique_probe (value) VALUES ('duplicate')"
+  );
+  await assert.rejects(
+    client.unsafe("INSERT INTO null_unique_probe (value) VALUES ('duplicate')")
+  );
+  await client.unsafe('DROP TABLE null_unique_probe');
 }
 
 async function verifySqliteFailedMigrationNotRecorded(): Promise<void> {
@@ -966,10 +1175,14 @@ async function runSqliteGate(): Promise<void> {
 async function runPostgresGate(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   assert.ok(databaseUrl, 'DATABASE_URL is required for PostgreSQL integration');
-  const databaseName = new URL(databaseUrl).pathname.replace(/^\//, '');
+  const databaseName = decodeURIComponent(
+    new URL(databaseUrl).pathname.replace(/^\//, '')
+  );
+  const dedicatedTestDatabase = /^(?:test|[a-z0-9][a-z0-9_]*_test)$/i;
+  assert.equal(dedicatedTestDatabase.test('latest'), false);
   assert.match(
     databaseName,
-    /test/i,
+    dedicatedTestDatabase,
     `refusing destructive PostgreSQL gate against non-test database ${databaseName}`
   );
   assert.equal(
@@ -1004,7 +1217,7 @@ async function runPostgresGate(): Promise<void> {
     validateMigrationText(
       'postgresql',
       await readFile(
-        path.join(postgresMigrations, '0000_portable_v2_baseline.sql'),
+        path.join(postgresMigrations, '0000_current_compat_baseline.sql'),
         'utf8'
       ),
       'PostgreSQL baseline'

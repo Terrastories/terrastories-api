@@ -46,7 +46,7 @@ const EARTH_RADIUS_KM = 6371;
 
 function normalizeLongitudeRadians(radians: number): number {
   const fullTurn = 2 * Math.PI;
-  return ((radians + Math.PI) % fullTurn + fullTurn) % fullTurn - Math.PI;
+  return ((((radians + Math.PI) % fullTurn) + fullTurn) % fullTurn) - Math.PI;
 }
 
 export const SpatialUtils = {

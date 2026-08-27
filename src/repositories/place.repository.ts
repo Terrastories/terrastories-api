@@ -20,6 +20,7 @@ import { storyPlaces } from '../db/schema/story_places.js';
 import { stories } from '../db/schema/stories.js';
 import { getCommunitiesTable } from '../db/schema/communities.js';
 import type { Database } from '../db/index.js';
+import { SpatialUtils } from '../shared/utils/spatial.js';
 import {
   DatabaseError,
   InvalidCoordinatesError,
@@ -329,21 +330,42 @@ export class PlaceRepository {
     if (!validateCoordinates(latitude, longitude)) {
       throw new InvalidCoordinatesError(latitude, longitude);
     }
+    if (!Number.isFinite(radiusKm) || radiusKm < 0) {
+      throw new InvalidBoundsError(
+        'Search radius must be a non-negative finite number'
+      );
+    }
 
     const placesTable = await getPlacesTable();
     const offset = (page - 1) * limit;
-    const whereConditions = [eq(placesTable.communityId, communityId)];
+    const bounds = SpatialUtils.calculateBoundingBox(
+      latitude,
+      longitude,
+      radiusKm
+    );
+    const whereConditions = [
+      eq(placesTable.communityId, communityId),
+      sql`${placesTable.latitude} BETWEEN ${bounds.south} AND ${bounds.north}`,
+    ];
+
+    if (!bounds.includesAllLongitudes) {
+      whereConditions.push(
+        bounds.crossesAntimeridian
+          ? sql`(${placesTable.longitude} >= ${bounds.west} OR ${placesTable.longitude} <= ${bounds.east})`
+          : sql`${placesTable.longitude} BETWEEN ${bounds.west} AND ${bounds.east}`
+      );
+    }
 
     if (!includeRestricted) {
       whereConditions.push(eq(placesTable.isRestricted, false));
     }
 
-    const places = await (this.db as any)
+    const candidates = await (this.db as any)
       .select()
       .from(placesTable)
       .where(and(...whereConditions));
 
-    const nearbyPlaces = places
+    const nearbyPlaces = candidates
       .map((place: Place) => ({
         place,
         distance: this.calculateHaversineDistance(

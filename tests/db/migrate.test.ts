@@ -11,11 +11,20 @@ describe('database migration dialect guard', () => {
     );
   });
 
-  it('fails closed instead of applying SQLite migrations to PostgreSQL', () => {
-    expect(() =>
-      getMigrationPlan('postgresql://user:password@localhost:5432/terrastories')
-    ).toThrow(
-      /Refusing to run the SQLite\/D1 migration set against PostgreSQL/
+  it('uses a dedicated PostgreSQL migration history for PostgreSQL', () => {
+    const plan = getMigrationPlan(
+      'postgresql://user:password@localhost:5432/terrastories'
     );
+
+    expect(plan.dialect).toBe('postgresql');
+    expect(plan.migrationsFolder.replaceAll('\\', '/')).toMatch(
+      /\/src\/db\/migrations\/postgres$/
+    );
+  });
+
+  it('fails closed for unsupported database URL dialects', () => {
+    expect(() =>
+      getMigrationPlan('mysql://user:password@localhost:3306/terrastories')
+    ).toThrow(/Unsupported database URL dialect/);
   });
 });

@@ -18,6 +18,15 @@ const SEVERITY_ORDER = new Map([
   ['critical', 3],
 ]);
 
+function isCalendarDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 export function filterBlockingAdvisories(advisories, minimumSeverity) {
   const minimumRank = SEVERITY_ORDER.get(minimumSeverity);
   if (minimumRank === undefined) {
@@ -43,10 +52,16 @@ export function validateBaselinePolicy(policy, today) {
     typeof policy !== 'object' ||
     Array.isArray(policy) ||
     !policy.trackingIssue ||
-    !policy.expires ||
     !SEVERITY_ORDER.has(policy.minimumSeverity)
   ) {
     throw new Error('Invalid security audit policy metadata');
+  }
+
+  if (!isCalendarDate(today)) {
+    throw new Error(`Invalid security audit current date: ${today}`);
+  }
+  if (!isCalendarDate(policy.expires)) {
+    throw new Error(`Invalid security audit expiry date: ${policy.expires}`);
   }
 
   const review = policy.review;
@@ -55,12 +70,13 @@ export function validateBaselinePolicy(policy, today) {
     review.status !== 'accepted' ||
     typeof review.reviewedBy !== 'string' ||
     review.reviewedBy.trim() === '' ||
-    typeof review.reviewedOn !== 'string' ||
-    !/^\d{4}-\d{2}-\d{2}$/.test(review.reviewedOn) ||
     typeof review.rationale !== 'string' ||
     review.rationale.trim() === ''
   ) {
     throw new Error('Security audit exceptions require an accepted review');
+  }
+  if (!isCalendarDate(review.reviewedOn)) {
+    throw new Error(`Invalid security audit review date: ${review.reviewedOn}`);
   }
 
   if (today > policy.expires) {

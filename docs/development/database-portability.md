@@ -7,6 +7,8 @@ Terrastories V2 supports two equal database targets:
 
 Neither backend defines product semantics for the other. Shared behavior is expressed through the repository and service layers. In particular, places use plain latitude/longitude columns and application-level Haversine and bounding-box logic; no spatial database extension is required.
 
+During the current Fastify V1/Hono V2 coexistence phase, the database compatibility history still has to support the V1 surface on `main`. Legacy cultural/elder columns that the canonical V2 product contract removes are therefore compatibility-only and are not V2 migration invariants. Their final schema contraction belongs to the dedicated V1-to-V2 cutover after an expand-contract/data-migration path can preserve supported records without breaking `/api/v1` coexistence.
+
 ## Required local gates
 
 Run the SQLite/D1-compatible gate directly:
@@ -33,7 +35,7 @@ ALLOW_POSTGRES_TEST_RESET=true \
 npm run test:db:postgres
 ```
 
-The PostgreSQL gate is destructive and refuses to run unless the database name contains `test` and `ALLOW_POSTGRES_TEST_RESET=true` is set.
+The PostgreSQL gate is destructive and refuses to run unless the database name follows the dedicated test-database convention (for example `terrastories_test`, ending in `_test`) and `ALLOW_POSTGRES_TEST_RESET=true` is set. A substring such as `latest` is never considered a test database.
 
 Both gates are mandatory pull-request CI jobs.
 
@@ -43,9 +45,9 @@ Each backend gate checks the same release contract:
 
 1. Fresh migration from an empty database.
 2. Upgrade from the supported previous-release schema with representative community, user, place, story, speaker, file, and join-table data.
-3. Preservation of ownership, restrictions, auth data/defaults, JSON payloads, associations, and coordinates through upgrade.
-4. Shared repository behavior for create/filter/order/pagination and application-level spatial queries.
-5. Foreign-key and uniqueness enforcement, transaction rollback, portable indexes, defaults, and timestamp decoding.
+3. Preservation of V2 ownership, auth, file, association, coordinate, timestamp, and representative payload invariants through upgrade. V1-only cultural/elder fields are not promoted into the V2 contract by this gate.
+4. Shared repository behavior for create/filter/order/real pagination boundaries and application-level spatial queries.
+5. Foreign-key and uniqueness enforcement, including nullable uniqueness semantics, transaction rollback, portable indexes, defaults, and timestamp decoding.
 6. Dialect validation that rejects SQL from the other backend.
 7. A deliberate failing migration that must fail and must not be recorded as applied.
 

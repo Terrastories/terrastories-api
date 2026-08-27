@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import * as auditModule from '../../scripts/check-audit-baseline.mjs';
 
@@ -105,6 +105,43 @@ describe('dependency audit exception policy', () => {
   });
 });
 
+describe('PR dependency review', () => {
+  const scriptPath = join(repoRoot, 'scripts/review-dependency-changes.mjs');
+
+  it('reports added, changed, and removed locked dependencies', async () => {
+    const scriptExists = existsSync(scriptPath);
+    expect(scriptExists).toBe(true);
+    if (!scriptExists) return;
+
+    const { summarizeDependencyChanges } = await import(
+      pathToFileURL(scriptPath).href
+    );
+
+    expect(
+      summarizeDependencyChanges(
+        {
+          packages: {
+            '': { name: 'example' },
+            'node_modules/a': { version: '1.0.0' },
+            'node_modules/b': { version: '1.0.0' },
+          },
+        },
+        {
+          packages: {
+            '': { name: 'example' },
+            'node_modules/a': { version: '2.0.0' },
+            'node_modules/c': { version: '1.0.0' },
+          },
+        }
+      )
+    ).toEqual([
+      { name: 'a', before: '1.0.0', after: '2.0.0', type: 'changed' },
+      { name: 'b', before: '1.0.0', after: null, type: 'removed' },
+      { name: 'c', before: null, after: '1.0.0', type: 'added' },
+    ]);
+  });
+});
+
 describe('release evidence workflow', () => {
   const path = join(repoRoot, '.github/workflows/supply-chain.yml');
 
@@ -113,9 +150,9 @@ describe('release evidence workflow', () => {
     if (!existsSync(path)) return;
 
     const workflow = readFileSync(path, 'utf8');
-    expect(workflow).toContain('actions/dependency-review-action@');
-    expect(workflow).toContain('fail-on-severity: moderate');
-    expect(workflow).toMatch(/gitleaks\/gitleaks-action@|trufflesecurity\/trufflehog@/);
+    expect(workflow).toContain('node scripts/review-dependency-changes.mjs');
+    expect(workflow).toContain('BASE_SHA: ${{ github.event.pull_request.base.sha }}');
+    expect(workflow).toContain('trufflesecurity/trufflehog@');
   });
 
   it('builds and verifies the production image before emitting release evidence', () => {

@@ -1,0 +1,11 @@
+{
+  "trackingIssue": 141,
+  "minimumSeverity": "moderate",
+  "expires": "2026-09-30",
+  "review": {
+    "status": "accepted",
+    "reviewedBy": "Terrastories maintainers under issue #141",
+    "reviewedOn": "2026-08-27",
+    "rationale": "Temporary exception for moderate-or-higher advisories already captured in the reviewed baseline inherited from issue #133. Any new advisory, severity increase, policy expiry, or baseline mismatch fails CI and requires explicit review under issue #141 before the exception set can change."
+  }
+}

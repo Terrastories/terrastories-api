@@ -28,7 +28,8 @@ export function summarizeDependencyChanges(baseLock, currentLock) {
       name: dependencyName(lockPath),
       before,
       after,
-      type: before === null ? 'added' : after === null ? 'removed' : 'changed',
+      type:
+        before === null ? 'added' : after === null ? 'removed' : 'changed',
     });
   }
 
@@ -101,7 +102,9 @@ export async function main() {
     stdio: 'inherit',
   });
   if (audit.error) {
-    throw new Error(`Could not execute dependency audit: ${audit.error.message}`);
+    throw new Error(
+      `Could not execute dependency audit: ${audit.error.message}`
+    );
   }
   if (audit.status !== 0) {
     throw new Error(

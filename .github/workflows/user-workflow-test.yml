@@ -38,10 +38,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -93,25 +93,14 @@ jobs:
       - name: Build application
         run: |
           echo "🔨 Building TypeScript application..."
-          # Try to build, but don't fail the workflow if there are type issues
-          if npm run build; then
-            echo "✅ Application built successfully"
-          else
-            echo "⚠️  Build had type errors, but continuing with development server"
-            echo "ℹ️  The workflow will use 'npm run dev' instead of compiled code"
-          fi
+          npm run build
+          test -f dist/server.js
+          echo "✅ Application built successfully"
 
       - name: Start server in background
         run: |
           echo "🚀 Starting Terrastories API server..."
-          # Use development server if build failed, otherwise use built version
-          if [ -f dist/server.js ]; then
-            echo "ℹ️  Using built application"
-            npm start > server.log 2>&1 &
-          else
-            echo "ℹ️  Using development server (tsx)"
-            npm run dev > server.log 2>&1 &
-          fi
+          npm start > server.log 2>&1 &
           SERVER_PID=$!
           echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
           echo "$SERVER_PID" > server.pid

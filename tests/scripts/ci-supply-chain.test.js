@@ -55,33 +55,33 @@ describe('GitHub Actions supply-chain policy', () => {
 });
 
 describe('dependency audit exception policy', () => {
-  const baseline = JSON.parse(readRepo('config/security-audit-baseline.json'));
+  const policy = JSON.parse(readRepo('config/security-audit-policy.json'));
 
   it('defines a blocking severity threshold and reviewed expiring exception set', () => {
-    expect(baseline.minimumSeverity).toBe('moderate');
-    expect(baseline.review).toMatchObject({ status: 'accepted' });
-    expect(baseline.review.reviewedBy).toEqual(expect.any(String));
-    expect(baseline.review.reviewedBy.length).toBeGreaterThan(0);
-    expect(baseline.review.reviewedOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(baseline.review.rationale).toEqual(expect.any(String));
-    expect(baseline.review.rationale.length).toBeGreaterThan(0);
-    expect(baseline.expires).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(policy.minimumSeverity).toBe('moderate');
+    expect(policy.review).toMatchObject({ status: 'accepted' });
+    expect(policy.review.reviewedBy).toEqual(expect.any(String));
+    expect(policy.review.reviewedBy.length).toBeGreaterThan(0);
+    expect(policy.review.reviewedOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(policy.review.rationale).toEqual(expect.any(String));
+    expect(policy.review.rationale.length).toBeGreaterThan(0);
+    expect(policy.expires).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   it('validates policy metadata and rejects expired exceptions', () => {
     expect(typeof auditModule.validateBaselinePolicy).toBe('function');
     if (typeof auditModule.validateBaselinePolicy !== 'function') return;
 
-    expect(() => auditModule.validateBaselinePolicy(baseline, '2026-08-27')).not.toThrow();
+    expect(() => auditModule.validateBaselinePolicy(policy, '2026-08-27')).not.toThrow();
     expect(() =>
       auditModule.validateBaselinePolicy(
-        { ...baseline, expires: '2026-08-26' },
+        { ...policy, expires: '2026-08-26' },
         '2026-08-27'
       )
     ).toThrow(/expired/i);
     expect(() =>
       auditModule.validateBaselinePolicy(
-        { ...baseline, review: { ...baseline.review, reviewedBy: '' } },
+        { ...policy, review: { ...policy.review, reviewedBy: '' } },
         '2026-08-27'
       )
     ).toThrow(/review/i);

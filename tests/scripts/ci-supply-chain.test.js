@@ -22,9 +22,7 @@ const criticalWorkflowPaths = [
 
 function externalActionRefs(workflow) {
   return [
-    ...workflow.matchAll(
-      /^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm
-    ),
+    ...workflow.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm),
   ].map((match) => match[1]);
 }
 

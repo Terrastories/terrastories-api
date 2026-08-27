@@ -19,10 +19,7 @@ const SEVERITY_ORDER = new Map([
 ]);
 
 function isCalendarDate(value) {
-  if (
-    typeof value !== 'string' ||
-    !/^\d{4}-\d{2}-\d{2}$/.test(value)
-  ) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return false;
   }
 
@@ -226,8 +223,7 @@ export async function main() {
   }
 
   const resolvedCount = blockingBaseline.filter(
-    (advisory) =>
-      !current.some((candidate) => key(candidate) === key(advisory))
+    (advisory) => !current.some((candidate) => key(candidate) === key(advisory))
   ).length;
 
   console.log(

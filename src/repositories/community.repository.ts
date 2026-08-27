@@ -97,6 +97,33 @@ export class InvalidCommunityDataError extends Error {
   }
 }
 
+function isUniqueConstraintError(error: unknown): boolean {
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 4 && current; depth++) {
+    if (typeof current !== 'object') {
+      return false;
+    }
+
+    const record = current as Record<string, unknown>;
+    const code = typeof record.code === 'string' ? record.code : undefined;
+    const message =
+      typeof record.message === 'string' ? record.message.toLowerCase() : '';
+
+    if (
+      code === '23505' ||
+      message.includes('unique constraint') ||
+      message.includes('duplicate key')
+    ) {
+      return true;
+    }
+
+    current = record.cause;
+  }
+
+  return false;
+}
+
 export class CommunityRepository {
   constructor(private database: Database) {}
 
@@ -210,13 +237,8 @@ export class CommunityRepository {
         throw error;
       }
 
-      if (error instanceof Error) {
-        if (
-          error.message.includes('UNIQUE constraint') ||
-          error.message.includes('unique constraint')
-        ) {
-          throw new DuplicateSlugError(`Community slug already exists`);
-        }
+      if (isUniqueConstraintError(error)) {
+        throw new DuplicateSlugError();
       }
 
       throw new Error(

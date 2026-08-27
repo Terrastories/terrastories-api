@@ -71,6 +71,7 @@ jobs:
           source = script_path.read_text().replace(
               '0000_portable_v2_baseline', '0000_current_compat_baseline'
           )
+          source = source.replace('client.json(', 'JSON.stringify(')
 
           pg_validation_start = "  validateMigrationText(\n    'postgresql',"
           pg_validation_end = "\n\n  for (const file of [\n    'src/db/index.ts',"

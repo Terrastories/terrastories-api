@@ -51,7 +51,15 @@ jobs:
 
           python - <<'PY'
           from pathlib import Path
-          import re
+
+          def replace_between(source: str, start_marker: str, end_marker: str, replacement: str, label: str) -> str:
+              start = source.find(start_marker)
+              if start < 0:
+                  raise SystemExit(f'{label}: start marker not found')
+              end = source.find(end_marker, start + len(start_marker))
+              if end < 0:
+                  raise SystemExit(f'{label}: end marker not found')
+              return source[:start] + replacement + source[end:]
 
           def replace_once(source: str, old: str, new: str, label: str) -> str:
               count = source.count(old)
@@ -60,19 +68,13 @@ jobs:
               return source.replace(old, new)
 
           script_path = Path('scripts/test-db-backend.ts')
-          source = script_path.read_text()
-          source = source.replace('0000_portable_v2_baseline', '0000_current_compat_baseline')
+          source = script_path.read_text().replace(
+              '0000_portable_v2_baseline', '0000_current_compat_baseline'
+          )
 
-          old_static = """  validateMigrationText(
-            'postgresql',
-            await readFile(
-              path.join(postgresMigrations, '0000_current_compat_baseline.sql'),
-              'utf8'
-            ),
-            'PostgreSQL migration history'
-          );
-          """
-          new_static = """  for (const file of [
+          pg_validation_start = "  validateMigrationText(\n    'postgresql',"
+          pg_validation_end = "\n\n  for (const file of [\n    'src/db/index.ts',"
+          pg_validation = """  for (const file of [
             '0000_current_compat_baseline.sql',
             '0001_theme_ownership_fk.sql',
           ]) {
@@ -81,10 +83,39 @@ jobs:
               await readFile(path.join(postgresMigrations, file), 'utf8'),
               file
             );
-          }
-          """
-          source = replace_once(source, old_static, new_static, 'postgres static migration validation')
+          }"""
+          source = replace_between(
+              source,
+              pg_validation_start,
+              pg_validation_end,
+              pg_validation,
+              'postgres static migration validation',
+          )
 
+          sqlite_schema_tail_start = "  const placeFks = sqlite"
+          sqlite_schema_tail_end = "\n}\n\nfunction verifySqlitePreservation"
+          sqlite_schema_tail = """  const placeFks = sqlite
+            .prepare('PRAGMA foreign_key_list(places)')
+            .all() as any[];
+          const userFks = sqlite
+            .prepare('PRAGMA foreign_key_list(users)')
+            .all() as any[];
+          const themeFks = sqlite
+            .prepare('PRAGMA foreign_key_list(themes)')
+            .all() as any[];
+          assert.ok(placeFks.some((row) => row.table === 'communities'));
+          assert.ok(userFks.some((row) => row.table === 'communities'));
+          assert.ok(themeFks.some((row) => row.table === 'communities'));"""
+          source = replace_between(
+              source,
+              sqlite_schema_tail_start,
+              sqlite_schema_tail_end,
+              sqlite_schema_tail,
+              'sqlite schema FK tail',
+          )
+
+          sqlite_preservation_start = 'function verifySqlitePreservation(sqlite: Database.Database): void {'
+          sqlite_preservation_end = '\n\nasync function verifyPostgresSchema'
           sqlite_preservation = r'''function verifySqlitePreservation(sqlite: Database.Database): void {
             const community = sqlite
               .prepare(
@@ -123,11 +154,11 @@ jobs:
             assert.deepEqual(JSON.parse(place.media_urls), fixture.places[0].mediaUrls);
             assert.equal(place.is_restricted, 1);
 
-            const [story] = sqlite
+            const story = sqlite
               .prepare(
                 'SELECT id, community_id, created_by, is_restricted FROM stories WHERE id = 1'
               )
-              .all() as any[];
+              .get() as any;
             assert.equal(story.id, fixture.story.id);
             assert.equal(story.community_id, fixture.story.communityId);
             assert.equal(story.created_by, fixture.story.createdBy);
@@ -175,16 +206,17 @@ jobs:
               sort_order: 0,
             });
           }'''
-          source, count = re.subn(
-              r'function verifySqlitePreservation\(sqlite: Database\.Database\): void \{.*?\n\}\n\nasync function verifyPostgresSchema',
-              sqlite_preservation + '\n\nasync function verifyPostgresSchema',
+          source = replace_between(
               source,
-              flags=re.S,
+              sqlite_preservation_start,
+              sqlite_preservation_end,
+              sqlite_preservation,
+              'sqlite preservation contract',
           )
-          if count != 1:
-              raise SystemExit(f'sqlite preservation replacement count {count}')
 
-          postgres_preservation = r'''async function verifyPostgresPreservation(
+          pg_preservation_start = 'async function verifyPostgresPreservation('
+          pg_preservation_end = '\n\nasync function runRepositoryContract'
+          pg_preservation = r'''async function verifyPostgresPreservation(
             client: PostgresClient
           ): Promise<void> {
             const [community] = await client.unsafe(
@@ -285,61 +317,33 @@ jobs:
               }
             );
           }'''
-          source, count = re.subn(
-              r'async function verifyPostgresPreservation\(\n  client: PostgresClient\n\): Promise<void> \{.*?\n\}\n\nasync function runRepositoryContract',
-              postgres_preservation + '\n\nasync function runRepositoryContract',
+          source = replace_between(
               source,
-              flags=re.S,
+              pg_preservation_start,
+              pg_preservation_end,
+              pg_preservation,
+              'postgres preservation contract',
           )
-          if count != 1:
-              raise SystemExit(f'postgres preservation replacement count {count}')
 
+          constraint_probe = "    'story_speakers_speaker_id_fkey',"
           source = replace_once(
               source,
-              """  const userFks = sqlite
-            .prepare('PRAGMA foreign_key_list(users)')
-            .all() as any[];
-          assert.ok(placeFks.some((row) => row.table === 'communities'));
-          assert.ok(userFks.some((row) => row.table === 'communities'));
-          """,
-              """  const userFks = sqlite
-            .prepare('PRAGMA foreign_key_list(users)')
-            .all() as any[];
-          const themeFks = sqlite
-            .prepare('PRAGMA foreign_key_list(themes)')
-            .all() as any[];
-          assert.ok(placeFks.some((row) => row.table === 'communities'));
-          assert.ok(userFks.some((row) => row.table === 'communities'));
-          assert.ok(themeFks.some((row) => row.table === 'communities'));
-          """,
-              'sqlite theme fk check',
+              constraint_probe,
+              constraint_probe + "\n    'themes_community_id_fkey',",
+              'theme FK assertion',
           )
 
-          source = replace_once(
-              source,
-              """    'story_speakers_story_id_fkey',
-            'story_speakers_speaker_id_fkey',
-          """,
-              """    'story_speakers_story_id_fkey',
-            'story_speakers_speaker_id_fkey',
-            'themes_community_id_fkey',
-          """,
-              'postgres theme fk check',
-          )
+          repository_start = source.find('async function runRepositoryContract(')
+          repository_end = source.find('\n}\n\nfunction verifySqliteTransactionAndForeignKey', repository_start)
+          if repository_start < 0 or repository_end < 0:
+              raise SystemExit('repository contract boundaries not found')
+          repository = source[repository_start:repository_end + 2]
 
-          ordered_anchor = """  assert.deepEqual(
-            ordered.data.map((place) => place.name),
-            ['A Nearby Public', 'B Nearby Restricted', 'C Far Public']
-          );
-
-          const countryResults = await communities.search({
-          """
-          ordered_replacement = """  assert.deepEqual(
-            ordered.data.map((place) => place.name),
-            ['A Nearby Public', 'B Nearby Restricted', 'C Far Public']
-          );
-
-          const firstPage = await places.getByCommunity(community.id, {
+          country_marker = "  const countryResults = await communities.search({"
+          country_index = repository.find(country_marker)
+          if country_index < 0:
+              raise SystemExit('country result marker not found')
+          pagination = r'''  const firstPage = await places.getByCommunity(community.id, {
             page: 1,
             limit: 2,
             includeRestricted: true,
@@ -364,15 +368,15 @@ jobs:
             ['C Far Public']
           );
 
-          const countryResults = await communities.search({
-          """
-          source = replace_once(source, ordered_anchor, ordered_replacement, 'pagination boundary contract')
+          '''
+          repository = repository[:country_index] + pagination + repository[country_index:]
 
-          contract_end = """  assert.ok(countryResults.some((row) => row.id === community.id));
-          }
-
-          function verifySqliteTransactionAndForeignKey"""
-          contract_replacement = """  assert.ok(countryResults.some((row) => row.id === community.id));
+          country_assert = '  assert.ok(countryResults.some((row) => row.id === community.id));'
+          assert_index = repository.find(country_assert)
+          if assert_index < 0:
+              raise SystemExit('country assertion marker not found')
+          assert_end = assert_index + len(country_assert)
+          edge_cases = r'''
 
           const datelineCommunity = await communities.create({
             name: 'Dateline Radius Community',
@@ -436,85 +440,103 @@ jobs:
           assert.deepEqual(
             polarResults.data.map((place) => place.id),
             [polarNear.id]
-          );
-          }
+          );'''
+          repository = repository[:assert_end] + edge_cases + repository[assert_end:]
+          source = source[:repository_start] + repository + source[repository_end + 2:]
 
-          function verifySqliteTransactionAndForeignKey"""
-          source = replace_once(source, contract_end, contract_replacement, 'dateline and pole repository contract')
+          sqlite_tx_start = 'function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {'
+          sqlite_tx_end = '\n\nasync function verifyPostgresTransactionAndForeignKey'
+          sqlite_tx = r'''function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {
+            const before = (
+              sqlite.prepare('SELECT count(*) AS count FROM communities').get() as any
+            ).count;
+            const transaction = sqlite.transaction(() => {
+              sqlite
+                .prepare(
+                  `INSERT INTO communities (name, slug, created_at, updated_at)
+                   VALUES ('Rollback Probe', 'rollback-probe', ?, ?)`
+                )
+                .run(Date.now(), Date.now());
+              throw new Error('rollback probe');
+            });
+            assert.throws(transaction, /rollback probe/);
+            const after = (
+              sqlite.prepare('SELECT count(*) AS count FROM communities').get() as any
+            ).count;
+            assert.equal(after, before);
 
-          sqlite_fk_anchor = """  assert.throws(() =>
-            sqlite
-              .prepare(
-                `INSERT INTO users
-                 (email, password_hash, first_name, last_name, community_id, created_at, updated_at)
-                 VALUES ('orphan@example.test', 'hash', 'Orphan', 'User', 999999, ?, ?)`
-              )
-              .run(Date.now(), Date.now())
-          );
-          }
-          """
-          sqlite_fk_replacement = """  assert.throws(() =>
-            sqlite
-              .prepare(
-                `INSERT INTO users
-                 (email, password_hash, first_name, last_name, community_id, created_at, updated_at)
-                 VALUES ('orphan@example.test', 'hash', 'Orphan', 'User', 999999, ?, ?)`
-              )
-              .run(Date.now(), Date.now())
-          );
+            assert.throws(() =>
+              sqlite
+                .prepare(
+                  `INSERT INTO users
+                   (email, password_hash, first_name, last_name, community_id, created_at, updated_at)
+                   VALUES ('orphan@example.test', 'hash', 'Orphan', 'User', 999999, ?, ?)`
+                )
+                .run(Date.now(), Date.now())
+            );
 
-          sqlite.exec('CREATE TEMP TABLE null_unique_probe (value TEXT UNIQUE)');
-          const nullableProbe = sqlite.prepare(
-            'INSERT INTO null_unique_probe (value) VALUES (?)'
-          );
-          nullableProbe.run(null);
-          nullableProbe.run(null);
-          nullableProbe.run('duplicate');
-          assert.throws(() => nullableProbe.run('duplicate'));
-          sqlite.exec('DROP TABLE null_unique_probe');
-          }
-          """
-          source = replace_once(source, sqlite_fk_anchor, sqlite_fk_replacement, 'sqlite null uniqueness')
+            sqlite.exec('CREATE TEMP TABLE null_unique_probe (value TEXT UNIQUE)');
+            const nullableProbe = sqlite.prepare(
+              'INSERT INTO null_unique_probe (value) VALUES (?)'
+            );
+            nullableProbe.run(null);
+            nullableProbe.run(null);
+            nullableProbe.run('duplicate');
+            assert.throws(() => nullableProbe.run('duplicate'));
+            sqlite.exec('DROP TABLE null_unique_probe');
+          }'''
+          source = replace_between(
+              source, sqlite_tx_start, sqlite_tx_end, sqlite_tx, 'sqlite transaction contract'
+          )
 
-          postgres_fk_anchor = """  await assert.rejects(
-            client`
-              INSERT INTO users
-                (email, password_hash, first_name, last_name, community_id)
-              VALUES
-                ('orphan@example.test', 'hash', 'Orphan', 'User', 999999)
-            `
-          );
-          }
-          """
-          postgres_fk_replacement = """  await assert.rejects(
-            client`
-              INSERT INTO users
-                (email, password_hash, first_name, last_name, community_id)
-              VALUES
-                ('orphan@example.test', 'hash', 'Orphan', 'User', 999999)
-            `
-          );
+          pg_tx_start = 'async function verifyPostgresTransactionAndForeignKey('
+          pg_tx_end = '\n\nasync function verifySqliteFailedMigrationNotRecorded'
+          pg_tx = r'''async function verifyPostgresTransactionAndForeignKey(
+            client: PostgresClient
+          ): Promise<void> {
+            const [{ count: before }] = await client.unsafe(
+              'SELECT count(*)::int AS count FROM communities'
+            );
+            await assert.rejects(
+              client.begin(async (transaction) => {
+                await transaction`
+                  INSERT INTO communities (name, slug)
+                  VALUES ('Rollback Probe', 'rollback-probe')
+                `;
+                throw new Error('rollback probe');
+              }),
+              /rollback probe/
+            );
+            const [{ count: after }] = await client.unsafe(
+              'SELECT count(*)::int AS count FROM communities'
+            );
+            assert.equal(after, before);
 
-          await client.unsafe('CREATE TEMP TABLE null_unique_probe (value text UNIQUE)');
-          await client.unsafe('INSERT INTO null_unique_probe (value) VALUES (NULL), (NULL)');
-          await client.unsafe("INSERT INTO null_unique_probe (value) VALUES ('duplicate')");
-          await assert.rejects(
-            client.unsafe("INSERT INTO null_unique_probe (value) VALUES ('duplicate')")
-          );
-          await client.unsafe('DROP TABLE null_unique_probe');
-          }
-          """
-          source = replace_once(source, postgres_fk_anchor, postgres_fk_replacement, 'postgres null uniqueness')
+            await assert.rejects(
+              client`
+                INSERT INTO users
+                  (email, password_hash, first_name, last_name, community_id)
+                VALUES
+                  ('orphan@example.test', 'hash', 'Orphan', 'User', 999999)
+              `
+            );
 
-          guard_old = """  const databaseName = new URL(databaseUrl).pathname.replace(/^\\//, '');
-          assert.match(
-            databaseName,
-            /test/i,
-            `refusing destructive PostgreSQL gate against non-test database ${databaseName}`
-          );
-          """
-          guard_new = """  const databaseName = decodeURIComponent(
-            new URL(databaseUrl).pathname.replace(/^\\//, '')
+            await client.unsafe('CREATE TEMP TABLE null_unique_probe (value text UNIQUE)');
+            await client.unsafe('INSERT INTO null_unique_probe (value) VALUES (NULL), (NULL)');
+            await client.unsafe("INSERT INTO null_unique_probe (value) VALUES ('duplicate')");
+            await assert.rejects(
+              client.unsafe("INSERT INTO null_unique_probe (value) VALUES ('duplicate')")
+            );
+            await client.unsafe('DROP TABLE null_unique_probe');
+          }'''
+          source = replace_between(
+              source, pg_tx_start, pg_tx_end, pg_tx, 'postgres transaction contract'
+          )
+
+          guard_start = "  const databaseName = new URL(databaseUrl).pathname.replace(/^\\//, '');"
+          guard_end = "  assert.equal(\n    process.env.ALLOW_POSTGRES_TEST_RESET,"
+          strict_guard = r'''  const databaseName = decodeURIComponent(
+            new URL(databaseUrl).pathname.replace(/^\//, '')
           );
           const dedicatedTestDatabase = /^(?:test|[a-z0-9][a-z0-9_]*_test)$/i;
           assert.equal(dedicatedTestDatabase.test('latest'), false);
@@ -523,39 +545,41 @@ jobs:
             dedicatedTestDatabase,
             `refusing destructive PostgreSQL gate against non-test database ${databaseName}`
           );
-          """
-          source = replace_once(source, guard_old, guard_new, 'strict destructive database guard')
-
+          '''
+          source = replace_between(
+              source, guard_start, guard_end, strict_guard, 'destructive database guard'
+          )
           script_path.write_text(source)
 
           repo_path = Path('src/repositories/place.repository.ts')
           repo = repo_path.read_text()
-          repo = replace_once(
-              repo,
-              """import type { Database } from '../db/index.js';
-          import {
-          """,
-              """import type { Database } from '../db/index.js';
-          import { SpatialUtils } from '../shared/utils/spatial.js';
-          import {
-          """,
-              'SpatialUtils repository import',
-          )
+          if "import { SpatialUtils } from '../shared/utils/spatial.js';" not in repo:
+              repo = replace_once(
+                  repo,
+                  "import type { Database } from '../db/index.js';",
+                  "import type { Database } from '../db/index.js';\nimport { SpatialUtils } from '../shared/utils/spatial.js';",
+                  'SpatialUtils import',
+              )
 
-          query_old = """    const placesTable = await getPlacesTable();
-            const offset = (page - 1) * limit;
-            const whereConditions = [eq(placesTable.communityId, communityId)];
+          near_start = '  async searchNear('
+          near_end = '\n\n  async searchInBounds('
+          near_method = r'''  async searchNear(
+            params: NearbySearchParams
+          ): Promise<PaginatedResponse<Place>> {
+            const {
+              communityId,
+              latitude,
+              longitude,
+              radiusKm,
+              page,
+              limit,
+              includeRestricted = false,
+            } = params;
 
-            if (!includeRestricted) {
-              whereConditions.push(eq(placesTable.isRestricted, false));
+            if (!validateCoordinates(latitude, longitude)) {
+              throw new InvalidCoordinatesError(latitude, longitude);
             }
-
-            const places = await (this.db as any)
-              .select()
-              .from(placesTable)
-              .where(and(...whereConditions));
-          """
-          query_new = """    if (!Number.isFinite(radiusKm) || radiusKm < 0) {
+            if (!Number.isFinite(radiusKm) || radiusKm < 0) {
               throw new InvalidBoundsError(
                 'Search radius must be a non-negative finite number'
               );
@@ -585,19 +609,49 @@ jobs:
               whereConditions.push(eq(placesTable.isRestricted, false));
             }
 
-            const places = await (this.db as any)
+            const candidates = await (this.db as any)
               .select()
               .from(placesTable)
               .where(and(...whereConditions));
-          """
-          repo = replace_once(repo, query_old, query_new, 'bounded radius query')
+
+            const nearbyPlaces = candidates
+              .map((place: Place) => ({
+                place,
+                distance: this.calculateHaversineDistance(
+                  latitude,
+                  longitude,
+                  place.latitude,
+                  place.longitude
+                ),
+              }))
+              .filter(({ distance }: { distance: number }) => distance <= radiusKm)
+              .sort(
+                (a: { distance: number }, b: { distance: number }) =>
+                  a.distance - b.distance
+              );
+
+            const total = nearbyPlaces.length;
+            const paginatedPlaces = nearbyPlaces
+              .slice(offset, offset + limit)
+              .map(({ place }: { place: Place }) => place);
+
+            return {
+              data: paginatedPlaces,
+              total,
+              page,
+              limit,
+              pages: Math.ceil(total / limit),
+            };
+          }'''
+          repo = replace_between(repo, near_start, near_end, near_method, 'bounded radius search')
           repo_path.write_text(repo)
 
           journal_path = Path('src/db/migrations/postgres/meta/_journal.json')
-          journal = journal_path.read_text().replace(
-              '0000_portable_v2_baseline', '0000_current_compat_baseline'
+          journal_path.write_text(
+              journal_path.read_text().replace(
+                  '0000_portable_v2_baseline', '0000_current_compat_baseline'
+              )
           )
-          journal_path.write_text(journal)
           PY
 
       - name: Format fixes
@@ -625,10 +679,6 @@ jobs:
 
       - name: Commit verified fixes
         run: |
-          if git diff --quiet; then
-            echo 'No review fixup changes required.'
-            exit 0
-          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A

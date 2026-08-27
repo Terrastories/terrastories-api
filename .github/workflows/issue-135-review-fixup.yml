@@ -1,0 +1,636 @@
+name: Issue 135 review fixup
+
+on:
+  push:
+    branches:
+      - feat/issue-135-dual-backend-ci
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:13-alpine
+        env:
+          POSTGRES_DB: terrastories_test
+          POSTGRES_USER: terrastories
+          POSTGRES_PASSWORD: terrastories-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U terrastories -d terrastories_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test
+      ALLOW_POSTGRES_TEST_RESET: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-135-dual-backend-ci
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Apply review fixes
+        run: |
+          git mv \
+            src/db/migrations/postgres/0000_portable_v2_baseline.sql \
+            src/db/migrations/postgres/0000_current_compat_baseline.sql
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(source: str, old: str, new: str, label: str) -> str:
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one match, found {count}')
+              return source.replace(old, new)
+
+          script_path = Path('scripts/test-db-backend.ts')
+          source = script_path.read_text()
+          source = source.replace('0000_portable_v2_baseline', '0000_current_compat_baseline')
+
+          old_static = """  validateMigrationText(
+            'postgresql',
+            await readFile(
+              path.join(postgresMigrations, '0000_current_compat_baseline.sql'),
+              'utf8'
+            ),
+            'PostgreSQL migration history'
+          );
+          """
+          new_static = """  for (const file of [
+            '0000_current_compat_baseline.sql',
+            '0001_theme_ownership_fk.sql',
+          ]) {
+            validateMigrationText(
+              'postgresql',
+              await readFile(path.join(postgresMigrations, file), 'utf8'),
+              file
+            );
+          }
+          """
+          source = replace_once(source, old_static, new_static, 'postgres static migration validation')
+
+          sqlite_preservation = r'''function verifySqlitePreservation(sqlite: Database.Database): void {
+            const community = sqlite
+              .prepare(
+                'SELECT id, name, country, beta, created_at, updated_at FROM communities WHERE id = 1'
+              )
+              .get() as any;
+            assert.equal(community.id, fixture.community.id);
+            assert.equal(community.name, fixture.community.name);
+            assert.equal(community.country, null);
+            assert.equal(community.beta, 0);
+            assert.equal(community.created_at, timestamp(fixture.community.createdAt));
+            assert.equal(community.updated_at, timestamp(fixture.community.updatedAt));
+
+            const user = sqlite
+              .prepare(
+                'SELECT id, email, community_id, reset_password_token, sign_in_count, created_at, updated_at FROM users WHERE id = 1'
+              )
+              .get() as any;
+            assert.equal(user.id, fixture.user.id);
+            assert.equal(user.email, fixture.user.email);
+            assert.equal(user.community_id, fixture.user.communityId);
+            assert.equal(user.reset_password_token, null);
+            assert.equal(user.sign_in_count, 0);
+            assert.equal(user.created_at, timestamp(fixture.user.createdAt));
+            assert.equal(user.updated_at, timestamp(fixture.user.updatedAt));
+
+            const place = sqlite
+              .prepare(
+                'SELECT id, community_id, latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1'
+              )
+              .get() as any;
+            assert.equal(place.id, fixture.places[0].id);
+            assert.equal(place.community_id, fixture.community.id);
+            assert.equal(place.latitude, fixture.places[0].latitude);
+            assert.equal(place.longitude, fixture.places[0].longitude);
+            assert.deepEqual(JSON.parse(place.media_urls), fixture.places[0].mediaUrls);
+            assert.equal(place.is_restricted, 1);
+
+            const [story] = sqlite
+              .prepare(
+                'SELECT id, community_id, created_by, is_restricted FROM stories WHERE id = 1'
+              )
+              .all() as any[];
+            assert.equal(story.id, fixture.story.id);
+            assert.equal(story.community_id, fixture.story.communityId);
+            assert.equal(story.created_by, fixture.story.createdBy);
+            assert.equal(story.is_restricted, 1);
+
+            const speaker = sqlite
+              .prepare('SELECT id, community_id FROM speakers WHERE id = 1')
+              .get() as any;
+            assert.equal(speaker.id, fixture.speaker.id);
+            assert.equal(speaker.community_id, fixture.speaker.communityId);
+
+            const file = sqlite
+              .prepare(
+                'SELECT id, community_id, uploaded_by, metadata, is_active FROM files WHERE id = ?'
+              )
+              .get(fixture.file.id) as any;
+            assert.equal(file.id, fixture.file.id);
+            assert.equal(file.community_id, fixture.file.communityId);
+            assert.equal(file.uploaded_by, fixture.file.uploadedBy);
+            assert.deepEqual(JSON.parse(file.metadata), fixture.file.metadata);
+            assert.equal(file.is_active, 1);
+
+            const storyPlace = sqlite
+              .prepare(
+                'SELECT id, story_id, place_id, sort_order FROM story_places WHERE id = 1'
+              )
+              .get() as any;
+            assert.deepEqual(storyPlace, {
+              id: fixture.storyPlace.id,
+              story_id: fixture.storyPlace.storyId,
+              place_id: fixture.storyPlace.placeId,
+              sort_order: 0,
+            });
+
+            const storySpeaker = sqlite
+              .prepare(
+                'SELECT id, story_id, speaker_id, story_role, sort_order FROM story_speakers WHERE id = 1'
+              )
+              .get() as any;
+            assert.deepEqual(storySpeaker, {
+              id: fixture.storySpeaker.id,
+              story_id: fixture.storySpeaker.storyId,
+              speaker_id: fixture.storySpeaker.speakerId,
+              story_role: 'narrator',
+              sort_order: 0,
+            });
+          }'''
+          source, count = re.subn(
+              r'function verifySqlitePreservation\(sqlite: Database\.Database\): void \{.*?\n\}\n\nasync function verifyPostgresSchema',
+              sqlite_preservation + '\n\nasync function verifyPostgresSchema',
+              source,
+              flags=re.S,
+          )
+          if count != 1:
+              raise SystemExit(f'sqlite preservation replacement count {count}')
+
+          postgres_preservation = r'''async function verifyPostgresPreservation(
+            client: PostgresClient
+          ): Promise<void> {
+            const [community] = await client.unsafe(
+              'SELECT id, name, country, beta, created_at, updated_at FROM communities WHERE id = 1'
+            );
+            assert.equal(community.id, fixture.community.id);
+            assert.equal(community.name, fixture.community.name);
+            assert.equal(community.country, null);
+            assert.equal(community.beta, false);
+            assert.equal(
+              new Date(community.created_at).getTime(),
+              timestamp(fixture.community.createdAt)
+            );
+            assert.equal(
+              new Date(community.updated_at).getTime(),
+              timestamp(fixture.community.updatedAt)
+            );
+
+            const [user] = await client.unsafe(
+              'SELECT id, email, community_id, reset_password_token, sign_in_count, created_at, updated_at FROM users WHERE id = 1'
+            );
+            assert.equal(user.id, fixture.user.id);
+            assert.equal(user.email, fixture.user.email);
+            assert.equal(user.community_id, fixture.user.communityId);
+            assert.equal(user.reset_password_token, null);
+            assert.equal(user.sign_in_count, 0);
+            assert.equal(new Date(user.created_at).getTime(), timestamp(fixture.user.createdAt));
+            assert.equal(new Date(user.updated_at).getTime(), timestamp(fixture.user.updatedAt));
+
+            const [place] = await client.unsafe(
+              'SELECT id, community_id, latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1'
+            );
+            assert.equal(place.id, fixture.places[0].id);
+            assert.equal(place.community_id, fixture.community.id);
+            assert.equal(place.latitude, fixture.places[0].latitude);
+            assert.equal(place.longitude, fixture.places[0].longitude);
+            assert.deepEqual(place.media_urls, fixture.places[0].mediaUrls);
+            assert.equal(place.is_restricted, true);
+
+            const [story] = await client.unsafe(
+              'SELECT id, community_id, created_by, is_restricted FROM stories WHERE id = 1'
+            );
+            assert.equal(story.id, fixture.story.id);
+            assert.equal(story.community_id, fixture.story.communityId);
+            assert.equal(story.created_by, fixture.story.createdBy);
+            assert.equal(story.is_restricted, true);
+
+            const [speaker] = await client.unsafe(
+              'SELECT id, community_id FROM speakers WHERE id = 1'
+            );
+            assert.equal(speaker.id, fixture.speaker.id);
+            assert.equal(speaker.community_id, fixture.speaker.communityId);
+
+            const [file] = await client.unsafe(
+              `SELECT id, community_id, uploaded_by, metadata, is_active FROM files WHERE id = '${fixture.file.id}'`
+            );
+            assert.equal(file.id, fixture.file.id);
+            assert.equal(file.community_id, fixture.file.communityId);
+            assert.equal(file.uploaded_by, fixture.file.uploadedBy);
+            assert.deepEqual(file.metadata, fixture.file.metadata);
+            assert.equal(file.is_active, true);
+
+            const [storyPlace] = await client.unsafe(
+              'SELECT id, story_id, place_id, sort_order FROM story_places WHERE id = 1'
+            );
+            assert.deepEqual(
+              {
+                id: storyPlace.id,
+                story_id: storyPlace.story_id,
+                place_id: storyPlace.place_id,
+                sort_order: storyPlace.sort_order,
+              },
+              {
+                id: fixture.storyPlace.id,
+                story_id: fixture.storyPlace.storyId,
+                place_id: fixture.storyPlace.placeId,
+                sort_order: 0,
+              }
+            );
+
+            const [storySpeaker] = await client.unsafe(
+              'SELECT id, story_id, speaker_id, story_role, sort_order FROM story_speakers WHERE id = 1'
+            );
+            assert.deepEqual(
+              {
+                id: storySpeaker.id,
+                story_id: storySpeaker.story_id,
+                speaker_id: storySpeaker.speaker_id,
+                story_role: storySpeaker.story_role,
+                sort_order: storySpeaker.sort_order,
+              },
+              {
+                id: fixture.storySpeaker.id,
+                story_id: fixture.storySpeaker.storyId,
+                speaker_id: fixture.storySpeaker.speakerId,
+                story_role: 'narrator',
+                sort_order: 0,
+              }
+            );
+          }'''
+          source, count = re.subn(
+              r'async function verifyPostgresPreservation\(\n  client: PostgresClient\n\): Promise<void> \{.*?\n\}\n\nasync function runRepositoryContract',
+              postgres_preservation + '\n\nasync function runRepositoryContract',
+              source,
+              flags=re.S,
+          )
+          if count != 1:
+              raise SystemExit(f'postgres preservation replacement count {count}')
+
+          source = replace_once(
+              source,
+              """  const userFks = sqlite
+            .prepare('PRAGMA foreign_key_list(users)')
+            .all() as any[];
+          assert.ok(placeFks.some((row) => row.table === 'communities'));
+          assert.ok(userFks.some((row) => row.table === 'communities'));
+          """,
+              """  const userFks = sqlite
+            .prepare('PRAGMA foreign_key_list(users)')
+            .all() as any[];
+          const themeFks = sqlite
+            .prepare('PRAGMA foreign_key_list(themes)')
+            .all() as any[];
+          assert.ok(placeFks.some((row) => row.table === 'communities'));
+          assert.ok(userFks.some((row) => row.table === 'communities'));
+          assert.ok(themeFks.some((row) => row.table === 'communities'));
+          """,
+              'sqlite theme fk check',
+          )
+
+          source = replace_once(
+              source,
+              """    'story_speakers_story_id_fkey',
+            'story_speakers_speaker_id_fkey',
+          """,
+              """    'story_speakers_story_id_fkey',
+            'story_speakers_speaker_id_fkey',
+            'themes_community_id_fkey',
+          """,
+              'postgres theme fk check',
+          )
+
+          ordered_anchor = """  assert.deepEqual(
+            ordered.data.map((place) => place.name),
+            ['A Nearby Public', 'B Nearby Restricted', 'C Far Public']
+          );
+
+          const countryResults = await communities.search({
+          """
+          ordered_replacement = """  assert.deepEqual(
+            ordered.data.map((place) => place.name),
+            ['A Nearby Public', 'B Nearby Restricted', 'C Far Public']
+          );
+
+          const firstPage = await places.getByCommunity(community.id, {
+            page: 1,
+            limit: 2,
+            includeRestricted: true,
+            sortBy: 'name',
+            sortOrder: 'asc',
+          });
+          const secondPage = await places.getByCommunity(community.id, {
+            page: 2,
+            limit: 2,
+            includeRestricted: true,
+            sortBy: 'name',
+            sortOrder: 'asc',
+          });
+          assert.equal(firstPage.total, 3);
+          assert.equal(firstPage.pages, 2);
+          assert.deepEqual(
+            firstPage.data.map((place) => place.name),
+            ['A Nearby Public', 'B Nearby Restricted']
+          );
+          assert.deepEqual(
+            secondPage.data.map((place) => place.name),
+            ['C Far Public']
+          );
+
+          const countryResults = await communities.search({
+          """
+          source = replace_once(source, ordered_anchor, ordered_replacement, 'pagination boundary contract')
+
+          contract_end = """  assert.ok(countryResults.some((row) => row.id === community.id));
+          }
+
+          function verifySqliteTransactionAndForeignKey"""
+          contract_replacement = """  assert.ok(countryResults.some((row) => row.id === community.id));
+
+          const datelineCommunity = await communities.create({
+            name: 'Dateline Radius Community',
+          });
+          const datelineEast = await places.create({
+            name: 'Dateline East',
+            communityId: datelineCommunity.id,
+            latitude: 0,
+            longitude: 179.9,
+          });
+          const datelineWest = await places.create({
+            name: 'Dateline West',
+            communityId: datelineCommunity.id,
+            latitude: 0,
+            longitude: -179.9,
+          });
+          await places.create({
+            name: 'Dateline Far',
+            communityId: datelineCommunity.id,
+            latitude: 0,
+            longitude: 170,
+          });
+          const datelineResults = await places.searchNear({
+            communityId: datelineCommunity.id,
+            latitude: 0,
+            longitude: 179.95,
+            radiusKm: 30,
+            page: 1,
+            limit: 10,
+            includeRestricted: true,
+          });
+          assert.deepEqual(
+            new Set(datelineResults.data.map((place) => place.id)),
+            new Set([datelineEast.id, datelineWest.id])
+          );
+
+          const polarCommunity = await communities.create({
+            name: 'Polar Radius Community',
+          });
+          const polarNear = await places.create({
+            name: 'Polar Near',
+            communityId: polarCommunity.id,
+            latitude: 89.9,
+            longitude: 120,
+          });
+          await places.create({
+            name: 'Polar Far',
+            communityId: polarCommunity.id,
+            latitude: 88,
+            longitude: 0,
+          });
+          const polarResults = await places.searchNear({
+            communityId: polarCommunity.id,
+            latitude: 89.9,
+            longitude: 0,
+            radiusKm: 30,
+            page: 1,
+            limit: 10,
+            includeRestricted: true,
+          });
+          assert.deepEqual(
+            polarResults.data.map((place) => place.id),
+            [polarNear.id]
+          );
+          }
+
+          function verifySqliteTransactionAndForeignKey"""
+          source = replace_once(source, contract_end, contract_replacement, 'dateline and pole repository contract')
+
+          sqlite_fk_anchor = """  assert.throws(() =>
+            sqlite
+              .prepare(
+                `INSERT INTO users
+                 (email, password_hash, first_name, last_name, community_id, created_at, updated_at)
+                 VALUES ('orphan@example.test', 'hash', 'Orphan', 'User', 999999, ?, ?)`
+              )
+              .run(Date.now(), Date.now())
+          );
+          }
+          """
+          sqlite_fk_replacement = """  assert.throws(() =>
+            sqlite
+              .prepare(
+                `INSERT INTO users
+                 (email, password_hash, first_name, last_name, community_id, created_at, updated_at)
+                 VALUES ('orphan@example.test', 'hash', 'Orphan', 'User', 999999, ?, ?)`
+              )
+              .run(Date.now(), Date.now())
+          );
+
+          sqlite.exec('CREATE TEMP TABLE null_unique_probe (value TEXT UNIQUE)');
+          const nullableProbe = sqlite.prepare(
+            'INSERT INTO null_unique_probe (value) VALUES (?)'
+          );
+          nullableProbe.run(null);
+          nullableProbe.run(null);
+          nullableProbe.run('duplicate');
+          assert.throws(() => nullableProbe.run('duplicate'));
+          sqlite.exec('DROP TABLE null_unique_probe');
+          }
+          """
+          source = replace_once(source, sqlite_fk_anchor, sqlite_fk_replacement, 'sqlite null uniqueness')
+
+          postgres_fk_anchor = """  await assert.rejects(
+            client`
+              INSERT INTO users
+                (email, password_hash, first_name, last_name, community_id)
+              VALUES
+                ('orphan@example.test', 'hash', 'Orphan', 'User', 999999)
+            `
+          );
+          }
+          """
+          postgres_fk_replacement = """  await assert.rejects(
+            client`
+              INSERT INTO users
+                (email, password_hash, first_name, last_name, community_id)
+              VALUES
+                ('orphan@example.test', 'hash', 'Orphan', 'User', 999999)
+            `
+          );
+
+          await client.unsafe('CREATE TEMP TABLE null_unique_probe (value text UNIQUE)');
+          await client.unsafe('INSERT INTO null_unique_probe (value) VALUES (NULL), (NULL)');
+          await client.unsafe("INSERT INTO null_unique_probe (value) VALUES ('duplicate')");
+          await assert.rejects(
+            client.unsafe("INSERT INTO null_unique_probe (value) VALUES ('duplicate')")
+          );
+          await client.unsafe('DROP TABLE null_unique_probe');
+          }
+          """
+          source = replace_once(source, postgres_fk_anchor, postgres_fk_replacement, 'postgres null uniqueness')
+
+          guard_old = """  const databaseName = new URL(databaseUrl).pathname.replace(/^\\//, '');
+          assert.match(
+            databaseName,
+            /test/i,
+            `refusing destructive PostgreSQL gate against non-test database ${databaseName}`
+          );
+          """
+          guard_new = """  const databaseName = decodeURIComponent(
+            new URL(databaseUrl).pathname.replace(/^\\//, '')
+          );
+          const dedicatedTestDatabase = /^(?:test|[a-z0-9][a-z0-9_]*_test)$/i;
+          assert.equal(dedicatedTestDatabase.test('latest'), false);
+          assert.match(
+            databaseName,
+            dedicatedTestDatabase,
+            `refusing destructive PostgreSQL gate against non-test database ${databaseName}`
+          );
+          """
+          source = replace_once(source, guard_old, guard_new, 'strict destructive database guard')
+
+          script_path.write_text(source)
+
+          repo_path = Path('src/repositories/place.repository.ts')
+          repo = repo_path.read_text()
+          repo = replace_once(
+              repo,
+              """import type { Database } from '../db/index.js';
+          import {
+          """,
+              """import type { Database } from '../db/index.js';
+          import { SpatialUtils } from '../shared/utils/spatial.js';
+          import {
+          """,
+              'SpatialUtils repository import',
+          )
+
+          query_old = """    const placesTable = await getPlacesTable();
+            const offset = (page - 1) * limit;
+            const whereConditions = [eq(placesTable.communityId, communityId)];
+
+            if (!includeRestricted) {
+              whereConditions.push(eq(placesTable.isRestricted, false));
+            }
+
+            const places = await (this.db as any)
+              .select()
+              .from(placesTable)
+              .where(and(...whereConditions));
+          """
+          query_new = """    if (!Number.isFinite(radiusKm) || radiusKm < 0) {
+              throw new InvalidBoundsError(
+                'Search radius must be a non-negative finite number'
+              );
+            }
+
+            const placesTable = await getPlacesTable();
+            const offset = (page - 1) * limit;
+            const bounds = SpatialUtils.calculateBoundingBox(
+              latitude,
+              longitude,
+              radiusKm
+            );
+            const whereConditions = [
+              eq(placesTable.communityId, communityId),
+              sql`${placesTable.latitude} BETWEEN ${bounds.south} AND ${bounds.north}`,
+            ];
+
+            if (!bounds.includesAllLongitudes) {
+              whereConditions.push(
+                bounds.crossesAntimeridian
+                  ? sql`(${placesTable.longitude} >= ${bounds.west} OR ${placesTable.longitude} <= ${bounds.east})`
+                  : sql`${placesTable.longitude} BETWEEN ${bounds.west} AND ${bounds.east}`
+              );
+            }
+
+            if (!includeRestricted) {
+              whereConditions.push(eq(placesTable.isRestricted, false));
+            }
+
+            const places = await (this.db as any)
+              .select()
+              .from(placesTable)
+              .where(and(...whereConditions));
+          """
+          repo = replace_once(repo, query_old, query_new, 'bounded radius query')
+          repo_path.write_text(repo)
+
+          journal_path = Path('src/db/migrations/postgres/meta/_journal.json')
+          journal = journal_path.read_text().replace(
+              '0000_portable_v2_baseline', '0000_current_compat_baseline'
+          )
+          journal_path.write_text(journal)
+          PY
+
+      - name: Format fixes
+        run: |
+          npx prettier --write \
+            scripts/test-db-backend.ts \
+            src/repositories/place.repository.ts \
+            src/shared/utils/spatial.ts \
+            src/db/schema/themes.ts \
+            tests/shared/spatial-portability.test.ts \
+            src/db/migrations/postgres/meta/_journal.json \
+            docs/development/database-portability.md
+
+      - name: Run focused spatial tests
+        run: npx vitest run tests/shared/spatial-portability.test.ts tests/repositories/place.repository.test.ts --reporter=dot --silent=true
+
+      - name: Run SQLite/D1 gate
+        run: npm run test:db:sqlite
+
+      - name: Run PostgreSQL gate
+        run: npm run test:db:postgres
+
+      - name: Run typecheck and format gate
+        run: npm run type-check && npm run format:check
+
+      - name: Commit verified fixes
+        run: |
+          if git diff --quiet; then
+            echo 'No review fixup changes required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: address dual-backend review findings'
+          git push origin HEAD:feat/issue-135-dual-backend-ci

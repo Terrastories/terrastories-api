@@ -63,10 +63,21 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Production runtime - minimal footprint
 FROM node:20.19.0-alpine AS production
 
-# Install system dependencies for runtime
-RUN apk add --no-cache \
-    sqlite \
-    dumb-init
+# Patch the supported Alpine runtime and install only required system packages.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache \
+      sqlite \
+      dumb-init && \
+    rm -rf \
+      /usr/local/lib/node_modules/npm \
+      /usr/local/lib/node_modules/corepack \
+      /opt/yarn-v1.22.22 && \
+    rm -f \
+      /usr/local/bin/npm \
+      /usr/local/bin/npx \
+      /usr/local/bin/corepack \
+      /usr/local/bin/yarn \
+      /usr/local/bin/yarnpkg
 
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
@@ -99,5 +110,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]
 
-# Start production server
-CMD ["npm", "start"]
+# Start production server directly; package managers are not present at runtime.
+CMD ["node", "dist/server.js"]

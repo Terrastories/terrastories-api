@@ -20,16 +20,23 @@ const criticalWorkflowPaths = [
   '.github/workflows/supply-chain.yml',
 ];
 
+function externalActionRefs(workflow) {
+  return [...workflow.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map(
+    (match) => match[1]
+  );
+}
+
 describe('GitHub Actions supply-chain policy', () => {
   it('pins every external action to an immutable commit SHA', () => {
     const unpinned = [];
+    let observedExternalActions = 0;
 
     for (const path of criticalWorkflowPaths) {
       if (!existsSync(join(repoRoot, path))) continue;
       const workflow = readRepo(path);
-      for (const match of workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)\s*$/gm)) {
-        const action = match[1];
+      for (const action of externalActionRefs(workflow)) {
         if (action.startsWith('./')) continue;
+        observedExternalActions += 1;
         const separator = action.lastIndexOf('@');
         const ref = separator === -1 ? '' : action.slice(separator + 1);
         if (!/^[0-9a-f]{40}$/i.test(ref)) {
@@ -38,7 +45,18 @@ describe('GitHub Actions supply-chain policy', () => {
       }
     }
 
+    expect(observedExternalActions).toBeGreaterThan(0);
     expect(unpinned).toEqual([]);
+  });
+
+  it('detects a commented floating action reference as mutable', () => {
+    const actions = externalActionRefs(
+      '  - uses: actions/checkout@v4 # human-readable version\n'
+    );
+
+    expect(actions).toEqual(['actions/checkout@v4']);
+    const ref = actions[0].slice(actions[0].lastIndexOf('@') + 1);
+    expect(/^[0-9a-f]{40}$/i.test(ref)).toBe(false);
   });
 
   it('keeps required CI and Docker checks fail closed', () => {
@@ -85,6 +103,33 @@ describe('dependency audit exception policy', () => {
         '2026-08-27'
       )
     ).toThrow(/review/i);
+  });
+
+  it('rejects malformed and impossible policy dates', () => {
+    expect(typeof auditModule.validateBaselinePolicy).toBe('function');
+    if (typeof auditModule.validateBaselinePolicy !== 'function') return;
+
+    expect(() =>
+      auditModule.validateBaselinePolicy(
+        { ...policy, expires: 'not-a-date' },
+        '2026-08-27'
+      )
+    ).toThrow(/date/i);
+    expect(() =>
+      auditModule.validateBaselinePolicy(
+        { ...policy, expires: '2026-02-30' },
+        '2026-08-27'
+      )
+    ).toThrow(/date/i);
+    expect(() =>
+      auditModule.validateBaselinePolicy(
+        {
+          ...policy,
+          review: { ...policy.review, reviewedOn: '2026-02-30' },
+        },
+        '2026-08-27'
+      )
+    ).toThrow(/date/i);
   });
 
   it('only treats advisories at or above the configured severity as blocking', () => {
@@ -166,6 +211,10 @@ describe('release evidence workflow', () => {
     expect(workflow).toMatch(/trivy-action@|scan-action@/);
     expect(workflow).toMatch(/exit-code:\s*['"]?1['"]?/);
     expect(workflow).toMatch(/severity:\s*['"]?HIGH,CRITICAL['"]?/);
+    expect(workflow).not.toContain('ignore-unfixed: true');
+    expect(workflow).toContain('format: json');
+    expect(workflow).toContain('output: release-vulnerabilities.json');
+    expect(workflow).toContain('release-vulnerabilities.json');
     expect(workflow).toContain('anchore/sbom-action@');
     expect(workflow).toContain('actions/attest-build-provenance@');
     expect(workflow).toContain('${{ github.sha }}');

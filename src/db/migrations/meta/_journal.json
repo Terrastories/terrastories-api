@@ -8,6 +8,20 @@
       "when": 1758134617085,
       "tag": "0000_glamorous_guardsmen",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787840000000,
+      "tag": "0001_authentication_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787840001000,
+      "tag": "0002_community_rails_fields",
+      "breakpoints": true
     }
   ]
 }

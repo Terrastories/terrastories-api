@@ -263,7 +263,9 @@ describe('Places Schema', () => {
 
     it('should evaluate bounding boxes in application code', () => {
       const bounds = { north: -15.7, south: -15.8, east: -47.9, west: -48.0 };
-      expect(SpatialUtils.isPointInBounds(-15.7801, -47.9292, bounds)).toBe(true);
+      expect(SpatialUtils.isPointInBounds(-15.7801, -47.9292, bounds)).toBe(
+        true
+      );
       expect(SpatialUtils.isPointInBounds(-16, -47.9292, bounds)).toBe(false);
     });
   });

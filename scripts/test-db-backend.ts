@@ -106,7 +106,9 @@ async function createTemporaryMigrationFolder(
   source: string,
   when: number
 ): Promise<string> {
-  const folder = await mkdtemp(path.join(os.tmpdir(), 'terrastories-migration-'));
+  const folder = await mkdtemp(
+    path.join(os.tmpdir(), 'terrastories-migration-')
+  );
   await mkdir(path.join(folder, 'meta'));
   await writeFile(
     path.join(folder, 'meta', '_journal.json'),
@@ -133,7 +135,9 @@ async function createTemporaryMigrationFolder(
 }
 
 async function createSqlitePreviousReleaseFolder(): Promise<string> {
-  const folder = await mkdtemp(path.join(os.tmpdir(), 'terrastories-sqlite-v1-'));
+  const folder = await mkdtemp(
+    path.join(os.tmpdir(), 'terrastories-sqlite-v1-')
+  );
   await mkdir(path.join(folder, 'meta'));
   await copyFile(
     path.join(sqliteMigrations, '0000_glamorous_guardsmen.sql'),
@@ -348,14 +352,16 @@ async function executePostgresFixture(client: PostgresClient): Promise<void> {
   }
 }
 
-async function seedPreviousReleasePostgres(client: PostgresClient): Promise<void> {
+async function seedPreviousReleasePostgres(
+  client: PostgresClient
+): Promise<void> {
   const c = fixture.community;
   await client`
     INSERT INTO communities
       (id, name, description, slug, public_stories, locale, cultural_settings, is_active, created_at, updated_at)
     VALUES
       (${c.id}, ${c.name}, ${c.description}, ${c.slug}, ${c.publicStories}, ${c.locale},
-       ${c.culturalSettings}, ${c.isActive}, ${new Date(c.createdAt)}, ${new Date(c.updatedAt)})
+       ${c.culturalSettings}, ${c.isActive}, ${c.createdAt}, ${c.updatedAt})
   `;
 
   const u = fixture.user;
@@ -364,7 +370,7 @@ async function seedPreviousReleasePostgres(client: PostgresClient): Promise<void
       (id, email, password_hash, first_name, last_name, role, community_id, is_active, created_at, updated_at)
     VALUES
       (${u.id}, ${u.email}, ${u.passwordHash}, ${u.firstName}, ${u.lastName}, ${u.role},
-       ${u.communityId}, ${u.isActive}, ${new Date(u.createdAt)}, ${new Date(u.updatedAt)})
+       ${u.communityId}, ${u.isActive}, ${u.createdAt}, ${u.updatedAt})
   `;
 
   for (const place of fixture.places) {
@@ -375,8 +381,8 @@ async function seedPreviousReleasePostgres(client: PostgresClient): Promise<void
       VALUES
         (${place.id}, ${place.name}, ${place.description}, ${c.id}, ${place.latitude}, ${place.longitude},
          ${place.region}, ${client.json(place.mediaUrls)}, ${place.photoUrl}, ${place.culturalSignificance},
-         ${place.isRestricted}, ${new Date('2024-02-01T10:00:00.000Z')},
-         ${new Date('2025-06-01T10:00:00.000Z')})
+         ${place.isRestricted}, ${'2024-02-01T10:00:00.000Z'},
+         ${'2025-06-01T10:00:00.000Z'})
     `;
   }
 
@@ -388,8 +394,8 @@ async function seedPreviousReleasePostgres(client: PostgresClient): Promise<void
     VALUES
       (${speaker.id}, ${speaker.name}, ${speaker.bio}, ${speaker.communityId}, ${speaker.photoUrl},
        ${speaker.bioAudioUrl}, ${speaker.birthYear}, ${speaker.elderStatus}, ${speaker.culturalRole},
-       ${speaker.isActive}, ${new Date('2024-03-01T10:00:00.000Z')},
-       ${new Date('2025-06-04T10:00:00.000Z')})
+       ${speaker.isActive}, ${'2024-03-01T10:00:00.000Z'},
+       ${'2025-06-04T10:00:00.000Z'})
   `;
 
   const story = fixture.story;
@@ -401,7 +407,7 @@ async function seedPreviousReleasePostgres(client: PostgresClient): Promise<void
       (${story.id}, ${story.title}, ${story.description}, ${story.slug}, ${story.communityId},
        ${story.createdBy}, ${story.isRestricted}, ${story.privacyLevel}, ${client.json(story.mediaUrls)},
        ${story.imageUrl}, ${story.audioUrl}, ${story.language}, ${client.json(story.tags)},
-       ${new Date('2024-04-01T10:00:00.000Z')}, ${new Date('2025-06-05T10:00:00.000Z')})
+       ${'2024-04-01T10:00:00.000Z'}, ${'2025-06-05T10:00:00.000Z'})
   `;
 
   const file = fixture.file;
@@ -413,7 +419,7 @@ async function seedPreviousReleasePostgres(client: PostgresClient): Promise<void
       (${file.id}, ${file.filename}, ${file.originalName}, ${file.path}, ${file.url}, ${file.mimeType},
        ${file.size}, ${file.communityId}, ${file.uploadedBy}, ${client.json(file.metadata)},
        ${client.json(file.culturalRestrictions)}, ${file.isActive},
-       ${new Date('2024-04-02T10:00:00.000Z')}, ${new Date('2025-06-06T10:00:00.000Z')})
+       ${'2024-04-02T10:00:00.000Z'}, ${'2025-06-06T10:00:00.000Z'})
   `;
 
   await client`
@@ -421,16 +427,16 @@ async function seedPreviousReleasePostgres(client: PostgresClient): Promise<void
       (id, story_id, place_id, cultural_context, sort_order, created_at, updated_at)
     VALUES
       (${fixture.storyPlace.id}, ${fixture.storyPlace.storyId}, ${fixture.storyPlace.placeId},
-       'restricted-context', 0, ${new Date('2024-04-03T10:00:00.000Z')},
-       ${new Date('2025-06-07T10:00:00.000Z')})
+       'restricted-context', 0, ${'2024-04-03T10:00:00.000Z'},
+       ${'2025-06-07T10:00:00.000Z'})
   `;
   await client`
     INSERT INTO story_speakers
       (id, story_id, speaker_id, story_role, sort_order, created_at, updated_at)
     VALUES
       (${fixture.storySpeaker.id}, ${fixture.storySpeaker.storyId}, ${fixture.storySpeaker.speakerId},
-       'narrator', 0, ${new Date('2024-04-04T10:00:00.000Z')},
-       ${new Date('2025-06-08T10:00:00.000Z')})
+       'narrator', 0, ${'2024-04-04T10:00:00.000Z'},
+       ${'2025-06-08T10:00:00.000Z'})
   `;
 }
 
@@ -439,14 +445,17 @@ function columnNames(rows: any[]): Set<string> {
 }
 
 function verifySqliteSchema(sqlite: Database.Database): void {
-  const communities = sqlite.prepare('PRAGMA table_info(communities)').all() as any[];
+  const communities = sqlite
+    .prepare('PRAGMA table_info(communities)')
+    .all() as any[];
   const users = sqlite.prepare('PRAGMA table_info(users)').all() as any[];
   const places = sqlite.prepare('PRAGMA table_info(places)').all() as any[];
   const communityColumns = columnNames(communities);
   const userColumns = columnNames(users);
   const placeColumns = columnNames(places);
 
-  for (const column of ['country', 'beta']) assert.ok(communityColumns.has(column));
+  for (const column of ['country', 'beta'])
+    assert.ok(communityColumns.has(column));
   for (const column of [
     'reset_password_token',
     'reset_password_sent_at',
@@ -474,8 +483,12 @@ function verifySqliteSchema(sqlite: Database.Database): void {
     assert.ok(fileIndexes.has(indexName), `missing SQLite index ${indexName}`);
   }
 
-  const placeFks = sqlite.prepare('PRAGMA foreign_key_list(places)').all() as any[];
-  const userFks = sqlite.prepare('PRAGMA foreign_key_list(users)').all() as any[];
+  const placeFks = sqlite
+    .prepare('PRAGMA foreign_key_list(places)')
+    .all() as any[];
+  const userFks = sqlite
+    .prepare('PRAGMA foreign_key_list(users)')
+    .all() as any[];
   assert.ok(placeFks.some((row) => row.table === 'communities'));
   assert.ok(userFks.some((row) => row.table === 'communities'));
 }
@@ -501,7 +514,9 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
   assert.equal(user.sign_in_count, 0);
 
   const place = sqlite
-    .prepare('SELECT latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1')
+    .prepare(
+      'SELECT latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1'
+    )
     .get() as any;
   assert.equal(place.latitude, fixture.places[0].latitude);
   assert.equal(place.longitude, fixture.places[0].longitude);
@@ -518,9 +533,14 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
   );
 
   const storyPlace = sqlite
-    .prepare('SELECT cultural_context, sort_order FROM story_places WHERE id = 1')
+    .prepare(
+      'SELECT cultural_context, sort_order FROM story_places WHERE id = 1'
+    )
     .get() as any;
-  assert.deepEqual(storyPlace, { cultural_context: 'restricted-context', sort_order: 0 });
+  assert.deepEqual(storyPlace, {
+    cultural_context: 'restricted-context',
+    sort_order: 0,
+  });
   const storySpeaker = sqlite
     .prepare('SELECT story_role, sort_order FROM story_speakers WHERE id = 1')
     .get() as any;
@@ -533,7 +553,9 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
      FROM information_schema.columns
      WHERE table_schema = 'public'`
   );
-  const names = new Set(columns.map((row: any) => `${row.table_name}.${row.column_name}`));
+  const names = new Set(
+    columns.map((row: any) => `${row.table_name}.${row.column_name}`)
+  );
   for (const required of [
     'communities.country',
     'communities.beta',
@@ -580,11 +602,16 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     'story_speakers_story_id_fkey',
     'story_speakers_speaker_id_fkey',
   ]) {
-    assert.ok(constraints.has(constraint), `missing PostgreSQL FK ${constraint}`);
+    assert.ok(
+      constraints.has(constraint),
+      `missing PostgreSQL FK ${constraint}`
+    );
   }
 }
 
-async function verifyPostgresPreservation(client: PostgresClient): Promise<void> {
+async function verifyPostgresPreservation(
+  client: PostgresClient
+): Promise<void> {
   const [community] = await client.unsafe(
     'SELECT id, name, country, beta FROM communities WHERE id = 1'
   );
@@ -611,20 +638,29 @@ async function verifyPostgresPreservation(client: PostgresClient): Promise<void>
     `SELECT metadata, cultural_restrictions FROM files WHERE id = '${fixture.file.id}'`
   );
   assert.deepEqual(file.metadata, fixture.file.metadata);
-  assert.deepEqual(file.cultural_restrictions, fixture.file.culturalRestrictions);
+  assert.deepEqual(
+    file.cultural_restrictions,
+    fixture.file.culturalRestrictions
+  );
 
   const [storyPlace] = await client.unsafe(
     'SELECT cultural_context, sort_order FROM story_places WHERE id = 1'
   );
   assert.deepEqual(
-    { cultural_context: storyPlace.cultural_context, sort_order: storyPlace.sort_order },
+    {
+      cultural_context: storyPlace.cultural_context,
+      sort_order: storyPlace.sort_order,
+    },
     { cultural_context: 'restricted-context', sort_order: 0 }
   );
   const [storySpeaker] = await client.unsafe(
     'SELECT story_role, sort_order FROM story_speakers WHERE id = 1'
   );
   assert.deepEqual(
-    { story_role: storySpeaker.story_role, sort_order: storySpeaker.sort_order },
+    {
+      story_role: storySpeaker.story_role,
+      sort_order: storySpeaker.sort_order,
+    },
     { story_role: 'narrator', sort_order: 0 }
   );
 }
@@ -633,7 +669,9 @@ async function runRepositoryContract(database: unknown): Promise<void> {
   const { CommunityRepository } = await import(
     '../src/repositories/community.repository.js'
   );
-  const { PlaceRepository } = await import('../src/repositories/place.repository.js');
+  const { PlaceRepository } = await import(
+    '../src/repositories/place.repository.js'
+  );
 
   const communities = new CommunityRepository(database as any);
   const places = new PlaceRepository(database as any);
@@ -689,7 +727,10 @@ async function runRepositoryContract(database: unknown): Promise<void> {
     page: 1,
     limit: 20,
   });
-  assert.deepEqual(publicNear.data.map((place) => place.id), [first.id]);
+  assert.deepEqual(
+    publicNear.data.map((place) => place.id),
+    [first.id]
+  );
 
   const allNear = await places.searchNear({
     communityId: community.id,
@@ -732,7 +773,10 @@ async function runRepositoryContract(database: unknown): Promise<void> {
     ['A Nearby Public', 'B Nearby Restricted', 'C Far Public']
   );
 
-  const countryResults = await communities.search({ country: 'BR', beta: true });
+  const countryResults = await communities.search({
+    country: 'BR',
+    beta: true,
+  });
   assert.ok(countryResults.some((row) => row.id === community.id));
 }
 
@@ -822,7 +866,9 @@ async function verifySqliteFailedMigrationNotRecorded(): Promise<void> {
     .get();
   if (table) {
     const count = (
-      sqlite.prepare('SELECT count(*) AS count FROM __drizzle_migrations').get() as any
+      sqlite
+        .prepare('SELECT count(*) AS count FROM __drizzle_migrations')
+        .get() as any
     ).count;
     assert.equal(count, 0, 'failed SQLite migration was recorded as applied');
   }
@@ -862,7 +908,11 @@ async function verifyPostgresFailedMigrationNotRecorded(
     const [{ count }] = await client.unsafe(
       'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations'
     );
-    assert.equal(count, 0, 'failed PostgreSQL migration was recorded as applied');
+    assert.equal(
+      count,
+      0,
+      'failed PostgreSQL migration was recorded as applied'
+    );
   }
 }
 
@@ -901,7 +951,10 @@ async function runSqliteGate(): Promise<void> {
   console.log('  3/4 deliberate dialect incompatibility rejection');
   validateMigrationText(
     'sqlite',
-    await readFile(path.join(sqliteMigrations, '0000_glamorous_guardsmen.sql'), 'utf8'),
+    await readFile(
+      path.join(sqliteMigrations, '0000_glamorous_guardsmen.sql'),
+      'utf8'
+    ),
     'SQLite baseline'
   );
 

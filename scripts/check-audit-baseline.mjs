@@ -6,6 +6,69 @@ const baselinePath = new URL(
   '../config/security-audit-baseline.json',
   import.meta.url
 );
+const policyPath = new URL(
+  '../config/security-audit-policy.json',
+  import.meta.url
+);
+
+const SEVERITY_ORDER = new Map([
+  ['low', 0],
+  ['moderate', 1],
+  ['high', 2],
+  ['critical', 3],
+]);
+
+export function filterBlockingAdvisories(advisories, minimumSeverity) {
+  const minimumRank = SEVERITY_ORDER.get(minimumSeverity);
+  if (minimumRank === undefined) {
+    throw new Error(
+      `Unsupported npm audit severity threshold: ${minimumSeverity}`
+    );
+  }
+
+  return advisories.filter((advisory) => {
+    const rank = SEVERITY_ORDER.get(advisory.severity);
+    if (rank === undefined) {
+      throw new Error(
+        `Unsupported npm audit advisory severity: ${advisory.severity}`
+      );
+    }
+    return rank >= minimumRank;
+  });
+}
+
+export function validateBaselinePolicy(policy, today) {
+  if (
+    !policy ||
+    typeof policy !== 'object' ||
+    Array.isArray(policy) ||
+    !policy.trackingIssue ||
+    !policy.expires ||
+    !SEVERITY_ORDER.has(policy.minimumSeverity)
+  ) {
+    throw new Error('Invalid security audit policy metadata');
+  }
+
+  const review = policy.review;
+  if (
+    !review ||
+    review.status !== 'accepted' ||
+    typeof review.reviewedBy !== 'string' ||
+    review.reviewedBy.trim() === '' ||
+    typeof review.reviewedOn !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(review.reviewedOn) ||
+    typeof review.rationale !== 'string' ||
+    review.rationale.trim() === ''
+  ) {
+    throw new Error('Security audit exceptions require an accepted review');
+  }
+
+  if (today > policy.expires) {
+    throw new Error(
+      `Security audit policy expired on ${policy.expires}; review tracked debt in #${policy.trackingIssue}`
+    );
+  }
+}
 
 export function parseAuditReport(stdout) {
   let report;
@@ -62,26 +125,29 @@ export function collectAdvisories(report) {
 
 export async function main() {
   const baseline = JSON.parse(await readFile(baselinePath, 'utf8'));
+  const policy = JSON.parse(await readFile(policyPath, 'utf8'));
   const today = new Date().toISOString().slice(0, 10);
+
+  validateBaselinePolicy(policy, today);
 
   if (
     !baseline.trackingIssue ||
-    !baseline.expires ||
-    !Array.isArray(baseline.advisories)
+    !Array.isArray(baseline.advisories) ||
+    baseline.trackingIssue !== policy.trackingIssue
   ) {
-    throw new Error('Invalid security audit baseline metadata');
-  }
-
-  if (today > baseline.expires) {
     throw new Error(
-      `Security audit baseline expired on ${baseline.expires}; review tracked debt in #${baseline.trackingIssue}`
+      'Invalid security audit baseline metadata or policy tracking mismatch'
     );
   }
 
-  const audit = spawnSync('npm', ['audit', '--json'], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const audit = spawnSync(
+    'npm',
+    ['audit', '--json', '--audit-level', policy.minimumSeverity],
+    {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
 
   if (audit.error) {
     throw new Error(`Could not execute npm audit: ${audit.error.message}`);
@@ -92,10 +158,17 @@ export async function main() {
   }
 
   const report = parseAuditReport(audit.stdout);
-  const current = collectAdvisories(report);
+  const current = filterBlockingAdvisories(
+    collectAdvisories(report),
+    policy.minimumSeverity
+  );
+  const blockingBaseline = filterBlockingAdvisories(
+    baseline.advisories,
+    policy.minimumSeverity
+  );
   const key = (advisory) => `${advisory.source}:${advisory.package}`;
   const baselineByKey = new Map(
-    baseline.advisories.map((advisory) => [key(advisory), advisory])
+    blockingBaseline.map((advisory) => [key(advisory), advisory])
   );
   const newAdvisories = current.filter(
     (advisory) => !baselineByKey.has(key(advisory))
@@ -107,7 +180,7 @@ export async function main() {
 
   if (newAdvisories.length > 0 || severityChanges.length > 0) {
     if (newAdvisories.length > 0) {
-      process.stderr.write('New npm audit advisories detected:\n');
+      process.stderr.write('New blocking npm audit advisories detected:\n');
       for (const advisory of newAdvisories) {
         process.stderr.write(
           `- ${advisory.package} ${advisory.severity} ${advisory.url || advisory.source}\n`
@@ -126,17 +199,18 @@ export async function main() {
     }
 
     throw new Error(
-      `Review dependency debt and update #${baseline.trackingIssue} before changing the baseline.`
+      `Review dependency debt and update #${policy.trackingIssue} before changing the accepted exception set.`
     );
   }
 
-  const resolvedCount = baseline.advisories.filter(
-    (advisory) => !current.some((candidate) => key(candidate) === key(advisory))
+  const resolvedCount = blockingBaseline.filter(
+    (advisory) =>
+      !current.some((candidate) => key(candidate) === key(advisory))
   ).length;
 
   console.log(
-    `npm audit baseline accepted: ${current.length} known advisories tracked by #${baseline.trackingIssue}; ` +
-      `${resolvedCount} baseline advisories resolved; baseline expires ${baseline.expires}.`
+    `npm audit baseline accepted at ${policy.minimumSeverity}+: ${current.length} known advisories tracked by #${policy.trackingIssue}; ` +
+      `${resolvedCount} baseline advisories resolved; policy expires ${policy.expires}.`
   );
 }
 

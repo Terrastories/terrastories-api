@@ -52,7 +52,9 @@ export const placesPg = pgTable(
     id: serial('id').primaryKey(),
     name: pgText('name').notNull(),
     description: pgText('description'),
-    communityId: pgInteger('community_id').notNull(),
+    communityId: pgInteger('community_id')
+      .notNull()
+      .references(() => communitiesPg.id),
     latitude: pgReal('latitude').notNull(),
     longitude: pgReal('longitude').notNull(),
     region: pgText('region'),

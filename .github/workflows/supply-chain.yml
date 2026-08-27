@@ -1,0 +1,147 @@
+name: Supply Chain
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        with:
+          fail-on-severity: moderate
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan changed history for secrets
+        uses: trufflesecurity/trufflehog@1ea7fc1960b818e3c3ac3984f85922e3acba4061 # pinned main
+        with:
+          version: 3.97.1
+          extra_args: --results=verified,unknown
+
+  production-image:
+    name: Production image evidence
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build production image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: production
+          load: true
+          push: false
+          tags: terrastories-api:ci-${{ github.sha }}
+
+      - name: Verify production image startup and health
+        run: |
+          jwt_secret="$(openssl rand -hex 32)"
+          session_secret="$(openssl rand -hex 32)"
+
+          docker run --name supply-chain-api -d \
+            -p 3000:3000 \
+            -e NODE_ENV=production \
+            -e DATABASE_URL=./data/supply-chain.db \
+            -e JWT_SECRET="$jwt_secret" \
+            -e SESSION_SECRET="$session_secret" \
+            terrastories-api:ci-${{ github.sha }}
+
+          healthy=false
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error http://localhost:3000/health > /dev/null; then
+              healthy=true
+              break
+            fi
+
+            if [ "$(docker inspect --format='{{.State.Running}}' supply-chain-api)" != "true" ]; then
+              docker logs supply-chain-api
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          if [ "$healthy" != "true" ]; then
+            docker logs supply-chain-api
+            exit 1
+          fi
+
+          curl --fail --silent --show-error http://localhost:3000/health > /dev/null
+          test "$(docker inspect --format='{{.State.Running}}' supply-chain-api)" = "true"
+
+      - name: Scan production image for known vulnerabilities
+        uses: aquasecurity/trivy-action@d2a0b60797ff03db6132bd4e2b293f9b37081297 # pinned master
+        with:
+          scan-type: image
+          image-ref: terrastories-api:ci-${{ github.sha }}
+          format: table
+          exit-code: '1'
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Generate production image SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: terrastories-api:ci-${{ github.sha }}
+          format: spdx-json
+          output-file: release-sbom.spdx.json
+          upload-artifact: false
+
+      - name: Record release evidence
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          test -n "$IMAGE_DIGEST"
+          printf '%s\n' \
+            '{' \
+            '  "source_sha": "${{ github.sha }}",' \
+            "  \"image_digest\": \"$IMAGE_DIGEST\"" \
+            '}' > release-evidence.json
+
+      - name: Upload release evidence bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-evidence-${{ github.sha }}
+          path: |
+            release-evidence.json
+            release-sbom.spdx.json
+          if-no-files-found: error
+
+      - name: Attest production image provenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: terrastories-api
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Cleanup production container
+        if: always()
+        run: docker rm -f supply-chain-api > /dev/null 2>&1 || true

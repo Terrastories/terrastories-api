@@ -42,7 +42,7 @@ jobs:
 
       - name: Format changed text files
         run: |
-          git diff --name-only origin/main...HEAD \
+          git diff --name-only --diff-filter=ACMRT origin/main...HEAD \
             | grep -E '\.(ts|js|mjs|json|md|yml|yaml)$' \
             | xargs -r npx prettier --write
 

@@ -28,8 +28,7 @@ export function summarizeDependencyChanges(baseLock, currentLock) {
       name: dependencyName(lockPath),
       before,
       after,
-      type:
-        before === null ? 'added' : after === null ? 'removed' : 'changed',
+      type: before === null ? 'added' : after === null ? 'removed' : 'changed',
     });
   }
 
@@ -83,9 +82,7 @@ export async function main() {
     return;
   }
 
-  const baseLock = JSON.parse(
-    runGit(['show', `${baseSha}:package-lock.json`])
-  );
+  const baseLock = JSON.parse(runGit(['show', `${baseSha}:package-lock.json`]));
   const currentLock = JSON.parse(await readFile('package-lock.json', 'utf8'));
   const changes = summarizeDependencyChanges(baseLock, currentLock);
 

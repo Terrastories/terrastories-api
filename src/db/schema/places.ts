@@ -1,13 +1,13 @@
 /**
- * Places table schema with multi-database support and PostGIS integration
+ * Places table schema with multi-database support
  *
- * Supports both PostgreSQL (production) and SQLite (development/testing)
- * Follows the same pattern as users.ts and stories.ts for consistency
+ * Supports PostgreSQL and SQLite/D1-compatible deployments with the same
+ * latitude/longitude storage contract. Spatial calculations are application-level
+ * so neither backend requires a database spatial extension.
  *
  * Features:
  * - Multi-tenant data isolation via communityId
- * - PostGIS geometry fields for spatial queries (PostgreSQL)
- * - Fallback lat/lng coordinates for SQLite compatibility
+ * - Plain latitude/longitude columns on every backend
  * - Cultural significance tracking for Indigenous communities
  * - Cross-database compatibility (PostgreSQL/SQLite)
  */
@@ -36,7 +36,6 @@ import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
 import { SpatialUtils } from '../../shared/utils/spatial.js';
 
-// Coordinate validation schemas
 export const CoordinateSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
@@ -44,10 +43,9 @@ export const CoordinateSchema = z.object({
 
 export const GeometryPointSchema = z.object({
   type: z.literal('Point'),
-  coordinates: z.tuple([z.number(), z.number()]), // [lng, lat] GeoJSON format
+  coordinates: z.tuple([z.number(), z.number()]),
 });
 
-// PostgreSQL table for production with PostGIS support
 export const placesPg = pgTable(
   'places',
   {
@@ -59,7 +57,6 @@ export const placesPg = pgTable(
     longitude: pgReal('longitude').notNull(),
     region: pgText('region'),
     mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
-    // Direct file URL column for dual-read capability (Issue #89)
     photoUrl: pgText('photo_url'),
     culturalSignificance: pgText('cultural_significance'),
     isRestricted: boolean('is_restricted').notNull().default(false),
@@ -67,15 +64,11 @@ export const placesPg = pgTable(
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
   (table) => ({
-    // Standard indexes for filtering
     communityIdx: index('places_community_id_idx').on(table.communityId),
-    // Index for photo URL queries (for media management)
     photoUrlIdx: index('places_photo_url_idx').on(table.photoUrl),
-    // Note: PostGIS geometry index will be added in migration
   })
 );
 
-// SQLite table for development/testing
 export const placesSqlite = sqliteTable(
   'places',
   {
@@ -91,7 +84,6 @@ export const placesSqlite = sqliteTable(
     mediaUrls: sqliteText('media_urls', { mode: 'json' })
       .$type<string[]>()
       .default([]),
-    // Direct file URL column for dual-read capability (Issue #89)
     photoUrl: sqliteText('photo_url'),
     culturalSignificance: sqliteText('cultural_significance'),
     isRestricted: integer('is_restricted', { mode: 'boolean' })
@@ -105,17 +97,12 @@ export const placesSqlite = sqliteTable(
       .$defaultFn(() => new Date()),
   },
   (table) => ({
-    // Standard indexes for filtering
     communityIdx: sqliteIndex('places_community_id_idx').on(table.communityId),
-    // Index for photo URL queries (for media management)
     photoUrlIdx: sqliteIndex('places_photo_url_idx').on(table.photoUrl),
   })
 );
 
-// Dynamic table selection based on database type (for runtime use)
-// Note: This function imports getConfig at runtime to avoid circular dependencies during migration
 export async function getPlacesTable() {
-  // Dynamic import to avoid issues with Drizzle Kit during migration generation
   const { getConfig } = await import('../../shared/config/index.js');
   const config = getConfig();
   const isPostgres =
@@ -125,7 +112,6 @@ export async function getPlacesTable() {
   return isPostgres ? placesPg : placesSqlite;
 }
 
-// Relations - Places belong to one community
 export const placesRelations = relations(placesPg, ({ one }) => ({
   community: one(communitiesPg, {
     fields: [placesPg.communityId],
@@ -133,7 +119,6 @@ export const placesRelations = relations(placesPg, ({ one }) => ({
   }),
 }));
 
-// SQLite relations (same structure)
 export const placesSqliteRelations = relations(placesSqlite, ({ one }) => ({
   community: one(communitiesSqlite, {
     fields: [placesSqlite.communityId],
@@ -141,7 +126,6 @@ export const placesSqliteRelations = relations(placesSqlite, ({ one }) => ({
   }),
 }));
 
-// Zod schemas for validation - using PostgreSQL table as base for consistency
 export const insertPlaceSchema = createInsertSchema(placesPg, {
   name: z.string().min(1, 'Name is required').max(200, 'Name too long'),
   description: z.string().max(2000, 'Description too long').optional(),
@@ -156,11 +140,9 @@ export const insertPlaceSchema = createInsertSchema(placesPg, {
 
 export const selectPlaceSchema = createSelectSchema(placesPg);
 
-// TypeScript types - Use SQLite for consistency with current deployment
 export type Place = typeof placesSqlite.$inferSelect;
 export type NewPlace = typeof placesSqlite.$inferInsert;
 
-// Additional validation schemas for specific use cases
 export const createPlaceSchema = insertPlaceSchema.omit({
   id: true,
   createdAt: true,
@@ -170,137 +152,13 @@ export const createPlaceSchema = insertPlaceSchema.omit({
 export const updatePlaceSchema = insertPlaceSchema.partial().omit({
   id: true,
   createdAt: true,
-  communityId: true, // Don't allow changing community
+  communityId: true,
 });
 
-/**
- * Validates and sanitizes coordinate values to prevent SQL injection
- * @param value - The coordinate value to validate
- * @param type - The coordinate type ('latitude' or 'longitude')
- * @returns The validated coordinate value
- * @throws Error if the coordinate is invalid or out of range
- */
-function validateCoordinate(
-  value: number,
-  type: 'latitude' | 'longitude'
-): number {
-  if (typeof value !== 'number' || !isFinite(value)) {
-    throw new Error(`Invalid ${type}: must be a finite number`);
-  }
-
-  if (type === 'latitude' && (value < -90 || value > 90)) {
-    throw new Error(
-      `Invalid latitude: must be between -90 and 90, got ${value}`
-    );
-  }
-
-  if (type === 'longitude' && (value < -180 || value > 180)) {
-    throw new Error(
-      `Invalid longitude: must be between -180 and 180, got ${value}`
-    );
-  }
-
-  return value;
-}
-
-/**
- * Validates radius parameter for spatial queries
- * @param radius - The radius value in meters to validate
- * @returns The validated radius value
- * @throws Error if the radius is invalid, negative, or exceeds maximum allowed (100km)
- */
-function validateRadius(radius: number): number {
-  if (typeof radius !== 'number' || !isFinite(radius) || radius < 0) {
-    throw new Error(
-      `Invalid radius: must be a positive finite number, got ${radius}`
-    );
-  }
-
-  // Reasonable maximum radius (half Earth's circumference)
-  if (radius > 20037508) {
-    throw new Error(`Invalid radius: too large, got ${radius}`);
-  }
-
-  return radius;
-}
-
-/**
- * PostGIS spatial utility functions (PostgreSQL only) with input validation
- * Uses parameterized queries to prevent SQL injection attacks
- */
-export const spatialHelpers = {
-  /**
-   * Create PostGIS POINT from latitude and longitude
-   * @param lat - Latitude coordinate (-90 to 90)
-   * @param lng - Longitude coordinate (-180 to 180)
-   * @returns SQL string for creating a PostGIS point with SRID 4326
-   */
-  createPoint: (lat: number, lng: number) => {
-    const validLat = validateCoordinate(lat, 'latitude');
-    const validLng = validateCoordinate(lng, 'longitude');
-    return `ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)`;
-  },
-
-  /**
-   * Find places within radius (in meters) using latitude/longitude columns
-   * @param lat - Center latitude coordinate
-   * @param lng - Center longitude coordinate
-   * @param radiusMeters - Search radius in meters (max 100km)
-   * @returns SQL string for spatial distance query
-   */
-  findWithinRadius: (lat: number, lng: number, radiusMeters: number) => {
-    const validLat = validateCoordinate(lat, 'latitude');
-    const validLng = validateCoordinate(lng, 'longitude');
-    const validRadius = validateRadius(radiusMeters);
-    return `ST_DWithin(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validLng}, ${validLat}), 4326)::geography, ${validRadius})`;
-  },
-
-  /**
-   * Find places within bounding box using latitude/longitude columns
-   * @param bounds - Bounding box coordinates
-   * @returns SQL string for bounding box query
-   */
-  findInBoundingBox: (bounds: {
-    north: number;
-    south: number;
-    east: number;
-    west: number;
-  }) => {
-    const validNorth = validateCoordinate(bounds.north, 'latitude');
-    const validSouth = validateCoordinate(bounds.south, 'latitude');
-    const validEast = validateCoordinate(bounds.east, 'longitude');
-    const validWest = validateCoordinate(bounds.west, 'longitude');
-
-    if (validSouth > validNorth) {
-      throw new Error(
-        'Invalid bounding box: south latitude must be less than north latitude'
-      );
-    }
-
-    return `latitude BETWEEN ${validSouth} AND ${validNorth} AND longitude BETWEEN ${validWest} AND ${validEast}`;
-  },
-
-  /**
-   * Calculate distance between two points (in meters) using latitude/longitude columns
-   * @param fromLat - Starting latitude coordinate
-   * @param fromLng - Starting longitude coordinate
-   * @returns SQL string for distance calculation
-   */
-  calculateDistance: (fromLat: number, fromLng: number) => {
-    const validFromLat = validateCoordinate(fromLat, 'latitude');
-    const validFromLng = validateCoordinate(fromLng, 'longitude');
-    return `ST_Distance(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography, ST_SetSRID(ST_MakePoint(${validFromLng}, ${validFromLat}), 4326)::geography)`;
-  },
-};
-
-// Export table variants for migration generation
-// The default export uses PostgreSQL table for Drizzle Kit
 export const places = placesPg;
 
-// Re-export SpatialUtils for backward compatibility with tests
 export { SpatialUtils };
 
-// Add validateCoordinates function for backward compatibility
 export const validateCoordinates = (lat: number, lng: number): boolean => {
   return SpatialUtils.validateCoordinates(lat, lng);
 };

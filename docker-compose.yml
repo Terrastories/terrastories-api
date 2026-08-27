@@ -53,10 +53,10 @@ services:
     restart: unless-stopped
 
   # =============================================================================
-  # DATABASE SERVICE - PostgreSQL with PostGIS
+  # DATABASE SERVICE - PostgreSQL 13 (no database-specific spatial extension)
   # =============================================================================
   db:
-    image: postgis/postgis:13-master
+    image: postgres:13-alpine
     environment:
       POSTGRES_DB: terrastories
       POSTGRES_USER: terrastories

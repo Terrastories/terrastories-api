@@ -66,6 +66,18 @@ Prefer Conventional Commits. PRs should state:
 
 For the full review/fix/CI lifecycle, follow `.agents/skills/pr-cycle/SKILL.md`. Merge requires explicit user authorization.
 
+### Production-critical branch protection
+
+`main` must require the stable, always-emitted CI and supply-chain checks that protect a release candidate. The exact required contexts are verified against live PR check-run names before changing branch protection. At minimum the protected set covers:
+
+- both Node.js matrix jobs from `CI`;
+- development and production image builds plus all Compose configuration jobs and Docker integration from `Docker CI`;
+- `Dependency review`, `Secret scan`, and `Production image evidence` from `Supply Chain`.
+
+Do not require a path-filtered workflow as an unconditional status context unless it emits a terminal check for every pull request; otherwise an unrelated PR can be blocked forever waiting for a check that never starts. As #134 and #135 land, their fail-closed API-parity and dual-backend database/migration checks must be added to the protected set before those issues can be counted as production gates.
+
+A required check is not valid evidence if its underlying command is masked by `continue-on-error`, `|| true`, `|| echo`, retries-only behavior, or an informational comparison that does not fail on mismatch. Supply-chain release evidence must retain the source commit SHA, production image digest, vulnerability scan result, SBOM, and provenance/attestation for the exact release image.
+
 ## Documentation
 
 Keep permanent documentation intentionally small. Do not add completion reports, duplicate roadmaps, agent session diaries, historical PR summaries, or provider-specific copies of repository instructions. Put durable information in its single canonical owner as defined by `AGENTS.md` and `docs/SOURCE-OF-TRUTH.md`.

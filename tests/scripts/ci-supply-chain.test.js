@@ -21,9 +21,11 @@ const criticalWorkflowPaths = [
 ];
 
 function externalActionRefs(workflow) {
-  return [...workflow.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map(
-    (match) => match[1]
-  );
+  return [
+    ...workflow.matchAll(
+      /^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm
+    ),
+  ].map((match) => match[1]);
 }
 
 describe('GitHub Actions supply-chain policy', () => {
@@ -90,7 +92,9 @@ describe('dependency audit exception policy', () => {
     expect(typeof auditModule.validateBaselinePolicy).toBe('function');
     if (typeof auditModule.validateBaselinePolicy !== 'function') return;
 
-    expect(() => auditModule.validateBaselinePolicy(policy, '2026-08-27')).not.toThrow();
+    expect(() =>
+      auditModule.validateBaselinePolicy(policy, '2026-08-27')
+    ).not.toThrow();
     expect(() =>
       auditModule.validateBaselinePolicy(
         { ...policy, expires: '2026-08-26' },
@@ -196,7 +200,9 @@ describe('release evidence workflow', () => {
 
     const workflow = readFileSync(path, 'utf8');
     expect(workflow).toContain('node scripts/review-dependency-changes.mjs');
-    expect(workflow).toContain('BASE_SHA: ${{ github.event.pull_request.base.sha }}');
+    expect(workflow).toContain(
+      'BASE_SHA: ${{ github.event.pull_request.base.sha }}'
+    );
     expect(workflow).toContain('trufflesecurity/trufflehog@');
   });
 

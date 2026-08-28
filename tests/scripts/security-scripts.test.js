@@ -97,6 +97,39 @@ describe('dependency review execution', () => {
     expect(log).toHaveBeenCalledWith('- added: @scope/beta none -> 1.0.0');
   });
 
+  it('reports same-version source and integrity substitutions', () => {
+    expect(
+      dependencyReview.summarizeDependencyChanges(
+        {
+          packages: {
+            'node_modules/alpha': {
+              version: '1.0.0',
+              resolved: 'https://registry.example/alpha-1.0.0.tgz',
+              integrity: 'sha512-old',
+            },
+          },
+        },
+        {
+          packages: {
+            'node_modules/alpha': {
+              version: '1.0.0',
+              resolved: 'https://mirror.example/alpha-1.0.0.tgz',
+              integrity: 'sha512-new',
+            },
+          },
+        }
+      )
+    ).toEqual([
+      {
+        name: 'alpha',
+        before: '1.0.0',
+        after: '1.0.0',
+        type: 'changed',
+        changedFields: ['resolved', 'integrity'],
+      },
+    ]);
+  });
+
   it('returns early when package manifests did not change', async () => {
     const { cwd, baseSha } = createGitFixture();
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -186,12 +219,6 @@ describe('npm audit report handling', () => {
         package: 'known-package',
         severity: 'moderate',
         url: 'https://example.invalid/known',
-      },
-      {
-        source: 'resolved',
-        package: 'resolved-package',
-        severity: 'high',
-        url: 'https://example.invalid/resolved',
       },
     ],
   };
@@ -290,9 +317,40 @@ describe('npm audit report handling', () => {
     expect(comparison).toMatchObject({
       newAdvisories: [],
       severityChanges: [],
-      resolvedCount: 1,
+      resolvedCount: 0,
     });
     expect(comparison.current).toHaveLength(1);
+  });
+
+  it('rejects stale resolved advisories in the accepted exception set', () => {
+    const staleBaseline = {
+      ...baseline,
+      advisories: [
+        ...baseline.advisories,
+        {
+          source: 'resolved',
+          package: 'resolved-package',
+          severity: 'high',
+          url: 'https://example.invalid/resolved',
+        },
+      ],
+    };
+
+    expect(() =>
+      auditModule.compareAuditAdvisories(staleBaseline, policy, {
+        vulnerabilities: {
+          'known-package': {
+            via: [
+              {
+                source: 'known',
+                severity: 'moderate',
+                url: 'https://example.invalid/known',
+              },
+            ],
+          },
+        },
+      })
+    ).toThrow(/resolved|prune/i);
   });
 
   it('detects new, changed, and mismatched audit debt', () => {

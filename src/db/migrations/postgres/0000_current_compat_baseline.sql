@@ -283,17 +283,17 @@ CREATE TABLE IF NOT EXISTS files (
   metadata jsonb,
   cultural_restrictions jsonb,
   is_active boolean NOT NULL DEFAULT true,
-  created_at timestamp NOT NULL DEFAULT now(),
-  updated_at timestamp NOT NULL DEFAULT now(),
+  created_at timestamp NOT NULL,
+  updated_at timestamp NOT NULL,
   CONSTRAINT files_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id),
   CONSTRAINT files_uploaded_by_users_id_fk FOREIGN KEY (uploaded_by) REFERENCES users(id)
 );
 --> statement-breakpoint
 ALTER TABLE files ALTER COLUMN id SET DEFAULT gen_random_uuid();
 --> statement-breakpoint
-ALTER TABLE files ALTER COLUMN created_at SET DEFAULT now();
+ALTER TABLE files ALTER COLUMN created_at DROP DEFAULT;
 --> statement-breakpoint
-ALTER TABLE files ALTER COLUMN updated_at SET DEFAULT now();
+ALTER TABLE files ALTER COLUMN updated_at DROP DEFAULT;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS files_community_idx ON files (community_id);
 --> statement-breakpoint

@@ -1206,6 +1206,17 @@
           "name": "users_email_community_unique",
           "columns": ["email", "community_id"],
           "isUnique": true
+        },
+        "idx_users_reset_password_token": {
+          "name": "idx_users_reset_password_token",
+          "columns": ["reset_password_token"],
+          "isUnique": false,
+          "where": "\"users\".\"reset_password_token\" IS NOT NULL"
+        },
+        "idx_users_community_email": {
+          "name": "idx_users_community_email",
+          "columns": ["community_id", "email"],
+          "isUnique": false
         }
       },
       "foreignKeys": {

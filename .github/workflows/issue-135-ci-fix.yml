@@ -2,7 +2,8 @@ name: Issue 135 final CI fix
 
 on:
   push:
-    branches: [feat/issue-135-dual-backend-ci]
+    branches:
+      - feat/issue-135-dual-backend-ci
 
 permissions:
   contents: write
@@ -46,16 +47,18 @@ jobs:
           import re
 
           def exact(path, old, new, count):
-              p = Path(path); s = p.read_text()
-              if s.count(old) != count:
-                  raise SystemExit(f'{path}: expected {count} occurrences of {old!r}, found {s.count(old)}')
+              p = Path(path)
+              s = p.read_text()
+              found = s.count(old)
+              if found != count:
+                  raise SystemExit(f'{path}: expected {count}, found {found}: {old!r}')
               p.write_text(s.replace(old, new))
 
           def regex(path, pattern, new):
-              p = Path(path); s = p.read_text()
-              out, count = re.subn(pattern, new, s, count=1, flags=re.S)
+              p = Path(path)
+              out, count = re.subn(pattern, new, p.read_text(), count=1, flags=re.S)
               if count != 1:
-                  raise SystemExit(f'{path}: regex patch did not match exactly once')
+                  raise SystemExit(f'{path}: regex patch did not match once')
               p.write_text(out)
 
           exact('scripts/test-db-backend.ts', "'CREATE TEMP TABLE null_unique_probe (value text UNIQUE)'", "'CREATE TABLE null_unique_probe (value text UNIQUE)'", 1)
@@ -67,43 +70,49 @@ jobs:
           exact('tests/services/community.service.test.ts', "expect(result).not.toHaveProperty('country');", "expect(result.country).toBe('CA');", 2)
           exact('tests/services/community.service.test.ts', "expect(result).not.toHaveProperty('beta');", "expect(result.beta).toBe(true);", 2)
 
-          regex('tests/services/user.service.test.ts', r"    test\('should omit deferred authentication fields from current user records', async \(\) => \{.*?\n    \}\);", """    test('should expose restored authentication fields with safe defaults', async () => {
-              const registeredUser = await userService.registerUser({
-                email: 'restored-auth-fields@example.com',
-                password: 'StrongPassword123@',
-                firstName: 'Restored',
-                lastName: 'Auth',
-                role: 'viewer',
-                communityId: testCommunityId,
-              });
-              const user = await userService.getUserById(registeredUser.id, testCommunityId);
-              expect(user).toMatchObject({
-                resetPasswordToken: null,
-                resetPasswordSentAt: null,
-                rememberCreatedAt: null,
-                signInCount: 0,
-                lastSignInAt: null,
-                currentSignInIp: null,
-              });
-            });""")
+          user_test = '\n'.join([
+              "    test('should expose restored authentication fields with safe defaults', async () => {",
+              "      const registeredUser = await userService.registerUser({",
+              "        email: 'restored-auth-fields@example.com',",
+              "        password: 'StrongPassword123@',",
+              "        firstName: 'Restored',",
+              "        lastName: 'Auth',",
+              "        role: 'viewer',",
+              "        communityId: testCommunityId,",
+              "      });",
+              "      const user = await userService.getUserById(registeredUser.id, testCommunityId);",
+              "      expect(user).toMatchObject({",
+              "        resetPasswordToken: null,",
+              "        resetPasswordSentAt: null,",
+              "        rememberCreatedAt: null,",
+              "        signInCount: 0,",
+              "        lastSignInAt: null,",
+              "        currentSignInIp: null,",
+              "      });",
+              "    });",
+          ])
+          regex('tests/services/user.service.test.ts', r"    test\('should omit deferred authentication fields from current user records', async \(\) => \{.*?\n    \}\);", user_test)
 
-          Path('scripts/dev-seed.sql').write_text("""-- =============================================================================
--- TERRASTORIES DEVELOPMENT SEED DATA
--- Sample data for development and testing purposes only
--- =============================================================================
-
--- Development seed data intentionally stays database-portable. Geographic
--- behavior is implemented and tested in the application layer, so a plain
--- PostgreSQL installation must be able to initialize this file.
-
-DO $$
-BEGIN
-    IF current_setting('server_version_num')::int >= 100000 THEN
-        RAISE NOTICE 'Development seed data can be loaded here';
-        RAISE NOTICE 'Portable spatial behavior is verified by application-level tests';
-    END IF;
-END $$;
-""")
+          seed = '\n'.join([
+              '-- =============================================================================',
+              '-- TERRASTORIES DEVELOPMENT SEED DATA',
+              '-- Sample data for development and testing purposes only',
+              '-- =============================================================================',
+              '',
+              '-- Development seed data intentionally stays database-portable. Geographic',
+              '-- behavior is implemented and tested in the application layer, so a plain',
+              '-- PostgreSQL installation must be able to initialize this file.',
+              '',
+              'DO $$',
+              'BEGIN',
+              "    IF current_setting('server_version_num')::int >= 100000 THEN",
+              "        RAISE NOTICE 'Development seed data can be loaded here';",
+              "        RAISE NOTICE 'Portable spatial behavior is verified by application-level tests';",
+              '    END IF;',
+              'END $$;',
+              '',
+          ])
+          Path('scripts/dev-seed.sql').write_text(seed)
           PY
           npx prettier --write scripts/test-db-backend.ts tests/services/community.service.test.ts tests/services/user.service.test.ts
 
@@ -126,11 +135,15 @@ END $$;
       - name: Reproduce Docker integration startup
         run: |
           printf '%s\n' \
-            'NODE_ENV=test' 'PORT=3000' 'POSTGRES_PASSWORD=test123' \
+            'NODE_ENV=test' \
+            'PORT=3000' \
+            'POSTGRES_PASSWORD=test123' \
             'JWT_SECRET=test-jwt-secret-minimum-32-characters-required-for-security-testing' \
             'SESSION_SECRET=test-session-secret-minimum-32-characters-required-for-cookies-testing' \
             'DATABASE_URL=postgresql://terrastories:test123@db:5432/terrastories' \
-            'DATABASE_URL_TEST=:memory:' 'LOG_LEVEL=error' 'UPLOAD_DIR=/app/uploads' \
+            'DATABASE_URL_TEST=:memory:' \
+            'LOG_LEVEL=error' \
+            'UPLOAD_DIR=/app/uploads' \
             'CORS_ORIGIN=http://localhost:3001' > .env.test
           if ! docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test up -d --build; then
             docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test logs --no-color db || true

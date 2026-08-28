@@ -59,7 +59,7 @@ function createGitFixture({ currentLock = null } = {}) {
     run('git', ['commit', '-m', 'dependency change'], cwd);
   }
 
-  return { cwd, baseSha, baseLock };
+  return { cwd, baseSha };
 }
 
 afterEach(() => {
@@ -70,7 +70,7 @@ afterEach(() => {
 });
 
 describe('dependency review execution', () => {
-  it('reviews a changed lockfile and reports the dependency delta', async () => {
+  it('reports dependency delta for a changed lockfile', async () => {
     const currentLock = {
       name: 'dependency-review-fixture',
       version: '1.0.0',
@@ -96,9 +96,7 @@ describe('dependency review execution', () => {
     expect(log).toHaveBeenCalledWith(
       '- changed: alpha 1.0.0 -> 2.0.0'
     );
-    expect(log).toHaveBeenCalledWith(
-      '- added: @scope/beta none -> 1.0.0'
-    );
+    expect(log).toHaveBeenCalledWith('- added: @scope/beta none -> 1.0.0');
   });
 
   it('returns early when package manifests did not change', async () => {
@@ -116,15 +114,17 @@ describe('dependency review execution', () => {
     );
   });
 
-  it('fails closed when the dependency audit rejects the change', async () => {
-    const { cwd, baseSha, baseLock } = createGitFixture({
-      currentLock: {
-        ...createGitFixture().baseLock,
-        packages: {
-          ...baseLock,
-        },
+  it('fails closed when dependency audit rejects the change', async () => {
+    const currentLock = {
+      name: 'dependency-review-fixture',
+      version: '1.0.0',
+      lockfileVersion: 3,
+      packages: {
+        '': { name: 'dependency-review-fixture', version: '1.0.0' },
+        'node_modules/alpha': { version: '2.0.0' },
       },
-    });
+    };
+    const { cwd, baseSha } = createGitFixture({ currentLock });
 
     await expect(
       dependencyReview.main({
@@ -198,7 +198,7 @@ describe('npm audit report handling', () => {
     ],
   };
 
-  it('parses and collects object advisories while ignoring transitive string entries', () => {
+  it('collects object advisories and ignores transitive strings', () => {
     const report = auditModule.parseAuditReport(
       JSON.stringify({
         vulnerabilities: {
@@ -228,7 +228,9 @@ describe('npm audit report handling', () => {
 
   it('rejects malformed, failed, and incomplete npm audit reports', () => {
     expect(() => auditModule.parseAuditReport('{')).toThrow(/parse npm audit/i);
-    expect(() => auditModule.parseAuditReport('[]')).toThrow(/invalid JSON report shape/i);
+    expect(() => auditModule.parseAuditReport('[]')).toThrow(
+      /invalid JSON report shape/i
+    );
     expect(() =>
       auditModule.parseAuditReport(
         JSON.stringify({ error: { summary: 'registry unavailable' } })
@@ -299,7 +301,7 @@ describe('npm audit report handling', () => {
     expect(comparison.current).toHaveLength(1);
   });
 
-  it('detects new advisories, severity changes, and baseline tracking mismatches', () => {
+  it('detects new, changed, and mismatched audit debt', () => {
     expect(() =>
       auditModule.compareAuditAdvisories(
         { ...baseline, trackingIssue: 999 },

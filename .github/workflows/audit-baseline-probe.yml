@@ -1,0 +1,43 @@
+name: Audit Baseline Probe
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Capture current moderate+ advisories
+        run: |
+          npm audit --json --audit-level moderate > audit.json || test -s audit.json
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import {
+            collectAdvisories,
+            filterBlockingAdvisories,
+            parseAuditReport,
+          } from './scripts/check-audit-baseline.mjs';
+
+          const report = parseAuditReport(readFileSync('audit.json', 'utf8'));
+          const advisories = filterBlockingAdvisories(
+            collectAdvisories(report),
+            'moderate'
+          );
+          console.log(`AUDIT_BASELINE_JSON=${JSON.stringify(advisories)}`);
+          NODE

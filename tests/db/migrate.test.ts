@@ -52,4 +52,28 @@ describe('database migration dialect guard', () => {
       }
     }
   });
+
+  it('drops the legacy PostgreSQL last-login default during upgrade', () => {
+    const previousRelease = readFileSync(
+      path.join(
+        process.cwd(),
+        'tests/fixtures/db/postgres-previous-release.sql'
+      ),
+      'utf8'
+    );
+    const baseline = readFileSync(
+      path.join(
+        process.cwd(),
+        'src/db/migrations/postgres/0000_current_compat_baseline.sql'
+      ),
+      'utf8'
+    );
+
+    expect(previousRelease).toMatch(
+      /last_login_at\s+timestamp\s+DEFAULT\s+now\(\)/i
+    );
+    expect(baseline).toMatch(
+      /ALTER TABLE users ALTER COLUMN last_login_at DROP DEFAULT/i
+    );
+  });
 });

@@ -11,10 +11,7 @@ const previousReleaseFixture = path.join(
   rootDir,
   'tests/fixtures/db/postgres-previous-release.sql'
 );
-const snapshotPath = path.join(
-  migrationsFolder,
-  'meta/0001_snapshot.json'
-);
+const snapshotPath = path.join(migrationsFolder, 'meta/0001_snapshot.json');
 
 function assertSafeTestDatabase(databaseUrl: string): void {
   const databaseName = decodeURIComponent(
@@ -40,7 +37,9 @@ function splitStatements(source: string): string[] {
     .filter(Boolean);
 }
 
-async function resetDatabase(client: ReturnType<typeof postgres>): Promise<void> {
+async function resetDatabase(
+  client: ReturnType<typeof postgres>
+): Promise<void> {
   await client.unsafe('DROP SCHEMA IF EXISTS drizzle CASCADE');
   await client.unsafe('DROP SCHEMA IF EXISTS public CASCADE');
   await client.unsafe('CREATE SCHEMA public');
@@ -70,9 +69,9 @@ async function verifyOrphanThemeUpgrade(
   await migrate(drizzle(client), { migrationsFolder });
 
   const [legacyTheme] = await client.unsafe(
-    "SELECT id, community_id FROM themes WHERE id = 999"
+    'SELECT id, community_id FROM themes WHERE id = 999'
   );
-  assert.equal(legacyTheme?.community_id, 999999);
+  assert.equal(String(legacyTheme?.community_id), '999999');
 
   const [constraint] = await client.unsafe(`
     SELECT convalidated

@@ -47,172 +47,100 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
-          def replace_once(path: str, old: str, new: str, label: str) -> None:
+          def replace_exact(path: str, old: str, new: str, expected: int, label: str) -> None:
               file = Path(path)
               source = file.read_text()
               count = source.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected one match, found {count}')
+              if count != expected:
+                  raise SystemExit(f'{label}: expected {expected} matches, found {count}')
               file.write_text(source.replace(old, new))
 
-          replace_once(
+          def replace_regex(path: str, pattern: str, new: str, label: str) -> None:
+              file = Path(path)
+              source = file.read_text()
+              updated, count = re.subn(pattern, new, source, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one regex match, found {count}')
+              file.write_text(updated)
+
+          replace_exact(
               'scripts/test-db-backend.ts',
-              """  await client.unsafe(
-            'CREATE TEMP TABLE null_unique_probe (value text UNIQUE)'
-          );
-          await client.unsafe(
-            'INSERT INTO null_unique_probe (value) VALUES (NULL), (NULL)'
-          );
-          await client.unsafe(
-            \"INSERT INTO null_unique_probe (value) VALUES ('duplicate')\"
-          );
-          await assert.rejects(
-            client.unsafe(
-              \"INSERT INTO null_unique_probe (value) VALUES ('duplicate')\"
-            )
-          );
-          await client.unsafe('DROP TABLE null_unique_probe');
-          """,
-              """  await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');
-          await client.unsafe(
-            'CREATE TABLE null_unique_probe (value text UNIQUE)'
-          );
-          try {
-            await client.unsafe(
-              'INSERT INTO null_unique_probe (value) VALUES (NULL), (NULL)'
-            );
-            await client.unsafe(
-              \"INSERT INTO null_unique_probe (value) VALUES ('duplicate')\"
-            );
-            await assert.rejects(
-              client.unsafe(
-                \"INSERT INTO null_unique_probe (value) VALUES ('duplicate')\"
-              )
-            );
-          } finally {
-            await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');
-          }
-          """,
-              'postgres nullable unique probe',
+              "'CREATE TEMP TABLE null_unique_probe (value text UNIQUE)'",
+              "'CREATE TABLE null_unique_probe (value text UNIQUE)'",
+              1,
+              'postgres nullable unique probe table kind',
+          )
+          replace_regex(
+              'scripts/test-db-backend.ts',
+              r"(async function verifyPostgresTransactionAndForeignKey\([\s\S]*?await assert\.rejects\([\s\S]*?\);\n\n)(  await client\.unsafe\(\n    'CREATE TABLE null_unique_probe \(value text UNIQUE\)'\n  \);)",
+              r"\1  await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');\n\2",
+              'postgres nullable unique probe pre-clean',
+          )
+          replace_exact(
+              'scripts/test-db-backend.ts',
+              "await client.unsafe('DROP TABLE null_unique_probe');",
+              "await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');",
+              1,
+              'postgres nullable unique probe cleanup',
           )
 
-          replace_once(
+          replace_exact(
               'tests/services/community.service.test.ts',
-              """    it('should keep Rails country/beta persistence deferred to #135', async () => {
-            const result = await communityService.createCommunity({
-              name: 'Deferred Rails Fields Community',
-              country: 'CA',
-              beta: true,
-            });
-
-            expect(result.name).toBe('Deferred Rails Fields Community');
-            expect(result).not.toHaveProperty('country');
-            expect(result).not.toHaveProperty('beta');
-          });
-          """,
-              """    it('should persist Rails-compatible country/beta fields', async () => {
-            const result = await communityService.createCommunity({
-              name: 'Rails Fields Community',
-              country: 'CA',
-              beta: true,
-            });
-
-            expect(result.name).toBe('Rails Fields Community');
-            expect(result.country).toBe('CA');
-            expect(result.beta).toBe(true);
-          });
-          """,
-              'community service create compatibility test',
+              "it('should keep Rails country/beta persistence deferred to #135'",
+              "it('should persist Rails-compatible country/beta fields'",
+              1,
+              'community create test title',
           )
-
-          replace_once(
+          replace_exact(
               'tests/services/community.service.test.ts',
-              """    it('should keep Rails country/beta updates deferred to #135', async () => {
-            const community = await communityService.createCommunity({
-              name: 'Deferred Update Community',
-            });
-
-            const result = await communityService.updateCommunity(community.id, {
-              country: 'CA',
-              beta: true,
-            });
-
-            expect(result.name).toBe('Deferred Update Community');
-            expect(result).not.toHaveProperty('country');
-            expect(result).not.toHaveProperty('beta');
-          });
-          """,
-              """    it('should update Rails-compatible country/beta fields', async () => {
-            const community = await communityService.createCommunity({
-              name: 'Rails Update Community',
-            });
-
-            const result = await communityService.updateCommunity(community.id, {
-              country: 'CA',
-              beta: true,
-            });
-
-            expect(result.name).toBe('Rails Update Community');
-            expect(result.country).toBe('CA');
-            expect(result.beta).toBe(true);
-          });
-          """,
-              'community service update compatibility test',
+              "it('should keep Rails country/beta updates deferred to #135'",
+              "it('should update Rails-compatible country/beta fields'",
+              1,
+              'community update test title',
+          )
+          replace_exact(
+              'tests/services/community.service.test.ts',
+              "expect(result).not.toHaveProperty('country');",
+              "expect(result.country).toBe('CA');",
+              2,
+              'community country assertions',
+          )
+          replace_exact(
+              'tests/services/community.service.test.ts',
+              "expect(result).not.toHaveProperty('beta');",
+              "expect(result.beta).toBe(true);",
+              2,
+              'community beta assertions',
           )
 
-          replace_once(
+          replace_regex(
               'tests/services/user.service.test.ts',
-              """    test('should omit deferred authentication fields from current user records', async () => {
-            const registeredUser = await userService.registerUser({
-              email: 'deferred-auth-fields@example.com',
-              password: 'StrongPassword123@',
-              firstName: 'Deferred',
-              lastName: 'Auth',
-              role: 'viewer',
-              communityId: testCommunityId,
-            });
-            const user = await userService.getUserById(
-              registeredUser.id,
-              testCommunityId
-            );
-
-            for (const field of [
-              'resetPasswordToken',
-              'resetPasswordSentAt',
-              'rememberCreatedAt',
-              'signInCount',
-              'lastSignInAt',
-              'currentSignInIp',
-            ]) {
-              expect(user).not.toHaveProperty(field);
-            }
-          });
-          """,
+              r"    test\('should omit deferred authentication fields from current user records', async \(\) => \{.*?\n    \}\);",
               """    test('should expose restored authentication fields with safe defaults', async () => {
-            const registeredUser = await userService.registerUser({
-              email: 'restored-auth-fields@example.com',
-              password: 'StrongPassword123@',
-              firstName: 'Restored',
-              lastName: 'Auth',
-              role: 'viewer',
-              communityId: testCommunityId,
-            });
-            const user = await userService.getUserById(
-              registeredUser.id,
-              testCommunityId
-            );
+              const registeredUser = await userService.registerUser({
+                email: 'restored-auth-fields@example.com',
+                password: 'StrongPassword123@',
+                firstName: 'Restored',
+                lastName: 'Auth',
+                role: 'viewer',
+                communityId: testCommunityId,
+              });
+              const user = await userService.getUserById(
+                registeredUser.id,
+                testCommunityId
+              );
 
-            expect(user).toMatchObject({
-              resetPasswordToken: null,
-              resetPasswordSentAt: null,
-              rememberCreatedAt: null,
-              signInCount: 0,
-              lastSignInAt: null,
-              currentSignInIp: null,
-            });
-          });
-          """,
+              expect(user).toMatchObject({
+                resetPasswordToken: null,
+                resetPasswordSentAt: null,
+                rememberCreatedAt: null,
+                signInCount: 0,
+                lastSignInAt: null,
+                currentSignInIp: null,
+              });
+            });""",
               'user service auth compatibility test',
           )
           PY
@@ -228,6 +156,27 @@ jobs:
 
       - name: Run canonical validation
         run: npm run validate:ci
+
+      - name: Reproduce Docker integration startup
+        run: |
+          cat > .env.test <<'EOF'
+          NODE_ENV=test
+          PORT=3000
+          POSTGRES_PASSWORD=test123
+          JWT_SECRET=test-jwt-secret-minimum-32-characters-required-for-security-testing
+          SESSION_SECRET=test-session-secret-minimum-32-characters-required-for-cookies-testing
+          DATABASE_URL=postgresql://terrastories:test123@db:5432/terrastories
+          DATABASE_URL_TEST=:memory:
+          LOG_LEVEL=error
+          UPLOAD_DIR=/app/uploads
+          CORS_ORIGIN=http://localhost:3001
+          EOF
+          if ! docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test up -d --build; then
+            docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test logs --no-color db || true
+            exit 1
+          fi
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test ps
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test down -v
 
       - name: Commit verified fixes
         run: |

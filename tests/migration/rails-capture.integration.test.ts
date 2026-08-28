@@ -41,7 +41,10 @@ describeWithPostgres('Rails source capture', () => {
     if (!pool) return;
     const schemaSql = await readFile(join(fixtureDir, 'schema.sql'), 'utf8');
     const dataSql = await readFile(join(fixtureDir, 'data.sql'), 'utf8');
-    const edgeDataSql = await readFile(join(fixtureDir, 'edge-data.sql'), 'utf8');
+    const edgeDataSql = await readFile(
+      join(fixtureDir, 'edge-data.sql'),
+      'utf8'
+    );
     await pool.query(schemaSql);
     await pool.query(dataSql);
     await pool.query(edgeDataSql);
@@ -209,12 +212,12 @@ describeWithPostgres('Rails source capture', () => {
     ).toBe("<svg xmlns='http://www.w3.org/2000/svg'></svg>\n");
     expect(await pathExists(join(outputDir, 'manifest.json'))).toBe(true);
     expect(permissionBits((await stat(outputDir)).mode)).toBe(0o700);
-    expect(permissionBits((await stat(join(outputDir, 'legacy.sqlite'))).mode)).toBe(
-      0o600
-    );
-    expect(permissionBits((await stat(join(outputDir, 'manifest.json'))).mode)).toBe(
-      0o600
-    );
+    expect(
+      permissionBits((await stat(join(outputDir, 'legacy.sqlite'))).mode)
+    ).toBe(0o600);
+    expect(
+      permissionBits((await stat(join(outputDir, 'manifest.json'))).mode)
+    ).toBe(0o600);
     expect(
       permissionBits((await stat(join(outputDir, 'blobs', 'fixtureblob'))).mode)
     ).toBe(0o600);

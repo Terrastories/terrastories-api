@@ -570,24 +570,24 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 
 ## 14. Resolved architectural decisions
 
-| Question                            | Decision                                                                                                                 |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Legacy compatibility target?        | Preserve user experience and data; do not preserve Rails/Fastify wire/internal compatibility.                            |
-| HTTP framework?                     | Hono.                                                                                                                    |
-| Database targets?                   | D1/SQLite and PostgreSQL equal first-class.                                                                              |
-| Physical schema?                    | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required.                     |
-| Spatial behavior?                   | Plain lat/lng + application-level portable logic; no PostGIS.                                                            |
-| Story privacy?                      | One `public / community / editors` visibility field, always subordinate to owning-community publication/lifecycle.       |
-| User roles?                         | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role.                                                     |
-| Login identity?                     | Preserve Rails username-or-email login behavior unless explicitly changed later.                                         |
-| Sessions?                           | Durable database-backed authoritative sessions; memory dev/test only.                                                    |
-| Media?                              | One `File` identity model + explicit typed relations; URLs derived by storage adapter; Theme static map included.        |
-| Map configuration?                  | One provider-neutral `CommunityMapConfig` per community; provider credentials are secrets.                               |
-| Legacy removed data?                | Preserve in migration archive; never silently discard.                                                                   |
+| Question                            | Decision                                                                                                                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Legacy compatibility target?        | Preserve user experience and data; do not preserve Rails/Fastify wire/internal compatibility.                                                                                        |
+| HTTP framework?                     | Hono.                                                                                                                                                                                |
+| Database targets?                   | D1/SQLite and PostgreSQL equal first-class.                                                                                                                                          |
+| Physical schema?                    | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required.                                                                                 |
+| Spatial behavior?                   | Plain lat/lng + application-level portable logic; no PostGIS.                                                                                                                        |
+| Story privacy?                      | One `public / community / editors` visibility field, always subordinate to owning-community publication/lifecycle.                                                                   |
+| User roles?                         | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role.                                                                                                                 |
+| Login identity?                     | Preserve Rails username-or-email login behavior unless explicitly changed later.                                                                                                     |
+| Sessions?                           | Durable database-backed authoritative sessions; memory dev/test only.                                                                                                                |
+| Media?                              | One `File` identity model + explicit typed relations; URLs derived by storage adapter; Theme static map included.                                                                    |
+| Map configuration?                  | One provider-neutral `CommunityMapConfig` per community; provider credentials are secrets.                                                                                           |
+| Legacy removed data?                | Preserve in migration archive; never silently discard.                                                                                                                               |
 | Rails beta/Flipper?                 | Known `public_communities` and `split_settings` outcomes become normal V2 publication/settings capabilities; archive gating state. Custom active keys require migration disposition. |
-| Password migration?                 | Verify legacy bcrypt on login, then rehash with current V2 hasher.                                                       |
-| Migration strategy?                 | Two-stage: lossless Rails PostgreSQL + ActiveStorage capture bundle, then deterministic bundle-to-canonical-V2 transform. |
-| API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy.                       |
+| Password migration?                 | Verify legacy bcrypt on login, then rehash with current V2 hasher.                                                                                                                   |
+| Migration strategy?                 | Two-stage: lossless Rails PostgreSQL + ActiveStorage capture bundle, then deterministic bundle-to-canonical-V2 transform.                                                            |
+| API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy.                                                                                   |
 
 ## 15. Change log
 
@@ -597,4 +597,4 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 | 2026-08-17 | Reaffirmed Hono, equal D1/SQLite + PostgreSQL targets, field-kit support, no PostGIS, and sovereignty constraints.                                                                                                                                                                                                                                                       |
 | 2026-08-28 | Reframed V2 from legacy wire/feature parity to intentional evolution: preserve user experience and all source data while simplifying the domain. Added canonical visibility/role/media/map/session models, real Rails migration contract, archive requirement for intentionally removed data, and V2-native contract testing.                                            |
 | 2026-08-28 | Addressed independent architecture review: made private/disabled community precedence explicit, preserved username-or-email login, added Theme static-map migration, required active beta/Flipper disposition, split migration into lossless source capture plus canonical target transform, and strengthened archive fidelity/security and contradictory-role handling. |
-| 2026-08-28 | Audited the pinned Rails feature flags and resolved known `public_communities`/`split_settings` outcomes as unconditional canonical V2 publication/settings capabilities while retaining legacy beta/Flipper state in migration artifacts. |
+| 2026-08-28 | Audited the pinned Rails feature flags and resolved known `public_communities`/`split_settings` outcomes as unconditional canonical V2 publication/settings capabilities while retaining legacy beta/Flipper state in migration artifacts.                                                                                                                               |

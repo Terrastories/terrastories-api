@@ -21,8 +21,27 @@ export function summarizeDependencyChanges(baseLock, currentLock) {
   for (const lockPath of paths) {
     if (!lockPath.includes('node_modules/')) continue;
 
-    const before = basePackages[lockPath]?.version ?? null;
-    const after = currentPackages[lockPath]?.version ?? null;
+    const beforePackage = basePackages[lockPath] ?? null;
+    const afterPackage = currentPackages[lockPath] ?? null;
+    const before = beforePackage?.version ?? null;
+    const after = afterPackage?.version ?? null;
+
+    if (before === after && beforePackage && afterPackage) {
+      const changedFields = ['resolved', 'integrity'].filter(
+        (field) => beforePackage[field] !== afterPackage[field]
+      );
+      if (changedFields.length === 0) continue;
+
+      changes.push({
+        name: dependencyName(lockPath),
+        before,
+        after,
+        type: 'changed',
+        changedFields,
+      });
+      continue;
+    }
+
     if (before === after) continue;
 
     changes.push({
@@ -102,8 +121,11 @@ export async function main(options = {}) {
     `Dependency review: ${changedManifests.join(', ')} changed; ${changes.length} locked dependency changes detected.`
   );
   for (const change of changes) {
+    const changedFields = change.changedFields?.length
+      ? ` [${change.changedFields.join(', ')}]`
+      : '';
     console.log(
-      `- ${change.type}: ${change.name} ${change.before ?? 'none'} -> ${change.after ?? 'none'}`
+      `- ${change.type}: ${change.name} ${change.before ?? 'none'} -> ${change.after ?? 'none'}${changedFields}`
     );
   }
 

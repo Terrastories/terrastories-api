@@ -2,8 +2,7 @@ name: Issue 135 final CI fix
 
 on:
   push:
-    branches:
-      - feat/issue-135-dual-backend-ci
+    branches: [feat/issue-135-dual-backend-ci]
 
 permissions:
   contents: write
@@ -20,105 +19,55 @@ jobs:
           POSTGRES_USER: terrastories
           POSTGRES_PASSWORD: terrastories-test
         ports:
-          - 5432:5432
+          - 55432:5432
         options: >-
           --health-cmd "pg_isready -U terrastories -d terrastories_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test
+      DATABASE_URL: postgresql://terrastories:terrastories-test@localhost:55432/terrastories_test
       ALLOW_POSTGRES_TEST_RESET: 'true'
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feat/issue-135-dual-backend-ci
           fetch-depth: 0
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20.x
           cache: npm
+      - run: npm ci --legacy-peer-deps
 
-      - name: Install dependencies
-        run: npm ci --legacy-peer-deps
-
-      - name: Apply deterministic CI fixes
+      - name: Apply verified source and test fixes
         run: |
           python - <<'PY'
           from pathlib import Path
           import re
 
-          def replace_exact(path: str, old: str, new: str, expected: int, label: str) -> None:
-              file = Path(path)
-              source = file.read_text()
-              count = source.count(old)
-              if count != expected:
-                  raise SystemExit(f'{label}: expected {expected} matches, found {count}')
-              file.write_text(source.replace(old, new))
+          def exact(path, old, new, count):
+              p = Path(path); s = p.read_text()
+              if s.count(old) != count:
+                  raise SystemExit(f'{path}: expected {count} occurrences of {old!r}, found {s.count(old)}')
+              p.write_text(s.replace(old, new))
 
-          def replace_regex(path: str, pattern: str, new: str, label: str) -> None:
-              file = Path(path)
-              source = file.read_text()
-              updated, count = re.subn(pattern, new, source, count=1, flags=re.S)
+          def regex(path, pattern, new):
+              p = Path(path); s = p.read_text()
+              out, count = re.subn(pattern, new, s, count=1, flags=re.S)
               if count != 1:
-                  raise SystemExit(f'{label}: expected one regex match, found {count}')
-              file.write_text(updated)
+                  raise SystemExit(f'{path}: regex patch did not match exactly once')
+              p.write_text(out)
 
-          replace_exact(
-              'scripts/test-db-backend.ts',
-              "'CREATE TEMP TABLE null_unique_probe (value text UNIQUE)'",
-              "'CREATE TABLE null_unique_probe (value text UNIQUE)'",
-              1,
-              'postgres nullable unique probe table kind',
-          )
-          replace_regex(
-              'scripts/test-db-backend.ts',
-              r"(async function verifyPostgresTransactionAndForeignKey\([\s\S]*?await assert\.rejects\([\s\S]*?\);\n\n)(  await client\.unsafe\(\n    'CREATE TABLE null_unique_probe \(value text UNIQUE\)'\n  \);)",
-              r"\1  await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');\n\2",
-              'postgres nullable unique probe pre-clean',
-          )
-          replace_exact(
-              'scripts/test-db-backend.ts',
-              "await client.unsafe('DROP TABLE null_unique_probe');",
-              "await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');",
-              1,
-              'postgres nullable unique probe cleanup',
-          )
+          exact('scripts/test-db-backend.ts', "'CREATE TEMP TABLE null_unique_probe (value text UNIQUE)'", "'CREATE TABLE null_unique_probe (value text UNIQUE)'", 1)
+          regex('scripts/test-db-backend.ts', r"(async function verifyPostgresTransactionAndForeignKey\([\s\S]*?await assert\.rejects\([\s\S]*?\);\n\n)(  await client\.unsafe\(\n    'CREATE TABLE null_unique_probe \(value text UNIQUE\)'\n  \);)", r"\1  await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');\n\2")
+          exact('scripts/test-db-backend.ts', "await client.unsafe('DROP TABLE null_unique_probe');", "await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');", 1)
 
-          replace_exact(
-              'tests/services/community.service.test.ts',
-              "it('should keep Rails country/beta persistence deferred to #135'",
-              "it('should persist Rails-compatible country/beta fields'",
-              1,
-              'community create test title',
-          )
-          replace_exact(
-              'tests/services/community.service.test.ts',
-              "it('should keep Rails country/beta updates deferred to #135'",
-              "it('should update Rails-compatible country/beta fields'",
-              1,
-              'community update test title',
-          )
-          replace_exact(
-              'tests/services/community.service.test.ts',
-              "expect(result).not.toHaveProperty('country');",
-              "expect(result.country).toBe('CA');",
-              2,
-              'community country assertions',
-          )
-          replace_exact(
-              'tests/services/community.service.test.ts',
-              "expect(result).not.toHaveProperty('beta');",
-              "expect(result.beta).toBe(true);",
-              2,
-              'community beta assertions',
-          )
+          exact('tests/services/community.service.test.ts', "it('should keep Rails country/beta persistence deferred to #135'", "it('should persist Rails-compatible country/beta fields'", 1)
+          exact('tests/services/community.service.test.ts', "it('should keep Rails country/beta updates deferred to #135'", "it('should update Rails-compatible country/beta fields'", 1)
+          exact('tests/services/community.service.test.ts', "expect(result).not.toHaveProperty('country');", "expect(result.country).toBe('CA');", 2)
+          exact('tests/services/community.service.test.ts', "expect(result).not.toHaveProperty('beta');", "expect(result.beta).toBe(true);", 2)
 
-          replace_regex(
-              'tests/services/user.service.test.ts',
-              r"    test\('should omit deferred authentication fields from current user records', async \(\) => \{.*?\n    \}\);",
-              """    test('should expose restored authentication fields with safe defaults', async () => {
+          regex('tests/services/user.service.test.ts', r"    test\('should omit deferred authentication fields from current user records', async \(\) => \{.*?\n    \}\);", """    test('should expose restored authentication fields with safe defaults', async () => {
               const registeredUser = await userService.registerUser({
                 email: 'restored-auth-fields@example.com',
                 password: 'StrongPassword123@',
@@ -127,11 +76,7 @@ jobs:
                 role: 'viewer',
                 communityId: testCommunityId,
               });
-              const user = await userService.getUserById(
-                registeredUser.id,
-                testCommunityId
-              );
-
+              const user = await userService.getUserById(registeredUser.id, testCommunityId);
               expect(user).toMatchObject({
                 resetPasswordToken: null,
                 resetPasswordSentAt: null,
@@ -140,30 +85,27 @@ jobs:
                 lastSignInAt: null,
                 currentSignInIp: null,
               });
-            });""",
-              'user service auth compatibility test',
-          )
+            });""")
 
-          Path('scripts/dev-seed.sql').write_text(
-              "-- =============================================================================\n"
-              "-- TERRASTORIES DEVELOPMENT SEED DATA\n"
-              "-- Sample data for development and testing purposes only\n"
-              "-- =============================================================================\n\n"
-              "-- Development seed data intentionally stays database-portable. Geographic\n"
-              "-- behavior is implemented and tested in the application layer, so a plain\n"
-              "-- PostgreSQL installation must be able to initialize this file.\n\n"
-              "DO $$\n"
-              "BEGIN\n"
-              "    IF current_setting('server_version_num')::int >= 100000 THEN\n"
-              "        RAISE NOTICE 'Development seed data can be loaded here';\n"
-              "        RAISE NOTICE 'Portable spatial behavior is verified by application-level tests';\n"
-              "    END IF;\n"
-              "END $$;\n"
-          )
+          Path('scripts/dev-seed.sql').write_text("""-- =============================================================================
+-- TERRASTORIES DEVELOPMENT SEED DATA
+-- Sample data for development and testing purposes only
+-- =============================================================================
+
+-- Development seed data intentionally stays database-portable. Geographic
+-- behavior is implemented and tested in the application layer, so a plain
+-- PostgreSQL installation must be able to initialize this file.
+
+DO $$
+BEGIN
+    IF current_setting('server_version_num')::int >= 100000 THEN
+        RAISE NOTICE 'Development seed data can be loaded here';
+        RAISE NOTICE 'Portable spatial behavior is verified by application-level tests';
+    END IF;
+END $$;
+""")
           PY
-
-      - name: Format changed files
-        run: npx prettier --write scripts/test-db-backend.ts tests/services/community.service.test.ts tests/services/user.service.test.ts
+          npx prettier --write scripts/test-db-backend.ts tests/services/community.service.test.ts tests/services/user.service.test.ts
 
       - name: Reject database-specific spatial runtime configuration
         run: |
@@ -172,11 +114,11 @@ jobs:
             exit 1
           fi
 
-      - name: Run affected service tests
-        run: npx vitest run tests/services/community.service.test.ts tests/services/user.service.test.ts --reporter=dot --silent=true
-
-      - name: Run both database gates
-        run: npm run test:db:sqlite && npm run test:db:postgres
+      - name: Verify affected behavior and both backends
+        run: |
+          npx vitest run tests/services/community.service.test.ts tests/services/user.service.test.ts --reporter=dot --silent=true
+          npm run test:db:sqlite
+          npm run test:db:postgres
 
       - name: Run canonical validation
         run: npm run validate:ci
@@ -184,15 +126,11 @@ jobs:
       - name: Reproduce Docker integration startup
         run: |
           printf '%s\n' \
-            'NODE_ENV=test' \
-            'PORT=3000' \
-            'POSTGRES_PASSWORD=test123' \
+            'NODE_ENV=test' 'PORT=3000' 'POSTGRES_PASSWORD=test123' \
             'JWT_SECRET=test-jwt-secret-minimum-32-characters-required-for-security-testing' \
             'SESSION_SECRET=test-session-secret-minimum-32-characters-required-for-cookies-testing' \
             'DATABASE_URL=postgresql://terrastories:test123@db:5432/terrastories' \
-            'DATABASE_URL_TEST=:memory:' \
-            'LOG_LEVEL=error' \
-            'UPLOAD_DIR=/app/uploads' \
+            'DATABASE_URL_TEST=:memory:' 'LOG_LEVEL=error' 'UPLOAD_DIR=/app/uploads' \
             'CORS_ORIGIN=http://localhost:3001' > .env.test
           if ! docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test up -d --build; then
             docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.test logs --no-color db || true

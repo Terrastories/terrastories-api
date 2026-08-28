@@ -14,6 +14,14 @@
  */
 
 import { FastifyRequest, FastifyReply } from 'fastify';
+import {
+  V2_COMMUNITY_ROLES,
+  authorizeCommunityContent,
+  createAuthorizationAuditEvent,
+  type ContentRouteFamily,
+  type ProtectedSurface,
+  type V2CommunityRole,
+} from '../authorization/sovereignty-policy.js';
 
 /**
  * User session interface with enhanced cultural role support
@@ -262,7 +270,7 @@ export function requireCommunityAccess(options: CommunityAccessOptions = {}) {
     // In offline mode, user might be set directly on the request instead of session
     const user = authRequest.user || authRequest.session?.user!;
 
-    // Extract community ID from route params or query
+    // Extract community ID from route params, query, or body
     const requestedCommunityId = extractCommunityId(request);
     const userCommunityId = user.communityId;
 
@@ -307,6 +315,89 @@ export function requireCommunityAccess(options: CommunityAccessOptions = {}) {
       );
     }
   };
+}
+
+/**
+ * Apply the canonical V2 sovereignty policy to a concrete community-content
+ * route. Legacy elder sessions stay on the legacy guard until V1 scope is
+ * retired; the V2 policy itself never gains an elder role.
+ */
+export function requireV2CommunityContentAccess(
+  family: ContentRouteFamily,
+  surface: ProtectedSurface
+) {
+  const legacyGuard = requireCommunityAccess();
+
+  return async function enforceV2CommunityContent(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const authRequest = request as AuthenticatedRequest;
+    const user = authRequest.user || authRequest.session?.user;
+
+    if (!user) {
+      return reply.status(401).send({
+        error: { message: 'Authentication required' },
+        statusCode: 401,
+      });
+    }
+
+    if (!isV2CommunityRole(user.role)) {
+      await legacyGuard(request, reply);
+      return;
+    }
+
+    const resourceCommunityId = extractCommunityId(request) ?? user.communityId;
+    const decision = authorizeCommunityContent({
+      actor: {
+        id: user.id,
+        role: user.role,
+        communityId: user.communityId,
+        // Login now fails closed for disabled users/inactive communities. #137
+        // owns revalidation of already-issued sessions after state changes.
+        active: true,
+      },
+      resourceCommunityId,
+      family,
+      surface,
+      visibility: 'community-only',
+      // Same issuance invariant as actor.active; stale session state is #137.
+      communityActive: true,
+    });
+
+    if (decision.allowed) return;
+
+    request.log.warn(
+      createAuthorizationAuditEvent({
+        actor: {
+          id: user.id,
+          role: user.role,
+          communityId: user.communityId,
+          active: true,
+        },
+        resourceCommunityId,
+        family,
+        surface,
+        decision,
+      }),
+      'V2 community content access denied'
+    );
+
+    if (decision.reason === 'super-admin-content-denied') {
+      return reply.status(403).send({
+        error: { message: 'Super administrators cannot access community data' },
+        reason: 'Indigenous data sovereignty protection',
+      });
+    }
+
+    return reply.status(403).send({
+      error: { message: 'Access denied - community data isolation' },
+    });
+  };
+}
+
+function isV2CommunityRole(role: UserSession['role']): role is V2CommunityRole {
+  return (V2_COMMUNITY_ROLES as readonly string[]).includes(role);
 }
 
 /**
@@ -534,21 +625,26 @@ export function checkUserPermissions(
  */
 export function extractCommunityId(request: FastifyRequest): number | null {
   const params = request.params as {
-    communityId?: string;
-    community_id?: string;
+    communityId?: string | number;
+    community_id?: string | number;
   };
   const query = request.query as {
-    communityId?: string;
-    community_id?: string;
+    communityId?: string | number;
+    community_id?: string | number;
+  };
+  const body = (request.body || {}) as {
+    communityId?: string | number;
+    community_id?: string | number;
   };
 
-  const communityId = parseInt(
-    params.communityId ||
-      params.community_id ||
-      query.communityId ||
-      query.community_id ||
-      '0'
-  );
+  const rawCommunityId =
+    params.communityId ??
+    params.community_id ??
+    query.communityId ??
+    query.community_id ??
+    body.communityId ??
+    body.community_id;
+  const communityId = Number.parseInt(String(rawCommunityId ?? '0'), 10);
   return communityId > 0 ? communityId : null;
 }
 

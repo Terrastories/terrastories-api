@@ -69,4 +69,23 @@ describe('inactive principal sovereignty guard', () => {
       userService.authenticateUserGlobal(email, 'candidate')
     ).rejects.toBeInstanceOf(AuthenticationError);
   });
+
+  it('keeps an active super-admin account usable when its attached community is inactive', async () => {
+    const superAdminEmail = `super-admin-${Date.now()}@example.test`;
+    await db.insert(usersSqlite).values(
+      TestDataFactory.createUser(communityId, {
+        email: superAdminEmail,
+        role: 'super_admin',
+        isActive: true,
+      })
+    );
+    expect(await communityRepository.deactivate(communityId)).toBe(true);
+
+    await expect(
+      userService.authenticateUser(superAdminEmail, 'candidate', communityId)
+    ).resolves.toMatchObject({ role: 'super_admin', communityId });
+    await expect(
+      userService.authenticateUserGlobal(superAdminEmail, 'candidate')
+    ).resolves.toMatchObject({ role: 'super_admin', communityId });
+  });
 });

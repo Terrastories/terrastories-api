@@ -57,6 +57,46 @@ describe('Public API Routes - Integration Tests', () => {
       expect(data.data).toHaveLength(0);
     });
 
+    it('serializes a real public story through the shared field policy', async () => {
+      const [author] = await db
+        .insert(usersSqlite)
+        .values(TestDataFactory.createUser(testCommunityId, { role: 'editor' }))
+        .returning();
+      const [publicStory] = await db
+        .insert(storiesSqlite)
+        .values({
+          title: 'Published story',
+          description: 'Safe public description',
+          slug: `published-story-${Date.now()}`,
+          communityId: testCommunityId,
+          createdBy: author.id,
+          isRestricted: false,
+          privacyLevel: 'public',
+        })
+        .returning();
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/communities/${testCommunityId}/stories`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toContainEqual(
+        expect.objectContaining({
+          id: publicStory.id,
+          title: 'Published story',
+          slug: publicStory.slug,
+        })
+      );
+      const exposedStory = response
+        .json()
+        .data.find((story: { id: number }) => story.id === publicStory.id);
+      expect(exposedStory).not.toHaveProperty('communityId');
+      expect(exposedStory).not.toHaveProperty('createdBy');
+      expect(exposedStory).not.toHaveProperty('privacyLevel');
+      expect(exposedStory).not.toHaveProperty('isRestricted');
+    });
+
     it('should not require authentication for explicitly public content', async () => {
       const response = await app.inject({
         method: 'GET',
@@ -142,19 +182,16 @@ describe('Public API Routes - Integration Tests', () => {
   });
 
   describe('GET /api/communities/:community_id/places', () => {
-    it('should return 200 with places list for an explicitly public community', async () => {
+    it('does not infer public place access from the story-sharing flag', async () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/communities/${testCommunityId}/places`,
       });
 
-      expect(response.statusCode).toBe(200);
-
-      const data = JSON.parse(response.body);
-      expect(data).toHaveProperty('data');
-      expect(data).toHaveProperty('meta');
-      expect(data.data).toBeInstanceOf(Array);
-      expect(data.data.length).toBeGreaterThanOrEqual(0);
+      expect(response.statusCode).toBe(404);
+      expect(JSON.parse(response.body)).toEqual({
+        error: 'Community not found',
+      });
     });
 
     it('should not expose places for a private community', async () => {
@@ -171,16 +208,16 @@ describe('Public API Routes - Integration Tests', () => {
   });
 
   describe('GET /api/communities/:community_id/places/:id', () => {
-    it('should return 404 for non-existent place', async () => {
+    it('fails closed before revealing whether a place exists', async () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/communities/${testCommunityId}/places/550e8400-e29b-41d4-a716-446655440000`,
       });
 
       expect(response.statusCode).toBe(404);
-
-      const data = JSON.parse(response.body);
-      expect(data.error).toBe('Place not found');
+      expect(JSON.parse(response.body)).toEqual({
+        error: 'Community not found',
+      });
     });
   });
 

@@ -195,6 +195,22 @@ describe('V2 sovereignty authorization matrix', () => {
         communityActive: true,
       })
     ).toMatchObject({ allowed: false, reason: 'disabled-user' });
+
+    expect(
+      authorizeCommunityContent({
+        actor: {
+          id: 10,
+          role: 'viewer',
+          communityId: 1,
+          active: undefined as unknown as boolean,
+        },
+        resourceCommunityId: 1,
+        family: 'places',
+        surface: 'list',
+        visibility: 'community-only',
+        communityActive: true,
+      })
+    ).toMatchObject({ allowed: false, reason: 'disabled-user' });
   });
 
   it('enforces field visibility without leaking operational fields', () => {
@@ -240,6 +256,19 @@ describe('V2 sovereignty authorization matrix', () => {
       canExposeField({
         category: 'never-exposed',
         actor: admin,
+        actorCommunityId: 5,
+        resourceCommunityId: 5,
+      })
+    ).toBe(false);
+    expect(
+      canExposeField({
+        category: 'community-only',
+        actor: {
+          id: 10,
+          role: 'viewer',
+          communityId: 5,
+          active: undefined as unknown as boolean,
+        },
         actorCommunityId: 5,
         resourceCommunityId: 5,
       })

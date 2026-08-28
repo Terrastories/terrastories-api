@@ -74,7 +74,9 @@ export async function publicApiRoutes(
           family,
           surface: 'public-api',
           visibility: 'public',
-          explicitlyPublic: community.publicStories,
+          // V2 has an explicit story-sharing grant, but no equivalent place
+          // publication grant. Never infer place publicity from publicStories.
+          explicitlyPublic: family === 'stories' && community.publicStories,
           communityActive: community.isActive,
         });
 
@@ -183,8 +185,19 @@ export async function publicApiRoutes(
           }
         );
 
+        const publicStories = result.stories.map((story) => {
+          const projected = toPublicStory(story, {
+            resourceCommunityId: Number(community_id),
+            explicitlyPublic: true,
+          });
+          if (!projected) {
+            throw new Error('Public story field projection denied');
+          }
+          return projected;
+        });
+
         return {
-          data: result.stories.map(toPublicStory),
+          data: publicStories,
           meta: {
             pagination: {
               page,
@@ -242,8 +255,18 @@ export async function publicApiRoutes(
           });
         }
 
+        const projected = toPublicStory(story, {
+          resourceCommunityId: Number(community_id),
+          explicitlyPublic: true,
+        });
+        if (!projected) {
+          return reply.status(404).send({
+            error: 'Story not found or not public',
+          });
+        }
+
         return {
-          data: toPublicStory(story),
+          data: projected,
         };
       } catch (error) {
         request.log.error(error, 'Public story retrieval error');

@@ -49,7 +49,7 @@ export interface AuthorizationActor {
   id: number;
   role: V2CommunityRole;
   communityId: number;
-  active?: boolean;
+  active: boolean;
 }
 
 export type AuthorizationReason =
@@ -87,6 +87,18 @@ export interface FieldExposureInput {
   resourceCommunityId: number;
   explicitlyPublic?: boolean;
   allowedRoles?: readonly V2CommunityRole[];
+}
+
+export interface FieldVisibilityRule {
+  category: FieldVisibilityCategory;
+  allowedRoles?: readonly V2CommunityRole[];
+}
+
+export interface FieldProjectionContext {
+  actor: AuthorizationActor | null;
+  actorCommunityId: number | null;
+  resourceCommunityId: number;
+  explicitlyPublic?: boolean;
 }
 
 export const AUTHORIZATION_MATRIX = {
@@ -135,7 +147,7 @@ export function authorizeCommunityContent(
     return deny('inactive-community');
   }
 
-  if (actor?.active === false) {
+  if (actor && actor.active !== true) {
     return deny('disabled-user');
   }
 
@@ -197,7 +209,7 @@ export function canExposeField(input: FieldExposureInput): boolean {
     return explicitlyPublic;
   }
 
-  if (!actor || actor.active === false) {
+  if (!actor || actor.active !== true) {
     return false;
   }
 
@@ -214,6 +226,34 @@ export function canExposeField(input: FieldExposureInput): boolean {
   }
 
   return true;
+}
+
+export function projectVisibleFields<T extends Record<string, unknown>>(
+  source: T,
+  rules: Partial<Record<keyof T, FieldVisibilityRule>>,
+  context: FieldProjectionContext
+): Partial<T> {
+  const projected: Partial<T> = {};
+
+  for (const key of Object.keys(rules) as Array<keyof T>) {
+    const rule = rules[key];
+    if (!rule) continue;
+
+    if (
+      canExposeField({
+        category: rule.category,
+        actor: context.actor,
+        actorCommunityId: context.actorCommunityId,
+        resourceCommunityId: context.resourceCommunityId,
+        explicitlyPublic: context.explicitlyPublic,
+        allowedRoles: rule.allowedRoles,
+      })
+    ) {
+      projected[key] = source[key];
+    }
+  }
+
+  return projected;
 }
 
 export interface AuthorizationAuditInput {

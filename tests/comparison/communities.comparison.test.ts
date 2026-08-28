@@ -139,40 +139,28 @@ describe('V1 Compatibility: Communities Endpoints', () => {
   });
 
   describe('GET /api/communities/:community_id/places', () => {
-    it('should return 200 with data array', async () => {
+    it('documents the intentional V2 hardening divergence: anonymous place access fails closed', async () => {
       const res = await app.inject({
         method: 'GET',
         url: `/api/communities/${testCommunityId}/places`,
       });
-      expect(res.statusCode).toBe(200);
-      const body = JSON.parse(res.body);
-      expect(body).toHaveProperty('data');
-      expect(Array.isArray(body.data)).toBe(true);
-      if (body.data.length > 0) {
-        expect(body.data[0]).toHaveProperty('id');
-        expect(body.data[0]).toHaveProperty('name');
-      }
+
+      // V1 exposed places anonymously. V2 intentionally requires an explicit
+      // place-publication grant; no such grant exists yet, so access fails closed.
+      expect(res.statusCode).toBe(404);
+      expect(JSON.parse(res.body)).toEqual({ error: 'Community not found' });
     });
   });
 
   describe('GET /api/communities/:community_id/places/:id', () => {
-    it('should return 200 with place data object', async () => {
-      const placesRes = await app.inject({
+    it('documents the intentional V2 hardening divergence for place detail', async () => {
+      const res = await app.inject({
         method: 'GET',
-        url: `/api/communities/${testCommunityId}/places`,
+        url: `/api/communities/${testCommunityId}/places/1`,
       });
-      const places = JSON.parse(placesRes.body).data;
-      if (places.length > 0) {
-        const res = await app.inject({
-          method: 'GET',
-          url: `/api/communities/${testCommunityId}/places/${places[0].id}`,
-        });
-        expect(res.statusCode).toBe(200);
-        const body = JSON.parse(res.body);
-        expect(body).toHaveProperty('data');
-        expect(body.data).toHaveProperty('id');
-        expect(body.data).toHaveProperty('name');
-      }
+
+      expect(res.statusCode).toBe(404);
+      expect(JSON.parse(res.body)).toEqual({ error: 'Community not found' });
     });
 
     it('should return 404 for nonexistent place', async () => {

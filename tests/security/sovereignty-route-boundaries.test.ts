@@ -17,6 +17,8 @@ describe('V2 sovereignty route boundaries', () => {
   let communityAId: number;
   let communityBId: number;
   let viewerCookie: string;
+  let adminCookie: string;
+  let superAdminCookie: string;
   let communityBStorySlug: string;
 
   beforeEach(async () => {
@@ -47,6 +49,26 @@ describe('V2 sovereignty route boundaries', () => {
         })
       )
       .returning();
+    const [admin] = await db
+      .insert(usersSqlite)
+      .values(
+        TestDataFactory.createUser(communityAId, {
+          email: `admin-a-${Date.now()}@example.test`,
+          role: 'admin',
+          passwordHash,
+        })
+      )
+      .returning();
+    const [superAdmin] = await db
+      .insert(usersSqlite)
+      .values(
+        TestDataFactory.createUser(communityAId, {
+          email: `super-admin-${Date.now()}@example.test`,
+          role: 'super_admin',
+          passwordHash,
+        })
+      )
+      .returning();
 
     communityBStorySlug = `community-b-story-${Date.now()}`;
     await db.insert(storiesSqlite).values({
@@ -71,6 +93,32 @@ describe('V2 sovereignty route boundaries', () => {
     });
     expect(login.statusCode).toBe(200);
     viewerCookie = extractSignedSessionCookie(login.headers['set-cookie']);
+
+    const adminLogin = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        email: admin.email,
+        password: TEST_PASSWORD,
+        communityId: communityAId,
+      },
+    });
+    expect(adminLogin.statusCode).toBe(200);
+    adminCookie = extractSignedSessionCookie(adminLogin.headers['set-cookie']);
+
+    const superAdminLogin = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        email: superAdmin.email,
+        password: TEST_PASSWORD,
+        communityId: communityAId,
+      },
+    });
+    expect(superAdminLogin.statusCode).toBe(200);
+    superAdminCookie = extractSignedSessionCookie(
+      superAdminLogin.headers['set-cookie']
+    );
   });
 
   afterEach(async () => {
@@ -99,4 +147,51 @@ describe('V2 sovereignty route boundaries', () => {
     expect(response.statusCode).toBe(403);
     expect(response.json().data).toBeUndefined();
   });
+
+  it('rejects a cross-community tenant override supplied in a write body', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/themes',
+      headers: { cookie: adminCookie },
+      payload: {
+        name: 'Cross-community theme',
+        communityId: communityBId,
+      },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().data).toBeUndefined();
+  });
+
+  it.each([
+    ['place list', '/api/v1/places'],
+    [
+      'place near search',
+      '/api/v1/places/near?latitude=0&longitude=0&radius=1',
+    ],
+    [
+      'place bounds search',
+      '/api/v1/places/bounds?north=1&south=-1&east=1&west=-1',
+    ],
+    ['place stats', '/api/v1/places/stats'],
+    ['speaker list', '/api/v1/speakers'],
+    ['speaker search', '/api/v1/speakers/search?q=test'],
+    ['speaker stats', '/api/v1/speakers/stats'],
+    ['theme list', '/api/v1/themes'],
+    ['active themes', '/api/v1/themes/active'],
+    ['file list', '/api/v1/files'],
+    ['story detail', '/api/v1/stories/999999'],
+  ])(
+    'blocks super-admin from the %s community-content surface',
+    async (_name, url) => {
+      const response = await app.inject({
+        method: 'GET',
+        url,
+        headers: { cookie: superAdminCookie },
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json().data).toBeUndefined();
+    }
+  );
 });

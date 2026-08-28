@@ -295,16 +295,19 @@ export class UserService {
         throw new AuthenticationError();
       }
 
-      // Fail closed when either the user or their community is inactive.
-      // Keep the external error generic so community state is not disclosed.
+      // Disabled accounts always fail closed. Community-role principals also
+      // require an active community; super admins remain system-level operators
+      // so an archived attached community cannot lock them out of administration.
       if (!user.isActive) {
         throw new AuthenticationError();
       }
-      const community = await this.communityService.getCommunityById(
-        user.communityId
-      );
-      if (!community?.isActive) {
-        throw new AuthenticationError();
+      if (user.role !== 'super_admin') {
+        const community = await this.communityService.getCommunityById(
+          user.communityId
+        );
+        if (!community?.isActive) {
+          throw new AuthenticationError();
+        }
       }
 
       return user;
@@ -340,16 +343,19 @@ export class UserService {
         throw new AuthenticationError();
       }
 
-      // Fail closed when either the user or their community is inactive.
-      // Keep the external error generic so community state is not disclosed.
+      // Disabled accounts always fail closed. Community-role principals also
+      // require an active community; super admins remain system-level operators
+      // so an archived attached community cannot lock them out of administration.
       if (!user.isActive) {
         throw new AuthenticationError();
       }
-      const community = await this.communityService.getCommunityById(
-        user.communityId
-      );
-      if (!community?.isActive) {
-        throw new AuthenticationError();
+      if (user.role !== 'super_admin') {
+        const community = await this.communityService.getCommunityById(
+          user.communityId
+        );
+        if (!community?.isActive) {
+          throw new AuthenticationError();
+        }
       }
 
       return user;

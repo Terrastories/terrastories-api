@@ -199,18 +199,6 @@ describe('dependency review execution', () => {
 });
 
 describe('npm audit report handling', () => {
-  const policy = {
-    trackingIssue: 141,
-    minimumSeverity: 'moderate',
-    expires: '2026-09-30',
-    review: {
-      status: 'accepted',
-      reviewedBy: 'Terrastories maintainers',
-      reviewedOn: '2026-08-27',
-      rationale: 'Reviewed temporary debt.',
-    },
-  };
-
   const baseline = {
     trackingIssue: 141,
     advisories: [
@@ -221,6 +209,20 @@ describe('npm audit report handling', () => {
         url: 'https://example.invalid/known',
       },
     ],
+  };
+
+  const policy = {
+    trackingIssue: 141,
+    minimumSeverity: 'moderate',
+    expires: '2026-09-30',
+    review: {
+      status: 'accepted',
+      reviewedBy: 'Terrastories maintainers',
+      reviewedOn: '2026-08-27',
+      rationale: 'Reviewed temporary debt.',
+      advisoriesSha256:
+        'c353e2ccf16863e21030ebf8f2136aafe376d02643eac10d7f7714a5f871b30e',
+    },
   };
 
   it('collects object advisories and ignores transitive strings', () => {
@@ -299,6 +301,56 @@ describe('npm audit report handling', () => {
     ).toThrow(/accepted review/i);
   });
 
+  it('computes a stable SHA-256 for the exact advisory set', () => {
+    expect(typeof auditModule.computeAdvisorySetDigest).toBe('function');
+    expect(auditModule.computeAdvisorySetDigest(baseline.advisories)).toBe(
+      policy.review.advisoriesSha256
+    );
+    expect(
+      auditModule.computeAdvisorySetDigest([...baseline.advisories].reverse())
+    ).toBe(policy.review.advisoriesSha256);
+  });
+
+  it('rejects a baseline change not bound to the accepted review', () => {
+    const changedBaseline = {
+      ...baseline,
+      advisories: [
+        ...baseline.advisories,
+        {
+          source: 'newly-added',
+          package: 'new-package',
+          severity: 'critical',
+          url: 'https://example.invalid/new',
+        },
+      ],
+    };
+
+    expect(() =>
+      auditModule.compareAuditAdvisories(changedBaseline, policy, {
+        vulnerabilities: {
+          'known-package': {
+            via: [
+              {
+                source: 'known',
+                severity: 'moderate',
+                url: 'https://example.invalid/known',
+              },
+            ],
+          },
+          'new-package': {
+            via: [
+              {
+                source: 'newly-added',
+                severity: 'critical',
+                url: 'https://example.invalid/new',
+              },
+            ],
+          },
+        },
+      })
+    ).toThrow(/review|digest|exact|approval/i);
+  });
+
   it('compares current audit debt against the reviewed baseline', () => {
     const comparison = auditModule.compareAuditAdvisories(baseline, policy, {
       vulnerabilities: {
@@ -335,9 +387,18 @@ describe('npm audit report handling', () => {
         },
       ],
     };
+    const stalePolicy = {
+      ...policy,
+      review: {
+        ...policy.review,
+        advisoriesSha256: auditModule.computeAdvisorySetDigest(
+          staleBaseline.advisories
+        ),
+      },
+    };
 
     expect(() =>
-      auditModule.compareAuditAdvisories(staleBaseline, policy, {
+      auditModule.compareAuditAdvisories(staleBaseline, stalePolicy, {
         vulnerabilities: {
           'known-package': {
             via: [

@@ -10,6 +10,19 @@ export type Database =
   | ReturnType<typeof drizzlePostgres>;
 
 let db: Database | null = null;
+let connectionProbe: (() => Promise<void>) | null = null;
+let closeConnection: (() => Promise<void>) | null = null;
+
+async function resetConnection(): Promise<void> {
+  const close = closeConnection;
+  db = null;
+  connectionProbe = null;
+  closeConnection = null;
+
+  if (close) {
+    await close().catch(() => undefined);
+  }
+}
 
 export async function getDb(): Promise<Database> {
   if (db) return db;
@@ -25,10 +38,23 @@ export async function getDb(): Promise<Database> {
       ssl: config.database.ssl ? 'require' : false,
     });
     db = drizzlePostgres(queryClient);
+    connectionProbe = async () => {
+      await queryClient`SELECT 1`;
+    };
+    closeConnection = async () => {
+      await queryClient.end({ timeout: 1 });
+    };
   } else {
     const dbPath =
       config.environment === 'test' ? ':memory:' : config.database.url;
-    db = drizzleSqlite(new Database(dbPath));
+    const sqliteClient = new Database(dbPath);
+    db = drizzleSqlite(sqliteClient);
+    connectionProbe = async () => {
+      sqliteClient.prepare('SELECT 1').get();
+    };
+    closeConnection = async () => {
+      sqliteClient.close();
+    };
   }
 
   return db;
@@ -48,12 +74,18 @@ export async function testConnection(): Promise<{
 }> {
   try {
     await getDb();
+    if (!connectionProbe) {
+      throw new Error('Database connection probe is unavailable');
+    }
+    await connectionProbe();
+
     return {
       connected: true,
       spatialSupport: true,
       version: 'application-level',
     };
   } catch {
+    await resetConnection();
     return {
       connected: false,
       spatialSupport: false,

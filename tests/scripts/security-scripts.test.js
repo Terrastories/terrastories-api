@@ -93,9 +93,7 @@ describe('dependency review execution', () => {
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining('2 locked dependency changes detected')
     );
-    expect(log).toHaveBeenCalledWith(
-      '- changed: alpha 1.0.0 -> 2.0.0'
-    );
+    expect(log).toHaveBeenCalledWith('- changed: alpha 1.0.0 -> 2.0.0');
     expect(log).toHaveBeenCalledWith('- added: @scope/beta none -> 1.0.0');
   });
 
@@ -275,23 +273,19 @@ describe('npm audit report handling', () => {
   });
 
   it('compares current audit debt against the reviewed baseline', () => {
-    const comparison = auditModule.compareAuditAdvisories(
-      baseline,
-      policy,
-      {
-        vulnerabilities: {
-          'known-package': {
-            via: [
-              {
-                source: 'known',
-                severity: 'moderate',
-                url: 'https://example.invalid/known',
-              },
-            ],
-          },
+    const comparison = auditModule.compareAuditAdvisories(baseline, policy, {
+      vulnerabilities: {
+        'known-package': {
+          via: [
+            {
+              source: 'known',
+              severity: 'moderate',
+              url: 'https://example.invalid/known',
+            },
+          ],
         },
-      }
-    );
+      },
+    });
 
     expect(comparison).toMatchObject({
       newAdvisories: [],
@@ -310,32 +304,28 @@ describe('npm audit report handling', () => {
       )
     ).toThrow(/tracking mismatch/i);
 
-    const comparison = auditModule.compareAuditAdvisories(
-      baseline,
-      policy,
-      {
-        vulnerabilities: {
-          'known-package': {
-            via: [
-              {
-                source: 'known',
-                severity: 'high',
-                url: 'https://example.invalid/known',
-              },
-            ],
-          },
-          'new-package': {
-            via: [
-              {
-                source: 'new',
-                severity: 'critical',
-                url: 'https://example.invalid/new',
-              },
-            ],
-          },
+    const comparison = auditModule.compareAuditAdvisories(baseline, policy, {
+      vulnerabilities: {
+        'known-package': {
+          via: [
+            {
+              source: 'known',
+              severity: 'high',
+              url: 'https://example.invalid/known',
+            },
+          ],
         },
-      }
-    );
+        'new-package': {
+          via: [
+            {
+              source: 'new',
+              severity: 'critical',
+              url: 'https://example.invalid/new',
+            },
+          ],
+        },
+      },
+    });
 
     expect(comparison.severityChanges).toHaveLength(1);
     expect(comparison.newAdvisories).toHaveLength(1);

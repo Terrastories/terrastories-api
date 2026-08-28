@@ -10,14 +10,16 @@ import {
   boolean,
   integer as pgInteger,
   unique,
+  index,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
   unique as sqliteUnique,
+  index as sqliteIndex,
 } from 'drizzle-orm/sqlite-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
@@ -63,6 +65,13 @@ export const usersPg = pgTable(
       table.email,
       table.communityId
     ),
+    resetPasswordTokenIdx: index('idx_users_reset_password_token')
+      .on(table.resetPasswordToken)
+      .where(sql`${table.resetPasswordToken} IS NOT NULL`),
+    communityEmailIdx: index('idx_users_community_email').on(
+      table.communityId,
+      table.email
+    ),
   })
 );
 
@@ -103,6 +112,13 @@ export const usersSqlite = sqliteTable(
     emailCommunityUnique: sqliteUnique('users_email_community_unique').on(
       table.email,
       table.communityId
+    ),
+    resetPasswordTokenIdx: sqliteIndex('idx_users_reset_password_token')
+      .on(table.resetPasswordToken)
+      .where(sql`${table.resetPasswordToken} IS NOT NULL`),
+    communityEmailIdx: sqliteIndex('idx_users_community_email').on(
+      table.communityId,
+      table.email
     ),
   })
 );

@@ -41,13 +41,13 @@ jobs:
           version: 3.97.1
           extra_args: --results=verified,unknown
 
-  production-image:
+  production_image:
     name: Production image evidence
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
-      attestations: write
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -178,13 +178,22 @@ jobs:
           vuln-type: os,library
           severity: HIGH,CRITICAL
 
-      - name: Attest production image provenance
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
-        with:
-          subject-name: terrastories-api
-          subject-digest: ${{ steps.build.outputs.digest }}
-
       - name: Cleanup production container
         if: always()
         run: docker rm -f supply-chain-api > /dev/null 2>&1 || true
+
+  provenance:
+    name: Production image provenance
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: production_image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Attest production image provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: terrastories-api
+          subject-digest: ${{ needs.production_image.outputs.image_digest }}

@@ -1,0 +1,49 @@
+name: Sync Lockfile Once
+
+on:
+  pull_request:
+    types: [reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Regenerate lockfile metadata
+        run: npm install --package-lock-only --ignore-scripts --legacy-peer-deps --no-audit --no-fund
+
+      - name: Verify and commit lockfile metadata
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          if (lock.packages?.['']?.engines?.node !== pkg.engines.node) {
+            throw new Error('package-lock root Node engine did not synchronize');
+          }
+          NODE
+
+          if git diff --quiet -- package-lock.json; then
+            echo 'Lockfile metadata already synchronized.'
+            exit 0
+          fi
+
+          git config user.name 'terrastories-ci'
+          git config user.email 'terrastories-ci@users.noreply.github.com'
+          git add package-lock.json
+          git commit -m 'chore: sync lockfile runtime metadata'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}

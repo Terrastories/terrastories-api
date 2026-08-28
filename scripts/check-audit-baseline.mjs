@@ -199,9 +199,10 @@ export function compareAuditAdvisories(baseline, policy, report) {
   }
 
   const baselineDigest = computeAdvisorySetDigest(baseline.advisories);
-  if (baselineDigest !== policy.review?.advisoriesSha256?.toLowerCase()) {
+  const reviewedDigest = policy.review?.advisoriesSha256?.toLowerCase();
+  if (baselineDigest !== reviewedDigest) {
     throw new Error(
-      `Security audit review digest does not match the exact accepted advisory set; re-review dependency debt under #${policy.trackingIssue}.`
+      `Security audit review digest does not match the exact accepted advisory set (computed ${baselineDigest}, reviewed ${reviewedDigest}); re-review dependency debt under #${policy.trackingIssue}.`
     );
   }
 

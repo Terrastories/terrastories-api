@@ -30,6 +30,10 @@ function isCalendarDate(value) {
   );
 }
 
+function advisoryKey(advisory) {
+  return `${advisory.source}:${advisory.package}`;
+}
+
 export function filterBlockingAdvisories(advisories, minimumSeverity) {
   const minimumRank = SEVERITY_ORDER.get(minimumSeverity);
   if (minimumRank === undefined) {
@@ -142,13 +146,7 @@ export function collectAdvisories(report) {
   return current;
 }
 
-export async function main() {
-  const baseline = JSON.parse(await readFile(baselinePath, 'utf8'));
-  const policy = JSON.parse(await readFile(policyPath, 'utf8'));
-  const today = new Date().toISOString().slice(0, 10);
-
-  validateBaselinePolicy(policy, today);
-
+export function compareAuditAdvisories(baseline, policy, report) {
   if (
     !baseline.trackingIssue ||
     !Array.isArray(baseline.advisories) ||
@@ -158,6 +156,48 @@ export async function main() {
       'Invalid security audit baseline metadata or policy tracking mismatch'
     );
   }
+
+  const current = filterBlockingAdvisories(
+    collectAdvisories(report),
+    policy.minimumSeverity
+  );
+  const blockingBaseline = filterBlockingAdvisories(
+    baseline.advisories,
+    policy.minimumSeverity
+  );
+  const baselineByKey = new Map(
+    blockingBaseline.map((advisory) => [advisoryKey(advisory), advisory])
+  );
+  const newAdvisories = current.filter(
+    (advisory) => !baselineByKey.has(advisoryKey(advisory))
+  );
+  const severityChanges = current.filter((advisory) => {
+    const existing = baselineByKey.get(advisoryKey(advisory));
+    return existing && existing.severity !== advisory.severity;
+  });
+  const resolvedCount = blockingBaseline.filter(
+    (advisory) =>
+      !current.some(
+        (candidate) => advisoryKey(candidate) === advisoryKey(advisory)
+      )
+  ).length;
+
+  return {
+    current,
+    blockingBaseline,
+    baselineByKey,
+    newAdvisories,
+    severityChanges,
+    resolvedCount,
+  };
+}
+
+export async function main() {
+  const baseline = JSON.parse(await readFile(baselinePath, 'utf8'));
+  const policy = JSON.parse(await readFile(policyPath, 'utf8'));
+  const today = new Date().toISOString().slice(0, 10);
+
+  validateBaselinePolicy(policy, today);
 
   const audit = spawnSync(
     'npm',
@@ -177,25 +217,13 @@ export async function main() {
   }
 
   const report = parseAuditReport(audit.stdout);
-  const current = filterBlockingAdvisories(
-    collectAdvisories(report),
-    policy.minimumSeverity
-  );
-  const blockingBaseline = filterBlockingAdvisories(
-    baseline.advisories,
-    policy.minimumSeverity
-  );
-  const key = (advisory) => `${advisory.source}:${advisory.package}`;
-  const baselineByKey = new Map(
-    blockingBaseline.map((advisory) => [key(advisory), advisory])
-  );
-  const newAdvisories = current.filter(
-    (advisory) => !baselineByKey.has(key(advisory))
-  );
-  const severityChanges = current.filter((advisory) => {
-    const existing = baselineByKey.get(key(advisory));
-    return existing && existing.severity !== advisory.severity;
-  });
+  const {
+    current,
+    baselineByKey,
+    newAdvisories,
+    severityChanges,
+    resolvedCount,
+  } = compareAuditAdvisories(baseline, policy, report);
 
   if (newAdvisories.length > 0 || severityChanges.length > 0) {
     if (newAdvisories.length > 0) {
@@ -210,7 +238,7 @@ export async function main() {
     if (severityChanges.length > 0) {
       process.stderr.write('Existing npm audit advisories changed severity:\n');
       for (const advisory of severityChanges) {
-        const previous = baselineByKey.get(key(advisory));
+        const previous = baselineByKey.get(advisoryKey(advisory));
         process.stderr.write(
           `- ${advisory.package} ${previous.severity} -> ${advisory.severity} ${advisory.url || advisory.source}\n`
         );
@@ -221,10 +249,6 @@ export async function main() {
       `Review dependency debt and update #${policy.trackingIssue} before changing the accepted exception set.`
     );
   }
-
-  const resolvedCount = blockingBaseline.filter(
-    (advisory) => !current.some((candidate) => key(candidate) === key(advisory))
-  ).length;
 
   console.log(
     `npm audit baseline accepted at ${policy.minimumSeverity}+: ${current.length} known advisories tracked by #${policy.trackingIssue}; ` +

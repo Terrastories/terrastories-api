@@ -27,29 +27,32 @@ describe('Database Connection', () => {
     expect(Array.isArray(result)).toBe(true);
   });
 
-  it('should report PostgreSQL unavailable when the configured server cannot be queried', async () => {
-    const originalDatabaseUrl = process.env.DATABASE_URL;
+  it(
+    'should report PostgreSQL unavailable when the configured server cannot be queried',
+    async () => {
+      const originalDatabaseUrl = process.env.DATABASE_URL;
 
-    try {
-      process.env.DATABASE_URL =
-        'postgresql://terrastories:terrastories-test@127.0.0.1:1/terrastories_test';
-      vi.resetModules();
+      try {
+        process.env.DATABASE_URL =
+          'postgresql://terrastories:terrastories-test@127.0.0.1:1/terrastories_test';
+        vi.resetModules();
 
-      const { testConnection } = await import('../../src/db/index.js');
-      const result = await testConnection();
+        const { testConnection } = await import('../../src/db/index.js');
+        const result = await testConnection();
 
-      expect(result).toEqual({
-        connected: false,
-        spatialSupport: false,
-        version: null,
-      });
-    } finally {
-      if (originalDatabaseUrl === undefined) {
-        delete process.env.DATABASE_URL;
-      } else {
-        process.env.DATABASE_URL = originalDatabaseUrl;
+        expect(result).toEqual({
+          connected: false,
+          spatialSupport: false,
+          version: null,
+        });
+      } finally {
+        if (originalDatabaseUrl === undefined) {
+          delete process.env.DATABASE_URL;
+        } else {
+          process.env.DATABASE_URL = originalDatabaseUrl;
+        }
+        vi.resetModules();
       }
-      vi.resetModules();
     }
-  });
+  );
 });

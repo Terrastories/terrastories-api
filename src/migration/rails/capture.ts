@@ -20,14 +20,40 @@ interface SourceColumn {
   columnName: string;
   dataType: string;
   udtName: string;
+  formattedType: string;
   nullable: boolean;
   ordinal: number;
+  columnDefault: string | null;
+  characterMaximumLength: number | null;
+  numericPrecision: number | null;
+  numericScale: number | null;
+  datetimePrecision: number | null;
+  collationName: string | null;
+  isIdentity: boolean;
+  identityGeneration: string | null;
+  isGenerated: boolean;
+  generationExpression: string | null;
+}
+
+interface SourceConstraint {
+  name: string;
+  type: string;
+  definition: string;
+}
+
+interface SourceIndex {
+  name: string;
+  definition: string;
 }
 
 interface SourceTable {
   tableName: string;
   columns: SourceColumn[];
   primaryKey: string[];
+  constraints: SourceConstraint[];
+  indexes: SourceIndex[];
+  rowSecurityEnabled: boolean;
+  rowSecurityForced: boolean;
 }
 
 export interface RailsCaptureManifest {
@@ -45,6 +71,10 @@ export interface RailsCaptureManifest {
       rowSha256: string;
       primaryKey: string[];
       columns: SourceColumn[];
+      constraints: SourceConstraint[];
+      indexes: SourceIndex[];
+      rowSecurityEnabled: boolean;
+      rowSecurityForced: boolean;
     }
   >;
   blobs: CapturedBlob[];
@@ -100,38 +130,124 @@ async function discoverTables(client: PoolClient): Promise<SourceTable[]> {
 
   const tables: SourceTable[] = [];
   for (const { table_name: tableName } of tableResult.rows) {
-    const [columnResult, primaryKeyResult] = await Promise.all([
-      client.query<{
-        column_name: string;
-        data_type: string;
-        udt_name: string;
-        is_nullable: 'YES' | 'NO';
-        ordinal_position: number;
-      }>(
-        `
-          SELECT column_name, data_type, udt_name, is_nullable, ordinal_position
-          FROM information_schema.columns
-          WHERE table_schema = 'public' AND table_name = $1
-          ORDER BY ordinal_position
-        `,
-        [tableName]
-      ),
-      client.query<{ column_name: string }>(
-        `
-          SELECT kcu.column_name
-          FROM information_schema.table_constraints tc
-          JOIN information_schema.key_column_usage kcu
-            ON tc.constraint_name = kcu.constraint_name
-           AND tc.table_schema = kcu.table_schema
-           AND tc.table_name = kcu.table_name
-          WHERE tc.table_schema = 'public'
-            AND tc.table_name = $1
-            AND tc.constraint_type = 'PRIMARY KEY'
-          ORDER BY kcu.ordinal_position
-        `,
-        [tableName]
-      ),
-    ]);
+    const [columnResult, primaryKeyResult, constraintResult, indexResult, rlsResult] =
+      await Promise.all([
+        client.query<{
+          column_name: string;
+          data_type: string;
+          udt_name: string;
+          formatted_type: string;
+          is_nullable: 'YES' | 'NO';
+          ordinal_position: number;
+          column_default: string | null;
+          character_maximum_length: number | null;
+          numeric_precision: number | null;
+          numeric_scale: number | null;
+          datetime_precision: number | null;
+          collation_name: string | null;
+          is_identity: 'YES' | 'NO';
+          identity_generation: string | null;
+          is_generated: 'ALWAYS' | 'NEVER';
+          generation_expression: string | null;
+        }>(
+          `
+            SELECT
+              cols.column_name,
+              cols.data_type,
+              cols.udt_name,
+              pg_catalog.format_type(attr.atttypid, attr.atttypmod) AS formatted_type,
+              cols.is_nullable,
+              cols.ordinal_position,
+              cols.column_default,
+              cols.character_maximum_length,
+              cols.numeric_precision,
+              cols.numeric_scale,
+              cols.datetime_precision,
+              cols.collation_name,
+              cols.is_identity,
+              cols.identity_generation,
+              cols.is_generated,
+              cols.generation_expression
+            FROM information_schema.columns cols
+            JOIN pg_catalog.pg_namespace ns
+              ON ns.nspname = cols.table_schema
+            JOIN pg_catalog.pg_class rel
+              ON rel.relnamespace = ns.oid
+             AND rel.relname = cols.table_name
+            JOIN pg_catalog.pg_attribute attr
+              ON attr.attrelid = rel.oid
+             AND attr.attname = cols.column_name
+             AND attr.attnum > 0
+             AND NOT attr.attisdropped
+            WHERE cols.table_schema = 'public'
+              AND cols.table_name = $1
+            ORDER BY cols.ordinal_position
+          `,
+          [tableName]
+        ),
+        client.query<{ column_name: string }>(
+          `
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema = kcu.table_schema
+             AND tc.table_name = kcu.table_name
+            WHERE tc.table_schema = 'public'
+              AND tc.table_name = $1
+              AND tc.constraint_type = 'PRIMARY KEY'
+            ORDER BY kcu.ordinal_position
+          `,
+          [tableName]
+        ),
+        client.query<{
+          constraint_name: string;
+          constraint_type: string;
+          definition: string;
+        }>(
+          `
+            SELECT
+              con.conname AS constraint_name,
+              CASE con.contype
+                WHEN 'c' THEN 'CHECK'
+                WHEN 'f' THEN 'FOREIGN KEY'
+                WHEN 'p' THEN 'PRIMARY KEY'
+                WHEN 'u' THEN 'UNIQUE'
+                WHEN 'x' THEN 'EXCLUDE'
+                ELSE con.contype::text
+              END AS constraint_type,
+              pg_catalog.pg_get_constraintdef(con.oid, true) AS definition
+            FROM pg_catalog.pg_constraint con
+            JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+            WHERE ns.nspname = 'public'
+              AND rel.relname = $1
+            ORDER BY con.conname
+          `,
+          [tableName]
+        ),
+        client.query<{ indexname: string; indexdef: string }>(
+          `
+            SELECT indexname, indexdef
+            FROM pg_catalog.pg_indexes
+            WHERE schemaname = 'public' AND tablename = $1
+            ORDER BY indexname
+          `,
+          [tableName]
+        ),
+        client.query<{
+          relrowsecurity: boolean;
+          relforcerowsecurity: boolean;
+        }>(
+          `
+            SELECT rel.relrowsecurity, rel.relforcerowsecurity
+            FROM pg_catalog.pg_class rel
+            JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+            WHERE ns.nspname = 'public' AND rel.relname = $1
+          `,
+          [tableName]
+        ),
+      ]);
 
     tables.push({
       tableName,
@@ -139,10 +255,32 @@ async function discoverTables(client: PoolClient): Promise<SourceTable[]> {
         columnName: column.column_name,
         dataType: column.data_type,
         udtName: column.udt_name,
+        formattedType: column.formatted_type,
         nullable: column.is_nullable === 'YES',
         ordinal: column.ordinal_position,
+        columnDefault: column.column_default,
+        characterMaximumLength: column.character_maximum_length,
+        numericPrecision: column.numeric_precision,
+        numericScale: column.numeric_scale,
+        datetimePrecision: column.datetime_precision,
+        collationName: column.collation_name,
+        isIdentity: column.is_identity === 'YES',
+        identityGeneration: column.identity_generation,
+        isGenerated: column.is_generated === 'ALWAYS',
+        generationExpression: column.generation_expression,
       })),
       primaryKey: primaryKeyResult.rows.map((row) => row.column_name),
+      constraints: constraintResult.rows.map((constraint) => ({
+        name: constraint.constraint_name,
+        type: constraint.constraint_type,
+        definition: constraint.definition,
+      })),
+      indexes: indexResult.rows.map((index) => ({
+        name: index.indexname,
+        definition: index.indexdef,
+      })),
+      rowSecurityEnabled: rlsResult.rows[0]?.relrowsecurity ?? false,
+      rowSecurityForced: rlsResult.rows[0]?.relforcerowsecurity ?? false,
     });
   }
 
@@ -198,6 +336,10 @@ function initializeArchive(path: string): Database.Database {
       table_name TEXT PRIMARY KEY,
       columns_json TEXT NOT NULL,
       primary_key_json TEXT NOT NULL,
+      constraints_json TEXT NOT NULL,
+      indexes_json TEXT NOT NULL,
+      row_security_enabled INTEGER NOT NULL,
+      row_security_forced INTEGER NOT NULL,
       row_count INTEGER NOT NULL,
       row_sha256 TEXT NOT NULL
     );
@@ -270,13 +412,26 @@ async function captureTable(
 
   archive
     .prepare(
-      `INSERT INTO source_tables(table_name, columns_json, primary_key_json, row_count, row_sha256)
-       VALUES (?, ?, ?, ?, '')`
+      `INSERT INTO source_tables(
+         table_name,
+         columns_json,
+         primary_key_json,
+         constraints_json,
+         indexes_json,
+         row_security_enabled,
+         row_security_forced,
+         row_count,
+         row_sha256
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')`
     )
     .run(
       table.tableName,
       JSON.stringify(table.columns),
       JSON.stringify(table.primaryKey),
+      JSON.stringify(table.constraints),
+      JSON.stringify(table.indexes),
+      table.rowSecurityEnabled ? 1 : 0,
+      table.rowSecurityForced ? 1 : 0,
       expectedCount
     );
 
@@ -382,6 +537,17 @@ async function captureBlobs(
   return blobs;
 }
 
+async function configureDeterministicSourceSession(client: PoolClient): Promise<void> {
+  await client.query(`SET LOCAL TIME ZONE 'UTC'`);
+  await client.query(`SET LOCAL DateStyle = 'ISO, YMD'`);
+  await client.query(`SET LOCAL IntervalStyle = 'iso_8601'`);
+  await client.query(`SET LOCAL bytea_output = 'hex'`);
+  await client.query(`SET LOCAL extra_float_digits = 3`);
+  // If RLS would hide rows for this connection, PostgreSQL errors instead of
+  // silently returning an incomplete migration snapshot.
+  await client.query(`SET LOCAL row_security = off`);
+}
+
 export async function captureRailsToBundle(
   options: CaptureRailsOptions
 ): Promise<RailsCaptureManifest> {
@@ -403,6 +569,7 @@ export async function captureRailsToBundle(
       'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'
     );
     transactionOpen = true;
+    await configureDeterministicSourceSession(client);
 
     const tables = await discoverTables(client);
     validateRequiredRailsSchema(tables);
@@ -436,6 +603,10 @@ export async function captureRailsToBundle(
         rowSha256: captured.rowSha256,
         primaryKey: table.primaryKey,
         columns: table.columns,
+        constraints: table.constraints,
+        indexes: table.indexes,
+        rowSecurityEnabled: table.rowSecurityEnabled,
+        rowSecurityForced: table.rowSecurityForced,
       };
       totalRows += captured.rowCount;
     }

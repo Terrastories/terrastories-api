@@ -129,8 +129,17 @@ jobs:
           npm run test:db:sqlite
           npm run test:db:postgres
 
-      - name: Run canonical validation
-        run: npm run validate:ci
+      - name: Run deterministic repository validation
+        run: |
+          npm run format:check
+          npm run type-check
+          npm run lint
+          npm run test:ci:contracts
+          npm run test:ci:core
+          npm run test:ci:routes
+          npm run test:ci:services
+          npm run test:ci:comparison
+          npm run build
 
       - name: Reproduce Docker integration startup
         run: |

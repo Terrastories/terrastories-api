@@ -1,12 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import {
-  chmod,
-  mkdir,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from 'node:fs/promises';
+import { chmod, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { Pool, type PoolClient } from 'pg';
@@ -166,7 +159,9 @@ function validateRequiredRailsSchema(tables: SourceTable[]): void {
       throw new Error(`Required Rails table is missing: ${tableName}`);
     }
 
-    const actualColumns = new Set(table.columns.map((column) => column.columnName));
+    const actualColumns = new Set(
+      table.columns.map((column) => column.columnName)
+    );
     for (const columnName of requiredColumns) {
       if (!actualColumns.has(columnName)) {
         throw new Error(
@@ -383,7 +378,9 @@ export async function captureRailsToBundle(
   let transactionOpen = false;
 
   try {
-    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await client.query(
+      'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'
+    );
     transactionOpen = true;
 
     const tables = await discoverTables(client);

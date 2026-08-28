@@ -43,7 +43,9 @@ export async function resolveActiveStorageBlobPath(
   throw new Error(`Missing ActiveStorage blob bytes for key ${key}`);
 }
 
-async function hashFile(path: string): Promise<{ md5: string; sha256: string }> {
+async function hashFile(
+  path: string
+): Promise<{ md5: string; sha256: string }> {
   return new Promise((resolve, reject) => {
     const md5 = createHash('md5');
     const sha256 = createHash('sha256');

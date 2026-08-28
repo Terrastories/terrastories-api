@@ -55,9 +55,9 @@ describe('ActiveStorage blob resolution', () => {
     const expected = join(root, 'fixtureblob');
     await writeFile(expected, 'fixture');
 
-    await expect(resolveActiveStorageBlobPath(root, 'fixtureblob')).resolves.toBe(
-      expected
-    );
+    await expect(
+      resolveActiveStorageBlobPath(root, 'fixtureblob')
+    ).resolves.toBe(expected);
   });
 
   it('accepts Rails DiskService two-level key layout', async () => {
@@ -67,15 +67,15 @@ describe('ActiveStorage blob resolution', () => {
     const expected = join(nested, 'fixtureblob');
     await writeFile(expected, 'fixture');
 
-    await expect(resolveActiveStorageBlobPath(root, 'fixtureblob')).resolves.toBe(
-      expected
-    );
+    await expect(
+      resolveActiveStorageBlobPath(root, 'fixtureblob')
+    ).resolves.toBe(expected);
   });
 
   it('rejects unsafe blob keys before touching the filesystem', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rails-unsafe-blobs-'));
-    await expect(resolveActiveStorageBlobPath(root, '../secret')).rejects.toThrow(
-      /unsafe ActiveStorage key/i
-    );
+    await expect(
+      resolveActiveStorageBlobPath(root, '../secret')
+    ).rejects.toThrow(/unsafe ActiveStorage key/i);
   });
 });

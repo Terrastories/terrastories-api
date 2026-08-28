@@ -27,11 +27,7 @@ export const REQUIRED_RAILS_TABLES = {
     'created_at',
     'service_name',
   ],
-  active_storage_variant_records: [
-    'id',
-    'blob_id',
-    'variation_digest',
-  ],
+  active_storage_variant_records: ['id', 'blob_id', 'variation_digest'],
   communities: [
     'id',
     'name',
@@ -60,13 +56,7 @@ export const REQUIRED_RAILS_TABLES = {
     'created_at',
     'updated_at',
   ],
-  flipper_features: [
-    'id',
-    'key',
-    'description',
-    'created_at',
-    'updated_at',
-  ],
+  flipper_features: ['id', 'key', 'description', 'created_at', 'updated_at'],
   flipper_gates: [
     'id',
     'feature_key',

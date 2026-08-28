@@ -109,9 +109,9 @@ describeWithPostgres('Rails source capture', () => {
 
     archive.close();
 
-    expect(await readFile(join(outputDir, 'blobs', 'fixtureblob'), 'utf8')).toBe(
-      "<svg xmlns='http://www.w3.org/2000/svg'></svg>\n"
-    );
+    expect(
+      await readFile(join(outputDir, 'blobs', 'fixtureblob'), 'utf8')
+    ).toBe("<svg xmlns='http://www.w3.org/2000/svg'></svg>\n");
     expect(await pathExists(join(outputDir, 'manifest.json'))).toBe(true);
   });
 

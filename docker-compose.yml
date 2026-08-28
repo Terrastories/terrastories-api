@@ -53,10 +53,12 @@ services:
     restart: unless-stopped
 
   # =============================================================================
-  # DATABASE SERVICE - PostgreSQL 13 (no database-specific spatial extension)
+  # DATABASE SERVICE - PostgreSQL 13 persisted-volume compatibility bridge
+  # Existing named volumes may contain historical PostGIS catalog objects.
+  # New initialization and application semantics do not create or use PostGIS.
   # =============================================================================
   db:
-    image: postgres:13-alpine
+    image: postgis/postgis:13-master
     environment:
       POSTGRES_DB: terrastories
       POSTGRES_USER: terrastories

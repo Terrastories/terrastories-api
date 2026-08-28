@@ -101,3 +101,236 @@ jobs:
         run: npm ci --legacy-peer-deps
       - name: Run PostgreSQL migration and integration gate
         run: npm run test:db:postgres
+
+  issue135-fk-history-fixer:
+    name: Issue 135 canonical FK history fixer
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'feat/issue-135-dual-backend-ci' &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    services:
+      postgres:
+        image: postgres:13-alpine
+        env:
+          POSTGRES_DB: terrastories_test
+          POSTGRES_USER: terrastories
+          POSTGRES_PASSWORD: terrastories-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U terrastories -d terrastories_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test
+      ALLOW_POSTGRES_TEST_RESET: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-135-dual-backend-ci
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Align PostgreSQL FK declarations and migration names
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          mappings = [
+              ('users_community_id_fkey', 'users_community_id_communities_id_fk', 'users'),
+              ('places_community_id_fkey', 'places_community_id_communities_id_fk', 'places'),
+              ('speakers_community_id_fkey', 'speakers_community_id_communities_id_fk', 'speakers'),
+              ('stories_community_id_fkey', 'stories_community_id_communities_id_fk', 'stories'),
+              ('stories_interview_location_id_fkey', 'stories_interview_location_id_places_id_fk', 'stories'),
+              ('stories_interviewer_id_fkey', 'stories_interviewer_id_speakers_id_fk', 'stories'),
+              ('files_community_id_fkey', 'files_community_id_communities_id_fk', 'files'),
+              ('files_uploaded_by_fkey', 'files_uploaded_by_users_id_fk', 'files'),
+              ('story_places_story_id_fkey', 'story_places_story_id_stories_id_fk', 'story_places'),
+              ('story_places_place_id_fkey', 'story_places_place_id_places_id_fk', 'story_places'),
+              ('story_speakers_story_id_fkey', 'story_speakers_story_id_stories_id_fk', 'story_speakers'),
+              ('story_speakers_speaker_id_fkey', 'story_speakers_speaker_id_speakers_id_fk', 'story_speakers'),
+          ]
+
+          baseline = Path('src/db/migrations/postgres/0000_current_compat_baseline.sql')
+          text = baseline.read_text()
+          for old, new, _table in mappings:
+              text = text.replace(old, new)
+
+          marker = "CREATE UNIQUE INDEX IF NOT EXISTS communities_slug_unique ON communities (slug);\n--> statement-breakpoint\n"
+          if 'DO $canonicalize_issue135_fks$' not in text:
+              if marker not in text:
+                  raise SystemExit('could not locate canonical FK rename insertion point')
+              values = ',\n    '.join(
+                  f"('{table}', '{old}', '{new}')"
+                  for old, new, table in mappings
+              )
+              rename_block = f"""DO $canonicalize_issue135_fks$\nDECLARE\n  mapping record;\nBEGIN\n  FOR mapping IN\n    SELECT * FROM (VALUES\n    {values}\n    ) AS mappings(table_name, old_name, new_name)\n  LOOP\n    IF EXISTS (\n      SELECT 1 FROM pg_constraint\n      WHERE conrelid = to_regclass(mapping.table_name)\n        AND conname = mapping.old_name\n    ) AND NOT EXISTS (\n      SELECT 1 FROM pg_constraint\n      WHERE conrelid = to_regclass(mapping.table_name)\n        AND conname = mapping.new_name\n    ) THEN\n      EXECUTE format(\n        'ALTER TABLE %I RENAME CONSTRAINT %I TO %I',\n        mapping.table_name, mapping.old_name, mapping.new_name\n      );\n    END IF;\n  END LOOP;\nEND $canonicalize_issue135_fks$;\n--> statement-breakpoint\n"""
+              text = text.replace(marker, marker + rename_block, 1)
+          baseline.write_text(text)
+
+          theme_migration = Path('src/db/migrations/postgres/0001_theme_ownership_fk.sql')
+          text = theme_migration.read_text().replace(
+              'themes_community_id_fkey',
+              'themes_community_id_communities_id_fk',
+          )
+          theme_migration.write_text(text)
+
+          speakers = Path('src/db/schema/speakers.ts')
+          text = speakers.read_text()
+          old = "communityId: pgInteger('community_id').notNull(),"
+          new = "communityId: pgInteger('community_id')\n      .notNull()\n      .references(() => communitiesPg.id),"
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'speakersPg' in text and new not in text:
+              raise SystemExit('could not add PostgreSQL speakers community FK')
+          speakers.write_text(text)
+
+          stories = Path('src/db/schema/stories.ts')
+          text = stories.read_text()
+          old = "communityId: pgInteger('community_id').notNull(),"
+          new = "communityId: pgInteger('community_id')\n      .notNull()\n      .references(() => communitiesPg.id),"
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'storiesPg' in text and new not in text:
+              raise SystemExit('could not add PostgreSQL stories community FK')
+          stories.write_text(text)
+
+          backend = Path('scripts/test-db-backend.ts')
+          text = backend.read_text()
+          for old, new, _table in mappings:
+              text = text.replace(old, new)
+          anchor = "    'stories_community_id_communities_id_fk',\n"
+          additions = (
+              anchor
+              + "    'stories_interview_location_id_places_id_fk',\n"
+              + "    'stories_interviewer_id_speakers_id_fk',\n"
+          )
+          if 'stories_interview_location_id_places_id_fk' not in text:
+              if anchor not in text:
+                  raise SystemExit('could not extend PostgreSQL FK assertions')
+              text = text.replace(anchor, additions, 1)
+          backend.write_text(text)
+
+          regression = Path('scripts/test-postgres-migration-regressions.ts')
+          text = regression.read_text().replace(
+              'themes_community_id_fkey',
+              'themes_community_id_communities_id_fk',
+          )
+          old = "  assert.equal(\n    constraint.convalidated,\n    false,\n    'legacy orphan rows must keep the staged FK unvalidated until remediated'\n  );\n\n  await assert.rejects("
+          new = "  assert.equal(\n    constraint.convalidated,\n    false,\n    'legacy orphan rows must keep the staged FK unvalidated until remediated'\n  );\n  await assertSnapshotConstraintNames(client);\n\n  await assert.rejects("
+          if 'await assertSnapshotConstraintNames(client);' not in text:
+              if old not in text:
+                  raise SystemExit('could not add upgraded snapshot-name assertion')
+              text = text.replace(old, new, 1)
+          text = text.replace(
+              'async function verifySnapshotConstraintNames(\n  client: ReturnType<typeof postgres>\n): Promise<void> {\n  await resetDatabase(client);\n  await migrate(drizzle(client), { migrationsFolder });\n\n',
+              'async function assertSnapshotConstraintNames(\n  client: ReturnType<typeof postgres>\n): Promise<void> {\n',
+          )
+          text = text.replace(
+              "async function main(): Promise<void> {",
+              "async function verifyFreshSnapshotConstraintNames(\n  client: ReturnType<typeof postgres>\n): Promise<void> {\n  await resetDatabase(client);\n  await migrate(drizzle(client), { migrationsFolder });\n  await assertSnapshotConstraintNames(client);\n\n  const [themeConstraint] = await client.unsafe(`\n    SELECT convalidated\n    FROM pg_constraint\n    WHERE connamespace = 'public'::regnamespace\n      AND conname = 'themes_community_id_communities_id_fk'\n  `);\n  assert.equal(\n    themeConstraint?.convalidated,\n    true,\n    'fresh databases must fully validate the theme ownership FK'\n  );\n}\n\nasync function main(): Promise<void> {",
+              1,
+          )
+          # Remove the old fresh-theme validation tail from the assertion helper.
+          duplicate = "\n  const [themeConstraint] = await client.unsafe(`\n    SELECT convalidated\n    FROM pg_constraint\n    WHERE connamespace = 'public'::regnamespace\n      AND conname = 'themes_community_id_communities_id_fk'\n  `);\n  assert.equal(\n    themeConstraint?.convalidated,\n    true,\n    'fresh databases must fully validate the theme ownership FK'\n  );\n}\n\nasync function verifyFreshSnapshotConstraintNames"
+          text = text.replace(duplicate, "\n}\n\nasync function verifyFreshSnapshotConstraintNames", 1)
+          text = text.replace(
+              '    await verifySnapshotConstraintNames(client);',
+              '    await verifyFreshSnapshotConstraintNames(client);',
+          )
+          regression.write_text(text)
+          PY
+
+          npx prettier --write \
+            src/db/schema/speakers.ts \
+            src/db/schema/stories.ts \
+            scripts/test-db-backend.ts \
+            scripts/test-postgres-migration-regressions.ts
+
+      - name: Regenerate PostgreSQL snapshots from the canonical schema states
+        run: |
+          rm -rf .issue135-fk-snapshots src/db/schema-snapshot
+          mkdir -p .issue135-fk-snapshots/postgres src/db/schema-snapshot
+          cp src/db/schema/*.ts src/db/schema-snapshot/
+          sed -i -E "s/(from[[:space:]]+['\"][^'\"]+)\.js(['\"])/\1.ts\2/g" src/db/schema-snapshot/*.ts
+
+          python3 <<'PY'
+          from pathlib import Path
+          themes = Path('src/db/schema-snapshot/themes.ts')
+          text = themes.read_text()
+          old = "communityId: bigint('community_id', { mode: 'number' })\n      .notNull()\n      .references(() => communitiesPg.id),"
+          new = "communityId: bigint('community_id', { mode: 'number' }).notNull(),"
+          if old not in text:
+              raise SystemExit('could not construct PostgreSQL 0000 schema state')
+          themes.write_text(text.replace(old, new, 1))
+          PY
+
+          cat > .issue135-fk-snapshots/postgres.config.ts <<'EOF'
+          import { defineConfig } from 'drizzle-kit';
+          export default defineConfig({
+            dialect: 'postgresql',
+            schema: './src/db/schema-snapshot/*.ts',
+            out: './.issue135-fk-snapshots/postgres',
+            dbCredentials: { url: 'postgresql://snapshot:snapshot@127.0.0.1:5432/snapshot' },
+            strict: true,
+          });
+          EOF
+
+          npx drizzle-kit generate --config=.issue135-fk-snapshots/postgres.config.ts --name=current_compat_baseline
+          test -f .issue135-fk-snapshots/postgres/meta/0000_snapshot.json
+
+          cp src/db/schema/themes.ts src/db/schema-snapshot/themes.ts
+          sed -i -E "s/(from[[:space:]]+['\"][^'\"]+)\.js(['\"])/\1.ts\2/g" src/db/schema-snapshot/themes.ts
+          npx drizzle-kit generate --config=.issue135-fk-snapshots/postgres.config.ts --name=theme_ownership_fk
+          test -f .issue135-fk-snapshots/postgres/meta/0001_snapshot.json
+
+          cp .issue135-fk-snapshots/postgres/meta/0000_snapshot.json src/db/migrations/postgres/meta/0000_snapshot.json
+          cp .issue135-fk-snapshots/postgres/meta/0001_snapshot.json src/db/migrations/postgres/meta/0001_snapshot.json
+          rm -rf .issue135-fk-snapshots src/db/schema-snapshot
+
+      - name: Verify formatting, generation drift, and both backend gates
+        run: |
+          npm run format:check
+          npm run type-check
+          npm run lint
+
+          before_pg=$(find src/db/migrations/postgres -maxdepth 1 -name '*.sql' | wc -l)
+          npx drizzle-kit generate --name=issue135_fk_name_probe
+          after_pg=$(find src/db/migrations/postgres -maxdepth 1 -name '*.sql' | wc -l)
+          if [ "$after_pg" -ne "$before_pg" ]; then
+            echo '::error::PostgreSQL schema still has pending migration drift'
+            cat src/db/migrations/postgres/*issue135_fk_name_probe.sql || true
+            exit 31
+          fi
+
+          npm run test:db:sqlite
+          npm run test:db:postgres
+          git diff --check
+
+      - name: Commit proven canonical FK history
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            src/db/migrations/postgres/0000_current_compat_baseline.sql \
+            src/db/migrations/postgres/0001_theme_ownership_fk.sql \
+            src/db/migrations/postgres/meta/0000_snapshot.json \
+            src/db/migrations/postgres/meta/0001_snapshot.json \
+            src/db/schema/speakers.ts \
+            src/db/schema/stories.ts \
+            scripts/test-db-backend.ts \
+            scripts/test-postgres-migration-regressions.ts
+          git diff --cached --check
+          git diff --cached --stat
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: align postgres foreign key history'
+          git push origin HEAD:feat/issue-135-dual-backend-ci

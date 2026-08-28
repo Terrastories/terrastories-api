@@ -80,8 +80,8 @@ export async function verifyAndCopyActiveStorageBlob(options: {
     options.blobRoot,
     options.key
   );
-  const sourceStat = await stat(sourcePath, { bigint: true });
   const expectedSize = BigInt(options.byteSize);
+  const sourceStat = await stat(sourcePath, { bigint: true });
 
   if (sourceStat.size !== expectedSize) {
     throw new Error(
@@ -89,8 +89,8 @@ export async function verifyAndCopyActiveStorageBlob(options: {
     );
   }
 
-  const hashes = await hashFile(sourcePath);
-  if (options.checksum && hashes.md5 !== options.checksum) {
+  const sourceHashes = await hashFile(sourcePath);
+  if (options.checksum && sourceHashes.md5 !== options.checksum) {
     throw new Error(
       `ActiveStorage checksum mismatch for key ${options.key}: Rails checksum does not match source bytes`
     );
@@ -101,6 +101,28 @@ export async function verifyAndCopyActiveStorageBlob(options: {
   await copyFile(sourcePath, destinationPath);
   await chmod(destinationPath, 0o600);
 
+  const destinationStat = await stat(destinationPath, { bigint: true });
+  if (destinationStat.size !== expectedSize) {
+    throw new Error(
+      `ActiveStorage copied size mismatch for key ${options.key}: expected ${expectedSize}, got ${destinationStat.size}`
+    );
+  }
+
+  const destinationHashes = await hashFile(destinationPath);
+  if (
+    destinationHashes.md5 !== sourceHashes.md5 ||
+    destinationHashes.sha256 !== sourceHashes.sha256
+  ) {
+    throw new Error(
+      `ActiveStorage copied checksum mismatch for key ${options.key}: destination bytes do not match verified source bytes`
+    );
+  }
+  if (options.checksum && destinationHashes.md5 !== options.checksum) {
+    throw new Error(
+      `ActiveStorage copied checksum mismatch for key ${options.key}: Rails checksum does not match destination bytes`
+    );
+  }
+
   return {
     id: options.id,
     key: options.key,
@@ -108,7 +130,7 @@ export async function verifyAndCopyActiveStorageBlob(options: {
     contentType: options.contentType,
     byteSize: options.byteSize,
     railsChecksum: options.checksum,
-    sha256: hashes.sha256,
+    sha256: destinationHashes.sha256,
     serviceName: options.serviceName,
   };
 }

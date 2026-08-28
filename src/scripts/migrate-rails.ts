@@ -35,7 +35,7 @@ function parseArgs(argv: string[]): CliOptions {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') {
-      console.log(usage());
+      process.stdout.write(usage());
       process.exit(0);
     }
 
@@ -70,14 +70,14 @@ async function main(): Promise<void> {
   const manifest = await captureRailsToBundle(options);
 
   // Never print source rows, secrets, database URLs, hashes, or filenames here.
-  console.log(
-    `Rails capture complete: ${manifest.totals.tables} tables, ${manifest.totals.rows} rows, ${manifest.totals.blobs} blobs.`
+  process.stdout.write(
+    `Rails capture complete: ${manifest.totals.tables} tables, ${manifest.totals.rows} rows, ${manifest.totals.blobs} blobs.\n`
   );
-  console.log(`Bundle: ${options.outputDir}`);
+  process.stdout.write(`Bundle: ${options.outputDir}\n`);
 }
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : 'Unknown migration error';
-  console.error(`Rails capture failed: ${message}`);
+  process.stderr.write(`Rails capture failed: ${message}\n`);
   process.exitCode = 1;
 });

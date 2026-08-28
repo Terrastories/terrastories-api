@@ -1035,9 +1035,8 @@ async function verifyPostgresTransactionAndForeignKey(
     `
   );
 
-  await client.unsafe(
-    'CREATE TEMP TABLE null_unique_probe (value text UNIQUE)'
-  );
+  await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');
+  await client.unsafe('CREATE TABLE null_unique_probe (value text UNIQUE)');
   await client.unsafe(
     'INSERT INTO null_unique_probe (value) VALUES (NULL), (NULL)'
   );
@@ -1047,7 +1046,7 @@ async function verifyPostgresTransactionAndForeignKey(
   await assert.rejects(
     client.unsafe("INSERT INTO null_unique_probe (value) VALUES ('duplicate')")
   );
-  await client.unsafe('DROP TABLE null_unique_probe');
+  await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');
 }
 
 async function verifySqliteFailedMigrationNotRecorded(): Promise<void> {

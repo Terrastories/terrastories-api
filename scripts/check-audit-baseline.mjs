@@ -168,6 +168,17 @@ export function compareAuditAdvisories(baseline, policy, report) {
   const baselineByKey = new Map(
     blockingBaseline.map((advisory) => [advisoryKey(advisory), advisory])
   );
+  const currentKeys = new Set(current.map(advisoryKey));
+  const resolvedAdvisories = blockingBaseline.filter(
+    (advisory) => !currentKeys.has(advisoryKey(advisory))
+  );
+
+  if (resolvedAdvisories.length > 0) {
+    throw new Error(
+      `Security audit baseline contains ${resolvedAdvisories.length} resolved advisories; prune resolved exceptions before CI can pass.`
+    );
+  }
+
   const newAdvisories = current.filter(
     (advisory) => !baselineByKey.has(advisoryKey(advisory))
   );
@@ -175,12 +186,6 @@ export function compareAuditAdvisories(baseline, policy, report) {
     const existing = baselineByKey.get(advisoryKey(advisory));
     return existing && existing.severity !== advisory.severity;
   });
-  const resolvedCount = blockingBaseline.filter(
-    (advisory) =>
-      !current.some(
-        (candidate) => advisoryKey(candidate) === advisoryKey(advisory)
-      )
-  ).length;
 
   return {
     current,
@@ -188,7 +193,7 @@ export function compareAuditAdvisories(baseline, policy, report) {
     baselineByKey,
     newAdvisories,
     severityChanges,
-    resolvedCount,
+    resolvedCount: 0,
   };
 }
 
@@ -217,13 +222,8 @@ export async function main() {
   }
 
   const report = parseAuditReport(audit.stdout);
-  const {
-    current,
-    baselineByKey,
-    newAdvisories,
-    severityChanges,
-    resolvedCount,
-  } = compareAuditAdvisories(baseline, policy, report);
+  const { current, baselineByKey, newAdvisories, severityChanges } =
+    compareAuditAdvisories(baseline, policy, report);
 
   if (newAdvisories.length > 0 || severityChanges.length > 0) {
     if (newAdvisories.length > 0) {
@@ -251,8 +251,7 @@ export async function main() {
   }
 
   console.log(
-    `npm audit baseline accepted at ${policy.minimumSeverity}+: ${current.length} known advisories tracked by #${policy.trackingIssue}; ` +
-      `${resolvedCount} baseline advisories resolved; policy expires ${policy.expires}.`
+    `npm audit baseline accepted at ${policy.minimumSeverity}+: ${current.length} exact known advisories tracked by #${policy.trackingIssue}; policy expires ${policy.expires}.`
   );
 }
 

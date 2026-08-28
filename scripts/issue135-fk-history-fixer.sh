@@ -86,6 +86,9 @@ backend = Path('scripts/test-db-backend.ts')
 text = backend.read_text()
 for old, new, _table in mappings:
     text = text.replace(old, new)
+text = text.replace(
+    'themes_community_id_fkey', 'themes_community_id_communities_id_fk'
+)
 anchor = "    'stories_community_id_communities_id_fk',\n"
 if "    'stories_interview_location_id_places_id_fk',\n" not in text:
     if anchor not in text:
@@ -329,14 +332,30 @@ npm run format:check
 npm run type-check
 npm run lint
 
-before_pg=$(find src/db/migrations/postgres -maxdepth 1 -name '*.sql' | wc -l)
-npx drizzle-kit generate --name=issue135_fk_name_probe
-after_pg=$(find src/db/migrations/postgres -maxdepth 1 -name '*.sql' | wc -l)
+rm -rf .issue135-drift-probe src/db/schema-drift-probe
+mkdir -p .issue135-drift-probe/postgres src/db/schema-drift-probe
+cp src/db/schema/*.ts src/db/schema-drift-probe/
+sed -i -E "s/(from[[:space:]]+['\"][^'\"]+)\.js(['\"])/\1.ts\2/g" src/db/schema-drift-probe/*.ts
+cp -R src/db/migrations/postgres/. .issue135-drift-probe/postgres/
+cat > .issue135-drift-probe/drift.config.ts <<'EOF'
+import { defineConfig } from 'drizzle-kit';
+export default defineConfig({
+  dialect: 'postgresql',
+  schema: './src/db/schema-drift-probe/*.ts',
+  out: './.issue135-drift-probe/postgres',
+  dbCredentials: { url: 'postgresql://snapshot:snapshot@127.0.0.1:5432/snapshot' },
+  strict: true,
+});
+EOF
+before_pg=$(find .issue135-drift-probe/postgres -maxdepth 1 -name '*.sql' | wc -l)
+npx drizzle-kit generate --config=.issue135-drift-probe/drift.config.ts --name=issue135_fk_name_probe
+after_pg=$(find .issue135-drift-probe/postgres -maxdepth 1 -name '*.sql' | wc -l)
 if [ "$after_pg" -ne "$before_pg" ]; then
   echo 'PostgreSQL schema still has pending migration drift' >&2
-  cat src/db/migrations/postgres/*issue135_fk_name_probe.sql || true
+  cat .issue135-drift-probe/postgres/*issue135_fk_name_probe.sql || true
   exit 31
 fi
+rm -rf .issue135-drift-probe src/db/schema-drift-probe
 
 npm run test:db:sqlite
 npm run test:db:postgres

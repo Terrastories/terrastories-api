@@ -86,6 +86,30 @@ async function assertSnapshotConstraintNames(
   );
 }
 
+async function assertFileTimestampDefaultsAbsent(
+  client: ReturnType<typeof postgres>
+): Promise<void> {
+  const rows = await client.unsafe(`
+    SELECT column_name, column_default
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'files'
+      AND column_name IN ('created_at', 'updated_at')
+    ORDER BY column_name
+  `);
+  assert.deepEqual(
+    rows.map((row) => ({
+      columnName: String(row.column_name),
+      columnDefault: row.column_default ?? null,
+    })),
+    [
+      { columnName: 'created_at', columnDefault: null },
+      { columnName: 'updated_at', columnDefault: null },
+    ],
+    'PostgreSQL file timestamps must not have database defaults when SQLite/schema history does not'
+  );
+}
+
 async function verifyOrphanThemeUpgrade(
   client: ReturnType<typeof postgres>
 ): Promise<void> {
@@ -99,6 +123,8 @@ async function verifyOrphanThemeUpgrade(
   `);
 
   await migrate(drizzle(client), { migrationsFolder });
+
+  await assertFileTimestampDefaultsAbsent(client);
 
   const [legacyTheme] = await client.unsafe(
     'SELECT id, community_id FROM themes WHERE id = 999'
@@ -137,6 +163,7 @@ async function verifyFreshSnapshotConstraintNames(
   await resetDatabase(client);
   await migrate(drizzle(client), { migrationsFolder });
   await assertSnapshotConstraintNames(client);
+  await assertFileTimestampDefaultsAbsent(client);
 
   const [themeConstraint] = await client.unsafe(`
     SELECT convalidated

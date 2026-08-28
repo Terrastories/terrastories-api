@@ -1,12 +1,12 @@
 # Terrastories API V2 — Technical Specification
 
-| Field | Value |
-| --- | --- |
-| **Status** | Canonical — proposed product/architecture source of truth |
-| **Created** | 2026-06-07 |
-| **Updated** | 2026-08-28 |
-| **Authors** | Terrastories Team |
-| **Repo** | `terrastories-api` |
+| Field       | Value                                                     |
+| ----------- | --------------------------------------------------------- |
+| **Status**  | Canonical — proposed product/architecture source of truth |
+| **Created** | 2026-06-07                                                |
+| **Updated** | 2026-08-28                                                |
+| **Authors** | Terrastories Team                                         |
+| **Repo**    | `terrastories-api`                                        |
 
 ---
 
@@ -24,16 +24,16 @@ The governing rule is:
 
 ### Goals
 
-| ID | Goal |
-| --- | --- |
-| G-1 | Run one product across Cloudflare Workers + D1 + R2, Node.js + PostgreSQL + self-hosted storage, and Node.js + SQLite + local filesystem field kits. |
+| ID  | Goal                                                                                                                                                                                                                                                                        |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G-1 | Run one product across Cloudflare Workers + D1 + R2, Node.js + PostgreSQL + self-hosted storage, and Node.js + SQLite + local filesystem field kits.                                                                                                                        |
 | G-2 | Preserve the user-visible Terrastories experience: public storytelling/map discovery, community content management, visibility rules, media, map configuration, branding, imports, onboarding, profile/auth flows, and system administration needed to operate communities. |
-| G-3 | Migrate legacy Rails deployments with **zero unintended data loss**. Every source row, relation, attachment, and field must be mapped, transformed, or preserved in a migration archive with a machine-readable disposition. |
-| G-4 | Make D1/SQLite and PostgreSQL equal first-class database targets for shared product semantics. |
-| G-5 | Keep field-kit deployments fully usable without runtime cloud dependencies. |
-| G-6 | Enforce community isolation and Indigenous data sovereignty structurally and with negative tests. |
-| G-7 | Provide a small, explicit, versioned V2 API contract that is easier to maintain and evolve than Rails or Fastify V1. |
-| G-8 | Remove accidental V1 scope and duplicated domain concepts rather than carrying them forward indefinitely. |
+| G-3 | Migrate legacy Rails deployments with **zero unintended data loss**. Every source row, relation, attachment, and field must be mapped, transformed, or preserved in a migration archive with a machine-readable disposition.                                                |
+| G-4 | Make D1/SQLite and PostgreSQL equal first-class database targets for shared product semantics.                                                                                                                                                                              |
+| G-5 | Keep field-kit deployments fully usable without runtime cloud dependencies.                                                                                                                                                                                                 |
+| G-6 | Enforce community isolation and Indigenous data sovereignty structurally and with negative tests.                                                                                                                                                                           |
+| G-7 | Provide a small, explicit, versioned V2 API contract that is easier to maintain and evolve than Rails or Fastify V1.                                                                                                                                                        |
+| G-8 | Remove accidental V1 scope and duplicated domain concepts rather than carrying them forward indefinitely.                                                                                                                                                                   |
 
 ### Non-goals
 
@@ -106,11 +106,11 @@ The experience contract is normative; Rails routes, Jbuilder payloads, Fastify r
 
 ## 5. Deployment architecture
 
-| Mode | Runtime | Database | Storage | Runtime cloud dependency |
-| --- | --- | --- | --- | --- |
-| **Hosted** | Cloudflare Workers | D1 / SQLite semantics | R2 | Cloudflare only |
-| **Self-hosted** | Node.js | PostgreSQL | pluggable self-hosted/object/local storage | none required beyond configured deployment dependencies |
-| **Field kit** | Node.js | SQLite | local filesystem | none |
+| Mode            | Runtime            | Database              | Storage                                    | Runtime cloud dependency                                |
+| --------------- | ------------------ | --------------------- | ------------------------------------------ | ------------------------------------------------------- |
+| **Hosted**      | Cloudflare Workers | D1 / SQLite semantics | R2                                         | Cloudflare only                                         |
+| **Self-hosted** | Node.js            | PostgreSQL            | pluggable self-hosted/object/local storage | none required beyond configured deployment dependencies |
+| **Field kit**   | Node.js            | SQLite                | local filesystem                           | none                                                    |
 
 All modes share domain/service behavior. Runtime, database, storage, hashing, and session implementations live behind explicit adapters where platform differences require them.
 
@@ -492,25 +492,25 @@ The same canonical migrated fixture must validate on SQLite/D1-compatible and Po
 
 ## 11. Legacy disposition at V2 launch
 
-| Legacy/V1 concept | V2 disposition | Rationale |
-| --- | --- | --- |
-| Communities, stories, places, speakers | RETAIN/IMPROVE | Core Terrastories domain |
-| Rails story permission levels | IMPROVE | One `visibility` enum preserves the same audience distinctions |
-| Rails `viewer` and `member` distinction | RETAIN | User-visible access difference must survive |
-| Username-or-email login | RETAIN | Established login experience; both identifiers migrate |
-| Story/place/speaker relationships | RETAIN | Core narrative/map data |
-| Uploaded media and external media links | IMPROVE | Normalize around `File` + explicit relations; preserve every item |
-| Community/user/place/speaker attachments | IMPROVE | Normalize into the same media system |
-| Theme `static_map` attachment | IMPROVE | Preserve through canonical File/map configuration relation |
-| Rails Theme | IMPROVE | Replace provider-specific singleton theme with `CommunityMapConfig` |
-| Map provider credentials in DB | IMPROVE/ARCHIVE | Move secrets out of domain rows; preserve source value in restricted migration artifact |
-| CSV imports | RETAIN/IMPROVE | Preserve user workflow with a typed/validated V2 implementation |
-| Rails `curriculums` | ARCHIVE by default | Schema exists but no current Rails route exposes it; do not rebuild runtime product without evidence of active user need |
-| Rails `beta` / Flipper state | CLASSIFY per active behavior | Preserve/replace any surviving user-visible effect; archive implementation state only after disposition |
-| Fastify elder role/restrictions | DROP | Explicit V1 scope creep; not a Rails user requirement |
-| Cultural-significance/settings/context V1 fields | DROP from canonical runtime; archive if source data exists | Avoid unreviewed cultural-protocol semantics |
-| PostGIS behavior | DROP | Portability and offline operation are higher-value requirements |
-| Persisted resource media URLs | DROP | URLs are deployment-specific derived values |
+| Legacy/V1 concept                                | V2 disposition                                             | Rationale                                                                                                                |
+| ------------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Communities, stories, places, speakers           | RETAIN/IMPROVE                                             | Core Terrastories domain                                                                                                 |
+| Rails story permission levels                    | IMPROVE                                                    | One `visibility` enum preserves the same audience distinctions                                                           |
+| Rails `viewer` and `member` distinction          | RETAIN                                                     | User-visible access difference must survive                                                                              |
+| Username-or-email login                          | RETAIN                                                     | Established login experience; both identifiers migrate                                                                   |
+| Story/place/speaker relationships                | RETAIN                                                     | Core narrative/map data                                                                                                  |
+| Uploaded media and external media links          | IMPROVE                                                    | Normalize around `File` + explicit relations; preserve every item                                                        |
+| Community/user/place/speaker attachments         | IMPROVE                                                    | Normalize into the same media system                                                                                     |
+| Theme `static_map` attachment                    | IMPROVE                                                    | Preserve through canonical File/map configuration relation                                                               |
+| Rails Theme                                      | IMPROVE                                                    | Replace provider-specific singleton theme with `CommunityMapConfig`                                                      |
+| Map provider credentials in DB                   | IMPROVE/ARCHIVE                                            | Move secrets out of domain rows; preserve source value in restricted migration artifact                                  |
+| CSV imports                                      | RETAIN/IMPROVE                                             | Preserve user workflow with a typed/validated V2 implementation                                                          |
+| Rails `curriculums`                              | ARCHIVE by default                                         | Schema exists but no current Rails route exposes it; do not rebuild runtime product without evidence of active user need |
+| Rails `beta` / Flipper state                     | CLASSIFY per active behavior                               | Preserve/replace any surviving user-visible effect; archive implementation state only after disposition                  |
+| Fastify elder role/restrictions                  | DROP                                                       | Explicit V1 scope creep; not a Rails user requirement                                                                    |
+| Cultural-significance/settings/context V1 fields | DROP from canonical runtime; archive if source data exists | Avoid unreviewed cultural-protocol semantics                                                                             |
+| PostGIS behavior                                 | DROP                                                       | Portability and offline operation are higher-value requirements                                                          |
+| Persisted resource media URLs                    | DROP                                                       | URLs are deployment-specific derived values                                                                              |
 
 ## 12. Testing and release gates
 
@@ -570,29 +570,29 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 
 ## 14. Resolved architectural decisions
 
-| Question | Decision |
-| --- | --- |
-| Legacy compatibility target? | Preserve user experience and data; do not preserve Rails/Fastify wire/internal compatibility. |
-| HTTP framework? | Hono. |
-| Database targets? | D1/SQLite and PostgreSQL equal first-class. |
-| Physical schema? | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required. |
-| Spatial behavior? | Plain lat/lng + application-level portable logic; no PostGIS. |
-| Story privacy? | One `public | community | editors` visibility field, always subordinate to owning-community publication/lifecycle. |
-| User roles? | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role. |
-| Login identity? | Preserve Rails username-or-email login behavior unless explicitly changed later. |
-| Sessions? | Durable database-backed authoritative sessions; memory dev/test only. |
-| Media? | One `File` identity model + explicit typed relations; URLs derived by storage adapter; Theme static map included. |
-| Map configuration? | One provider-neutral `CommunityMapConfig` per community; provider credentials are secrets. |
-| Legacy removed data? | Preserve in migration archive; never silently discard. |
-| Password migration? | Verify legacy bcrypt on login, then rehash with current V2 hasher. |
-| Migration strategy? | Two-stage: lossless Rails PostgreSQL + ActiveStorage capture bundle, then deterministic bundle-to-canonical-V2 transform. |
-| API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy. |
+| Question                            | Decision                                                                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------------------------------------------- |
+| Legacy compatibility target?        | Preserve user experience and data; do not preserve Rails/Fastify wire/internal compatibility.                             |
+| HTTP framework?                     | Hono.                                                                                                                     |
+| Database targets?                   | D1/SQLite and PostgreSQL equal first-class.                                                                               |
+| Physical schema?                    | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required.                      |
+| Spatial behavior?                   | Plain lat/lng + application-level portable logic; no PostGIS.                                                             |
+| Story privacy?                      | One `public                                                                                                               | community | editors` visibility field, always subordinate to owning-community publication/lifecycle. |
+| User roles?                         | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role.                                                      |
+| Login identity?                     | Preserve Rails username-or-email login behavior unless explicitly changed later.                                          |
+| Sessions?                           | Durable database-backed authoritative sessions; memory dev/test only.                                                     |
+| Media?                              | One `File` identity model + explicit typed relations; URLs derived by storage adapter; Theme static map included.         |
+| Map configuration?                  | One provider-neutral `CommunityMapConfig` per community; provider credentials are secrets.                                |
+| Legacy removed data?                | Preserve in migration archive; never silently discard.                                                                    |
+| Password migration?                 | Verify legacy bcrypt on login, then rehash with current V2 hasher.                                                        |
+| Migration strategy?                 | Two-stage: lossless Rails PostgreSQL + ActiveStorage capture bundle, then deterministic bundle-to-canonical-V2 transform. |
+| API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy.                        |
 
 ## 15. Change log
 
-| Date | Changes |
-| --- | --- |
-| 2026-06-07 | Initial V2 Cloudflare/Hono specification. |
-| 2026-08-17 | Reaffirmed Hono, equal D1/SQLite + PostgreSQL targets, field-kit support, no PostGIS, and sovereignty constraints. |
-| 2026-08-28 | Reframed V2 from legacy wire/feature parity to intentional evolution: preserve user experience and all source data while simplifying the domain. Added canonical visibility/role/media/map/session models, real Rails migration contract, archive requirement for intentionally removed data, and V2-native contract testing. |
+| Date       | Changes                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-06-07 | Initial V2 Cloudflare/Hono specification.                                                                                                                                                                                                                                                                                                                                |
+| 2026-08-17 | Reaffirmed Hono, equal D1/SQLite + PostgreSQL targets, field-kit support, no PostGIS, and sovereignty constraints.                                                                                                                                                                                                                                                       |
+| 2026-08-28 | Reframed V2 from legacy wire/feature parity to intentional evolution: preserve user experience and all source data while simplifying the domain. Added canonical visibility/role/media/map/session models, real Rails migration contract, archive requirement for intentionally removed data, and V2-native contract testing.                                            |
 | 2026-08-28 | Addressed independent architecture review: made private/disabled community precedence explicit, preserved username-or-email login, added Theme static-map migration, required active beta/Flipper disposition, split migration into lossless source capture plus canonical target transform, and strengthened archive fidelity/security and contradictory-role handling. |

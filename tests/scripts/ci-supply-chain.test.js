@@ -98,9 +98,7 @@ describe('GitHub Actions supply-chain policy', () => {
 
 describe('dependency audit exception policy', () => {
   const policy = JSON.parse(readRepo('config/security-audit-policy.json'));
-  const baseline = JSON.parse(
-    readRepo('config/security-audit-baseline.json')
-  );
+  const baseline = JSON.parse(readRepo('config/security-audit-baseline.json'));
 
   it('defines a blocking severity threshold and reviewed expiring exception set', () => {
     expect(policy.minimumSeverity).toBe('moderate');

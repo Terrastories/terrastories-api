@@ -66,9 +66,7 @@ export function computeAdvisorySetDigest(advisories) {
     );
   });
 
-  return createHash('sha256')
-    .update(JSON.stringify(canonical))
-    .digest('hex');
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
 export function filterBlockingAdvisories(advisories, minimumSeverity) {

@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 function dependencyName(lockPath) {
@@ -40,8 +41,9 @@ export function summarizeDependencyChanges(baseLock, currentLock) {
   );
 }
 
-function runGit(args) {
+function runGit(args, cwd) {
   const result = spawnSync('git', args, {
+    cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -58,21 +60,27 @@ function runGit(args) {
   return result.stdout;
 }
 
-export async function main() {
-  const baseSha = process.env.BASE_SHA || process.argv[2];
+export async function main(options = {}) {
+  const cwd = options.cwd || process.cwd();
+  const baseSha = options.baseSha || process.env.BASE_SHA || process.argv[2];
+  const auditCommand = options.auditCommand || ['npm', 'run', 'audit:baseline'];
+
   if (!baseSha || !/^[0-9a-f]{40}$/i.test(baseSha)) {
     throw new Error('BASE_SHA must be a full 40-character commit SHA');
   }
 
-  const changedManifests = runGit([
-    'diff',
-    '--name-only',
-    baseSha,
-    'HEAD',
-    '--',
-    'package.json',
-    'package-lock.json',
-  ])
+  const changedManifests = runGit(
+    [
+      'diff',
+      '--name-only',
+      baseSha,
+      'HEAD',
+      '--',
+      'package.json',
+      'package-lock.json',
+    ],
+    cwd
+  )
     .split('\n')
     .map((entry) => entry.trim())
     .filter(Boolean);
@@ -82,8 +90,12 @@ export async function main() {
     return;
   }
 
-  const baseLock = JSON.parse(runGit(['show', `${baseSha}:package-lock.json`]));
-  const currentLock = JSON.parse(await readFile('package-lock.json', 'utf8'));
+  const baseLock = JSON.parse(
+    runGit(['show', `${baseSha}:package-lock.json`], cwd)
+  );
+  const currentLock = JSON.parse(
+    await readFile(join(cwd, 'package-lock.json'), 'utf8')
+  );
   const changes = summarizeDependencyChanges(baseLock, currentLock);
 
   console.log(
@@ -95,7 +107,9 @@ export async function main() {
     );
   }
 
-  const audit = spawnSync('npm', ['run', 'audit:baseline'], {
+  const [auditExecutable, ...auditArgs] = auditCommand;
+  const audit = spawnSync(auditExecutable, auditArgs, {
+    cwd,
     stdio: 'inherit',
   });
   if (audit.error) {

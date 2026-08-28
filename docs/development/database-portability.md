@@ -17,7 +17,7 @@ Run the SQLite/D1-compatible gate directly:
 npm run test:db:sqlite
 ```
 
-For PostgreSQL, start a disposable PostgreSQL 13 database. One example is:
+For PostgreSQL, start a disposable **plain PostgreSQL 13** database. One example is:
 
 ```sh
 docker run --rm --name terrastories-postgres-test \
@@ -37,7 +37,20 @@ npm run test:db:postgres
 
 The PostgreSQL gate is destructive and refuses to run unless the database name follows the dedicated test-database convention (for example `terrastories_test`, ending in `_test`) and `ALLOW_POSTGRES_TEST_RESET=true` is set. A substring such as `latest` is never considered a test database.
 
-Both gates are mandatory pull-request CI jobs.
+Both gates are mandatory pull-request CI jobs. The PostgreSQL gate deliberately uses plain `postgres:13-alpine`; passing it proves that application and migration behavior does not depend on PostGIS or another database-specific spatial extension.
+
+## Docker persisted-volume compatibility
+
+The base Compose file temporarily retains the historical `postgis/postgis:13-master` image **only as a storage compatibility bridge**. Existing `postgres_data` named volumes created by previous releases may contain PostGIS extension catalog objects whose server-side libraries must still be present when PostgreSQL opens that volume. Replacing the image in place before those volumes have a tested migration path can make an otherwise valid persisted deployment fail to start.
+
+This compatibility image does **not** make PostGIS a V2 dependency:
+
+- `scripts/init-db.sql` no longer creates or probes PostGIS extensions.
+- New migrations, schemas, repositories, and spatial queries use portable PostgreSQL/SQLite semantics only.
+- The required PostgreSQL CI and local reproduction gate run against plain PostgreSQL 13.
+- New databases created by the Compose stack do not rely on PostGIS behavior even though the compatibility image contains the extension libraries.
+
+Removing the compatibility image is a separate risky storage cutover. Before that change can ship, it needs an explicit, tested backup/restore or forward-migration procedure for existing named volumes, including representative legacy PostGIS-enabled data and a negative failure path. Do not silently swap an existing persisted volume from the PostGIS-capable image to plain PostgreSQL.
 
 ## What the gates prove
 

@@ -20,20 +20,6 @@ describe('security audit review policy binding', () => {
     expires: '2026-09-30',
   };
 
-  const report = {
-    vulnerabilities: {
-      'known-package': {
-        via: [
-          {
-            source: 'known',
-            severity: 'moderate',
-            url: 'https://example.invalid/known',
-          },
-        ],
-      },
-    },
-  };
-
   it('binds accepted review to expiry, severity threshold, tracking issue, and advisory set', () => {
     expect(typeof auditModule.computeReviewedPolicyDigest).toBe('function');
 
@@ -63,10 +49,6 @@ describe('security audit review policy binding', () => {
   });
 
   it('rejects extending the expiry without a fresh reviewed-policy digest', () => {
-    const reviewedPolicySha256 = auditModule.computeReviewedPolicyDigest(
-      baseline.advisories,
-      policy
-    );
     const acceptedPolicy = {
       ...policy,
       review: {
@@ -74,16 +56,18 @@ describe('security audit review policy binding', () => {
         reviewedBy: 'Terrastories maintainers',
         reviewedOn: '2026-08-28',
         rationale: 'Reviewed temporary debt.',
-        policySha256: reviewedPolicySha256,
+        policySha256: auditModule.computeReviewedPolicyDigest(
+          baseline.advisories,
+          policy
+        ),
       },
     };
 
     expect(() =>
-      auditModule.compareAuditAdvisories(
-        baseline,
-        { ...acceptedPolicy, expires: '2026-10-31' },
-        report
-      )
+      auditModule.validateReviewedPolicyBinding(baseline, {
+        ...acceptedPolicy,
+        expires: '2026-10-31',
+      })
     ).toThrow(/review|digest|policy|expiry/i);
   });
 });

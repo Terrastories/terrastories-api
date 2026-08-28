@@ -52,4 +52,29 @@ describe('Database Connection', () => {
       vi.resetModules();
     }
   });
+
+  it('should preserve the shared PostgreSQL client after a failed health probe', async () => {
+    const originalDatabaseUrl = process.env.DATABASE_URL;
+
+    try {
+      process.env.DATABASE_URL =
+        'postgresql://terrastories:terrastories-test@127.0.0.1:1/terrastories_test';
+      vi.resetModules();
+
+      const databaseModule = await import('../../src/db/index.js');
+      const capturedByRepository = await databaseModule.getDb();
+      const result = await databaseModule.testConnection();
+      const afterProbe = await databaseModule.getDb();
+
+      expect(result.connected).toBe(false);
+      expect(afterProbe).toBe(capturedByRepository);
+    } finally {
+      if (originalDatabaseUrl === undefined) {
+        delete process.env.DATABASE_URL;
+      } else {
+        process.env.DATABASE_URL = originalDatabaseUrl;
+      }
+      vi.resetModules();
+    }
+  });
 });

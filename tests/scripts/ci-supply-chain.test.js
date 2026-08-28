@@ -26,6 +26,17 @@ function externalActionRefs(workflow) {
   ].map((match) => match[1]);
 }
 
+function workflowJobBlock(workflow, jobName) {
+  const marker = `\n  ${jobName}:\n`;
+  const start = workflow.indexOf(marker);
+  if (start === -1) return '';
+
+  const bodyStart = start + marker.length;
+  const rest = workflow.slice(bodyStart);
+  const nextJob = rest.search(/\n  [A-Za-z0-9_-]+:\n/);
+  return nextJob === -1 ? rest : rest.slice(0, nextJob);
+}
+
 describe('GitHub Actions supply-chain policy', () => {
   it('pins every external action to an immutable commit SHA', () => {
     const unpinned = [];
@@ -79,6 +90,18 @@ describe('GitHub Actions supply-chain policy', () => {
   it('keeps the declared Node runtime compatible with Sharp 0.35', () => {
     const packageJson = JSON.parse(readRepo('package.json'));
     expect(packageJson.engines.node).toBe('>=20.9.0');
+  });
+
+  it('keeps production Compose compatible with the package-manager-free runtime', () => {
+    const dockerfile = readRepo('Dockerfile');
+    const productionCompose = readRepo('docker-compose.prod.yml');
+
+    expect(dockerfile).toContain('/usr/local/bin/npm');
+    expect(productionCompose).not.toMatch(/\bnpm\b/);
+    expect(productionCompose).toContain('node dist/db/migrate.js');
+    expect(productionCompose).toContain('node dist/server.js');
+    expect(dockerfile).toContain('/app/src/db/migrations');
+    expect(dockerfile).toContain('./dist/db/migrations');
   });
 
   it('defines weekly automated dependency updates for all release inputs', () => {
@@ -254,5 +277,28 @@ describe('release evidence workflow', () => {
     expect(workflow).toContain('release-image.tar');
     expect(workflow).toContain('${{ github.sha }}');
     expect(workflow).toMatch(/digest/i);
+  });
+
+  it('keeps PR image checks read-only and isolates provenance writes to main pushes', () => {
+    expect(existsSync(path)).toBe(true);
+    if (!existsSync(path)) return;
+
+    const workflow = readFileSync(path, 'utf8');
+    const productionImage = workflowJobBlock(workflow, 'production_image');
+    const provenance = workflowJobBlock(workflow, 'provenance');
+
+    expect(productionImage).not.toBe('');
+    expect(productionImage).not.toContain('id-token: write');
+    expect(productionImage).not.toContain('attestations: write');
+    expect(provenance).not.toBe('');
+    expect(provenance).toContain(
+      "if: github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    );
+    expect(provenance).toContain('needs: production_image');
+    expect(provenance).toContain('id-token: write');
+    expect(provenance).toContain('attestations: write');
+    expect(provenance).toContain(
+      'subject-digest: ${{ needs.production_image.outputs.image_digest }}'
+    );
   });
 });

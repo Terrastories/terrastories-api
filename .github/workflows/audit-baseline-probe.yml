@@ -1,4 +1,4 @@
-name: Audit Baseline Probe
+name: Final Hardening Probe
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  audit:
+  contracts:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -23,21 +23,8 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
-      - name: Capture current moderate+ advisories
-        run: |
-          npm audit --json --audit-level moderate > audit.json || test -s audit.json
-          node --input-type=module <<'NODE'
-          import { readFileSync } from 'node:fs';
-          import {
-            collectAdvisories,
-            filterBlockingAdvisories,
-            parseAuditReport,
-          } from './scripts/check-audit-baseline.mjs';
+      - name: Check hardening test formatting
+        run: npx prettier --check tests/scripts/ci-supply-chain.test.js tests/scripts/security-scripts.test.js
 
-          const report = parseAuditReport(readFileSync('audit.json', 'utf8'));
-          const advisories = filterBlockingAdvisories(
-            collectAdvisories(report),
-            'moderate'
-          );
-          console.log(`AUDIT_BASELINE_JSON=${JSON.stringify(advisories)}`);
-          NODE
+      - name: Run hardening contracts
+        run: npx vitest run tests/scripts/ci-supply-chain.test.js tests/scripts/security-scripts.test.js

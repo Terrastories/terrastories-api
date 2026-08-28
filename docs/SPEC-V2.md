@@ -57,7 +57,7 @@ When V2 work encounters behavior or data from Rails/Fastify that is not already 
 
 An implementation, old test, issue, or existing Fastify behavior cannot silently redefine V2. Material changes to this specification require explicit review and approval.
 
-Legacy operational state such as Rails `beta` or Flipper features/gates may be classified as ARCHIVE only after each **active** flag/state is checked for a surviving user-visible effect. If it changes a workflow, visibility rule, map behavior, or other experience still in use, V2 must RETAIN or intentionally IMPROVE that outcome before the implementation state itself is archived.
+The pinned Rails revision has two product-facing Flipper gates: `public_communities` and `split_settings`. They gate access to community-publication/settings UI and whether branding settings are edited with Theme or Community settings. V2 retains those user outcomes directly: community publication/private visibility and administrator-managed branding/settings are canonical capabilities rather than feature-flagged experiments. The Rails `beta` field and known Flipper feature/gate rows are therefore archived as historical operational state, not recreated as V2 runtime requirements. If a real source deployment contains additional/custom active Flipper keys, Stage 2 must classify their user-visible effect before that migration can be declared successful.
 
 ## 4. User-experience continuity contract
 
@@ -144,7 +144,7 @@ Community
 - `status` is operational lifecycle state and is not a privacy flag.
 - A community that is `private` or `disabled` cannot expose its stories/media through public projections even when an individual story is marked `public`.
 - Slugs are stable and unique. V2 may generate them automatically.
-- Rails `beta` and Fastify `culturalSettings` are not canonical community domain fields. `beta` may be archived only after active beta/feature behavior is dispositioned under Section 3; data-bearing values remain in migration artifacts.
+- Rails `beta` and Fastify `culturalSettings` are not canonical community domain fields. The audited Rails beta/Flipper-gated outcomes are represented directly by canonical V2 capabilities; raw legacy values remain in migration artifacts, and unknown/custom active flags require explicit Stage-2 disposition.
 
 ### 6.2 User and roles
 
@@ -483,7 +483,7 @@ A migration is successful only when automated checks prove:
 - username/email login identities and role/visibility behavior match the experience contract;
 - contradictory role/super-admin state cannot be silently normalized;
 - public/private/disabled community behavior is preserved, including private-community override of public stories;
-- active beta/Flipper behavior has an explicit RETAIN/IMPROVE/ARCHIVE disposition;
+- known Rails beta/Flipper-gated outcomes map to canonical V2 capabilities, and every unknown/custom active source flag has an explicit RETAIN/IMPROVE/ARCHIVE disposition;
 - public map/filter data remains representable;
 - migration is deterministic and safe to re-run against a fresh destination;
 - failure is atomic or leaves an explicitly disposable incomplete destination, never a falsely successful partial migration.
@@ -506,7 +506,7 @@ The same canonical migrated fixture must validate on SQLite/D1-compatible and Po
 | Map provider credentials in DB                   | IMPROVE/ARCHIVE                                            | Move secrets out of domain rows; preserve source value in restricted migration artifact                                  |
 | CSV imports                                      | RETAIN/IMPROVE                                             | Preserve user workflow with a typed/validated V2 implementation                                                          |
 | Rails `curriculums`                              | ARCHIVE by default                                         | Schema exists but no current Rails route exposes it; do not rebuild runtime product without evidence of active user need |
-| Rails `beta` / Flipper state                     | CLASSIFY per active behavior                               | Preserve/replace any surviving user-visible effect; archive implementation state only after disposition                  |
+| Rails `beta` / known Flipper state               | IMPROVE/ARCHIVE                                            | Preserve publication/settings outcomes as canonical V2 capabilities; archive legacy gating state; classify custom keys   |
 | Fastify elder role/restrictions                  | DROP                                                       | Explicit V1 scope creep; not a Rails user requirement                                                                    |
 | Cultural-significance/settings/context V1 fields | DROP from canonical runtime; archive if source data exists | Avoid unreviewed cultural-protocol semantics                                                                             |
 | PostGIS behavior                                 | DROP                                                       | Portability and offline operation are higher-value requirements                                                          |
@@ -570,23 +570,24 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 
 ## 14. Resolved architectural decisions
 
-| Question                            | Decision                                                                                                                  |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------------------------------------------- |
-| Legacy compatibility target?        | Preserve user experience and data; do not preserve Rails/Fastify wire/internal compatibility.                             |
-| HTTP framework?                     | Hono.                                                                                                                     |
-| Database targets?                   | D1/SQLite and PostgreSQL equal first-class.                                                                               |
-| Physical schema?                    | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required.                      |
-| Spatial behavior?                   | Plain lat/lng + application-level portable logic; no PostGIS.                                                             |
-| Story privacy?                      | One `public                                                                                                               | community | editors` visibility field, always subordinate to owning-community publication/lifecycle. |
-| User roles?                         | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role.                                                      |
-| Login identity?                     | Preserve Rails username-or-email login behavior unless explicitly changed later.                                          |
-| Sessions?                           | Durable database-backed authoritative sessions; memory dev/test only.                                                     |
-| Media?                              | One `File` identity model + explicit typed relations; URLs derived by storage adapter; Theme static map included.         |
-| Map configuration?                  | One provider-neutral `CommunityMapConfig` per community; provider credentials are secrets.                                |
-| Legacy removed data?                | Preserve in migration archive; never silently discard.                                                                    |
-| Password migration?                 | Verify legacy bcrypt on login, then rehash with current V2 hasher.                                                        |
+| Question                            | Decision                                                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Legacy compatibility target?        | Preserve user experience and data; do not preserve Rails/Fastify wire/internal compatibility.                            |
+| HTTP framework?                     | Hono.                                                                                                                    |
+| Database targets?                   | D1/SQLite and PostgreSQL equal first-class.                                                                              |
+| Physical schema?                    | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required.                     |
+| Spatial behavior?                   | Plain lat/lng + application-level portable logic; no PostGIS.                                                            |
+| Story privacy?                      | One `public / community / editors` visibility field, always subordinate to owning-community publication/lifecycle.       |
+| User roles?                         | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role.                                                     |
+| Login identity?                     | Preserve Rails username-or-email login behavior unless explicitly changed later.                                         |
+| Sessions?                           | Durable database-backed authoritative sessions; memory dev/test only.                                                    |
+| Media?                              | One `File` identity model + explicit typed relations; URLs derived by storage adapter; Theme static map included.        |
+| Map configuration?                  | One provider-neutral `CommunityMapConfig` per community; provider credentials are secrets.                               |
+| Legacy removed data?                | Preserve in migration archive; never silently discard.                                                                   |
+| Rails beta/Flipper?                 | Known `public_communities` and `split_settings` outcomes become normal V2 publication/settings capabilities; archive gating state. Custom active keys require migration disposition. |
+| Password migration?                 | Verify legacy bcrypt on login, then rehash with current V2 hasher.                                                       |
 | Migration strategy?                 | Two-stage: lossless Rails PostgreSQL + ActiveStorage capture bundle, then deterministic bundle-to-canonical-V2 transform. |
-| API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy.                        |
+| API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy.                       |
 
 ## 15. Change log
 
@@ -596,3 +597,4 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 | 2026-08-17 | Reaffirmed Hono, equal D1/SQLite + PostgreSQL targets, field-kit support, no PostGIS, and sovereignty constraints.                                                                                                                                                                                                                                                       |
 | 2026-08-28 | Reframed V2 from legacy wire/feature parity to intentional evolution: preserve user experience and all source data while simplifying the domain. Added canonical visibility/role/media/map/session models, real Rails migration contract, archive requirement for intentionally removed data, and V2-native contract testing.                                            |
 | 2026-08-28 | Addressed independent architecture review: made private/disabled community precedence explicit, preserved username-or-email login, added Theme static-map migration, required active beta/Flipper disposition, split migration into lossless source capture plus canonical target transform, and strengthened archive fidelity/security and contradictory-role handling. |
+| 2026-08-28 | Audited the pinned Rails feature flags and resolved known `public_communities`/`split_settings` outcomes as unconditional canonical V2 publication/settings capabilities while retaining legacy beta/Flipper state in migration artifacts. |

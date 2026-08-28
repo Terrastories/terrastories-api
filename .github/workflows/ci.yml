@@ -132,6 +132,10 @@ jobs:
               baseline.write_text(text.replace(needle, addition, 1))
           PY
 
+          rewrite_scratch_imports() {
+            sed -i -E "s/(from[[:space:]]+['\"][^'\"]+)\.js(['\"])/\1.ts\2/g" src/db/schema-snapshot/*.ts
+          }
+
           rm -rf .issue135-snapshots src/db/schema-snapshot
           mkdir -p .issue135-snapshots/sqlite/meta src/db/schema-snapshot
           while IFS= read -r file; do
@@ -139,6 +143,7 @@ jobs:
             mkdir -p "$(dirname "$out")"
             git show "$BASE_SHA:$file" > "$out"
           done < <(git ls-tree -r --name-only "$BASE_SHA" src/db/schema | grep '\.ts$')
+          rewrite_scratch_imports
           cp src/db/migrations/0000_glamorous_guardsmen.sql .issue135-snapshots/sqlite/
           cp src/db/migrations/meta/0000_snapshot.json .issue135-snapshots/sqlite/meta/
           python3 <<'PY'
@@ -159,11 +164,17 @@ jobs:
           });
           EOF
           cp src/db/schema/users.ts src/db/schema-snapshot/users.ts
+          rewrite_scratch_imports
           npx drizzle-kit generate --config=.issue135-snapshots/sqlite.config.ts --name=authentication_fields
+          test -f .issue135-snapshots/sqlite/meta/0001_snapshot.json
           cp src/db/schema/communities.ts src/db/schema-snapshot/communities.ts
+          rewrite_scratch_imports
           npx drizzle-kit generate --config=.issue135-snapshots/sqlite.config.ts --name=community_rails_fields
+          test -f .issue135-snapshots/sqlite/meta/0002_snapshot.json
           cp src/db/schema/files.ts src/db/schema-snapshot/files.ts
+          rewrite_scratch_imports
           npx drizzle-kit generate --config=.issue135-snapshots/sqlite.config.ts --name=file_indexes
+          test -f .issue135-snapshots/sqlite/meta/0003_snapshot.json
           cp .issue135-snapshots/sqlite/meta/0001_snapshot.json src/db/migrations/meta/0001_snapshot.json
           cp .issue135-snapshots/sqlite/meta/0002_snapshot.json src/db/migrations/meta/0002_snapshot.json
           cp .issue135-snapshots/sqlite/meta/0003_snapshot.json src/db/migrations/meta/0003_snapshot.json
@@ -172,6 +183,7 @@ jobs:
           mkdir -p src/db/schema-snapshot .issue135-snapshots/postgres
           cp src/db/schema/*.ts src/db/schema-snapshot/
           git show "$BASE_SHA:src/db/schema/themes.ts" > src/db/schema-snapshot/themes.ts
+          rewrite_scratch_imports
           cat > .issue135-snapshots/postgres.config.ts <<'EOF'
           import { defineConfig } from 'drizzle-kit';
           export default defineConfig({
@@ -183,6 +195,7 @@ jobs:
           });
           EOF
           npx drizzle-kit generate --config=.issue135-snapshots/postgres.config.ts --name=current_compat_baseline
+          test -f .issue135-snapshots/postgres/meta/0000_snapshot.json
           python3 <<'PY'
           from pathlib import Path
           import os, subprocess
@@ -193,7 +206,9 @@ jobs:
               raise SystemExit('could not construct theme ownership state')
           Path('src/db/schema-snapshot/themes.ts').write_text(text.replace(old, new, 1))
           PY
+          rewrite_scratch_imports
           npx drizzle-kit generate --config=.issue135-snapshots/postgres.config.ts --name=theme_ownership_fk
+          test -f .issue135-snapshots/postgres/meta/0001_snapshot.json
           mkdir -p src/db/migrations/postgres/meta
           cp .issue135-snapshots/postgres/meta/0000_snapshot.json src/db/migrations/postgres/meta/0000_snapshot.json
           cp .issue135-snapshots/postgres/meta/0001_snapshot.json src/db/migrations/postgres/meta/0001_snapshot.json

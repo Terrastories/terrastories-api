@@ -54,6 +54,38 @@ async function installPreviousRelease(
   }
 }
 
+type SnapshotForeignKey = { name?: string };
+type SnapshotTable = { foreignKeys?: Record<string, SnapshotForeignKey> };
+type Snapshot = { tables?: Record<string, SnapshotTable> };
+
+async function snapshotForeignKeyNames(): Promise<string[]> {
+  const snapshot = JSON.parse(await readFile(snapshotPath, 'utf8')) as Snapshot;
+  return Object.values(snapshot.tables ?? {})
+    .flatMap((table) => Object.values(table.foreignKeys ?? {}))
+    .map((foreignKey) => foreignKey.name)
+    .filter((name): name is string => Boolean(name))
+    .sort();
+}
+
+async function assertSnapshotConstraintNames(
+  client: ReturnType<typeof postgres>
+): Promise<void> {
+  const expected = await snapshotForeignKeyNames();
+  const rows = await client.unsafe(`
+    SELECT conname
+    FROM pg_constraint
+    WHERE connamespace = 'public'::regnamespace
+      AND contype = 'f'
+    ORDER BY conname
+  `);
+  const actual = rows.map((row) => String(row.conname)).sort();
+  assert.deepEqual(
+    actual,
+    expected,
+    'applied PostgreSQL FK names must exactly match the latest Drizzle snapshot'
+  );
+}
+
 async function verifyOrphanThemeUpgrade(
   client: ReturnType<typeof postgres>
 ): Promise<void> {
@@ -77,7 +109,7 @@ async function verifyOrphanThemeUpgrade(
     SELECT convalidated
     FROM pg_constraint
     WHERE connamespace = 'public'::regnamespace
-      AND conname = 'themes_community_id_fkey'
+      AND conname = 'themes_community_id_communities_id_fk'
   `);
   assert.ok(constraint, 'theme ownership FK must exist after legacy upgrade');
   assert.equal(
@@ -85,6 +117,7 @@ async function verifyOrphanThemeUpgrade(
     false,
     'legacy orphan rows must keep the staged FK unvalidated until remediated'
   );
+  await assertSnapshotConstraintNames(client);
 
   await assert.rejects(
     client.unsafe(`
@@ -98,46 +131,18 @@ async function verifyOrphanThemeUpgrade(
   );
 }
 
-type SnapshotForeignKey = { name?: string };
-type SnapshotTable = { foreignKeys?: Record<string, SnapshotForeignKey> };
-type Snapshot = { tables?: Record<string, SnapshotTable> };
-
-async function snapshotForeignKeyNames(): Promise<string[]> {
-  const snapshot = JSON.parse(await readFile(snapshotPath, 'utf8')) as Snapshot;
-  return Object.values(snapshot.tables ?? {})
-    .flatMap((table) => Object.values(table.foreignKeys ?? {}))
-    .map((foreignKey) => foreignKey.name)
-    .filter((name): name is string => Boolean(name))
-    .sort();
-}
-
-async function verifySnapshotConstraintNames(
+async function verifyFreshSnapshotConstraintNames(
   client: ReturnType<typeof postgres>
 ): Promise<void> {
   await resetDatabase(client);
   await migrate(drizzle(client), { migrationsFolder });
-
-  const expected = await snapshotForeignKeyNames();
-  const rows = await client.unsafe(`
-    SELECT conname
-    FROM pg_constraint
-    WHERE connamespace = 'public'::regnamespace
-      AND contype = 'f'
-    ORDER BY conname
-  `);
-  const actual = rows.map((row) => String(row.conname)).sort();
-
-  assert.deepEqual(
-    actual,
-    expected,
-    'applied PostgreSQL FK names must exactly match the latest Drizzle snapshot'
-  );
+  await assertSnapshotConstraintNames(client);
 
   const [themeConstraint] = await client.unsafe(`
     SELECT convalidated
     FROM pg_constraint
     WHERE connamespace = 'public'::regnamespace
-      AND conname = 'themes_community_id_fkey'
+      AND conname = 'themes_community_id_communities_id_fk'
   `);
   assert.equal(
     themeConstraint?.convalidated,
@@ -157,7 +162,7 @@ async function main(): Promise<void> {
     console.log('  1/2 orphan-theme expand-contract upgrade');
     await verifyOrphanThemeUpgrade(client);
     console.log('  2/2 applied FK names match Drizzle snapshot');
-    await verifySnapshotConstraintNames(client);
+    await verifyFreshSnapshotConstraintNames(client);
     console.log('✅ PostgreSQL migration regression gate passed');
   } finally {
     await client.end();

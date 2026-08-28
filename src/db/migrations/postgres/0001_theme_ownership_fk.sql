@@ -3,10 +3,10 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM pg_constraint
-    WHERE conname = 'themes_community_id_fkey'
+    WHERE conname = 'themes_community_id_communities_id_fk'
   ) THEN
     ALTER TABLE themes
-      ADD CONSTRAINT themes_community_id_fkey
+      ADD CONSTRAINT themes_community_id_communities_id_fk
       FOREIGN KEY (community_id) REFERENCES communities(id)
       NOT VALID;
   END IF;
@@ -18,6 +18,6 @@ BEGIN
     WHERE communities.id IS NULL
   ) THEN
     ALTER TABLE themes
-      VALIDATE CONSTRAINT themes_community_id_fkey;
+      VALIDATE CONSTRAINT themes_community_id_communities_id_fk;
   END IF;
 END $theme_ownership_fk$;

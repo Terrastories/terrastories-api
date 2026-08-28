@@ -42,7 +42,9 @@ export const speakersPg = pgTable(
     id: serial('id').primaryKey(),
     name: pgText('name').notNull(),
     bio: pgText('bio'),
-    communityId: pgInteger('community_id').notNull(),
+    communityId: pgInteger('community_id')
+      .notNull()
+      .references(() => communitiesPg.id),
     photoUrl: pgText('photo_url'),
     // Direct file URL column for dual-read capability (Issue #89)
     bioAudioUrl: pgText('bio_audio_url'),

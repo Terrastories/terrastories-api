@@ -1,6 +1,6 @@
 {
-  "id": "78a85e3c-b012-43e8-97b3-a687bf714de7",
-  "prevId": "2bed4d1a-ca2e-44c4-a60a-6a4c13a1350c",
+  "id": "73e87584-b1e0-4b76-9886-e7eaa4b77d2c",
+  "prevId": "4706d065-1e72-4996-a284-fc2887f21457",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -651,7 +651,17 @@
           "with": {}
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "speakers_community_id_communities_id_fk": {
+          "name": "speakers_community_id_communities_id_fk",
+          "tableFrom": "speakers",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -856,6 +866,15 @@
         }
       },
       "foreignKeys": {
+        "stories_community_id_communities_id_fk": {
+          "name": "stories_community_id_communities_id_fk",
+          "tableFrom": "stories",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
         "stories_interview_location_id_places_id_fk": {
           "name": "stories_interview_location_id_places_id_fk",
           "tableFrom": "stories",

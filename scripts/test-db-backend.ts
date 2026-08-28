@@ -645,17 +645,19 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     constraintRows.map((row: any) => String(row.conname))
   );
   for (const constraint of [
-    'users_community_id_fkey',
-    'places_community_id_fkey',
-    'speakers_community_id_fkey',
-    'stories_community_id_fkey',
-    'files_community_id_fkey',
-    'files_uploaded_by_fkey',
-    'story_places_story_id_fkey',
-    'story_places_place_id_fkey',
-    'story_speakers_story_id_fkey',
-    'story_speakers_speaker_id_fkey',
-    'themes_community_id_fkey',
+    'users_community_id_communities_id_fk',
+    'places_community_id_communities_id_fk',
+    'speakers_community_id_communities_id_fk',
+    'stories_community_id_communities_id_fk',
+    'stories_interview_location_id_places_id_fk',
+    'stories_interviewer_id_speakers_id_fk',
+    'files_community_id_communities_id_fk',
+    'files_uploaded_by_users_id_fk',
+    'story_places_story_id_stories_id_fk',
+    'story_places_place_id_places_id_fk',
+    'story_speakers_story_id_stories_id_fk',
+    'story_speakers_speaker_id_speakers_id_fk',
+    'themes_community_id_communities_id_fk',
   ]) {
     assert.ok(
       constraints.has(constraint),

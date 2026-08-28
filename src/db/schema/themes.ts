@@ -20,7 +20,7 @@ import {
   boolean,
   timestamp,
   decimal,
-  integer as pgInteger,
+  bigint,
   index,
 } from 'drizzle-orm/pg-core';
 import {
@@ -81,7 +81,7 @@ export const themesPg = pgTable(
     neBoundaryLat: decimal('ne_boundary_lat', { precision: 10, scale: 6 }),
     neBoundaryLong: decimal('ne_boundary_long', { precision: 10, scale: 6 }),
     active: boolean('active').notNull().default(false),
-    communityId: pgInteger('community_id')
+    communityId: bigint('community_id', { mode: 'number' })
       .notNull()
       .references(() => communitiesPg.id),
     createdAt: timestamp('created_at').defaultNow().notNull(),

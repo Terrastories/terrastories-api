@@ -533,10 +533,22 @@ export function checkUserPermissions(
  * Extract community ID from request params or query
  */
 export function extractCommunityId(request: FastifyRequest): number | null {
-  const params = request.params as { communityId?: string };
-  const query = request.query as { communityId?: string };
+  const params = request.params as {
+    communityId?: string;
+    community_id?: string;
+  };
+  const query = request.query as {
+    communityId?: string;
+    community_id?: string;
+  };
 
-  const communityId = parseInt(params.communityId || query.communityId || '0');
+  const communityId = parseInt(
+    params.communityId ||
+      params.community_id ||
+      query.communityId ||
+      query.community_id ||
+      '0'
+  );
   return communityId > 0 ? communityId : null;
 }
 

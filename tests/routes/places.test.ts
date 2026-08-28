@@ -28,6 +28,7 @@ import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 describe('Places API Routes - Integration Tests', () => {
   let app: FastifyInstance;
   let testCommunityId: number;
+  let otherCommunityId: number;
   let adminSessionId: string;
   let editorSessionId: string;
   let viewerSessionId: string;
@@ -39,6 +40,7 @@ describe('Places API Routes - Integration Tests', () => {
     await testDb.clearData();
     const fixtures = await testDb.seedTestData();
     testCommunityId = fixtures.communities[1].id; // Skip system community
+    otherCommunityId = fixtures.communities[0].id;
 
     // Create test app with real routes
     app = await createTestApp(testDb.db);
@@ -443,6 +445,19 @@ describe('Places API Routes - Integration Tests', () => {
       const body = JSON.parse(response.body);
       expect(body.meta.page).toBe(1);
       expect(body.meta.limit).toBe(20);
+    });
+
+    test('should reject an authenticated cross-community list override', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/places?community_id=${otherCommunityId}`,
+        headers: { cookie: viewerSessionId },
+      });
+
+      expect(response.statusCode).toBe(403);
+      const body = JSON.parse(response.body);
+      expect(body.data).toBeUndefined();
+      expect(body.error).toBeDefined();
     });
 
     test('should require authentication', async () => {

@@ -295,9 +295,16 @@ export class UserService {
         throw new AuthenticationError();
       }
 
-      // Check if user is active
+      // Fail closed when either the user or their community is inactive.
+      // Keep the external error generic so community state is not disclosed.
       if (!user.isActive) {
-        throw new AuthenticationError('Account is deactivated');
+        throw new AuthenticationError();
+      }
+      const community = await this.communityService.getCommunityById(
+        user.communityId
+      );
+      if (!community?.isActive) {
+        throw new AuthenticationError();
       }
 
       return user;
@@ -333,9 +340,16 @@ export class UserService {
         throw new AuthenticationError();
       }
 
-      // Check if user is active
+      // Fail closed when either the user or their community is inactive.
+      // Keep the external error generic so community state is not disclosed.
       if (!user.isActive) {
-        throw new AuthenticationError('Account is deactivated');
+        throw new AuthenticationError();
+      }
+      const community = await this.communityService.getCommunityById(
+        user.communityId
+      );
+      if (!community?.isActive) {
+        throw new AuthenticationError();
       }
 
       return user;

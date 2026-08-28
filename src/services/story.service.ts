@@ -1172,16 +1172,12 @@ export class StoryService {
     const logEntry = {
       timestamp: new Date().toISOString(),
       storyId: story.id,
-      storyTitle: story.title,
       userId: user.id,
       userRole: user.role,
       communityId: story.communityId,
       operation,
       allowed,
       reason,
-      culturalProtocols: (
-        story as StoryWithRelations & { culturalProtocols?: CulturalProtocols }
-      ).culturalProtocols,
     };
 
     // Log to appropriate audit system for Indigenous community oversight
@@ -1270,24 +1266,23 @@ export class StoryService {
         return null;
       }
 
-      // Check if story is public (not restricted)
-      if (story.isRestricted) {
+      // Public visibility is an explicit contract: both the story privacy level
+      // and restriction flag must permit anonymous access.
+      if (story.privacyLevel !== 'public' || story.isRestricted) {
         this.logger.warn('[PUBLIC_API_ACCESS_DENIED]', {
           timestamp: new Date().toISOString(),
-          reason: 'Story has cultural restrictions and is not public',
+          reason: 'story_not_public',
           storyId: parseInt(storyId, 10),
-          isRestricted: story.isRestricted,
           communityId: parseInt(communityId, 10),
         });
         return null;
       }
 
-      // Log successful public access
+      // Authorization audit metadata intentionally excludes story content.
       this.logger.info('[PUBLIC_API_ACCESS]', {
         timestamp: new Date().toISOString(),
         operation: 'get_public_story',
         storyId: parseInt(storyId, 10),
-        storyTitle: story.title,
         communityId: parseInt(communityId, 10),
       });
 

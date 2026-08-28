@@ -30,6 +30,11 @@ import {
   CommunityIdParamSchema,
   PaginationQuerySchema,
 } from '../shared/types/public.js';
+import {
+  authorizeCommunityContent,
+  createAuthorizationAuditEvent,
+  type ContentRouteFamily,
+} from '../shared/authorization/sovereignty-policy.js';
 
 // Note: Request validation schemas removed as they're not currently used
 // in favor of simple parameter validation within route handlers
@@ -45,35 +50,57 @@ export async function publicApiRoutes(
    * Community validation middleware
    * Validates that community_id exists and is accessible
    */
-  async function validateCommunity(
-    request: FastifyRequest<{ Params: { community_id: string } }>,
-    reply: FastifyReply
-  ) {
-    const { community_id } = request.params;
+  function validateCommunity(family: ContentRouteFamily) {
+    return async function validatePublicCommunity(
+      request: FastifyRequest<{ Params: { community_id: string } }>,
+      reply: FastifyReply
+    ) {
+      const { community_id } = request.params;
+      const resourceCommunityId = parseInt(community_id, 10);
 
-    try {
-      const communityRepository = new CommunityRepository(database);
-      const communityService = new CommunityService(communityRepository);
+      try {
+        const communityRepository = new CommunityRepository(database);
+        const communityService = new CommunityService(communityRepository);
+        const community =
+          await communityService.getCommunityById(resourceCommunityId);
 
-      const community = await communityService.getCommunityById(
-        parseInt(community_id, 10)
-      );
+        if (!community) {
+          return reply.status(404).send({ error: 'Community not found' });
+        }
 
-      if (!community) {
-        return reply.status(404).send({
-          error: 'Community not found',
+        const decision = authorizeCommunityContent({
+          actor: null,
+          resourceCommunityId,
+          family,
+          surface: 'public-api',
+          visibility: 'public',
+          explicitlyPublic: community.publicStories,
+          communityActive: community.isActive,
+        });
+
+        if (!decision.allowed) {
+          request.log.warn(
+            createAuthorizationAuditEvent({
+              actor: null,
+              resourceCommunityId,
+              family,
+              surface: 'public-api',
+              decision,
+            }),
+            'Public community content access denied'
+          );
+          return reply.status(404).send({ error: 'Community not found' });
+        }
+
+        (request as FastifyRequest & { community: unknown }).community =
+          community;
+      } catch (error) {
+        request.log.error(error, 'Community validation error');
+        return reply.status(500).send({
+          error: 'Internal server error',
         });
       }
-
-      // Attach community to request context for service use
-      (request as FastifyRequest & { community: unknown }).community =
-        community;
-    } catch (error) {
-      request.log.error(error, 'Community validation error');
-      return reply.status(500).send({
-        error: 'Internal server error',
-      });
-    }
+    };
   }
 
   // GET /communities - List all communities
@@ -126,7 +153,7 @@ export async function publicApiRoutes(
   }>(
     '/communities/:community_id/stories',
     {
-      preHandler: validateCommunity,
+      preHandler: validateCommunity('stories'),
     },
     async (request, reply) => {
       try {
@@ -190,7 +217,7 @@ export async function publicApiRoutes(
   }>(
     '/communities/:community_id/stories/:id',
     {
-      preHandler: validateCommunity,
+      preHandler: validateCommunity('stories'),
     },
     async (request, reply) => {
       const { community_id, id } = request.params;
@@ -234,7 +261,7 @@ export async function publicApiRoutes(
   }>(
     '/communities/:community_id/places',
     {
-      preHandler: validateCommunity,
+      preHandler: validateCommunity('places'),
     },
     async (request, reply) => {
       const { community_id } = request.params;
@@ -290,7 +317,7 @@ export async function publicApiRoutes(
   }>(
     '/communities/:community_id/places/:id',
     {
-      preHandler: validateCommunity,
+      preHandler: validateCommunity('places'),
     },
     async (request, reply) => {
       const { community_id, id } = request.params;

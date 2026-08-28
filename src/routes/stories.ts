@@ -550,7 +550,7 @@ export default async function storiesRoutes(
   }>(
     '/slug/:slug/community/:communityId',
     {
-      preHandler: [requireAuth],
+      preHandler: [requireAuth, requireCommunityAccess()],
       schema: {
         description:
           'Get story by slug within community with cultural protocol enforcement',

@@ -34,6 +34,7 @@ export interface Story {
   language: string;
   tags: string[] | null;
   isRestricted: boolean;
+  privacyLevel: string;
   // Interview metadata fields for Indigenous storytelling context
   dateInterviewed?: Date | null;
   interviewLocationId?: number | null;

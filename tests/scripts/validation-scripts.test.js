@@ -181,3 +181,39 @@ describe('deterministic Vitest worker configuration', () => {
     expect(productionCommand).toContain('--minWorkers=1');
   });
 });
+
+describe('V2 sovereignty release gate', () => {
+  const packageJson = JSON.parse(
+    readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
+  );
+  const ciWorkflow = readFileSync(
+    new URL('../../.github/workflows/ci.yml', import.meta.url),
+    'utf8'
+  );
+
+  it('defines a deterministic issue-specific sovereignty suite', () => {
+    const command = packageJson.scripts['test:sovereignty'];
+
+    expect(command).toBeDefined();
+    expect(command).toContain('tests/security/sovereignty-matrix.test.ts');
+    expect(command).toContain('tests/security/inactive-principal.test.ts');
+    expect(command).toContain(
+      'tests/security/sovereignty-audit-logging.test.ts'
+    );
+    expect(command).toContain(
+      'tests/security/sovereignty-route-boundaries.test.ts'
+    );
+    expect(command).toContain('tests/routes/public-api.test.ts');
+    expect(command).toContain(
+      'tests/shared/middleware/data-sovereignty.test.ts'
+    );
+    expect(command).toContain('--maxWorkers=2');
+    expect(command).toContain('--minWorkers=2');
+    expect(command).not.toContain('cultural-roles.test.ts');
+  });
+
+  it('runs the sovereignty suite as an explicit CI release gate', () => {
+    expect(ciWorkflow).toContain('name: V2 data sovereignty gate');
+    expect(ciWorkflow).toContain('npm run test:sovereignty');
+  });
+});

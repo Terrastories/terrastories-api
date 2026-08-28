@@ -417,6 +417,32 @@ describe('StoryService', () => {
       expect(result).toEqual(elderOnlyStory);
     });
 
+    it('logs authorization metadata without protected story content', async () => {
+      const story = createElderOnlyStory();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      const result = await storyService.getStoryById(
+        story.id,
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      expect(result).toEqual(story);
+      const auditCall = mockLogger.info.mock.calls.find(
+        ([message]: [string]) => message === '[CULTURAL_ACCESS_AUDIT]'
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall?.[1]).toMatchObject({
+        storyId: story.id,
+        userId: testData.users.admin.id,
+        communityId: testData.community.id,
+        allowed: true,
+      });
+      expect(auditCall?.[1]).not.toHaveProperty('storyTitle');
+      expect(auditCall?.[1]).not.toHaveProperty('culturalProtocols');
+    });
+
     it('should deny editor access to elder-only content', async () => {
       // Arrange
       const elderOnlyStory = createElderOnlyStory();

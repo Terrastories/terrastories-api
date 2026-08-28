@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -32,6 +33,42 @@ function isCalendarDate(value) {
 
 function advisoryKey(advisory) {
   return `${advisory.source}:${advisory.package}`;
+}
+
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalAdvisory(advisory) {
+  if (!advisory || typeof advisory !== 'object' || Array.isArray(advisory)) {
+    throw new Error('Invalid security audit advisory in accepted baseline');
+  }
+
+  return {
+    source: String(advisory.source),
+    package: String(advisory.package),
+    severity: String(advisory.severity),
+    url: advisory.url == null ? null : String(advisory.url),
+  };
+}
+
+export function computeAdvisorySetDigest(advisories) {
+  if (!Array.isArray(advisories)) {
+    throw new Error('Security audit advisory set must be an array');
+  }
+
+  const canonical = advisories.map(canonicalAdvisory).sort((left, right) => {
+    return (
+      compareText(left.source, right.source) ||
+      compareText(left.package, right.package) ||
+      compareText(left.severity, right.severity) ||
+      compareText(left.url ?? '', right.url ?? '')
+    );
+  });
+
+  return createHash('sha256')
+    .update(JSON.stringify(canonical))
+    .digest('hex');
 }
 
 export function filterBlockingAdvisories(advisories, minimumSeverity) {
@@ -78,9 +115,13 @@ export function validateBaselinePolicy(policy, today) {
     typeof review.reviewedBy !== 'string' ||
     review.reviewedBy.trim() === '' ||
     typeof review.rationale !== 'string' ||
-    review.rationale.trim() === ''
+    review.rationale.trim() === '' ||
+    typeof review.advisoriesSha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/i.test(review.advisoriesSha256)
   ) {
-    throw new Error('Security audit exceptions require an accepted review');
+    throw new Error(
+      'Security audit exceptions require an accepted review bound to an advisory digest'
+    );
   }
   if (!isCalendarDate(review.reviewedOn)) {
     throw new Error(`Invalid security audit review date: ${review.reviewedOn}`);
@@ -154,6 +195,13 @@ export function compareAuditAdvisories(baseline, policy, report) {
   ) {
     throw new Error(
       'Invalid security audit baseline metadata or policy tracking mismatch'
+    );
+  }
+
+  const baselineDigest = computeAdvisorySetDigest(baseline.advisories);
+  if (baselineDigest !== policy.review?.advisoriesSha256?.toLowerCase()) {
+    throw new Error(
+      `Security audit review digest does not match the exact accepted advisory set; re-review dependency debt under #${policy.trackingIssue}.`
     );
   }
 

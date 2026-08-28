@@ -62,6 +62,7 @@ describe('GitHub Actions supply-chain policy', () => {
   it('keeps required CI and Docker checks fail closed', () => {
     const ci = readRepo('.github/workflows/ci.yml');
     const docker = readRepo('.github/workflows/docker-ci.yml');
+    const supplyChain = readRepo('.github/workflows/supply-chain.yml');
 
     expect(ci).not.toContain('continue-on-error: true');
     expect(docker).not.toContain('continue-on-error: true');
@@ -69,6 +70,27 @@ describe('GitHub Actions supply-chain policy', () => {
     expect(docker).not.toMatch(/npm list[^\n]*\|\|\s*echo/);
     expect(docker).toContain('curl --fail --silent --show-error');
     expect(docker).toContain('docker inspect');
+    expect(docker).toContain('health.config.valid');
+    expect(docker).toContain('health.database.connected');
+    expect(supplyChain).toContain('health.config.valid');
+    expect(supplyChain).toContain('health.database.connected');
+  });
+
+  it('keeps the declared Node runtime compatible with Sharp 0.35', () => {
+    const packageJson = JSON.parse(readRepo('package.json'));
+    expect(packageJson.engines.node).toBe('>=20.9.0');
+  });
+
+  it('defines weekly automated dependency updates for all release inputs', () => {
+    const path = join(repoRoot, '.github/dependabot.yml');
+    expect(existsSync(path)).toBe(true);
+    if (!existsSync(path)) return;
+
+    const dependabot = readFileSync(path, 'utf8');
+    for (const ecosystem of ['npm', 'github-actions', 'docker']) {
+      expect(dependabot).toContain(`package-ecosystem: '${ecosystem}'`);
+    }
+    expect(dependabot.match(/interval:\s*'weekly'/g)).toHaveLength(3);
   });
 });
 
@@ -221,6 +243,8 @@ describe('release evidence workflow', () => {
     expect(workflow).toContain('release-vulnerabilities.json');
     expect(workflow).toContain('anchore/sbom-action@');
     expect(workflow).toContain('actions/attest-build-provenance@');
+    expect(workflow).toContain('docker save');
+    expect(workflow).toContain('release-image.tar');
     expect(workflow).toContain('${{ github.sha }}');
     expect(workflow).toMatch(/digest/i);
   });

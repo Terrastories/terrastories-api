@@ -32,16 +32,16 @@ if old_alter not in text:
 path.write_text(text.replace(old_alter, new_alter, 1))
 PY
 
-rm -rf .issue135-metadata
-mkdir -p .issue135-metadata/schema .issue135-metadata/sqlite .issue135-metadata/postgres
-cp src/db/schema/*.ts .issue135-metadata/schema/
-sed -i -E "s/(from[[:space:]]+['\"][^'\"]+)\.js(['\"])/\1.ts\2/g" .issue135-metadata/schema/*.ts
+rm -rf .issue135-metadata src/db/schema-metadata-probe
+mkdir -p .issue135-metadata/sqlite .issue135-metadata/postgres src/db/schema-metadata-probe
+cp src/db/schema/*.ts src/db/schema-metadata-probe/
+sed -i -E "s/(from[[:space:]]+['\"][^'\"]+)\.js(['\"])/\1.ts\2/g" src/db/schema-metadata-probe/*.ts
 
 cat > .issue135-metadata/sqlite.config.ts <<'EOF'
 import { defineConfig } from 'drizzle-kit';
 export default defineConfig({
   dialect: 'sqlite',
-  schema: './.issue135-metadata/schema/*.ts',
+  schema: './src/db/schema-metadata-probe/*.ts',
   out: './.issue135-metadata/sqlite',
   dbCredentials: { url: './.issue135-metadata/probe.db' },
   strict: true,
@@ -51,7 +51,7 @@ cat > .issue135-metadata/postgres.config.ts <<'EOF'
 import { defineConfig } from 'drizzle-kit';
 export default defineConfig({
   dialect: 'postgresql',
-  schema: './.issue135-metadata/schema/*.ts',
+  schema: './src/db/schema-metadata-probe/*.ts',
   out: './.issue135-metadata/postgres',
   dbCredentials: { url: 'postgresql://snapshot:snapshot@127.0.0.1:5432/snapshot' },
   strict: true,
@@ -124,7 +124,7 @@ cat > .issue135-metadata/sqlite-drift.config.ts <<'EOF'
 import { defineConfig } from 'drizzle-kit';
 export default defineConfig({
   dialect: 'sqlite',
-  schema: './.issue135-metadata/schema/*.ts',
+  schema: './src/db/schema-metadata-probe/*.ts',
   out: './.issue135-metadata/sqlite-history',
   dbCredentials: { url: './.issue135-metadata/probe.db' },
   strict: true,
@@ -134,7 +134,7 @@ cat > .issue135-metadata/postgres-drift.config.ts <<'EOF'
 import { defineConfig } from 'drizzle-kit';
 export default defineConfig({
   dialect: 'postgresql',
-  schema: './.issue135-metadata/schema/*.ts',
+  schema: './src/db/schema-metadata-probe/*.ts',
   out: './.issue135-metadata/postgres-history',
   dbCredentials: { url: 'postgresql://snapshot:snapshot@127.0.0.1:5432/snapshot' },
   strict: true,
@@ -155,7 +155,7 @@ if [ "$before_pg" -ne "$after_pg" ]; then
   cat .issue135-metadata/postgres-history/*issue135_metadata_probe.sql || true
   exit 32
 fi
-rm -rf .issue135-metadata
+rm -rf .issue135-metadata src/db/schema-metadata-probe
 
 npm run format:check
 npm run type-check

@@ -69,6 +69,21 @@ export function computeAdvisorySetDigest(advisories) {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
+export function computeReviewedPolicyDigest(advisories, policy) {
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
+    throw new Error('Invalid security audit policy metadata');
+  }
+
+  const canonical = {
+    advisoriesSha256: computeAdvisorySetDigest(advisories),
+    expires: String(policy.expires),
+    minimumSeverity: String(policy.minimumSeverity),
+    trackingIssue: String(policy.trackingIssue),
+  };
+
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
 export function filterBlockingAdvisories(advisories, minimumSeverity) {
   const minimumRank = SEVERITY_ORDER.get(minimumSeverity);
   if (minimumRank === undefined) {
@@ -115,10 +130,12 @@ export function validateBaselinePolicy(policy, today) {
     typeof review.rationale !== 'string' ||
     review.rationale.trim() === '' ||
     typeof review.advisoriesSha256 !== 'string' ||
-    !/^[0-9a-f]{64}$/i.test(review.advisoriesSha256)
+    !/^[0-9a-f]{64}$/i.test(review.advisoriesSha256) ||
+    typeof review.policySha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/i.test(review.policySha256)
   ) {
     throw new Error(
-      'Security audit exceptions require an accepted review bound to an advisory digest'
+      'Security audit exceptions require an accepted review bound to advisory and policy digests'
     );
   }
   if (!isCalendarDate(review.reviewedOn)) {
@@ -128,6 +145,23 @@ export function validateBaselinePolicy(policy, today) {
   if (today > policy.expires) {
     throw new Error(
       `Security audit policy expired on ${policy.expires}; review tracked debt in #${policy.trackingIssue}`
+    );
+  }
+}
+
+export function validateReviewedPolicyBinding(baseline, policy) {
+  if (!baseline || !Array.isArray(baseline.advisories)) {
+    throw new Error('Invalid security audit baseline metadata');
+  }
+
+  const computedDigest = computeReviewedPolicyDigest(
+    baseline.advisories,
+    policy
+  );
+  const reviewedDigest = policy.review?.policySha256?.toLowerCase();
+  if (computedDigest !== reviewedDigest) {
+    throw new Error(
+      `Security audit reviewed-policy digest does not match the accepted advisory set, expiry, severity threshold, and tracking issue (computed ${computedDigest}, reviewed ${reviewedDigest}); renew review under #${policy.trackingIssue}.`
     );
   }
 }
@@ -250,6 +284,7 @@ export async function main() {
   const today = new Date().toISOString().slice(0, 10);
 
   validateBaselinePolicy(policy, today);
+  validateReviewedPolicyBinding(baseline, policy);
 
   const audit = spawnSync(
     'npm',

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, stat } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const SAFE_ACTIVE_STORAGE_KEY = /^[A-Za-z0-9_-]+$/;
@@ -99,6 +99,7 @@ export async function verifyAndCopyActiveStorageBlob(options: {
   await mkdir(options.destinationRoot, { recursive: true, mode: 0o700 });
   const destinationPath = join(options.destinationRoot, options.key);
   await copyFile(sourcePath, destinationPath);
+  await chmod(destinationPath, 0o600);
 
   return {
     id: options.id,

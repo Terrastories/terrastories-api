@@ -11,18 +11,6 @@ export type Database =
 
 let db: Database | null = null;
 let connectionProbe: (() => Promise<void>) | null = null;
-let closeConnection: (() => Promise<void>) | null = null;
-
-async function resetConnection(): Promise<void> {
-  const close = closeConnection;
-  db = null;
-  connectionProbe = null;
-  closeConnection = null;
-
-  if (close) {
-    await close().catch(() => undefined);
-  }
-}
 
 export async function getDb(): Promise<Database> {
   if (db) return db;
@@ -41,9 +29,6 @@ export async function getDb(): Promise<Database> {
     connectionProbe = async () => {
       await queryClient`SELECT 1`;
     };
-    closeConnection = async () => {
-      await queryClient.end({ timeout: 1 });
-    };
   } else {
     const dbPath =
       config.environment === 'test' ? ':memory:' : config.database.url;
@@ -51,9 +36,6 @@ export async function getDb(): Promise<Database> {
     db = drizzleSqlite(sqliteClient);
     connectionProbe = async () => {
       sqliteClient.prepare('SELECT 1').get();
-    };
-    closeConnection = async () => {
-      sqliteClient.close();
     };
   }
 
@@ -85,7 +67,8 @@ export async function testConnection(): Promise<{
       version: 'application-level',
     };
   } catch {
-    await resetConnection();
+    // Keep the shared client alive. postgres.js reconnects its pool after
+    // transient failures, and route repositories retain this Drizzle instance.
     return {
       connected: false,
       spatialSupport: false,

@@ -1,0 +1,94 @@
+name: Temporary spec cleanup
+
+on:
+  push:
+    branches:
+      - spec/v2-intentional-evolution
+
+permissions:
+  contents: write
+
+jobs:
+  fix-spec:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: spec/v2-intentional-evolution
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Resolve audited legacy flags and repair decisions table
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('docs/SPEC-V2.md')
+          text = path.read_text()
+
+          old = '''Legacy operational state such as Rails `beta` or Flipper features/gates may be classified as ARCHIVE only after each **active** flag/state is checked for a surviving user-visible effect. If it changes a workflow, visibility rule, map behavior, or other experience still in use, V2 must RETAIN or intentionally IMPROVE that outcome before the implementation state itself is archived.'''
+          new = '''The pinned Rails revision has two product-facing Flipper gates: `public_communities` and `split_settings`. They gate access to community-publication/settings UI and whether branding settings are edited with Theme or Community settings. V2 retains those user outcomes directly: community publication/private visibility and administrator-managed branding/settings are canonical capabilities rather than feature-flagged experiments. The Rails `beta` field and known Flipper feature/gate rows are therefore archived as historical operational state, not recreated as V2 runtime requirements. If a real source deployment contains additional/custom active Flipper keys, Stage 2 must classify their user-visible effect before that migration can be declared successful.'''
+          if old not in text:
+              raise SystemExit('expected operational-state paragraph not found')
+          text = text.replace(old, new)
+
+          old = '''- Rails `beta` and Fastify `culturalSettings` are not canonical community domain fields. `beta` may be archived only after active beta/feature behavior is dispositioned under Section 3; data-bearing values remain in migration artifacts.'''
+          new = '''- Rails `beta` and Fastify `culturalSettings` are not canonical community domain fields. The audited Rails beta/Flipper-gated outcomes are represented directly by canonical V2 capabilities; raw legacy values remain in migration artifacts, and unknown/custom active flags require explicit Stage-2 disposition.'''
+          if old not in text:
+              raise SystemExit('expected community beta paragraph not found')
+          text = text.replace(old, new)
+
+          old = '''- active beta/Flipper behavior has an explicit RETAIN/IMPROVE/ARCHIVE disposition;'''
+          new = '''- known Rails beta/Flipper-gated outcomes map to canonical V2 capabilities, and every unknown/custom active source flag has an explicit RETAIN/IMPROVE/ARCHIVE disposition;'''
+          if old not in text:
+              raise SystemExit('expected migration flag validation line not found')
+          text = text.replace(old, new)
+
+          old = '''| Rails `beta` / Flipper state                     | CLASSIFY per active behavior                               | Preserve/replace any surviving user-visible effect; archive implementation state only after disposition                  |'''
+          new = '''| Rails `beta` / known Flipper state               | IMPROVE/ARCHIVE                                            | Preserve publication/settings outcomes as canonical V2 capabilities; archive legacy gating state; classify custom keys    |'''
+          if old not in text:
+              raise SystemExit('expected legacy-disposition flag row not found')
+          text = text.replace(old, new)
+
+          section_start = text.index('## 14. Resolved architectural decisions')
+          section_end = text.index('## 15. Change log')
+          replacement = '''## 14. Resolved architectural decisions
+
+| Question | Decision |
+| --- | --- |
+| Legacy compatibility target? | Preserve user experience and data; do not preserve Rails/Fastify wire/internal compatibility. |
+| HTTP framework? | Hono. |
+| Database targets? | D1/SQLite and PostgreSQL equal first-class. |
+| Physical schema? | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required. |
+| Spatial behavior? | Plain lat/lng + application-level portable logic; no PostGIS. |
+| Story privacy? | One `public / community / editors` visibility field, always subordinate to owning-community publication/lifecycle. |
+| User roles? | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role. |
+| Login identity? | Preserve Rails username-or-email login behavior unless explicitly changed later. |
+| Sessions? | Durable database-backed authoritative sessions; memory dev/test only. |
+| Media? | One `File` identity model + explicit typed relations; URLs derived by storage adapter; Theme static map included. |
+| Map configuration? | One provider-neutral `CommunityMapConfig` per community; provider credentials are secrets. |
+| Legacy removed data? | Preserve in migration archive; never silently discard. |
+| Rails beta/Flipper? | Known `public_communities` and `split_settings` outcomes become normal V2 publication/settings capabilities; archive their gating state. Custom active keys require migration disposition. |
+| Password migration? | Verify legacy bcrypt on login, then rehash with current V2 hasher. |
+| Migration strategy? | Two-stage: lossless Rails PostgreSQL + ActiveStorage capture bundle, then deterministic bundle-to-canonical-V2 transform. |
+| API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy. |
+
+'''
+          text = text[:section_start] + replacement + text[section_end:]
+          path.write_text(text)
+          PY
+          npx prettier --write docs/SPEC-V2.md
+      - name: Commit spec cleanup
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/SPEC-V2.md
+          git commit -m 'docs: resolve Rails feature-flag disposition'
+          git push origin HEAD:spec/v2-intentional-evolution

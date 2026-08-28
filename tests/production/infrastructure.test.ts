@@ -242,9 +242,10 @@ describe('Production Infrastructure Validation - Phase 1', () => {
     test('production startup command includes database migration', async () => {
       const prodCompose = await fs.readFile('docker-compose.prod.yml', 'utf-8');
 
-      // Should run migrations on startup
-      expect(prodCompose).toContain('npm run db:migrate');
-      expect(prodCompose).toContain('npm start');
+      // Production runtime removes package managers, so startup uses compiled Node entry points.
+      expect(prodCompose).toContain('node dist/db/migrate.js');
+      expect(prodCompose).toContain('node dist/server.js');
+      expect(prodCompose).not.toMatch(/\bnpm\b/);
     });
   });
 

@@ -176,7 +176,9 @@ export function validateAuditProcessResult(audit) {
   }
 
   if (audit.status !== 0 && audit.status !== 1) {
-    throw new Error(`npm audit exited unexpectedly with status ${audit.status}`);
+    throw new Error(
+      `npm audit exited unexpectedly with status ${audit.status}`
+    );
   }
 }
 

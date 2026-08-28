@@ -7,6 +7,7 @@ on:
       - 'src/scripts/migrate-rails.ts'
       - 'tests/migration/**'
       - 'tests/fixtures/rails/**'
+      - 'docs/RAILS-MIGRATION.md'
       - '.github/workflows/rails-migration-contract.yml'
   workflow_dispatch:
 
@@ -16,7 +17,12 @@ permissions:
 jobs:
   rails-source-capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x, 22.x]
 
     services:
       postgres:
@@ -41,7 +47,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
 
       - run: npm ci
@@ -49,11 +55,14 @@ jobs:
       - name: Run Rails migration source contract
         run: npx vitest run tests/migration --reporter=dot --maxWorkers=1 --minWorkers=1
 
-      - name: Type-check migration implementation
-        run: npm run type-check
+      # This PR is intentionally stacked on the spec branch. The repository's
+      # normal CI workflow only triggers for PRs targeting main, so reproduce
+      # the canonical gates here rather than accepting a validation blind spot.
+      - name: Run canonical CI validation
+        run: npm run validate:ci
 
-      - name: Lint migration implementation
-        run: npm run lint
+      - name: Run full coverage gate
+        run: npm run test:coverage
 
-      - name: Check formatting
-        run: npm run format:check
+      - name: Enforce dependency audit baseline
+        run: npm run audit:baseline

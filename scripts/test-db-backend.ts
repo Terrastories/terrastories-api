@@ -592,7 +592,7 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
 
 async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   const columns = await client.unsafe(
-    `SELECT table_name, column_name
+    `SELECT table_name, column_name, column_default
      FROM information_schema.columns
      WHERE table_schema = 'public'`
   );
@@ -612,6 +612,17 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     assert.ok(names.has(required), `missing ${required}`);
   }
   assert.equal(names.has('places.location'), false);
+
+  const lastLoginColumn = columns.find(
+    (row: any) =>
+      row.table_name === 'users' && row.column_name === 'last_login_at'
+  );
+  assert.ok(lastLoginColumn, 'missing users.last_login_at');
+  assert.equal(
+    lastLoginColumn.column_default,
+    null,
+    'users.last_login_at must not retain a legacy default'
+  );
 
   const indexRows = await client.unsafe(
     `SELECT indexname FROM pg_indexes WHERE schemaname = 'public'`

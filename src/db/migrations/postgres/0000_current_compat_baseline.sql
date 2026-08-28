@@ -62,6 +62,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS last_sign_in_at timestamp;
 --> statement-breakpoint
 ALTER TABLE users ADD COLUMN IF NOT EXISTS current_sign_in_ip text;
 --> statement-breakpoint
+ALTER TABLE users ALTER COLUMN last_login_at DROP DEFAULT;
+--> statement-breakpoint
 ALTER TABLE users ALTER COLUMN created_at SET DEFAULT now();
 --> statement-breakpoint
 ALTER TABLE users ALTER COLUMN updated_at SET DEFAULT now();

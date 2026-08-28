@@ -6,6 +6,7 @@
     "status": "accepted",
     "reviewedBy": "Terrastories maintainers under issue #141",
     "reviewedOn": "2026-08-27",
-    "rationale": "Temporary exception for moderate-or-higher advisories already captured in the reviewed baseline inherited from issue #133. Any new advisory, severity increase, policy expiry, or baseline mismatch fails CI and requires explicit review under issue #141 before the exception set can change."
+    "advisoriesSha256": "c005820446472cecca6227df1b7879433c2ccbd06f9759201578ac89609e35ad",
+    "rationale": "Temporary exception for moderate-or-higher advisories already captured in the reviewed baseline inherited from issue #133. The accepted review is cryptographically bound to the exact advisory set; any new advisory, severity increase, policy expiry, resolved stale exception, or baseline digest mismatch fails CI and requires explicit review under issue #141 before the exception set can change."
   }
 }

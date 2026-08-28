@@ -1,0 +1,44 @@
+name: Temporary migration formatter
+
+on:
+  push:
+    branches:
+      - feat/rails-to-v2-migration
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/rails-to-v2-migration
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Format changed source and tests
+        run: >-
+          npx prettier --write
+          docs/SPEC-V2.md
+          src/migration/rails/active-storage.ts
+          src/migration/rails/capture.ts
+          src/migration/rails/contract.ts
+          src/scripts/migrate-rails.ts
+          tests/migration/rails-capture.integration.test.ts
+          tests/migration/rails-contract.test.ts
+      - name: Commit canonical formatting
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/SPEC-V2.md src/migration/rails src/scripts/migrate-rails.ts tests/migration
+          git commit -m 'style: apply canonical formatting'
+          git push origin HEAD:feat/rails-to-v2-migration

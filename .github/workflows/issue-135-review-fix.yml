@@ -1,32 +1,29 @@
-name: Issue 135 review-fix formatter
+name: Issue 135 review-fix RED proof
 
 on:
   push:
     branches:
       - feat/issue-135-dual-backend-ci
 
-permissions:
-  contents: write
-
 jobs:
-  format-tests:
-    if: github.actor != 'github-actions[bot]'
+  red-connection-health:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: feat/issue-135-dual-backend-ci
-          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20.x
           cache: npm
       - run: npm ci --legacy-peer-deps
-      - run: npx prettier --write tests/db/connection.test.ts tests/docker/docker-config.test.ts
-      - run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add tests/db/connection.test.ts tests/docker/docker-config.test.ts
-          git diff --cached --quiet && exit 0
-          git commit -m 'style: format review regression tests'
-          git push origin HEAD:feat/issue-135-dual-backend-ci
+      - run: npx vitest run tests/db/connection.test.ts --reporter=verbose
+
+  red-persisted-volume-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - run: npx vitest run tests/docker/docker-config.test.ts --reporter=verbose

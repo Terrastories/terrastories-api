@@ -98,8 +98,8 @@ describe('GitHub Actions supply-chain policy', () => {
 
     expect(dockerfile).toContain('/usr/local/bin/npm');
     expect(productionCompose).not.toMatch(/\bnpm\b/);
-    expect(productionCompose).toContain('node dist/db/migrate.js');
-    expect(productionCompose).toContain('node dist/server.js');
+    expect(productionCompose).not.toContain('node dist/db/migrate.js');
+    expect(productionCompose).toContain("command: ['node', 'dist/server.js']");
     expect(dockerfile).toContain('/app/src/db/migrations');
     expect(dockerfile).toContain('./dist/db/migrations');
   });

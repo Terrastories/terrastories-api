@@ -200,11 +200,20 @@ export function parseAuditReport(stdout) {
   return report;
 }
 
+function normalizeAuditNodes(nodes) {
+  if (!Array.isArray(nodes)) {
+    return [];
+  }
+
+  return [...new Set(nodes.filter((node) => typeof node === 'string'))].sort();
+}
+
 export function collectAdvisories(report) {
   const current = [];
   for (const [packageName, vulnerability] of Object.entries(
     report.vulnerabilities
   )) {
+    const nodes = normalizeAuditNodes(vulnerability.nodes);
     for (const via of vulnerability.via || []) {
       if (via && typeof via === 'object') {
         current.push({
@@ -212,11 +221,26 @@ export function collectAdvisories(report) {
           package: packageName,
           severity: via.severity,
           url: via.url,
+          nodes,
         });
       }
     }
   }
   return current;
+}
+
+export function formatAdvisoryDiagnostic(advisory, previousSeverity) {
+  const severity = previousSeverity
+    ? `${previousSeverity} -> ${advisory.severity}`
+    : advisory.severity;
+  const location = advisory.url || advisory.source;
+  const nodes = normalizeAuditNodes(advisory.nodes);
+  const paths =
+    nodes.length > 0
+      ? nodes.join(', ')
+      : '(dependency path not reported by npm audit)';
+
+  return `- ${advisory.package} ${severity} ${location}; paths: ${paths}`;
 }
 
 export function compareAuditAdvisories(baseline, policy, report) {
@@ -311,9 +335,7 @@ export async function main() {
     if (newAdvisories.length > 0) {
       process.stderr.write('New blocking npm audit advisories detected:\n');
       for (const advisory of newAdvisories) {
-        process.stderr.write(
-          `- ${advisory.package} ${advisory.severity} ${advisory.url || advisory.source}\n`
-        );
+        process.stderr.write(`${formatAdvisoryDiagnostic(advisory)}\n`);
       }
     }
 
@@ -322,7 +344,7 @@ export async function main() {
       for (const advisory of severityChanges) {
         const previous = baselineByKey.get(advisoryKey(advisory));
         process.stderr.write(
-          `- ${advisory.package} ${previous.severity} -> ${advisory.severity} ${advisory.url || advisory.source}\n`
+          `${formatAdvisoryDiagnostic(advisory, previous.severity)}\n`
         );
       }
     }

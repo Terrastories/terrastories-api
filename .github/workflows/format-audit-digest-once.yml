@@ -1,0 +1,42 @@
+name: Format Audit Digest Once
+
+on:
+  push:
+    branches:
+      - feat/issue-141-ci-supply-chain
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: feat/issue-141-ci-supply-chain
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Format digest files
+        run: npx prettier --write scripts/check-audit-baseline.mjs tests/scripts/ci-supply-chain.test.js
+
+      - name: Commit formatting if needed
+        run: |
+          if git diff --quiet; then
+            echo "No formatting changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts/check-audit-baseline.mjs tests/scripts/ci-supply-chain.test.js
+          git commit -m "chore: format audit digest files"
+          git push origin HEAD:feat/issue-141-ci-supply-chain

@@ -1,6 +1,7 @@
 name: Issue 135 final migration state
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - feat/issue-135-dual-backend-ci

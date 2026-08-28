@@ -12,7 +12,7 @@ Before planning, editing, reviewing, or implementing an issue:
 4. For production-hardening/release work, read the relevant part of `docs/PRODUCTION-READINESS-ROADMAP-2026.md`.
 5. Read the complete GitHub issue/PR and current code/tests.
 
-The canonical product/architecture specification outranks roadmaps, issues, code, and tests. If they conflict, do not silently normalize the conflict: resolve the spec relationship before implementation.
+The canonical product/architecture specification outranks roadmaps, issues, code, tests, Fastify V1, and legacy Rails behavior. If they conflict, do not silently normalize the conflict: resolve the spec relationship before implementation.
 
 ### Non-negotiable V2 invariants
 
@@ -22,13 +22,16 @@ The canonical product/architecture specification outranks roadmaps, issues, code
   - Node.js + PostgreSQL + local/self-hosted storage;
   - Node.js + SQLite + local filesystem for offline field kits.
 - D1/SQLite and PostgreSQL are equal first-class database targets for shared behavior.
+- V2 has one canonical logical relational schema/behavior contract. Dialect-specific definitions/migrations are allowed when tooling requires them, but product semantics may not drift between SQLite/D1 and PostgreSQL.
 - Shared schema/query behavior must remain SQLite-compatible. PostgreSQL-specific behavior must not become the product contract.
 - PostGIS/database-specific spatial extensions are a V2 non-goal. Spatial behavior uses portable latitude/longitude logic unless the canonical spec is explicitly amended.
-- V2 targets legacy Rails feature parity, with intentional URL/shape differences explicitly mapped.
-- New product features beyond approved parity are out of scope unless separately approved.
+- V2 preserves established user-visible Terrastories capabilities and community data; it does **not** target Rails/Fastify wire, route, response-shape, schema, or implementation compatibility.
+- When legacy/V1 behavior or data is encountered, classify it as RETAIN, IMPROVE, ARCHIVE, DROP, or DEFER according to `SPEC-V2.md`. Data-bearing source fields may never be silently dropped.
+- Rails migration must achieve zero unintended data loss: every source row, relationship, attachment, and field is mapped/transformed or retained in the restricted migration archive with machine-readable disposition evidence.
 - V1 scope creep removed by V2 must not be reintroduced indirectly: no elder role/elder-only restrictions, elder speaker status, cultural-significance metadata, community cultural settings, story-place cultural context, or removed cultural-restriction schema unless the spec is deliberately amended.
 - Community data isolation and Indigenous data sovereignty are mandatory. Super admins may manage system-level users/communities but cannot gain access to protected community content merely because they are privileged administrators.
 - Field-kit functionality must remain fully usable offline without runtime cloud dependencies.
+- Released V2 contracts, not Rails/Fastify contracts, are the backward-compatibility baseline for future V2 changes.
 
 ## 2. Spec-drift preflight
 
@@ -37,10 +40,10 @@ For every non-trivial task, record:
 1. Governing spec section(s).
 2. Whether the issue/plan/code conflicts with them.
 3. Impact on D1/SQLite, PostgreSQL, and field-kit portability.
-4. Whether the task is parity/hardening or an unapproved new feature.
+4. If legacy/V1 behavior or data is involved, its RETAIN/IMPROVE/ARCHIVE/DROP/DEFER disposition and user/data impact.
 5. The observable tests/evidence required to prove completion.
 
-Use `.agents/skills/spec-guard/SKILL.md` when the task touches architecture, deployment, database behavior, sovereignty, scope, or when any conflict is suspected.
+Use `.agents/skills/spec-guard/SKILL.md` when the task touches architecture, deployment, database behavior, sovereignty, scope, migration/data preservation, or when any conflict is suspected.
 
 Verdicts are:
 
@@ -101,14 +104,16 @@ npm run test:coverage
 npm run test:compatibility
 ```
 
-Run the smallest affected terminating test set first, then the broader required suite. Issue #133 landed in PR #152: `npm run validate:ci` is the canonical terminating aggregate gate, `npm run validate` is its alias, and `npm run test:ci` executes the bounded deterministic full-suite shards. Coverage and API compatibility remain separate gates so neither can hide full-suite failures. Do not treat a configured script as proof unless it actually completes successfully on the revision being reviewed.
+Run the smallest affected terminating test set first, then the broader required suite. Issue #133 landed in PR #152: `npm run validate:ci` is the canonical terminating aggregate gate, `npm run validate` is its alias, and `npm run test:ci` executes the bounded deterministic full-suite shards. Coverage and API comparison remain separate gates so neither can hide full-suite failures. Do not treat a configured script as proof unless it actually completes successfully on the revision being reviewed.
 
-### API migration/parity
+### API migration/contracts
 
 - Hono smoke tests are necessary but not sufficient.
-- Migrated behavior must run through the same transport-neutral contract assertions against Fastify V1 and Hono V2.
-- Unexpected status/body/error/header/cookie/pagination/content-type differences must fail.
-- Intentional V1/V2 differences and removed V1 scope must map explicitly to `SPEC-V2.md`; do not preserve stale behavior simply because an old test expects it.
+- The canonical fail-closed V2 contract suite is the destination oracle.
+- During Fastify/Hono coexistence, shared assertions may execute against both transports to expose regressions or unclassified behavior, but Fastify output is not normative merely because it exists.
+- Every material legacy/V1 behavior encountered must be classified under `SPEC-V2.md`; do not preserve stale behavior simply because an old test expects it.
+- Unexpected divergence from the **approved V2 contract** in status/body/error/header/cookie/pagination/content-type behavior must fail.
+- Once V2 is released, OpenAPI/contract compatibility checks protect released V2 clients; intentional breaking V2 changes require explicit versioning/deprecation/migration documentation.
 
 ### Database/schema/migrations
 
@@ -124,9 +129,11 @@ Require appropriate D1/SQLite-compatible **and** PostgreSQL evidence for:
 
 Never add PostGIS to satisfy an old test or historical document. Risky/destructive migrations require expand-contract or an explicit tested backup/restore/forward-fix strategy.
 
+For Rails-to-V2 migration tooling, use the actual Rails schema/ActiveStorage relationships as the source fixture contract. FactoryBot values are useful but insufficient. Prove every source row/column/relation/attachment is mapped, transformed, or archived; never make a stricter V2 constraint pass by inventing historical provenance.
+
 ### High-risk surfaces
 
-Auth, sessions, files/media, migrations, community isolation, public/private visibility, exports, and super-admin boundaries require negative/adversarial tests as well as success paths.
+Auth, sessions, files/media, imports, migrations, community isolation, public/private visibility, exports, and super-admin boundaries require negative/adversarial tests as well as success paths.
 
 At minimum consider:
 
@@ -134,6 +141,7 @@ At minimum consider:
 - cross-community access and indirect leaks via lists/counts/metadata/files;
 - session expiry/revocation/tampering/restart behavior;
 - file MIME/size/path/content hazards and ownership;
+- migration truncation, nullability, orphan relations, duplicate identifiers, attachment/checksum mismatch, interrupted writes, and reruns;
 - secrets/session IDs/protected content absent from logs/errors;
 - dependency outage/failure behavior where relevant.
 
@@ -172,6 +180,8 @@ Keep durable context small and single-owned:
 - `README.md` / `CONTRIBUTING.md`: human-facing orientation only.
 
 Do not add completion reports, session diaries, duplicate roadmaps, provider-specific instruction copies, or historical review summaries to the repository. Git history and GitHub issues/PRs already preserve that history.
+
+Feature-specific operator documentation may live beside a migration/deployment tool when required to run it safely and does not duplicate the canonical product contract.
 
 If a canonical product decision changes, update `SPEC-V2.md` (or an explicitly accepted amendment/ADR) and downstream active plans/issues in the same change. An issue alone is not a spec amendment.
 

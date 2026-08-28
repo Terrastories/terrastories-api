@@ -221,7 +221,7 @@ export function collectAdvisories(report) {
           package: packageName,
           severity: via.severity,
           url: via.url,
-          nodes,
+          ...(nodes.length > 0 ? { nodes } : {}),
         });
       }
     }

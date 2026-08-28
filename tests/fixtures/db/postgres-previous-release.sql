@@ -122,42 +122,63 @@ CREATE TABLE files (
   updated_at timestamp NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX files_community_idx ON files (community_id);
---> statement-breakpoint
-CREATE INDEX files_user_idx ON files (uploaded_by);
---> statement-breakpoint
-CREATE INDEX files_mime_type_idx ON files (mime_type);
---> statement-breakpoint
-CREATE INDEX files_active_idx ON files (is_active);
---> statement-breakpoint
-CREATE INDEX files_created_at_idx ON files (created_at);
---> statement-breakpoint
 CREATE TABLE story_places (
   id serial PRIMARY KEY,
-  story_id integer NOT NULL REFERENCES stories(id),
-  place_id integer NOT NULL REFERENCES places(id),
+  story_id integer NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  place_id integer NOT NULL REFERENCES places(id) ON DELETE CASCADE,
   cultural_context text,
-  sort_order integer NOT NULL DEFAULT 0,
+  sort_order integer DEFAULT 0,
   created_at timestamp NOT NULL,
   updated_at timestamp NOT NULL
 );
+--> statement-breakpoint
+CREATE UNIQUE INDEX story_place_unique ON story_places (story_id, place_id);
 --> statement-breakpoint
 CREATE TABLE story_speakers (
   id serial PRIMARY KEY,
-  story_id integer NOT NULL REFERENCES stories(id),
-  speaker_id integer NOT NULL REFERENCES speakers(id),
+  story_id integer NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  speaker_id integer NOT NULL REFERENCES speakers(id) ON DELETE CASCADE,
   story_role text,
-  sort_order integer NOT NULL DEFAULT 0,
+  sort_order integer DEFAULT 0,
   created_at timestamp NOT NULL,
   updated_at timestamp NOT NULL
 );
+--> statement-breakpoint
+CREATE UNIQUE INDEX story_speaker_unique ON story_speakers (story_id, speaker_id);
 --> statement-breakpoint
 CREATE TABLE themes (
   id serial PRIMARY KEY,
   name text NOT NULL,
   description text,
-  community_id integer NOT NULL,
-  color text,
+  mapbox_style_url text,
+  mapbox_access_token text,
+  center_lat numeric(10, 6),
+  center_long numeric(10, 6),
+  sw_boundary_lat numeric(10, 6),
+  sw_boundary_long numeric(10, 6),
+  ne_boundary_lat numeric(10, 6),
+  ne_boundary_long numeric(10, 6),
+  active boolean NOT NULL DEFAULT false,
+  community_id bigint NOT NULL,
   created_at timestamp NOT NULL,
   updated_at timestamp NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX idx_themes_community_id ON themes (community_id);
+--> statement-breakpoint
+CREATE INDEX idx_themes_active ON themes (active);
+--> statement-breakpoint
+CREATE INDEX idx_themes_name ON themes (name);
+--> statement-breakpoint
+CREATE INDEX idx_themes_community_active ON themes (community_id, active);
+--> statement-breakpoint
+CREATE TABLE attachments (
+  id serial PRIMARY KEY,
+  attachable_id integer NOT NULL,
+  attachable_type text NOT NULL,
+  url text NOT NULL,
+  filename text NOT NULL,
+  content_type text,
+  file_size integer,
+  created_at timestamp NOT NULL
 );

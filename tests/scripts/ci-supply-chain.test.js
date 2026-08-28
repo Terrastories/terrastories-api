@@ -88,9 +88,11 @@ describe('GitHub Actions supply-chain policy', () => {
 
     const dependabot = readFileSync(path, 'utf8');
     for (const ecosystem of ['npm', 'github-actions', 'docker']) {
-      expect(dependabot).toContain(`package-ecosystem: '${ecosystem}'`);
+      expect(dependabot).toMatch(
+        new RegExp(`package-ecosystem:\\s*['\"]?${ecosystem}['\"]?`)
+      );
     }
-    expect(dependabot.match(/interval:\s*'weekly'/g)).toHaveLength(3);
+    expect(dependabot.match(/interval:\s*['"]?weekly['"]?/g)).toHaveLength(3);
   });
 });
 

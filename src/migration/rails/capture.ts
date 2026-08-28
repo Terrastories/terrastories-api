@@ -14,6 +14,7 @@ import {
 } from './active-storage.js';
 
 const PAGE_SIZE = 500;
+const JSON_BUILD_OBJECT_COLUMN_CHUNK = 40;
 
 interface SourceColumn {
   columnName: string;
@@ -214,25 +215,44 @@ function initializeArchive(path: string): Database.Database {
   return archive;
 }
 
-function buildRowQuery(table: SourceTable): string {
-  const jsonArguments = table.columns
-    .flatMap((column) => [
-      quoteLiteral(column.columnName),
-      `${quoteIdentifier(column.columnName)}::text`,
-    ])
-    .join(', ');
+function buildRowJsonExpression(columns: SourceColumn[]): string {
+  if (columns.length === 0) return `'{}'::jsonb`;
 
+  const chunks: string[] = [];
+  for (
+    let offset = 0;
+    offset < columns.length;
+    offset += JSON_BUILD_OBJECT_COLUMN_CHUNK
+  ) {
+    const argumentsForChunk = columns
+      .slice(offset, offset + JSON_BUILD_OBJECT_COLUMN_CHUNK)
+      .flatMap((column) => [
+        quoteLiteral(column.columnName),
+        `${quoteIdentifier(column.columnName)}::text`,
+      ])
+      .join(', ');
+    chunks.push(`jsonb_build_object(${argumentsForChunk})`);
+  }
+
+  return chunks.join(' || ');
+}
+
+function buildRowQuery(table: SourceTable): string {
+  const rowJsonExpression = buildRowJsonExpression(table.columns);
   const orderColumns =
     table.primaryKey.length > 0
       ? table.primaryKey
       : table.columns.map((column) => column.columnName);
-  const orderBy = orderColumns
-    .map((column) => `${quoteIdentifier(column)}::text NULLS FIRST`)
-    .join(', ');
+  const orderBy =
+    orderColumns.length > 0
+      ? ` ORDER BY ${orderColumns
+          .map((column) => `${quoteIdentifier(column)}::text NULLS FIRST`)
+          .join(', ')}`
+      : '';
 
-  return `SELECT json_build_object(${jsonArguments})::text AS row_json FROM ${quoteIdentifier(
+  return `SELECT (${rowJsonExpression})::text AS row_json FROM ${quoteIdentifier(
     table.tableName
-  )} ORDER BY ${orderBy} LIMIT $1 OFFSET $2`;
+  )}${orderBy} LIMIT $1 OFFSET $2`;
 }
 
 async function captureTable(
@@ -373,11 +393,12 @@ export async function captureRailsToBundle(
 
   const archivePath = join(temporaryDir, 'legacy.sqlite');
   const pool = new Pool({ connectionString: options.sourceUrl, max: 1 });
-  const client = await pool.connect();
+  let client: PoolClient | null = null;
   let archive: Database.Database | null = null;
   let transactionOpen = false;
 
   try {
+    client = await pool.connect();
     await client.query(
       'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'
     );
@@ -458,7 +479,7 @@ export async function captureRailsToBundle(
     return manifest;
   } catch (error) {
     archive?.close();
-    if (transactionOpen) {
+    if (transactionOpen && client) {
       try {
         await client.query('ROLLBACK');
       } catch {
@@ -468,7 +489,7 @@ export async function captureRailsToBundle(
     await rm(temporaryDir, { recursive: true, force: true });
     throw error;
   } finally {
-    client.release();
+    client?.release();
     await pool.end();
   }
 }

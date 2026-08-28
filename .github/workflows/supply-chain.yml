@@ -70,6 +70,28 @@ jobs:
           jwt_secret="$(openssl rand -hex 32)"
           session_secret="$(openssl rand -hex 32)"
 
+          check_health() {
+            local health_json
+            if ! health_json="$(curl --fail --silent --show-error http://localhost:3000/health)"; then
+              return 1
+            fi
+
+            HEALTH_JSON="$health_json" node --input-type=module <<'NODE'
+          const health = JSON.parse(process.env.HEALTH_JSON);
+          if (
+            !health ||
+            health.status !== 'ok' ||
+            !health.config ||
+            health.config.valid !== true ||
+            !health.database ||
+            health.database.connected !== true
+          ) {
+            process.stderr.write(`Unhealthy API response: ${JSON.stringify(health)}\n`);
+            process.exit(1);
+          }
+          NODE
+          }
+
           docker run --name supply-chain-api -d \
             -p 3000:3000 \
             -e NODE_ENV=production \
@@ -80,7 +102,7 @@ jobs:
 
           healthy=false
           for attempt in $(seq 1 12); do
-            if curl --fail --silent --show-error http://localhost:3000/health > /dev/null; then
+            if check_health; then
               healthy=true
               break
             fi
@@ -98,8 +120,11 @@ jobs:
             exit 1
           fi
 
-          curl --fail --silent --show-error http://localhost:3000/health > /dev/null
+          check_health
           test "$(docker inspect --format='{{.State.Running}}' supply-chain-api)" = "true"
+
+      - name: Preserve exact production image
+        run: docker save terrastories-api:ci-${{ github.sha }} -o release-image.tar
 
       - name: Record production image vulnerability report
         uses: aquasecurity/trivy-action@d2a0b60797ff03db6132bd4e2b293f9b37081297 # pinned master
@@ -128,7 +153,8 @@ jobs:
           printf '%s\n' \
             '{' \
             '  "source_sha": "${{ github.sha }}",' \
-            "  \"image_digest\": \"$IMAGE_DIGEST\"" \
+            "  \"image_digest\": \"$IMAGE_DIGEST\"," \
+            '  "image_archive": "release-image.tar"' \
             '}' > release-evidence.json
 
       - name: Upload release evidence bundle
@@ -137,6 +163,7 @@ jobs:
           name: release-evidence-${{ github.sha }}
           path: |
             release-evidence.json
+            release-image.tar
             release-sbom.spdx.json
             release-vulnerabilities.json
           if-no-files-found: error

@@ -40,6 +40,28 @@ jobs:
             jwt_secret="$(openssl rand -hex 32)"
             session_secret="$(openssl rand -hex 32)"
 
+            check_health() {
+              local health_json
+              if ! health_json="$(curl --fail --silent --show-error http://localhost:3000/health)"; then
+                return 1
+              fi
+
+              HEALTH_JSON="$health_json" node --input-type=module <<'NODE'
+          const health = JSON.parse(process.env.HEALTH_JSON);
+          if (
+            !health ||
+            health.status !== 'ok' ||
+            !health.config ||
+            health.config.valid !== true ||
+            !health.database ||
+            health.database.connected !== true
+          ) {
+            process.stderr.write(`Unhealthy API response: ${JSON.stringify(health)}\n`);
+            process.exit(1);
+          }
+          NODE
+            }
+
             docker run --name test-container -d \
               -p 3000:3000 \
               -e NODE_ENV=production \
@@ -50,7 +72,7 @@ jobs:
 
             healthy=false
             for attempt in $(seq 1 12); do
-              if curl --fail --silent --show-error http://localhost:3000/health > /dev/null; then
+              if check_health; then
                 healthy=true
                 break
               fi
@@ -68,7 +90,7 @@ jobs:
               exit 1
             fi
 
-            curl --fail --silent --show-error http://localhost:3000/health > /dev/null
+            check_health
             test "$(docker inspect --format='{{.State.Running}}' test-container)" = "true"
             docker stop test-container
           fi

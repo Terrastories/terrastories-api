@@ -105,12 +105,15 @@ jobs:
   issue135-migration-drift:
     name: Issue 135 migration history diagnostic
     if: github.event_name == 'pull_request' && github.head_ref == 'feat/issue-135-dual-backend-ci'
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     env:
       BASE_SHA: 2721e083c53fcd96fa3749c25bab716eb10d74e9
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: feat/issue-135-dual-backend-ci
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
@@ -122,6 +125,7 @@ jobs:
         run: |
           python3 <<'PY'
           from pathlib import Path
+
           baseline = Path('src/db/migrations/postgres/0000_current_compat_baseline.sql')
           text = baseline.read_text()
           needle = "ALTER TABLE users ADD COLUMN IF NOT EXISTS current_sign_in_ip text;\n"
@@ -130,6 +134,20 @@ jobs:
               if needle not in text:
                   raise SystemExit('could not locate last-login correction point')
               baseline.write_text(text.replace(needle, addition, 1))
+
+          harness = Path('scripts/test-db-backend.ts')
+          text = harness.read_text()
+          old_query = "`SELECT table_name, column_name\n     FROM information_schema.columns\n     WHERE table_schema = 'public'`"
+          new_query = "`SELECT table_name, column_name, column_default\n     FROM information_schema.columns\n     WHERE table_schema = 'public'`"
+          if old_query in text:
+              text = text.replace(old_query, new_query, 1)
+          marker = "  assert.equal(names.has('places.location'), false);\n"
+          assertion = marker + "\n  const lastLoginColumn = columns.find(\n    (row: any) =>\n      row.table_name === 'users' && row.column_name === 'last_login_at'\n  );\n  assert.ok(lastLoginColumn, 'missing users.last_login_at');\n  assert.equal(\n    lastLoginColumn.column_default,\n    null,\n    'users.last_login_at must not retain a legacy default'\n  );\n"
+          if 'users.last_login_at must not retain a legacy default' not in text:
+              if marker not in text:
+                  raise SystemExit('could not locate PostgreSQL schema assertion point')
+              text = text.replace(marker, assertion, 1)
+          harness.write_text(text)
           PY
 
           rewrite_scratch_imports() {
@@ -213,7 +231,7 @@ jobs:
           cp .issue135-snapshots/postgres/meta/0000_snapshot.json src/db/migrations/postgres/meta/0000_snapshot.json
           cp .issue135-snapshots/postgres/meta/0001_snapshot.json src/db/migrations/postgres/meta/0001_snapshot.json
 
-      - name: Show real pending migration drift
+      - name: Verify no pending migration drift
         run: |
           rm -rf src/db/schema-snapshot
           before_sqlite=$(find src/db/migrations -maxdepth 1 -name '*.sql' | wc -l)
@@ -233,5 +251,47 @@ jobs:
             cat src/db/migrations/postgres/*issue135_generation_probe.sql || true
             exit 22
           fi
-
           echo 'No pending SQLite or PostgreSQL migration drift.'
+
+      - name: Run focused GREEN gates
+        run: |
+          npx prettier --write scripts/test-db-backend.ts tests/db/connection.test.ts tests/db/migrate.test.ts
+          npx vitest run tests/db/connection.test.ts tests/db/migrate.test.ts --reporter=dot --maxWorkers=1 --minWorkers=1
+          npm run test:db:sqlite
+
+          docker run -d --name issue135-postgres \
+            -e POSTGRES_DB=terrastories_test \
+            -e POSTGRES_USER=terrastories \
+            -e POSTGRES_PASSWORD=terrastories-test \
+            -p 55432:5432 postgres:13-alpine
+          trap 'docker rm -f issue135-postgres >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if docker exec issue135-postgres pg_isready -U terrastories -d terrastories_test >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec issue135-postgres pg_isready -U terrastories -d terrastories_test
+          DATABASE_URL=postgresql://terrastories:terrastories-test@127.0.0.1:55432/terrastories_test \
+            ALLOW_POSTGRES_TEST_RESET=true \
+            npm run test:db:postgres
+
+      - name: Commit proven migration history fixes
+        run: |
+          rm -rf .issue135-snapshots src/db/schema-snapshot
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/db/migrations/postgres/0000_current_compat_baseline.sql \
+                  scripts/test-db-backend.ts \
+                  src/db/migrations/meta/0001_snapshot.json \
+                  src/db/migrations/meta/0002_snapshot.json \
+                  src/db/migrations/meta/0003_snapshot.json \
+                  src/db/migrations/postgres/meta/0000_snapshot.json \
+                  src/db/migrations/postgres/meta/0001_snapshot.json \
+                  tests/db/connection.test.ts \
+                  tests/db/migrate.test.ts
+          git diff --cached --check
+          git diff --cached --stat
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: complete issue 135 migration history'
+          git push origin HEAD:feat/issue-135-dual-backend-ci

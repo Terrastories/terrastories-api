@@ -280,4 +280,31 @@ describeWithPostgres('Rails source capture', () => {
 
     expect(await readFile(join(outputDir, 'sentinel'), 'utf8')).toBe('keep-me');
   });
+
+  it('fails closed instead of silently skipping application tables outside public', async () => {
+    if (!pool) return;
+    const parent = await mkdtemp(join(tmpdir(), 'rails-extra-schema-'));
+    const outputDir = join(parent, 'bundle');
+
+    await pool.query(`CREATE SCHEMA community_extra`);
+    await pool.query(
+      `CREATE TABLE community_extra.protected_history (id bigint PRIMARY KEY, payload text NOT NULL)`
+    );
+    await pool.query(
+      `INSERT INTO community_extra.protected_history(id, payload) VALUES (1, 'must-not-disappear')`
+    );
+
+    try {
+      await expect(
+        captureRailsToBundle({
+          sourceUrl: sourceUrl!,
+          outputDir,
+          blobRoot: join(fixtureDir, 'blobs'),
+        })
+      ).rejects.toThrow(/unsupported source schema|non-public.*table/i);
+      expect(await pathExists(outputDir)).toBe(false);
+    } finally {
+      await pool.query(`DROP SCHEMA community_extra CASCADE`);
+    }
+  });
 });

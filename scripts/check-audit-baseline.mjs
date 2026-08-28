@@ -166,6 +166,20 @@ export function validateReviewedPolicyBinding(baseline, policy) {
   }
 }
 
+export function validateAuditProcessResult(audit) {
+  if (!audit || typeof audit !== 'object' || Array.isArray(audit)) {
+    throw new Error('npm audit returned an invalid process result');
+  }
+
+  if (audit.signal != null) {
+    throw new Error(`npm audit was terminated by signal ${audit.signal}`);
+  }
+
+  if (audit.status !== 0 && audit.status !== 1) {
+    throw new Error(`npm audit exited unexpectedly with status ${audit.status}`);
+  }
+}
+
 export function parseAuditReport(stdout) {
   let report;
   try {
@@ -322,6 +336,8 @@ export async function main() {
   if (audit.error) {
     throw new Error(`Could not execute npm audit: ${audit.error.message}`);
   }
+
+  validateAuditProcessResult(audit);
 
   if (!audit.stdout) {
     throw new Error(audit.stderr || 'npm audit produced no JSON output');

@@ -1,0 +1,32 @@
+name: Issue 135 final formatter
+
+on:
+  push:
+    branches:
+      - feat/issue-135-dual-backend-ci
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-135-dual-backend-ci
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - run: npx prettier --write src/db/index.ts docs/development/database-portability.md
+      - run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/db/index.ts docs/development/database-portability.md
+          git diff --cached --quiet && exit 0
+          git commit -m 'style: format final issue 135 review fixes'
+          git push origin HEAD:feat/issue-135-dual-backend-ci

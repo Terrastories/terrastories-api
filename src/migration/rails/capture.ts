@@ -119,6 +119,35 @@ async function assertPathDoesNotExist(path: string): Promise<void> {
   }
 }
 
+async function assertNoUnhandledApplicationSchemas(
+  client: PoolClient
+): Promise<void> {
+  const result = await client.query<{
+    table_schema: string;
+    table_name: string;
+  }>(`
+    SELECT table_schema, table_name
+    FROM information_schema.tables
+    WHERE table_type = 'BASE TABLE'
+      AND table_schema NOT IN ('public', 'pg_catalog', 'information_schema')
+      AND table_schema NOT LIKE 'pg_toast%'
+      AND table_schema NOT LIKE 'pg_temp_%'
+    ORDER BY table_schema, table_name
+  `);
+
+  if (result.rows.length === 0) return;
+
+  const examples = result.rows
+    .slice(0, 5)
+    .map((row) => `${row.table_schema}.${row.table_name}`)
+    .join(', ');
+  const suffix = result.rows.length > 5 ? ', …' : '';
+  throw new Error(
+    `Unsupported source schema: found non-public application table(s) ${examples}${suffix}. ` +
+      'Stage-1 capture refuses to ignore them; extend/review the migration contract before continuing.'
+  );
+}
+
 async function discoverTables(client: PoolClient): Promise<SourceTable[]> {
   const tableResult = await client.query<{ table_name: string }>(`
     SELECT table_name
@@ -130,124 +159,129 @@ async function discoverTables(client: PoolClient): Promise<SourceTable[]> {
 
   const tables: SourceTable[] = [];
   for (const { table_name: tableName } of tableResult.rows) {
-    const [columnResult, primaryKeyResult, constraintResult, indexResult, rlsResult] =
-      await Promise.all([
-        client.query<{
-          column_name: string;
-          data_type: string;
-          udt_name: string;
-          formatted_type: string;
-          is_nullable: 'YES' | 'NO';
-          ordinal_position: number;
-          column_default: string | null;
-          character_maximum_length: number | null;
-          numeric_precision: number | null;
-          numeric_scale: number | null;
-          datetime_precision: number | null;
-          collation_name: string | null;
-          is_identity: 'YES' | 'NO';
-          identity_generation: string | null;
-          is_generated: 'ALWAYS' | 'NEVER';
-          generation_expression: string | null;
-        }>(
-          `
-            SELECT
-              cols.column_name,
-              cols.data_type,
-              cols.udt_name,
-              pg_catalog.format_type(attr.atttypid, attr.atttypmod) AS formatted_type,
-              cols.is_nullable,
-              cols.ordinal_position,
-              cols.column_default,
-              cols.character_maximum_length,
-              cols.numeric_precision,
-              cols.numeric_scale,
-              cols.datetime_precision,
-              cols.collation_name,
-              cols.is_identity,
-              cols.identity_generation,
-              cols.is_generated,
-              cols.generation_expression
-            FROM information_schema.columns cols
-            JOIN pg_catalog.pg_namespace ns
-              ON ns.nspname = cols.table_schema
-            JOIN pg_catalog.pg_class rel
-              ON rel.relnamespace = ns.oid
-             AND rel.relname = cols.table_name
-            JOIN pg_catalog.pg_attribute attr
-              ON attr.attrelid = rel.oid
-             AND attr.attname = cols.column_name
-             AND attr.attnum > 0
-             AND NOT attr.attisdropped
-            WHERE cols.table_schema = 'public'
-              AND cols.table_name = $1
-            ORDER BY cols.ordinal_position
-          `,
-          [tableName]
-        ),
-        client.query<{ column_name: string }>(
-          `
-            SELECT kcu.column_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-             AND tc.table_schema = kcu.table_schema
-             AND tc.table_name = kcu.table_name
-            WHERE tc.table_schema = 'public'
-              AND tc.table_name = $1
-              AND tc.constraint_type = 'PRIMARY KEY'
-            ORDER BY kcu.ordinal_position
-          `,
-          [tableName]
-        ),
-        client.query<{
-          constraint_name: string;
-          constraint_type: string;
-          definition: string;
-        }>(
-          `
-            SELECT
-              con.conname AS constraint_name,
-              CASE con.contype
-                WHEN 'c' THEN 'CHECK'
-                WHEN 'f' THEN 'FOREIGN KEY'
-                WHEN 'p' THEN 'PRIMARY KEY'
-                WHEN 'u' THEN 'UNIQUE'
-                WHEN 'x' THEN 'EXCLUDE'
-                ELSE con.contype::text
-              END AS constraint_type,
-              pg_catalog.pg_get_constraintdef(con.oid, true) AS definition
-            FROM pg_catalog.pg_constraint con
-            JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
-            JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
-            WHERE ns.nspname = 'public'
-              AND rel.relname = $1
-            ORDER BY con.conname
-          `,
-          [tableName]
-        ),
-        client.query<{ indexname: string; indexdef: string }>(
-          `
-            SELECT indexname, indexdef
-            FROM pg_catalog.pg_indexes
-            WHERE schemaname = 'public' AND tablename = $1
-            ORDER BY indexname
-          `,
-          [tableName]
-        ),
-        client.query<{
-          relrowsecurity: boolean;
-          relforcerowsecurity: boolean;
-        }>(
-          `
-            SELECT rel.relrowsecurity, rel.relforcerowsecurity
-            FROM pg_catalog.pg_class rel
-            JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
-            WHERE ns.nspname = 'public' AND rel.relname = $1
-          `,
-          [tableName]
-        ),
-      ]);
+    const [
+      columnResult,
+      primaryKeyResult,
+      constraintResult,
+      indexResult,
+      rlsResult,
+    ] = await Promise.all([
+      client.query<{
+        column_name: string;
+        data_type: string;
+        udt_name: string;
+        formatted_type: string;
+        is_nullable: 'YES' | 'NO';
+        ordinal_position: number;
+        column_default: string | null;
+        character_maximum_length: number | null;
+        numeric_precision: number | null;
+        numeric_scale: number | null;
+        datetime_precision: number | null;
+        collation_name: string | null;
+        is_identity: 'YES' | 'NO';
+        identity_generation: string | null;
+        is_generated: 'ALWAYS' | 'NEVER';
+        generation_expression: string | null;
+      }>(
+        `
+          SELECT
+            cols.column_name,
+            cols.data_type,
+            cols.udt_name,
+            pg_catalog.format_type(attr.atttypid, attr.atttypmod) AS formatted_type,
+            cols.is_nullable,
+            cols.ordinal_position,
+            cols.column_default,
+            cols.character_maximum_length,
+            cols.numeric_precision,
+            cols.numeric_scale,
+            cols.datetime_precision,
+            cols.collation_name,
+            cols.is_identity,
+            cols.identity_generation,
+            cols.is_generated,
+            cols.generation_expression
+          FROM information_schema.columns cols
+          JOIN pg_catalog.pg_namespace ns
+            ON ns.nspname = cols.table_schema
+          JOIN pg_catalog.pg_class rel
+            ON rel.relnamespace = ns.oid
+           AND rel.relname = cols.table_name
+          JOIN pg_catalog.pg_attribute attr
+            ON attr.attrelid = rel.oid
+           AND attr.attname = cols.column_name
+           AND attr.attnum > 0
+           AND NOT attr.attisdropped
+          WHERE cols.table_schema = 'public'
+            AND cols.table_name = $1
+          ORDER BY cols.ordinal_position
+        `,
+        [tableName]
+      ),
+      client.query<{ column_name: string }>(
+        `
+          SELECT kcu.column_name
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage kcu
+            ON tc.constraint_name = kcu.constraint_name
+           AND tc.table_schema = kcu.table_schema
+           AND tc.table_name = kcu.table_name
+          WHERE tc.table_schema = 'public'
+            AND tc.table_name = $1
+            AND tc.constraint_type = 'PRIMARY KEY'
+          ORDER BY kcu.ordinal_position
+        `,
+        [tableName]
+      ),
+      client.query<{
+        constraint_name: string;
+        constraint_type: string;
+        definition: string;
+      }>(
+        `
+          SELECT
+            con.conname AS constraint_name,
+            CASE con.contype
+              WHEN 'c' THEN 'CHECK'
+              WHEN 'f' THEN 'FOREIGN KEY'
+              WHEN 'p' THEN 'PRIMARY KEY'
+              WHEN 'u' THEN 'UNIQUE'
+              WHEN 'x' THEN 'EXCLUDE'
+              ELSE con.contype::text
+            END AS constraint_type,
+            pg_catalog.pg_get_constraintdef(con.oid, true) AS definition
+          FROM pg_catalog.pg_constraint con
+          JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+          JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+          WHERE ns.nspname = 'public'
+            AND rel.relname = $1
+          ORDER BY con.conname
+        `,
+        [tableName]
+      ),
+      client.query<{ indexname: string; indexdef: string }>(
+        `
+          SELECT indexname, indexdef
+          FROM pg_catalog.pg_indexes
+          WHERE schemaname = 'public' AND tablename = $1
+          ORDER BY indexname
+        `,
+        [tableName]
+      ),
+      client.query<{
+        relrowsecurity: boolean;
+        relforcerowsecurity: boolean;
+      }>(
+        `
+          SELECT rel.relrowsecurity, rel.relforcerowsecurity
+          FROM pg_catalog.pg_class rel
+          JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+          WHERE ns.nspname = 'public' AND rel.relname = $1
+        `,
+        [tableName]
+      ),
+    ]);
 
     tables.push({
       tableName,
@@ -537,7 +571,9 @@ async function captureBlobs(
   return blobs;
 }
 
-async function configureDeterministicSourceSession(client: PoolClient): Promise<void> {
+async function configureDeterministicSourceSession(
+  client: PoolClient
+): Promise<void> {
   await client.query(`SET LOCAL TIME ZONE 'UTC'`);
   await client.query(`SET LOCAL DateStyle = 'ISO, YMD'`);
   await client.query(`SET LOCAL IntervalStyle = 'iso_8601'`);
@@ -570,6 +606,7 @@ export async function captureRailsToBundle(
     );
     transactionOpen = true;
     await configureDeterministicSourceSession(client);
+    await assertNoUnhandledApplicationSchemas(client);
 
     const tables = await discoverTables(client);
     validateRequiredRailsSchema(tables);

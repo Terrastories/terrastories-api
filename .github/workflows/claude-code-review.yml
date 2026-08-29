@@ -72,7 +72,6 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.x
-          cache: npm
 
       - name: Install dependencies before secret-bearing review step
         run: npm ci
@@ -189,8 +188,7 @@ jobs:
       - name: Remove checked-out source before secret-bearing model step
         run: |
           set -euo pipefail
-          rm -rf "$GITHUB_WORKSPACE"
-          mkdir -p "$GITHUB_WORKSPACE"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 
       - name: Run isolated Claude Opus 5 long-context review
         id: claude
@@ -212,6 +210,25 @@ jobs:
             --disallowedTools "Agent,AskUserQuestion,Bash,BashOutput,CronCreate,CronDelete,CronList,Edit,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Glob,Grep,KillShell,LSP,Monitor,NotebookEdit,PowerShell,Read,ScheduleWakeup,ShareOnboardingGuide,Skill,Task,TaskCreate,TaskGet,TaskList,TaskOutput,TaskUpdate,TodoWrite,ToolSearch,WebFetch,WebSearch,Write"
             --json-schema '{"type":"object","additionalProperties":false,"properties":{"verdict":{"type":"string","enum":["NO_BLOCKER_OR_SHOULD_FIX","HAS_BLOCKER_OR_SHOULD_FIX"]},"review_markdown":{"type":"string","minLength":1}},"required":["verdict","review_markdown"]}'
           show_full_output: false
+
+      - name: Re-verify PR head/base pair after model review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha }}
+        run: |
+          set -euo pipefail
+          actual_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          actual_base="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .base.sha)"
+          test "$actual_head" = "$EXPECTED_HEAD_SHA" || {
+            echo "PR head moved during review: expected $EXPECTED_HEAD_SHA, got $actual_head" >&2
+            exit 1
+          }
+          test "$actual_base" = "$EXPECTED_BASE_SHA" || {
+            echo "PR base moved during review: expected $EXPECTED_BASE_SHA, got $actual_base" >&2
+            exit 1
+          }
 
       - name: Validate and publish Claude review result
         env:

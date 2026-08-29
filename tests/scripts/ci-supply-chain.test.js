@@ -273,7 +273,10 @@ describe('release evidence workflow', () => {
     expect(workflow).toContain('release-vulnerabilities.json');
     expect(workflow).toContain('anchore/sbom-action@');
     expect(workflow).toContain('actions/attest-build-provenance@');
-    expect(workflow).toContain('docker save');
+    expect(workflow).toContain('outputs: type=docker,dest=release-image.tar');
+    expect(workflow).toContain('docker load --input release-image.tar');
+    expect(workflow).not.toContain('docker save');
+    expect(workflow).toContain('image_archive_sha256');
     expect(workflow).toContain('release-image.tar');
     expect(workflow).toContain('${{ github.sha }}');
     expect(workflow).toMatch(/digest/i);

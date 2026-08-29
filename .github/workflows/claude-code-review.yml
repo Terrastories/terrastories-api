@@ -32,10 +32,11 @@ jobs:
 
     steps:
       - name: Checkout exact review head
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ inputs.expected_head_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify exact review context
         env:

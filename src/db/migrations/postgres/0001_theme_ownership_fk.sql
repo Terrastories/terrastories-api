@@ -3,7 +3,8 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM pg_constraint
-    WHERE conname = 'themes_community_id_communities_id_fk'
+    WHERE conrelid = 'public.themes'::regclass
+      AND conname = 'themes_community_id_communities_id_fk'
   ) THEN
     ALTER TABLE themes
       ADD CONSTRAINT themes_community_id_communities_id_fk

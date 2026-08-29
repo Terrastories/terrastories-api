@@ -113,12 +113,13 @@ CREATE INDEX IF NOT EXISTS idx_users_community_email ON users (community_id, ema
 --> statement-breakpoint
 DO $users_fk$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_community_id_communities_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.users'::regclass AND conname = 'users_community_id_communities_id_fk') THEN
     ALTER TABLE users ADD CONSTRAINT users_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'users_community_id_communities_id_fk'
+    WHERE conrelid = 'public.users'::regclass
+      AND conname = 'users_community_id_communities_id_fk'
       AND NOT convalidated
   ) AND NOT EXISTS (
     SELECT 1
@@ -165,12 +166,13 @@ CREATE INDEX IF NOT EXISTS places_photo_url_idx ON places (photo_url);
 --> statement-breakpoint
 DO $places_fk$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'places_community_id_communities_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.places'::regclass AND conname = 'places_community_id_communities_id_fk') THEN
     ALTER TABLE places ADD CONSTRAINT places_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'places_community_id_communities_id_fk'
+    WHERE conrelid = 'public.places'::regclass
+      AND conname = 'places_community_id_communities_id_fk'
       AND NOT convalidated
   ) AND NOT EXISTS (
     SELECT 1
@@ -220,12 +222,13 @@ CREATE INDEX IF NOT EXISTS speakers_is_active_idx ON speakers (is_active);
 --> statement-breakpoint
 DO $speakers_fk$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'speakers_community_id_communities_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.speakers'::regclass AND conname = 'speakers_community_id_communities_id_fk') THEN
     ALTER TABLE speakers ADD CONSTRAINT speakers_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'speakers_community_id_communities_id_fk'
+    WHERE conrelid = 'public.speakers'::regclass
+      AND conname = 'speakers_community_id_communities_id_fk'
       AND NOT convalidated
   ) AND NOT EXISTS (
     SELECT 1
@@ -295,12 +298,13 @@ CREATE INDEX IF NOT EXISTS stories_privacy_level_idx ON stories (privacy_level);
 --> statement-breakpoint
 DO $stories_fks$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'stories_community_id_communities_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.stories'::regclass AND conname = 'stories_community_id_communities_id_fk') THEN
     ALTER TABLE stories ADD CONSTRAINT stories_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'stories_community_id_communities_id_fk'
+    WHERE conrelid = 'public.stories'::regclass
+      AND conname = 'stories_community_id_communities_id_fk'
       AND NOT convalidated
   ) AND NOT EXISTS (
     SELECT 1
@@ -310,10 +314,10 @@ BEGIN
   ) THEN
     ALTER TABLE stories VALIDATE CONSTRAINT stories_community_id_communities_id_fk;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'stories_interview_location_id_places_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.stories'::regclass AND conname = 'stories_interview_location_id_places_id_fk') THEN
     ALTER TABLE stories ADD CONSTRAINT stories_interview_location_id_places_id_fk FOREIGN KEY (interview_location_id) REFERENCES places(id);
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'stories_interviewer_id_speakers_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.stories'::regclass AND conname = 'stories_interviewer_id_speakers_id_fk') THEN
     ALTER TABLE stories ADD CONSTRAINT stories_interviewer_id_speakers_id_fk FOREIGN KEY (interviewer_id) REFERENCES speakers(id);
   END IF;
 END $stories_fks$;
@@ -355,10 +359,10 @@ CREATE INDEX IF NOT EXISTS files_created_at_idx ON files (created_at);
 --> statement-breakpoint
 DO $files_fks$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'files_community_id_communities_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.files'::regclass AND conname = 'files_community_id_communities_id_fk') THEN
     ALTER TABLE files ADD CONSTRAINT files_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id);
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'files_uploaded_by_users_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.files'::regclass AND conname = 'files_uploaded_by_users_id_fk') THEN
     ALTER TABLE files ADD CONSTRAINT files_uploaded_by_users_id_fk FOREIGN KEY (uploaded_by) REFERENCES users(id);
   END IF;
 END $files_fks$;
@@ -387,10 +391,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS story_place_unique ON story_places (story_id, 
 --> statement-breakpoint
 DO $story_places_fks$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'story_places_story_id_stories_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.story_places'::regclass AND conname = 'story_places_story_id_stories_id_fk') THEN
     ALTER TABLE story_places ADD CONSTRAINT story_places_story_id_stories_id_fk FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'story_places_place_id_places_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.story_places'::regclass AND conname = 'story_places_place_id_places_id_fk') THEN
     ALTER TABLE story_places ADD CONSTRAINT story_places_place_id_places_id_fk FOREIGN KEY (place_id) REFERENCES places(id) ON DELETE CASCADE;
   END IF;
 END $story_places_fks$;
@@ -454,10 +458,10 @@ END $canonicalize_issue135_unique_constraints$;
 --> statement-breakpoint
 DO $story_speakers_fks$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'story_speakers_story_id_stories_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.story_speakers'::regclass AND conname = 'story_speakers_story_id_stories_id_fk') THEN
     ALTER TABLE story_speakers ADD CONSTRAINT story_speakers_story_id_stories_id_fk FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'story_speakers_speaker_id_speakers_id_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.story_speakers'::regclass AND conname = 'story_speakers_speaker_id_speakers_id_fk') THEN
     ALTER TABLE story_speakers ADD CONSTRAINT story_speakers_speaker_id_speakers_id_fk FOREIGN KEY (speaker_id) REFERENCES speakers(id) ON DELETE CASCADE;
   END IF;
 END $story_speakers_fks$;

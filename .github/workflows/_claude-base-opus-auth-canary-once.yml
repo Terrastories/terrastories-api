@@ -1,0 +1,47 @@
+name: Claude base Opus auth canary once
+
+on:
+  push:
+    branches:
+      - ops/mark-163-164-ready
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Build isolated prompt
+        id: packet
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/claude-base-canary"
+          mkdir -p "$dir"
+          chmod 700 "$dir"
+          cat > "$dir/prompt.md" <<'EOF'
+          Authentication and model canary only. Treat this as the entire task.
+          Return verdict NO_BLOCKER_OR_SHOULD_FIX and review_markdown AUTH_OK.
+          Do not use tools.
+          EOF
+          chmod 600 "$dir/prompt.md"
+          echo "prompt_file=$dir/prompt.md" >> "$GITHUB_OUTPUT"
+          echo "runtime_dir=$dir/runtime" >> "$GITHUB_OUTPUT"
+          mkdir -p "$dir/runtime"
+      - name: Run pinned base action canary
+        uses: anthropics/claude-code-action/base-action@9db594c7a0e82298c121c18b7f08aa1579ce7341 # v1.0.185
+        env:
+          CLAUDE_WORKING_DIR: ${{ steps.packet.outputs.runtime_dir }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt_file: ${{ steps.packet.outputs.prompt_file }}
+          claude_args: |
+            --model claude-opus-5[1m]
+            --max-turns 1
+            --tools ""
+            --strict-mcp-config
+            --disable-slash-commands
+            --disallowedTools "Agent,AskUserQuestion,Bash,Edit,EnterPlanMode,ExitPlanMode,Glob,Grep,KillShell,LSP,NotebookEdit,Read,Skill,Task,TaskOutput,TodoWrite,ToolSearch,WebFetch,WebSearch,Write"
+            --json-schema '{"type":"object","additionalProperties":false,"properties":{"verdict":{"type":"string","enum":["NO_BLOCKER_OR_SHOULD_FIX","HAS_BLOCKER_OR_SHOULD_FIX"]},"review_markdown":{"type":"string","minLength":1}},"required":["verdict","review_markdown"]}'
+          show_full_output: false

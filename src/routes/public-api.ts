@@ -74,9 +74,11 @@ export async function publicApiRoutes(
           family,
           surface: 'public-api',
           visibility: 'public',
-          // V2 has an explicit story-sharing grant, but no equivalent place
-          // publication grant. Never infer place publicity from publicStories.
-          explicitlyPublic: family === 'stories' && community.publicStories,
+          // The legacy publicStories column is the persisted community-level
+          // public API grant carried forward for Rails parity. It explicitly
+          // gates both public story and public place endpoints; route namespace
+          // alone never grants visibility.
+          explicitlyPublic: community.publicStories,
           communityActive: community.isActive,
         });
 

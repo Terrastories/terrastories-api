@@ -549,12 +549,17 @@ export class StoryService {
     id: number,
     updates: Partial<StoryCreateInput>,
     userId: number,
-    userRole: string
+    userRole: string,
+    userCommunityId: number
   ): Promise<StoryWithRelations> {
     this.logger.info('Updating story', { storyId: id, userId, userRole });
 
-    // Get existing story
-    const existingStory = await this.storyRepository.findByIdWithRelations(id);
+    // Resolve within the authenticated tenant before loading any relations so a
+    // foreign story is indistinguishable from a nonexistent story.
+    const existingStory = await this.storyRepository.findByIdWithRelations(
+      id,
+      userCommunityId
+    );
     if (!existingStory) {
       throw new StoryNotFoundError();
     }
@@ -739,12 +744,17 @@ export class StoryService {
   async deleteStory(
     id: number,
     userId: number,
-    userRole: string
+    userRole: string,
+    userCommunityId: number
   ): Promise<void> {
     this.logger.info('Deleting story', { storyId: id, userId, userRole });
 
-    // Get existing story
-    const existingStory = await this.storyRepository.findByIdWithRelations(id);
+    // Resolve within the authenticated tenant before loading any relations so a
+    // foreign story is indistinguishable from a nonexistent story.
+    const existingStory = await this.storyRepository.findByIdWithRelations(
+      id,
+      userCommunityId
+    );
     if (!existingStory) {
       throw new StoryNotFoundError();
     }

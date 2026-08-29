@@ -581,7 +581,8 @@ describe('StoryService', () => {
         existingStory.id,
         updates,
         testData.users.editor.id,
-        testData.users.editor.role
+        testData.users.editor.role,
+        testData.community.id
       );
 
       // Assert
@@ -612,7 +613,8 @@ describe('StoryService', () => {
         existingStory.id,
         updates,
         testData.users.editor.id,
-        testData.users.editor.role
+        testData.users.editor.role,
+        testData.community.id
       );
 
       // Assert
@@ -632,7 +634,8 @@ describe('StoryService', () => {
           existingStory.id,
           { title: 'Unauthorized Update' },
           testData.users.viewer.id, // Viewer cannot edit
-          testData.users.viewer.role
+          testData.users.viewer.role,
+          testData.community.id
         )
       ).rejects.toThrow('Insufficient permissions to modify this story');
     });
@@ -660,7 +663,8 @@ describe('StoryService', () => {
       await storyService.deleteStory(
         storyToDelete.id,
         testData.users.admin.id, // Admin can delete any story
-        testData.users.admin.role
+        testData.users.admin.role,
+        testData.community.id
       );
 
       // Assert
@@ -680,7 +684,8 @@ describe('StoryService', () => {
       await storyService.deleteStory(
         storyToDelete.id,
         testData.users.editor.id, // Creator can delete own story
-        testData.users.editor.role
+        testData.users.editor.role,
+        testData.community.id
       );
 
       // Assert
@@ -699,7 +704,8 @@ describe('StoryService', () => {
         storyService.deleteStory(
           storyToDelete.id,
           testData.users.viewer.id, // Viewer cannot delete
-          testData.users.viewer.role
+          testData.users.viewer.role,
+          testData.community.id
         )
       ).rejects.toThrow('Insufficient permissions to delete this story');
     });

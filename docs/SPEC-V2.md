@@ -4,7 +4,7 @@
 | ------------- | -------------------------------------------------------- |
 | **Status**    | Canonical — implementation source of truth               |
 | **Created**   | 2026-06-07                                               |
-| **Updated**   | 2026-08-22                                               |
+| **Updated**   | 2026-08-29                                               |
 | **Authors**   | Terrastories Team                                        |
 | **Reviewers** | DeepSeek (automated -- 9 risks identified and addressed) |
 | **Repo**      | `terrastories-api`                                       |
@@ -232,6 +232,8 @@ interface ApiError {
 V2 must replicate all capabilities from the legacy Rails application.
 
 ### Data Models
+
+**Public API compatibility mapping:** until a dedicated publication model replaces the legacy schema, `communities.publicStories` is the persisted community-level public/private grant for the legacy unauthenticated public story and place endpoints. The historical column name does not make route namespace alone sufficient: the community grant must be enabled, the community must be active, and content-level restrictions still apply. Splitting this grant by content family is a product/schema change and requires an explicit spec amendment and migration.
 
 - [ ] **Communities** -- CRUD, slug, locale, country, public/private flag
 - [ ] **Stories** -- CRUD, title, description, language, topic, permission level, privacy level, interview metadata (date interviewed, interviewer, interview location), media attachments

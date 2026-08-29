@@ -19,6 +19,7 @@ describe('V2 sovereignty route boundaries', () => {
   let viewerCookie: string;
   let adminCookie: string;
   let superAdminCookie: string;
+  let communityBStoryId: number;
   let communityBStorySlug: string;
 
   beforeEach(async () => {
@@ -71,15 +72,19 @@ describe('V2 sovereignty route boundaries', () => {
       .returning();
 
     communityBStorySlug = `community-b-story-${Date.now()}`;
-    await db.insert(storiesSqlite).values({
-      title: 'Community B private story',
-      description: 'Must never be observable by Community A',
-      slug: communityBStorySlug,
-      communityId: communityBId,
-      createdBy: communityBAuthor.id,
-      isRestricted: false,
-      privacyLevel: 'private',
-    });
+    const [communityBStory] = await db
+      .insert(storiesSqlite)
+      .values({
+        title: 'Community B private story',
+        description: 'Must never be observable by Community A',
+        slug: communityBStorySlug,
+        communityId: communityBId,
+        createdBy: communityBAuthor.id,
+        isRestricted: false,
+        privacyLevel: 'private',
+      })
+      .returning();
+    communityBStoryId = communityBStory.id;
 
     app = await createTestApp(db);
     const login = await app.inject({
@@ -156,6 +161,29 @@ describe('V2 sovereignty route boundaries', () => {
     });
 
     expect(response.statusCode).toBe(403);
+    expect(response.json().data).toBeUndefined();
+  });
+
+  it('does not reveal or mutate a foreign story through an ID-only update route', async () => {
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/stories/${communityBStoryId}`,
+      headers: { cookie: adminCookie },
+      payload: { title: 'Cross-community overwrite attempt' },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().data).toBeUndefined();
+  });
+
+  it('does not reveal or delete a foreign story through an ID-only delete route', async () => {
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/stories/${communityBStoryId}`,
+      headers: { cookie: adminCookie },
+    });
+
+    expect(response.statusCode).toBe(404);
     expect(response.json().data).toBeUndefined();
   });
 

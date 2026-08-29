@@ -859,14 +859,18 @@ export default async function storiesRoutes(
       try {
         const { id } = storyParamsSchema.parse(request.params);
         const updates = updateStorySchema.parse(request.body);
-        const { id: userId, role: userRole } = (request as AuthenticatedRequest)
-          .session.user!;
+        const {
+          id: userId,
+          role: userRole,
+          communityId: userCommunityId,
+        } = (request as AuthenticatedRequest).session.user!;
 
         const story = await storyService.updateStory(
           id,
           updates as Partial<StoryCreateInput>,
           userId,
-          userRole
+          userRole,
+          userCommunityId
         );
 
         const warnings = addDeprecationWarnings();
@@ -985,10 +989,13 @@ export default async function storiesRoutes(
     ) => {
       try {
         const { id } = storyParamsSchema.parse(request.params);
-        const { id: userId, role: userRole } = (request as AuthenticatedRequest)
-          .session.user!;
+        const {
+          id: userId,
+          role: userRole,
+          communityId: userCommunityId,
+        } = (request as AuthenticatedRequest).session.user!;
 
-        await storyService.deleteStory(id, userId, userRole);
+        await storyService.deleteStory(id, userId, userRole, userCommunityId);
 
         return reply.status(204).send();
       } catch (error: unknown) {

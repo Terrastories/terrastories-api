@@ -671,8 +671,7 @@ describe('Production Performance Validation - Phase 1', () => {
       const railsBenchmarks = {
         '/api/communities': 150, // ms
         '/api/communities/2/stories': 180, // ms
-        // V2 has no explicit anonymous place-publication grant. Public place
-        // routes intentionally fail closed and are covered by sovereignty tests.
+        '/api/communities/2/places': 120, // ms
       };
 
       const testEndpoints = Object.keys(railsBenchmarks);

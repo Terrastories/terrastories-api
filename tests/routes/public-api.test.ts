@@ -25,6 +25,7 @@ describe('Public API Routes - Integration Tests', () => {
   let db: TestDatabase;
   let testCommunityId: number;
   let privateCommunityId: number;
+  let testPlaceId: number;
 
   beforeEach(async () => {
     db = await testDb.setup();
@@ -32,6 +33,7 @@ describe('Public API Routes - Integration Tests', () => {
     const fixtures = await testDb.seedTestData();
     testCommunityId = fixtures.communities[0].id;
     privateCommunityId = fixtures.communities[1].id;
+    testPlaceId = fixtures.places[0].id;
 
     app = await createTestApp(db);
   });
@@ -182,16 +184,20 @@ describe('Public API Routes - Integration Tests', () => {
   });
 
   describe('GET /api/communities/:community_id/places', () => {
-    it('does not infer public place access from the story-sharing flag', async () => {
+    it('returns public places when the community public API grant is enabled', async () => {
       const response = await app.inject({
         method: 'GET',
         url: `/api/communities/${testCommunityId}/places`,
       });
 
-      expect(response.statusCode).toBe(404);
-      expect(JSON.parse(response.body)).toEqual({
-        error: 'Community not found',
-      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(Array.isArray(body.data)).toBe(true);
+      expect(body.data).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: testPlaceId, name: 'Test Place 1' }),
+        ])
+      );
     });
 
     it('should not expose places for a private community', async () => {
@@ -208,16 +214,26 @@ describe('Public API Routes - Integration Tests', () => {
   });
 
   describe('GET /api/communities/:community_id/places/:id', () => {
-    it('fails closed before revealing whether a place exists', async () => {
+    it('returns a public place when the community public API grant is enabled', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: `/api/communities/${testCommunityId}/places/550e8400-e29b-41d4-a716-446655440000`,
+        url: `/api/communities/${testCommunityId}/places/${testPlaceId}`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toEqual(
+        expect.objectContaining({ id: testPlaceId, name: 'Test Place 1' })
+      );
+    });
+
+    it('returns the normal not-found response inside an explicitly public community', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/communities/${testCommunityId}/places/999999`,
       });
 
       expect(response.statusCode).toBe(404);
-      expect(JSON.parse(response.body)).toEqual({
-        error: 'Community not found',
-      });
+      expect(response.json()).toEqual({ error: 'Place not found' });
     });
   });
 

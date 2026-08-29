@@ -710,7 +710,8 @@ export async function verifyCapturedArchive(
         archivedTable.rowSha256 !== expected.rowSha256 ||
         archivedTable.columnsJson !== JSON.stringify(expected.columns) ||
         archivedTable.primaryKeyJson !== JSON.stringify(expected.primaryKey) ||
-        archivedTable.constraintsJson !== JSON.stringify(expected.constraints) ||
+        archivedTable.constraintsJson !==
+          JSON.stringify(expected.constraints) ||
         archivedTable.indexesJson !== JSON.stringify(expected.indexes) ||
         Boolean(archivedTable.rowSecurityEnabled) !==
           expected.rowSecurityEnabled ||
@@ -723,7 +724,9 @@ export async function verifyCapturedArchive(
 
       const tableHash = createHash('sha256');
       let rowCount = 0;
-      for (const row of selectRows.iterate(archivedTable.tableName) as Iterable<{
+      for (const row of selectRows.iterate(
+        archivedTable.tableName
+      ) as Iterable<{
         ordinal: number;
         rowJson: string;
         rowSha256: string;

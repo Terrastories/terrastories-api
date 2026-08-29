@@ -81,7 +81,10 @@ describe('ActiveStorage blob resolution', () => {
 
   it('rejects symlinks instead of following blob paths outside the trusted export', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rails-symlink-blobs-'));
-    const outside = join(await mkdtemp(join(tmpdir(), 'rails-secret-')), 'secret');
+    const outside = join(
+      await mkdtemp(join(tmpdir(), 'rails-secret-')),
+      'secret'
+    );
     await writeFile(outside, 'not-an-exported-blob');
     await symlink(outside, join(root, 'fixtureblob'));
 

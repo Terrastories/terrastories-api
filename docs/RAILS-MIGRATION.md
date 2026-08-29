@@ -26,7 +26,7 @@ The audited baseline is pinned to:
 
 The capture tool records the observed `schema_migrations` version and a digest of the **actually discovered** PostgreSQL schema. It validates that the required pinned Rails tables/columns still exist, but it does not use that allowlist as the universe of preserved data: unknown or community-specific public tables are captured too.
 
-If the source predates, postdates, or customizes the pinned baseline, preserve the resulting bundle but do not declare the migration validated until the schema difference has been reviewed and dispositioned.
+If the source predates, postdates, or customizes the pinned baseline, preserve the resulting bundle but do not declare the migration validated until the schema difference has been reviewed and dispositioned. If application tables exist outside PostgreSQL's `public` schema, Stage 1 fails closed rather than silently skipping them; extend/review the capture contract before continuing that deployment.
 
 ## ActiveStorage prerequisite
 
@@ -41,16 +41,29 @@ The tool rejects unsafe keys, requires bytes for every ActiveStorage blob, check
 
 For S3-backed legacy installations, make a complete trusted local export of the object keys before invoking the tool. Do not put S3 credentials into the bundle or command output.
 
+## Database credentials
+
+Do **not** put a production database password directly in `--source`; shell history and process listings can expose command-line arguments.
+
+Prefer PostgreSQL's password-file mechanism on the trusted migration host. Create a dedicated `pgpass` file outside the repository, restrict it to the operator, and point libpq-compatible clients at it:
+
+```bash
+chmod 600 /trusted/path/terrastories.pgpass
+export PGPASSFILE=/trusted/path/terrastories.pgpass
+```
+
+Use a source URL that contains the host/user/database identity but not the password. Keep the password file and any environment configuration outside the repository and remove/rotate temporary migration credentials after the operation.
+
 ## Capture command
 
 ```bash
 npx tsx src/scripts/migrate-rails.ts \
-  --source 'postgresql://USER:PASSWORD@HOST:PORT/DATABASE' \
+  --source 'postgresql://USER@HOST:PORT/DATABASE' \
   --blob-root /trusted/path/to/active-storage-export \
   --output /trusted/path/to/terrastories-rails-bundle
 ```
 
-Do not reuse an output directory. The tool refuses to overwrite an existing destination. It writes to an owner-only temporary directory and only renames that directory to the requested final path after database capture, media verification, manifest creation, and source-transaction completion all succeed.
+Do not reuse an output directory. The tool refuses to overwrite an existing destination. It writes to an owner-only temporary directory and only renames that directory to the requested final path after database capture, media verification, SQLite archive self-verification, manifest creation, and source-transaction completion all succeed.
 
 If the run fails, there must be no final bundle that could be mistaken for success.
 
@@ -74,7 +87,9 @@ terrastories-rails-bundle/
 - source values using PostgreSQL text representation to avoid JavaScript bigint/decimal/timestamp precision coercion;
 - deterministic per-row and per-table SHA-256 digests.
 
-`manifest.json` records the pinned legacy contract, observed schema version, actual schema digest, table/row counts, schema metadata, ActiveStorage metadata, Rails checksums, and SHA-256 values. It intentionally does not reproduce full source rows.
+Before the bundle is accepted, Stage 1 closes and reopens the SQLite archive read-only, runs SQLite integrity/foreign-key checks, re-verifies persisted schema metadata, re-hashes every persisted row and table, and confirms total counts. The final archive byte size and SHA-256 are then recorded in `manifest.json`.
+
+`manifest.json` records the pinned legacy contract, observed schema version, actual schema digest, archive size/SHA-256, table/row counts, schema metadata, ActiveStorage metadata, Rails checksums, and blob SHA-256 values. It intentionally does not reproduce full source rows.
 
 ## Required verification before accepting Stage 1
 
@@ -83,16 +98,18 @@ A successful process exit is necessary but not sufficient for a real migration. 
 1. Keep the original Rails database backup and original media export unchanged.
 2. Confirm the manifest's observed schema version and investigate any unexpected source schema/custom tables rather than deleting them.
 3. Confirm all discovered tables have recorded row counts and hashes.
-4. Confirm the manifest accounts for every ActiveStorage blob and that the capture reported no missing/checksum failures.
+4. Confirm the manifest records `legacy.sqlite` size/SHA-256 and accounts for every ActiveStorage blob, with no missing/checksum failures.
 5. Store the bundle encrypted if retained or transferred.
 6. Record who performed the capture, the source backup/snapshot identity, capture date, tool commit, and destination custody outside the public repository.
 7. Do not delete or alter the legacy deployment solely because Stage 1 succeeded. Cutover requires the later Stage-2 transform plus end-to-end user/data validation from `SPEC-V2.md`.
+
+If custody or transfer could have modified the bundle after capture, recompute and compare the archive/blob SHA-256 values before Stage 2. A hash mismatch invalidates that copy; recreate or restore it from the trusted capture rather than editing the manifest.
 
 ## Failure and rerun rules
 
 - Fix the source/export/precondition that caused the failure; do not weaken validation to make the run pass.
 - Rerun into a **new empty output path**.
-- A missing required Rails table/column, unreadable source row, row-security visibility problem, missing/corrupt blob, changed row count, or destination collision is a hard failure.
+- A missing required Rails table/column, unreadable source row, row-security visibility problem, unsupported non-public application table, SQLite archive integrity/hash mismatch, missing/corrupt blob, changed row count, or destination collision is a hard failure.
 - Do not hand-edit `legacy.sqlite` or `manifest.json` and then treat the result as a valid capture. Recreate the bundle from the authoritative source.
 
 ## Stage-2 boundary

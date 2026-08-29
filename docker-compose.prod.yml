@@ -53,8 +53,7 @@ services:
     restart: unless-stopped
     # Fail closed until #135 supplies tested PostgreSQL migration parity. The compiled
     # migrator currently refuses PostgreSQL without its dialect-specific journal.
-    command:
-      ['sh', '-c', 'node dist/db/migrate.js && exec node dist/server.js']
+    command: ['sh', '-c', 'node dist/db/migrate.js && exec node dist/server.js']
 
   # =============================================================================
   # DATABASE SERVICE - Production Configuration

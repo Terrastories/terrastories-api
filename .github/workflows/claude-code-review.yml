@@ -83,6 +83,25 @@ jobs:
           npm run test:coverage
           npm run audit:baseline
 
+      - name: Install exact Claude Code reviewer runtime
+        id: claude-cli
+        env:
+          DISABLE_UPDATES: '1'
+          DISABLE_AUTOUPDATER: '1'
+        run: |
+          set -euo pipefail
+          prefix="${RUNNER_TEMP}/claude-code-2.1.222"
+          npm install --prefix "$prefix" --no-save --no-audit --no-fund @anthropic-ai/claude-code@2.1.222
+          executable="$prefix/node_modules/.bin/claude"
+          test -x "$executable"
+          version="$($executable --version)"
+          echo "$version"
+          [[ "$version" == 2.1.222* ]] || {
+            echo "Unexpected Claude Code version: $version" >&2
+            exit 1
+          }
+          echo "executable=$executable" >> "$GITHUB_OUTPUT"
+
       - name: Build isolated review packet
         id: review-packet
         env:
@@ -178,7 +197,10 @@ jobs:
         uses: anthropics/claude-code-action/base-action@9db594c7a0e82298c121c18b7f08aa1579ce7341 # v1.0.185
         env:
           CLAUDE_WORKING_DIR: ${{ steps.review-packet.outputs.runtime_dir }}
+          DISABLE_UPDATES: '1'
+          DISABLE_AUTOUPDATER: '1'
         with:
+          path_to_claude_code_executable: ${{ steps.claude-cli.outputs.executable }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt_file: ${{ steps.review-packet.outputs.prompt_file }}
           claude_args: |
@@ -187,7 +209,7 @@ jobs:
             --tools ""
             --strict-mcp-config
             --disable-slash-commands
-            --disallowedTools "Agent,AskUserQuestion,Bash,Edit,EnterPlanMode,ExitPlanMode,Glob,Grep,KillShell,LSP,NotebookEdit,Read,Skill,Task,TaskOutput,TodoWrite,ToolSearch,WebFetch,WebSearch,Write"
+            --disallowedTools "Agent,AskUserQuestion,Bash,BashOutput,CronCreate,CronDelete,CronList,Edit,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Glob,Grep,KillShell,LSP,Monitor,NotebookEdit,PowerShell,Read,ScheduleWakeup,ShareOnboardingGuide,Skill,Task,TaskCreate,TaskGet,TaskList,TaskOutput,TaskUpdate,TodoWrite,ToolSearch,WebFetch,WebSearch,Write"
             --json-schema '{"type":"object","additionalProperties":false,"properties":{"verdict":{"type":"string","enum":["NO_BLOCKER_OR_SHOULD_FIX","HAS_BLOCKER_OR_SHOULD_FIX"]},"review_markdown":{"type":"string","minLength":1}},"required":["verdict","review_markdown"]}'
           show_full_output: false
 

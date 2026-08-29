@@ -57,6 +57,14 @@ describeWithPostgres('Rails source capture', () => {
     await pool.query(
       `INSERT INTO community_extension(id, payload) VALUES (1, 'custom-data')`
     );
+    // PostgreSQL permits identifiers that collide with JavaScript object
+    // prototype keys. They are still ordinary source tables and must survive.
+    await pool.query(
+      `CREATE TABLE "__proto__" (id bigint PRIMARY KEY, payload text NOT NULL)`
+    );
+    await pool.query(
+      `INSERT INTO "__proto__"(id, payload) VALUES (1, 'prototype-name-data')`
+    );
   });
 
   afterAll(async () => {
@@ -87,6 +95,10 @@ describeWithPostgres('Rails source capture', () => {
     expect(manifest.source.observedSchemaVersion).toBe('20240410210545');
     expect(manifest.tables.community_extension?.rowCount).toBe(1);
     expect(manifest.tables.community_extension_wide?.rowCount).toBe(1);
+    expect(Object.prototype.hasOwnProperty.call(manifest.tables, '__proto__')).toBe(
+      true
+    );
+    expect(manifest.tables['__proto__']?.rowCount).toBe(1);
     expect(manifest.blobs).toHaveLength(1);
     expect(manifest.blobs[0]?.sha256).toBe(
       '0ec70a2413d61dfe7639d725d34f3781ece06b44f6b41c386a5605700c00c4e1'
@@ -177,6 +189,16 @@ describeWithPostgres('Rails source capture', () => {
     expect(JSON.parse(custom.rowJson)).toEqual({
       id: '1',
       payload: 'custom-data',
+    });
+
+    const prototypeNamed = archive
+      .prepare(
+        `SELECT row_json AS rowJson FROM source_rows WHERE table_name = ? ORDER BY ordinal`
+      )
+      .get('__proto__') as { rowJson: string };
+    expect(JSON.parse(prototypeNamed.rowJson)).toEqual({
+      id: '1',
+      payload: 'prototype-name-data',
     });
 
     const wide = archive

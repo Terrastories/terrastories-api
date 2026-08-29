@@ -2,6 +2,7 @@ name: Claude Opus 5 Code Review
 
 # Manual-only until #153 proves a healthy Anthropic credential. Keeping this
 # fail-closed prevents an external authentication outage from making every PR red.
+# Dispatch this workflow from main; expected_head_sha selects the exact PR revision.
 on:
   workflow_dispatch:
     inputs:
@@ -10,7 +11,7 @@ on:
         required: true
         type: string
       expected_head_sha:
-        description: 'Exact PR head SHA; the job fails if checkout differs'
+        description: 'Exact PR head SHA to check out and review'
         required: true
         type: string
       base_ref:
@@ -30,9 +31,10 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout exact review branch
+      - name: Checkout exact review head
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.expected_head_sha }}
           fetch-depth: 0
 
       - name: Verify exact review context
@@ -46,6 +48,9 @@ jobs:
           if [ "$actual_head" != "$EXPECTED_HEAD_SHA" ]; then
             echo "Expected head $EXPECTED_HEAD_SHA, got $actual_head" >&2
             exit 1
+          fi
+          if ! git rev-parse --verify "${BASE_REF}^{commit}" >/dev/null 2>&1; then
+            git fetch --no-tags origin "$BASE_REF"
           fi
           git rev-parse --verify "${BASE_REF}^{commit}" >/dev/null
           base_sha="$(git rev-parse "${BASE_REF}^{commit}")"

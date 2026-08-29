@@ -301,7 +301,7 @@ describe('release evidence workflow', () => {
     expect(provenance).toContain('id-token: write');
     expect(provenance).toContain('attestations: write');
     expect(provenance).toContain(
-      'subject-digest: ${{ needs.production_image.outputs.image_digest }}'
+      'subject-digest: ${{ needs.production_image.outputs.image_archive_sha256 }}'
     );
   });
 });

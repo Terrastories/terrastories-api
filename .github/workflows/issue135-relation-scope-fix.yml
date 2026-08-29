@@ -1,0 +1,90 @@
+name: Issue 135 relation-scope fix helper
+
+on:
+  push:
+    branches:
+      - feat/issue-135-dual-backend-ci
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-135-dual-backend-ci
+          fetch-depth: 0
+      - name: Scope PostgreSQL constraint probes to target relations
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          baseline = Path('src/db/migrations/postgres/0000_current_compat_baseline.sql')
+          source = baseline.read_text()
+          mappings = {
+            'users_community_id_communities_id_fk': 'users',
+            'places_community_id_communities_id_fk': 'places',
+            'speakers_community_id_communities_id_fk': 'speakers',
+            'stories_community_id_communities_id_fk': 'stories',
+            'stories_interview_location_id_places_id_fk': 'stories',
+            'stories_interviewer_id_speakers_id_fk': 'stories',
+            'files_community_id_communities_id_fk': 'files',
+            'files_uploaded_by_users_id_fk': 'files',
+            'story_places_story_id_stories_id_fk': 'story_places',
+            'story_places_place_id_places_id_fk': 'story_places',
+            'story_speakers_story_id_stories_id_fk': 'story_speakers',
+            'story_speakers_speaker_id_speakers_id_fk': 'story_speakers',
+          }
+          for constraint, table in mappings.items():
+            one_line = f"SELECT 1 FROM pg_constraint WHERE conname = '{constraint}'"
+            scoped_one_line = (
+              f"SELECT 1 FROM pg_constraint WHERE conrelid = 'public.{table}'::regclass "
+              f"AND conname = '{constraint}'"
+            )
+            source = source.replace(one_line, scoped_one_line)
+
+            multiline = f"WHERE conname = '{constraint}'\n      AND NOT convalidated"
+            scoped_multiline = (
+              f"WHERE conrelid = 'public.{table}'::regclass\n"
+              f"      AND conname = '{constraint}'\n"
+              f"      AND NOT convalidated"
+            )
+            source = source.replace(multiline, scoped_multiline)
+
+          baseline.write_text(source)
+
+          theme = Path('src/db/migrations/postgres/0001_theme_ownership_fk.sql')
+          theme_source = theme.read_text()
+          theme_source = theme_source.replace(
+            "WHERE conname = 'themes_community_id_communities_id_fk'",
+            "WHERE conrelid = 'public.themes'::regclass\n      AND conname = 'themes_community_id_communities_id_fk'",
+          )
+          theme.write_text(theme_source)
+          PY
+      - name: Verify no unscoped FK existence probes remain
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          for filename in [
+            'src/db/migrations/postgres/0000_current_compat_baseline.sql',
+            'src/db/migrations/postgres/0001_theme_ownership_fk.sql',
+          ]:
+            source = Path(filename).read_text()
+            bad = re.findall(r"FROM pg_constraint(?:\s+WHERE| WHERE) conname = '[^']+_fk'", source)
+            if bad:
+              raise SystemExit(f'unscoped constraint probes remain in {filename}: {bad}')
+          PY
+      - name: Commit helper output
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            exit 0
+          fi
+          git add src/db/migrations/postgres/0000_current_compat_baseline.sql src/db/migrations/postgres/0001_theme_ownership_fk.sql
+          git commit -m "fix: scope postgres constraint probes by relation"
+          git push origin HEAD:feat/issue-135-dual-backend-ci

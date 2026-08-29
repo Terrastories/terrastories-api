@@ -213,7 +213,7 @@ jobs:
           node-version: 22.x
 
       - name: Install dependencies on no-secret validation runner
-        run: npm ci
+        run: npm ci --legacy-peer-deps
 
       - name: Run deterministic repository validation on no-secret runner
         run: |

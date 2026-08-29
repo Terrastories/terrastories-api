@@ -13,6 +13,13 @@ const previousReleaseFixture = path.join(
 );
 const snapshotPath = path.join(migrationsFolder, 'meta/0001_snapshot.json');
 
+const canonicalUniqueConstraints = [
+  'communities_slug_unique',
+  'story_place_unique',
+  'story_speaker_unique',
+  'users_email_community_unique',
+] as const;
+
 function assertSafeTestDatabase(databaseUrl: string): void {
   const databaseName = decodeURIComponent(
     new URL(databaseUrl).pathname.replace(/^\//, '')
@@ -86,6 +93,41 @@ async function assertSnapshotConstraintNames(
   );
 }
 
+async function assertCanonicalUniqueConstraints(
+  client: ReturnType<typeof postgres>
+): Promise<void> {
+  const expectedNames = [...canonicalUniqueConstraints].sort();
+  const rows = await client.unsafe(`
+    SELECT constraint_entry.conname, constraint_entry.contype, backing_index.relname AS index_name
+    FROM pg_constraint AS constraint_entry
+    LEFT JOIN pg_class AS backing_index ON backing_index.oid = constraint_entry.conindid
+    WHERE constraint_entry.connamespace = 'public'::regnamespace
+      AND constraint_entry.conname = ANY (
+        ARRAY[
+          'communities_slug_unique',
+          'story_place_unique',
+          'story_speaker_unique',
+          'users_email_community_unique'
+        ]::text[]
+      )
+    ORDER BY constraint_entry.conname
+  `);
+
+  assert.deepEqual(
+    rows.map((row) => ({
+      name: String(row.conname),
+      type: String(row.contype),
+      indexName: row.index_name ? String(row.index_name) : null,
+    })),
+    expectedNames.map((name) => ({
+      name,
+      type: 'u',
+      indexName: name,
+    })),
+    'PostgreSQL shared uniqueness rules must be named UNIQUE constraints with matching backing indexes, not bare unique indexes'
+  );
+}
+
 async function assertFileTimestampDefaultsAbsent(
   client: ReturnType<typeof postgres>
 ): Promise<void> {
@@ -125,6 +167,7 @@ async function verifyOrphanThemeUpgrade(
   await migrate(drizzle(client), { migrationsFolder });
 
   await assertFileTimestampDefaultsAbsent(client);
+  await assertCanonicalUniqueConstraints(client);
 
   const [legacyTheme] = await client.unsafe(
     'SELECT id, community_id FROM themes WHERE id = 999'
@@ -164,6 +207,7 @@ async function verifyFreshSnapshotConstraintNames(
   await migrate(drizzle(client), { migrationsFolder });
   await assertSnapshotConstraintNames(client);
   await assertFileTimestampDefaultsAbsent(client);
+  await assertCanonicalUniqueConstraints(client);
 
   const [themeConstraint] = await client.unsafe(`
     SELECT convalidated
@@ -188,7 +232,7 @@ async function main(): Promise<void> {
     console.log('🐘 PostgreSQL migration regression gate');
     console.log('  1/2 orphan-theme expand-contract upgrade');
     await verifyOrphanThemeUpgrade(client);
-    console.log('  2/2 applied FK names match Drizzle snapshot');
+    console.log('  2/2 applied constraints match Drizzle snapshot semantics');
     await verifyFreshSnapshotConstraintNames(client);
     console.log('✅ PostgreSQL migration regression gate passed');
   } finally {

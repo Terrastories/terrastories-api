@@ -2,6 +2,6 @@
 # These are executable real-database verification harnesses, equivalent to tests,
 # but they live under scripts/ because they run outside Vitest against actual backends.
 ignore:
-  - "scripts/test-db-backend.ts"
-  - "scripts/test-migration-metadata.ts"
-  - "scripts/test-postgres-migration-regressions.ts"
+  - scripts/test-db-backend.ts
+  - scripts/test-migration-metadata.ts
+  - scripts/test-postgres-migration-regressions.ts

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { chmod, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -15,6 +16,7 @@ import {
 
 const PAGE_SIZE = 500;
 const JSON_BUILD_OBJECT_COLUMN_CHUNK = 40;
+const ARCHIVE_FILENAME = 'legacy.sqlite';
 
 interface SourceColumn {
   columnName: string;
@@ -64,6 +66,11 @@ export interface RailsCaptureManifest {
     observedSchemaVersion: string | null;
     schemaSha256: string;
   };
+  archive: {
+    filename: typeof ARCHIVE_FILENAME;
+    byteSize: string;
+    sha256: string;
+  };
   tables: Record<
     string,
     {
@@ -93,6 +100,16 @@ export interface CaptureRailsOptions {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+async function sha256File(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(path);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
 }
 
 function quoteIdentifier(value: string): string {
@@ -584,6 +601,171 @@ async function configureDeterministicSourceSession(
   await client.query(`SET LOCAL row_security = off`);
 }
 
+export async function verifyCapturedArchive(
+  archivePath: string,
+  manifest: RailsCaptureManifest
+): Promise<void> {
+  const archiveStat = await stat(archivePath);
+  if (String(archiveStat.size) !== manifest.archive.byteSize) {
+    throw new Error(
+      `Rails archive size mismatch: expected ${manifest.archive.byteSize}, got ${archiveStat.size}`
+    );
+  }
+
+  const archiveDigest = await sha256File(archivePath);
+  if (archiveDigest !== manifest.archive.sha256) {
+    throw new Error('Rails archive SHA-256 digest mismatch');
+  }
+
+  const archive = new Database(archivePath, { readonly: true });
+  try {
+    const integrity = archive.pragma('integrity_check') as Array<{
+      integrity_check: string;
+    }>;
+    if (integrity.length !== 1 || integrity[0]?.integrity_check !== 'ok') {
+      throw new Error('Rails archive SQLite integrity check failed');
+    }
+
+    const foreignKeyFailures = archive.pragma('foreign_key_check') as unknown[];
+    if (foreignKeyFailures.length > 0) {
+      throw new Error('Rails archive foreign-key integrity check failed');
+    }
+
+    const metadataRows = archive
+      .prepare(`SELECT key, value FROM source_metadata ORDER BY key`)
+      .all() as Array<{ key: string; value: string }>;
+    const metadata = new Map(metadataRows.map((row) => [row.key, row.value]));
+    const expectedMetadata = new Map<string, string>([
+      ['legacy_commit', manifest.source.legacyCommit],
+      ['pinned_rails_schema_version', manifest.source.pinnedRailsSchemaVersion],
+      [
+        'observed_schema_version',
+        manifest.source.observedSchemaVersion ?? 'unknown',
+      ],
+      ['source_schema_sha256', manifest.source.schemaSha256],
+    ]);
+    if (
+      metadata.size !== expectedMetadata.size ||
+      [...expectedMetadata].some(([key, value]) => metadata.get(key) !== value)
+    ) {
+      throw new Error('Rails archive source metadata does not match manifest');
+    }
+
+    const archivedTables = archive
+      .prepare(
+        `SELECT
+           table_name AS tableName,
+           columns_json AS columnsJson,
+           primary_key_json AS primaryKeyJson,
+           constraints_json AS constraintsJson,
+           indexes_json AS indexesJson,
+           row_security_enabled AS rowSecurityEnabled,
+           row_security_forced AS rowSecurityForced,
+           row_count AS rowCount,
+           row_sha256 AS rowSha256
+         FROM source_tables
+         ORDER BY table_name`
+      )
+      .all() as Array<{
+      tableName: string;
+      columnsJson: string;
+      primaryKeyJson: string;
+      constraintsJson: string;
+      indexesJson: string;
+      rowSecurityEnabled: number;
+      rowSecurityForced: number;
+      rowCount: number;
+      rowSha256: string;
+    }>;
+
+    const expectedTableNames = Object.keys(manifest.tables).sort();
+    if (
+      archivedTables.length !== manifest.totals.tables ||
+      archivedTables.length !== expectedTableNames.length ||
+      archivedTables.some(
+        (table, index) => table.tableName !== expectedTableNames[index]
+      )
+    ) {
+      throw new Error('Rails archive table inventory does not match manifest');
+    }
+
+    const selectRows = archive.prepare(
+      `SELECT ordinal, row_json AS rowJson, row_sha256 AS rowSha256
+       FROM source_rows
+       WHERE table_name = ?
+       ORDER BY ordinal`
+    );
+    let verifiedRows = 0;
+
+    for (const archivedTable of archivedTables) {
+      const expected = manifest.tables[archivedTable.tableName];
+      if (!expected) {
+        throw new Error(
+          `Rails archive contains unexpected table ${archivedTable.tableName}`
+        );
+      }
+
+      if (
+        archivedTable.rowCount !== expected.rowCount ||
+        archivedTable.rowSha256 !== expected.rowSha256 ||
+        archivedTable.columnsJson !== JSON.stringify(expected.columns) ||
+        archivedTable.primaryKeyJson !== JSON.stringify(expected.primaryKey) ||
+        archivedTable.constraintsJson !== JSON.stringify(expected.constraints) ||
+        archivedTable.indexesJson !== JSON.stringify(expected.indexes) ||
+        Boolean(archivedTable.rowSecurityEnabled) !==
+          expected.rowSecurityEnabled ||
+        Boolean(archivedTable.rowSecurityForced) !== expected.rowSecurityForced
+      ) {
+        throw new Error(
+          `Rails archive schema metadata mismatch for ${archivedTable.tableName}`
+        );
+      }
+
+      const tableHash = createHash('sha256');
+      let rowCount = 0;
+      for (const row of selectRows.iterate(archivedTable.tableName) as Iterable<{
+        ordinal: number;
+        rowJson: string;
+        rowSha256: string;
+      }>) {
+        if (row.ordinal !== rowCount) {
+          throw new Error(
+            `Rails archive row ordinal mismatch for ${archivedTable.tableName}`
+          );
+        }
+        const digest = sha256(row.rowJson);
+        if (digest !== row.rowSha256) {
+          throw new Error(
+            `Rails archive row digest mismatch for ${archivedTable.tableName} ordinal ${row.ordinal}`
+          );
+        }
+        tableHash.update(digest);
+        rowCount += 1;
+      }
+
+      if (rowCount !== expected.rowCount) {
+        throw new Error(
+          `Rails archive row count mismatch for ${archivedTable.tableName}`
+        );
+      }
+      if (tableHash.digest('hex') !== expected.rowSha256) {
+        throw new Error(
+          `Rails archive table digest mismatch for ${archivedTable.tableName}`
+        );
+      }
+      verifiedRows += rowCount;
+    }
+
+    if (verifiedRows !== manifest.totals.rows) {
+      throw new Error(
+        `Rails archive total row count mismatch: expected ${manifest.totals.rows}, got ${verifiedRows}`
+      );
+    }
+  } finally {
+    archive.close();
+  }
+}
+
 export async function captureRailsToBundle(
   options: CaptureRailsOptions
 ): Promise<RailsCaptureManifest> {
@@ -593,7 +775,7 @@ export async function captureRailsToBundle(
   const temporaryDir = `${options.outputDir}.tmp-${randomUUID()}`;
   await mkdir(temporaryDir, { recursive: false, mode: 0o700 });
 
-  const archivePath = join(temporaryDir, 'legacy.sqlite');
+  const archivePath = join(temporaryDir, ARCHIVE_FILENAME);
   const pool = new Pool({ connectionString: options.sourceUrl, max: 1 });
   let client: PoolClient | null = null;
   let archive: Database.Database | null = null;
@@ -655,6 +837,12 @@ export async function captureRailsToBundle(
       tableNames
     );
 
+    archive.close();
+    archive = null;
+    await chmod(archivePath, 0o600);
+    const archiveStat = await stat(archivePath);
+    const archiveSha256 = await sha256File(archivePath);
+
     const manifest: RailsCaptureManifest = {
       formatVersion: 1,
       source: {
@@ -662,6 +850,11 @@ export async function captureRailsToBundle(
         pinnedRailsSchemaVersion: RAILS_SCHEMA_VERSION,
         observedSchemaVersion,
         schemaSha256,
+      },
+      archive: {
+        filename: ARCHIVE_FILENAME,
+        byteSize: String(archiveStat.size),
+        sha256: archiveSha256,
       },
       tables: manifestTables,
       blobs,
@@ -672,9 +865,7 @@ export async function captureRailsToBundle(
       },
     };
 
-    archive.close();
-    archive = null;
-    await chmod(archivePath, 0o600);
+    await verifyCapturedArchive(archivePath, manifest);
     await writeFile(
       join(temporaryDir, 'manifest.json'),
       `${JSON.stringify(manifest, null, 2)}\n`,

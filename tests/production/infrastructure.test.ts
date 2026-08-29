@@ -242,9 +242,9 @@ describe('Production Infrastructure Validation - Phase 1', () => {
     test('production startup uses the compiled server entry point', async () => {
       const prodCompose = await fs.readFile('docker-compose.prod.yml', 'utf-8');
 
-      // PostgreSQL migration parity is tracked by #135, so startup must not invoke the fail-closed migrator.
-      expect(prodCompose).not.toContain('node dist/db/migrate.js');
-      expect(prodCompose).toContain("command: ['node', 'dist/server.js']");
+      // PostgreSQL migration parity is tracked by #135, so startup must fail closed through the compiled migrator until parity lands.
+      expect(prodCompose).toContain('node dist/db/migrate.js');
+      expect(prodCompose).toContain('exec node dist/server.js');
       expect(prodCompose).not.toMatch(/\bnpm\b/);
     });
   });

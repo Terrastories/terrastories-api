@@ -49,6 +49,8 @@ describe('release artifact reproducibility', () => {
     expect(migrationRunner).toContain(
       'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL.',
     );
-    expect(migrationRunner).toContain('PostgreSQL migration parity is tracked by #135.');
+    expect(migrationRunner).toContain(
+      'PostgreSQL migration parity is tracked by #135.',
+    );
   });
 });

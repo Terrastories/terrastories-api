@@ -29,14 +29,14 @@ describe('release artifact reproducibility', () => {
     const workflow = readRepo('.github/workflows/supply-chain.yml');
 
     expect(workflow).toContain(
-      'image_archive_sha256: ${{ steps.evidence.outputs.archive_sha256 }}',
+      'image_archive_sha256: ${{ steps.evidence.outputs.archive_sha256 }}'
     );
     expect(workflow).toContain('subject-name: release-image.tar');
     expect(workflow).toContain(
-      'subject-digest: ${{ needs.production_image.outputs.image_archive_sha256 }}',
+      'subject-digest: ${{ needs.production_image.outputs.image_archive_sha256 }}'
     );
     expect(workflow).not.toContain(
-      'subject-digest: ${{ needs.production_image.outputs.image_digest }}',
+      'subject-digest: ${{ needs.production_image.outputs.image_digest }}'
     );
   });
 
@@ -47,10 +47,10 @@ describe('release artifact reproducibility', () => {
     expect(productionCompose).toContain('node dist/db/migrate.js');
     expect(productionCompose).toContain('exec node dist/server.js');
     expect(migrationRunner).toContain(
-      'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL.',
+      'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL.'
     );
     expect(migrationRunner).toContain(
-      'PostgreSQL migration parity is tracked by #135.',
+      'PostgreSQL migration parity is tracked by #135.'
     );
   });
 });

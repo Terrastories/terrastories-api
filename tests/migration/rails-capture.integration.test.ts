@@ -95,9 +95,9 @@ describeWithPostgres('Rails source capture', () => {
     expect(manifest.source.observedSchemaVersion).toBe('20240410210545');
     expect(manifest.tables.community_extension?.rowCount).toBe(1);
     expect(manifest.tables.community_extension_wide?.rowCount).toBe(1);
-    expect(Object.prototype.hasOwnProperty.call(manifest.tables, '__proto__')).toBe(
-      true
-    );
+    expect(
+      Object.prototype.hasOwnProperty.call(manifest.tables, '__proto__')
+    ).toBe(true);
     expect(manifest.tables['__proto__']?.rowCount).toBe(1);
     expect(manifest.blobs).toHaveLength(1);
     expect(manifest.blobs[0]?.sha256).toBe(

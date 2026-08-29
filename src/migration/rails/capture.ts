@@ -816,7 +816,9 @@ export async function captureRailsToBundle(
       .prepare(`INSERT INTO source_metadata(key, value) VALUES (?, ?)`)
       .run('source_schema_sha256', schemaSha256);
 
-    const manifestTables: RailsCaptureManifest['tables'] = {};
+    const manifestTables = Object.create(
+      null
+    ) as RailsCaptureManifest['tables'];
     let totalRows = 0;
     for (const table of tables) {
       const captured = await captureTable(client, archive, table);

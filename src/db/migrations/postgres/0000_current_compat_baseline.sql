@@ -369,6 +369,41 @@ ALTER TABLE story_speakers ALTER COLUMN updated_at SET DEFAULT now();
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS story_speaker_unique ON story_speakers (story_id, speaker_id);
 --> statement-breakpoint
+DO $canonicalize_issue135_unique_constraints$
+DECLARE
+  mapping record;
+BEGIN
+  FOR mapping IN
+    SELECT * FROM (VALUES
+      ('communities', 'communities_slug_unique'),
+      ('users', 'users_email_community_unique'),
+      ('story_places', 'story_place_unique'),
+      ('story_speakers', 'story_speaker_unique')
+    ) AS mappings(table_name, constraint_name)
+  LOOP
+    IF NOT EXISTS (
+      SELECT 1
+      FROM pg_constraint
+      WHERE conrelid = to_regclass(mapping.table_name)
+        AND conname = mapping.constraint_name
+        AND contype = 'u'
+    ) THEN
+      IF to_regclass(mapping.constraint_name) IS NULL THEN
+        RAISE EXCEPTION
+          'Cannot attach unique constraint %: backing index is missing',
+          mapping.constraint_name;
+      END IF;
+
+      EXECUTE format(
+        'ALTER TABLE %I ADD CONSTRAINT %I UNIQUE USING INDEX %I',
+        mapping.table_name,
+        mapping.constraint_name,
+        mapping.constraint_name
+      );
+    END IF;
+  END LOOP;
+END $canonicalize_issue135_unique_constraints$;
+--> statement-breakpoint
 DO $story_speakers_fks$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'story_speakers_story_id_stories_id_fk') THEN

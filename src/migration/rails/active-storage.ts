@@ -1,7 +1,14 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chmod, copyFile, lstat, mkdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  realpath,
+  stat,
+} from 'node:fs/promises';
+import { isAbsolute, join, relative } from 'node:path';
 
 const SAFE_ACTIVE_STORAGE_KEY = /^[A-Za-z0-9_-]+$/;
 
@@ -24,6 +31,16 @@ function isMissingPath(error: unknown): boolean {
   );
 }
 
+function isWithinRoot(root: string, candidate: string): boolean {
+  const fromRoot = relative(root, candidate);
+  return (
+    fromRoot === '' ||
+    (!fromRoot.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) &&
+      fromRoot !== '..' &&
+      !isAbsolute(fromRoot))
+  );
+}
+
 export async function resolveActiveStorageBlobPath(
   blobRoot: string,
   key: string
@@ -32,6 +49,7 @@ export async function resolveActiveStorageBlobPath(
     throw new Error(`Unsafe ActiveStorage key rejected: ${key}`);
   }
 
+  const trustedRoot = await realpath(blobRoot);
   const candidates = [
     // Flat export from an object store such as S3.
     join(blobRoot, key),
@@ -53,7 +71,15 @@ export async function resolveActiveStorageBlobPath(
         `Symlinked ActiveStorage blob path rejected for key ${key}`
       );
     }
-    if (info.isFile()) return candidate;
+    if (!info.isFile()) continue;
+
+    const resolvedCandidate = await realpath(candidate);
+    if (!isWithinRoot(trustedRoot, resolvedCandidate)) {
+      throw new Error(
+        `ActiveStorage blob path escapes trusted export root for key ${key}`
+      );
+    }
+    return candidate;
   }
 
   throw new Error(`Missing ActiveStorage blob bytes for key ${key}`);

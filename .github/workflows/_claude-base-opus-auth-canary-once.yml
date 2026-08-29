@@ -13,13 +13,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+      - name: Install exact Claude Code CLI from npm
+        id: cli
+        env:
+          DISABLE_UPDATES: '1'
+          DISABLE_AUTOUPDATER: '1'
+        run: |
+          set -euo pipefail
+          prefix="${RUNNER_TEMP}/claude-code-2.1.222"
+          npm install --prefix "$prefix" --no-save --no-audit --no-fund @anthropic-ai/claude-code@2.1.222
+          executable="$prefix/node_modules/.bin/claude"
+          test -x "$executable"
+          version="$($executable --version)"
+          echo "$version"
+          [[ "$version" == 2.1.222* ]] || { echo "Unexpected Claude Code version: $version" >&2; exit 1; }
+          echo "executable=$executable" >> "$GITHUB_OUTPUT"
       - name: Build isolated prompt
         id: packet
         run: |
           set -euo pipefail
           dir="${RUNNER_TEMP}/claude-base-canary"
-          mkdir -p "$dir"
-          chmod 700 "$dir"
+          mkdir -p "$dir/runtime"
+          chmod 700 "$dir" "$dir/runtime"
           cat > "$dir/prompt.md" <<'EOF'
           Authentication and model canary only. Treat this as the entire task.
           Return verdict NO_BLOCKER_OR_SHOULD_FIX and review_markdown AUTH_OK.
@@ -28,20 +47,21 @@ jobs:
           chmod 600 "$dir/prompt.md"
           echo "prompt_file=$dir/prompt.md" >> "$GITHUB_OUTPUT"
           echo "runtime_dir=$dir/runtime" >> "$GITHUB_OUTPUT"
-          mkdir -p "$dir/runtime"
       - name: Run pinned base action canary
         uses: anthropics/claude-code-action/base-action@9db594c7a0e82298c121c18b7f08aa1579ce7341 # v1.0.185
         env:
           CLAUDE_WORKING_DIR: ${{ steps.packet.outputs.runtime_dir }}
+          DISABLE_UPDATES: '1'
+          DISABLE_AUTOUPDATER: '1'
         with:
+          path_to_claude_code_executable: ${{ steps.cli.outputs.executable }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt_file: ${{ steps.packet.outputs.prompt_file }}
           claude_args: |
             --model claude-opus-5[1m]
             --max-turns 1
-            --tools ""
             --strict-mcp-config
             --disable-slash-commands
-            --disallowedTools "Agent,AskUserQuestion,Bash,Edit,EnterPlanMode,ExitPlanMode,Glob,Grep,KillShell,LSP,NotebookEdit,Read,Skill,Task,TaskOutput,TodoWrite,ToolSearch,WebFetch,WebSearch,Write"
+            --disallowedTools "Agent,AskUserQuestion,Bash,BashOutput,CronCreate,CronDelete,CronList,Edit,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Glob,Grep,KillShell,LSP,Monitor,NotebookEdit,PowerShell,Read,ScheduleWakeup,ShareOnboardingGuide,Skill,Task,TaskCreate,TaskGet,TaskList,TaskOutput,TaskUpdate,TodoWrite,ToolSearch,WebFetch,WebSearch,Write"
             --json-schema '{"type":"object","additionalProperties":false,"properties":{"verdict":{"type":"string","enum":["NO_BLOCKER_OR_SHOULD_FIX","HAS_BLOCKER_OR_SHOULD_FIX"]},"review_markdown":{"type":"string","minLength":1}},"required":["verdict","review_markdown"]}'
           show_full_output: false

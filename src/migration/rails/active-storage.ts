@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chmod, copyFile, mkdir, stat } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const SAFE_ACTIVE_STORAGE_KEY = /^[A-Za-z0-9_-]+$/;
@@ -14,6 +14,14 @@ export interface CapturedBlob {
   railsChecksum: string | null;
   sha256: string;
   serviceName: string;
+}
+
+function isMissingPath(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    (error as NodeJS.ErrnoException).code === 'ENOENT'
+  );
 }
 
 export async function resolveActiveStorageBlobPath(
@@ -32,12 +40,20 @@ export async function resolveActiveStorageBlobPath(
   ];
 
   for (const candidate of candidates) {
+    let info;
     try {
-      const info = await stat(candidate);
-      if (info.isFile()) return candidate;
-    } catch {
-      // Try the next supported source layout.
+      info = await lstat(candidate);
+    } catch (error) {
+      if (isMissingPath(error)) continue;
+      throw error;
     }
+
+    if (info.isSymbolicLink()) {
+      throw new Error(
+        `Symlinked ActiveStorage blob path rejected for key ${key}`
+      );
+    }
+    if (info.isFile()) return candidate;
   }
 
   throw new Error(`Missing ActiveStorage blob bytes for key ${key}`);

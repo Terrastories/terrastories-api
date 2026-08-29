@@ -20,6 +20,13 @@ const canonicalUniqueConstraints = [
   'users_email_community_unique',
 ] as const;
 
+const stagedCommunityOwnershipConstraints = [
+  'places_community_id_communities_id_fk',
+  'speakers_community_id_communities_id_fk',
+  'stories_community_id_communities_id_fk',
+  'users_community_id_communities_id_fk',
+] as const;
+
 function assertSafeTestDatabase(databaseUrl: string): void {
   const databaseName = decodeURIComponent(
     new URL(databaseUrl).pathname.replace(/^\//, '')
@@ -93,6 +100,35 @@ async function assertSnapshotConstraintNames(
   );
 }
 
+async function assertConstraintValidation(
+  client: ReturnType<typeof postgres>,
+  constraintNames: readonly string[],
+  expectedValidated: boolean,
+  message: string
+): Promise<void> {
+  const rows = await client.unsafe(
+    `
+      SELECT conname, convalidated
+      FROM pg_constraint
+      WHERE connamespace = 'public'::regnamespace
+        AND conname = ANY ($1::text[])
+      ORDER BY conname
+    `,
+    [constraintNames]
+  );
+
+  assert.deepEqual(
+    rows.map((row) => ({
+      name: String(row.conname),
+      validated: Boolean(row.convalidated),
+    })),
+    [...constraintNames]
+      .sort()
+      .map((name) => ({ name, validated: expectedValidated })),
+    message
+  );
+}
+
 async function assertCanonicalUniqueConstraints(
   client: ReturnType<typeof postgres>
 ): Promise<void> {
@@ -152,6 +188,114 @@ async function assertFileTimestampDefaultsAbsent(
   );
 }
 
+async function verifyLegacyCommunityOwnershipOrphanUpgrade(
+  client: ReturnType<typeof postgres>
+): Promise<void> {
+  await resetDatabase(client);
+  await installPreviousRelease(client);
+
+  await client.unsafe(`
+    INSERT INTO users
+      (id, email, password_hash, first_name, last_name, role, community_id, is_active, created_at, updated_at)
+    VALUES
+      (991, 'legacy-orphan@example.com', 'hash', 'Legacy', 'User', 'viewer', 999991, true, now(), now())
+  `);
+  await client.unsafe(`
+    INSERT INTO places
+      (id, name, community_id, latitude, longitude, created_at, updated_at)
+    VALUES
+      (992, 'Legacy orphan place', 999992, 1, 1, now(), now())
+  `);
+  await client.unsafe(`
+    INSERT INTO speakers
+      (id, name, community_id, created_at, updated_at)
+    VALUES
+      (993, 'Legacy orphan speaker', 999993, now(), now())
+  `);
+  await client.unsafe(`
+    INSERT INTO stories
+      (id, title, slug, community_id, created_by, created_at, updated_at)
+    VALUES
+      (994, 'Legacy orphan story', 'legacy-orphan-story', 999994, 991, now(), now())
+  `);
+
+  await migrate(drizzle(client), { migrationsFolder });
+
+  await assertConstraintValidation(
+    client,
+    stagedCommunityOwnershipConstraints,
+    false,
+    'legacy community orphans must keep newly introduced ownership FKs staged and unvalidated'
+  );
+  await assertSnapshotConstraintNames(client);
+
+  const preservedRows = await client.unsafe(`
+    SELECT 'users' AS table_name, id, community_id FROM users WHERE id = 991
+    UNION ALL
+    SELECT 'places' AS table_name, id, community_id FROM places WHERE id = 992
+    UNION ALL
+    SELECT 'speakers' AS table_name, id, community_id FROM speakers WHERE id = 993
+    UNION ALL
+    SELECT 'stories' AS table_name, id, community_id FROM stories WHERE id = 994
+    ORDER BY table_name
+  `);
+  assert.deepEqual(
+    preservedRows.map((row) => ({
+      tableName: String(row.table_name),
+      id: Number(row.id),
+      communityId: Number(row.community_id),
+    })),
+    [
+      { tableName: 'places', id: 992, communityId: 999992 },
+      { tableName: 'speakers', id: 993, communityId: 999993 },
+      { tableName: 'stories', id: 994, communityId: 999994 },
+      { tableName: 'users', id: 991, communityId: 999991 },
+    ],
+    'legacy orphan ownership rows must be preserved exactly during upgrade'
+  );
+
+  await assert.rejects(
+    client.unsafe(`
+      INSERT INTO users
+        (email, password_hash, first_name, last_name, role, community_id, is_active, created_at, updated_at)
+      VALUES
+        ('new-orphan@example.com', 'hash', 'New', 'User', 'viewer', 999981, true, now(), now())
+    `),
+    undefined,
+    'staged user ownership FK must reject new orphan writes'
+  );
+  await assert.rejects(
+    client.unsafe(`
+      INSERT INTO places
+        (name, community_id, latitude, longitude, created_at, updated_at)
+      VALUES
+        ('New orphan place', 999982, 1, 1, now(), now())
+    `),
+    undefined,
+    'staged place ownership FK must reject new orphan writes'
+  );
+  await assert.rejects(
+    client.unsafe(`
+      INSERT INTO speakers
+        (name, community_id, created_at, updated_at)
+      VALUES
+        ('New orphan speaker', 999983, now(), now())
+    `),
+    undefined,
+    'staged speaker ownership FK must reject new orphan writes'
+  );
+  await assert.rejects(
+    client.unsafe(`
+      INSERT INTO stories
+        (title, slug, community_id, created_by, created_at, updated_at)
+      VALUES
+        ('New orphan story', 'new-orphan-story', 999984, 991, now(), now())
+    `),
+    undefined,
+    'staged story ownership FK must reject new orphan writes'
+  );
+}
+
 async function verifyOrphanThemeUpgrade(
   client: ReturnType<typeof postgres>
 ): Promise<void> {
@@ -168,6 +312,12 @@ async function verifyOrphanThemeUpgrade(
 
   await assertFileTimestampDefaultsAbsent(client);
   await assertCanonicalUniqueConstraints(client);
+  await assertConstraintValidation(
+    client,
+    stagedCommunityOwnershipConstraints,
+    true,
+    'ownership FKs must validate on clean previous-release upgrades'
+  );
 
   const [legacyTheme] = await client.unsafe(
     'SELECT id, community_id FROM themes WHERE id = 999'
@@ -208,6 +358,12 @@ async function verifyFreshSnapshotConstraintNames(
   await assertSnapshotConstraintNames(client);
   await assertFileTimestampDefaultsAbsent(client);
   await assertCanonicalUniqueConstraints(client);
+  await assertConstraintValidation(
+    client,
+    stagedCommunityOwnershipConstraints,
+    true,
+    'fresh databases must fully validate community ownership FKs'
+  );
 
   const [themeConstraint] = await client.unsafe(`
     SELECT convalidated
@@ -230,9 +386,11 @@ async function main(): Promise<void> {
   const client = postgres(databaseUrl, { max: 2, onnotice: () => undefined });
   try {
     console.log('🐘 PostgreSQL migration regression gate');
-    console.log('  1/2 orphan-theme expand-contract upgrade');
+    console.log('  1/3 previous-schema ownership orphan expand-contract upgrade');
+    await verifyLegacyCommunityOwnershipOrphanUpgrade(client);
+    console.log('  2/3 orphan-theme expand-contract upgrade');
     await verifyOrphanThemeUpgrade(client);
-    console.log('  2/2 applied constraints match Drizzle snapshot semantics');
+    console.log('  3/3 applied constraints match Drizzle snapshot semantics');
     await verifyFreshSnapshotConstraintNames(client);
     console.log('✅ PostgreSQL migration regression gate passed');
   } finally {

@@ -137,6 +137,17 @@ describe('V2 sovereignty route boundaries', () => {
     expect(response.json().data).toBeUndefined();
   });
 
+  it('rejects conflicting tenant aliases before a handler can select the foreign community', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/places?communityId=${communityAId}&community_id=${communityBId}`,
+      headers: { cookie: viewerCookie },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().data).toBeUndefined();
+  });
+
   it('rejects a cross-community story-by-slug tenant override', async () => {
     const response = await app.inject({
       method: 'GET',

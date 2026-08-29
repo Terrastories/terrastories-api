@@ -269,8 +269,27 @@ export function requireCommunityAccess(options: CommunityAccessOptions = {}) {
     // In offline mode, user might be set directly on the request instead of session
     const user = authRequest.user || authRequest.session?.user!;
 
-    // Extract community ID from route params, query, or body
-    const requestedCommunityId = extractCommunityId(request);
+    // Extract community ID from route params, query, or body. Multiple
+    // aliases are permitted only when they identify the same tenant; a
+    // conflicting set is ambiguous and must fail closed before any handler
+    // can consume a different alias than the authorization layer.
+    let requestedCommunityId: number | null;
+    try {
+      requestedCommunityId = extractCommunityId(request);
+    } catch (error) {
+      if (!(error instanceof ConflictingCommunityIdError)) throw error;
+      request.log.warn(
+        {
+          userId: user.id,
+          userCommunityId: user.communityId,
+          requestedCommunityIds: error.communityIds,
+        },
+        'Conflicting community identifiers rejected'
+      );
+      return reply.status(403).send({
+        error: { message: 'Access denied - community data isolation' },
+      });
+    }
     const userCommunityId = user.communityId;
 
     // Community isolation check
@@ -346,7 +365,33 @@ export function requireV2CommunityContentAccess(
       return;
     }
 
-    const resourceCommunityId = extractCommunityId(request) ?? user.communityId;
+    let resourceCommunityId: number;
+    try {
+      resourceCommunityId = extractCommunityId(request) ?? user.communityId;
+    } catch (error) {
+      if (!(error instanceof ConflictingCommunityIdError)) throw error;
+      request.log.warn(
+        createAuthorizationAuditEvent({
+          actor: {
+            id: user.id,
+            role: user.role,
+            communityId: user.communityId,
+            active: true,
+          },
+          resourceCommunityId: user.communityId,
+          family,
+          surface,
+          decision: {
+            allowed: false,
+            reason: 'cross-community-denied',
+          },
+        }),
+        'Conflicting community identifiers rejected'
+      );
+      return reply.status(403).send({
+        error: { message: 'Access denied - community data isolation' },
+      });
+    }
     const decision = authorizeCommunityContent({
       actor: {
         id: user.id,
@@ -616,31 +661,51 @@ export function checkUserPermissions(
 }
 
 /**
- * Extract community ID from request params or query
+ * Raised when a request carries more than one distinct positive community ID
+ * across supported tenant aliases. Authorization must reject this ambiguity
+ * before route handlers can select a different alias.
+ */
+class ConflictingCommunityIdError extends Error {
+  constructor(readonly communityIds: readonly number[]) {
+    super('Conflicting community identifiers');
+    this.name = 'ConflictingCommunityIdError';
+  }
+}
+
+/**
+ * Extract one unambiguous community ID from params, query, or body.
  */
 export function extractCommunityId(request: FastifyRequest): number | null {
-  const params = request.params as {
-    communityId?: string | number;
-    community_id?: string | number;
-  };
-  const query = request.query as {
-    communityId?: string | number;
-    community_id?: string | number;
-  };
-  const body = (request.body || {}) as {
-    communityId?: string | number;
-    community_id?: string | number;
+  type CommunityIdValue = string | number | readonly (string | number)[];
+  type CommunityIdContainer = {
+    communityId?: CommunityIdValue;
+    community_id?: CommunityIdValue;
   };
 
-  const rawCommunityId =
-    params.communityId ??
-    params.community_id ??
-    query.communityId ??
-    query.community_id ??
-    body.communityId ??
-    body.community_id;
-  const communityId = Number.parseInt(String(rawCommunityId ?? '0'), 10);
-  return communityId > 0 ? communityId : null;
+  const params = request.params as CommunityIdContainer;
+  const query = request.query as CommunityIdContainer;
+  const body = (request.body || {}) as CommunityIdContainer;
+
+  const rawValues = [
+    params.communityId,
+    params.community_id,
+    query.communityId,
+    query.community_id,
+    body.communityId,
+    body.community_id,
+  ];
+  const communityIds = rawValues
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .filter((value): value is string | number => value !== undefined)
+    .map((value) => Number.parseInt(String(value), 10))
+    .filter((value) => value > 0);
+  const uniqueCommunityIds = [...new Set(communityIds)];
+
+  if (uniqueCommunityIds.length > 1) {
+    throw new ConflictingCommunityIdError(uniqueCommunityIds);
+  }
+
+  return uniqueCommunityIds[0] ?? null;
 }
 
 /**

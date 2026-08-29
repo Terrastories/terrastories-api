@@ -24,4 +24,16 @@ describe('release artifact reproducibility', () => {
     expect(workflow).toContain('sha256sum release-image.tar');
     expect(workflow).toContain('image_archive_sha256');
   });
+
+  it('keeps PostgreSQL production startup fail closed until migration parity lands', () => {
+    const productionCompose = readRepo('docker-compose.prod.yml');
+    const migrationRunner = readRepo('src/db/migrate.ts');
+
+    expect(productionCompose).toContain('node dist/db/migrate.js');
+    expect(productionCompose).toContain('exec node dist/server.js');
+    expect(migrationRunner).toContain(
+      'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL.'
+    );
+    expect(migrationRunner).toContain('PostgreSQL migration parity is tracked by #135.');
+  });
 });

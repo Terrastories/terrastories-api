@@ -1,0 +1,139 @@
+name: Issue 135 ownership fix helper
+
+on:
+  push:
+    branches:
+      - feat/issue-135-dual-backend-ci
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-135-dual-backend-ci
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - name: Apply expand-contract ownership FK fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/db/migrations/postgres/0000_current_compat_baseline.sql')
+          source = path.read_text()
+
+          replacements = {
+          """DO $users_fk$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_community_id_communities_id_fk') THEN
+              ALTER TABLE users ADD CONSTRAINT users_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id);
+            END IF;
+          END $users_fk$;""": """DO $users_fk$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_community_id_communities_id_fk') THEN
+              ALTER TABLE users ADD CONSTRAINT users_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
+            END IF;
+            IF EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'users_community_id_communities_id_fk'
+                AND NOT convalidated
+            ) AND NOT EXISTS (
+              SELECT 1
+              FROM users
+              LEFT JOIN communities ON communities.id = users.community_id
+              WHERE communities.id IS NULL
+            ) THEN
+              ALTER TABLE users VALIDATE CONSTRAINT users_community_id_communities_id_fk;
+            END IF;
+          END $users_fk$;""",
+          """DO $places_fk$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'places_community_id_communities_id_fk') THEN
+              ALTER TABLE places ADD CONSTRAINT places_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id);
+            END IF;
+          END $places_fk$;""": """DO $places_fk$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'places_community_id_communities_id_fk') THEN
+              ALTER TABLE places ADD CONSTRAINT places_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
+            END IF;
+            IF EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'places_community_id_communities_id_fk'
+                AND NOT convalidated
+            ) AND NOT EXISTS (
+              SELECT 1
+              FROM places
+              LEFT JOIN communities ON communities.id = places.community_id
+              WHERE communities.id IS NULL
+            ) THEN
+              ALTER TABLE places VALIDATE CONSTRAINT places_community_id_communities_id_fk;
+            END IF;
+          END $places_fk$;""",
+          """DO $speakers_fk$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'speakers_community_id_communities_id_fk') THEN
+              ALTER TABLE speakers ADD CONSTRAINT speakers_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id);
+            END IF;
+          END $speakers_fk$;""": """DO $speakers_fk$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'speakers_community_id_communities_id_fk') THEN
+              ALTER TABLE speakers ADD CONSTRAINT speakers_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
+            END IF;
+            IF EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'speakers_community_id_communities_id_fk'
+                AND NOT convalidated
+            ) AND NOT EXISTS (
+              SELECT 1
+              FROM speakers
+              LEFT JOIN communities ON communities.id = speakers.community_id
+              WHERE communities.id IS NULL
+            ) THEN
+              ALTER TABLE speakers VALIDATE CONSTRAINT speakers_community_id_communities_id_fk;
+            END IF;
+          END $speakers_fk$;""",
+          """  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'stories_community_id_communities_id_fk') THEN
+              ALTER TABLE stories ADD CONSTRAINT stories_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id);
+            END IF;""": """  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'stories_community_id_communities_id_fk') THEN
+              ALTER TABLE stories ADD CONSTRAINT stories_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
+            END IF;
+            IF EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'stories_community_id_communities_id_fk'
+                AND NOT convalidated
+            ) AND NOT EXISTS (
+              SELECT 1
+              FROM stories
+              LEFT JOIN communities ON communities.id = stories.community_id
+              WHERE communities.id IS NULL
+            ) THEN
+              ALTER TABLE stories VALIDATE CONSTRAINT stories_community_id_communities_id_fk;
+            END IF;""",
+          }
+
+          for old, new in replacements.items():
+              if old not in source:
+                  raise SystemExit(f'expected migration block not found:\n{old}')
+              source = source.replace(old, new, 1)
+
+          path.write_text(source)
+          PY
+      - name: Format regression test
+        run: npx prettier --write scripts/test-postgres-migration-regressions.ts
+      - name: Commit helper output
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            exit 0
+          fi
+          git add src/db/migrations/postgres/0000_current_compat_baseline.sql scripts/test-postgres-migration-regressions.ts
+          git commit -m "fix: stage legacy postgres ownership constraints"
+          git push origin HEAD:feat/issue-135-dual-backend-ci

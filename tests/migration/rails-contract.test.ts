@@ -90,6 +90,19 @@ describe('ActiveStorage blob resolution', () => {
 
     await expect(
       resolveActiveStorageBlobPath(root, 'fixtureblob')
-    ).rejects.toThrow(/symlink|missing ActiveStorage blob bytes/i);
+    ).rejects.toThrow(/symlink|outside|missing ActiveStorage blob bytes/i);
+  });
+
+  it('rejects DiskService paths whose parent directory escapes through a symlink', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rails-parent-symlink-blobs-'));
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'rails-parent-secret-'));
+    const outsideNested = join(outsideRoot, 'xt');
+    await mkdir(outsideNested);
+    await writeFile(join(outsideNested, 'fixtureblob'), 'outside-root');
+    await symlink(outsideRoot, join(root, 'fi'));
+
+    await expect(
+      resolveActiveStorageBlobPath(root, 'fixtureblob')
+    ).rejects.toThrow(/outside|symlink|missing ActiveStorage blob bytes/i);
   });
 });

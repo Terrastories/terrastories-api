@@ -331,7 +331,7 @@ describe('CommunityService', () => {
       });
     });
 
-    it('should keep Rails country/beta persistence deferred to #135', async () => {
+    it('should persist Rails-compatible country/beta fields', async () => {
       const result = await communityService.createCommunity({
         name: 'Deferred Rails Fields Community',
         country: 'CA',
@@ -339,8 +339,8 @@ describe('CommunityService', () => {
       });
 
       expect(result.name).toBe('Deferred Rails Fields Community');
-      expect(result).not.toHaveProperty('country');
-      expect(result).not.toHaveProperty('beta');
+      expect(result.country).toBe('CA');
+      expect(result.beta).toBe(true);
     });
 
     it('should throw validation error for invalid country code', async () => {
@@ -659,7 +659,7 @@ describe('CommunityService', () => {
       ).rejects.toThrow(CommunityValidationError);
     });
 
-    it('should keep Rails country/beta updates deferred to #135', async () => {
+    it('should update Rails-compatible country/beta fields', async () => {
       const community = await communityService.createCommunity({
         name: 'Deferred Update Community',
       });
@@ -670,8 +670,8 @@ describe('CommunityService', () => {
       });
 
       expect(result.name).toBe('Deferred Update Community');
-      expect(result).not.toHaveProperty('country');
-      expect(result).not.toHaveProperty('beta');
+      expect(result.country).toBe('CA');
+      expect(result.beta).toBe(true);
     });
 
     it('should throw validation error for invalid country code in update', async () => {

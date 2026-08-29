@@ -18,12 +18,8 @@ import { communitiesSqlite, communitiesPg } from '../db/schema/index.js';
 import type { Community } from '../db/schema/communities.js';
 import type { Database } from '../db/index.js';
 
-// Re-export Community type for other modules
 export type { Community } from '../db/schema/communities.js';
 
-/**
- * Community data for creation requests
- */
 export interface CreateCommunityData {
   name: string;
   description?: string;
@@ -32,14 +28,10 @@ export interface CreateCommunityData {
   locale?: string;
   culturalSettings?: string;
   isActive?: boolean;
-  // Rails compatibility fields
   country?: string;
   beta?: boolean;
 }
 
-/**
- * Community data for update requests
- */
 export interface UpdateCommunityData {
   name?: string;
   description?: string;
@@ -48,28 +40,20 @@ export interface UpdateCommunityData {
   culturalSettings?: string;
   isActive?: boolean;
   updatedAt?: Date;
-  // Rails compatibility fields
   country?: string;
   beta?: boolean;
 }
 
-/**
- * Search parameters for community queries
- */
 export interface CommunitySearchParams {
   query?: string;
   locale?: string;
   isActive?: boolean;
   limit?: number;
   offset?: number;
-  // Rails compatibility filters
   country?: string;
   beta?: boolean;
 }
 
-/**
- * Cultural protocol configuration for Indigenous communities
- */
 export interface CulturalProtocols {
   languagePreferences: string[];
   elderContentRestrictions: boolean;
@@ -81,9 +65,6 @@ export interface CulturalProtocols {
   culturalNotes?: string;
 }
 
-/**
- * Community statistics and metrics
- */
 export interface CommunityStats {
   id: number;
   name: string;
@@ -95,9 +76,6 @@ export interface CommunityStats {
   lastActive: Date | null;
 }
 
-/**
- * Custom error classes for community operations
- */
 export class CommunityNotFoundError extends Error {
   constructor(message = 'Community not found') {
     super(message);
@@ -119,51 +97,61 @@ export class InvalidCommunityDataError extends Error {
   }
 }
 
-/**
- * Community Repository class providing database operations
- */
+function isUniqueConstraintError(error: unknown): boolean {
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 4 && current; depth++) {
+    if (typeof current !== 'object') {
+      return false;
+    }
+
+    const record = current as Record<string, unknown>;
+    const code = typeof record.code === 'string' ? record.code : undefined;
+    const message =
+      typeof record.message === 'string' ? record.message.toLowerCase() : '';
+
+    if (
+      code === '23505' ||
+      message.includes('unique constraint') ||
+      message.includes('duplicate key')
+    ) {
+      return true;
+    }
+
+    current = record.cause;
+  }
+
+  return false;
+}
+
 export class CommunityRepository {
   constructor(private database: Database) {}
 
   private get communities() {
-    // Determine which schema to use based on database type
-    // This is a runtime check to use the correct schema
     return 'execute' in this.database ? communitiesPg : communitiesSqlite;
   }
 
-  // Type-safe database query wrapper - cast to any to handle union type
   private get db() {
-    // Cast to any to resolve union type issues
-    // This is safe because both drizzle instances have compatible query interfaces
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- #135 will replace this cross-dialect Drizzle union cast with backend-specific integration typing.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- cross-dialect Drizzle query interfaces are behaviorally equivalent here.
     return this.database as any;
   }
 
-  /**
-   * Generate a unique slug from community name
-   * @param name - Community name
-   * @param excludeId - Community ID to exclude from uniqueness check
-   * @returns Promise<string> - Unique slug
-   */
   private async generateUniqueSlug(
     name: string,
     excludeId?: number
   ): Promise<string> {
-    // Create base slug from name
     let baseSlug = name
       .toLowerCase()
       .trim()
-      .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
-      .replace(/[\s]+/g, '-') // Replace spaces with hyphens
-      .replace(/-+/g, '-') // Remove multiple consecutive hyphens
-      .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/[\s]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
 
-    // Ensure minimum length
     if (baseSlug.length < 3) {
       baseSlug = `community-${baseSlug}`;
     }
 
-    // Check for existing slugs and find unique variant
     let slug = baseSlug;
     let counter = 1;
 
@@ -190,14 +178,8 @@ export class CommunityRepository {
     return slug;
   }
 
-  /**
-   * Create a new community
-   * @param data - Community creation data
-   * @returns Promise<Community> - Created community
-   */
   async create(data: CreateCommunityData): Promise<Community> {
     try {
-      // Validate required fields
       if (!data.name?.trim()) {
         throw new InvalidCommunityDataError('Community name is required');
       }
@@ -214,10 +196,8 @@ export class CommunityRepository {
         );
       }
 
-      // Generate unique slug
       const slug = data.slug || (await this.generateUniqueSlug(data.name));
 
-      // Validate cultural settings if provided
       if (data.culturalSettings) {
         try {
           JSON.parse(data.culturalSettings);
@@ -228,10 +208,6 @@ export class CommunityRepository {
         }
       }
 
-      // Country validation handled by Zod schema at service layer
-
-      // Rails country/beta persistence is intentionally deferred to #135.
-      // Keep the current insert shape limited to columns present in both schemas.
       const communityData = {
         name: data.name.trim(),
         description: data.description?.trim() || null,
@@ -240,11 +216,12 @@ export class CommunityRepository {
         locale: data.locale || 'en',
         culturalSettings: data.culturalSettings || null,
         isActive: data.isActive ?? true,
+        country: data.country ?? null,
+        beta: data.beta ?? false,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
 
-      // Create community
       const result = await this.db
         .insert(this.communities)
         .values(communityData)
@@ -260,14 +237,8 @@ export class CommunityRepository {
         throw error;
       }
 
-      // Handle database constraint violations
-      if (error instanceof Error) {
-        if (
-          error.message.includes('UNIQUE constraint') ||
-          error.message.includes('unique constraint')
-        ) {
-          throw new DuplicateSlugError(`Community slug already exists`);
-        }
+      if (isUniqueConstraintError(error)) {
+        throw new DuplicateSlugError();
       }
 
       throw new Error(
@@ -276,11 +247,6 @@ export class CommunityRepository {
     }
   }
 
-  /**
-   * Find community by ID
-   * @param id - Community ID
-   * @returns Promise<Community | null> - Community or null if not found
-   */
   async findById(id: number): Promise<Community | null> {
     try {
       const result = await this.db
@@ -297,11 +263,6 @@ export class CommunityRepository {
     }
   }
 
-  /**
-   * Find community by slug
-   * @param slug - Community slug
-   * @returns Promise<Community | null> - Community or null if not found
-   */
   async findBySlug(slug: string): Promise<Community | null> {
     try {
       const result = await this.db
@@ -318,27 +279,20 @@ export class CommunityRepository {
     }
   }
 
-  /**
-   * Search communities with filters
-   * @param params - Search parameters
-   * @returns Promise<Community[]> - Array of matching communities
-   */
   async search(params: CommunitySearchParams = {}): Promise<Community[]> {
     try {
       const {
         query,
         locale,
         isActive,
-        country: _country,
-        beta: _beta,
+        country,
+        beta,
         limit = 50,
         offset = 0,
       } = params;
 
-      // Build where conditions
       const conditions = [];
 
-      // Search query across name and description
       if (query?.trim()) {
         const searchTerm = `%${query.trim()}%`;
         conditions.push(
@@ -349,27 +303,22 @@ export class CommunityRepository {
         );
       }
 
-      // Filter by locale
       if (locale) {
         conditions.push(eq(this.communities.locale, locale));
       }
 
-      // Filter by active status
       if (isActive !== undefined) {
         conditions.push(eq(this.communities.isActive, isActive));
       }
 
-      // Filter by country - commented out until database migration is complete
-      // if (country) {
-      //   conditions.push(eq(this.communities.country, country));
-      // }
+      if (country) {
+        conditions.push(eq(this.communities.country, country));
+      }
 
-      // Filter by beta status - commented out until database migration is complete
-      // if (beta !== undefined) {
-      //   conditions.push(eq(this.communities.beta, beta));
-      // }
+      if (beta !== undefined) {
+        conditions.push(eq(this.communities.beta, beta));
+      }
 
-      // Execute query with pagination
       const whereClause =
         conditions.length > 0 ? and(...conditions) : undefined;
 
@@ -389,34 +338,20 @@ export class CommunityRepository {
     }
   }
 
-  /**
-   * Get all active communities
-   * @param limit - Maximum number of communities to return
-   * @param offset - Number of communities to skip
-   * @returns Promise<Community[]> - Array of active communities
-   */
   async findAllActive(limit = 50, offset = 0): Promise<Community[]> {
     return this.search({ isActive: true, limit, offset });
   }
 
-  /**
-   * Update community by ID
-   * @param id - Community ID
-   * @param updates - Partial community data to update
-   * @returns Promise<Community | null> - Updated community or null if not found
-   */
   async update(
     id: number,
     updates: UpdateCommunityData
   ): Promise<Community | null> {
     try {
-      // Check if community exists
       const existingCommunity = await this.findById(id);
       if (!existingCommunity) {
         throw new CommunityNotFoundError();
       }
 
-      // Validate updates
       if (updates.name !== undefined) {
         if (!updates.name?.trim()) {
           throw new InvalidCommunityDataError('Community name cannot be empty');
@@ -448,25 +383,19 @@ export class CommunityRepository {
         }
       }
 
-      // Country validation handled by Zod schema at service layer
-
-      // Prepare update data
       const updateData = {
         ...updates,
         updatedAt: new Date(),
       };
 
-      // If name is being updated, regenerate slug
       if (updates.name && updates.name.trim() !== existingCommunity.name) {
         updateData.name = updates.name.trim();
       }
 
-      // Remove undefined values
       const cleanUpdateData = Object.fromEntries(
         Object.entries(updateData).filter(([_, value]) => value !== undefined)
       );
 
-      // Update community
       const result = await this.db
         .update(this.communities)
         .set(cleanUpdateData)
@@ -488,21 +417,13 @@ export class CommunityRepository {
     }
   }
 
-  /**
-   * Delete community by ID
-   * Note: This should be used with caution as it may affect related data
-   * @param id - Community ID
-   * @returns Promise<boolean> - True if deleted, false if not found
-   */
   async delete(id: number): Promise<boolean> {
     try {
-      // Check if community exists
       const existingCommunity = await this.findById(id);
       if (!existingCommunity) {
         return false;
       }
 
-      // Delete community (CASCADE should handle related data)
       const result = await this.db
         .delete(this.communities)
         .where(eq(this.communities.id, id))
@@ -510,7 +431,6 @@ export class CommunityRepository {
 
       return result.length > 0;
     } catch (error) {
-      // Handle foreign key constraint errors
       if (error instanceof Error && error.message.includes('FOREIGN KEY')) {
         throw new InvalidCommunityDataError(
           'Cannot delete community with existing users, stories, or other associated data'
@@ -523,11 +443,6 @@ export class CommunityRepository {
     }
   }
 
-  /**
-   * Get community count with optional filters
-   * @param isActive - Filter by active status
-   * @returns Promise<number> - Number of communities
-   */
   async count(isActive?: boolean): Promise<number> {
     try {
       const conditions = [];
@@ -551,12 +466,6 @@ export class CommunityRepository {
     }
   }
 
-  /**
-   * Check if a community slug is available
-   * @param slug - Slug to check
-   * @param excludeId - Community ID to exclude from check
-   * @returns Promise<boolean> - True if slug is available
-   */
   async isSlugAvailable(slug: string, excludeId?: number): Promise<boolean> {
     try {
       const conditions = [eq(this.communities.slug, slug)];
@@ -578,11 +487,6 @@ export class CommunityRepository {
     }
   }
 
-  /**
-   * Soft delete community (mark as inactive)
-   * @param id - Community ID
-   * @returns Promise<boolean> - True if deactivated, false if not found
-   */
   async deactivate(id: number): Promise<boolean> {
     try {
       const updated = await this.update(id, { isActive: false });
@@ -595,11 +499,6 @@ export class CommunityRepository {
     }
   }
 
-  /**
-   * Reactivate community
-   * @param id - Community ID
-   * @returns Promise<boolean> - True if reactivated, false if not found
-   */
   async reactivate(id: number): Promise<boolean> {
     try {
       const updated = await this.update(id, { isActive: true });

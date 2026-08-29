@@ -17,6 +17,8 @@
     "test:ci:production": "vitest run tests/production tests/docker --reporter=dot --silent=true --maxWorkers=1 --minWorkers=1",
     "test:ci:comparison": "vitest run tests/comparison --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
     "test:ci": "node scripts/run-test-shards.mjs",
+    "test:db:sqlite": "tsx scripts/test-db-backend.ts sqlite && tsx scripts/test-migration-metadata.ts",
+    "test:db:postgres": "tsx scripts/test-db-backend.ts postgres && tsx scripts/test-postgres-migration-regressions.ts",
     "lint": "eslint . --max-warnings 0",
     "audit:baseline": "node scripts/check-audit-baseline.mjs",
     "format": "prettier --write .",

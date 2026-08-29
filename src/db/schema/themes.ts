@@ -81,7 +81,9 @@ export const themesPg = pgTable(
     neBoundaryLat: decimal('ne_boundary_lat', { precision: 10, scale: 6 }),
     neBoundaryLong: decimal('ne_boundary_long', { precision: 10, scale: 6 }),
     active: boolean('active').notNull().default(false),
-    communityId: bigint('community_id', { mode: 'number' }).notNull(),
+    communityId: bigint('community_id', { mode: 'number' })
+      .notNull()
+      .references(() => communitiesPg.id),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },

@@ -10,64 +10,44 @@ export type Database =
   | ReturnType<typeof drizzlePostgres>;
 
 let db: Database | null = null;
+let connectionProbe: (() => Promise<void>) | null = null;
 
 export async function getDb(): Promise<Database> {
   if (db) return db;
 
   const config = getConfig();
-
-  // Determine database type from URL
   const isPostgres =
     config.database.url.startsWith('postgresql://') ||
     config.database.url.startsWith('postgres://');
 
   if (isPostgres) {
-    // PostgreSQL with PostGIS support
-    const connectionString = config.database.url;
-    const queryClient = postgres(connectionString, {
+    const queryClient = postgres(config.database.url, {
       max: config.database.poolSize,
       ssl: config.database.ssl ? 'require' : false,
-      prepare: false, // Required for PostGIS spatial functions
-      // Note: PostGIS type configuration would go here in production
-      // For now, keeping it simple to avoid TypeScript issues
     });
-
     db = drizzlePostgres(queryClient);
-
-    // Verify PostGIS extension
-    if (config.database.spatialSupport && config.environment !== 'test') {
-      try {
-        await queryClient`SELECT PostGIS_Version()`;
-        // PostGIS extension verified
-      } catch {
-        // PostGIS extension not found - spatial features will be limited
-      }
-    }
+    connectionProbe = async () => {
+      await queryClient`SELECT 1`;
+    };
   } else {
-    // SQLite with SpatiaLite support for development/testing
     const dbPath =
       config.environment === 'test' ? ':memory:' : config.database.url;
-    const sqlite = new Database(dbPath);
-
-    // Enable spatial support for SQLite if available
-    if (config.database.spatialSupport) {
-      try {
-        sqlite.loadExtension('mod_spatialite');
-        sqlite.exec('SELECT InitSpatialMetaData()');
-        // SpatiaLite extension loaded
-      } catch {
-        // SpatiaLite extension not found - spatial features will be limited
-      }
-    }
-
-    db = drizzleSqlite(sqlite);
+    const sqliteClient = new Database(dbPath);
+    db = drizzleSqlite(sqliteClient);
+    connectionProbe = async () => {
+      sqliteClient.prepare('SELECT 1').get();
+    };
   }
 
   return db;
 }
 
 /**
- * Test database connection and spatial capabilities
+ * Test the configured database connection surface.
+ *
+ * Spatial behavior is intentionally application-level on every backend, so a
+ * connected database always has the same portable Haversine/bounding-box
+ * capability and never depends on a database extension.
  */
 export async function testConnection(): Promise<{
   connected: boolean;
@@ -75,47 +55,20 @@ export async function testConnection(): Promise<{
   version: string | null;
 }> {
   try {
-    const database = await getDb();
-    const config = getConfig();
-
-    let spatialSupport = false;
-    let version: string | null = null;
-
-    if (
-      config.database.url.startsWith('postgresql://') ||
-      config.database.url.startsWith('postgres://')
-    ) {
-      // Test PostgreSQL + PostGIS
-      try {
-        const result = await (
-          database as ReturnType<typeof drizzlePostgres>
-        ).execute('SELECT PostGIS_Version() as version');
-
-        version = (result as any).rows[0]?.version || null;
-        spatialSupport = !!version;
-      } catch {
-        spatialSupport = false;
-      }
-    } else {
-      // Test SQLite + SpatiaLite
-      try {
-        const result = (database as any)
-          .prepare('SELECT spatialite_version() as version')
-          .get();
-        version = result?.version || null;
-        spatialSupport = !!version;
-      } catch {
-        spatialSupport = false;
-      }
+    await getDb();
+    if (!connectionProbe) {
+      throw new Error('Database connection probe is unavailable');
     }
+    await connectionProbe();
 
     return {
       connected: true,
-      spatialSupport,
-      version,
+      spatialSupport: true,
+      version: 'application-level',
     };
   } catch {
-    // Database connection test failed
+    // Keep the shared client alive. postgres.js reconnects its pool after
+    // transient failures, and route repositories retain this Drizzle instance.
     return {
       connected: false,
       spatialSupport: false,

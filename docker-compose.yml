@@ -53,7 +53,9 @@ services:
     restart: unless-stopped
 
   # =============================================================================
-  # DATABASE SERVICE - PostgreSQL with PostGIS
+  # DATABASE SERVICE - PostgreSQL 13 persisted-volume compatibility bridge
+  # Existing named volumes may contain historical PostGIS catalog objects.
+  # New initialization and application semantics do not create or use PostGIS.
   # =============================================================================
   db:
     image: postgis/postgis:13-master

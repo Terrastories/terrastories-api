@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -77,5 +77,16 @@ describe('ActiveStorage blob resolution', () => {
     await expect(
       resolveActiveStorageBlobPath(root, '../secret')
     ).rejects.toThrow(/unsafe ActiveStorage key/i);
+  });
+
+  it('rejects symlinks instead of following blob paths outside the trusted export', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rails-symlink-blobs-'));
+    const outside = join(await mkdtemp(join(tmpdir(), 'rails-secret-')), 'secret');
+    await writeFile(outside, 'not-an-exported-blob');
+    await symlink(outside, join(root, 'fixtureblob'));
+
+    await expect(
+      resolveActiveStorageBlobPath(root, 'fixtureblob')
+    ).rejects.toThrow(/symlink|missing ActiveStorage blob bytes/i);
   });
 });

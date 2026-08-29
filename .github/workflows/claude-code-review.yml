@@ -276,10 +276,12 @@ jobs:
           DISABLE_UPDATES: '1'
           DISABLE_AUTOUPDATER: '1'
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-          NPM_CONFIG_USERCONFIG: /dev/null
-          NPM_CONFIG_GLOBALCONFIG: /dev/null
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/npm-userconfig
+          NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/npm-globalconfig
         run: |
           set -euo pipefail
+          : > "$NPM_CONFIG_USERCONFIG"
+          : > "$NPM_CONFIG_GLOBALCONFIG"
           cd "$RUNNER_TEMP"
           prefix="${RUNNER_TEMP}/claude-code-2.1.222"
           npm install --prefix "$prefix" --no-save --no-audit --no-fund @anthropic-ai/claude-code@2.1.222

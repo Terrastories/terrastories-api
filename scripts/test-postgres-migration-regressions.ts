@@ -54,6 +54,7 @@ function splitStatements(source: string): string[] {
 async function resetDatabase(
   client: ReturnType<typeof postgres>
 ): Promise<void> {
+  await client.unsafe('DROP SCHEMA IF EXISTS issue135_collision CASCADE');
   await client.unsafe('DROP SCHEMA IF EXISTS drizzle CASCADE');
   await client.unsafe('DROP SCHEMA IF EXISTS public CASCADE');
   await client.unsafe('CREATE SCHEMA public');
@@ -296,6 +297,59 @@ async function verifyLegacyCommunityOwnershipOrphanUpgrade(
   );
 }
 
+async function verifyConstraintNameCollisionUpgrade(
+  client: ReturnType<typeof postgres>
+): Promise<void> {
+  await resetDatabase(client);
+  await installPreviousRelease(client);
+
+  await client.unsafe('CREATE SCHEMA issue135_collision');
+  await client.unsafe(`
+    CREATE TABLE issue135_collision.communities (
+      id integer PRIMARY KEY
+    )
+  `);
+  for (const [tableName, constraintName] of [
+    ['users', 'users_community_id_communities_id_fk'],
+    ['places', 'places_community_id_communities_id_fk'],
+    ['speakers', 'speakers_community_id_communities_id_fk'],
+    ['stories', 'stories_community_id_communities_id_fk'],
+  ] as const) {
+    await client.unsafe(`
+      CREATE TABLE issue135_collision.${tableName} (
+        community_id integer NOT NULL,
+        CONSTRAINT ${constraintName}
+          FOREIGN KEY (community_id)
+          REFERENCES issue135_collision.communities(id)
+      )
+    `);
+  }
+
+  try {
+    await migrate(drizzle(client), { migrationsFolder });
+    await assertConstraintValidation(
+      client,
+      stagedCommunityOwnershipConstraints,
+      true,
+      'same-named constraints in another schema must not suppress public ownership FKs'
+    );
+    await assertSnapshotConstraintNames(client);
+
+    await assert.rejects(
+      client.unsafe(`
+        INSERT INTO users
+          (email, password_hash, first_name, last_name, role, community_id, is_active, created_at, updated_at)
+        VALUES
+          ('collision-orphan@example.com', 'hash', 'Collision', 'User', 'viewer', 999971, true, now(), now())
+      `),
+      undefined,
+      'public user ownership FK must reject new orphan writes despite same-named constraints elsewhere'
+    );
+  } finally {
+    await client.unsafe('DROP SCHEMA IF EXISTS issue135_collision CASCADE');
+  }
+}
+
 async function verifyOrphanThemeUpgrade(
   client: ReturnType<typeof postgres>
 ): Promise<void> {
@@ -387,12 +441,14 @@ async function main(): Promise<void> {
   try {
     console.log('🐘 PostgreSQL migration regression gate');
     console.log(
-      '  1/3 previous-schema ownership orphan expand-contract upgrade'
+      '  1/4 previous-schema ownership orphan expand-contract upgrade'
     );
     await verifyLegacyCommunityOwnershipOrphanUpgrade(client);
-    console.log('  2/3 orphan-theme expand-contract upgrade');
+    console.log('  2/4 cross-schema constraint-name collision upgrade');
+    await verifyConstraintNameCollisionUpgrade(client);
+    console.log('  3/4 orphan-theme expand-contract upgrade');
     await verifyOrphanThemeUpgrade(client);
-    console.log('  3/3 applied constraints match Drizzle snapshot semantics');
+    console.log('  4/4 applied constraints match Drizzle snapshot semantics');
     await verifyFreshSnapshotConstraintNames(client);
     console.log('✅ PostgreSQL migration regression gate passed');
   } finally {

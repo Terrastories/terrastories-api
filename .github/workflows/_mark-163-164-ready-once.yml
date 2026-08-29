@@ -1,0 +1,25 @@
+name: Mark PRs 163 and 164 ready once
+
+on:
+  push:
+    branches:
+      - ops/mark-163-164-ready
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  mark-ready:
+    if: github.actor == 'luandro'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Mark validated PRs ready for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr ready 163 --repo Terrastories/terrastories-api
+          gh pr ready 164 --repo Terrastories/terrastories-api
+          test "$(gh pr view 163 --repo Terrastories/terrastories-api --json isDraft --jq .isDraft)" = false
+          test "$(gh pr view 164 --repo Terrastories/terrastories-api --json isDraft --jq .isDraft)" = false

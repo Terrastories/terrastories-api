@@ -56,8 +56,8 @@ COPY . .
 # Build the application
 RUN npm run build
 
-# Remove dev dependencies
-RUN npm ci --omit=dev && npm cache clean --force
+# Remove dev dependencies from the locked install without rerunning lifecycle scripts.
+RUN npm prune --omit=dev --ignore-scripts && npm cache clean --force
 
 # =============================================================================
 # Production runtime - minimal footprint

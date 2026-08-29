@@ -101,21 +101,3 @@ jobs:
         run: npm ci --legacy-peer-deps
       - name: Run PostgreSQL migration and integration gate
         run: npm run test:db:postgres
-
-  cleanup-issue135-temp-workflow:
-    if: github.head_ref == 'feat/issue-135-dual-backend-ci'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: feat/issue-135-dual-backend-ci
-          fetch-depth: 0
-      - name: Remove temporary issue 135 workflow
-        run: |
-          git rm .github/workflows/issue-135-unique-constraint-fix.yml
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'chore: remove temporary issue 135 fixer workflow'
-          git push origin HEAD:feat/issue-135-dual-backend-ci

@@ -76,7 +76,7 @@ export async function resolveActiveStorageBlobPath(
     const resolvedCandidate = await realpath(candidate);
     if (!isWithinRoot(trustedRoot, resolvedCandidate)) {
       throw new Error(
-        `ActiveStorage blob path escapes trusted export root for key ${key}`
+        `ActiveStorage blob path is outside trusted export root for key ${key}`
       );
     }
     return candidate;

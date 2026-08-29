@@ -13,6 +13,7 @@ import {
   type CapturedBlob,
   verifyAndCopyActiveStorageBlob,
 } from './active-storage.js';
+import { buildCaptureValidationSummary } from './validation-summary.js';
 
 const PAGE_SIZE = 500;
 const JSON_BUILD_OBJECT_COLUMN_CHUNK = 40;
@@ -874,6 +875,11 @@ export async function captureRailsToBundle(
     await writeFile(
       join(temporaryDir, 'manifest.json'),
       `${JSON.stringify(manifest, null, 2)}\n`,
+      { encoding: 'utf8', mode: 0o600 }
+    );
+    await writeFile(
+      join(temporaryDir, 'validation-summary.txt'),
+      buildCaptureValidationSummary(manifest),
       { encoding: 'utf8', mode: 0o600 }
     );
 

@@ -255,7 +255,9 @@ describeWithPostgres('Rails source capture', () => {
       permissionBits((await stat(join(outputDir, 'manifest.json'))).mode)
     ).toBe(0o600);
     expect(
-      permissionBits((await stat(join(outputDir, 'validation-summary.txt'))).mode)
+      permissionBits(
+        (await stat(join(outputDir, 'validation-summary.txt'))).mode
+      )
     ).toBe(0o600);
     expect(
       permissionBits((await stat(join(outputDir, 'blobs', 'fixtureblob'))).mode)

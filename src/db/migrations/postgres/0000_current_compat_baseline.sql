@@ -114,7 +114,19 @@ CREATE INDEX IF NOT EXISTS idx_users_community_email ON users (community_id, ema
 DO $users_fk$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_community_id_communities_id_fk') THEN
-    ALTER TABLE users ADD CONSTRAINT users_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id);
+    ALTER TABLE users ADD CONSTRAINT users_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'users_community_id_communities_id_fk'
+      AND NOT convalidated
+  ) AND NOT EXISTS (
+    SELECT 1
+    FROM users
+    LEFT JOIN communities ON communities.id = users.community_id
+    WHERE communities.id IS NULL
+  ) THEN
+    ALTER TABLE users VALIDATE CONSTRAINT users_community_id_communities_id_fk;
   END IF;
 END $users_fk$;
 --> statement-breakpoint
@@ -154,7 +166,19 @@ CREATE INDEX IF NOT EXISTS places_photo_url_idx ON places (photo_url);
 DO $places_fk$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'places_community_id_communities_id_fk') THEN
-    ALTER TABLE places ADD CONSTRAINT places_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id);
+    ALTER TABLE places ADD CONSTRAINT places_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'places_community_id_communities_id_fk'
+      AND NOT convalidated
+  ) AND NOT EXISTS (
+    SELECT 1
+    FROM places
+    LEFT JOIN communities ON communities.id = places.community_id
+    WHERE communities.id IS NULL
+  ) THEN
+    ALTER TABLE places VALIDATE CONSTRAINT places_community_id_communities_id_fk;
   END IF;
 END $places_fk$;
 --> statement-breakpoint
@@ -197,7 +221,19 @@ CREATE INDEX IF NOT EXISTS speakers_is_active_idx ON speakers (is_active);
 DO $speakers_fk$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'speakers_community_id_communities_id_fk') THEN
-    ALTER TABLE speakers ADD CONSTRAINT speakers_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id);
+    ALTER TABLE speakers ADD CONSTRAINT speakers_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'speakers_community_id_communities_id_fk'
+      AND NOT convalidated
+  ) AND NOT EXISTS (
+    SELECT 1
+    FROM speakers
+    LEFT JOIN communities ON communities.id = speakers.community_id
+    WHERE communities.id IS NULL
+  ) THEN
+    ALTER TABLE speakers VALIDATE CONSTRAINT speakers_community_id_communities_id_fk;
   END IF;
 END $speakers_fk$;
 --> statement-breakpoint
@@ -260,7 +296,19 @@ CREATE INDEX IF NOT EXISTS stories_privacy_level_idx ON stories (privacy_level);
 DO $stories_fks$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'stories_community_id_communities_id_fk') THEN
-    ALTER TABLE stories ADD CONSTRAINT stories_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id);
+    ALTER TABLE stories ADD CONSTRAINT stories_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'stories_community_id_communities_id_fk'
+      AND NOT convalidated
+  ) AND NOT EXISTS (
+    SELECT 1
+    FROM stories
+    LEFT JOIN communities ON communities.id = stories.community_id
+    WHERE communities.id IS NULL
+  ) THEN
+    ALTER TABLE stories VALIDATE CONSTRAINT stories_community_id_communities_id_fk;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'stories_interview_location_id_places_id_fk') THEN
     ALTER TABLE stories ADD CONSTRAINT stories_interview_location_id_places_id_fk FOREIGN KEY (interview_location_id) REFERENCES places(id);

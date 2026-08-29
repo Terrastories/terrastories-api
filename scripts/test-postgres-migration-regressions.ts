@@ -386,7 +386,9 @@ async function main(): Promise<void> {
   const client = postgres(databaseUrl, { max: 2, onnotice: () => undefined });
   try {
     console.log('🐘 PostgreSQL migration regression gate');
-    console.log('  1/3 previous-schema ownership orphan expand-contract upgrade');
+    console.log(
+      '  1/3 previous-schema ownership orphan expand-contract upgrade'
+    );
     await verifyLegacyCommunityOwnershipOrphanUpgrade(client);
     console.log('  2/3 orphan-theme expand-contract upgrade');
     await verifyOrphanThemeUpgrade(client);

@@ -211,6 +211,7 @@ describe('File Routes Integration', () => {
       expect(result.data.communityId).toBe(testCommunity.id);
       expect(result.data.uploadedBy).toBe(testUser.id || testUser.user?.id);
       expect(result.data.url).toMatch(/^\/api\/v1\/files\//);
+      expect(result.data).not.toHaveProperty('path');
     });
 
     it('should reject upload without authentication', async () => {

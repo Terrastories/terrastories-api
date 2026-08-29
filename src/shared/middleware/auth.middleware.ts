@@ -15,12 +15,11 @@
 
 import { FastifyRequest, FastifyReply } from 'fastify';
 import {
-  V2_COMMUNITY_ROLES,
   authorizeCommunityContent,
   createAuthorizationAuditEvent,
+  isV2CommunityRole,
   type ContentRouteFamily,
   type ProtectedSurface,
-  type V2CommunityRole,
 } from '../authorization/sovereignty-policy.js';
 
 /**
@@ -394,10 +393,6 @@ export function requireV2CommunityContentAccess(
       error: { message: 'Access denied - community data isolation' },
     });
   };
-}
-
-function isV2CommunityRole(role: UserSession['role']): role is V2CommunityRole {
-  return (V2_COMMUNITY_ROLES as readonly string[]).includes(role);
 }
 
 /**

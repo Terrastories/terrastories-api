@@ -103,7 +103,6 @@ export async function fileRoutes(
                   id: { type: 'string', format: 'uuid' },
                   filename: { type: 'string' },
                   originalName: { type: 'string' },
-                  path: { type: 'string' },
                   url: { type: 'string' },
                   size: { type: 'number' },
                   mimeType: { type: 'string' },

@@ -7,6 +7,10 @@ export const V2_COMMUNITY_ROLES = [
 
 export type V2CommunityRole = (typeof V2_COMMUNITY_ROLES)[number];
 
+export function isV2CommunityRole(role: string): role is V2CommunityRole {
+  return (V2_COMMUNITY_ROLES as readonly string[]).includes(role);
+}
+
 export const CONTENT_ROUTE_FAMILIES = [
   'stories',
   'places',
@@ -129,6 +133,20 @@ export const AUTHORIZATION_MATRIX = {
     'never-exposed': { anonymous: false },
   },
 } as const;
+
+export const NEVER_EXPOSED_FIELDS_BY_FAMILY: Record<
+  ContentRouteFamily,
+  readonly string[]
+> = {
+  stories: [],
+  places: [],
+  speakers: [],
+  themes: ['mapboxAccessToken'],
+  files: ['path'],
+  'nested-relations': [],
+  aggregates: [],
+  exports: [],
+};
 
 export function authorizeCommunityContent(
   input: CommunityContentAuthorizationInput
@@ -254,6 +272,33 @@ export function projectVisibleFields<T extends Record<string, unknown>>(
   }
 
   return projected;
+}
+
+export function projectCommunityResourceFields<
+  T extends Record<string, unknown>,
+>(
+  family: ContentRouteFamily,
+  source: T,
+  actor: AuthorizationActor,
+  resourceCommunityId: number
+): Partial<T> {
+  const neverExposed = new Set(NEVER_EXPOSED_FIELDS_BY_FAMILY[family]);
+  const rules = Object.fromEntries(
+    Object.keys(source).map((key) => [
+      key,
+      {
+        category: neverExposed.has(key)
+          ? ('never-exposed' as const)
+          : ('community-only' as const),
+      },
+    ])
+  ) as Partial<Record<keyof T, FieldVisibilityRule>>;
+
+  return projectVisibleFields(source, rules, {
+    actor,
+    actorCommunityId: actor.communityId,
+    resourceCommunityId,
+  });
 }
 
 export interface AuthorizationAuditInput {

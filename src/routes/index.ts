@@ -1,8 +1,14 @@
 import { FastifyInstance, type RouteOptions } from 'fastify';
-import { requireV2CommunityContentAccess } from '../shared/middleware/auth.middleware.js';
-import type {
-  ContentRouteFamily,
-  ProtectedSurface,
+import {
+  requireV2CommunityContentAccess,
+  type AuthenticatedRequest,
+} from '../shared/middleware/auth.middleware.js';
+import {
+  isV2CommunityRole,
+  projectCommunityResourceFields,
+  type AuthorizationActor,
+  type ContentRouteFamily,
+  type ProtectedSurface,
 } from '../shared/authorization/sovereignty-policy.js';
 import { healthRoute } from './health.js';
 import { authRoutes } from './auth.js';
@@ -44,8 +50,62 @@ async function registerCommunityContentRoutes(
       ];
     });
 
+    scope.addHook('preSerialization', async (request, reply, payload) => {
+      if (reply.statusCode < 200 || reply.statusCode >= 300) return payload;
+
+      const authRequest = request as AuthenticatedRequest;
+      const user = authRequest.user || authRequest.session?.user;
+      if (!user || !isV2CommunityRole(user.role)) return payload;
+
+      const actor: AuthorizationActor = {
+        id: user.id,
+        role: user.role,
+        communityId: user.communityId,
+        // #137 owns revalidation of already-issued sessions. This hook only
+        // projects responses after the authenticated route guard has succeeded.
+        active: true,
+      };
+
+      return projectCommunityPayload(family, payload, actor);
+    });
+
     await register(scope);
   });
+}
+
+function projectCommunityPayload(
+  family: ContentRouteFamily,
+  payload: unknown,
+  actor: AuthorizationActor
+): unknown {
+  if (
+    !isRecord(payload) ||
+    !Object.prototype.hasOwnProperty.call(payload, 'data')
+  ) {
+    return payload;
+  }
+
+  const projectResource = (resource: unknown): unknown => {
+    if (!isRecord(resource)) return resource;
+    return projectCommunityResourceFields(
+      family,
+      resource,
+      actor,
+      actor.communityId
+    );
+  };
+
+  const data = payload.data;
+  return {
+    ...payload,
+    data: Array.isArray(data)
+      ? data.map(projectResource)
+      : projectResource(data),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function classifyProtectedSurface(

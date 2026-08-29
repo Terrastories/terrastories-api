@@ -16,9 +16,10 @@ Usage:
     [--blob-root <active-storage-export>]
 
 The command creates a lossless migration bundle containing:
-  legacy.sqlite   typed source schema + every source row
-  blobs/          verified ActiveStorage bytes by blob key
-  manifest.json   counts, schema/row/blob digests and provenance
+  legacy.sqlite          typed source schema + every source row
+  blobs/                 verified ActiveStorage bytes by blob key
+  manifest.json          counts, schema/row/blob digests and provenance
+  validation-summary.txt secret-safe human-readable capture summary
 
 If ActiveStorage blob rows exist, --blob-root is mandatory. The root may be a
 flat object-store export keyed by ActiveStorage key or a Rails DiskService root.

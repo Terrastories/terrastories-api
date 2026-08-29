@@ -48,6 +48,7 @@ jobs:
       contents: read
     outputs:
       image_digest: ${{ steps.build.outputs.digest }}
+      image_archive_sha256: ${{ steps.evidence.outputs.archive_sha256 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -148,12 +149,14 @@ jobs:
           upload-artifact: false
 
       - name: Record release evidence
+        id: evidence
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           test -n "$IMAGE_DIGEST"
           IMAGE_ARCHIVE_SHA256="sha256:$(sha256sum release-image.tar | awk '{print $1}')"
           test "$IMAGE_ARCHIVE_SHA256" != "sha256:"
+          echo "archive_sha256=$IMAGE_ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
           printf '%s\n' \
             '{' \
             '  "source_sha": "${{ github.sha }}",' \
@@ -188,7 +191,7 @@ jobs:
         run: docker rm -f supply-chain-api > /dev/null 2>&1 || true
 
   provenance:
-    name: Production image provenance
+    name: Release artifact provenance
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: production_image
     runs-on: ubuntu-latest
@@ -197,8 +200,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Attest production image provenance
+      - name: Attest retained release artifact provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          subject-name: terrastories-api
-          subject-digest: ${{ needs.production_image.outputs.image_digest }}
+          subject-name: release-image.tar
+          subject-digest: ${{ needs.production_image.outputs.image_archive_sha256 }}

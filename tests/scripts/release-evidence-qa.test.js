@@ -25,6 +25,21 @@ describe('release artifact reproducibility', () => {
     expect(workflow).toContain('image_archive_sha256');
   });
 
+  it('attests the retained release archive rather than an unpublished image subject', () => {
+    const workflow = readRepo('.github/workflows/supply-chain.yml');
+
+    expect(workflow).toContain(
+      'image_archive_sha256: ${{ steps.evidence.outputs.archive_sha256 }}',
+    );
+    expect(workflow).toContain('subject-name: release-image.tar');
+    expect(workflow).toContain(
+      'subject-digest: ${{ needs.production_image.outputs.image_archive_sha256 }}',
+    );
+    expect(workflow).not.toContain(
+      'subject-digest: ${{ needs.production_image.outputs.image_digest }}',
+    );
+  });
+
   it('keeps PostgreSQL production startup fail closed until migration parity lands', () => {
     const productionCompose = readRepo('docker-compose.prod.yml');
     const migrationRunner = readRepo('src/db/migrate.ts');
@@ -32,7 +47,7 @@ describe('release artifact reproducibility', () => {
     expect(productionCompose).toContain('node dist/db/migrate.js');
     expect(productionCompose).toContain('exec node dist/server.js');
     expect(migrationRunner).toContain(
-      'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL.'
+      'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL.',
     );
     expect(migrationRunner).toContain('PostgreSQL migration parity is tracked by #135.');
   });

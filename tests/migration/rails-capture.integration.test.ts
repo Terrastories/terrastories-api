@@ -233,12 +233,29 @@ describeWithPostgres('Rails source capture', () => {
       await readFile(join(outputDir, 'blobs', 'fixtureblob'), 'utf8')
     ).toBe("<svg xmlns='http://www.w3.org/2000/svg'></svg>\n");
     expect(await pathExists(join(outputDir, 'manifest.json'))).toBe(true);
+    const validationSummary = await readFile(
+      join(outputDir, 'validation-summary.txt'),
+      'utf8'
+    );
+    expect(validationSummary).toContain(
+      'Terrastories Rails Stage-1 Capture Validation Summary'
+    );
+    expect(validationSummary).toContain(`Tables: ${manifest.totals.tables}`);
+    expect(validationSummary).toContain(`Rows: ${manifest.totals.rows}`);
+    expect(validationSummary).toContain(`Blobs: ${manifest.totals.blobs}`);
+    expect(validationSummary).toContain(manifest.archive.sha256);
+    expect(validationSummary).not.toContain(sourceUrl!);
+    expect(validationSummary).not.toContain('custom-data');
+    expect(validationSummary).not.toContain('prototype-name-data');
     expect(permissionBits((await stat(outputDir)).mode)).toBe(0o700);
     expect(
       permissionBits((await stat(join(outputDir, 'legacy.sqlite'))).mode)
     ).toBe(0o600);
     expect(
       permissionBits((await stat(join(outputDir, 'manifest.json'))).mode)
+    ).toBe(0o600);
+    expect(
+      permissionBits((await stat(join(outputDir, 'validation-summary.txt'))).mode)
     ).toBe(0o600);
     expect(
       permissionBits((await stat(join(outputDir, 'blobs', 'fixtureblob'))).mode)

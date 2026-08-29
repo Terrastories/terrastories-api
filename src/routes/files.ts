@@ -302,6 +302,21 @@ export async function fileRoutes(
 
         const filePath = pathMatch[1];
 
+        // Field-kit paths are still community content. Resolve the persisted
+        // file record within the authenticated tenant before touching disk so a
+        // guessed or previously observed path from another community cannot be
+        // streamed directly.
+        const ownedFile = await fileRepository.findByPath(
+          filePath,
+          authRequest.session.user.communityId
+        );
+        if (!ownedFile || !ownedFile.isActive) {
+          return reply.status(404).send({
+            error: 'File not found',
+            statusCode: 404,
+          });
+        }
+
         // Build full file path
         const fullPath = join(config.fileUpload.uploadDir, filePath);
 

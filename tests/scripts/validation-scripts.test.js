@@ -206,6 +206,9 @@ describe('V2 sovereignty release gate', () => {
     expect(command).toContain(
       'tests/security/sovereignty-field-serialization.test.ts'
     );
+    expect(command).toContain(
+      'tests/security/field-kit-file-sovereignty.test.ts'
+    );
     expect(command).toContain('tests/routes/public-api.test.ts');
     expect(command).toContain('tests/routes/files.test.ts');
     expect(command).toContain(

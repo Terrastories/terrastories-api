@@ -26,9 +26,8 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
       issues: read
-      id-token: write
 
     steps:
       - name: Checkout exact review head

@@ -1,0 +1,53 @@
+name: Finish Rails validation summary once
+
+on:
+  push:
+    branches:
+      - feat/rails-to-v2-migration
+
+permissions:
+  contents: write
+
+jobs:
+  finish:
+    if: github.actor == 'luandro'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: terrastories_rails_fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d terrastories_rails_fixture"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      RAILS_MIGRATION_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/terrastories_rails_fixture
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/rails-to-v2-migration
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: node .github/scripts/_finish-rails-validation-summary-once.mjs
+      - run: npx prettier --write src/migration/rails/capture.ts src/migration/rails/active-storage.ts src/migration/rails/validation-summary.ts tests/migration/rails-capture.integration.test.ts tests/migration/rails-contract.test.ts
+      - name: Verify focused migration suite green before commit
+        run: npx vitest run tests/migration --reporter=dot --maxWorkers=1 --minWorkers=1
+      - run: npm run type-check
+      - name: Commit green implementation
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/migration/rails/capture.ts src/migration/rails/active-storage.ts src/migration/rails/validation-summary.ts tests/migration/rails-capture.integration.test.ts tests/migration/rails-contract.test.ts
+          git diff --cached --quiet && exit 1
+          git commit -m 'fix: wire Rails capture validation summary'
+          git push origin HEAD:feat/rails-to-v2-migration

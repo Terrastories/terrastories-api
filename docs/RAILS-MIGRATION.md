@@ -63,7 +63,7 @@ npx tsx src/scripts/migrate-rails.ts \
   --output /trusted/path/to/terrastories-rails-bundle
 ```
 
-Do not reuse an output directory. The tool refuses to overwrite an existing destination. It writes to an owner-only temporary directory and only renames that directory to the requested final path after database capture, media verification, SQLite archive self-verification, manifest creation, and source-transaction completion all succeed.
+Do not reuse an output directory. The tool refuses to overwrite an existing destination. It writes to an owner-only temporary directory and only renames that directory to the requested final path after database capture, media verification, SQLite archive self-verification, manifest creation, validation-summary creation, and source-transaction completion all succeed.
 
 If the run fails, there must be no final bundle that could be mistaken for success.
 
@@ -75,6 +75,7 @@ A successful Stage-1 directory contains:
 terrastories-rails-bundle/
   legacy.sqlite
   manifest.json
+  validation-summary.txt
   blobs/
     <active-storage-key>
 ```
@@ -91,13 +92,15 @@ Before the bundle is accepted, Stage 1 closes and reopens the SQLite archive rea
 
 `manifest.json` records the pinned legacy contract, observed schema version, actual schema digest, archive size/SHA-256, table/row counts, schema metadata, ActiveStorage metadata, Rails checksums, and blob SHA-256 values. It intentionally does not reproduce full source rows.
 
+`validation-summary.txt` is a human-readable, owner-only acceptance aid. It reports source provenance, archive digest, total/table row counts, and blob count while intentionally excluding source row contents, password hashes, provider/database credentials, reset/session tokens, and media names. It is evidence for Stage-1 source preservation only; it does not declare V2 cutover complete.
+
 ## Required verification before accepting Stage 1
 
 A successful process exit is necessary but not sufficient for a real migration. Before accepting a production bundle:
 
 1. Keep the original Rails database backup and original media export unchanged.
 2. Confirm the manifest's observed schema version and investigate any unexpected source schema/custom tables rather than deleting them.
-3. Confirm all discovered tables have recorded row counts and hashes.
+3. Confirm all discovered tables have recorded row counts and hashes and that `validation-summary.txt` reports the same aggregate/table counts.
 4. Confirm the manifest records `legacy.sqlite` size/SHA-256 and accounts for every ActiveStorage blob, with no missing/checksum failures.
 5. Store the bundle encrypted if retained or transferred.
 6. Record who performed the capture, the source backup/snapshot identity, capture date, tool commit, and destination custody outside the public repository.
@@ -110,7 +113,7 @@ If custody or transfer could have modified the bundle after capture, recompute a
 - Fix the source/export/precondition that caused the failure; do not weaken validation to make the run pass.
 - Rerun into a **new empty output path**.
 - A missing required Rails table/column, unreadable source row, row-security visibility problem, unsupported non-public application table, SQLite archive integrity/hash mismatch, missing/corrupt blob, changed row count, or destination collision is a hard failure.
-- Do not hand-edit `legacy.sqlite` or `manifest.json` and then treat the result as a valid capture. Recreate the bundle from the authoritative source.
+- Do not hand-edit `legacy.sqlite`, `manifest.json`, or `validation-summary.txt` and then treat the result as a valid capture. Recreate the bundle from the authoritative source.
 
 ## Stage-2 boundary
 

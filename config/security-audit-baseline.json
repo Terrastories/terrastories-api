@@ -126,99 +126,77 @@
       "package": "esbuild",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-67mh-4wv8-2f99",
-      "nodes": [
-        "node_modules/@esbuild-kit/core-utils/node_modules/esbuild"
-      ]
+      "nodes": ["node_modules/@esbuild-kit/core-utils/node_modules/esbuild"]
     },
     {
       "source": "1114301",
       "package": "file-type",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-5v7r-6r5c-r473",
-      "nodes": [
-        "node_modules/file-type"
-      ]
+      "nodes": ["node_modules/file-type"]
     },
     {
       "source": "1114726",
       "package": "file-type",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-j47w-4g3g-c36v",
-      "nodes": [
-        "node_modules/file-type"
-      ]
+      "nodes": ["node_modules/file-type"]
     },
     {
       "source": "1114526",
       "package": "flatted",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-25h7-pfq9-p65f",
-      "nodes": [
-        "node_modules/flatted"
-      ]
+      "nodes": ["node_modules/flatted"]
     },
     {
       "source": "1115357",
       "package": "flatted",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-rf6f-7fwh-wjgh",
-      "nodes": [
-        "node_modules/flatted"
-      ]
+      "nodes": ["node_modules/flatted"]
     },
     {
       "source": "1120743",
       "package": "form-data",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-hmw2-7cc7-3qxx",
-      "nodes": [
-        "node_modules/form-data"
-      ]
+      "nodes": ["node_modules/form-data"]
     },
     {
       "source": "1109842",
       "package": "glob",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-5j98-mcp5-4vw2",
-      "nodes": [
-        "node_modules/test-exclude/node_modules/glob"
-      ]
+      "nodes": ["node_modules/test-exclude/node_modules/glob"]
     },
     {
       "source": "1112715",
       "package": "js-yaml",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-mh29-5h37-fv8m",
-      "nodes": [
-        "node_modules/js-yaml"
-      ]
+      "nodes": ["node_modules/js-yaml"]
     },
     {
       "source": "1121860",
       "package": "js-yaml",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-h67p-54hq-rp68",
-      "nodes": [
-        "node_modules/js-yaml"
-      ]
+      "nodes": ["node_modules/js-yaml"]
     },
     {
       "source": "1123911",
       "package": "js-yaml",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-52cp-r559-cp3m",
-      "nodes": [
-        "node_modules/js-yaml"
-      ]
+      "nodes": ["node_modules/js-yaml"]
     },
     {
       "source": "1138115",
       "package": "js-yaml",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-5p4m-2wfm-xmqj",
-      "nodes": [
-        "node_modules/js-yaml"
-      ]
+      "nodes": ["node_modules/js-yaml"]
     },
     {
       "source": "1113459",
@@ -297,18 +275,14 @@
       "package": "nanoid",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-28wg-ghj8-5hjv",
-      "nodes": [
-        "node_modules/nanoid"
-      ]
+      "nodes": ["node_modules/nanoid"]
     },
     {
       "source": "1139427",
       "package": "nanoid",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-2v37-7h3g-55p8",
-      "nodes": [
-        "node_modules/nanoid"
-      ]
+      "nodes": ["node_modules/nanoid"]
     },
     {
       "source": "1115549",
@@ -363,126 +337,98 @@
       "package": "postcss",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-qx2v-qp2m-jg93",
-      "nodes": [
-        "node_modules/postcss"
-      ]
+      "nodes": ["node_modules/postcss"]
     },
     {
       "source": "1124252",
       "package": "postcss",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-6g55-p6wh-862q",
-      "nodes": [
-        "node_modules/postcss"
-      ]
+      "nodes": ["node_modules/postcss"]
     },
     {
       "source": "1130709",
       "package": "postcss",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-fxqj-rqcc-2cmp",
-      "nodes": [
-        "node_modules/postcss"
-      ]
+      "nodes": ["node_modules/postcss"]
     },
     {
       "source": "1139510",
       "package": "postcss",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-r28c-9q8g-f849",
-      "nodes": [
-        "node_modules/postcss"
-      ]
+      "nodes": ["node_modules/postcss"]
     },
     {
       "source": "1113515",
       "package": "rollup",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-mw96-cpmx-2vgc",
-      "nodes": [
-        "node_modules/rollup"
-      ]
+      "nodes": ["node_modules/rollup"]
     },
     {
       "source": "1119441",
       "package": "uuid",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-w5hq-g745-h8pq",
-      "nodes": [
-        "node_modules/uuid"
-      ]
+      "nodes": ["node_modules/uuid"]
     },
     {
       "source": "1109137",
       "package": "vite",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-93m4-6634-74q7",
-      "nodes": [
-        "node_modules/vite"
-      ]
+      "nodes": ["node_modules/vite"]
     },
     {
       "source": "1116230",
       "package": "vite",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-4w7w-66w2-5vf9",
-      "nodes": [
-        "node_modules/vite"
-      ]
+      "nodes": ["node_modules/vite"]
     },
     {
       "source": "1116232",
       "package": "vite",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-v2wj-q39q-566r",
-      "nodes": [
-        "node_modules/vite"
-      ]
+      "nodes": ["node_modules/vite"]
     },
     {
       "source": "1116235",
       "package": "vite",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-p9ff-h696-f583",
-      "nodes": [
-        "node_modules/vite"
-      ]
+      "nodes": ["node_modules/vite"]
     },
     {
       "source": "1120785",
       "package": "vite",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-v6wh-96g9-6wx3",
-      "nodes": [
-        "node_modules/vite"
-      ]
+      "nodes": ["node_modules/vite"]
     },
     {
       "source": "1123526",
       "package": "vite",
       "severity": "high",
       "url": "https://github.com/advisories/GHSA-fx2h-pf6j-xcff",
-      "nodes": [
-        "node_modules/vite"
-      ]
+      "nodes": ["node_modules/vite"]
     },
     {
       "source": "1139528",
       "package": "vitest",
       "severity": "critical",
       "url": "https://github.com/advisories/GHSA-5xrq-8626-4rwp",
-      "nodes": [
-        "node_modules/vitest"
-      ]
+      "nodes": ["node_modules/vitest"]
     },
     {
       "source": "1115556",
       "package": "yaml",
       "severity": "moderate",
       "url": "https://github.com/advisories/GHSA-48c2-rrv3-qjmp",
-      "nodes": [
-        "node_modules/yaml"
-      ]
+      "nodes": ["node_modules/yaml"]
     }
   ]
 }

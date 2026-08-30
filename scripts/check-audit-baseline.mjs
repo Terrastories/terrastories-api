@@ -18,6 +18,9 @@ const SEVERITY_ORDER = new Map([
   ['high', 2],
   ['critical', 3],
 ]);
+const TRUSTED_APPROVAL_PERMISSIONS = new Set(['admin', 'write']);
+const EXTERNAL_APPROVAL_PATTERN =
+  /^SECURITY-AUDIT-APPROVAL v1 policySha256=([0-9a-f]{64}) trackingIssue=(\d+)$/im;
 
 function isCalendarDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -39,17 +42,39 @@ function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function normalizeAuditNodes(nodes) {
+  if (!Array.isArray(nodes)) {
+    return [];
+  }
+
+  return [...new Set(nodes.filter((node) => typeof node === 'string'))].sort();
+}
+
+function sameAuditNodes(left, right) {
+  const leftNodes = normalizeAuditNodes(left);
+  const rightNodes = normalizeAuditNodes(right);
+  return (
+    leftNodes.length === rightNodes.length &&
+    leftNodes.every((node, index) => node === rightNodes[index])
+  );
+}
+
 function canonicalAdvisory(advisory) {
   if (!advisory || typeof advisory !== 'object' || Array.isArray(advisory)) {
     throw new Error('Invalid security audit advisory in accepted baseline');
   }
 
-  return {
+  const canonical = {
     source: String(advisory.source),
     package: String(advisory.package),
     severity: String(advisory.severity),
     url: advisory.url == null ? null : String(advisory.url),
   };
+  const nodes = normalizeAuditNodes(advisory.nodes);
+  if (nodes.length > 0) {
+    canonical.nodes = nodes;
+  }
+  return canonical;
 }
 
 export function computeAdvisorySetDigest(advisories) {
@@ -62,7 +87,8 @@ export function computeAdvisorySetDigest(advisories) {
       compareText(left.source, right.source) ||
       compareText(left.package, right.package) ||
       compareText(left.severity, right.severity) ||
-      compareText(left.url ?? '', right.url ?? '')
+      compareText(left.url ?? '', right.url ?? '') ||
+      compareText(JSON.stringify(left.nodes ?? []), JSON.stringify(right.nodes ?? []))
     );
   });
 
@@ -166,6 +192,144 @@ export function validateReviewedPolicyBinding(baseline, policy) {
   }
 }
 
+export function parseExternalAuditApproval(body) {
+  if (typeof body !== 'string') {
+    return null;
+  }
+
+  const match = body.match(EXTERNAL_APPROVAL_PATTERN);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    policySha256: match[1].toLowerCase(),
+    trackingIssue: Number(match[2]),
+  };
+}
+
+export function validateExternalAuditApproval(policy, approvals) {
+  const expectedDigest = policy?.review?.policySha256?.toLowerCase();
+  if (!expectedDigest || !/^[0-9a-f]{64}$/.test(expectedDigest)) {
+    throw new Error(
+      'Security audit external approval requires a valid reviewed policy digest'
+    );
+  }
+  if (!Array.isArray(approvals)) {
+    throw new Error('Security audit external approval records must be an array');
+  }
+
+  for (const approval of approvals) {
+    const parsed = parseExternalAuditApproval(approval?.body);
+    if (
+      !parsed ||
+      parsed.policySha256 !== expectedDigest ||
+      parsed.trackingIssue !== Number(policy.trackingIssue)
+    ) {
+      continue;
+    }
+    if (!TRUSTED_APPROVAL_PERMISSIONS.has(approval.permission)) {
+      continue;
+    }
+    if (typeof approval.author !== 'string' || approval.author.trim() === '') {
+      continue;
+    }
+
+    return {
+      author: approval.author,
+      permission: approval.permission,
+      policySha256: parsed.policySha256,
+      trackingIssue: parsed.trackingIssue,
+    };
+  }
+
+  throw new Error(
+    `Security audit policy ${expectedDigest} requires an exact external approval under #${policy.trackingIssue} from a repository writer or administrator.`
+  );
+}
+
+async function fetchGitHubJson(url, token, fetchImpl) {
+  const response = await fetchImpl(url, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(
+      `GitHub security audit approval lookup failed with HTTP ${response.status}`
+    );
+  }
+  return response.json();
+}
+
+export async function verifyExternalAuditApproval(
+  policy,
+  {
+    repository = process.env.GITHUB_REPOSITORY,
+    token = process.env.GITHUB_TOKEN,
+    fetchImpl = globalThis.fetch,
+  } = {}
+) {
+  if (
+    typeof repository !== 'string' ||
+    !/^[^/]+\/[^/]+$/.test(repository) ||
+    typeof token !== 'string' ||
+    token === '' ||
+    typeof fetchImpl !== 'function'
+  ) {
+    throw new Error(
+      'Security audit external approval verification requires a GitHub repository, token, and fetch implementation'
+    );
+  }
+
+  const [owner, repo] = repository.split('/');
+  const approvals = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const commentsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${policy.trackingIssue}/comments?per_page=100&page=${page}`;
+    const comments = await fetchGitHubJson(commentsUrl, token, fetchImpl);
+    if (!Array.isArray(comments)) {
+      throw new Error('GitHub security audit approval comments response is invalid');
+    }
+
+    for (const comment of comments) {
+      const parsed = parseExternalAuditApproval(comment?.body);
+      if (
+        !parsed ||
+        parsed.policySha256 !== policy.review?.policySha256?.toLowerCase() ||
+        parsed.trackingIssue !== Number(policy.trackingIssue)
+      ) {
+        continue;
+      }
+
+      const author = comment?.user?.login;
+      if (typeof author !== 'string' || author === '') {
+        continue;
+      }
+      const permissionUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/collaborators/${encodeURIComponent(author)}/permission`;
+      const permission = await fetchGitHubJson(
+        permissionUrl,
+        token,
+        fetchImpl
+      );
+      approvals.push({
+        body: comment.body,
+        author,
+        permission: permission?.permission,
+      });
+    }
+
+    if (comments.length < 100) {
+      return validateExternalAuditApproval(policy, approvals);
+    }
+  }
+
+  throw new Error(
+    `Security audit external approval lookup exceeded 100 pages for #${policy.trackingIssue}`
+  );
+}
+
 export function validateAuditProcessResult(audit) {
   if (!audit || typeof audit !== 'object' || Array.isArray(audit)) {
     throw new Error('npm audit returned an invalid process result');
@@ -216,14 +380,6 @@ export function parseAuditReport(stdout) {
   return report;
 }
 
-function normalizeAuditNodes(nodes) {
-  if (!Array.isArray(nodes)) {
-    return [];
-  }
-
-  return [...new Set(nodes.filter((node) => typeof node === 'string'))].sort();
-}
-
 export function collectAdvisories(report) {
   const current = [];
   for (const [packageName, vulnerability] of Object.entries(
@@ -257,6 +413,16 @@ export function formatAdvisoryDiagnostic(advisory, previousSeverity) {
       : '(dependency path not reported by npm audit)';
 
   return `- ${advisory.package} ${severity} ${location}; paths: ${paths}`;
+}
+
+export function formatPathChangeDiagnostic(change) {
+  const previous =
+    change.previousNodes.length > 0
+      ? change.previousNodes.join(', ')
+      : '(none recorded)';
+  const current =
+    change.nodes.length > 0 ? change.nodes.join(', ') : '(none reported)';
+  return `- ${change.package} ${change.severity} ${change.url || change.source}; previous paths: ${previous}; current paths: ${current}`;
 }
 
 export function compareAuditAdvisories(baseline, policy, report) {
@@ -307,6 +473,19 @@ export function compareAuditAdvisories(baseline, policy, report) {
     const existing = baselineByKey.get(advisoryKey(advisory));
     return existing && existing.severity !== advisory.severity;
   });
+  const pathChanges = current.flatMap((advisory) => {
+    const existing = baselineByKey.get(advisoryKey(advisory));
+    if (!existing || sameAuditNodes(existing.nodes, advisory.nodes)) {
+      return [];
+    }
+    return [
+      {
+        ...advisory,
+        nodes: normalizeAuditNodes(advisory.nodes),
+        previousNodes: normalizeAuditNodes(existing.nodes),
+      },
+    ];
+  });
 
   return {
     current,
@@ -314,6 +493,7 @@ export function compareAuditAdvisories(baseline, policy, report) {
     baselineByKey,
     newAdvisories,
     severityChanges,
+    pathChanges,
     resolvedCount: 0,
   };
 }
@@ -325,6 +505,9 @@ export async function main() {
 
   validateBaselinePolicy(policy, today);
   validateReviewedPolicyBinding(baseline, policy);
+  if (process.env.REQUIRE_EXTERNAL_AUDIT_APPROVAL === '1') {
+    await verifyExternalAuditApproval(policy);
+  }
 
   const audit = spawnSync(
     'npm',
@@ -346,10 +529,19 @@ export async function main() {
   }
 
   const report = parseAuditReport(audit.stdout);
-  const { current, baselineByKey, newAdvisories, severityChanges } =
-    compareAuditAdvisories(baseline, policy, report);
+  const {
+    current,
+    baselineByKey,
+    newAdvisories,
+    severityChanges,
+    pathChanges,
+  } = compareAuditAdvisories(baseline, policy, report);
 
-  if (newAdvisories.length > 0 || severityChanges.length > 0) {
+  if (
+    newAdvisories.length > 0 ||
+    severityChanges.length > 0 ||
+    pathChanges.length > 0
+  ) {
     if (newAdvisories.length > 0) {
       process.stderr.write('New blocking npm audit advisories detected:\n');
       for (const advisory of newAdvisories) {
@@ -364,6 +556,15 @@ export async function main() {
         process.stderr.write(
           `${formatAdvisoryDiagnostic(advisory, previous.severity)}\n`
         );
+      }
+    }
+
+    if (pathChanges.length > 0) {
+      process.stderr.write(
+        'Existing npm audit advisories changed dependency installation paths:\n'
+      );
+      for (const change of pathChanges) {
+        process.stderr.write(`${formatPathChangeDiagnostic(change)}\n`);
       }
     }
 

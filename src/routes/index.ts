@@ -2,6 +2,7 @@ import { FastifyInstance, type RouteOptions } from 'fastify';
 import {
   requireV2CommunityContentAccess,
   type AuthenticatedRequest,
+  type ResourceCommunityResolver,
 } from '../shared/middleware/auth.middleware.js';
 import {
   isV2CommunityRole,
@@ -23,16 +24,78 @@ import { publicApiRoutes } from './public-api.js';
 import { memberRoutes } from './member/index.js';
 import { superAdminRoutes } from './super_admin.js';
 import { devRoutes } from './dev.js';
+import { getDb, type Database } from '../db/index.js';
+import { StoryOwnershipRepository } from '../repositories/story-ownership.repository.js';
+import { PlaceRepository } from '../repositories/place.repository.js';
+import { SpeakerRepository } from '../repositories/speaker.repository.js';
+import { ThemesRepository } from '../repositories/themes.repository.js';
+import { FileRepository } from '../repositories/file.repository.js';
 
 export interface RegisterRoutesOptions {
   database?: unknown;
 }
 
+function createResourceCommunityResolver(
+  family: ContentRouteFamily,
+  database: Database
+): ResourceCommunityResolver {
+  return async (request, actorCommunityId) => {
+    const rawId = (request.params as { id?: string | number }).id;
+    if (rawId === undefined) return undefined;
+
+    if (family === 'files') {
+      const resource = await new FileRepository(database).findById(
+        String(rawId),
+        actorCommunityId
+      );
+      return resource ? actorCommunityId : null;
+    }
+
+    const numericId = Number(rawId);
+    if (!Number.isSafeInteger(numericId) || numericId <= 0) return null;
+
+    switch (family) {
+      case 'stories': {
+        const exists = await new StoryOwnershipRepository(
+          database
+        ).existsInCommunity(numericId, actorCommunityId);
+        return exists ? actorCommunityId : null;
+      }
+      case 'places': {
+        const resource = await new PlaceRepository(
+          database
+        ).getByIdWithCommunityCheck(numericId, actorCommunityId);
+        return resource ? actorCommunityId : null;
+      }
+      case 'speakers': {
+        const resource = await new SpeakerRepository(
+          database
+        ).getByIdWithCommunityCheck(numericId, actorCommunityId);
+        return resource ? actorCommunityId : null;
+      }
+      case 'themes': {
+        const resource = await new ThemesRepository(
+          database
+        ).findByIdWithCommunityCheck(numericId, actorCommunityId);
+        return resource ? actorCommunityId : null;
+      }
+      default:
+        return undefined;
+    }
+  };
+}
+
 async function registerCommunityContentRoutes(
   app: FastifyInstance,
   family: ContentRouteFamily,
+  database: Database,
   register: (scope: FastifyInstance) => Promise<unknown>
 ) {
+  const resolveResourceCommunity = createResourceCommunityResolver(
+    family,
+    database
+  );
+
   await app.register(async (scope) => {
     scope.addHook('onRoute', (routeOptions: RouteOptions) => {
       const existing = routeOptions.preHandler;
@@ -45,7 +108,8 @@ async function registerCommunityContentRoutes(
         ...preHandlers,
         requireV2CommunityContentAccess(
           family,
-          classifyProtectedSurface(routeOptions, family)
+          classifyProtectedSurface(routeOptions, family),
+          resolveResourceCommunity
         ),
       ];
     });
@@ -141,6 +205,8 @@ export async function registerRoutes(
   options?: RegisterRoutesOptions
 ) {
   const opts = options || {};
+  const contentDatabase =
+    (opts.database as Database | undefined) || (await getDb());
 
   // Health check route (no authentication required) - at root level for monitoring
   await app.register(healthRoute, opts);
@@ -154,21 +220,49 @@ export async function registerRoutes(
   // Authenticated API routes
   await app.register(authRoutes, { prefix: '/api/v1', ...opts });
   await app.register(communityRoutes, { prefix: '/api/v1', ...opts });
-  await registerCommunityContentRoutes(app, 'files', async (scope) => {
-    await scope.register(fileRoutes, { prefix: '/api/v1/files', ...opts });
-  });
-  await registerCommunityContentRoutes(app, 'stories', async (scope) => {
-    await scope.register(storiesRoutes, { prefix: '/api/v1/stories', ...opts });
-  });
-  await registerCommunityContentRoutes(app, 'places', async (scope) => {
-    await scope.register(placesRoutes, { prefix: '/api/v1', ...opts });
-  });
-  await registerCommunityContentRoutes(app, 'speakers', async (scope) => {
-    await scope.register(speakerRoutes, { prefix: '/api/v1', ...opts });
-  });
-  await registerCommunityContentRoutes(app, 'themes', async (scope) => {
-    await scope.register(themesRoutes, { prefix: '/api/v1/themes', ...opts });
-  });
+  await registerCommunityContentRoutes(
+    app,
+    'files',
+    contentDatabase,
+    async (scope) => {
+      await scope.register(fileRoutes, { prefix: '/api/v1/files', ...opts });
+    }
+  );
+  await registerCommunityContentRoutes(
+    app,
+    'stories',
+    contentDatabase,
+    async (scope) => {
+      await scope.register(storiesRoutes, {
+        prefix: '/api/v1/stories',
+        ...opts,
+      });
+    }
+  );
+  await registerCommunityContentRoutes(
+    app,
+    'places',
+    contentDatabase,
+    async (scope) => {
+      await scope.register(placesRoutes, { prefix: '/api/v1', ...opts });
+    }
+  );
+  await registerCommunityContentRoutes(
+    app,
+    'speakers',
+    contentDatabase,
+    async (scope) => {
+      await scope.register(speakerRoutes, { prefix: '/api/v1', ...opts });
+    }
+  );
+  await registerCommunityContentRoutes(
+    app,
+    'themes',
+    contentDatabase,
+    async (scope) => {
+      await scope.register(themesRoutes, { prefix: '/api/v1/themes', ...opts });
+    }
+  );
   await app.register(userRoutes, { prefix: '/api/v1/users', ...opts });
 
   // Member dashboard routes (authenticated member endpoints)

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { eq } from 'drizzle-orm';
 import { storiesSqlite, usersSqlite } from '../../src/db/schema/index.js';
 import { hashPassword } from '../../src/services/password.service.js';
 import { createTestApp } from '../helpers/api-client.js';
@@ -153,6 +154,17 @@ describe('V2 sovereignty route boundaries', () => {
     expect(response.json().data).toBeUndefined();
   });
 
+  it('rejects malformed tenant aliases instead of silently discarding them', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/places?communityId=${communityAId}&community_id=invalid`,
+      headers: { cookie: viewerCookie },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().data).toBeUndefined();
+  });
+
   it('rejects a cross-community story-by-slug tenant override', async () => {
     const response = await app.inject({
       method: 'GET',
@@ -171,9 +183,22 @@ describe('V2 sovereignty route boundaries', () => {
       headers: { cookie: adminCookie },
       payload: { title: 'Cross-community overwrite attempt' },
     });
+    const nonexistentResponse = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/stories/999999',
+      headers: { cookie: adminCookie },
+      payload: { title: 'Cross-community overwrite attempt' },
+    });
 
     expect(response.statusCode).toBe(404);
-    expect(response.json().data).toBeUndefined();
+    expect(response.statusCode).toBe(nonexistentResponse.statusCode);
+    expect(response.json()).toEqual(nonexistentResponse.json());
+
+    const [persistedStory] = await db
+      .select()
+      .from(storiesSqlite)
+      .where(eq(storiesSqlite.id, communityBStoryId));
+    expect(persistedStory.title).toBe('Community B private story');
   });
 
   it('does not reveal or delete a foreign story through an ID-only delete route', async () => {
@@ -182,9 +207,21 @@ describe('V2 sovereignty route boundaries', () => {
       url: `/api/v1/stories/${communityBStoryId}`,
       headers: { cookie: adminCookie },
     });
+    const nonexistentResponse = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/stories/999999',
+      headers: { cookie: adminCookie },
+    });
 
     expect(response.statusCode).toBe(404);
-    expect(response.json().data).toBeUndefined();
+    expect(response.statusCode).toBe(nonexistentResponse.statusCode);
+    expect(response.json()).toEqual(nonexistentResponse.json());
+
+    const [persistedStory] = await db
+      .select()
+      .from(storiesSqlite)
+      .where(eq(storiesSqlite.id, communityBStoryId));
+    expect(persistedStory).toBeDefined();
   });
 
   it('rejects a cross-community tenant override supplied in a write body', async () => {

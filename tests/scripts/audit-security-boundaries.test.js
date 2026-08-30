@@ -86,8 +86,7 @@ describe('security audit trust boundaries', () => {
       ...basePolicy,
       review: { policySha256 },
     };
-    const approvalBody =
-      `SECURITY-AUDIT-APPROVAL v1 policySha256=${policySha256} trackingIssue=141`;
+    const approvalBody = `SECURITY-AUDIT-APPROVAL v1 policySha256=${policySha256} trackingIssue=141`;
 
     expect(() =>
       auditModule.validateExternalAuditApproval(policy, [

@@ -4,10 +4,10 @@
   "expires": "2026-09-30",
   "review": {
     "status": "accepted",
-    "reviewedBy": "Terrastories maintainers under issue #141",
-    "reviewedOn": "2026-08-28",
-    "advisoriesSha256": "f8cb3a5d5af3748b5e09fdb76485629ee37c12a470c434b13afa59264eabb14f",
-    "policySha256": "1b0e6ee71b7c4e3293d7dea8692233d5bb83d83252dcdc26b158c1795e721e67",
-    "rationale": "Temporary exception for moderate-or-higher advisories already captured in the reviewed baseline inherited from issue #133. The accepted review is cryptographically bound to the exact advisory set, expiry date, severity threshold, and tracking issue; changing any of those values, adding or escalating an advisory, retaining a resolved stale exception, or allowing the policy to expire fails CI and requires explicit renewed review under issue #141."
+    "reviewedBy": "Repository writer/admin approval recorded externally under issue #141",
+    "reviewedOn": "2026-08-30",
+    "advisoriesSha256": "1f4d776d90a4423e2097d3bcb9cda06c11652b47ef111086a9efa7ea9d6bfc77",
+    "policySha256": "a2b206595cda59dea42e83c7a2cd469082990423c5d15200affccc7112771919",
+    "rationale": "Temporary exception for the exact moderate-or-higher advisory set and normalized npm installation paths captured in the reviewed baseline. CI verifies a matching external approval from a GitHub repository writer or administrator under issue #141 before accepting this policy. The policy digest binds the advisory identities, path-aware advisory digest, expiry date, severity threshold, and tracking issue; any advisory, path, expiry, threshold, or issue change invalidates both the in-repository digest and external approval and must fail closed until explicitly reviewed again."
   }
 }

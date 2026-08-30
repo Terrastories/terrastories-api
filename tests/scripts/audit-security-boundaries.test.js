@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import * as auditModule from '../../scripts/check-audit-baseline.mjs';
 
@@ -117,5 +118,62 @@ describe('security audit trust boundaries', () => {
         },
       ])
     ).toThrow(/exact|digest|approval/i);
+  });
+
+  it('loads approval from the tracking issue and verifies repository permission', async () => {
+    expect(typeof auditModule.verifyExternalAuditApproval).toBe('function');
+    if (typeof auditModule.verifyExternalAuditApproval !== 'function') return;
+
+    const policySha256 = 'a'.repeat(64);
+    const policy = {
+      ...basePolicy,
+      review: { policySha256 },
+    };
+    const requests = [];
+    const fetchImpl = async (url) => {
+      requests.push(url);
+      if (url.endsWith('/issues/141/comments?per_page=100&page=1')) {
+        return new Response(
+          JSON.stringify([
+            {
+              body: `SECURITY-AUDIT-APPROVAL v1 policySha256=${policySha256} trackingIssue=141`,
+              user: { login: 'trusted-maintainer' },
+            },
+          ]),
+          { status: 200 }
+        );
+      }
+      if (url.endsWith('/collaborators/trusted-maintainer/permission')) {
+        return new Response(JSON.stringify({ permission: 'write' }), {
+          status: 200,
+        });
+      }
+      return new Response('not found', { status: 404 });
+    };
+
+    await expect(
+      auditModule.verifyExternalAuditApproval(policy, {
+        repository: 'Terrastories/terrastories-api',
+        token: 'test-token',
+        fetchImpl,
+      })
+    ).resolves.toEqual(
+      expect.objectContaining({
+        author: 'trusted-maintainer',
+        permission: 'write',
+      })
+    );
+    expect(requests).toHaveLength(2);
+  });
+
+  it('enforces external approval in every required dependency-audit workflow', () => {
+    for (const path of [
+      '.github/workflows/ci.yml',
+      '.github/workflows/supply-chain.yml',
+    ]) {
+      const workflow = readFileSync(path, 'utf8');
+      expect(workflow).toContain('REQUIRE_EXTERNAL_AUDIT_APPROVAL: 1');
+      expect(workflow).toContain('GITHUB_TOKEN: ${{ github.token }}');
+    }
   });
 });

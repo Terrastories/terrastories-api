@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 jobs:
   dependency-review:
@@ -24,6 +25,8 @@ jobs:
       - name: Review dependency changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUIRE_EXTERNAL_AUDIT_APPROVAL: 1
         run: node scripts/review-dependency-changes.mjs
 
   secret-scan:

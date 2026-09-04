@@ -16,6 +16,7 @@
     "test:ci:services": "vitest run tests/repositories tests/services tests/shared tests/security tests/unit tests/app.test.ts tests/config.test.ts --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
     "test:ci:production": "vitest run tests/production tests/docker --reporter=dot --silent=true --maxWorkers=1 --minWorkers=1",
     "test:ci:comparison": "vitest run tests/comparison --reporter=dot --silent=true --maxWorkers=4 --minWorkers=4",
+    "test:sovereignty": "vitest run tests/security/sovereignty-matrix.test.ts tests/security/inactive-principal.test.ts tests/security/sovereignty-audit-logging.test.ts tests/security/sovereignty-route-boundaries.test.ts tests/security/sovereignty-field-serialization.test.ts tests/security/field-kit-file-sovereignty.test.ts tests/routes/public-api.test.ts tests/routes/files.test.ts tests/shared/middleware/data-sovereignty.test.ts --reporter=dot --silent=true --maxWorkers=2 --minWorkers=2",
     "test:ci": "node scripts/run-test-shards.mjs",
     "lint": "eslint . --max-warnings 0",
     "audit:baseline": "node scripts/check-audit-baseline.mjs",

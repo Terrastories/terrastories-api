@@ -809,7 +809,7 @@ describe('Production Performance Validation - Phase 1', () => {
       const communityId = communityIds[communityIndex];
       const createdBy = communityIndex === 0 ? user1?.id || 1 : user2?.id || 1;
       storyInserts.push(`
-        (${i}, 'Performance Test Story ${i}', 'Content for story ${i}', 'performance-test-story-${i}', ${communityId}, ${createdBy}, 0, 'en', datetime('now'), datetime('now'))
+        (${i}, 'Performance Test Story ${i}', 'Content for story ${i}', 'performance-test-story-${i}', ${communityId}, ${createdBy}, 0, 'en', unixepoch(), unixepoch())
       `);
     }
 
@@ -829,7 +829,7 @@ describe('Production Performance Validation - Phase 1', () => {
       const communityIndex = Math.floor((i - 1) / 25); // 0 for first 25, 1 for second 25
       const communityId = communityIds[communityIndex];
       placeInserts.push(`
-        (${i}, 'Performance Test Place ${i}', ${communityId}, ${lng}, ${lat}, datetime('now'), datetime('now'))
+        (${i}, 'Performance Test Place ${i}', ${communityId}, ${lng}, ${lat}, unixepoch(), unixepoch())
       `);
     }
 

@@ -417,6 +417,32 @@ describe('StoryService', () => {
       expect(result).toEqual(elderOnlyStory);
     });
 
+    it('logs authorization metadata without protected story content', async () => {
+      const story = createElderOnlyStory();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      const result = await storyService.getStoryById(
+        story.id,
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      expect(result).toEqual(story);
+      const auditCall = mockLogger.info.mock.calls.find(
+        ([message]: [string]) => message === '[CULTURAL_ACCESS_AUDIT]'
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall?.[1]).toMatchObject({
+        storyId: story.id,
+        userId: testData.users.admin.id,
+        communityId: testData.community.id,
+        allowed: true,
+      });
+      expect(auditCall?.[1]).not.toHaveProperty('storyTitle');
+      expect(auditCall?.[1]).not.toHaveProperty('culturalProtocols');
+    });
+
     it('should deny editor access to elder-only content', async () => {
       // Arrange
       const elderOnlyStory = createElderOnlyStory();
@@ -555,7 +581,8 @@ describe('StoryService', () => {
         existingStory.id,
         updates,
         testData.users.editor.id,
-        testData.users.editor.role
+        testData.users.editor.role,
+        testData.community.id
       );
 
       // Assert
@@ -586,7 +613,8 @@ describe('StoryService', () => {
         existingStory.id,
         updates,
         testData.users.editor.id,
-        testData.users.editor.role
+        testData.users.editor.role,
+        testData.community.id
       );
 
       // Assert
@@ -606,7 +634,8 @@ describe('StoryService', () => {
           existingStory.id,
           { title: 'Unauthorized Update' },
           testData.users.viewer.id, // Viewer cannot edit
-          testData.users.viewer.role
+          testData.users.viewer.role,
+          testData.community.id
         )
       ).rejects.toThrow('Insufficient permissions to modify this story');
     });
@@ -634,7 +663,8 @@ describe('StoryService', () => {
       await storyService.deleteStory(
         storyToDelete.id,
         testData.users.admin.id, // Admin can delete any story
-        testData.users.admin.role
+        testData.users.admin.role,
+        testData.community.id
       );
 
       // Assert
@@ -654,7 +684,8 @@ describe('StoryService', () => {
       await storyService.deleteStory(
         storyToDelete.id,
         testData.users.editor.id, // Creator can delete own story
-        testData.users.editor.role
+        testData.users.editor.role,
+        testData.community.id
       );
 
       // Assert
@@ -673,7 +704,8 @@ describe('StoryService', () => {
         storyService.deleteStory(
           storyToDelete.id,
           testData.users.viewer.id, // Viewer cannot delete
-          testData.users.viewer.role
+          testData.users.viewer.role,
+          testData.community.id
         )
       ).rejects.toThrow('Insufficient permissions to delete this story');
     });

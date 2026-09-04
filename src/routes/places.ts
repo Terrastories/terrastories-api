@@ -16,6 +16,7 @@ import { PlaceRepository } from '../repositories/place.repository.js';
 import { getDb, type Database } from '../db/index.js';
 import {
   requireAuth,
+  requireCommunityAccess,
   requireRole,
   type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
@@ -188,7 +189,7 @@ export async function placesRoutes(
    * GET /api/v1/places
    */
   fastify.get('/places', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, requireCommunityAccess()],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       const params = PaginationSchema.parse(request.query);
       const { community_id } = request.query as { community_id?: string };

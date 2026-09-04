@@ -139,7 +139,7 @@ describe('V1 Compatibility: Communities Endpoints', () => {
   });
 
   describe('GET /api/communities/:community_id/places', () => {
-    it('should return 200 with data array', async () => {
+    it('should return 200 with data array for an explicitly public community', async () => {
       const res = await app.inject({
         method: 'GET',
         url: `/api/communities/${testCommunityId}/places`,
@@ -156,7 +156,7 @@ describe('V1 Compatibility: Communities Endpoints', () => {
   });
 
   describe('GET /api/communities/:community_id/places/:id', () => {
-    it('should return 200 with place data object', async () => {
+    it('should return 200 with place data object for an explicitly public community', async () => {
       const placesRes = await app.inject({
         method: 'GET',
         url: `/api/communities/${testCommunityId}/places`,

@@ -430,21 +430,20 @@ describe('API Integration Tests', () => {
       });
     });
 
-    it('should handle empty results gracefully', async () => {
+    it('should reject caller-selected community IDs outside the authenticated scope', async () => {
       const tokens = await apiClient.getTokens();
       const response = await apiClient.get(
         '/api/v1/places',
         {
-          community_id: 99999, // Non-existent community
+          community_id: 99999,
         },
         tokens.admin
       );
 
-      apiClient.assertSuccess(response);
-
-      const result = apiClient.assertPaginatedResponse(response);
-      expect(result.data).toHaveLength(0);
-      expect(result.meta.total).toBe(0);
+      expect(response.statusCode).toBe(403);
+      expect(JSON.parse(response.body)).toEqual({
+        error: { message: 'Access denied - community data isolation' },
+      });
     });
   });
 

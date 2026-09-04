@@ -295,9 +295,19 @@ export class UserService {
         throw new AuthenticationError();
       }
 
-      // Check if user is active
+      // Disabled accounts always fail closed. Community-role principals also
+      // require an active community; super admins remain system-level operators
+      // so an archived attached community cannot lock them out of administration.
       if (!user.isActive) {
-        throw new AuthenticationError('Account is deactivated');
+        throw new AuthenticationError();
+      }
+      if (user.role !== 'super_admin') {
+        const community = await this.communityService.getCommunityById(
+          user.communityId
+        );
+        if (!community?.isActive) {
+          throw new AuthenticationError();
+        }
       }
 
       return user;
@@ -333,9 +343,19 @@ export class UserService {
         throw new AuthenticationError();
       }
 
-      // Check if user is active
+      // Disabled accounts always fail closed. Community-role principals also
+      // require an active community; super admins remain system-level operators
+      // so an archived attached community cannot lock them out of administration.
       if (!user.isActive) {
-        throw new AuthenticationError('Account is deactivated');
+        throw new AuthenticationError();
+      }
+      if (user.role !== 'super_admin') {
+        const community = await this.communityService.getCommunityById(
+          user.communityId
+        );
+        if (!community?.isActive) {
+          throw new AuthenticationError();
+        }
       }
 
       return user;

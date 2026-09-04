@@ -14,6 +14,13 @@
  */
 
 import { FastifyRequest, FastifyReply } from 'fastify';
+import {
+  authorizeCommunityContent,
+  createAuthorizationAuditEvent,
+  isV2CommunityRole,
+  type ContentRouteFamily,
+  type ProtectedSurface,
+} from '../authorization/sovereignty-policy.js';
 
 /**
  * User session interface with enhanced cultural role support
@@ -262,8 +269,35 @@ export function requireCommunityAccess(options: CommunityAccessOptions = {}) {
     // In offline mode, user might be set directly on the request instead of session
     const user = authRequest.user || authRequest.session?.user!;
 
-    // Extract community ID from route params or query
-    const requestedCommunityId = extractCommunityId(request);
+    // Extract community ID from route params, query, or body. Multiple
+    // aliases are permitted only when they identify the same tenant; a
+    // conflicting set is ambiguous and must fail closed before any handler
+    // can consume a different alias than the authorization layer.
+    let requestedCommunityId: number | null;
+    try {
+      requestedCommunityId = extractCommunityId(request);
+    } catch (error) {
+      if (
+        !(error instanceof ConflictingCommunityIdError) &&
+        !(error instanceof InvalidCommunityIdError)
+      ) {
+        throw error;
+      }
+      request.log.warn(
+        {
+          userId: user.id,
+          userCommunityId: user.communityId,
+          requestedCommunityIds:
+            error instanceof ConflictingCommunityIdError
+              ? error.communityIds
+              : undefined,
+        },
+        'Invalid or conflicting community identifiers rejected'
+      );
+      return reply.status(403).send({
+        error: { message: 'Access denied - community data isolation' },
+      });
+    }
     const userCommunityId = user.communityId;
 
     // Community isolation check
@@ -306,6 +340,214 @@ export function requireCommunityAccess(options: CommunityAccessOptions = {}) {
         'Elder role community access granted'
       );
     }
+  };
+}
+
+/**
+ * Apply the canonical V2 sovereignty policy to a concrete community-content
+ * route. Legacy elder sessions stay on the legacy guard until V1 scope is
+ * retired; the V2 policy itself never gains an elder role.
+ */
+export type ResourceCommunityResolver = (
+  request: FastifyRequest,
+  actorCommunityId: number
+) => Promise<number | null | undefined>;
+
+function sendResourceNotFound(
+  reply: FastifyReply,
+  family: ContentRouteFamily,
+  request: FastifyRequest
+): FastifyReply {
+  const rawId = (request.params as { id?: string | number }).id;
+
+  switch (family) {
+    case 'stories':
+      return reply.status(404).send({ error: 'Story not found' });
+    case 'themes':
+      return reply.status(404).send({ error: 'Theme not found' });
+    case 'places':
+      return reply.status(404).send({
+        error: {
+          message:
+            rawId === undefined
+              ? 'Place not found'
+              : `Place with ID ${rawId} not found`,
+        },
+      });
+    case 'speakers':
+      return reply.status(404).send({
+        error: { message: 'Speaker not found' },
+      });
+    case 'files':
+      return reply.status(404).send({
+        error: { message: 'File not found' },
+      });
+    default:
+      return reply.status(404).send({
+        error: { message: 'Resource not found' },
+      });
+  }
+}
+
+export function requireV2CommunityContentAccess(
+  family: ContentRouteFamily,
+  surface: ProtectedSurface,
+  resolveResourceCommunity?: ResourceCommunityResolver
+) {
+  const legacyGuard = requireCommunityAccess();
+
+  return async function enforceV2CommunityContent(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const authRequest = request as AuthenticatedRequest;
+    const user = authRequest.user || authRequest.session?.user;
+
+    if (!user) {
+      return reply.status(401).send({
+        error: { message: 'Authentication required' },
+        statusCode: 401,
+      });
+    }
+
+    if (!isV2CommunityRole(user.role)) {
+      await legacyGuard(request, reply);
+      return;
+    }
+
+    if (user.role === 'super_admin') {
+      const decision = authorizeCommunityContent({
+        actor: {
+          id: user.id,
+          role: user.role,
+          communityId: user.communityId,
+          active: true,
+        },
+        resourceCommunityId: user.communityId,
+        family,
+        surface,
+        visibility: 'community-only',
+        communityActive: true,
+      });
+      request.log.warn(
+        createAuthorizationAuditEvent({
+          actor: {
+            id: user.id,
+            role: user.role,
+            communityId: user.communityId,
+            active: true,
+          },
+          resourceCommunityId: user.communityId,
+          family,
+          surface,
+          decision,
+        }),
+        'V2 community content access denied'
+      );
+      return reply.status(403).send({
+        error: { message: 'Super administrators cannot access community data' },
+        reason: 'Indigenous data sovereignty protection',
+      });
+    }
+
+    let resourceCommunityId: number;
+    try {
+      const requestedCommunityId = extractCommunityId(request);
+      const resolvedCommunityId = resolveResourceCommunity
+        ? await resolveResourceCommunity(request, user.communityId)
+        : undefined;
+
+      if (resolvedCommunityId === null) {
+        sendResourceNotFound(reply, family, request);
+        return;
+      }
+
+      if (
+        requestedCommunityId !== null &&
+        resolvedCommunityId !== undefined &&
+        requestedCommunityId !== resolvedCommunityId
+      ) {
+        return reply.status(403).send({
+          error: { message: 'Access denied - community data isolation' },
+        });
+      }
+
+      resourceCommunityId =
+        resolvedCommunityId ?? requestedCommunityId ?? user.communityId;
+    } catch (error) {
+      if (
+        !(error instanceof ConflictingCommunityIdError) &&
+        !(error instanceof InvalidCommunityIdError)
+      ) {
+        throw error;
+      }
+      request.log.warn(
+        createAuthorizationAuditEvent({
+          actor: {
+            id: user.id,
+            role: user.role,
+            communityId: user.communityId,
+            active: true,
+          },
+          resourceCommunityId: user.communityId,
+          family,
+          surface,
+          decision: {
+            allowed: false,
+            reason: 'cross-community-denied',
+          },
+        }),
+        'Invalid or conflicting community identifiers rejected'
+      );
+      return reply.status(403).send({
+        error: { message: 'Access denied - community data isolation' },
+      });
+    }
+    const decision = authorizeCommunityContent({
+      actor: {
+        id: user.id,
+        role: user.role,
+        communityId: user.communityId,
+        // Login now fails closed for disabled users/inactive communities. #137
+        // owns revalidation of already-issued sessions after state changes.
+        active: true,
+      },
+      resourceCommunityId,
+      family,
+      surface,
+      visibility: 'community-only',
+      // Same issuance invariant as actor.active; stale session state is #137.
+      communityActive: true,
+    });
+
+    if (decision.allowed) return;
+
+    request.log.warn(
+      createAuthorizationAuditEvent({
+        actor: {
+          id: user.id,
+          role: user.role,
+          communityId: user.communityId,
+          active: true,
+        },
+        resourceCommunityId,
+        family,
+        surface,
+        decision,
+      }),
+      'V2 community content access denied'
+    );
+
+    if (decision.reason === 'super-admin-content-denied') {
+      return reply.status(403).send({
+        error: { message: 'Super administrators cannot access community data' },
+        reason: 'Indigenous data sovereignty protection',
+      });
+    }
+
+    return reply.status(403).send({
+      error: { message: 'Access denied - community data isolation' },
+    });
   };
 }
 
@@ -530,14 +772,64 @@ export function checkUserPermissions(
 }
 
 /**
- * Extract community ID from request params or query
+ * Raised when a request carries more than one distinct positive community ID
+ * across supported tenant aliases. Authorization must reject this ambiguity
+ * before route handlers can select a different alias.
+ */
+class ConflictingCommunityIdError extends Error {
+  constructor(readonly communityIds: readonly number[]) {
+    super('Conflicting community identifiers');
+    this.name = 'ConflictingCommunityIdError';
+  }
+}
+
+class InvalidCommunityIdError extends Error {
+  constructor() {
+    super('Invalid community identifier');
+    this.name = 'InvalidCommunityIdError';
+  }
+}
+
+/**
+ * Extract one unambiguous community ID from params, query, or body.
  */
 export function extractCommunityId(request: FastifyRequest): number | null {
-  const params = request.params as { communityId?: string };
-  const query = request.query as { communityId?: string };
+  type CommunityIdValue = string | number | readonly (string | number)[];
+  type CommunityIdContainer = {
+    communityId?: CommunityIdValue;
+    community_id?: CommunityIdValue;
+  };
 
-  const communityId = parseInt(params.communityId || query.communityId || '0');
-  return communityId > 0 ? communityId : null;
+  const params = request.params as CommunityIdContainer;
+  const query = request.query as CommunityIdContainer;
+  const body = (request.body || {}) as CommunityIdContainer;
+
+  const rawValues = [
+    params.communityId,
+    params.community_id,
+    query.communityId,
+    query.community_id,
+    body.communityId,
+    body.community_id,
+  ];
+  const providedValues = rawValues
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .filter((value): value is string | number => value !== undefined);
+  const communityIds = providedValues.map((value) => Number(value));
+
+  if (
+    communityIds.some((value) => !Number.isSafeInteger(value) || value <= 0)
+  ) {
+    throw new InvalidCommunityIdError();
+  }
+
+  const uniqueCommunityIds = [...new Set(communityIds)];
+
+  if (uniqueCommunityIds.length > 1) {
+    throw new ConflictingCommunityIdError(uniqueCommunityIds);
+  }
+
+  return uniqueCommunityIds[0] ?? null;
 }
 
 /**

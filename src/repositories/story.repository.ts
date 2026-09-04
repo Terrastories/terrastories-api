@@ -34,6 +34,7 @@ export interface Story {
   language: string;
   tags: string[] | null;
   isRestricted: boolean;
+  privacyLevel: string;
   // Interview metadata fields for Indigenous storytelling context
   dateInterviewed?: Date | null;
   interviewLocationId?: number | null;
@@ -330,23 +331,33 @@ export class StoryRepository {
   /**
    * Find story by ID
    */
-  async findById(id: number): Promise<Story | null> {
+  async findById(id: number, communityId?: number): Promise<Story | null> {
     const storiesTable = this.getStoriesTable();
+    const condition =
+      communityId === undefined
+        ? eq(storiesTable.id, id)
+        : and(
+            eq(storiesTable.id, id),
+            eq(storiesTable.communityId, communityId)
+          );
     const [story] = await this.db
       .select()
       .from(storiesTable)
-      .where(eq(storiesTable.id, id))
+      .where(condition)
       .limit(1);
 
     return story || null;
   }
 
   /**
-   * Find story by ID with all relations
+   * Find story by ID with all relations, optionally scoped to one community.
    */
-  async findByIdWithRelations(id: number): Promise<StoryWithRelations | null> {
-    // Get the base story
-    const story = await this.findById(id);
+  async findByIdWithRelations(
+    id: number,
+    communityId?: number
+  ): Promise<StoryWithRelations | null> {
+    // Scope the base lookup before loading any related community content.
+    const story = await this.findById(id, communityId);
     if (!story) return null;
 
     // Get community

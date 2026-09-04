@@ -374,6 +374,34 @@ describe('Data Sovereignty Enforcement', () => {
       expect(mockReply.status).not.toHaveBeenCalled();
       expect(mockReply.send).not.toHaveBeenCalled();
     });
+
+    it('still resolves ID ownership when a same-community tenant alias is supplied', async () => {
+      const userSession: UserSession = {
+        id: 1,
+        email: 'admin@community1.org',
+        role: 'admin',
+        communityId: 1,
+      };
+      mockRequest.session!.user = userSession;
+      mockRequest.user = userSession;
+      mockRequest.params = { id: '99' };
+      mockRequest.query = { communityId: '1' };
+      const resolveResourceCommunity = vi.fn().mockResolvedValue(null);
+
+      const middleware = requireV2CommunityContentAccess(
+        'stories',
+        'crud',
+        resolveResourceCommunity
+      );
+      await middleware(
+        mockRequest as FastifyRequest,
+        mockReply as FastifyReply
+      );
+
+      expect(resolveResourceCommunity).toHaveBeenCalled();
+      expect(mockReply.status).toHaveBeenCalledWith(404);
+      expect(mockReply.send).toHaveBeenCalledWith({ error: 'Story not found' });
+    });
   });
 
   describe('Data Sovereignty Compliance', () => {

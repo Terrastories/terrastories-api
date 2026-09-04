@@ -179,7 +179,7 @@ describe('V2 sovereignty route boundaries', () => {
   it('does not reveal or mutate a foreign story through an ID-only update route', async () => {
     const response = await app.inject({
       method: 'PATCH',
-      url: `/api/v1/stories/${communityBStoryId}`,
+      url: `/api/v1/stories/${communityBStoryId}?communityId=${communityAId}`,
       headers: { cookie: adminCookie },
       payload: { title: 'Cross-community overwrite attempt' },
     });
@@ -204,7 +204,7 @@ describe('V2 sovereignty route boundaries', () => {
   it('does not reveal or delete a foreign story through an ID-only delete route', async () => {
     const response = await app.inject({
       method: 'DELETE',
-      url: `/api/v1/stories/${communityBStoryId}`,
+      url: `/api/v1/stories/${communityBStoryId}?communityId=${communityAId}`,
       headers: { cookie: adminCookie },
     });
     const nonexistentResponse = await app.inject({

@@ -453,21 +453,27 @@ export function requireV2CommunityContentAccess(
     let resourceCommunityId: number;
     try {
       const requestedCommunityId = extractCommunityId(request);
-      if (requestedCommunityId !== null) {
-        resourceCommunityId = requestedCommunityId;
-      } else if (resolveResourceCommunity) {
-        const resolvedCommunityId = await resolveResourceCommunity(
-          request,
-          user.communityId
-        );
-        if (resolvedCommunityId === null) {
-          sendResourceNotFound(reply, family, request);
-          return;
-        }
-        resourceCommunityId = resolvedCommunityId ?? user.communityId;
-      } else {
-        resourceCommunityId = user.communityId;
+      const resolvedCommunityId = resolveResourceCommunity
+        ? await resolveResourceCommunity(request, user.communityId)
+        : undefined;
+
+      if (resolvedCommunityId === null) {
+        sendResourceNotFound(reply, family, request);
+        return;
       }
+
+      if (
+        requestedCommunityId !== null &&
+        resolvedCommunityId !== undefined &&
+        requestedCommunityId !== resolvedCommunityId
+      ) {
+        return reply.status(403).send({
+          error: { message: 'Access denied - community data isolation' },
+        });
+      }
+
+      resourceCommunityId =
+        resolvedCommunityId ?? requestedCommunityId ?? user.communityId;
     } catch (error) {
       if (
         !(error instanceof ConflictingCommunityIdError) &&

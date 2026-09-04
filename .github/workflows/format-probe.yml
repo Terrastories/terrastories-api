@@ -1,19 +1,22 @@
 name: Format Probe
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches:
+      - feat/issue-141-ci-supply-chain
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  prettier-diff:
+  prettier-fix:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout feature branch
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: feat/issue-141-ci-supply-chain
 
       - name: Use Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -24,7 +27,15 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
-      - name: Print exact Prettier diff
+      - name: Apply exact Prettier formatting
         run: |
           npx prettier --write config/security-audit-baseline.json scripts/check-audit-baseline.mjs
-          git diff --no-color -- config/security-audit-baseline.json scripts/check-audit-baseline.mjs
+          if git diff --quiet -- config/security-audit-baseline.json scripts/check-audit-baseline.mjs; then
+            echo "No formatting changes required"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config/security-audit-baseline.json scripts/check-audit-baseline.mjs
+          git commit -m "style: apply Prettier to audit checks"
+          git push origin HEAD:feat/issue-141-ci-supply-chain

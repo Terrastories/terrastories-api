@@ -42,7 +42,7 @@ jobs:
         uses: trufflesecurity/trufflehog@1ea7fc1960b818e3c3ac3984f85922e3acba4061 # pinned main
         with:
           version: 3.97.1
-          extra_args: --results=verified,unknown
+          extra_args: --results=verified,unknown --fail
 
   production_image:
     name: Production image evidence

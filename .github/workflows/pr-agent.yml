@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: PR Agent action step
         id: pragent
-        uses: qodo-ai/pr-agent@main
+        uses: qodo-ai/pr-agent@5d9913392a0e4facb35b33638bf422ee54aac05d # pinned main
         env:
           # OpenAI configuration for Terrastories API
           OPENAI_KEY: ${{ secrets.OPENAI_KEY }}

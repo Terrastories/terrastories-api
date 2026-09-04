@@ -1,0 +1,66 @@
+name: Issue 141 Dependency Diagnostic
+
+on:
+  push:
+    branches:
+      - feat/issue-141-ci-supply-chain
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Explain vulnerable dependency paths
+        run: |
+          npm explain @humanfs/node
+          npm explain fast-uri
+          npm explain fflate
+          npm explain nanoid
+
+      - name: Report audit remediation metadata
+        run: |
+          set +e
+          npm audit --json --audit-level moderate > audit.json
+          audit_status=$?
+          set -e
+          if [ "$audit_status" -ne 0 ] && [ "$audit_status" -ne 1 ]; then
+            echo "npm audit failed unexpectedly with status $audit_status" >&2
+            exit "$audit_status"
+          fi
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const report = JSON.parse(readFileSync('audit.json', 'utf8'));
+          for (const name of ['@humanfs/node', 'fast-uri', 'fflate', 'nanoid']) {
+            const item = report.vulnerabilities?.[name];
+            console.log(`=== ${name} ===`);
+            console.log(JSON.stringify({
+              severity: item?.severity,
+              range: item?.range,
+              nodes: item?.nodes,
+              fixAvailable: item?.fixAvailable,
+              via: Array.isArray(item?.via)
+                ? item.via.map((via) => typeof via === 'string' ? via : ({
+                    source: via.source,
+                    name: via.name,
+                    severity: via.severity,
+                    range: via.range,
+                    url: via.url,
+                  }))
+                : item?.via,
+            }, null, 2));
+          }
+          NODE

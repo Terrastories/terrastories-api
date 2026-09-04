@@ -18,10 +18,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build Docker image
         run: |
@@ -31,18 +31,73 @@ jobs:
 
       - name: Test Docker image
         run: |
-          # Test image can start
           if [ "${{ matrix.target }}" == "development" ]; then
-            # Development image should have dev dependencies
             echo "Testing development image dependencies..."
-            docker run --rm terrastories-api:${{ matrix.target }}-test npm list --depth=0 | grep -E "(typescript|eslint|vitest)" || echo "Dev dependencies check completed"
+            docker run --rm terrastories-api:${{ matrix.target }}-test \
+              npm list --depth=0 typescript eslint vitest
           else
-            # Production image should start correctly
-            echo "Testing production image startup..."
-            docker run --rm --name test-container -d terrastories-api:${{ matrix.target }}-test || echo "Production startup test completed"
-            sleep 5
-            docker stop test-container 2>/dev/null || true
+            echo "Testing production image startup and health..."
+            jwt_secret="$(openssl rand -hex 32)"
+            session_secret="$(openssl rand -hex 32)"
+
+            check_health() {
+              local health_json
+              if ! health_json="$(curl --fail --silent --show-error http://localhost:3000/health)"; then
+                return 1
+              fi
+
+              HEALTH_JSON="$health_json" node --input-type=module <<'NODE'
+          const health = JSON.parse(process.env.HEALTH_JSON);
+          if (
+            !health ||
+            health.status !== 'ok' ||
+            !health.config ||
+            health.config.valid !== true ||
+            !health.database ||
+            health.database.connected !== true
+          ) {
+            process.stderr.write(`Unhealthy API response: ${JSON.stringify(health)}\n`);
+            process.exit(1);
+          }
+          NODE
+            }
+
+            docker run --name test-container -d \
+              -p 3000:3000 \
+              -e NODE_ENV=production \
+              -e DATABASE_URL=./data/docker-ci.db \
+              -e JWT_SECRET="$jwt_secret" \
+              -e SESSION_SECRET="$session_secret" \
+              terrastories-api:${{ matrix.target }}-test
+
+            healthy=false
+            for attempt in $(seq 1 12); do
+              if check_health; then
+                healthy=true
+                break
+              fi
+
+              if [ "$(docker inspect --format='{{.State.Running}}' test-container)" != "true" ]; then
+                docker logs test-container
+                exit 1
+              fi
+
+              sleep 5
+            done
+
+            if [ "$healthy" != "true" ]; then
+              docker logs test-container
+              exit 1
+            fi
+
+            check_health
+            test "$(docker inspect --format='{{.State.Running}}' test-container)" = "true"
+            docker stop test-container
           fi
+
+      - name: Cleanup Docker image test
+        if: always() && matrix.target == 'production'
+        run: docker rm -f test-container > /dev/null 2>&1 || true
 
   # =============================================================================
   # DOCKER COMPOSE CONFIGURATION TESTING
@@ -59,7 +114,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Test Docker Compose configuration syntax
         run: |
@@ -84,7 +139,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Create test environment file
         run: |

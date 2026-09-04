@@ -133,27 +133,44 @@ export async function buildApp(options?: BuildAppOptions) {
 
     app.log.error({ error, method, url }, 'Request error');
 
+    const errorDetails =
+      typeof error === 'object' && error !== null
+        ? (error as Record<string, unknown>)
+        : {};
+    const statusCode =
+      typeof errorDetails.statusCode === 'number'
+        ? errorDetails.statusCode
+        : undefined;
+    const message =
+      error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+          ? error
+          : 'Unknown error';
+    const validation =
+      errorDetails.validation ?? errorDetails.validationContext ?? undefined;
+
     // Don't leak internal errors in production
     const isDevelopment = config.environment === 'development';
 
-    if (error.statusCode && error.statusCode < 500) {
+    if (statusCode && statusCode < 500) {
       // Handle schema validation errors - all 400 errors are validation errors in this context
-      if (error.statusCode === 400) {
-        return reply.status(error.statusCode).send({
+      if (statusCode === 400) {
+        return reply.status(statusCode).send({
           error: 'Request validation failed',
-          statusCode: error.statusCode,
-          issues: error.validation || error.validationContext || undefined,
+          statusCode,
+          issues: validation,
         });
       }
 
-      return reply.status(error.statusCode).send({
-        error: error.message,
-        statusCode: error.statusCode,
+      return reply.status(statusCode).send({
+        error: message,
+        statusCode,
       });
     }
 
     return reply.status(500).send({
-      error: isDevelopment ? error.message : 'Internal Server Error',
+      error: isDevelopment ? message : 'Internal Server Error',
       statusCode: 500,
     });
   });

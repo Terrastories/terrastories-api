@@ -1,0 +1,41 @@
+name: Issue 141 TDD Probe
+
+on:
+  push:
+    branches:
+      - feat/issue-141-ci-supply-chain
+
+permissions:
+  contents: write
+
+jobs:
+  add-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: feat/issue-141-ci-supply-chain
+
+      - name: Add fail-closed secret scan regression
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tests/scripts/ci-supply-chain.test.js')
+          text = path.read_text()
+          needle = "    expect(workflow).toContain('trufflesecurity/trufflehog@');\n"
+          replacement = needle + "    expect(workflow).toMatch(/extra_args:.*--fail/);\n"
+          if replacement not in text:
+              if needle not in text:
+                  raise SystemExit('expected test insertion point not found')
+              path.write_text(text.replace(needle, replacement, 1))
+          PY
+          if git diff --quiet -- tests/scripts/ci-supply-chain.test.js; then
+            echo "Regression assertion already present"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/scripts/ci-supply-chain.test.js
+          git commit -m "test: require trufflehog fail-closed mode"
+          git push origin HEAD:feat/issue-141-ci-supply-chain

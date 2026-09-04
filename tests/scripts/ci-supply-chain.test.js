@@ -254,6 +254,7 @@ describe('release evidence workflow', () => {
       'BASE_SHA: ${{ github.event.pull_request.base.sha }}'
     );
     expect(workflow).toContain('trufflesecurity/trufflehog@');
+    expect(workflow).toMatch(/extra_args:.*--fail/);
   });
 
   it('builds and verifies the production image before emitting release evidence', () => {

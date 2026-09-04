@@ -88,7 +88,10 @@ export function computeAdvisorySetDigest(advisories) {
       compareText(left.package, right.package) ||
       compareText(left.severity, right.severity) ||
       compareText(left.url ?? '', right.url ?? '') ||
-      compareText(JSON.stringify(left.nodes ?? []), JSON.stringify(right.nodes ?? []))
+      compareText(
+        JSON.stringify(left.nodes ?? []),
+        JSON.stringify(right.nodes ?? [])
+      )
     );
   });
 
@@ -216,7 +219,9 @@ export function validateExternalAuditApproval(policy, approvals) {
     );
   }
   if (!Array.isArray(approvals)) {
-    throw new Error('Security audit external approval records must be an array');
+    throw new Error(
+      'Security audit external approval records must be an array'
+    );
   }
 
   for (const approval of approvals) {
@@ -290,7 +295,9 @@ export async function verifyExternalAuditApproval(
     const commentsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${policy.trackingIssue}/comments?per_page=100&page=${page}`;
     const comments = await fetchGitHubJson(commentsUrl, token, fetchImpl);
     if (!Array.isArray(comments)) {
-      throw new Error('GitHub security audit approval comments response is invalid');
+      throw new Error(
+        'GitHub security audit approval comments response is invalid'
+      );
     }
 
     for (const comment of comments) {
@@ -308,11 +315,7 @@ export async function verifyExternalAuditApproval(
         continue;
       }
       const permissionUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/collaborators/${encodeURIComponent(author)}/permission`;
-      const permission = await fetchGitHubJson(
-        permissionUrl,
-        token,
-        fetchImpl
-      );
+      const permission = await fetchGitHubJson(permissionUrl, token, fetchImpl);
       approvals.push({
         body: comment.body,
         author,

@@ -258,6 +258,15 @@ Do not combine `privacyLevel`, `isRestricted`, elder-only flags, or other overla
 
 `createdBy` is nullable in storage so imported/historical records can be represented truthfully; new application-created stories must record the actor when known.
 
+Story relationships are explicit canonical records:
+
+```text
+StoryPlace: id, storyId, placeId, sortOrder?
+StorySpeaker: id, storyId, speakerId, storyRole?, sortOrder?
+```
+
+Both endpoints of a relationship must belong to the same community. Retain every source edge and its multiplicity; do not silently deduplicate source relations to satisfy a target unique constraint. Preserve an existing order or speaker's narrative role when supplied; `storyRole` is descriptive metadata, never an authorization or cultural-restriction role. These optional attributes exist in Fastify V1 and the preceding V2 contract; the pinned Rails `places_stories`/`speaker_stories` tables do not contain them. Do not invent historical roles/order: leave absent values null and use a documented stable ID-based tie-breaker for display. If identifiers must be generated for source edges, record their deterministic source-to-target mapping in the migration manifest. Removed story-place cultural context remains archive-only under Section 11.
+
 ### 6.4 Place
 
 ```text
@@ -332,7 +341,7 @@ File identity must be independent of storage URLs and deployment providers.
 ```text
 File
   id
-  communityId
+  communityId?
   storageKey
   originalName?
   mimeType
@@ -360,6 +369,21 @@ Where legacy UI behavior depends on the order of a multi-attachment collection s
 Do not duplicate media identity in `mediaUrls`, `imageUrl`, `audioUrl`, `photoUrl`, or similar resource columns.
 
 `uploadedBy` is nullable so imported ActiveStorage objects can be represented without inventing provenance.
+
+Community files require `communityId`. The only launch exception is an account-owned profile photo for a canonical `super_admin` without a community: its `communityId` is null and an explicit typed user-photo relation identifies the account owner before staging or serving. Null never means global/public ownership and cannot be used for stories, places, speakers, branding, maps, or cross-community sharing. Only that account owner can manage/read its system profile photo; null is not a shared community and system privilege does not authorize another account's photo. An orphan historical user/attachment that cannot map to a valid canonical account is retained together in the restricted archive with explicit manual disposition and community acceptance before cutover, never assigned an invented tenant or silently discarded.
+
+File IDs, storage keys, and tenant membership alone never authorize serving. Resolve a typed attachment and its owning resource, then apply the same policy to metadata, download, byte-range requests, and transformed variants. Community files use community-scoped storage keys; the null-community profile exception uses an isolated account-scoped key namespace. The launch policy is:
+
+| Owning resource                   | Read audience                                                                                                             | Attachment changes                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Story                             | Actors permitted to read that story under Sections 4/6.2, including community publication and lifecycle gates             | Same-community editor/admin permitted to edit the story  |
+| Place/speaker                     | Approved projection through a readable story, or same-community editor/admin managing the standalone record               | Same-community editor/admin permitted to edit the record |
+| User profile                      | Account owner or same-community admin with user-management authority; never public merely because the community is public | Account owner or authorized same-community admin         |
+| Community branding/map/static map | Same-community viewer/member/editor/admin while active; public projections only when the community is active and public   | Same-community admin with community-settings authority   |
+
+For community-owned assets, disabled-community and system-privilege restrictions apply to every row. Unattached uploads are private staging objects accessible only to their authorized uploader or same-community admin for completion/cleanup; missing owner/policy information fails closed. Imported objects without uploader provenance gain runtime access only through a valid authorized relation.
+
+For a file with multiple relations, an authorized relation permits its bytes but never disclosure of other protected relations/metadata. Adding/reusing a relation that broadens the bytes' audience requires publishing authority over every affected owner, otherwise reject it. Removing an attachment requires authority over that owner; deleting shared bytes requires authority over all remaining owners or prior authorized removal of all references. Orphan cleanup must not remove still-referenced bytes. Tests must cover multiply related, unattached, historical-without-uploader, and private-profile/branding files as well as story media. Public/signed serving and caches must honor current policy after publication changes or revocation; possession of a historical URL is not a bypass.
 
 ## 7. Authentication, sessions, and sovereignty
 
@@ -411,19 +435,21 @@ Test administrative sequences, not only direct content requests: credential reco
 - Raw SQL is allowed only when necessary behind repository/migration boundaries; it must be parameterized and either portable or explicitly dialect-scoped with equivalent behavior tests.
 - JSON fields are storage containers unless a capability is explicitly proven portable; shared product behavior must not depend on PostgreSQL JSONB-only operators.
 - Risky schema changes use expand/contract or a tested backup/restore/forward-fix strategy.
-- Media storage keys are community-scoped and server-generated; user filenames are metadata only.
+- Media storage keys are server-generated and community-scoped, except the isolated account-scoped system-profile case in Section 6.7; user filenames are metadata only.
 
 ## 9. API contract
 
 V2 owns its own API contract. Rails/Fastify are not normative transports.
 
-Preferred namespaces:
+Canonical launch namespaces (normative):
 
 ```text
 /v2/public/*   unauthenticated public projections
 /v2/*          authenticated community API
 /v2/admin/*    system administration
 ```
+
+Login, authorized bootstrap/recovery, and health/readiness are explicit non-community-authenticated exceptions within `/v2/`, with their own fail-closed contracts. Issue #134 owns their exact operation paths and the route registry before #145/#146 domain implementation. Temporary coexistence paths require a documented mapping; they cannot become a second released V2 namespace by accident.
 
 Do not duplicate resource CRUD merely because a user is a "member"; authorization belongs in policy/service boundaries.
 
@@ -526,6 +552,8 @@ Stage 2 produces:
 5. a human-readable validation summary that fails the run on unexplained differences.
 
 The legacy archive is not queried by the runtime application and must not become a backdoor around community authorization. It exists solely to make intentional model simplification compatible with zero unintended data loss.
+
+The Stage-2 legacy archive and any retained copies inherit every concrete bundle protection in Section 10.3: owner-only creation where supported, encryption when leaving the trusted migration host or retained as backup/artifact, no real data in CI/public/third-party artifacts, no secret/source-row logging, and community/operator-controlled retention/deletion. Restricted manifests and machine-readable dispositions containing sensitive data receive the same controls; human-readable summaries contain counts/disposition references only. Validation must reject unsafe archive permissions/transfer destinations, secret-bearing summaries, and unprotected retained artifacts rather than treating the word "restricted" as sufficient evidence.
 
 ### 10.5 Validation gates
 

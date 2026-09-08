@@ -219,7 +219,7 @@ Role meanings:
 
 `communityId` is required for community roles and nullable for `super_admin`.
 
-Community publication and story audience are separate axes. For authenticated own-community access, an active community's `private` status does not block the role's permitted story audience. `member` adds the `community` audience; `editor`/`admin` add `editors`. Anonymous and other-community access use the public intersection in Section 4; no role grants protected access across communities. A disabled community denies community-content access for every role; authorized system lifecycle operations may still restore service without reading protected content. A super admin may consume public projections only on the same terms as any public caller. Place/speaker/media projections and filter/count metadata must derive from stories readable by that actor and approved public community assets; a relationship to an unreadable story must not expose that story or its protected metadata. Unassociated records are not automatically public. Editors/admins retain authorized same-community management of standalone records.
+Community publication and story audience are separate axes. For authenticated own-community access, an active community's `private` status does not block the role's permitted story audience. `member` adds the `community` audience; `editor`/`admin` add `editors`. Anonymous and other-community access use the public intersection in Section 4; no role grants protected access across communities. A disabled community denies community-content access for every role; authorized system lifecycle operations may still restore service without reading protected content. A super admin may consume public projections only on the same terms as any public caller. Public and story-derived place/speaker/media projections and filter/count metadata must expose only readable stories and approved public assets; a relationship to an unreadable story must not expose that story or its protected metadata. Unassociated records are not automatically public. Authenticated own-profile photos and private community branding/map assets follow their resource-specific same-community policy, not a requirement to be attached to a public story. Editors/admins retain authorized same-community management of standalone records.
 
 V2 keeps the meaningful Rails `member` versus `viewer` distinction because it affects the user-visible privacy model. The duplicated Rails `super_admin` boolean is normalized into the role enum for canonical V2 rows, but migration must first preserve both raw values. Contradictory source combinations must fail/manual-disposition canonical mapping rather than being guessed.
 
@@ -323,7 +323,7 @@ CommunityMapConfig
 - Provider credentials/tokens are deployment secrets, not domain data.
 - Map configuration is provider-neutral; Mapbox/Protomaps-specific naming must not leak into the canonical model unless required by an adapter.
 - Rails Theme `static_map` is a data-bearing ActiveStorage attachment and must migrate through the canonical File/media system.
-- Legacy provider credentials are preserved in the restricted migration archive/report and require explicit operator handling during cutover rather than being copied into ordinary V2 rows.
+- Legacy provider credentials are preserved only in the restricted migration archive and require explicit operator handling during cutover rather than being copied into ordinary V2 rows. Reports contain disposition references only, never credential values.
 
 ### 6.7 Files and media
 

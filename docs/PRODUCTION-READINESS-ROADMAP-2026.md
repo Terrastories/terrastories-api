@@ -14,7 +14,7 @@ Current baseline as of 2026-08-22:
 - On that same candidate, API comparison passed 203/203 plus report generation, and Docker development/production builds, Compose base/dev/prod/field-kit validation, Docker integration, and user-workflow/data-sovereignty scenarios were green.
 - PostgreSQL fresh/upgrade migration parity remains separately owned by #135. V2 does not depend on PostGIS, and SQLite migrations must not be run against PostgreSQL.
 - Existing dependency debt remains tracked by #141; the audit baseline is explicitly expiring rather than silently accepting new advisories.
-- Hono transport parity, production session storage, CORS, and other Hono-specific readiness claims must be re-audited against the exact PR #132 revision before Phase 1 can exit.
+- Hono canonical-contract coverage, production session storage, CORS, and other Hono-specific readiness claims must be re-audited against the exact PR #132 revision before Phase 1 can exit.
 
 ## Production definition of done
 
@@ -24,8 +24,8 @@ A Terrastories API revision is production-ready only when all of the following a
 2. All required tests are deterministic and green on the exact release revision.
 3. Both first-class database targets — SQLite/D1-compatible behavior and PostgreSQL — prove shared schema, migration, repository, and portable spatial behavior. PostGIS is not a V2 dependency.
 4. Authentication, authorization, community isolation, file isolation, and data sovereignty have comprehensive negative tests without reintroducing V1 scope that `SPEC-V2.md` explicitly removed.
-5. Production sessions survive process restart and work correctly across multiple instances, or deployment is explicitly constrained to a single instance with a documented temporary risk acceptance.
-6. CI fails closed: no security, startup, parity, migration, or required test failure can be hidden by `continue-on-error`, `|| true`, or equivalent logic.
+5. Production sessions use durable database authority, survive restart, and work across instances where supported. Single-instance deployment does not permit in-memory or cookie-only authorization authority.
+6. CI fails closed: no security, startup, canonical-contract, migration, or required test failure can be hidden by `continue-on-error`, `|| true`, or equivalent logic.
 7. Production images start, become ready, serve real requests, and shut down gracefully in an automated test.
 8. Backups and restores are tested from production-like data; schema changes have an explicit rollback/restore or expand-contract strategy.
 9. Logs, metrics, traces, and alerts are sufficient to diagnose failures without exposing secrets or sensitive cultural data.
@@ -53,27 +53,25 @@ A Terrastories API revision is production-ready only when all of the following a
 - No stale/broken validation scripts.
 - No unowned quarantined production tests.
 
-## Phase 1 — Make API compatibility executable (P0)
+## Phase 1 — Make canonical V2 behavior executable (P0)
 
 **Goal:** prove the Hono migration rather than infer it from smoke tests.
 
 ### Work
 
-- Refactor the existing compatibility assertions into transport-neutral contract tests.
-- Parameterize them over at least:
-  - Fastify V1 app + V1 prefixes;
-  - Hono V2 app + V2 prefixes.
-- Create an explicit route/namespace mapping for intentional V1/V2 differences.
-- Make unexpected status, response-body, error-envelope, pagination, header/cookie, and content-type differences fail tests.
-- Convert the Rails/TypeScript response differ from an informational detector into a fail-closed parity gate for endpoints where Rails compatibility is still required.
+- Build transport-neutral assertions from the approved V2 contract and the launch continuity scenarios in `SPEC-V2.md` Section 4. Issue #134 owns the harness and #145/#146 the domain cases.
+- Execute canonical assertions against Hono. Fastify/Rails comparisons are optional discovery evidence; classify differences explicitly before they become V2 requirements.
+- Map temporary/coexistence routes to approved V2 namespaces without making old route names or response shapes authoritative.
+- Make unexpected V2 status, response-body, error-envelope, pagination, header/cookie, and content-type differences fail tests.
+- Deliberately introduce a V2 mismatch to prove the harness fails closed.
 - Add contract coverage for all Hono domains implemented by PR #132: health, auth, public API, themes, places, speakers, communities, stories, users, files, member, admin, and dev/test-only routes.
 - Test route ordering for static routes vs `/:id` across every affected resource.
 - Add real HTTP smoke tests against `@hono/node-server`, not only in-process `app.request()` calls.
 
 ### Exit gate
 
-- The same contract suite passes against both Fastify and Hono for every migrated domain.
-- No unexplained Rails/TypeScript mismatch remains for contracts declared compatible.
+- Canonical V2 contracts pass against Hono for every migrated domain.
+- Material legacy differences have explicit RETAIN/IMPROVE/ARCHIVE/DROP/DEFER dispositions; no required V2 outcome is omitted.
 - Hono real-HTTP smoke tests pass.
 
 ## Phase 2 — Database and migration safety (P0)
@@ -84,15 +82,15 @@ A Terrastories API revision is production-ready only when all of the following a
 
 - Add required PostgreSQL CI and a D1/SQLite-compatible CI path; shared database behavior must pass on both first-class targets.
 - Run schema/repository/portable-spatial integration tests against both backends. Remove the legacy PostGIS bootstrap/verification/query branch and its dedicated test (`src/db/migrate.ts`, `src/db/index.ts`, `src/repositories/place.repository.ts`, `tests/db/postgis.test.ts`); V2 spatial behavior must remain portable application-level latitude/longitude logic.
-- Converge the duplicated `pgTable`/`sqliteTable` schema definitions to the single portable schema required by FR-003, with backend-specific adapters only where the canonical spec permits them.
-- Replace Worker-incompatible native dependencies used on shared V2 paths (including native `bcrypt`; `bcryptjs` is the canonical password-hashing dependency) and verify the resulting dependency graph on Workers and Node.
+- Establish the single logical relational schema/behavior contract in `SPEC-V2.md` Sections 6/8 on both targets. Dialect-specific Drizzle definitions/migrations are allowed; equivalent product semantics are mandatory.
+- Replace Worker-incompatible dependencies on shared paths. Implement `PasswordHasher` with an approved KDF benchmarked on Workers and Node; legacy bcrypt verification/upgrade is migration behavior, not a mandate for the new-password algorithm.
 - Add migration tests for:
   - empty database -> latest;
   - previous release -> latest;
   - production-like fixture/snapshot -> latest;
   - idempotency where applicable;
   - constraints, indexes, foreign keys, defaults, timestamps, and portable latitude/longitude spatial behavior.
-- Add data invariants for community IDs, ownership, file ownership, join tables, and Rails compatibility fields that remain in V2 scope.
+- Add data invariants for community IDs, ownership, file ownership, join tables, and canonical fields and retained legacy relationships.
 - Require expand-contract migrations for risky changes: add/backfill/read-switch/remove rather than destructive one-step changes.
 - Build automated backup + restore verification with checksums/counts and selected semantic invariants.
 - Define RPO/RTO targets and prove them in a restoration drill.
@@ -109,8 +107,8 @@ A Terrastories API revision is production-ready only when all of the following a
 
 ### Work
 
-- Replace Hono `MemorySessionStore` with production session handling that preserves `SPEC-V2.md` FR-010: KV-backed sessions on Cloudflare and secure cookie-backed sessions on self-hosted Node.js and offline field kits. If server-side revocation/version metadata is needed for Node profiles, keep it in the deployment's local database (PostgreSQL for self-hosted, SQLite for field kits) without changing the canonical cookie-session contract or adding a runtime cloud dependency.
-- Add tests for process restart, multi-instance access where applicable, concurrent sessions, logout-one-session, expiry, tampered cookies, key rotation, disabled users, and role/community changes during an active session. Explicitly prove field-kit cookie-session behavior, local revocation semantics, and restart behavior while fully offline.
+- Replace Hono `MemorySessionStore` with opaque cookie identifiers backed by authoritative D1, PostgreSQL, or local SQLite state under `SPEC-V2.md` Section 7. Memory is dev/test-only; KV may cache but cannot authorize. Prove current authorization after revocation, disablement, and role/community changes, including D1 replication/session-read behavior.
+- Add tests for process restart, multi-instance access where applicable, concurrent sessions, logout-one-session, expiry, tampered cookies, key rotation, disabled users, and role/community changes during an active session. Explicitly prove field-kit database-backed session behavior, local recovery/revocation semantics, and restart behavior while fully offline.
 - Define session-secret rotation with overlap and emergency revocation procedures.
 - Review cookie flags for production (`Secure`, `HttpOnly`, `SameSite`, domain/path, lifetime).
 - Replace wildcard CORS with an environment-validated allowlist. Never combine permissive wildcard behavior with credentialed production requests.
@@ -130,8 +128,8 @@ A Terrastories API revision is production-ready only when all of the following a
 
 ### Work
 
-- Build a reusable authorization matrix covering the V2 roles defined by the canonical spec (anonymous/public behavior plus viewer, editor, admin, and super-admin as applicable) across communities.
-- For every protected community-data endpoint, add cross-community negative tests and super-admin data-sovereignty restriction tests.
+- Build a reusable authorization matrix covering the V2 roles defined by the canonical spec (anonymous/public behavior plus viewer, member, editor, admin, and super-admin) across communities.
+- For every protected community-data endpoint, add cross-community negative tests and super-admin data-sovereignty restriction tests. Include private-community viewer access, story audiences, disabled communities, and indirect administrative privilege escalation under `SPEC-V2.md` Sections 6.2/7.
 - Test list/search/stats/export/file endpoints for indirect leaks, not only direct `GET /:id` routes.
 - Add property/invariant tests asserting a principal from community A cannot observe community B data unless the contract explicitly permits public data.
 - Validate V2 public/private and community-ownership behavior consistently in nested relations, search, public API, files, and metadata; do not reintroduce elder-only/cultural-metadata scope removed by the V2 spec.
@@ -225,7 +223,7 @@ A Terrastories API revision is production-ready only when all of the following a
 
 ### Work
 
-- Provision representative validation/staging for all supported deployment modes: Cloudflare Workers + D1 + R2, Node.js + PostgreSQL/self-hosted storage, and offline Node.js + SQLite field kit.
+- Provision separate representative validation/staging for all three deployment modes: Cloudflare Workers + D1 + R2, Node.js + PostgreSQL/self-hosted storage, and offline Node.js + SQLite field kit. SQLite-compatible query tests do not replace actual Workers/D1/R2 adapter evidence.
 - Seed anonymized/representative data, including multilingual, public/private, and cross-community isolation cases within V2 scope.
 - Run migration, contract, sovereignty, file-security, load-smoke, and backup/restore suites against each applicable profile.
 - Deploy immutable, traceable artifacts: image digest for containerized Node deployments and an immutable Worker deployment/version identity for Cloudflare.
@@ -237,17 +235,20 @@ A Terrastories API revision is production-ready only when all of the following a
 
 - Staging passes the complete production gate on the exact release artifact.
 - Rollback/restore rehearsal succeeds.
-- Pilot/community deployment has explicit human approval before wider rollout.
+- Every launch continuity scenario in `SPEC-V2.md` Section 4 passes against named API/frontend/public-client revisions and migrated representative data. #147 owns the evidence, frontend-owner assignments, and community approval.
+- Cold-start browser/server tests with internet blocked prove local maps/assets/media, login, editing/import, recovery, and restart; external links have the documented offline state.
+- Pilot/community deployment has explicit human approval of workflow/runtime/archive dispositions before wider rollout. Successful archive checks alone do not approve loss of a usable capability.
 
 ## Recommended execution order
 
 1. **Baseline trust:** Phase 0.
-2. **Hono correctness:** Phase 1.
-3. **Data safety:** Phase 2.
-4. **Auth/session + sovereignty:** Phases 3 and 4 in parallel where independent.
-5. **Files + CI supply chain:** Phases 5 and 6.
-6. **Operations + performance:** Phases 7 and 8.
-7. **Release:** Phase 9.
+2. **Hono correctness:** Phase 1. Land PR #132 as the coexistence foundation, then complete #134/#145/#146; foundation merge is not the full Phase 1 exit gate.
+3. **Early deployment proof:** before broad domain normalization, run one canonical login/protected-story/media/revocation slice across Workers+D1+R2, Node+PostgreSQL, and disconnected Node+SQLite. #147 coordinates #135/#137/#140/#142; #144 records measured KDF, request, upload, and resource budgets, including representative field-kit hardware.
+4. **Data safety:** Phase 2.
+5. **Auth/session + sovereignty:** Phases 3 and 4 in parallel where independent.
+6. **Files + CI supply chain:** Phases 5 and 6.
+7. **Operations + performance:** Phases 7 and 8.
+8. **Release:** Phase 9.
 
 Do not cut over production traffic from Fastify to Hono before Phases 0-4 and the relevant Phase 5/6 P0 items are complete.
 
@@ -257,11 +258,11 @@ Keep changes reviewable and independently verifiable. A practical sequence is:
 
 1. CI truthfulness + broken scripts.
 2. Full-suite stabilization/test isolation.
-3. Shared Fastify/Hono contract harness.
-4. Hono contract parity domain-by-domain.
+3. Canonical V2 contract harness with optional legacy comparisons.
+4. Hono canonical contracts and legacy dispositions domain-by-domain.
 5. Mandatory dual-backend CI for D1/SQLite-compatible behavior and PostgreSQL.
 6. Migration/restore test harness.
-7. Production Hono session handling + cookie-session hardening and restart/multi-instance tests.
+7. Durable database-backed Hono sessions, cookie hardening, local recovery, and restart/multi-instance tests.
 8. CORS/cookie/CSRF/rate-limit hardening.
 9. Sovereignty authorization matrix + adversarial tests.
 10. File/media hardening.

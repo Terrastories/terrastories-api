@@ -4,7 +4,7 @@
 | ----------- | --------------------------------------------------------- |
 | **Status**  | Canonical — proposed product/architecture source of truth |
 | **Created** | 2026-06-07                                                |
-| **Updated** | 2026-08-28                                                |
+| **Updated** | 2026-09-08                                                |
 | **Authors** | Terrastories Team                                         |
 | **Repo**    | `terrastories-api`                                        |
 
@@ -44,6 +44,7 @@ The governing rule is:
 - PostGIS or any database-specific spatial product semantics.
 - Elder role/elder-only restrictions, elder speaker status, cultural-significance metadata, community cultural-settings blobs, story-place cultural-context fields, or the removed cultural-restriction schema.
 - Rebuilding Rails-only tables that have no current user-visible product role. Their data must still be preserved by migration when present.
+- New product features are not automatically launch requirements because they would be useful. The continuity scenarios in Section 4 bound launch scope; additions require an explicit product decision and owner.
 
 ## 3. Authority and intentional-evolution policy
 
@@ -59,6 +60,25 @@ An implementation, old test, issue, or existing Fastify behavior cannot silently
 
 The pinned Rails revision has two product-facing Flipper gates: `public_communities` and `split_settings`. They gate access to community-publication/settings UI and whether branding settings are edited with Theme or Community settings. V2 retains those user outcomes directly: community publication/private visibility and administrator-managed branding/settings are canonical capabilities rather than feature-flagged experiments. The Rails `beta` field and known Flipper feature/gate rows are therefore archived as historical operational state, not recreated as V2 runtime requirements. If a real source deployment contains additional/custom active Flipper keys, Stage 2 must classify their user-visible effect before that migration can be declared successful.
 
+### Audited legacy evidence
+
+The behavior inventory below uses [`Terrastories/terrastories@f6f033a17bd4a4c600ffea8bc2e773d243f88f72`](https://github.com/Terrastories/terrastories/tree/f6f033a17bd4a4c600ffea8bc2e773d243f88f72), with Rails schema version `2024_04_10_210545`. Paths are relative to that immutable revision. This is source inspection, not proof that every deployment uses these workflows or that the legacy tests pass. Migration manifests must still pin their own actual source/fixture provenance under Section 10.
+
+| Legacy evidence                                                                                                                                                       | Observed outcome                                                                                                                                             | V2 disposition                                                                                                                                             |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `README.md`; `rails/app/javascript/components/App.jsx`, `Sort.jsx`                                                                                                    | Map and story selection work in both directions; category filters and newest/title sorting; separate Explore public client                                   | RETAIN workflows; IMPROVE typed projections and deterministic pagination/sorting                                                                           |
+| `rails/app/policies/story_policy.rb`; `rails/app/controllers/api/stories_controller.rb`; `rails/app/controllers/application_controller.rb`                            | Story audiences and community publication are separate; an authenticated viewer can browse own-community anonymous-level stories even in a private community | RETAIN audience distinction; IMPROVE consistent enforcement on every route and related resource                                                            |
+| `rails/app/models/user.rb`; `rails/app/controllers/passwords_controller.rb`; `rails/app/controllers/dashboard/users_controller.rb`                                    | Username-or-email login, password change, and community-admin account management/reset                                                                       | RETAIN local account workflows; IMPROVE verification, session revocation, and community-controlled recovery; email delivery is not an offline prerequisite |
+| `rails/app/controllers/dashboard/communities_controller.rb`; `rails/app/controllers/super_admin/communities_controller.rb`                                            | Community admins control publication/settings; system admins provision communities and initial admins                                                        | RETAIN stewardship; IMPROVE bootstrap and indirect-access controls under Section 7                                                                         |
+| `rails/app/controllers/onboard_controller.rb`; `rails/app/controllers/onboard/account_controller.rb`                                                                  | Initial community/admin setup includes unauthenticated setup and a shipped privileged password                                                               | RETAIN setup outcome; DROP reusable default credentials; IMPROVE one-time bootstrap authorization                                                          |
+| `rails/app/javascript/components/StoryMedia.jsx`; `rails/app/models/story.rb`, `place.rb`, `speaker.rb`, `theme.rb`; `rails/app/views/api/stories/show.json.jbuilder` | Uploaded audio/video/images, place-name audio, interview metadata, speaker/place relationships, static maps                                                  | RETAIN playback and relationships; IMPROVE normalized file identity and protected serving                                                                  |
+| `rails/app/javascript/components/Story.jsx`                                                                                                                           | Story descriptions render HTML                                                                                                                               | RETAIN meaningful text/formatting; IMPROVE safe rendering, never preserve executable markup as runtime behavior; raw source stays archived                 |
+| `rails/app/controllers/dashboard/imports_controller.rb`; `rails/app/models/concerns/importable.rb`                                                                    | Header mapping, related records/media, and row results; import can coerce permissions and omit missing media                                                 | RETAIN import workflow; IMPROVE explicit audience validation, missing-file errors, duplicate handling, and atomicity                                       |
+| `rails/app/services/map.rb`; `rails/config/environments/offline.rb`; `tileserver/README.md`                                                                           | Local map packages, local storage/assets, cloud-provider override in offline mode                                                                            | RETAIN full local operation; IMPROVE packaging and disconnected browser verification                                                                       |
+| `rails/config/routes.rb`; `rails/app/models/curriculum.rb`                                                                                                            | Curriculum data model exists without an exposed route                                                                                                        | ARCHIVE by default; validate real community use before approving removal from a deployment's runtime                                                       |
+
+Source behavior is not permission to reproduce an authorization bypass, unsafe default, silent import loss, or implementation-specific credential storage. Those changes are explicit IMPROVE/DROP decisions, with source data preservation independently required.
+
 ## 4. User-experience continuity contract
 
 V2 may use new APIs and a new frontend integration, but the migration/cutover must not remove established user-facing capabilities without an explicit product decision.
@@ -72,6 +92,8 @@ V2 must support:
 - story detail with speakers, places, interview metadata, uploaded media, and external media links;
 - filtering/search by place, region, place type, topic, language, speaker, and speaker affiliation where data exists;
 - community map style/view configuration and community branding assets.
+- map-to-story and story-to-map selection, plus newest-first and title ascending/descending ordering with a stable tie-breaker;
+- meaningful story description formatting through a documented safe representation; migration preserves the original source and records any sanitization/transformation.
 
 Public story visibility is an intersection, never a story-only decision. A public request may expose a story only when **all** relevant publication gates allow it. At minimum:
 
@@ -96,6 +118,8 @@ V2 must support:
 
 Changing username-or-email login to email-only or username-only is a product change and requires explicit approval plus migration/UX handling.
 
+CSV imports must preview explicit header/field mappings, audience values, related records, media references, duplicate handling, and row errors before committing. Unknown audience values or missing referenced media cannot silently become public content or disappear. Define the atomic write unit and retry behavior; creation of related places/speakers must be included in the preview and use the same community authorization as direct creation. This is an improvement over Rails import coercion/partial-save behavior, distinct from the lossless Rails deployment migration in Section 10.
+
 ### System administration
 
 V2 must support system-level community/user lifecycle operations required to operate hosted deployments. System privilege must not imply access to protected community content.
@@ -103,6 +127,22 @@ V2 must support system-level community/user lifecycle operations required to ope
 ### Compatibility boundary
 
 The experience contract is normative; Rails routes, Jbuilder payloads, Fastify routes, CSS/layout, and database column names are not. Frontends may require an intentional adapter/migration to consume V2.
+
+### Launch continuity scenarios and ownership
+
+API contracts alone do not prove user-experience continuity. Issue #147 owns integration evidence and must name the concrete community-management/map frontend and Explore/public client revisions, their responsible maintainers, and the pilot community approver before cutover. Frontend implementation can live in separate repositories; it remains a dependency of product release. Issue #134 owns the reusable contract harness, #145/#146 the domain cases, and #139 the shared authorization matrix.
+
+| Scenario                         | Required observable outcome                                                                                                                              | Implementation/evidence owner |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| Public discovery and publication | Public active community exposes only approved stories, points, filters, related metadata, and media; privatizing/disabling closes every public path      | #139, #145, #146              |
+| Private community and roles      | Own-community viewer/member/editor/admin receive their distinct story audiences; cross-community and system privilege do not expand protected access     | #139, #146                    |
+| Accounts and setup               | Migrated username and email login, password change, authorized local recovery, restart/revocation, and safe initial community/admin setup                | #137, #126, #146              |
+| Browse and manage                | Select map point/story in either direction; filter/sort; view interview/speaker/place data; authorized create/edit/delete and safe description rendering | #145, #147                    |
+| Media and branding               | Play uploaded audio/video, display images, play place-name audio, render static maps and ordered branding assets after migration                         | #140, #145, #147              |
+| Import and preservation          | Preview/commit related CSV data with explicit errors; verify migrated rows, relations, bytes, and runtime/archive dispositions separately                | #123, #135, #147              |
+| Disconnected field kit           | Cold-start browser and server without internet; local login, map, media, editing/import, recovery, and restart remain usable                             | #137, #140, #142, #147        |
+
+Every row requires success and applicable negative cases using migrated synthetic representative data, including multilingual content. Each pilot additionally needs community-approved disposition of runtime capability removals: successful archival is data preservation, not proof that a lost workflow is acceptable. Uncovered required scenarios block cutover. Discovery of active custom features or curriculum use reopens the deployment's disposition decision rather than silently expanding or reducing launch scope.
 
 ## 5. Deployment architecture
 
@@ -119,6 +159,12 @@ All modes share domain/service behavior. Runtime, database, storage, hashing, an
 There is one canonical **logical relational schema and behavior contract**. Dialect-specific Drizzle definitions or migration files are allowed when tooling requires them, but SQLite/D1 and PostgreSQL may not expose different product semantics.
 
 Shared behavior must remain SQLite-compatible. PostgreSQL-only extensions may not become product requirements.
+
+### Offline profile
+
+Field kits package the frontend, API, database, uploaded media, map styles/tiles and their glyph/sprite/font dependencies for local serving. Cloud URLs and provider credentials must not override offline configuration. A locally hosted map service is permitted; internet services are not required at runtime. Deployment acceptance includes cold-start browser tests with external network access blocked, not just SQLite or container configuration checks.
+
+External media links remain preserved as links. Offline clients show a clear unavailable-offline state without automatic remote requests; an external link does not promise a local copy of the remote content. Downloading third-party content or adding hosted/field-kit synchronization is not a launch requirement. Locally imported/uploaded media remains fully usable offline. Account recovery must have a community-authorized local path without email or cloud identity services.
 
 ## 6. Canonical domain model
 
@@ -165,7 +211,7 @@ User
 
 Role meanings:
 
-- `viewer` — may view public content only; authenticated account features do not expand community-content visibility.
+- `viewer` — may view the `public` story audience within their own active community, including when that community is private; cannot view `community` or `editors` stories.
 - `member` — may view public and community-visible content for their community.
 - `editor` — member access plus content creation/editing.
 - `admin` — editor access plus community/user administration.
@@ -173,9 +219,13 @@ Role meanings:
 
 `communityId` is required for community roles and nullable for `super_admin`.
 
+Community publication and story audience are separate axes. For authenticated own-community access, an active community's `private` status does not block the role's permitted story audience. `member` adds the `community` audience; `editor`/`admin` add `editors`. Anonymous and other-community access use the public intersection in Section 4; no role grants protected access across communities. A disabled community denies community-content access for every role; authorized system lifecycle operations may still restore service without reading protected content. A super admin may consume public projections only on the same terms as any public caller. Place/speaker/media projections and filter/count metadata must derive from stories readable by that actor and approved public community assets; a relationship to an unreadable story must not expose that story or its protected metadata. Unassociated records are not automatically public. Editors/admins retain authorized same-community management of standalone records.
+
 V2 keeps the meaningful Rails `member` versus `viewer` distinction because it affects the user-visible privacy model. The duplicated Rails `super_admin` boolean is normalized into the role enum for canonical V2 rows, but migration must first preserve both raw values. Contradictory source combinations must fail/manual-disposition canonical mapping rather than being guessed.
 
 `username` remains a stable unique login identifier. Email uniqueness rules must support the approved login behavior without losing any legacy account; migration validation must detect collisions before cutover rather than rewriting identifiers silently.
+
+Login resolution must be unambiguous across username and email together. Never select the first of multiple matching accounts. Define one normalization/case-comparison contract shared by SQLite/D1 and PostgreSQL, enforce it on new/updated identities, and validate migrated duplicate emails, case collisions, and usernames matching another account's email. Preserve raw identifiers and require explicit operator resolution before cutover when they conflict. Do not invent a community membership for an orphan historical account.
 
 ### 6.3 Story
 
@@ -202,7 +252,7 @@ Story
 - `community` maps the user need previously represented by Rails `user_only`;
 - `editors` maps the user need previously represented by Rails `editor_only`.
 
-Story visibility never overrides the owning community's publication/lifecycle state.
+Story visibility never overrides the owning community's publication gate for public requests or its disabled lifecycle state. Authenticated access to an active private community follows Section 6.2.
 
 Do not combine `privacyLevel`, `isRestricted`, elder-only flags, or other overlapping privacy mechanisms with this field.
 
@@ -342,6 +392,16 @@ Every content path requires positive and negative tests for:
 - file/media leakage;
 - private/disabled-community public projection leakage;
 - super-admin attempts to read protected community content.
+
+### Bootstrap and account lifecycle
+
+Preserve community and initial-administrator setup while replacing unsafe Rails setup mechanics. Bootstrap authority must be explicitly established for the intended fresh installation/community, work offline, and be invalidated after completion. Setup replay must not create privileged accounts or reset credentials. No production profile may depend on shipped privileged passwords. Provisioning an additional hosted community requires authorized system lifecycle action; it is not permission to reopen installation bootstrap.
+
+Preserve self-service password change and community-admin-assisted recovery, including accounts without email. Require verified recovery authority, revocation of existing sessions on recovery, and no disclosure of passwords/tokens in logs or reports. The last/only community administrator needs a tested, community-authorized recovery procedure established during setup; system privilege alone is not recovery authority. Email-based recovery may be an optional adapter but cannot replace the offline path. Rails reset-token columns alone do not establish a working email-recovery product requirement.
+
+Community administrators authorize membership, community roles, member recovery, and publication. System administrators may provision/manage system and community lifecycle records, but cannot unilaterally acquire protected access by issuing/resetting credentials, changing membership/roles, impersonating users, or changing publication. Initial administration and exceptional recovery require explicit community/bootstrap authority; do not require a new invitation or multi-community-account product merely to implement that boundary.
+
+Test administrative sequences, not only direct content requests: credential recovery then login/read; role or membership change then read; private-to-public change then public read; bootstrap replay after setup. Each sequence must enforce the same community authority and current session policy. These are application authorization guarantees; infrastructure operators' access to database/storage backups is a separate operational trust boundary governed by community-controlled deployment, credentials, and retention.
 
 ## 8. Database and storage rules
 
@@ -577,7 +637,7 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 | Database targets?                   | D1/SQLite and PostgreSQL equal first-class.                                                                                                                                          |
 | Physical schema?                    | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required.                                                                                 |
 | Spatial behavior?                   | Plain lat/lng + application-level portable logic; no PostGIS.                                                                                                                        |
-| Story privacy?                      | One `public / community / editors` visibility field, always subordinate to owning-community publication/lifecycle.                                                                   |
+| Story privacy?                      | One `public / community / editors` audience field; public requests also require a public active community, while authenticated own-community access follows Section 6.2.             |
 | User roles?                         | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role.                                                                                                                 |
 | Login identity?                     | Preserve Rails username-or-email login behavior unless explicitly changed later.                                                                                                     |
 | Sessions?                           | Durable database-backed authoritative sessions; memory dev/test only.                                                                                                                |
@@ -593,6 +653,7 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 
 | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-09-08 | Pinned legacy behavior evidence; separated publication from authenticated story audiences; specified safe setup, community-admin stewardship, unambiguous identities, local recovery, import fidelity, disconnected browser acceptance, and named continuity/release owners.                                                                                             |
 | 2026-06-07 | Initial V2 Cloudflare/Hono specification.                                                                                                                                                                                                                                                                                                                                |
 | 2026-08-17 | Reaffirmed Hono, equal D1/SQLite + PostgreSQL targets, field-kit support, no PostGIS, and sovereignty constraints.                                                                                                                                                                                                                                                       |
 | 2026-08-28 | Reframed V2 from legacy wire/feature parity to intentional evolution: preserve user experience and all source data while simplifying the domain. Added canonical visibility/role/media/map/session models, real Rails migration contract, archive requirement for intentionally removed data, and V2-native contract testing.                                            |

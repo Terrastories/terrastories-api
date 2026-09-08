@@ -92,4 +92,4 @@ Phase 1 is complete only when, on the exact merge candidate:
 8. `/api/v1` remains intact for temporary coexistence until an explicitly approved cutover.
 9. The merge candidate remains consistent with `SPEC-V2.md` and the production-readiness roadmap.
 
-After Phase 1 merges, Hono-specific production hardening proceeds through the dependency/readiness ordering in GitHub rather than growing this foundation PR into a production mega-PR.
+PR #132 may merge as the coexistence foundation before the broader Phase 1 exit gate is complete; #134/#145/#146 follow on that base. Hono-specific production hardening proceeds through the dependency/readiness ordering in GitHub rather than growing this foundation PR into a production mega-PR.

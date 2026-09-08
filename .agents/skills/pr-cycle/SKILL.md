@@ -71,9 +71,9 @@ Choose gates by risk, but never weaken them to make a PR pass.
 
 ### API/Hono/Fastify behavior
 
-- Run the shared API contract suite against every transport touched by the change.
-- During the Fastify -> Hono migration, a Hono change is not merge-ready merely because `tests/hono` smoke tests pass. The same behavioral contract assertions must execute against both Fastify V1 and Hono V2, with intentionally documented namespace differences only.
-- A comparison test that merely detects or logs mismatches does not count as parity. Unexpected response/status/header mismatches must fail the gate.
+- Run approved V2 contract assertions against every V2 transport touched by the change.
+- During Fastify/Hono coexistence, Hono smoke tests alone are insufficient. The canonical V2 behavior suite must fail closed; optional Fastify/Rails comparisons discover omissions but do not define the destination contract.
+- Classify material legacy differences under `SPEC-V2.md` before retaining them. Unexpected differences from approved V2 response/status/header/cookie/pagination/content-type behavior must fail the gate.
 - Preserve error envelopes, auth semantics, pagination, multipart behavior, community isolation, and data-sovereignty rules unless an explicit API change is approved and documented. Preserve cultural behavior only when it is still required by canonical V2; never reintroduce removed V1 elder/cultural-metadata restrictions merely because legacy tests or reviews expect them.
 
 ### Database/schema/migration changes

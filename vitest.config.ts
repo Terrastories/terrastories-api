@@ -33,6 +33,10 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'clover'],
       reportsDirectory: './coverage',
+      // Vitest 4 removed coverage.all and now reports only loaded files unless
+      // the source scope is explicit. Keep the same full-source denominator
+      // used by the Vitest 3 baseline so Codecov comparisons stay meaningful.
+      include: ['src/**/*.{js,ts}', 'scripts/**/*.{js,mjs}'],
       exclude: [
         'node_modules/',
         'dist/',

@@ -294,6 +294,7 @@ Speaker
   id
   communityId
   name
+  biography?
   birthdate?
   birthplaceId?
   affiliation?
@@ -301,7 +302,9 @@ Speaker
   updatedAt
 ```
 
-`affiliation` is the V2 name for the user-facing concept previously stored as Rails `speaker_community`.
+`biography` retains the editable `bio` capability already exposed by Fastify V1 and present in the preceding V2 contract. It is nullable for Rails migrations because the pinned Rails Speaker table has no biography field. `affiliation` is the V2 name for the user-facing concept previously stored as Rails `speaker_community`.
+
+`birthplaceId` retains the pinned Rails `Speaker.belongs_to :birthplace` relationship to a Place; Rails stores `birthplace_id`, not a free-text birthplace column. The historical `scripts/terrastories-api-test.sh` free-text `birthplace` request does not match the current Fastify speaker route/schema and is classified **DROP** as an unimplemented wire-only probe, with no source-data loss. Any different source installation that contains a data-bearing free-text birthplace still falls under the unknown-field capture and explicit-disposition rules in Section 10; it must not be silently converted into an invented Place or cross-tenant link.
 
 Do not add elder status or cultural-role fields as launch requirements. New speaker metadata requires a separate product decision.
 

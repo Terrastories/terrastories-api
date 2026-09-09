@@ -118,7 +118,9 @@ V2 must support:
 
 Changing username-or-email login to email-only or username-only is a product change and requires explicit approval plus migration/UX handling.
 
-CSV imports must preview explicit header/field mappings, audience values, related records, media references, duplicate handling, and row errors before committing. Unknown audience values or missing referenced media cannot silently become public content or disappear. Define the atomic write unit and retry behavior; creation of related places/speakers must be included in the preview and use the same community authorization as direct creation. This is an improvement over Rails import coercion/partial-save behavior, distinct from the lossless Rails deployment migration in Section 10.
+CSV imports must preview explicit header/field mappings, audience values, related records, media references, duplicate handling, and row errors before committing. Unknown audience values or missing referenced media cannot silently become public content or disappear. Creation of related places/speakers must be included in the preview and use the same community authorization as direct creation.
+
+The accepted preview produces an immutable normalized manifest with a community-scoped idempotency key and digest. A commit is all-or-nothing for the complete manifest: all rows, related records, relations, File metadata, and import-result state commit in one portable database transaction. Media bytes must be staged and checksum-verified at their final immutable content-addressed keys before that transaction, but remain unreachable through the application until committed File relations authorize access. The relational commit is the single visibility point; it requires no fallible post-commit media promotion. Failed validation or database commit exposes no imported content, and cleanup of unreferenced staged bytes must be restart-safe and idempotent. Retrying the same community/key/digest returns or resumes the same import result and cannot create duplicates. Reusing a key with a different digest fails. No failure may leave partially visible rows or media. This is an improvement over Rails import coercion/partial-save behavior, distinct from the lossless Rails deployment migration in Section 10.
 
 ### System administration
 
@@ -295,14 +297,22 @@ Speaker
   communityId
   name
   biography?
-  birthdate?
+  birth?
+    year
+    month?
+    day?
   birthplaceId?
   affiliation?
+  status: active | inactive
   createdAt
   updatedAt
 ```
 
 `biography` retains the editable `bio` capability already exposed by Fastify V1 and present in the preceding V2 contract. It is nullable for Rails migrations because the pinned Rails Speaker table has no biography field. `affiliation` is the V2 name for the user-facing concept previously stored as Rails `speaker_community`.
+
+`birth` preserves source precision without inventing a date. A year-only Fastify value maps to `{ year }`; a Rails date maps to `{ year, month, day }`. `month` and `day` must either both be present or both absent, and all components must form a valid non-future value. Storage may use portable scalar columns, but every V2 API uses this one logical partial-date representation.
+
+`status` retains the Fastify speaker withdrawal capability. Inactive speakers and their photos are absent from public and viewer/member projections, direct reads, filters, counts, and story-derived speaker relations even when a related story is otherwise readable. The record and its relationships remain intact and are visible to authorized same-community editors/admins for management or reactivation. Rails imports default to `active` because the pinned Rails Speaker table has no lifecycle field; Fastify migration preserves `isActive` exactly.
 
 `birthplaceId` retains the pinned Rails `Speaker.belongs_to :birthplace` relationship to a Place; Rails stores `birthplace_id`, not a free-text birthplace column. The historical `scripts/terrastories-api-test.sh` free-text `birthplace` request does not match the current Fastify speaker route/schema and is classified **DROP** as an unimplemented wire-only probe, with no source-data loss. Any different source installation that contains a data-bearing free-text birthplace still falls under the unknown-field capture and explicit-disposition rules in Section 10; it must not be silently converted into an invented Place or cross-tenant link.
 
@@ -513,7 +523,7 @@ Unknown/community-specific source tables must be captured automatically. A hand-
 
 - Preserve legacy primary IDs for canonical domain records when doing so is safe; record any remap explicitly.
 - Never invent required foreign keys/provenance merely to satisfy a stricter V2 schema.
-- Preserve nulls when absence is meaningful; application creation rules may be stricter than import/storage rules.
+- Preserve nulls and source precision when absence or granularity is meaningful; application creation rules may be stricter than import/storage rules. Rails speaker dates map to full canonical partial dates, while Fastify year-only values remain year-only and never gain invented month/day values.
 - Map Rails story permission values deterministically to V2 visibility.
 - Preserve user role semantics, including `viewer` versus `member`.
 - Preserve both legacy `role` and `super_admin` source values before normalization. Contradictory combinations require explicit/manual disposition and may not be guessed.

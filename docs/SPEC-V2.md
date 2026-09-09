@@ -531,6 +531,7 @@ Unknown/community-specific source tables must be captured automatically. A hand-
 - Preserve every relationship edge and relationship multiplicity.
 - Copy media bytes, MIME type, filename, byte size, checksum, attachment role, and a deterministic ordering signal for multi-attachments; verify checksums after write.
 - Preserve legacy external media links.
+- When a source V1 resource stores deployment-derived media URL fields such as `mediaUrls`, `imageUrl`, `audioUrl`, or `photoUrl`, remove those fields from the canonical runtime model but preserve every raw source value in the restricted legacy archive. The migration manifest must account for each field/value disposition even when no durable media object can be recovered from the URL.
 - Preserve legacy bcrypt hashes with algorithm metadata for lazy upgrade.
 - Never silently discard a source field. Fields intentionally absent from canonical V2 go to the machine-readable legacy archive.
 - Structurally inconsistent or unmappable source rows remain losslessly present in the bundle/archive and fail or require explicit manual disposition before a migration run can be declared successful.
@@ -613,7 +614,7 @@ The same canonical migrated fixture must validate on SQLite/D1-compatible and Po
 | Fastify elder role/restrictions                  | DROP                                                       | Explicit V1 scope creep; not a Rails user requirement                                                                    |
 | Cultural-significance/settings/context V1 fields | DROP from canonical runtime; archive if source data exists | Avoid unreviewed cultural-protocol semantics                                                                             |
 | PostGIS behavior                                 | DROP                                                       | Portability and offline operation are higher-value requirements                                                          |
-| Persisted resource media URLs                    | DROP                                                       | URLs are deployment-specific derived values                                                                              |
+| Persisted resource media URL fields              | DROP from canonical runtime; ARCHIVE source values         | URLs are deployment-specific derived values, but persisted values remain data-bearing migration evidence                 |
 
 ## 12. Testing and release gates
 
@@ -643,7 +644,7 @@ Migration CI uses synthetic fixtures only; never real community data. It must in
 - the pinned Rails `schema.rb` and an executable PostgreSQL equivalent;
 - every Rails role and story permission value;
 - nullable and edge states such as missing place coordinates and system users without community IDs;
-- all relationship tables and external media links;
+- all relationship tables, external media links, and persisted resource media URL fields, including a case where the URL is the only surviving media reference;
 - curriculums and operational tables;
 - every relevant ActiveStorage attachment role, including Theme `static_map`;
 - deterministic blob payloads with known size/checksum;

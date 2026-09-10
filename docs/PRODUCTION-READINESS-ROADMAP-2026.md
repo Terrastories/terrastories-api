@@ -91,6 +91,8 @@ A Terrastories API revision is production-ready only when all of the following a
   - idempotency where applicable;
   - constraints, indexes, foreign keys, defaults, timestamps, and portable latitude/longitude spatial behavior.
 - Add data invariants for community IDs, ownership, file ownership, join tables, and canonical fields and retained legacy relationships.
+- Implement lossless Stage-1 source adapters for Rails PostgreSQL/ActiveStorage and Fastify V1 PostgreSQL-or-SQLite with configured storage. Both emit the same portable bundle contract and account for every source row and stored byte payload.
+- Drill the final cutover boundary under an enforced read-only source or a complete ordered change journal plus reconciled high-water mark; writes after an earlier snapshot must prevent success.
 - Require expand-contract migrations for risky changes: add/backfill/read-switch/remove rather than destructive one-step changes.
 - Build automated backup + restore verification with checksums/counts and selected semantic invariants.
 - Define RPO/RTO targets and prove them in a restoration drill.
@@ -98,6 +100,7 @@ A Terrastories API revision is production-ready only when all of the following a
 ### Exit gate
 
 - PostgreSQL and D1/SQLite-compatible migration suites are mandatory and green for shared schema behavior.
+- Rails and Fastify V1 source-profile captures plus both canonical destination transforms pass losslessness, checksum, archive, and cutover-boundary gates.
 - Restore drill succeeds from a production-like backup with documented timing and integrity checks.
 - Every pending schema change has a reviewed migration and rollback/restore plan.
 

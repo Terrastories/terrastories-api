@@ -28,7 +28,7 @@ The governing rule is:
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | G-1 | Run one product across Cloudflare Workers + D1 + R2, Node.js + PostgreSQL + self-hosted storage, and Node.js + SQLite + local filesystem field kits.                                                                                                                        |
 | G-2 | Preserve the user-visible Terrastories experience: public storytelling/map discovery, community content management, visibility rules, media, map configuration, branding, imports, onboarding, profile/auth flows, and system administration needed to operate communities. |
-| G-3 | Migrate legacy Rails deployments with **zero unintended data loss**. Every source row, relation, attachment, and field must be mapped, transformed, or preserved in a migration archive with a machine-readable disposition.                                                |
+| G-3 | Migrate legacy Rails and deployed Fastify V1 installations with **zero unintended data loss**. Every source row, relation, attachment, field, and stored byte payload must be mapped, transformed, or preserved in a migration archive with a machine-readable disposition. |
 | G-4 | Make D1/SQLite and PostgreSQL equal first-class database targets for shared product semantics.                                                                                                                                                                              |
 | G-5 | Keep field-kit deployments fully usable without runtime cloud dependencies.                                                                                                                                                                                                 |
 | G-6 | Enforce community isolation and Indigenous data sovereignty structurally and with negative tests.                                                                                                                                                                           |
@@ -485,30 +485,30 @@ Requirements:
 
 During Fastify/Hono coexistence, contract tests may execute both transports to detect accidental regressions, but Fastify output is not the V2 oracle. The canonical V2 contract is.
 
-## 10. Legacy Rails migration contract
+## 10. Legacy source migration contract
 
-Migration is a one-time deterministic ETL from a real Rails deployment into V2. It is not a raw PostgreSQL-to-SQLite conversion and it does not read Rails directly into today's mutable V2 tables.
+Migration is a one-time deterministic ETL from a real supported legacy source into V2. Supported launch source profiles are Rails PostgreSQL + ActiveStorage and Fastify V1 on PostgreSQL or SQLite with its configured File/object/local storage. Migration is not a raw database conversion and does not read a live source directly into today's mutable V2 tables.
 
 Migration is explicitly **two-stage**:
 
-1. **Lossless source capture** — read a consistent Rails PostgreSQL snapshot plus ActiveStorage bytes into a versioned portable migration bundle containing the discovered source schema/types, every source row, every blob, provenance, and checksums. This stage is independent of the V2 physical schema.
+1. **Lossless source capture** — a source-profile adapter reads a consistent source database snapshot plus every referenced or discovered stored byte payload into one versioned portable migration-bundle format containing the discovered source schema/types, every source row, every stored object, provenance, and checksums. This stage is independent of the V2 physical schema.
 2. **Canonical target transform** — read the verified bundle and map it into the approved canonical V2 logical schema for SQLite/D1-compatible and PostgreSQL targets, while producing field/table dispositions and validation evidence.
 
 This separation lets Terrastories prove source preservation before target schema normalization is finished and prevents migration code from inheriting transient Fastify/V1 schema drift.
 
-Cutover requires one enforced, auditable source-write boundary that includes relational writes, background jobs, attachments, and ActiveStorage blob uploads. The default path is a community-approved maintenance window: disable and drain every source writer, place Rails in read-only mode, take the final consistent Stage-1 capture from that quiescent source, transform/validate it, switch traffic, and keep Rails read-only until target acceptance completes. A lower-downtime path is permitted only when an ordered durable change journal captures and checksum-accounts for every row, relation, attachment, and blob after the initial snapshot; replay is idempotent, a final high-water mark is reconciled under a short write freeze, and no untracked dual-write window exists. A migration cannot be declared successful from an earlier snapshot while the source remains writable.
+Cutover requires one enforced, auditable source-write boundary that includes relational writes, background jobs, attachments, and stored-object uploads. The default path is a community-approved maintenance window: disable and drain every source writer, place the legacy application in read-only mode, take the final consistent Stage-1 capture from that quiescent source, transform/validate it, switch traffic, and keep the legacy source read-only until target acceptance completes. A lower-downtime path is permitted only when an ordered durable change journal captures and checksum-accounts for every row, relation, attachment, and stored object after the initial snapshot; replay is idempotent, a final high-water mark is reconciled under a short write freeze, and no untracked dual-write window exists. A migration cannot be declared successful from an earlier snapshot while the source remains writable.
 
 ### 10.1 Source of truth for migration
 
 The source-capture contract is pinned to the audited legacy repository revision and schema version used by fixtures. Every migration manifest records:
 
-- legacy repository commit/reference used by the migration contract;
-- pinned Rails `schema.rb` version;
-- observed source `schema_migrations` version when available;
+- source profile (`rails-postgresql`, `fastify-postgresql`, or `fastify-sqlite`) and legacy repository commit/reference used by the migration contract;
+- pinned Rails `schema.rb`/`schema_migrations` version for Rails, or pinned Fastify Drizzle schema/migration revision and configured storage profile for Fastify V1;
+- observed source migration version when available;
 - a digest of the actually discovered source schema;
 - every discovered source table/column/type, including unknown/custom tables.
 
-The required baseline includes:
+The Rails source-profile baseline includes:
 
 - communities;
 - users and integer roles plus historical `super_admin` boolean;
@@ -523,7 +523,9 @@ The required baseline includes:
 - curriculums/curriculum-stories and other data-bearing legacy tables even when not part of the V2 runtime product;
 - Rails/Flipper operational tables where present, so active behavior can be dispositioned rather than lost.
 
-Legacy FactoryBot factories are useful for representative values but are not sufficient as the migration schema contract. Integration fixtures must combine the exact/pinned Rails schema with production-valid edge states not represented by FactoryBot.
+The Fastify V1 source-profile baseline includes every table/column represented by the pinned Drizzle schema and applied migration metadata, including communities, users/auth state, stories, places, speakers, relationship tables, files/media metadata, imports, sessions/operational state, and all configured local/object-storage bytes. Capture must run against the installation's actual PostgreSQL or SQLite dialect and actual storage layout; converting through the other dialect first is not source evidence. Unknown/custom tables and unrecognized stored objects follow the same dynamic-capture and explicit-disposition rules.
+
+Legacy FactoryBot factories are useful for representative Rails values but are not sufficient as a migration schema contract. Integration fixtures must combine the exact/pinned Rails schema with production-valid edge states not represented by FactoryBot, and must separately exercise the exact pinned Fastify V1 PostgreSQL and SQLite schemas plus configured storage semantics.
 
 Unknown/community-specific source tables must be captured automatically. A hand-maintained allowlist may make known-schema regressions fail closed, but it may not define the universe of data that is preserved.
 
@@ -549,8 +551,8 @@ Unknown/community-specific source tables must be captured automatically. A hand-
 Stage 1 produces a self-contained migration bundle. At minimum it contains:
 
 1. a portable SQLite archive containing discovered source schema/type metadata and every relational source row;
-2. all ActiveStorage blob bytes, keyed by immutable source blob key;
-3. a machine-readable manifest containing source provenance, table/row counts, schema digest, per-table deterministic row digest, blob byte size, Rails checksum when present, and SHA-256;
+2. every source stored-object byte payload, keyed by immutable source blob/File/storage identity;
+3. a machine-readable manifest containing source-profile/revision/storage provenance, table/row counts, schema digest, per-table deterministic row digest, stored-object byte size, source checksum when present, and SHA-256;
 4. a human-readable validation summary that contains counts/dispositions but not source row contents, password hashes, provider credentials, session/reset tokens, or other secrets.
 
 Source values must be serialized without JavaScript precision loss. Numeric/decimal/bigint/timestamp values therefore use a source-database canonical representation plus explicit source column types, or an equivalently lossless encoding.
@@ -563,7 +565,7 @@ The bundle is sensitive community data:
 - never upload a real community migration bundle to CI, public Actions artifacts, or third-party review services;
 - keep retention/deletion under community/operator control.
 
-Stage 1 must fail closed on missing required Rails schema, source read inconsistency, missing blob bytes, byte-size mismatch, checksum mismatch, destination overwrite, or unexplained capture-count changes. Failure must not leave a destination that can be mistaken for a successful bundle.
+Stage 1 must fail closed on a missing/mismatched required source-profile schema or migration revision, unsupported storage profile, source read inconsistency, missing stored-object bytes, byte-size mismatch, checksum mismatch, destination overwrite, or unexplained capture-count changes. Failure must not leave a destination that can be mistaken for a successful bundle.
 
 ### 10.4 Canonical target artifacts
 
@@ -572,25 +574,25 @@ Stage 2 produces:
 1. the V2 database for the chosen target;
 2. migrated media/storage objects;
 3. a machine-readable migration manifest with source/bundle/target counts, ID mappings, field dispositions, warnings, and checksums;
-4. a restricted **legacy archive** containing every data-bearing source row/field not represented canonically in V2 and every discovered blob payload not copied to canonical storage, normally sourced directly from the verified Stage-1 bundle rather than reconstructed after transformation;
+4. a restricted **legacy archive** containing every data-bearing source row/field not represented canonically in V2 and every discovered stored-object payload not copied to canonical storage, normally sourced directly from the verified Stage-1 bundle rather than reconstructed after transformation;
 5. a human-readable validation summary that fails the run on unexplained differences.
 
 The legacy archive is not queried by the runtime application and must not become a backdoor around community authorization. It exists solely to make intentional model simplification compatible with zero unintended data loss.
 
 The Stage-2 legacy archive and any retained copies inherit every concrete bundle protection in Section 10.3: owner-only creation where supported, encryption when leaving the trusted migration host or retained as backup/artifact, no real data in CI/public/third-party artifacts, no secret/source-row logging, and community/operator-controlled retention/deletion. Restricted manifests and machine-readable dispositions containing sensitive data receive the same controls; human-readable summaries contain counts/disposition references only. Validation must reject unsafe archive permissions/transfer destinations, secret-bearing summaries, and unprotected retained artifacts rather than treating the word "restricted" as sufficient evidence.
 
-Archived blob payloads use immutable source keys plus byte size and checksum metadata. The verified Stage-1 bundle may be deleted only after every discovered blob payload has exactly one manifest disposition whose complete destination set is checksum-verified: one or more tenant-scoped canonical objects when accepted attachments require fan-out, or one protected archive object when no canonical copy exists.
+Archived stored-object payloads use immutable source keys plus byte size and checksum metadata. The verified Stage-1 bundle may be deleted only after every discovered payload has exactly one manifest disposition whose complete destination set is checksum-verified: one or more tenant-scoped canonical objects when accepted attachments require fan-out, or one protected archive object when no canonical copy exists.
 
 ### 10.5 Validation gates
 
 A migration is successful only when automated checks prove:
 
-- source capture accounts for every discovered source table, row, column/type, and ActiveStorage blob;
+- source capture accounts for every discovered source table, row, column/type, and stored-object payload;
 - source and target/archive account for every source table, row, and data-bearing column;
 - canonical entity counts and IDs match the migration manifest;
 - all foreign keys and many-to-many edges are accounted for;
 - nullable/edge states survive correctly;
-- every ActiveStorage blob payload, including unattached/orphan blobs, is checksum-accounted in canonical storage or the protected Stage-2 archive, and every attachment is mapped to its blob and canonical/archive disposition;
+- every source stored-object payload, including unattached/orphan ActiveStorage blobs and unrecognized Fastify storage objects, is checksum-accounted in canonical storage or the protected Stage-2 archive, and every attachment/File reference is mapped to its payload and canonical/archive disposition;
 - Theme static-map and community/user/place/speaker/story attachment roles are represented;
 - multi-attachment ordering is deterministic and explicitly mapped;
 - external media links are preserved;
@@ -654,6 +656,7 @@ Both paths must cover fresh schema creation, supported upgrades, constraints, in
 Migration CI uses synthetic fixtures only; never real community data. It must include:
 
 - the pinned Rails `schema.rb` and an executable PostgreSQL equivalent;
+- the pinned Fastify V1 schema/migration state executed against both PostgreSQL and SQLite, with representative File/local/object-storage records and bytes;
 - every Rails role and story permission value, plus blank/nonblank Rails topics and ordered multi-value Fastify V1 tags;
 - nullable and edge states such as missing place coordinates and system users without community IDs;
 - all relationship tables, external media links, and persisted resource media URL fields, including source-owned, externally hosted, redundant derived, ambiguous, and URL-only media cases;
@@ -661,11 +664,11 @@ Migration CI uses synthetic fixtures only; never real community data. It must in
 - every relevant ActiveStorage attachment role, including Theme `static_map`;
 - deterministic attached and unattached/orphan blob payloads with known size/checksum, proving each byte payload reaches canonical storage or the protected Stage-2 archive before Stage-1 deletion;
 - one source blob attached within multiple communities, proving checksum-verified tenant-scoped fan-out and complete attachment disposition without cross-tenant File reuse;
-- writes attempted during cutover, proving the enforced read-only boundary or journal/high-water reconciliation includes relational and ActiveStorage changes;
+- writes attempted during cutover, proving the enforced read-only boundary or journal/high-water reconciliation includes relational, attachment, and stored-object changes for each source profile;
 - at least one unexpected/custom source table proving dynamic capture;
 - corruption/missing-media and destination-overwrite negative tests.
 
-Stage-1 capture tests run against real PostgreSQL semantics. Stage-2 mapping tests must run the same verified bundle into both SQLite/D1-compatible and PostgreSQL targets.
+Rails Stage-1 capture tests run against real PostgreSQL/ActiveStorage semantics. Fastify V1 Stage-1 capture tests run against real PostgreSQL and SQLite semantics plus the supported configured storage profiles. Stage-2 mapping tests run each source-profile bundle into both SQLite/D1-compatible and PostgreSQL V2 targets.
 
 ### Deployment tests
 
@@ -678,11 +681,11 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 ## 13. Phased path
 
 1. **Contract correction** — approve this V2 source-of-truth model and update dependent issues/plans.
-2. **Migration source preservation** — land an independently reviewable Stage-1 Rails capture/bundle contract pinned to the real Rails schema; it may be developed in parallel but cannot establish canonical target mappings before this spec is accepted.
+2. **Migration source preservation** — land independently reviewable Stage-1 Rails (#164) and Fastify V1 (#168) source adapters that emit the same portable bundle contract, pinned to real source schemas/storage semantics; they may be developed in parallel but cannot establish canonical target mappings before this spec is accepted.
 3. **Transport foundation** — finish Hono coexistence while treating canonical V2 behavior, not Fastify parity, as destination truth.
 4. **Domain/schema normalization** — remove V1 scope creep and duplicated privacy/media/provider concepts; establish the canonical logical schema on both DB targets.
 5. **Production adapters** — D1/PostgreSQL/SQLite, R2/local storage, durable sessions, password hashing, deployment hardening.
-6. **Canonical migration transform** — consume the verified Rails bundle into the finalized V2 SQLite/PostgreSQL schemas with field dispositions, media migration, and archive validation.
+6. **Canonical migration transform** — consume each verified source-profile bundle into the finalized V2 SQLite/PostgreSQL schemas with field dispositions, media migration, and archive validation.
 7. **Frontend/cutover validation** — prove established user workflows against migrated representative data before production cutover.
 8. **Release** — exact-revision production-readiness gate across hosted, self-hosted, and field-kit profiles.
 
@@ -704,7 +707,7 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 | Legacy removed data?                | Preserve in migration archive; never silently discard.                                                                                                                               |
 | Rails beta/Flipper?                 | Known `public_communities` and `split_settings` outcomes become normal V2 publication/settings capabilities; archive gating state. Custom active keys require migration disposition. |
 | Password migration?                 | Verify legacy bcrypt on login, then rehash with current V2 hasher.                                                                                                                   |
-| Migration strategy?                 | Two-stage: lossless Rails PostgreSQL + ActiveStorage capture bundle, then deterministic bundle-to-canonical-V2 transform.                                                            |
+| Migration strategy?                 | Two-stage: lossless source-profile capture for Rails PostgreSQL/ActiveStorage and Fastify V1 PostgreSQL-or-SQLite/storage, then deterministic bundle-to-canonical-V2 transform.      |
 | API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy.                                                                                   |
 
 ## 15. Change log

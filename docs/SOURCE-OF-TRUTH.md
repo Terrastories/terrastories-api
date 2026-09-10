@@ -33,7 +33,7 @@ These are summaries for navigation; `SPEC-V2.md` owns the full wording.
 - Spatial behavior is portable application-level latitude/longitude logic. **PostGIS/database-specific spatial extensions are a V2 non-goal.**
 - Legacy Rails and Fastify V1 are evidence, not compatibility contracts. V2 preserves established user-visible capabilities and community data while intentionally improving APIs, domain models, security, deployment, and implementation details.
 - Every material legacy/V1 concept discovered during V2 work must be explicitly classified as **RETAIN, IMPROVE, ARCHIVE, DROP, or DEFER**. Data-bearing legacy fields may never be silently dropped.
-- Migration from Rails must achieve **zero unintended data loss**: every source row, relation, attachment, and field is mapped/transformed or retained in the restricted migration archive with machine-readable disposition evidence.
+- Migration from Rails or a deployed Fastify V1 installation must achieve **zero unintended data loss**: every source row, relation, attachment, field, and stored byte payload is mapped/transformed or retained in the restricted migration archive with machine-readable disposition evidence.
 - V1 scope creep removed by V2 is not a requirement: no elder role/elder-only restrictions, elder speaker status, cultural-significance metadata, community cultural settings, story-place cultural context, or removed cultural-restriction schema unless the spec is deliberately amended.
 - Community isolation and Indigenous data sovereignty remain mandatory. Super-admin system privilege does not grant access to protected community content.
 - Field-kit functionality must operate without runtime cloud dependencies.
@@ -48,7 +48,7 @@ Use the legacy Rails repository to answer two questions:
 
 Do **not** use Rails to dictate V2 route names, response shapes, database column names, framework patterns, or provider-specific implementation choices.
 
-Fastify V1 is useful implementation evidence during the Hono transition, but it is not an architectural oracle and must not reintroduce scope that `SPEC-V2.md` deliberately removes.
+Fastify V1 is useful implementation evidence during the Hono transition, but it is not an architectural oracle and must not reintroduce scope that `SPEC-V2.md` deliberately removes. When a deployed Fastify installation is a migration source, its pinned Drizzle schema/migration state, actual PostgreSQL-or-SQLite database, and configured File/storage objects are authoritative only for what Stage 1 must capture losslessly.
 
 ## Surviving durable documentation
 

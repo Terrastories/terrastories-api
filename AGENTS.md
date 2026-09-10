@@ -27,7 +27,7 @@ The canonical product/architecture specification outranks roadmaps, issues, code
 - PostGIS/database-specific spatial extensions are a V2 non-goal. Spatial behavior uses portable latitude/longitude logic unless the canonical spec is explicitly amended.
 - V2 preserves established user-visible Terrastories capabilities and community data; it does **not** target Rails/Fastify wire, route, response-shape, schema, or implementation compatibility.
 - When legacy/V1 behavior or data is encountered, classify it as RETAIN, IMPROVE, ARCHIVE, DROP, or DEFER according to `SPEC-V2.md`. Data-bearing source fields may never be silently dropped.
-- Rails migration must achieve zero unintended data loss: every source row, relationship, attachment, and field is mapped/transformed or retained in the restricted migration archive with machine-readable disposition evidence.
+- Legacy migration from Rails or a deployed Fastify V1 installation must achieve zero unintended data loss: every source row, relationship, attachment, field, and stored byte payload is mapped/transformed or retained in the restricted migration archive with machine-readable disposition evidence.
 - V1 scope creep removed by V2 must not be reintroduced indirectly: no elder role/elder-only restrictions, elder speaker status, cultural-significance metadata, community cultural settings, story-place cultural context, or removed cultural-restriction schema unless the spec is deliberately amended.
 - Community data isolation and Indigenous data sovereignty are mandatory. Super admins may manage system-level users/communities but cannot gain access to protected community content merely because they are privileged administrators.
 - Field-kit functionality must remain fully usable offline without runtime cloud dependencies.
@@ -129,7 +129,7 @@ Require appropriate D1/SQLite-compatible **and** PostgreSQL evidence for:
 
 Never add PostGIS to satisfy an old test or historical document. Risky/destructive migrations require expand-contract or an explicit tested backup/restore/forward-fix strategy.
 
-For Rails-to-V2 migration tooling, use the actual Rails schema/ActiveStorage relationships as the source fixture contract. FactoryBot values are useful but insufficient. Prove every source row/column/relation/attachment is mapped, transformed, or archived; never make a stricter V2 constraint pass by inventing historical provenance.
+For legacy-to-V2 migration tooling, use the actual source-profile contract: Rails schema/ActiveStorage relationships for Rails, or the pinned Fastify V1 Drizzle schema/migrations and configured PostgreSQL-or-SQLite/File-storage semantics for Fastify. FactoryBot values and conversion through another source dialect are insufficient. Prove every source row/column/relation/attachment/stored object is mapped, transformed, or archived; never make a stricter V2 constraint pass by inventing historical provenance.
 
 ### High-risk surfaces
 

@@ -200,7 +200,7 @@ Community
 User
   id
   email?
-  username
+  username?
   displayName?
   passwordHash
   passwordAlgorithm
@@ -225,9 +225,9 @@ Community publication and story audience are separate axes. For authenticated ow
 
 V2 keeps the meaningful Rails `member` versus `viewer` distinction because it affects the user-visible privacy model. The duplicated Rails `super_admin` boolean is normalized into the role enum for canonical V2 rows, but migration must first preserve both raw values. Contradictory source combinations must fail/manual-disposition canonical mapping rather than being guessed.
 
-`username` remains a stable unique login identifier. Email uniqueness rules must support the approved login behavior without losing any legacy account; migration validation must detect collisions before cutover rather than rewriting identifiers silently.
+`username` is required for new V2 accounts and for an imported account whose source provides one. It remains a stable globally unique login identifier when present. It is nullable only so a Fastify V1 account, whose source schema has no username, can migrate without inventing identity data. Migration must never synthesize a username from a name, email, or source ID. An authorized community account-management flow may later assign a unique username. Email is unique within a community but may identify different accounts in different communities; migration validation must detect collisions before cutover rather than rewriting identifiers silently.
 
-Login resolution must be unambiguous across username and email together. Never select the first of multiple matching accounts. Define one normalization/case-comparison contract shared by SQLite/D1 and PostgreSQL, enforce it on new/updated identities, and validate migrated duplicate emails, case collisions, and usernames matching another account's email. Preserve raw identifiers and require explicit operator resolution before cutover when they conflict. Do not invent a community membership for an orphan historical account.
+Login resolution must be unambiguous across username and email together. A username match identifies one account. An email match identifies one account only when it is globally unambiguous or when an explicit community locator narrows it to one account; otherwise login requires community context and returns the same non-enumerating failure as any invalid credential. Never select the first of multiple matching accounts. Define one normalization/case-comparison contract shared by SQLite/D1 and PostgreSQL, enforce it on new/updated identities, and validate duplicate emails within a community, cross-community email ambiguity, case collisions, and a username matching another account's email. Preserve raw identifiers and require explicit operator resolution before cutover when they conflict. Do not invent a community membership for an orphan historical account.
 
 ### 6.3 Story
 
@@ -258,6 +258,8 @@ Story visibility never overrides the owning community's publication gate for pub
 
 Do not combine `privacyLevel`, `isRestricted`, elder-only flags, or other overlapping privacy mechanisms with this field.
 
+Fastify V1 collapses its overlapping story controls during migration. When `isRestricted = false`, `privacyLevel = public` maps to `public` and `members_only` maps to `community`; `privacyLevel = restricted` may map to `editors` only when source evidence confirms the row was not subject to the narrower elder/admin path. `isRestricted = true` was limited to elder/admin audiences that have no exact canonical equivalent, so it remains unavailable in V2 runtime and blocks cutover until the community explicitly approves a canonical audience or an archive-only disposition. `editors` is the closest retained runtime audience, but migration cannot select it silently. Any other value or contradictory source state follows the same explicit community-approved disposition path and never defaults to public.
+
 `createdBy` is nullable in storage so imported/historical records can be represented truthfully; new application-created stories must record the actor when known.
 
 `tags` is the canonical portable story taxonomy and filter list. A nonblank Rails `topic` maps to a one-element list with its exact source value; a blank/null topic maps to an empty list. Fastify V1 `tags` retain every ordered source value and may not be collapsed into one topic. Public/member filters match any requested tag under one documented case-comparison contract shared by SQLite/D1 and PostgreSQL. Migration retains the raw source field/value in its evidence so canonical validation or future normalization never invents, silently deduplicates, or loses taxonomy data.
@@ -283,11 +285,14 @@ Place
   description?
   typeOfPlace?
   region?
+  visibility: public | community | editors
   latitude?
   longitude?
   createdAt
   updatedAt
 ```
+
+`visibility` controls whether a place may appear in direct, map, search, count, story-derived, and media projections. A readable story does not widen a related place's audience; callers see the intersection of story and place access. Authorized same-community editors/admins can manage every canonical place. Rails places default to `public` because the pinned Rails source has no place restriction. Fastify `isRestricted = false` maps to `public`. A restricted Fastify place had elder-specific read access with no exact canonical equivalent, so it stays unavailable in V2 runtime and blocks cutover until the community explicitly approves a canonical audience or archive-only disposition; `editors` is the closest runtime audience but is never selected implicitly. Raw `isRestricted` and removed cultural-significance values remain in migration evidence/archive.
 
 Coordinates are nullable in storage. Map publication and spatial operations require a valid coordinate pair. Spatial operations use portable application-level latitude/longitude logic; no PostGIS dependency is permitted.
 
@@ -350,6 +355,7 @@ CommunityMapConfig
 - Map configuration is provider-neutral; Mapbox/Protomaps-specific naming must not leak into the canonical model unless required by an adapter.
 - Rails Theme `static_map` is a data-bearing ActiveStorage attachment and must migrate through the canonical File/media system.
 - Legacy provider credentials are preserved only in the restricted migration archive and require explicit operator handling during cutover rather than being copied into ordinary V2 rows. Reports contain disposition references only, never credential values.
+- Fastify V1 permits multiple theme rows and multiple active themes per community. Exactly one active row maps to the canonical configuration. Zero or multiple active rows require an explicit same-community administrator selection accepted under the community cutover process; migration must never choose the first, newest, or otherwise guessed row. Every source theme row and its disposition remains in the archive/manifest. A community that actively relies on switching among multiple configurations requires a product/spec decision before its cutover rather than silent feature loss.
 
 ### 6.7 Files and media
 
@@ -413,7 +419,9 @@ When one legacy source blob is attached to resources in more than one community,
 Password hashing is behind a `PasswordHasher` abstraction. The domain contract stores the encoded hash and algorithm/version metadata rather than coupling the product to one library.
 
 - New-password hashing must use a modern approved password KDF with parameters benchmarked on the supported Workers and Node runtimes before release.
-- Legacy Rails bcrypt hashes are accepted only for migration/login upgrade. After a successful legacy-hash verification, V2 re-hashes with the current V2 algorithm and clears the legacy marker.
+- The verifier registry must recognize exact preserved source encodings and metadata for Rails bcrypt and Fastify V1 Argon2id PHC strings, including algorithm/version and encoded parameters. Unsupported, malformed, or tampered hashes fail closed without exposing which check failed.
+- After successful verification of a source hash, V2 re-hashes with the current V2 policy and clears the source marker when the algorithm or parameters are obsolete. A Fastify Argon2id hash already satisfying the current V2 policy remains valid without an unnecessary rewrite.
+- Every release profile, including Workers and the offline field kit, must support these source verifiers until the documented password-upgrade window closes; migration cannot make a valid source account unusable on a supported target.
 - Never reverse, decrypt, or replace a legacy password with a generated password during migration.
 
 ### Sessions
@@ -534,15 +542,15 @@ Unknown/community-specific source tables must be captured automatically. A hand-
 - Preserve legacy primary IDs for canonical domain records when doing so is safe; record any remap explicitly.
 - Never invent required foreign keys/provenance merely to satisfy a stricter V2 schema.
 - Preserve nulls and source precision when absence or granularity is meaningful; application creation rules may be stricter than import/storage rules. Rails speaker dates map to full canonical partial dates, while Fastify year-only values remain year-only and never gain invented month/day values.
-- Map Rails story permission values deterministically to V2 visibility.
+- Map Rails story permission values and unrestricted Fastify story/place states deterministically to V2 visibility. Fastify elder/admin-restricted content requires explicit community-approved audience/archive disposition and never defaults to a broader audience.
 - Preserve user role semantics, including `viewer` versus `member`.
 - Preserve both legacy `role` and `super_admin` source values before normalization. Contradictory combinations require explicit/manual disposition and may not be guessed.
-- Preserve username and email values so username-or-email login can survive cutover. Identifier collisions or invalid canonical uniqueness must fail validation for operator resolution; never silently rewrite identities.
+- Preserve every source username and email value so username-or-email login can survive cutover. Fastify accounts retain a null username until an authorized user assigns one; never synthesize an identifier. Duplicate or cross-kind ambiguous identifiers require community context or explicit operator resolution under Section 6.2 and may never use first-match behavior.
 - Preserve every relationship edge and relationship multiplicity.
 - Copy media bytes, MIME type, filename, byte size, checksum, attachment role, and a deterministic ordering signal for multi-attachments; verify checksums after write.
 - Preserve legacy external media links.
 - Classify every source V1 `mediaUrls`, `imageUrl`, `audioUrl`, or `photoUrl` value independently before removing those resource columns from the canonical runtime. A URL proven to reference source-owned media is recovered into `File` plus the correct typed relation with checksum evidence. A Story URL that represents externally hosted content is retained as a canonical external-media-link record with exact URL and source order. A redundant deployment-generated serving/signed URL is omitted from runtime only after its underlying media has been accounted for, while its raw value remains in the restricted legacy archive. Ambiguous, unsafe, unreachable, or unsupported values remain archived and require explicit community/operator disposition before the migration can succeed; the transform must not guess from filename or URL shape alone. The migration manifest records the classification and destination/archive reference for every value.
-- Preserve legacy bcrypt hashes with algorithm metadata for lazy upgrade.
+- Preserve exact Rails bcrypt and Fastify Argon2id PHC hashes with algorithm/version/parameter provenance for verification and policy-aware lazy upgrade.
 - Never silently discard a source field. Fields intentionally absent from canonical V2 go to the machine-readable legacy archive.
 - Structurally inconsistent or unmappable source rows remain losslessly present in the bundle/archive and fail or require explicit manual disposition before a migration run can be declared successful.
 
@@ -596,9 +604,12 @@ A migration is successful only when automated checks prove:
 - Theme static-map and community/user/place/speaker/story attachment roles are represented;
 - multi-attachment ordering is deterministic and explicitly mapped;
 - external media links are preserved;
-- username/email login identities and role/visibility behavior match the experience contract;
+- username/email login identities, including null Fastify usernames and cross-community duplicate emails, match the unambiguous experience contract;
+- Rails bcrypt and Fastify Argon2id accounts authenticate on every release profile, reject malformed/tampered hashes, and upgrade only when the source algorithm/parameters are outside current policy;
 - contradictory role/super-admin state cannot be silently normalized;
 - public/private/disabled community behavior is preserved, including private-community override of public stories;
+- Fastify restricted stories and places remain unavailable until their explicit community-approved audience/archive disposition, and never widen through canonical mapping or direct/list/search/map/count/media/story-derived projections;
+- every Fastify theme row is archived/dispositioned, and zero/multiple active-theme states require explicit community selection rather than implicit ordering;
 - Rails story topics and Fastify V1 story tags retain their complete values and filtering behavior through the canonical tags list;
 - known Rails beta/Flipper-gated outcomes map to canonical V2 capabilities, and every unknown/custom active source flag has an explicit RETAIN/IMPROVE/ARCHIVE disposition;
 - public map/filter data remains representable;
@@ -621,11 +632,12 @@ The same canonical migrated fixture must validate on SQLite/D1-compatible and Po
 | Community/user/place/speaker attachments         | IMPROVE                                                    | Normalize into the same media system                                                                                      |
 | Theme `static_map` attachment                    | IMPROVE                                                    | Preserve through canonical File/map configuration relation                                                                |
 | Rails Theme                                      | IMPROVE                                                    | Replace provider-specific singleton theme with `CommunityMapConfig`                                                       |
+| Fastify multiple themes per community            | IMPROVE/ARCHIVE                                            | Community selects one canonical configuration; every source row remains accounted for                                     |
 | Map provider credentials in DB                   | IMPROVE/ARCHIVE                                            | Move secrets out of domain rows; preserve source value in restricted migration artifact                                   |
 | CSV imports                                      | RETAIN/IMPROVE                                             | Preserve user workflow with a typed/validated V2 implementation                                                           |
 | Rails `curriculums`                              | ARCHIVE by default                                         | Schema exists but no current Rails route exposes it; do not rebuild runtime product without evidence of active user need  |
 | Rails `beta` / known Flipper state               | IMPROVE/ARCHIVE                                            | Preserve publication/settings outcomes as canonical V2 capabilities; archive legacy gating state; classify custom keys    |
-| Fastify elder role/restrictions                  | DROP                                                       | Explicit V1 scope creep; not a Rails user requirement                                                                     |
+| Fastify elder role/elder-only policy             | DROP                                                       | Remove scope creep; persisted restricted rows require community-approved canonical audience or archive-only disposition   |
 | Cultural-significance/settings/context V1 fields | DROP from canonical runtime; archive if source data exists | Avoid unreviewed cultural-protocol semantics                                                                              |
 | PostGIS behavior                                 | DROP                                                       | Portability and offline operation are higher-value requirements                                                           |
 | Persisted V1 resource media URL fields           | IMPROVE/ARCHIVE                                            | Classify each value; retain external story links or recover owned media, while archiving redundant/unsupported raw values |
@@ -640,7 +652,7 @@ Legacy/Fastify comparison tests may help discover omissions, but an old behavior
 
 Public contract tests must specifically prove that community publication/lifecycle gates override story-level public visibility across list/detail/search/map/media paths.
 
-Authentication contract tests must cover username and email login identifiers for migrated and new V2 users according to the approved uniqueness rules.
+Authentication contract tests must cover username and email login identifiers for migrated and new V2 users according to the approved uniqueness rules, including imported accounts without usernames, duplicate emails across communities, required community disambiguation, identifier case/cross-kind collisions, and non-enumerating failures.
 
 ### Database tests
 
@@ -658,6 +670,9 @@ Migration CI uses synthetic fixtures only; never real community data. It must in
 - the pinned Rails `schema.rb` and an executable PostgreSQL equivalent;
 - the pinned Fastify V1 schema/migration state executed against both PostgreSQL and SQLite, with representative File/local/object-storage records and bytes;
 - every Rails role and story permission value, plus blank/nonblank Rails topics and ordered multi-value Fastify V1 tags;
+- Fastify users without usernames, duplicate emails across communities, same-community/case/cross-kind collisions, valid Rails bcrypt and Fastify Argon2id parameter variants, and malformed/tampered hashes;
+- every recognized Fastify story `privacyLevel` combined with both `isRestricted` states, unknown/contradictory values, and restricted/unrestricted places linked to stories with every canonical audience;
+- Fastify communities with zero, one, and multiple active themes plus inactive alternatives, proving explicit selection and complete row disposition;
 - nullable and edge states such as missing place coordinates and system users without community IDs;
 - all relationship tables, external media links, and persisted resource media URL fields, including source-owned, externally hosted, redundant derived, ambiguous, and URL-only media cases;
 - curriculums and operational tables;
@@ -691,29 +706,31 @@ Auth, sessions, files/media, imports, migration, community isolation, public/pri
 
 ## 14. Resolved architectural decisions
 
-| Question                            | Decision                                                                                                                                                                             |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Legacy compatibility target?        | Preserve user experience and data; do not preserve Rails/Fastify wire/internal compatibility.                                                                                        |
-| HTTP framework?                     | Hono.                                                                                                                                                                                |
-| Database targets?                   | D1/SQLite and PostgreSQL equal first-class.                                                                                                                                          |
-| Physical schema?                    | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required.                                                                                 |
-| Spatial behavior?                   | Plain lat/lng + application-level portable logic; no PostGIS.                                                                                                                        |
-| Story privacy?                      | One `public / community / editors` audience field; public requests also require a public active community, while authenticated own-community access follows Section 6.2.             |
-| User roles?                         | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role.                                                                                                                 |
-| Login identity?                     | Preserve Rails username-or-email login behavior unless explicitly changed later.                                                                                                     |
-| Sessions?                           | Durable database-backed authoritative sessions; memory dev/test only.                                                                                                                |
-| Media?                              | One `File` identity model + explicit typed relations; URLs derived by storage adapter; Theme static map included.                                                                    |
-| Map configuration?                  | One provider-neutral `CommunityMapConfig` per community; provider credentials are secrets.                                                                                           |
-| Legacy removed data?                | Preserve in migration archive; never silently discard.                                                                                                                               |
-| Rails beta/Flipper?                 | Known `public_communities` and `split_settings` outcomes become normal V2 publication/settings capabilities; archive gating state. Custom active keys require migration disposition. |
-| Password migration?                 | Verify legacy bcrypt on login, then rehash with current V2 hasher.                                                                                                                   |
-| Migration strategy?                 | Two-stage: lossless source-profile capture for Rails PostgreSQL/ActiveStorage and Fastify V1 PostgreSQL-or-SQLite/storage, then deterministic bundle-to-canonical-V2 transform.      |
-| API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy.                                                                                   |
+| Question                            | Decision                                                                                                                                                                               |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Legacy compatibility target?        | Preserve user experience and data; do not preserve Rails/Fastify wire/internal compatibility.                                                                                          |
+| HTTP framework?                     | Hono.                                                                                                                                                                                  |
+| Database targets?                   | D1/SQLite and PostgreSQL equal first-class.                                                                                                                                            |
+| Physical schema?                    | One logical schema/behavior contract; dialect-specific definitions/migrations allowed when required.                                                                                   |
+| Spatial behavior?                   | Plain lat/lng + application-level portable logic; no PostGIS.                                                                                                                          |
+| Story privacy?                      | One `public / community / editors` audience field; public requests also require a public active community, while authenticated own-community access follows Section 6.2.               |
+| Place privacy?                      | One `public / community / editors` audience field; story relationships cannot widen it, and Fastify restrictions require community disposition because elder access has no equivalent. |
+| User roles?                         | `viewer`, `member`, `editor`, `admin`, `super_admin`; no elder role.                                                                                                                   |
+| Login identity?                     | Preserve username-or-email login; Fastify imports may have no username, and ambiguous cross-community email matches require community context rather than first-match lookup.          |
+| Sessions?                           | Durable database-backed authoritative sessions; memory dev/test only.                                                                                                                  |
+| Media?                              | One `File` identity model + explicit typed relations; URLs derived by storage adapter; Theme static map included.                                                                      |
+| Map configuration?                  | One provider-neutral `CommunityMapConfig` per community; ambiguous Fastify multi-theme state requires community selection; provider credentials are secrets.                           |
+| Legacy removed data?                | Preserve in migration archive; never silently discard.                                                                                                                                 |
+| Rails beta/Flipper?                 | Known `public_communities` and `split_settings` outcomes become normal V2 publication/settings capabilities; archive gating state. Custom active keys require migration disposition.   |
+| Password migration?                 | Verify preserved Rails bcrypt and Fastify Argon2id on every profile; rehash after login only when the source hash falls outside current V2 policy.                                     |
+| Migration strategy?                 | Two-stage: lossless source-profile capture for Rails PostgreSQL/ActiveStorage and Fastify V1 PostgreSQL-or-SQLite/storage, then deterministic bundle-to-canonical-V2 transform.        |
+| API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy.                                                                                     |
 
 ## 15. Change log
 
 | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-09-10 | Added the Fastify V1 account, password, restriction, and theme transform contracts: nullable imported usernames with unambiguous community-aware email login; Argon2id preservation and policy-aware upgrade; fail-closed story/place audiences; and community selection for ambiguous multi-theme state.                                                                |
 | 2026-09-08 | Pinned legacy behavior evidence; separated publication from authenticated story audiences; specified safe setup, community-admin stewardship, unambiguous identities, local recovery, import fidelity, disconnected browser acceptance, and named continuity/release owners.                                                                                             |
 | 2026-06-07 | Initial V2 Cloudflare/Hono specification.                                                                                                                                                                                                                                                                                                                                |
 | 2026-08-17 | Reaffirmed Hono, equal D1/SQLite + PostgreSQL targets, field-kit support, no PostGIS, and sovereignty constraints.                                                                                                                                                                                                                                                       |

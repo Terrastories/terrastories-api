@@ -379,6 +379,8 @@ Media relations are explicit and typed. At minimum V2 must represent:
 - community display image, background image, and sponsor logos;
 - theme/community map static-map media.
 
+Story external media links are canonical link records, distinct from `File`: they retain the owning story/community, exact validated URL, and deterministic source order. They do not claim ownership of remote bytes and do not grant access to any local object. Offline clients may display retained metadata but must not fetch remote links automatically.
+
 Where legacy UI behavior depends on the order of a multi-attachment collection such as sponsor logos, migration must choose and document a deterministic source ordering (for example attachment creation/id order) and preserve that order explicitly in V2 rather than relying on database return order.
 
 Do not duplicate media identity in `mediaUrls`, `imageUrl`, `audioUrl`, `photoUrl`, or similar resource columns.
@@ -531,7 +533,7 @@ Unknown/community-specific source tables must be captured automatically. A hand-
 - Preserve every relationship edge and relationship multiplicity.
 - Copy media bytes, MIME type, filename, byte size, checksum, attachment role, and a deterministic ordering signal for multi-attachments; verify checksums after write.
 - Preserve legacy external media links.
-- When a source V1 resource stores deployment-derived media URL fields such as `mediaUrls`, `imageUrl`, `audioUrl`, or `photoUrl`, remove those fields from the canonical runtime model but preserve every raw source value in the restricted legacy archive. The migration manifest must account for each field/value disposition even when no durable media object can be recovered from the URL.
+- Classify every source V1 `mediaUrls`, `imageUrl`, `audioUrl`, or `photoUrl` value independently before removing those resource columns from the canonical runtime. A URL proven to reference source-owned media is recovered into `File` plus the correct typed relation with checksum evidence. A Story URL that represents externally hosted content is retained as a canonical external-media-link record with exact URL and source order. A redundant deployment-generated serving/signed URL is omitted from runtime only after its underlying media has been accounted for, while its raw value remains in the restricted legacy archive. Ambiguous, unsafe, unreachable, or unsupported values remain archived and require explicit community/operator disposition before the migration can succeed; the transform must not guess from filename or URL shape alone. The migration manifest records the classification and destination/archive reference for every value.
 - Preserve legacy bcrypt hashes with algorithm metadata for lazy upgrade.
 - Never silently discard a source field. Fields intentionally absent from canonical V2 go to the machine-readable legacy archive.
 - Structurally inconsistent or unmappable source rows remain losslessly present in the bundle/archive and fail or require explicit manual disposition before a migration run can be declared successful.
@@ -564,12 +566,14 @@ Stage 2 produces:
 1. the V2 database for the chosen target;
 2. migrated media/storage objects;
 3. a machine-readable migration manifest with source/bundle/target counts, ID mappings, field dispositions, warnings, and checksums;
-4. a restricted **legacy archive** containing every data-bearing source row/field not represented canonically in V2, normally sourced directly from the verified Stage-1 bundle rather than reconstructed after transformation;
+4. a restricted **legacy archive** containing every data-bearing source row/field not represented canonically in V2 and every discovered blob payload not copied to canonical storage, normally sourced directly from the verified Stage-1 bundle rather than reconstructed after transformation;
 5. a human-readable validation summary that fails the run on unexplained differences.
 
 The legacy archive is not queried by the runtime application and must not become a backdoor around community authorization. It exists solely to make intentional model simplification compatible with zero unintended data loss.
 
 The Stage-2 legacy archive and any retained copies inherit every concrete bundle protection in Section 10.3: owner-only creation where supported, encryption when leaving the trusted migration host or retained as backup/artifact, no real data in CI/public/third-party artifacts, no secret/source-row logging, and community/operator-controlled retention/deletion. Restricted manifests and machine-readable dispositions containing sensitive data receive the same controls; human-readable summaries contain counts/disposition references only. Validation must reject unsafe archive permissions/transfer destinations, secret-bearing summaries, and unprotected retained artifacts rather than treating the word "restricted" as sufficient evidence.
+
+Archived blob payloads use immutable source keys plus byte size and checksum metadata. The verified Stage-1 bundle may be deleted only after every discovered blob payload is checksum-verified at exactly one accounted destination: canonical storage or this protected archive.
 
 ### 10.5 Validation gates
 
@@ -580,7 +584,7 @@ A migration is successful only when automated checks prove:
 - canonical entity counts and IDs match the migration manifest;
 - all foreign keys and many-to-many edges are accounted for;
 - nullable/edge states survive correctly;
-- every ActiveStorage attachment is accounted for and migrated bytes match source checksums;
+- every ActiveStorage blob payload, including unattached/orphan blobs, is checksum-accounted in canonical storage or the protected Stage-2 archive, and every attachment is mapped to its blob and canonical/archive disposition;
 - Theme static-map and community/user/place/speaker/story attachment roles are represented;
 - multi-attachment ordering is deterministic and explicitly mapped;
 - external media links are preserved;
@@ -596,25 +600,25 @@ The same canonical migrated fixture must validate on SQLite/D1-compatible and Po
 
 ## 11. Legacy disposition at V2 launch
 
-| Legacy/V1 concept                                | V2 disposition                                             | Rationale                                                                                                                |
-| ------------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Communities, stories, places, speakers           | RETAIN/IMPROVE                                             | Core Terrastories domain                                                                                                 |
-| Rails story permission levels                    | IMPROVE                                                    | One `visibility` enum preserves the same audience distinctions                                                           |
-| Rails `viewer` and `member` distinction          | RETAIN                                                     | User-visible access difference must survive                                                                              |
-| Username-or-email login                          | RETAIN                                                     | Established login experience; both identifiers migrate                                                                   |
-| Story/place/speaker relationships                | RETAIN                                                     | Core narrative/map data                                                                                                  |
-| Uploaded media and external media links          | IMPROVE                                                    | Normalize around `File` + explicit relations; preserve every item                                                        |
-| Community/user/place/speaker attachments         | IMPROVE                                                    | Normalize into the same media system                                                                                     |
-| Theme `static_map` attachment                    | IMPROVE                                                    | Preserve through canonical File/map configuration relation                                                               |
-| Rails Theme                                      | IMPROVE                                                    | Replace provider-specific singleton theme with `CommunityMapConfig`                                                      |
-| Map provider credentials in DB                   | IMPROVE/ARCHIVE                                            | Move secrets out of domain rows; preserve source value in restricted migration artifact                                  |
-| CSV imports                                      | RETAIN/IMPROVE                                             | Preserve user workflow with a typed/validated V2 implementation                                                          |
-| Rails `curriculums`                              | ARCHIVE by default                                         | Schema exists but no current Rails route exposes it; do not rebuild runtime product without evidence of active user need |
-| Rails `beta` / known Flipper state               | IMPROVE/ARCHIVE                                            | Preserve publication/settings outcomes as canonical V2 capabilities; archive legacy gating state; classify custom keys   |
-| Fastify elder role/restrictions                  | DROP                                                       | Explicit V1 scope creep; not a Rails user requirement                                                                    |
-| Cultural-significance/settings/context V1 fields | DROP from canonical runtime; archive if source data exists | Avoid unreviewed cultural-protocol semantics                                                                             |
-| PostGIS behavior                                 | DROP                                                       | Portability and offline operation are higher-value requirements                                                          |
-| Persisted resource media URL fields              | DROP from canonical runtime; ARCHIVE source values         | URLs are deployment-specific derived values, but persisted values remain data-bearing migration evidence                 |
+| Legacy/V1 concept                                | V2 disposition                                             | Rationale                                                                                                                 |
+| ------------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Communities, stories, places, speakers           | RETAIN/IMPROVE                                             | Core Terrastories domain                                                                                                  |
+| Rails story permission levels                    | IMPROVE                                                    | One `visibility` enum preserves the same audience distinctions                                                            |
+| Rails `viewer` and `member` distinction          | RETAIN                                                     | User-visible access difference must survive                                                                               |
+| Username-or-email login                          | RETAIN                                                     | Established login experience; both identifiers migrate                                                                    |
+| Story/place/speaker relationships                | RETAIN                                                     | Core narrative/map data                                                                                                   |
+| Uploaded media and external media links          | IMPROVE                                                    | Normalize around `File` + explicit relations; preserve every item                                                         |
+| Community/user/place/speaker attachments         | IMPROVE                                                    | Normalize into the same media system                                                                                      |
+| Theme `static_map` attachment                    | IMPROVE                                                    | Preserve through canonical File/map configuration relation                                                                |
+| Rails Theme                                      | IMPROVE                                                    | Replace provider-specific singleton theme with `CommunityMapConfig`                                                       |
+| Map provider credentials in DB                   | IMPROVE/ARCHIVE                                            | Move secrets out of domain rows; preserve source value in restricted migration artifact                                   |
+| CSV imports                                      | RETAIN/IMPROVE                                             | Preserve user workflow with a typed/validated V2 implementation                                                           |
+| Rails `curriculums`                              | ARCHIVE by default                                         | Schema exists but no current Rails route exposes it; do not rebuild runtime product without evidence of active user need  |
+| Rails `beta` / known Flipper state               | IMPROVE/ARCHIVE                                            | Preserve publication/settings outcomes as canonical V2 capabilities; archive legacy gating state; classify custom keys    |
+| Fastify elder role/restrictions                  | DROP                                                       | Explicit V1 scope creep; not a Rails user requirement                                                                     |
+| Cultural-significance/settings/context V1 fields | DROP from canonical runtime; archive if source data exists | Avoid unreviewed cultural-protocol semantics                                                                              |
+| PostGIS behavior                                 | DROP                                                       | Portability and offline operation are higher-value requirements                                                           |
+| Persisted V1 resource media URL fields           | IMPROVE/ARCHIVE                                            | Classify each value; retain external story links or recover owned media, while archiving redundant/unsupported raw values |
 
 ## 12. Testing and release gates
 
@@ -644,10 +648,10 @@ Migration CI uses synthetic fixtures only; never real community data. It must in
 - the pinned Rails `schema.rb` and an executable PostgreSQL equivalent;
 - every Rails role and story permission value;
 - nullable and edge states such as missing place coordinates and system users without community IDs;
-- all relationship tables, external media links, and persisted resource media URL fields, including a case where the URL is the only surviving media reference;
+- all relationship tables, external media links, and persisted resource media URL fields, including source-owned, externally hosted, redundant derived, ambiguous, and URL-only media cases;
 - curriculums and operational tables;
 - every relevant ActiveStorage attachment role, including Theme `static_map`;
-- deterministic blob payloads with known size/checksum;
+- deterministic attached and unattached/orphan blob payloads with known size/checksum, proving each byte payload reaches canonical storage or the protected Stage-2 archive before Stage-1 deletion;
 - at least one unexpected/custom source table proving dynamic capture;
 - corruption/missing-media and destination-overwrite negative tests.
 

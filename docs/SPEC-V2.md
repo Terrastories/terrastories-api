@@ -238,7 +238,7 @@ Story
   title
   description?
   visibility: public | community | editors
-  topic?
+  tags: string[]
   language?
   dateInterviewed?
   interviewLocationId?
@@ -259,6 +259,8 @@ Story visibility never overrides the owning community's publication gate for pub
 Do not combine `privacyLevel`, `isRestricted`, elder-only flags, or other overlapping privacy mechanisms with this field.
 
 `createdBy` is nullable in storage so imported/historical records can be represented truthfully; new application-created stories must record the actor when known.
+
+`tags` is the canonical portable story taxonomy and filter list. A nonblank Rails `topic` maps to a one-element list with its exact source value; a blank/null topic maps to an empty list. Fastify V1 `tags` retain every ordered source value and may not be collapsed into one topic. Public/member filters match any requested tag under one documented case-comparison contract shared by SQLite/D1 and PostgreSQL. Migration retains the raw source field/value in its evidence so canonical validation or future normalization never invents, silently deduplicates, or loses taxonomy data.
 
 Story relationships are explicit canonical records:
 
@@ -402,6 +404,8 @@ For community-owned assets, disabled-community and system-privilege restrictions
 
 Every community-owned relation must target a resource whose `communityId` equals the File's `communityId`; the null-community system-profile exception may relate only to its owning `super_admin` account. A file may have multiple relations within that one tenant. An authorized relation permits its bytes but never disclosure of other protected relations/metadata. Adding/reusing a relation that broadens the bytes' audience requires publishing authority over every affected owner, otherwise reject it. Deliberate cross-community publication creates a distinct destination-tenant File identity and storage object after authorization by both communities and records source/checksum provenance; it never reuses a source tenant's File row or storage key. Removing an attachment requires authority over that owner; deleting shared bytes requires authority over all remaining owners or prior authorized removal of all references. Orphan cleanup must not remove still-referenced bytes. Imported cross-tenant relations remain losslessly captured and require explicit manual disposition before cutover rather than becoming runtime links. Tests must cover multiply related within one tenant, rejected cross-tenant relations, authorized copy-for-publication, unattached, historical-without-uploader, and private-profile/branding files as well as story media. Public/signed serving and caches must honor current policy after publication changes or revocation; possession of a historical URL is not a bypass.
 
+When one legacy source blob is attached to resources in more than one community, Stage 2 creates a separate File identity, tenant-scoped storage key, and checksum-verified object for each destination community whose attachment is accepted for cutover. The manifest accounts for the source payload once and lists every destination copy plus each source attachment disposition. It never reuses one tenant's File/storage identity across communities; an attachment that cannot be accepted remains archived for explicit community/operator disposition.
+
 ## 7. Authentication, sessions, and sovereignty
 
 ### Passwords
@@ -492,6 +496,8 @@ Migration is explicitly **two-stage**:
 
 This separation lets Terrastories prove source preservation before target schema normalization is finished and prevents migration code from inheriting transient Fastify/V1 schema drift.
 
+Cutover requires one enforced, auditable source-write boundary that includes relational writes, background jobs, attachments, and ActiveStorage blob uploads. The default path is a community-approved maintenance window: disable and drain every source writer, place Rails in read-only mode, take the final consistent Stage-1 capture from that quiescent source, transform/validate it, switch traffic, and keep Rails read-only until target acceptance completes. A lower-downtime path is permitted only when an ordered durable change journal captures and checksum-accounts for every row, relation, attachment, and blob after the initial snapshot; replay is idempotent, a final high-water mark is reconciled under a short write freeze, and no untracked dual-write window exists. A migration cannot be declared successful from an earlier snapshot while the source remains writable.
+
 ### 10.1 Source of truth for migration
 
 The source-capture contract is pinned to the audited legacy repository revision and schema version used by fixtures. Every migration manifest records:
@@ -573,7 +579,7 @@ The legacy archive is not queried by the runtime application and must not become
 
 The Stage-2 legacy archive and any retained copies inherit every concrete bundle protection in Section 10.3: owner-only creation where supported, encryption when leaving the trusted migration host or retained as backup/artifact, no real data in CI/public/third-party artifacts, no secret/source-row logging, and community/operator-controlled retention/deletion. Restricted manifests and machine-readable dispositions containing sensitive data receive the same controls; human-readable summaries contain counts/disposition references only. Validation must reject unsafe archive permissions/transfer destinations, secret-bearing summaries, and unprotected retained artifacts rather than treating the word "restricted" as sufficient evidence.
 
-Archived blob payloads use immutable source keys plus byte size and checksum metadata. The verified Stage-1 bundle may be deleted only after every discovered blob payload is checksum-verified at exactly one accounted destination: canonical storage or this protected archive.
+Archived blob payloads use immutable source keys plus byte size and checksum metadata. The verified Stage-1 bundle may be deleted only after every discovered blob payload has exactly one manifest disposition whose complete destination set is checksum-verified: one or more tenant-scoped canonical objects when accepted attachments require fan-out, or one protected archive object when no canonical copy exists.
 
 ### 10.5 Validation gates
 
@@ -591,6 +597,7 @@ A migration is successful only when automated checks prove:
 - username/email login identities and role/visibility behavior match the experience contract;
 - contradictory role/super-admin state cannot be silently normalized;
 - public/private/disabled community behavior is preserved, including private-community override of public stories;
+- Rails story topics and Fastify V1 story tags retain their complete values and filtering behavior through the canonical tags list;
 - known Rails beta/Flipper-gated outcomes map to canonical V2 capabilities, and every unknown/custom active source flag has an explicit RETAIN/IMPROVE/ARCHIVE disposition;
 - public map/filter data remains representable;
 - migration is deterministic and safe to re-run against a fresh destination;
@@ -604,6 +611,7 @@ The same canonical migrated fixture must validate on SQLite/D1-compatible and Po
 | ------------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | Communities, stories, places, speakers           | RETAIN/IMPROVE                                             | Core Terrastories domain                                                                                                  |
 | Rails story permission levels                    | IMPROVE                                                    | One `visibility` enum preserves the same audience distinctions                                                            |
+| Rails story topic / Fastify V1 story tags        | IMPROVE                                                    | One portable ordered tags list preserves singular and multi-value taxonomy/filter behavior                                |
 | Rails `viewer` and `member` distinction          | RETAIN                                                     | User-visible access difference must survive                                                                               |
 | Username-or-email login                          | RETAIN                                                     | Established login experience; both identifiers migrate                                                                    |
 | Story/place/speaker relationships                | RETAIN                                                     | Core narrative/map data                                                                                                   |
@@ -646,12 +654,14 @@ Both paths must cover fresh schema creation, supported upgrades, constraints, in
 Migration CI uses synthetic fixtures only; never real community data. It must include:
 
 - the pinned Rails `schema.rb` and an executable PostgreSQL equivalent;
-- every Rails role and story permission value;
+- every Rails role and story permission value, plus blank/nonblank Rails topics and ordered multi-value Fastify V1 tags;
 - nullable and edge states such as missing place coordinates and system users without community IDs;
 - all relationship tables, external media links, and persisted resource media URL fields, including source-owned, externally hosted, redundant derived, ambiguous, and URL-only media cases;
 - curriculums and operational tables;
 - every relevant ActiveStorage attachment role, including Theme `static_map`;
 - deterministic attached and unattached/orphan blob payloads with known size/checksum, proving each byte payload reaches canonical storage or the protected Stage-2 archive before Stage-1 deletion;
+- one source blob attached within multiple communities, proving checksum-verified tenant-scoped fan-out and complete attachment disposition without cross-tenant File reuse;
+- writes attempted during cutover, proving the enforced read-only boundary or journal/high-water reconciliation includes relational and ActiveStorage changes;
 - at least one unexpected/custom source table proving dynamic capture;
 - corruption/missing-media and destination-overwrite negative tests.
 

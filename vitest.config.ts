@@ -15,7 +15,6 @@ export default defineConfig({
 
     // Parallel execution settings
     maxConcurrency: 5, // Limit concurrent tests for database isolation
-    minWorkers: 1,
     maxWorkers: 4,
 
     // Test file patterns
@@ -34,8 +33,10 @@ export default defineConfig({
       reporter: ['text', 'json', 'html', 'clover'],
       reportsDirectory: './coverage',
       // Vitest 4 removed coverage.all and now reports only loaded files unless
-      // the source scope is explicit. Keep the same full-source denominator
-      // used by the Vitest 3 baseline so Codecov comparisons stay meaningful.
+      // the source scope is explicit. This explicit scope approximates the
+      // Vitest 3 full-source denominator for Codecov continuity; it excludes a
+      // few root/archive files the old all-mode still counted
+      // (eslint.config.js, archive/migration-tools/migrate-activestorage.ts).
       include: ['src/**/*.{js,ts}', 'scripts/**/*.{js,mjs}'],
       exclude: [
         'node_modules/',
@@ -48,21 +49,18 @@ export default defineConfig({
         'src/server.ts', // Exclude server entry point
       ],
 
-      // Strict 80% coverage enforcement
+      // Enforced top-level floors (Vitest ignores a nested `thresholds.global`
+      // shape and unknown options like `checkCoverage`; the former "Strict
+      // 80%" block never failed a run). Floors sit slightly below the measured
+      // full-scope values at head 05e928d (75.14% statements/lines, 73.2%
+      // branches, 80.2% functions on Node 20 and 22) so normal jitter cannot
+      // fail CI. See issue #167 for the accepted Vitest 4 denominator reset.
       thresholds: {
-        global: {
-          branches: 80,
-          functions: 80,
-          lines: 80,
-          statements: 80,
-        },
-        // Per-file thresholds to prevent single bad files
-        perFile: true,
+        statements: 74,
+        branches: 72,
+        functions: 79,
+        lines: 74,
       },
-
-      // Fail build if coverage is below threshold
-      skipFull: false,
-      checkCoverage: true,
     },
 
     // Reporter configuration

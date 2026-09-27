@@ -2,7 +2,7 @@
 
 **Status:** Active foundation in PR #132  
 **Authority:** Execution plan subordinate to `docs/SPEC-V2.md`  
-**Last reviewed:** 2026-08-28
+**Last reviewed:** 2026-09-27
 
 ## Goal
 

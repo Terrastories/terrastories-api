@@ -6,7 +6,7 @@
 
 Historical 2025 documents describe the Fastify TypeScript API as production-ready, but V2 introduces a Fastify-to-Hono migration and therefore needs a new production-readiness proof. Production readiness is a property of a specific revision and deployment configuration, not a permanent repository label.
 
-Current baseline as of 2026-08-22:
+Current baseline as of 2026-09-27:
 
 - `main` still runs Fastify V1; the Phase 1 Hono foundation is pending in PR #132. Hono-specific audit evidence must therefore be bound to that PR's exact head rather than described as current `main` state.
 - Issue #133 landed in PR #152 on 2026-08-21, restoring `validate:ci` as a terminating fail-closed aggregate gate, bounded deterministic test shards, zero-warning lint, separate source coverage, repaired compatibility scripts, and an expiring fail-closed dependency-audit baseline.

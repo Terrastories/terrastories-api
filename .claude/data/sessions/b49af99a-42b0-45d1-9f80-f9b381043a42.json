@@ -1,0 +1,8 @@
+{
+  "session_id": "b49af99a-42b0-45d1-9f80-f9b381043a42",
+  "prompts": [
+    ".",
+    "there are still 3 failing flows, thinkhard on a plan to solve them, make a temporary TODO.md with that plan and the steps to solve them, and then work on it"
+  ],
+  "agent_name": "Nexus"
+}

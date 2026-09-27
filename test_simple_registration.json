@@ -1,0 +1,8 @@
+{
+  "email": "simple@test.com",
+  "password": "SimplePassword123!",
+  "firstName": "Simple",
+  "lastName": "Test",
+  "role": "viewer",
+  "communityId": 1
+}

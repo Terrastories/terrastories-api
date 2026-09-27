@@ -1,0 +1,8 @@
+{
+  "email": "debug@example.com",
+  "password": "ValidPass123!",
+  "firstName": "Debug",
+  "lastName": "User",
+  "role": "viewer",
+  "communityId": 1
+}

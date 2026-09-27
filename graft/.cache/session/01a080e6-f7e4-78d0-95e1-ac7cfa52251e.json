@@ -1,0 +1,9 @@
+{
+  "lastQuery": "can we derive these behaviors from https://github.com/Terrastories/terrastories? whats worth keeping from legacy and what's worth improving? Help me get this PR ready for merging and defining the direction of this new implmentation",
+  "perAgentQuery": {},
+  "graftReads": 0,
+  "sourceReads": 0,
+  "savedTokens": 0,
+  "injectedPointers": [],
+  "nudges": 0
+}

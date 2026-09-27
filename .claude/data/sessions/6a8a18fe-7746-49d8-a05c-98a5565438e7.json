@@ -1,0 +1,9 @@
+{
+  "session_id": "6a8a18fe-7746-49d8-a05c-98a5565438e7",
+  "prompts": [
+    "do we have local work on terrastories-api? check remote sync them",
+    "whats local work? any obvious path forward?",
+    "lets save local work as a branch making sure its signalled what it is and likely stale; then sync with remote and to latest commit, likely where we stopped"
+  ],
+  "agent_name": "Synth"
+}

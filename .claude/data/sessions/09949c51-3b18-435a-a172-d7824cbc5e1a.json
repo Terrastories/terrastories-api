@@ -1,0 +1,12 @@
+{
+  "session_id": "09949c51-3b18-435a-a172-d7824cbc5e1a",
+  "prompts": [
+    ".",
+    "please create a new branch, review, lint, add and commit the changes (in batches that make sense), and open a PR with the work we're doing.",
+    "what happened to all other changes and updates to the @scripts/user_workflow.sh ?",
+    "we need to restore the changes we've worked hard on, they seem to have been lost. the @scripts/user_workflow.sh is as it was without any improvements we've been working on",
+    "so we've really lost all of our work on the @scripts/user_workflow.sh which was adapted to @docs/FRONTEND_CALLS.md?",
+    "that's not it, we'll have to start over"
+  ],
+  "agent_name": "Aurora"
+}

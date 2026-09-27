@@ -1,0 +1,8 @@
+{
+  "session_id": "c9d03737-26fa-41df-8d41-a18637e55b91",
+  "prompts": [
+    "/merge-pr ",
+    "/merge-pr 91 make sure not to lose any unstaged files"
+  ],
+  "agent_name": "Atlas"
+}

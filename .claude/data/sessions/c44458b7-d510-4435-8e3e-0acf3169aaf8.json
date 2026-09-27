@@ -1,0 +1,8 @@
+{
+  "session_id": "c44458b7-d510-4435-8e3e-0acf3169aaf8",
+  "prompts": [
+    "add an option to run all in an order that makes sense, so that we can see the whole user flow happening",
+    "\u274c Story creation failed: body must have required property 'communityId' the dev server is running in case you want to test yourself, make sure the @scripts/user_workflow.sh works, if not test one by one and create USER_WORKFLOW_REPORT.md with all the issues"
+  ],
+  "agent_name": "Oracle"
+}

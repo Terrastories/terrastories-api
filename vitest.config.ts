@@ -53,9 +53,11 @@ export default defineConfig({
       // shape and unknown options like `checkCoverage`; the former "Strict
       // 80%" block never failed a run). Floors sit below the CI-measured
       // full-scope values on the 20.x matrix leg (67.65% statements, 68.03%
-      // lines, 70.01% functions, 60.12% branches at head a33f308); local
-      // runs measure higher under a different V8 remapping, so both pass. See
-      // issue #167 for the accepted Vitest 4 denominator reset.
+      // lines, 70.01% functions, 60.12% branches at head a33f308);
+      // lockfile-exact local runs measure the same (~67.6/60.0/70.0/68.0
+      // after npm ci --legacy-peer-deps; an earlier 75% reading came from a
+      // stale node_modules). See issue #167 for the accepted Vitest 4
+      // denominator reset.
       thresholds: {
         statements: 67,
         branches: 59,

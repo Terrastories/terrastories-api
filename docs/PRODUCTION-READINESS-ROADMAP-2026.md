@@ -6,7 +6,7 @@
 
 Historical 2025 documents describe the Fastify TypeScript API as production-ready, but V2 introduces a Fastify-to-Hono migration and therefore needs a new production-readiness proof. Production readiness is a property of a specific revision and deployment configuration, not a permanent repository label.
 
-Current baseline as of 2026-09-27:
+Current baseline as of 2026-08-22:
 
 - `main` still runs Fastify V1; the Phase 1 Hono foundation is pending in PR #132. Hono-specific audit evidence must therefore be bound to that PR's exact head rather than described as current `main` state.
 - Issue #133 landed in PR #152 on 2026-08-21, restoring `validate:ci` as a terminating fail-closed aggregate gate, bounded deterministic test shards, zero-warning lint, separate source coverage, repaired compatibility scripts, and an expiring fail-closed dependency-audit baseline.
@@ -136,7 +136,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Test list/search/stats/export/file endpoints for indirect leaks, not only direct `GET /:id` routes.
 - Add property/invariant tests asserting a principal from community A cannot observe community B data unless the contract explicitly permits public data.
 - Validate V2 public/private and community-ownership behavior consistently in nested relations, search, public API, files, and metadata; do not reintroduce elder-only/cultural-metadata scope removed by the V2 spec.
-- Ensure audit logs capture security-relevant administrative actions while excluding cultural content bodies, credentials, tokens, and unnecessary PII.
+- Ensure audit logs capture security-relevant administrative actions under the content-free audit contract in `SPEC-V2.md` Section 7 (actor/community/action/resource IDs and outcome; network metadata only on authentication and security events with bounded retention).
 - Add a release-blocking sovereignty suite independent from general unit coverage.
 
 ### Exit gate

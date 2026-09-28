@@ -239,12 +239,13 @@ describe('Production Infrastructure Validation - Phase 1', () => {
       expect(prodCompose).toContain('nginx_logs:/var/log/nginx');
     });
 
-    test('production startup command includes database migration', async () => {
+    test('production startup uses the compiled server entry point', async () => {
       const prodCompose = await fs.readFile('docker-compose.prod.yml', 'utf-8');
 
-      // Should run migrations on startup
-      expect(prodCompose).toContain('npm run db:migrate');
-      expect(prodCompose).toContain('npm start');
+      // PostgreSQL migration parity is tracked by #135, so startup must fail closed through the compiled migrator until parity lands.
+      expect(prodCompose).toContain('node dist/db/migrate.js');
+      expect(prodCompose).toContain('exec node dist/server.js');
+      expect(prodCompose).not.toMatch(/\bnpm\b/);
     });
   });
 

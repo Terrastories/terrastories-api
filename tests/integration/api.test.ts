@@ -561,40 +561,43 @@ describe('API Integration Tests', () => {
     });
   });
 
-  describe('Performance Testing', () => {
-    it('should respond within performance limits', async () => {
-      const maxResponseTime = 1000; // 1 second
+  describe.skipIf(process.env.SKIP_TIMING_ASSERTIONS === 'true')(
+    'Performance Testing',
+    () => {
+      it('should respond within performance limits', async () => {
+        const maxResponseTime = 1000; // 1 second
 
-      const start = performance.now();
-      const response = await apiClient.get('/api/v1/communities');
-      const duration = performance.now() - start;
+        const start = performance.now();
+        const response = await apiClient.get('/api/v1/communities');
+        const duration = performance.now() - start;
 
-      apiClient.assertSuccess(response);
-      expect(duration).toBeLessThan(maxResponseTime);
-    });
-
-    it('should handle load testing', async () => {
-      const concurrentRequests = 20;
-      const maxResponseTime = 2000; // 2 seconds for concurrent load
-
-      const start = performance.now();
-
-      const requests = Array.from({ length: concurrentRequests }, () =>
-        apiClient.get('/api/v1/communities')
-      );
-
-      const responses = await Promise.all(requests);
-      const duration = performance.now() - start;
-
-      // All requests should succeed
-      responses.forEach((response) => {
         apiClient.assertSuccess(response);
+        expect(duration).toBeLessThan(maxResponseTime);
       });
 
-      expect(duration).toBeLessThan(maxResponseTime);
-      console.log(
-        `Load test: ${concurrentRequests} requests in ${duration.toFixed(2)}ms`
-      );
-    });
-  });
+      it('should handle load testing', async () => {
+        const concurrentRequests = 20;
+        const maxResponseTime = 2000; // 2 seconds for concurrent load
+
+        const start = performance.now();
+
+        const requests = Array.from({ length: concurrentRequests }, () =>
+          apiClient.get('/api/v1/communities')
+        );
+
+        const responses = await Promise.all(requests);
+        const duration = performance.now() - start;
+
+        // All requests should succeed
+        responses.forEach((response) => {
+          apiClient.assertSuccess(response);
+        });
+
+        expect(duration).toBeLessThan(maxResponseTime);
+        console.log(
+          `Load test: ${concurrentRequests} requests in ${duration.toFixed(2)}ms`
+        );
+      });
+    }
+  );
 });

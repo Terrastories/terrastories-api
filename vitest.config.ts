@@ -15,7 +15,6 @@ export default defineConfig({
 
     // Parallel execution settings
     maxConcurrency: 5, // Limit concurrent tests for database isolation
-    minWorkers: 1,
     maxWorkers: 4,
 
     // Test file patterns
@@ -33,6 +32,12 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'clover'],
       reportsDirectory: './coverage',
+      // Vitest 4 removed coverage.all and now reports only loaded files unless
+      // the source scope is explicit. This explicit scope approximates the
+      // Vitest 3 full-source denominator for Codecov continuity; it excludes a
+      // few root/archive files the old all-mode still counted
+      // (eslint.config.js, archive/migration-tools/migrate-activestorage.ts).
+      include: ['src/**/*.{js,ts}', 'scripts/**/*.{js,mjs}'],
       exclude: [
         'node_modules/',
         'dist/',
@@ -44,21 +49,21 @@ export default defineConfig({
         'src/server.ts', // Exclude server entry point
       ],
 
-      // Strict 80% coverage enforcement
+      // Enforced top-level floors (Vitest ignores a nested `thresholds.global`
+      // shape and unknown options like `checkCoverage`; the former "Strict
+      // 80%" block never failed a run). Floors sit below the CI-measured
+      // full-scope values on the 20.x matrix leg (67.65% statements, 68.03%
+      // lines, 70.01% functions, 60.12% branches at head a33f308);
+      // lockfile-exact local runs measure the same (~67.6/60.0/70.0/68.0
+      // after npm ci --legacy-peer-deps; an earlier 75% reading came from a
+      // stale node_modules). See issue #167 for the accepted Vitest 4
+      // denominator reset.
       thresholds: {
-        global: {
-          branches: 80,
-          functions: 80,
-          lines: 80,
-          statements: 80,
-        },
-        // Per-file thresholds to prevent single bad files
-        perFile: true,
+        statements: 67,
+        branches: 59,
+        functions: 69,
+        lines: 67,
       },
-
-      // Fail build if coverage is below threshold
-      skipFull: false,
-      checkCoverage: true,
     },
 
     // Reporter configuration

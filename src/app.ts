@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyError } from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import cors from '@fastify/cors';
@@ -128,7 +128,7 @@ export async function buildApp(options?: BuildAppOptions) {
   });
 
   // Global error handler
-  app.setErrorHandler(async (error, request, reply) => {
+  app.setErrorHandler<FastifyError>(async (error, request, reply) => {
     const { method, url } = request;
 
     app.log.error({ error, method, url }, 'Request error');

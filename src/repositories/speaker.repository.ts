@@ -106,14 +106,15 @@ export interface PaginatedResponse<T> {
 }
 
 /**
- * Community speaker statistics
+ * Community speaker statistics (SPEC-V2 §6.5). `inactive` is management
+ * metadata for editors/admins only; viewer/member counts cover active
+ * speakers exclusively. Elder-status counts are removed V1 scope and never
+ * appear in V2 projections.
  */
 export interface SpeakerStats {
   total: number;
   active: number;
-  inactive: number;
-  elders: number;
-  nonElders: number;
+  inactive?: number;
 }
 
 /**
@@ -560,15 +561,27 @@ export class SpeakerRepository {
   }
 
   /**
-   * Get speaker statistics for a community
+   * Get speaker statistics for a community (SPEC-V2 §6.5). Without
+   * `includeInactive` the counts cover active speakers only, so viewer/member
+   * callers learn nothing about withdrawn speakers.
    */
-  async getCommunityStats(communityId: number): Promise<SpeakerStats> {
+  async getCommunityStats(
+    communityId: number,
+    options: { includeInactive?: boolean } = {}
+  ): Promise<SpeakerStats> {
     const speakersTable = await getSpeakersTable();
+
+    const scope = options.includeInactive
+      ? eq(speakersTable.communityId, communityId)
+      : and(
+          eq(speakersTable.communityId, communityId),
+          eq(speakersTable.isActive, true)
+        );
 
     const [totalResult] = await (this.db as any)
       .select({ count: count() })
       .from(speakersTable)
-      .where(eq(speakersTable.communityId, communityId));
+      .where(scope);
 
     const [activeResult] = await (this.db as any)
       .select({ count: count() })
@@ -580,26 +593,13 @@ export class SpeakerRepository {
         )
       );
 
-    const [eldersResult] = await (this.db as any)
-      .select({ count: count() })
-      .from(speakersTable)
-      .where(
-        and(
-          eq(speakersTable.communityId, communityId),
-          eq(speakersTable.elderStatus, true)
-        )
-      );
-
     const total = Number(totalResult.count);
     const active = Number(activeResult.count);
-    const elders = Number(eldersResult.count);
 
     return {
       total,
       active,
-      inactive: total - active,
-      elders,
-      nonElders: total - elders,
+      ...(options.includeInactive ? { inactive: total - active } : {}),
     };
   }
 }

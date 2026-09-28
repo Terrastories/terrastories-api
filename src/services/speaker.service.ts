@@ -32,6 +32,7 @@ import {
   InvalidSearchQueryError,
   InvalidBirthYearError,
 } from '../shared/errors/index.js';
+import { isV2CommunityRole } from '../shared/authorization/sovereignty-policy.js';
 
 /**
  * Request data for speaker creation
@@ -314,10 +315,18 @@ export class SpeakerService {
   }
 
   /**
-   * Get community speaker statistics
+   * Get community speaker statistics. `role` decides whether withdrawn
+   * speakers are countable (editors/admins manage them; SPEC-V2 §6.5).
    */
-  async getCommunityStats(communityId: number): Promise<SpeakerStats> {
-    return await this.repository.getCommunityStats(communityId);
+  async getCommunityStats(
+    communityId: number,
+    role: string
+  ): Promise<SpeakerStats> {
+    const includeInactive =
+      !isV2CommunityRole(role) || role === 'editor' || role === 'admin';
+    return await this.repository.getCommunityStats(communityId, {
+      includeInactive,
+    });
   }
 
   /**

@@ -36,6 +36,11 @@ import {
   InvalidFieldLengthError,
   RequiredFieldError,
 } from '../shared/errors/index.js';
+import {
+  STORY_AUDIENCES,
+  isV2CommunityRole,
+  roleCanReadStoryAudience,
+} from '../shared/authorization/sovereignty-policy.js';
 
 /**
  * Request data for place creation
@@ -391,15 +396,31 @@ export class PlaceService {
   }
 
   /**
-   * Get community place statistics
+   * Get community place statistics (SPEC-V2 §6.4). `role` decides whether
+   * restricted places are countable: editors/admins manage them, while
+   * viewer/member counts cover unrestricted places and only places linked
+   * to stories that role may read.
    */
-  async getCommunityPlaceStats(communityId: number): Promise<{
+  async getCommunityPlaceStats(
+    communityId: number,
+    role: string
+  ): Promise<{
     total: number;
-    restricted: number;
+    restricted?: number;
     public: number;
     withStories: number;
   }> {
-    return await this.repository.getCommunityPlaceStats(communityId);
+    const fullStats =
+      !isV2CommunityRole(role) || role === 'editor' || role === 'admin';
+    const storyAudiences = fullStats
+      ? undefined
+      : STORY_AUDIENCES.filter((audience) =>
+          roleCanReadStoryAudience(role, audience)
+        );
+    return await this.repository.getCommunityPlaceStats(communityId, {
+      includeRestricted: fullStats,
+      storyAudiences,
+    });
   }
 
   /**

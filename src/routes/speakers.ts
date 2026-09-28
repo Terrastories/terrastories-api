@@ -330,7 +330,10 @@ export async function speakerRoutes(
       try {
         const { user } = request as AuthenticatedRequest;
 
-        const stats = await service.getCommunityStats(user.communityId);
+        const stats = await service.getCommunityStats(
+          user.communityId,
+          user.role
+        );
 
         return reply.send({
           data: stats,

@@ -387,7 +387,10 @@ export async function placesRoutes(
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       const { user } = request as AuthenticatedRequest;
 
-      const stats = await placeService.getCommunityPlaceStats(user.communityId);
+      const stats = await placeService.getCommunityPlaceStats(
+        user.communityId,
+        user.role
+      );
 
       return reply.send({
         data: stats,

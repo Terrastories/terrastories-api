@@ -254,7 +254,11 @@ describe('release evidence workflow', () => {
       'BASE_SHA: ${{ github.event.pull_request.base.sha }}'
     );
     expect(workflow).toContain('trufflesecurity/trufflehog@');
-    expect(workflow).toMatch(/extra_args:.*--fail/);
+    // The pinned trufflehog action injects `--fail` into its own docker
+    // invocation; repeating it in extra_args aborts the CLI with
+    // "flag 'fail' cannot be repeated" and would skip the scan entirely.
+    expect(workflow).toMatch(/extra_args:[^\n]*--results=verified,unknown/);
+    expect(workflow).not.toMatch(/extra_args:[^\n]*--fail/);
   });
 
   it('builds and verifies the production image before emitting release evidence', () => {

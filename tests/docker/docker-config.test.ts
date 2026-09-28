@@ -271,6 +271,23 @@ describe('Docker Configuration Tests', () => {
       expect(content).toContain('POSTGRES_USER: terrastories');
       expect(content).toContain('pg_isready -U terrastories -d terrastories');
     });
+
+    it('should preserve the legacy PostGIS-capable image until persisted volumes have a tested cutover', async () => {
+      const composePath = path.join(projectRoot, 'docker-compose.yml');
+      const composeContent = await fs.readFile(composePath, 'utf-8');
+      const initDbPath = path.join(projectRoot, 'scripts/init-db.sql');
+      const initDbContent = await fs.readFile(initDbPath, 'utf-8');
+
+      // Existing named volumes may still contain PostGIS catalog objects from
+      // previous releases. Keep the compatible image until a dedicated,
+      // tested backup/restore or forward-migration cutover is available.
+      expect(composeContent).toContain('image: postgis/postgis:13-master');
+
+      // New databases must not create or depend on spatial extensions. The
+      // compatibility image is only for old-volume safety, not V2 semantics.
+      expect(initDbContent).not.toMatch(/CREATE EXTENSION[^;]*postgis/i);
+      expect(initDbContent).not.toMatch(/PostGIS_version\s*\(/i);
+    });
   });
 
   describe('Security Configuration', () => {

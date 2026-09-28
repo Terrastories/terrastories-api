@@ -18,8 +18,6 @@ jobs:
     steps:
       - name: Install system dependencies (self-hosted only)
         run: |
-          # Only install dependencies on self-hosted runners
-          # GitHub-hosted runners already have these dependencies
           if [ "$RUNNER_ENVIRONMENT" != "github-hosted" ] && ! command -v unzip &> /dev/null; then
             if command -v apt-get &> /dev/null; then
               sudo apt update && sudo apt install -y unzip curl wget build-essential python3
@@ -58,3 +56,48 @@ jobs:
 
       - name: Enforce dependency audit baseline
         run: npm run audit:baseline
+
+  database-sqlite:
+    name: Database gate (SQLite/D1-compatible)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Run SQLite/D1-compatible migration and integration gate
+        run: npm run test:db:sqlite
+
+  database-postgres:
+    name: Database gate (PostgreSQL 13)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:13-alpine
+        env:
+          POSTGRES_DB: terrastories_test
+          POSTGRES_USER: terrastories
+          POSTGRES_PASSWORD: terrastories-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U terrastories -d terrastories_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test
+      ALLOW_POSTGRES_TEST_RESET: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Run PostgreSQL migration and integration gate
+        run: npm run test:db:postgres

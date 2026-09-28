@@ -47,7 +47,9 @@ export const storiesPg = pgTable(
     title: pgText('title').notNull(),
     description: pgText('description'),
     slug: pgText('slug').notNull(),
-    communityId: pgInteger('community_id').notNull(),
+    communityId: pgInteger('community_id')
+      .notNull()
+      .references(() => communitiesPg.id),
     createdBy: pgInteger('created_by').notNull(),
     isRestricted: boolean('is_restricted').notNull().default(false),
     privacyLevel: pgText('privacy_level').notNull().default('public'),

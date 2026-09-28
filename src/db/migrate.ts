@@ -27,14 +27,17 @@ export function getMigrationPlan(databaseUrl: string): {
     databaseUrl.startsWith('postgresql://') ||
     databaseUrl.startsWith('postgres://');
 
+  if (!isPostgres && /^[a-z][a-z0-9+.-]*:\/\//i.test(databaseUrl)) {
+    throw new Error(`Unsupported database URL dialect: ${databaseUrl}`);
+  }
+
   if (isPostgres) {
     const migrationsFolder = path.join(__dirname, 'migrations', 'postgres');
     const journalPath = path.join(migrationsFolder, 'meta', '_journal.json');
 
     if (!existsSync(journalPath)) {
       throw new Error(
-        'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL. ' +
-          'PostgreSQL migration parity is tracked by #135.'
+        'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL.'
       );
     }
 

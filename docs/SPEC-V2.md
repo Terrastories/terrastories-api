@@ -441,9 +441,9 @@ When one legacy source blob is attached to resources in more than one community,
 Password hashing is behind a `PasswordHasher` abstraction. The domain contract stores the encoded hash and algorithm/version metadata rather than coupling the product to one library.
 
 - New-password hashing must use a modern approved password KDF with parameters benchmarked on the supported Workers and Node runtimes before release.
-- The verifier registry must recognize exact preserved source encodings and metadata for Rails bcrypt and Fastify V1 Argon2id PHC strings, including algorithm/version and encoded parameters. Unsupported, malformed, or tampered hashes fail closed without exposing which check failed.
+- The verifier registry must recognize exact preserved source encodings and metadata for Rails bcrypt, and for Fastify V1 Argon2id PHC strings once the deferred Fastify profile is re-activated (Section 10), including algorithm/version and encoded parameters. Unsupported, malformed, or tampered hashes fail closed without exposing which check failed.
 - After successful verification of a source hash, V2 re-hashes with the current V2 policy and clears the source marker when the algorithm or parameters are obsolete. A Fastify Argon2id hash already satisfying the current V2 policy remains valid without an unnecessary rewrite.
-- Every release profile, including Workers and the offline field kit, must support these source verifiers until the documented password-upgrade window closes; migration cannot make a valid source account unusable on a supported target.
+- At launch, every release profile, including Workers and the offline field kit, must support the Rails bcrypt source verifier until the documented password-upgrade window closes; the Fastify Argon2id verifier is required on every release profile only once the deferred Fastify profile is re-activated, consistent with the Section 13 feasibility gate. Migration cannot make a valid source account unusable on a supported target.
 - Never reverse, decrypt, or replace a legacy password with a generated password during migration.
 
 ### Sessions
@@ -578,7 +578,7 @@ Unknown/community-specific source tables must be captured automatically. A hand-
 - Copy media bytes, MIME type, filename, byte size, checksum, attachment role, and a deterministic ordering signal for multi-attachments; verify checksums after write.
 - Preserve legacy external media links.
 - Classify every source V1 `mediaUrls`, `imageUrl`, `audioUrl`, or `photoUrl` value independently before removing those resource columns from the canonical runtime. A URL proven to reference source-owned media is recovered into `File` plus the correct typed relation with checksum evidence. A Story URL that represents externally hosted content is retained as a canonical external-media-link record with exact URL and source order. A redundant deployment-generated serving/signed URL is omitted from runtime only after its underlying media has been accounted for, while its raw value remains in the restricted legacy archive. Ambiguous, unsafe, unreachable, or unsupported values remain archived and require explicit community/operator disposition before the migration can succeed; the transform must not guess from filename or URL shape alone. The migration manifest records the classification and destination/archive reference for every value.
-- Preserve exact Rails bcrypt and Fastify Argon2id PHC hashes with algorithm/version/parameter provenance for verification and policy-aware lazy upgrade.
+- Preserve exact Rails bcrypt, and Fastify Argon2id when that deferred profile is re-activated, with algorithm/version/parameter provenance for verification and policy-aware lazy upgrade.
 - Never silently discard a source field. Fields intentionally absent from canonical V2 go to the machine-readable legacy archive.
 - Structurally inconsistent or unmappable source rows remain losslessly present in the bundle/archive and fail or require explicit manual disposition before a migration run can be declared successful.
 
@@ -632,13 +632,13 @@ A migration is successful only when automated checks prove:
 - Theme static-map and community/user/place/speaker/story attachment roles are represented;
 - multi-attachment ordering is deterministic and explicitly mapped;
 - external media links are preserved;
-- username/email login identities, including null Fastify usernames and cross-community duplicate emails, match the unambiguous experience contract;
-- Rails bcrypt and Fastify Argon2id accounts authenticate on every release profile, reject malformed/tampered hashes, and upgrade only when the source algorithm/parameters are outside current policy;
+- username/email login identities, including null Fastify usernames (when re-activated) and cross-community duplicate emails, match the unambiguous experience contract;
+- Rails bcrypt accounts authenticate on every release profile, reject malformed/tampered hashes, and upgrade only when the source algorithm/parameters are outside current policy; Fastify Argon2id accounts meet the same release checks when the deferred Fastify profile is re-activated;
 - contradictory role/super-admin state cannot be silently normalized;
 - public/private/disabled community behavior is preserved, including private-community override of public stories;
-- Fastify restricted stories and places remain unavailable until their explicit community-approved audience/archive disposition, and never widen through canonical mapping or direct/list/search/map/count/media/story-derived projections;
-- every Fastify theme row is archived/dispositioned, and zero/multiple active-theme states require explicit community selection rather than implicit ordering;
-- Rails story topics and Fastify V1 story tags retain their complete values and filtering behavior through the canonical tags list;
+- Fastify restricted stories and places remain unavailable until their explicit community-approved audience/archive disposition, and never widen through canonical mapping or direct/list/search/map/count/media/story-derived projections (when re-activated);
+- every Fastify theme row is archived/dispositioned, and zero/multiple active-theme states require explicit community selection rather than implicit ordering (when re-activated);
+- Rails story topics and Fastify V1 story tags (when re-activated) retain their complete values and filtering behavior through the canonical tags list;
 - known Rails beta/Flipper-gated outcomes map to canonical V2 capabilities, and every unknown/custom active source flag has an explicit RETAIN/IMPROVE/ARCHIVE disposition;
 - public map/filter data remains representable;
 - migration is deterministic and safe to re-run against a fresh destination;
@@ -700,7 +700,7 @@ Migration CI uses synthetic fixtures only; never real community data. It must in
 - the pinned Rails `schema.rb` and an executable PostgreSQL equivalent;
 - the pinned Fastify V1 schema/migration state executed against both PostgreSQL and SQLite, with representative File/local/object-storage records and bytes;
 - every Rails role and story permission value, plus blank/nonblank Rails topics and ordered multi-value Fastify V1 tags;
-- Fastify users without usernames, duplicate emails across communities, same-community/case/cross-kind collisions, valid Rails bcrypt and Fastify Argon2id parameter variants, and malformed/tampered hashes;
+- Fastify users without usernames, duplicate emails across communities, same-community/case/cross-kind collisions, valid Rails bcrypt and Fastify Argon2id parameter variants (when re-activated), and malformed/tampered hashes;
 - every recognized Fastify story `privacyLevel` combined with both `isRestricted` states, unknown/contradictory values, and restricted/unrestricted places linked to stories with every canonical audience;
 - Fastify communities with zero, one, and multiple active themes plus inactive alternatives, proving explicit selection and complete row disposition;
 - nullable and edge states such as missing place coordinates and system users without community IDs;
@@ -756,7 +756,7 @@ Community-claim-token tests must prove: issuance is refused for a community that
 | Map configuration?                  | One provider-neutral `CommunityMapConfig` per community; ambiguous Fastify multi-theme state requires community selection; provider credentials are secrets.                                                                        |
 | Legacy removed data?                | Preserve in migration archive; never silently discard.                                                                                                                                                                              |
 | Rails beta/Flipper?                 | Known `public_communities` and `split_settings` outcomes become normal V2 publication/settings capabilities; archive gating state. Custom active keys require migration disposition.                                                |
-| Password migration?                 | Verify preserved Rails bcrypt and Fastify Argon2id on every profile; rehash after login only when the source hash falls outside current V2 policy.                                                                                  |
+| Password migration?                 | Verify preserved Rails bcrypt on every profile at launch; Fastify Argon2id verification applies when the deferred Fastify profile is re-activated; rehash after login only when the source hash falls outside current V2 policy.    |
 | Migration strategy?                 | Two-stage: lossless Rails PostgreSQL/ActiveStorage source capture, then deterministic bundle-to-canonical-V2 transform; the Fastify V1 source profile is DEFER (Section 10) and uses the same two-stage contract when re-activated. |
 | API compatibility after V2 release? | Protect released V2 contracts with OpenAPI/contract CI and explicit versioning/deprecation policy.                                                                                                                                  |
 

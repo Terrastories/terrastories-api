@@ -83,7 +83,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Add required PostgreSQL CI and a D1/SQLite-compatible CI path; shared database behavior must pass on both first-class targets.
 - Run schema/repository/portable-spatial integration tests against both backends. Remove the legacy PostGIS bootstrap/verification/query branch and its dedicated test (`src/db/migrate.ts`, `src/db/index.ts`, `src/repositories/place.repository.ts`, `tests/db/postgis.test.ts`); V2 spatial behavior must remain portable application-level latitude/longitude logic.
 - Establish the single logical relational schema/behavior contract in `SPEC-V2.md` Sections 6/8 on both targets. Dialect-specific Drizzle definitions/migrations are allowed; equivalent product semantics are mandatory.
-- Replace Worker-incompatible dependencies on shared paths. Implement `PasswordHasher` with an approved KDF benchmarked on Workers and Node; preserved Rails bcrypt and Fastify Argon2id verification with policy-aware lazy upgrade is migration behavior, not a mandate for the new-password algorithm.
+- Replace Worker-incompatible dependencies on shared paths. Implement `PasswordHasher` with an approved KDF benchmarked on Workers and Node; preserved Rails bcrypt verification (and Fastify Argon2id once that deferred profile is re-activated, per `SPEC-V2.md` Section 10) with policy-aware lazy upgrade is migration behavior, not a mandate for the new-password algorithm.
 - Add migration tests for:
   - empty database -> latest;
   - previous release -> latest;

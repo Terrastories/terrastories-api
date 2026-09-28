@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import {
   projectVisibleFields,
+  type CommunityVisibility,
   type FieldVisibilityRule,
 } from '../authorization/sovereignty-policy.js';
 
@@ -87,7 +88,7 @@ export type PublicStory = z.infer<typeof PublicStorySchema>;
 
 export interface PublicStoryProjectionContext {
   resourceCommunityId: number;
-  explicitlyPublic: boolean;
+  communityVisibility: CommunityVisibility;
 }
 
 const PUBLIC_STORY_FIELD_RULES = {
@@ -184,7 +185,7 @@ export function toPublicStory(
     actor: null,
     actorCommunityId: null,
     resourceCommunityId: context.resourceCommunityId,
-    explicitlyPublic: context.explicitlyPublic,
+    communityVisibility: context.communityVisibility,
   });
   const parsed = PublicStorySchema.safeParse(projected);
   return parsed.success ? parsed.data : null;

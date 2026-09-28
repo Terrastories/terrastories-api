@@ -427,7 +427,7 @@ export function requireV2CommunityContentAccess(
         family,
         surface,
         visibility: 'community-only',
-        communityActive: true,
+        communityStatus: 'active',
       });
       request.log.warn(
         createAuthorizationAuditEvent({
@@ -517,7 +517,7 @@ export function requireV2CommunityContentAccess(
       surface,
       visibility: 'community-only',
       // Same issuance invariant as actor.active; stale session state is #137.
-      communityActive: true,
+      communityStatus: 'active',
     });
 
     if (decision.allowed) return;

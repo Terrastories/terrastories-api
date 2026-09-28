@@ -10,6 +10,7 @@ import {
   authorizeCommunityContent,
   canExposeField,
   createAuthorizationAuditEvent,
+  fastifyCommunityToGates,
   fastifyStoryToAudience,
   roleCanReadStoryAudience,
   type AuthorizationActor,
@@ -19,7 +20,7 @@ import {
 
 const communityActor = (
   role: (typeof V2_COMMUNITY_ROLES)[number],
-  communityId = 1,
+  communityId: number | null = 1,
   active = true
 ): AuthorizationActor => ({
   id: 10,
@@ -90,7 +91,7 @@ describe('V2 sovereignty authorization matrix', () => {
           family: 'stories',
           surface: 'list',
           visibility: 'community-only',
-          communityActive: true,
+          communityStatus: 'active',
         })
       ).toMatchObject({ allowed: true, reason: 'same-community' });
     }
@@ -107,7 +108,7 @@ describe('V2 sovereignty authorization matrix', () => {
           family,
           surface,
           visibility: 'community-only',
-          communityActive: true,
+          communityStatus: 'active',
         });
         expect(decision.allowed, `${family}/${surface}`).toBe(false);
         expect(decision.reason).toBe('super-admin-content-denied');
@@ -126,7 +127,7 @@ describe('V2 sovereignty authorization matrix', () => {
           family: familyForSurface(surface),
           surface,
           visibility: 'community-only',
-          communityActive: true,
+          communityStatus: 'active',
         });
         expect(decision.allowed, `${role}/${surface}`).toBe(false);
         expect(decision.reason).toBe('cross-community-denied');
@@ -141,8 +142,8 @@ describe('V2 sovereignty authorization matrix', () => {
       family: 'stories',
       surface: 'public-api',
       visibility: 'public',
-      explicitlyPublic: false,
-      communityActive: true,
+      communityVisibility: 'private',
+      communityStatus: 'active',
     });
     expect(missingExplicitGrant).toMatchObject({
       allowed: false,
@@ -155,8 +156,8 @@ describe('V2 sovereignty authorization matrix', () => {
       family: 'stories',
       surface: 'public-api',
       visibility: 'public',
-      explicitlyPublic: true,
-      communityActive: true,
+      communityVisibility: 'public',
+      communityStatus: 'active',
     });
     expect(explicitGrant).toMatchObject({
       allowed: true,
@@ -172,8 +173,8 @@ describe('V2 sovereignty authorization matrix', () => {
         family: 'stories',
         surface: 'list',
         visibility: 'public',
-        explicitlyPublic: true,
-        communityActive: true,
+        communityVisibility: 'public',
+        communityStatus: 'active',
       })
     ).toMatchObject({ allowed: false, reason: 'authentication-required' });
   });
@@ -186,7 +187,7 @@ describe('V2 sovereignty authorization matrix', () => {
         family: 'places',
         surface: 'crud',
         visibility: 'community-only',
-        communityActive: false,
+        communityStatus: 'disabled',
       })
     ).toMatchObject({ allowed: false, reason: 'inactive-community' });
 
@@ -197,7 +198,7 @@ describe('V2 sovereignty authorization matrix', () => {
         family: 'places',
         surface: 'crud',
         visibility: 'community-only',
-        communityActive: true,
+        communityStatus: 'active',
       })
     ).toMatchObject({ allowed: false, reason: 'disabled-user' });
 
@@ -213,7 +214,7 @@ describe('V2 sovereignty authorization matrix', () => {
         family: 'places',
         surface: 'list',
         visibility: 'community-only',
-        communityActive: true,
+        communityStatus: 'active',
       })
     ).toMatchObject({ allowed: false, reason: 'disabled-user' });
   });
@@ -228,7 +229,7 @@ describe('V2 sovereignty authorization matrix', () => {
         actor: null,
         actorCommunityId: null,
         resourceCommunityId: 5,
-        explicitlyPublic: true,
+        communityVisibility: 'public',
       })
     ).toBe(true);
     expect(
@@ -287,7 +288,7 @@ describe('V2 sovereignty authorization matrix', () => {
       family: 'stories',
       surface: 'search',
       visibility: 'community-only',
-      communityActive: true,
+      communityStatus: 'active',
     });
     const event = createAuthorizationAuditEvent({
       actor: communityActor('editor', 1),
@@ -363,6 +364,92 @@ describe('V2 story audiences (SPEC-V2 §6.2/§6.3)', () => {
     expect(fastifyStoryToAudience('private', false)).toBe('editors');
     expect(fastifyStoryToAudience('restricted', false)).toBe('editors');
     expect(fastifyStoryToAudience('', false)).toBe('editors');
+  });
+});
+
+describe('V2 community gates and super-admin boundary (SPEC-V2 §6.1/§6.2)', () => {
+  it('maps the Fastify community columns to canonical gates', () => {
+    expect(fastifyCommunityToGates(true, true)).toEqual({
+      visibility: 'public',
+      status: 'active',
+    });
+    expect(fastifyCommunityToGates(false, true)).toEqual({
+      visibility: 'private',
+      status: 'active',
+    });
+    expect(fastifyCommunityToGates(true, false)).toEqual({
+      visibility: 'public',
+      status: 'disabled',
+    });
+    expect(fastifyCommunityToGates(false, false)).toEqual({
+      visibility: 'private',
+      status: 'disabled',
+    });
+  });
+
+  it('admits anonymous public projections only for an active public community', () => {
+    const input = {
+      actor: null,
+      resourceCommunityId: 5,
+      family: 'stories' as const,
+      surface: 'public-api' as const,
+      visibility: 'public' as const,
+    };
+    expect(
+      authorizeCommunityContent({
+        ...input,
+        communityStatus: 'active',
+        communityVisibility: 'public',
+      })
+    ).toMatchObject({ allowed: true, reason: 'explicit-public' });
+    expect(
+      authorizeCommunityContent({
+        ...input,
+        communityStatus: 'active',
+        communityVisibility: 'private',
+      })
+    ).toMatchObject({ allowed: false, reason: 'not-explicitly-public' });
+    expect(
+      authorizeCommunityContent({
+        ...input,
+        communityStatus: 'disabled',
+        communityVisibility: 'public',
+      })
+    ).toMatchObject({ allowed: false, reason: 'inactive-community' });
+  });
+
+  it('keeps the strict super-admin deny even on fully public gates', () => {
+    // Defense in depth (§6.2): a super admin consumes public projections as
+    // an anonymous caller (the public-api routes never attach an actor), and
+    // any actor-bearing super-admin request is denied on every surface.
+    const decision = authorizeCommunityContent({
+      actor: communityActor('super_admin', null),
+      resourceCommunityId: 5,
+      family: 'stories',
+      surface: 'public-api',
+      visibility: 'public',
+      communityStatus: 'active',
+      communityVisibility: 'public',
+    });
+    expect(decision).toMatchObject({
+      allowed: false,
+      reason: 'super-admin-content-denied',
+    });
+  });
+
+  it('treats a canonical null-community actor as outside every community', () => {
+    const decision = authorizeCommunityContent({
+      actor: { ...communityActor('viewer', 1), communityId: null },
+      resourceCommunityId: 1,
+      family: 'stories',
+      surface: 'list',
+      visibility: 'community-only',
+      communityStatus: 'active',
+    });
+    expect(decision).toMatchObject({
+      allowed: false,
+      reason: 'cross-community-denied',
+    });
   });
 });
 

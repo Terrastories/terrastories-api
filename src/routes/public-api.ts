@@ -33,6 +33,7 @@ import {
 import {
   authorizeCommunityContent,
   createAuthorizationAuditEvent,
+  fastifyCommunityToGates,
   type ContentRouteFamily,
 } from '../shared/authorization/sovereignty-policy.js';
 
@@ -68,18 +69,19 @@ export async function publicApiRoutes(
           return reply.status(404).send({ error: 'Community not found' });
         }
 
+        // Transitional Fastify mapping (§6.1): `publicStories`/`isActive` are
+        // the persisted grant/lifecycle columns until #145/#146. Route
+        // namespace alone never grants visibility.
+        const { visibility: communityVisibility, status: communityStatus } =
+          fastifyCommunityToGates(community.publicStories, community.isActive);
         const decision = authorizeCommunityContent({
           actor: null,
           resourceCommunityId,
           family,
           surface: 'public-api',
           visibility: 'public',
-          // The legacy publicStories column is the persisted community-level
-          // public API grant carried forward for Rails parity. It explicitly
-          // gates both public story and public place endpoints; route namespace
-          // alone never grants visibility.
-          explicitlyPublic: community.publicStories,
-          communityActive: community.isActive,
+          communityStatus,
+          communityVisibility,
         });
 
         if (!decision.allowed) {
@@ -190,7 +192,7 @@ export async function publicApiRoutes(
         const publicStories = result.stories.map((story) => {
           const projected = toPublicStory(story, {
             resourceCommunityId: Number(community_id),
-            explicitlyPublic: true,
+            communityVisibility: 'public',
           });
           if (!projected) {
             throw new Error('Public story field projection denied');
@@ -259,7 +261,7 @@ export async function publicApiRoutes(
 
         const projected = toPublicStory(story, {
           resourceCommunityId: Number(community_id),
-          explicitlyPublic: true,
+          communityVisibility: 'public',
         });
         if (!projected) {
           return reply.status(404).send({

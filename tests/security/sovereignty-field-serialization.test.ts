@@ -35,7 +35,7 @@ describe('V2 sovereignty field serialization', () => {
   it('fails closed when a public serializer is used without an explicit publication grant', () => {
     const result = (toPublicStory as unknown as Function)(story, {
       resourceCommunityId: story.communityId,
-      explicitlyPublic: false,
+      communityVisibility: 'private',
     });
 
     expect(result).toBeNull();
@@ -44,7 +44,7 @@ describe('V2 sovereignty field serialization', () => {
   it('projects only explicitly public fields when publication is granted', () => {
     const result = (toPublicStory as unknown as Function)(story, {
       resourceCommunityId: story.communityId,
-      explicitlyPublic: true,
+      communityVisibility: 'public',
     });
 
     expect(result).toMatchObject({

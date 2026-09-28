@@ -113,10 +113,45 @@ export const FIELD_VISIBILITY_CATEGORIES = [
 export type FieldVisibilityCategory =
   (typeof FIELD_VISIBILITY_CATEGORIES)[number];
 
+/**
+ * Canonical community publication/lifecycle gates (SPEC-V2 §6.1).
+ * `visibility` controls public discoverability; `status` is operational
+ * lifecycle, not a privacy flag. A private or disabled community overrides
+ * any story-level public visibility for anonymous callers (§4).
+ */
+export const COMMUNITY_VISIBILITIES = ['public', 'private'] as const;
+
+export type CommunityVisibility = (typeof COMMUNITY_VISIBILITIES)[number];
+
+export const COMMUNITY_STATUSES = ['active', 'disabled'] as const;
+
+export type CommunityStatus = (typeof COMMUNITY_STATUSES)[number];
+
+/**
+ * Transitional mapping from the Fastify community columns to the canonical
+ * gates (SPEC-V2 §6.1). The physical columns stay until #145/#146:
+ * `communities.publicStories === true` ⇔ `visibility: 'public'`, and
+ * `communities.isActive === true` ⇔ `status: 'active'`.
+ */
+export function fastifyCommunityToGates(
+  publicStories: boolean,
+  isActive: boolean
+): { visibility: CommunityVisibility; status: CommunityStatus } {
+  return {
+    visibility: publicStories ? 'public' : 'private',
+    status: isActive ? 'active' : 'disabled',
+  };
+}
+
 export interface AuthorizationActor {
   id: number;
   role: V2CommunityRole;
-  communityId: number;
+  /**
+   * Canonical super admins never carry a communityId (§6.2); community
+   * roles always do. Transitional Fastify super_admin rows may still hold
+   * one, but they are denied before communityId is ever consulted.
+   */
+  communityId: number | null;
   active: boolean;
 }
 
@@ -143,8 +178,10 @@ export interface CommunityContentAuthorizationInput {
   family: ContentRouteFamily;
   surface: ProtectedSurface;
   visibility: FieldVisibilityCategory;
-  communityActive: boolean;
-  explicitlyPublic?: boolean;
+  /** Canonical community lifecycle gate (§6.1); `disabled` denies all content access. */
+  communityStatus: CommunityStatus;
+  /** Canonical community publication gate (§6.1); only `public` admits anonymous projections. */
+  communityVisibility?: CommunityVisibility;
   allowedRoles?: readonly V2CommunityRole[];
 }
 
@@ -152,8 +189,9 @@ export interface FieldExposureInput {
   category: FieldVisibilityCategory;
   actor: AuthorizationActor | null;
   actorCommunityId: number | null;
-  resourceCommunityId: number;
-  explicitlyPublic?: boolean;
+  resourceCommunityId: number | null;
+  /** Publication gate for `public` fields: only a `public` community exposes them anonymously. */
+  communityVisibility?: CommunityVisibility;
   allowedRoles?: readonly V2CommunityRole[];
 }
 
@@ -165,8 +203,8 @@ export interface FieldVisibilityRule {
 export interface FieldProjectionContext {
   actor: AuthorizationActor | null;
   actorCommunityId: number | null;
-  resourceCommunityId: number;
-  explicitlyPublic?: boolean;
+  resourceCommunityId: number | null;
+  communityVisibility?: CommunityVisibility;
 }
 
 export const AUTHORIZATION_MATRIX = {
@@ -220,12 +258,12 @@ export function authorizeCommunityContent(
     resourceCommunityId,
     surface,
     visibility,
-    communityActive,
-    explicitlyPublic = false,
+    communityStatus,
+    communityVisibility = 'private',
     allowedRoles,
   } = input;
 
-  if (!communityActive) {
+  if (communityStatus !== 'active') {
     return deny('inactive-community');
   }
 
@@ -242,7 +280,7 @@ export function authorizeCommunityContent(
   }
 
   if (surface === 'public-api') {
-    if (visibility === 'public' && explicitlyPublic) {
+    if (visibility === 'public' && communityVisibility === 'public') {
       return allow('explicit-public');
     }
     if (actor && actor.communityId !== resourceCommunityId) {
@@ -275,7 +313,7 @@ export function canExposeField(input: FieldExposureInput): boolean {
     actor,
     actorCommunityId,
     resourceCommunityId,
-    explicitlyPublic = false,
+    communityVisibility = 'private',
     allowedRoles,
   } = input;
 
@@ -288,7 +326,7 @@ export function canExposeField(input: FieldExposureInput): boolean {
   }
 
   if (category === 'public') {
-    return explicitlyPublic;
+    return communityVisibility === 'public';
   }
 
   if (!actor || actor.active !== true) {
@@ -327,7 +365,7 @@ export function projectVisibleFields<T extends Record<string, unknown>>(
         actor: context.actor,
         actorCommunityId: context.actorCommunityId,
         resourceCommunityId: context.resourceCommunityId,
-        explicitlyPublic: context.explicitlyPublic,
+        communityVisibility: context.communityVisibility,
         allowedRoles: rule.allowedRoles,
       })
     ) {
@@ -344,7 +382,7 @@ export function projectCommunityResourceFields<
   family: ContentRouteFamily,
   source: T,
   actor: AuthorizationActor,
-  resourceCommunityId: number
+  resourceCommunityId: number | null
 ): Partial<T> {
   const neverExposed = new Set(NEVER_EXPOSED_FIELDS_BY_FAMILY[family]);
   const rules = Object.fromEntries(

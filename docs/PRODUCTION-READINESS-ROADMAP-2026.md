@@ -83,7 +83,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Add required PostgreSQL CI and a D1/SQLite-compatible CI path; shared database behavior must pass on both first-class targets.
 - Run schema/repository/portable-spatial integration tests against both backends. Remove the legacy PostGIS bootstrap/verification/query branch and its dedicated test (`src/db/migrate.ts`, `src/db/index.ts`, `src/repositories/place.repository.ts`, `tests/db/postgis.test.ts`); V2 spatial behavior must remain portable application-level latitude/longitude logic.
 - Establish the single logical relational schema/behavior contract in `SPEC-V2.md` Sections 6/8 on both targets. Dialect-specific Drizzle definitions/migrations are allowed; equivalent product semantics are mandatory.
-- Replace Worker-incompatible dependencies on shared paths. Implement `PasswordHasher` with an approved KDF benchmarked on Workers and Node; preserved Rails bcrypt and Fastify Argon2id verification with policy-aware lazy upgrade is migration behavior, not a mandate for the new-password algorithm.
+- Replace Worker-incompatible dependencies on shared paths. Implement `PasswordHasher` with an approved KDF benchmarked on Workers and Node; preserved Rails bcrypt verification (and Fastify Argon2id once that deferred profile is re-activated, per `SPEC-V2.md` Section 10) with policy-aware lazy upgrade is migration behavior, not a mandate for the new-password algorithm.
 - Add migration tests for:
   - empty database -> latest;
   - previous release -> latest;
@@ -91,7 +91,7 @@ A Terrastories API revision is production-ready only when all of the following a
   - idempotency where applicable;
   - constraints, indexes, foreign keys, defaults, timestamps, and portable latitude/longitude spatial behavior.
 - Add data invariants for community IDs, ownership, file ownership, join tables, and canonical fields and retained legacy relationships.
-- Implement lossless Stage-1 source adapters for Rails PostgreSQL/ActiveStorage and Fastify V1 PostgreSQL-or-SQLite with configured storage. Both emit the same portable bundle contract and account for every source row and stored byte payload.
+- Implement the lossless Stage-1 Rails PostgreSQL/ActiveStorage source adapter emitting the portable bundle contract and accounting for every source row and stored byte payload. The Fastify V1 PostgreSQL-or-SQLite adapter is DEFER per `SPEC-V2.md` Section 10 until a named deployed installation holding community data is identified; its mapping contracts remain specified there.
 - Drill the final cutover boundary under an enforced read-only source or a complete ordered change journal plus reconciled high-water mark; writes after an earlier snapshot must prevent success.
 - Require expand-contract migrations for risky changes: add/backfill/read-switch/remove rather than destructive one-step changes.
 - Build automated backup + restore verification with checksums/counts and selected semantic invariants.
@@ -100,7 +100,7 @@ A Terrastories API revision is production-ready only when all of the following a
 ### Exit gate
 
 - PostgreSQL and D1/SQLite-compatible migration suites are mandatory and green for shared schema behavior.
-- Rails and Fastify V1 source-profile captures plus both canonical destination transforms pass losslessness, checksum, archive, and cutover-boundary gates.
+- The Rails source-profile capture plus its canonical destination transform passes losslessness, checksum, archive, and cutover-boundary gates. The deferred Fastify V1 profile passes the same gates when re-activated.
 - Restore drill succeeds from a production-like backup with documented timing and integrity checks.
 - Every pending schema change has a reviewed migration and rollback/restore plan.
 
@@ -246,7 +246,7 @@ A Terrastories API revision is production-ready only when all of the following a
 
 1. **Baseline trust:** Phase 0.
 2. **Hono correctness:** Phase 1. Land PR #132 as the coexistence foundation, then complete #134/#145/#146; foundation merge is not the full Phase 1 exit gate.
-3. **Early deployment proof:** before broad domain normalization, run one canonical login/protected-story/media/revocation slice across Workers+D1+R2, Node+PostgreSQL, and disconnected Node+SQLite. #147 coordinates #135/#137/#140/#142; #144 records measured KDF, request, upload, and resource budgets, including representative field-kit hardware.
+3. **Early deployment proof (the SPEC-V2 Section 13 three-profile feasibility gate):** before broad domain normalization, prove login, protected media serving, revocation, legacy password verification (Rails bcrypt), and import transaction limits on real Workers+D1+R2, Node+PostgreSQL, and disconnected Node+SQLite. Failure requires an explicit scope or platform decision. #147 coordinates #135/#137/#140/#142; #144 records measured KDF, request, upload, and resource budgets, including representative field-kit hardware.
 4. **Data safety:** Phase 2.
 5. **Auth/session + sovereignty:** Phases 3 and 4 in parallel where independent.
 6. **Files + CI supply chain:** Phases 5 and 6.

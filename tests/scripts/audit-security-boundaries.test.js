@@ -78,6 +78,119 @@ describe('security audit trust boundaries', () => {
     ]);
   });
 
+  it('fails a self-consistently tampered baseline without external approval', async () => {
+    // Attack: a PR adds an advisory and recomputes both in-repo digests so
+    // the baseline/policy pair validates on its own. The only remaining
+    // satisfier is an approval comment on the tracking issue from a
+    // repository writer/administrator, which the PR diff cannot contain.
+    const tamperedAdvisories = [
+      advisory(['node_modules/known-package']),
+      {
+        source: 'sneaky',
+        package: 'sneaky-package',
+        severity: 'high',
+        url: 'https://example.invalid/sneaky',
+        nodes: ['node_modules/sneaky-package'],
+      },
+    ];
+    const tamperedPolicy = {
+      ...basePolicy,
+      review: {
+        status: 'accepted',
+        reviewedBy: 'attacker',
+        reviewedOn: '2026-09-27',
+        advisoriesSha256:
+          auditModule.computeAdvisorySetDigest(tamperedAdvisories),
+      },
+    };
+    tamperedPolicy.review.policySha256 =
+      auditModule.computeReviewedPolicyDigest(
+        tamperedAdvisories,
+        tamperedPolicy
+      );
+
+    // The in-repo binding is self-consistent: digest recomputation alone
+    // gets the attacker past validateReviewedPolicyBinding.
+    const baseline = { trackingIssue: 141, advisories: tamperedAdvisories };
+    expect(() =>
+      auditModule.validateReviewedPolicyBinding(baseline, tamperedPolicy)
+    ).not.toThrow();
+
+    // The tracking issue carries no approval for the tampered policy
+    // digest, so the external gate must reject it.
+    const fetchImpl = async (url) => {
+      if (url.endsWith('/issues/141/comments?per_page=100&page=1')) {
+        return new Response(
+          JSON.stringify([
+            {
+              body: `SECURITY-AUDIT-APPROVAL v1 policySha256=${'c'.repeat(64)} trackingIssue=141`,
+              user: { login: 'trusted-maintainer' },
+            },
+          ]),
+          { status: 200 }
+        );
+      }
+      if (url.endsWith('/collaborators/trusted-maintainer/permission')) {
+        return new Response(JSON.stringify({ permission: 'admin' }), {
+          status: 200,
+        });
+      }
+      return new Response('not found', { status: 404 });
+    };
+
+    await expect(
+      auditModule.verifyExternalAuditApproval(tamperedPolicy, {
+        repository: 'Terrastories/terrastories-api',
+        token: 'test-token',
+        fetchImpl,
+      })
+    ).rejects.toThrow(/approval/i);
+  });
+
+  it('treats the same advisory on a replacement path as new exposure', () => {
+    const baseline = {
+      trackingIssue: 141,
+      advisories: [advisory(['node_modules/known-package'])],
+    };
+    const policy = {
+      ...basePolicy,
+      review: {
+        advisoriesSha256: auditModule.computeAdvisorySetDigest(
+          baseline.advisories
+        ),
+      },
+    };
+
+    // Same advisory identity (source + package), but reachable only
+    // through a dependency path the accepted baseline never covered.
+    const comparison = auditModule.compareAuditAdvisories(baseline, policy, {
+      vulnerabilities: {
+        'known-package': {
+          nodes: ['node_modules/moved-parent/node_modules/known-package'],
+          via: [
+            {
+              source: 'known',
+              severity: 'moderate',
+              url: 'https://example.invalid/known',
+            },
+          ],
+        },
+      },
+    });
+
+    expect(comparison.newAdvisories).toEqual([]);
+    expect(comparison.pathChanges).toEqual([
+      expect.objectContaining({
+        package: 'known-package',
+        previousNodes: ['node_modules/known-package'],
+        nodes: ['node_modules/moved-parent/node_modules/known-package'],
+      }),
+    ]);
+    // main() fails closed whenever pathChanges is non-empty, so a moved
+    // advisory cannot reuse the accepted exception.
+    expect(comparison.pathChanges.length).toBeGreaterThan(0);
+  });
+
   it('requires an exact external approval from a repository writer', () => {
     expect(typeof auditModule.validateExternalAuditApproval).toBe('function');
     if (typeof auditModule.validateExternalAuditApproval !== 'function') return;

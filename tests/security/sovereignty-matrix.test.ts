@@ -4,10 +4,14 @@ import {
   CONTENT_ROUTE_FAMILIES,
   FIELD_VISIBILITY_CATEGORIES,
   PROTECTED_SURFACES,
+  STORY_AUDIENCES,
+  STORY_AUDIENCE_ROLES,
   V2_COMMUNITY_ROLES,
   authorizeCommunityContent,
   canExposeField,
   createAuthorizationAuditEvent,
+  fastifyStoryToAudience,
+  roleCanReadStoryAudience,
   type AuthorizationActor,
   type ContentRouteFamily,
   type ProtectedSurface,
@@ -28,6 +32,7 @@ describe('V2 sovereignty authorization matrix', () => {
   it('contains only the canonical V2 roles', () => {
     expect(V2_COMMUNITY_ROLES).toEqual([
       'viewer',
+      'member',
       'editor',
       'admin',
       'super_admin',
@@ -306,6 +311,58 @@ describe('V2 sovereignty authorization matrix', () => {
     expect(event).not.toHaveProperty('body');
     expect(event).not.toHaveProperty('content');
     expect(event).not.toHaveProperty('payload');
+  });
+});
+
+describe('V2 story audiences (SPEC-V2 §6.2/§6.3)', () => {
+  it('lists exactly the canonical story audiences', () => {
+    expect(STORY_AUDIENCES).toEqual(['public', 'community', 'editors']);
+  });
+
+  it('grants each role exactly its §6.2 audiences', () => {
+    expect(STORY_AUDIENCE_ROLES.public).toEqual([
+      'viewer',
+      'member',
+      'editor',
+      'admin',
+    ]);
+    expect(STORY_AUDIENCE_ROLES.community).toEqual([
+      'member',
+      'editor',
+      'admin',
+    ]);
+    expect(STORY_AUDIENCE_ROLES.editors).toEqual(['editor', 'admin']);
+
+    // No role table ever grants super_admin an authenticated story audience.
+    for (const audience of STORY_AUDIENCES) {
+      expect(STORY_AUDIENCE_ROLES[audience]).not.toContain('super_admin');
+      expect(STORY_AUDIENCE_ROLES[audience]).not.toContain('elder');
+    }
+  });
+
+  it('lets member read public and community but not editors audiences', () => {
+    expect(roleCanReadStoryAudience('member', 'public')).toBe(true);
+    expect(roleCanReadStoryAudience('member', 'community')).toBe(true);
+    expect(roleCanReadStoryAudience('member', 'editors')).toBe(false);
+  });
+
+  it('restricts viewer to the public audience', () => {
+    expect(roleCanReadStoryAudience('viewer', 'public')).toBe(true);
+    expect(roleCanReadStoryAudience('viewer', 'community')).toBe(false);
+    expect(roleCanReadStoryAudience('viewer', 'editors')).toBe(false);
+  });
+
+  it('maps every Fastify column state to a canonical audience fail-closed', () => {
+    expect(fastifyStoryToAudience('public', false)).toBe('public');
+    expect(fastifyStoryToAudience('members_only', false)).toBe('community');
+    // Restriction overrides every privacy level (elder/admin-only has no
+    // canonical runtime equivalent; editors is the closest retained audience).
+    expect(fastifyStoryToAudience('public', true)).toBe('editors');
+    expect(fastifyStoryToAudience('members_only', true)).toBe('editors');
+    // Unknown legacy values never widen access.
+    expect(fastifyStoryToAudience('private', false)).toBe('editors');
+    expect(fastifyStoryToAudience('restricted', false)).toBe('editors');
+    expect(fastifyStoryToAudience('', false)).toBe('editors');
   });
 });
 

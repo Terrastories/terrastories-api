@@ -20,6 +20,12 @@ import { getDb, type Database } from '../db/index.js';
 import { storiesSqlite, storiesPg } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import {
+  STORY_AUDIENCES,
+  isV2CommunityRole,
+  roleCanReadStoryAudience,
+} from '../shared/authorization/sovereignty-policy.js';
+import { storyAudienceCondition } from '../repositories/story.repository.js';
+import {
   requireAuth,
   requireRole,
 } from '../shared/middleware/auth.middleware.js';
@@ -574,7 +580,21 @@ export async function communityRoutes(
         const storiesTable = getStoriesTable();
         const conditions = [eq(storiesTable.communityId, communityId)];
 
-        if (user.role !== 'admin') {
+        // V2 story-audience filtering (SPEC-V2 §6.2/§6.3); legacy `elder`
+        // keeps the V1 restriction filter.
+        if (isV2CommunityRole(user.role)) {
+          const audienceCondition = storyAudienceCondition(
+            STORY_AUDIENCES.filter((audience) =>
+              roleCanReadStoryAudience(user.role, audience)
+            ),
+            storiesTable
+          );
+          if (!audienceCondition) {
+            // No audience grant for this role: expose nothing, fail closed.
+            return reply.status(200).send({ data: [] });
+          }
+          conditions.push(audienceCondition);
+        } else if (user.role !== 'admin') {
           // Only show non-restricted stories to non-admin users
           conditions.push(eq(storiesTable.isRestricted, false));
         }

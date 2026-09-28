@@ -1,5 +1,6 @@
 export const V2_COMMUNITY_ROLES = [
   'viewer',
+  'member',
   'editor',
   'admin',
   'super_admin',
@@ -9,6 +10,69 @@ export type V2CommunityRole = (typeof V2_COMMUNITY_ROLES)[number];
 
 export function isV2CommunityRole(role: string): role is V2CommunityRole {
   return (V2_COMMUNITY_ROLES as readonly string[]).includes(role);
+}
+
+/**
+ * Canonical story audiences (SPEC-V2 §6.3). These are read audiences for
+ * story content, distinct from `FieldVisibilityCategory`, which classifies
+ * individual fields inside an already-authorized response.
+ */
+export const STORY_AUDIENCES = ['public', 'community', 'editors'] as const;
+
+export type StoryAudience = (typeof STORY_AUDIENCES)[number];
+
+/**
+ * Which authenticated roles may read each story audience inside their own
+ * ACTIVE community (SPEC-V2 §6.2): viewer adds `public`, `member` adds
+ * `community`, `editor`/`admin` add `editors`. A private community does not
+ * block these reads; only community `status` does. `super_admin` never
+ * appears: it has no authenticated community-content access, only public
+ * projections on anonymous terms.
+ */
+export const STORY_AUDIENCE_ROLES: Record<
+  StoryAudience,
+  readonly V2CommunityRole[]
+> = {
+  public: ['viewer', 'member', 'editor', 'admin'],
+  community: ['member', 'editor', 'admin'],
+  editors: ['editor', 'admin'],
+};
+
+export function roleCanReadStoryAudience(
+  role: V2CommunityRole,
+  audience: StoryAudience
+): boolean {
+  return STORY_AUDIENCE_ROLES[audience].includes(role);
+}
+
+/**
+ * Transitional mapping from the Fastify V1 story columns to canonical
+ * audiences (SPEC-V2 §6.3). The physical columns stay until #145/#146;
+ * this function is the single documented mapping and its SQL transcription
+ * in `StoryRepository.findMany` must stay in sync:
+ *
+ * - `isRestricted = true` -> `editors`. The Fastify restriction was
+ *   elder/admin-only, which has no canonical runtime equivalent; `editors`
+ *   is the closest retained audience and the fail-closed default.
+ * - `privacyLevel = 'public'` + unrestricted -> `public`.
+ * - `privacyLevel = 'members_only'` + unrestricted -> `community`.
+ * - any other `privacyLevel` -> `editors` (fail-closed for unknown legacy
+ *   values; migration dispositions them explicitly per §6.3).
+ */
+export function fastifyStoryToAudience(
+  privacyLevel: string,
+  isRestricted: boolean
+): StoryAudience {
+  if (isRestricted) {
+    return 'editors';
+  }
+  if (privacyLevel === 'public') {
+    return 'public';
+  }
+  if (privacyLevel === 'members_only') {
+    return 'community';
+  }
+  return 'editors';
 }
 
 export const CONTENT_ROUTE_FAMILIES = [

@@ -498,6 +498,9 @@ describe('StoryService', () => {
         title: 'Public Story',
         slug: 'public-story',
         communityId: testData.community.id,
+        // Physical Fastify columns the §6.2/§6.3 audience gate reads.
+        privacyLevel: 'public',
+        isRestricted: false,
         culturalProtocols: { permissionLevel: 'public' },
         imageUrl: null, // Added by dual-read
         audioUrl: null, // Added by dual-read

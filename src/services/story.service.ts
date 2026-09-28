@@ -28,6 +28,12 @@ import type { User } from '../db/schema/users.js';
 import type { Logger } from '../shared/types/index.js';
 import { getConfig } from '../shared/config/index.js';
 import { fileOperationsMetrics } from '../shared/metrics/file-operations.js';
+import {
+  STORY_AUDIENCES,
+  fastifyStoryToAudience,
+  isV2CommunityRole,
+  roleCanReadStoryAudience,
+} from '../shared/authorization/sovereignty-policy.js';
 
 /**
  * Cultural protocols for story access and modifications
@@ -444,6 +450,17 @@ export class StoryService {
       return null;
     }
 
+    // V2 story-audience gate (§6.2/§6.3): denied reads stay
+    // indistinguishable from nonexistent stories.
+    if (this.storyAudienceDenied(story, userRole)) {
+      this.logger.warn('Story audience access denied', {
+        userId,
+        storyId: id,
+        reason: 'story_audience_denied',
+      });
+      return null;
+    }
+
     // Cultural protocol access validation
     const accessResult = await this.validateCulturalAccess(
       story,
@@ -509,6 +526,17 @@ export class StoryService {
       communityId
     );
     if (!story) {
+      return null;
+    }
+
+    // V2 story-audience gate (§6.2/§6.3): denied reads stay
+    // indistinguishable from nonexistent stories.
+    if (this.storyAudienceDenied(story, userRole)) {
+      this.logger.warn('Story audience access denied', {
+        userId,
+        slug,
+        reason: 'story_audience_denied',
+      });
       return null;
     }
 
@@ -871,9 +899,13 @@ export class StoryService {
       communityId: userCommunityId,
     };
 
-    // Apply cultural protocol filtering at database level based on user role
-    if (userRole !== 'elder' && userRole !== 'admin') {
-      // Non-elders cannot see restricted content - filter at DB level
+    // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): each role sees exactly
+    // its audiences at database level. Legacy `elder` keeps the V1 path.
+    if (isV2CommunityRole(userRole)) {
+      scopedFilters.storyAudiences = STORY_AUDIENCES.filter((audience) =>
+        roleCanReadStoryAudience(userRole, audience)
+      );
+    } else if (userRole !== 'elder' && userRole !== 'admin') {
       scopedFilters.isRestricted = false;
     }
 
@@ -947,6 +979,25 @@ export class StoryService {
         'Super administrators cannot access community stories - data sovereignty protection'
       );
     }
+  }
+
+  /**
+   * SPEC-V2 §6.2/§6.3 story-audience gate for authenticated reads on the
+   * transitional Fastify schema (`privacyLevel`/`isRestricted` -> canonical
+   * audience). Non-V2 roles (legacy `elder`) keep their V1 path; super
+   * admins are already denied before callers reach this check.
+   */
+  private storyAudienceDenied(
+    story: Pick<StoryWithRelations, 'privacyLevel' | 'isRestricted'>,
+    userRole: string
+  ): boolean {
+    if (!isV2CommunityRole(userRole)) {
+      return false;
+    }
+    return !roleCanReadStoryAudience(
+      userRole,
+      fastifyStoryToAudience(story.privacyLevel, story.isRestricted)
+    );
   }
 
   /**

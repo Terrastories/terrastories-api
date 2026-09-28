@@ -5,7 +5,20 @@
  * community isolation, search capabilities, and association handling.
  */
 
-import { eq, and, like, desc, or, sql, count, inArray } from 'drizzle-orm';
+import {
+  eq,
+  and,
+  like,
+  desc,
+  or,
+  sql,
+  count,
+  inArray,
+  notInArray,
+  type AnyColumn,
+  type SQL,
+} from 'drizzle-orm';
+import type { StoryAudience } from '../shared/authorization/sovereignty-policy.js';
 import {
   storiesSqlite,
   communitiesSqlite,
@@ -184,6 +197,12 @@ export interface StoryFilters {
   communityId?: number;
   isRestricted?: boolean;
   privacyLevel?: string;
+  /**
+   * Canonical V2 story audiences the caller may read (SPEC-V2 §6.2/§6.3).
+   * Transcribed to SQL exactly as documented on `fastifyStoryToAudience`
+   * in the sovereignty policy; keep both in sync.
+   */
+  storyAudiences?: StoryAudience[];
   tags?: string[];
   createdBy?: number;
   language?: string;
@@ -978,6 +997,16 @@ export class StoryRepository {
       conditions.push(eq(storiesTable.privacyLevel, filters.privacyLevel));
     }
 
+    if (filters.storyAudiences) {
+      const audienceCondition = storyAudienceCondition(
+        filters.storyAudiences,
+        storiesTable
+      );
+      if (audienceCondition) {
+        conditions.push(audienceCondition);
+      }
+    }
+
     if (filters.createdBy) {
       conditions.push(eq(storiesTable.createdBy, filters.createdBy));
     }
@@ -1183,4 +1212,45 @@ export class StoryRepository {
       .replace(/^-|-$/g, '') // Remove leading/trailing hyphens
       .substring(0, 50); // Truncate to reasonable length
   }
+}
+
+/**
+ * SQL transcription of `fastifyStoryToAudience` (sovereignty policy):
+ * - public    = unrestricted + privacyLevel 'public'
+ * - community = unrestricted + privacyLevel 'members_only'
+ * - editors   = restricted OR any other privacyLevel (fail-closed default)
+ *
+ * Single source for `findMany` and route-level community story listings so
+ * the mapping exists exactly once outside the policy module. Works for both
+ * dialect tables because it only references shared column shape.
+ */
+export function storyAudienceCondition(
+  audiences: readonly StoryAudience[],
+  storiesTable: {
+    isRestricted: AnyColumn;
+    privacyLevel: AnyColumn;
+  }
+): SQL | undefined {
+  const conditions = audiences.map((audience) => {
+    if (audience === 'public') {
+      return and(
+        eq(storiesTable.isRestricted, false),
+        eq(storiesTable.privacyLevel, 'public')
+      );
+    }
+    if (audience === 'community') {
+      return and(
+        eq(storiesTable.isRestricted, false),
+        eq(storiesTable.privacyLevel, 'members_only')
+      );
+    }
+    return or(
+      eq(storiesTable.isRestricted, true),
+      notInArray(storiesTable.privacyLevel, ['public', 'members_only'])
+    );
+  });
+  if (conditions.length === 0) {
+    return undefined;
+  }
+  return conditions.length === 1 ? conditions[0] : or(...conditions);
 }

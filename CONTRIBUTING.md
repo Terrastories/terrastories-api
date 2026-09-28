@@ -4,7 +4,7 @@ Before changing code, read [`AGENTS.md`](AGENTS.md) and [`docs/SOURCE-OF-TRUTH.m
 
 ## Development setup
 
-Requirements: Node.js 20+ and npm 9+.
+Requirements: Node.js 20.9+ and npm 9+.
 
 ```bash
 npm install

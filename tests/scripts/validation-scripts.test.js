@@ -144,7 +144,7 @@ describe('deterministic Vitest worker configuration', () => {
     readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
   );
 
-  it('pins worker bounds for every CI test shard', () => {
+  it('bounds workers for every CI test shard with Vitest 4 options', () => {
     const shardScripts = Object.entries(packageJson.scripts).filter(([name]) =>
       name.startsWith('test:ci:')
     );
@@ -153,14 +153,16 @@ describe('deterministic Vitest worker configuration', () => {
     for (const [name, command] of shardScripts) {
       // Performance tests generate their own 100+ request concurrency and must
       // run without unrelated test-file contention. Other shards use a fixed
-      // four-worker production-like CI configuration.
+      // four-worker production-like CI configuration. Vitest 4 removed the
+      // minWorkers option, so maxWorkers is the supported deterministic bound.
       const expectedWorkers = name === 'test:ci:production' ? 1 : 4;
       expect(command, `${name} must pin max workers`).toContain(
         `--maxWorkers=${expectedWorkers}`
       );
-      expect(command, `${name} must pin min workers`).toContain(
-        `--minWorkers=${expectedWorkers}`
-      );
+      expect(
+        command,
+        `${name} must use supported Vitest 4 options`
+      ).not.toContain('--minWorkers');
     }
   });
 
@@ -171,13 +173,15 @@ describe('deterministic Vitest worker configuration', () => {
     expect(coverageCommand).toContain(
       '--exclude tests/production/performance.test.ts'
     );
+    expect(coverageCommand).toContain('SKIP_TIMING_ASSERTIONS=true');
     expect(coverageCommand).toContain('--maxWorkers=4');
-    expect(coverageCommand).toContain('--minWorkers=4');
+    expect(coverageCommand).not.toContain('--minWorkers');
 
     // The performance suite is still required by the canonical CI suite; only
     // V8 instrumentation is excluded because it perturbs memory measurements.
     expect(productionCommand).toContain('tests/production');
     expect(productionCommand).toContain('--maxWorkers=1');
-    expect(productionCommand).toContain('--minWorkers=1');
+    expect(productionCommand).not.toContain('--minWorkers');
+    expect(productionCommand).not.toContain('SKIP_TIMING_ASSERTIONS');
   });
 });

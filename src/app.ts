@@ -135,7 +135,7 @@ export async function buildApp(options?: BuildAppOptions) {
 
     const errorDetails =
       typeof error === 'object' && error !== null
-        ? (error as Record<string, unknown>)
+        ? (error as unknown as Record<string, unknown>)
         : {};
     const statusCode =
       typeof errorDetails.statusCode === 'number'

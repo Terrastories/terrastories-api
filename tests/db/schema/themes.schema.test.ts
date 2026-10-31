@@ -479,6 +479,133 @@ describe('Themes Schema', () => {
       expect(result.success).toBe(false);
       expect(result.error?.issues).toHaveLength(2); // both lat and long boundary errors
     });
+
+    const baseCreateData = { name: 'Valid Theme', communityId: 1 };
+
+    it.each([
+      ['name', 'A'],
+      ['name', 'x'.repeat(255)],
+      ['description', 'x'.repeat(1000)],
+      ['mapboxStyleUrl', ''],
+      ['mapboxStyleUrl', 'mapbox://styles/user/custom-style'],
+      ['mapboxAccessToken', 'pk.test.token'],
+      ['centerLat', -90],
+      ['centerLat', 0],
+      ['centerLat', 90],
+      ['centerLong', -180],
+      ['centerLong', 180],
+      ['swBoundaryLat', -90],
+      ['neBoundaryLong', 180],
+      ['communityId', 1],
+    ])('should accept valid create field %s', (field, value) => {
+      const result = createThemeSchema.safeParse({
+        ...baseCreateData,
+        [field]: value,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it.each([
+      ['name', ''],
+      ['name', 'x'.repeat(256)],
+      ['description', 'x'.repeat(1001)],
+      ['mapboxStyleUrl', 'https://api.mapbox.com/styles/v1/mapbox/streets-v11'],
+      ['communityId', 0],
+      ['communityId', -1],
+      ['centerLat', -91],
+      ['centerLat', 91],
+      ['centerLong', -181],
+      ['centerLong', 181],
+      ['swBoundaryLat', 91],
+      ['neBoundaryLat', -91],
+      ['swBoundaryLong', -181],
+      ['neBoundaryLong', 181],
+    ])('should reject invalid create field %s', (field, value) => {
+      const result = createThemeSchema.safeParse({
+        ...baseCreateData,
+        [field]: value,
+      });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map((issue) => issue.path[0])).toContain(
+        field
+      );
+    });
+
+    it.each([
+      {
+        bounds: { swBoundaryLat: 47.0, neBoundaryLat: 46.0 },
+        path: 'swBoundaryLat',
+      },
+      {
+        bounds: { swBoundaryLong: -121.0, neBoundaryLong: -122.0 },
+        path: 'swBoundaryLong',
+      },
+    ])(
+      'should reject reversed nonzero bounds for $path in create',
+      ({ bounds, path }) => {
+        const result = createThemeSchema.safeParse({
+          ...baseCreateData,
+          ...bounds,
+        });
+        expect(result.success).toBe(false);
+        expect(result.error?.issues.map((issue) => issue.path[0])).toContain(
+          path
+        );
+      }
+    );
+
+    it.each([
+      { swBoundaryLat: 0, neBoundaryLat: -5 },
+      { swBoundaryLong: 0, neBoundaryLong: -5 },
+      { swBoundaryLat: 5, neBoundaryLat: 0 },
+      { swBoundaryLong: 5, neBoundaryLong: 0 },
+    ])(
+      'should skip reversed-bounds check when a boundary is zero %j',
+      (bounds) => {
+        const result = createThemeSchema.safeParse({
+          ...baseCreateData,
+          ...bounds,
+        });
+        expect(result.success).toBe(true);
+      }
+    );
+
+    it.each([
+      {},
+      { name: 'Updated Theme' },
+      { centerLat: 45.0, centerLong: -123.0 },
+    ])('should accept partial update input %j', (input) => {
+      const result = updateThemeSchema.safeParse(input);
+      expect(result.success).toBe(true);
+    });
+
+    it.each([{ communityId: 999 }, { name: 'Updated Theme', communityId: 0 }])(
+      'should strip communityId from update input %j',
+      (input) => {
+        const result = updateThemeSchema.safeParse(input);
+        expect(result.success).toBe(true);
+        expect(result.data).not.toHaveProperty('communityId');
+      }
+    );
+
+    it('should reject out-of-range centerLat in update', () => {
+      const result = updateThemeSchema.safeParse({ centerLat: 91 });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map((issue) => issue.path[0])).toContain(
+        'centerLat'
+      );
+    });
+
+    it.each([
+      { swBoundaryLat: 47.0, neBoundaryLat: 46.0 },
+      { swBoundaryLong: -121.0, neBoundaryLong: -122.0 },
+    ])(
+      'should accept reversed bounds in update (create-only check) %j',
+      (bounds) => {
+        const result = updateThemeSchema.safeParse(bounds);
+        expect(result.success).toBe(true);
+      }
+    );
   });
 
   describe('Performance & Indexing', () => {

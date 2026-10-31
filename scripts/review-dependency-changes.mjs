@@ -1,6 +1,23 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+// Same-version lock fields a reviewer must see: install source, install
+// scripts, executables, and the flags that decide production inclusion.
+const REVIEWED_LOCK_FIELDS = [
+  'resolved',
+  'integrity',
+  'hasInstallScript',
+  'bin',
+  'link',
+  'dependencies',
+  'optionalDependencies',
+  'peerDependencies',
+  'dev',
+  'devOptional',
+  'optional',
+  'peer',
+];
+
 function dependencyName(lockPath) {
   const marker = 'node_modules/';
   const index = lockPath.lastIndexOf(marker);
@@ -25,8 +42,10 @@ export function summarizeDependencyChanges(baseLock, currentLock) {
     const after = afterPackage?.version ?? null;
 
     if (before === after && beforePackage && afterPackage) {
-      const changedFields = ['resolved', 'integrity'].filter(
-        (field) => beforePackage[field] !== afterPackage[field]
+      const changedFields = REVIEWED_LOCK_FIELDS.filter(
+        (field) =>
+          JSON.stringify(beforePackage[field]) !==
+          JSON.stringify(afterPackage[field])
       );
       if (changedFields.length === 0) continue;
 

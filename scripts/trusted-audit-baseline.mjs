@@ -1,13 +1,34 @@
 import { createHash } from 'node:crypto';
-import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const trustedAuditVersion = '2';
+const trustedAuditVersion = '3';
 const trackingIssue = 141;
+
+// Untrusted inputs (the PR tree) are read with hard size caps so a PR cannot
+// exhaust the runner, and their contents are never echoed into job logs.
+export const MAX_CONFIG_BYTES = 1024 * 1024;
+export const MAX_MANIFEST_BYTES = 64 * 1024 * 1024;
+const NPM_REGISTRY_ORIGIN = 'https://registry.npmjs.org/';
+// Lock flags that decide whether a package ships in the production install
+// (`npm ci --omit=dev`). They are part of each accepted advisory's binding.
+const LOCK_SCOPE_FLAGS = ['dev', 'devOptional', 'optional', 'peer'];
+const LOCK_NODE_PATH_PATTERN =
+  /^(?:node_modules\/(?:@[^/]+\/)?[^/]+\/)*node_modules\/(?:@[^/]+\/)?[^/]+$/;
+const PACKAGE_NAME_PATTERN =
+  /^(?:@[A-Za-z0-9_~-][A-Za-z0-9._~-]*\/)?[A-Za-z0-9_~-][A-Za-z0-9._~-]*$/;
+const PACKAGE_VERSION_PATTERN =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const SHA512_INTEGRITY_PATTERN = /^sha512-[A-Za-z0-9+/]{86}==$/;
+const GITHUB_FETCH_TIMEOUT_MS = 15_000;
+const MAX_APPROVAL_COMMENT_PAGES = 20;
+const MAX_APPROVAL_CANDIDATES = 25;
+const MAX_REPORTED_LOCK_PROBLEMS = 20;
 
 const SEVERITY_ORDER = new Map([
   ['low', 0],
@@ -16,8 +37,10 @@ const SEVERITY_ORDER = new Map([
   ['critical', 3],
 ]);
 const TRUSTED_APPROVAL_PERMISSIONS = new Set(['admin', 'write']);
+// Anchored to the whole (trimmed) comment body and case-sensitive: a comment
+// that only quotes the line, or adds any other text, is not an approval.
 const EXTERNAL_APPROVAL_PATTERN =
-  /^SECURITY-AUDIT-APPROVAL v1 policySha256=([0-9a-f]{64}) trackingIssue=(\d+)$/im;
+  /^SECURITY-AUDIT-APPROVAL v1 policySha256=([0-9a-f]{64}) trackingIssue=([1-9]\d*)$/;
 
 function isCalendarDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -63,6 +86,25 @@ function normalizeAuditNodes(nodes) {
   return [...new Set(nodes.filter((node) => typeof node === 'string'))].sort();
 }
 
+function normalizeNodeScopes(nodes, nodeScopes) {
+  if (
+    !nodeScopes ||
+    typeof nodeScopes !== 'object' ||
+    Array.isArray(nodeScopes)
+  ) {
+    return null;
+  }
+
+  return Object.fromEntries(
+    normalizeAuditNodes(nodes).map((node) => {
+      const scope = Object.prototype.hasOwnProperty.call(nodeScopes, node)
+        ? nodeScopes[node]
+        : null;
+      return [node, typeof scope === 'string' ? scope : null];
+    })
+  );
+}
+
 function sameAuditNodes(left, right) {
   const leftNodes = normalizeAuditNodes(left);
   const rightNodes = normalizeAuditNodes(right);
@@ -70,6 +112,55 @@ function sameAuditNodes(left, right) {
     leftNodes.length === rightNodes.length &&
     leftNodes.every((node, index) => node === rightNodes[index])
   );
+}
+
+function sameAuditBinding(accepted, current) {
+  if (!sameAuditNodes(accepted.nodes, current.nodes)) {
+    return false;
+  }
+  const acceptedScopes = normalizeNodeScopes(
+    accepted.nodes,
+    accepted.nodeScopes
+  );
+  const currentScopes = normalizeNodeScopes(current.nodes, current.nodeScopes);
+  return JSON.stringify(acceptedScopes) === JSON.stringify(currentScopes);
+}
+
+export function lockEntryScope(entry) {
+  const flags = LOCK_SCOPE_FLAGS.filter((flag) => entry?.[flag] === true);
+  return flags.length > 0 ? flags.join('+') : 'prod';
+}
+
+// Binds each advisory install path to its lock scope (prod, dev, optional...),
+// so moving an accepted dev-only package into the production install is a
+// binding change that needs a new review.
+export function annotateAdvisoryScopes(advisories, lock) {
+  const packages = lock?.packages;
+  if (!packages || typeof packages !== 'object' || Array.isArray(packages)) {
+    throw new Error(
+      'package-lock.json has no packages map to bind audit paths'
+    );
+  }
+
+  return advisories.map((advisory) => {
+    const nodes = normalizeAuditNodes(advisory.nodes);
+    if (nodes.length === 0) {
+      return advisory;
+    }
+    const nodeScopes = {};
+    for (const node of nodes) {
+      const entry = Object.prototype.hasOwnProperty.call(packages, node)
+        ? packages[node]
+        : undefined;
+      if (!entry || typeof entry !== 'object') {
+        throw new Error(
+          `npm audit reported dependency path ${JSON.stringify(node)} that package-lock.json does not contain`
+        );
+      }
+      nodeScopes[node] = lockEntryScope(entry);
+    }
+    return { ...advisory, nodes, nodeScopes };
+  });
 }
 
 function canonicalAdvisory(advisory) {
@@ -86,6 +177,10 @@ function canonicalAdvisory(advisory) {
   const nodes = normalizeAuditNodes(advisory.nodes);
   if (nodes.length > 0) {
     canonical.nodes = nodes;
+    const nodeScopes = normalizeNodeScopes(nodes, advisory.nodeScopes);
+    if (nodeScopes) {
+      canonical.nodeScopes = nodeScopes;
+    }
   }
   return canonical;
 }
@@ -104,6 +199,10 @@ export function computeAdvisorySetDigest(advisories) {
       compareText(
         JSON.stringify(left.nodes ?? []),
         JSON.stringify(right.nodes ?? [])
+      ) ||
+      compareText(
+        JSON.stringify(left.nodeScopes ?? null),
+        JSON.stringify(right.nodeScopes ?? null)
       )
     );
   });
@@ -150,7 +249,8 @@ export function validateBaselinePolicy(policy, today) {
     !policy ||
     typeof policy !== 'object' ||
     Array.isArray(policy) ||
-    !policy.trackingIssue ||
+    !Number.isInteger(policy.trackingIssue) ||
+    policy.trackingIssue <= 0 ||
     !SEVERITY_ORDER.has(policy.minimumSeverity)
   ) {
     throw new Error('Invalid security audit policy metadata');
@@ -213,15 +313,19 @@ export function parseExternalAuditApproval(body) {
     return null;
   }
 
-  const match = body.match(EXTERNAL_APPROVAL_PATTERN);
+  const match = body.trim().match(EXTERNAL_APPROVAL_PATTERN);
   if (!match) {
     return null;
   }
 
   return {
-    policySha256: match[1].toLowerCase(),
+    policySha256: match[1],
     trackingIssue: Number(match[2]),
   };
+}
+
+export function expectedApprovalLine(policy) {
+  return `SECURITY-AUDIT-APPROVAL v1 policySha256=${policy.review.policySha256.toLowerCase()} trackingIssue=${policy.trackingIssue}`;
 }
 
 export function validateExternalAuditApproval(policy, approvals) {
@@ -242,7 +346,7 @@ export function validateExternalAuditApproval(policy, approvals) {
     if (
       !parsed ||
       parsed.policySha256 !== expectedDigest ||
-      parsed.trackingIssue !== Number(policy.trackingIssue)
+      parsed.trackingIssue !== policy.trackingIssue
     ) {
       continue;
     }
@@ -266,20 +370,44 @@ export function validateExternalAuditApproval(policy, approvals) {
   );
 }
 
-async function fetchGitHubJson(url, token, fetchImpl) {
-  const response = await fetchImpl(url, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${token}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-    },
-  });
+async function fetchGitHubJson(
+  url,
+  token,
+  fetchImpl,
+  { description, allowNotFound = false }
+) {
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    const reason =
+      error?.name === 'TimeoutError' || error?.name === 'AbortError'
+        ? `timed out after ${GITHUB_FETCH_TIMEOUT_MS} ms`
+        : 'request failed';
+    throw new Error(`GitHub security audit ${description} ${reason}`);
+  }
+  if (allowNotFound && response.status === 404) {
+    return null;
+  }
   if (!response.ok) {
     throw new Error(
-      `GitHub security audit approval lookup failed with HTTP ${response.status}`
+      `GitHub security audit ${description} failed with HTTP ${response.status}`
     );
   }
-  return response.json();
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(
+      `GitHub security audit ${description} returned invalid JSON`
+    );
+  }
 }
 
 export async function verifyExternalAuditApproval(
@@ -290,7 +418,7 @@ export async function verifyExternalAuditApproval(
     fetchImpl = globalThis.fetch,
   } = {}
 ) {
-  if (Number(policy?.trackingIssue) !== trackingIssue) {
+  if (policy?.trackingIssue !== trackingIssue) {
     throw new Error(
       `Security audit approval must be recorded under #${trackingIssue}`
     );
@@ -306,12 +434,24 @@ export async function verifyExternalAuditApproval(
       'Security audit external approval verification requires a GitHub repository, token, and fetch implementation'
     );
   }
+  const expectedDigest = policy.review?.policySha256?.toLowerCase();
+  if (!expectedDigest || !/^[0-9a-f]{64}$/.test(expectedDigest)) {
+    throw new Error(
+      'Security audit external approval requires a valid reviewed policy digest'
+    );
+  }
 
+  // Only comments whose whole body is exactly the expected line cost a
+  // permission lookup, and the lookups are capped, so pasted copies on the
+  // public tracking issue cannot drain the token or stall the gate.
+  const expectedLine = expectedApprovalLine(policy);
   const [owner, repo] = repository.split('/');
-  const approvals = [];
-  for (let page = 1; page <= 100; page += 1) {
-    const commentsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${policy.trackingIssue}/comments?per_page=100&page=${page}`;
-    const comments = await fetchGitHubJson(commentsUrl, token, fetchImpl);
+  let candidates = 0;
+  for (let page = 1; page <= MAX_APPROVAL_COMMENT_PAGES; page += 1) {
+    const commentsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${trackingIssue}/comments?per_page=100&page=${page}`;
+    const comments = await fetchGitHubJson(commentsUrl, token, fetchImpl, {
+      description: `approval comment lookup (page ${page})`,
+    });
     if (!Array.isArray(comments)) {
       throw new Error(
         'GitHub security audit approval comments response is invalid'
@@ -319,11 +459,9 @@ export async function verifyExternalAuditApproval(
     }
 
     for (const comment of comments) {
-      const parsed = parseExternalAuditApproval(comment?.body);
       if (
-        !parsed ||
-        parsed.policySha256 !== policy.review?.policySha256?.toLowerCase() ||
-        parsed.trackingIssue !== Number(policy.trackingIssue) ||
+        typeof comment?.body !== 'string' ||
+        comment.body.trim() !== expectedLine ||
         !isUneditedComment(comment)
       ) {
         continue;
@@ -333,22 +471,36 @@ export async function verifyExternalAuditApproval(
       if (typeof author !== 'string' || author === '') {
         continue;
       }
+      candidates += 1;
+      if (candidates > MAX_APPROVAL_CANDIDATES) {
+        throw new Error(
+          `Security audit approval lookup found more than ${MAX_APPROVAL_CANDIDATES} matching comments on #${trackingIssue} without a trusted author; remove the copies or restrict #${trackingIssue} to collaborators.`
+        );
+      }
       const permissionUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/collaborators/${encodeURIComponent(author)}/permission`;
-      const permission = await fetchGitHubJson(permissionUrl, token, fetchImpl);
-      approvals.push({
-        body: comment.body,
-        author,
-        permission: permission?.permission,
-      });
+      const permission = await fetchGitHubJson(
+        permissionUrl,
+        token,
+        fetchImpl,
+        {
+          description: `permission lookup for approval comment ${Number(comment.id) || 'unknown'} by ${JSON.stringify(author)}`,
+          allowNotFound: true,
+        }
+      );
+      if (TRUSTED_APPROVAL_PERMISSIONS.has(permission?.permission)) {
+        return validateExternalAuditApproval(policy, [
+          { body: comment.body, author, permission: permission.permission },
+        ]);
+      }
     }
 
     if (comments.length < 100) {
-      return validateExternalAuditApproval(policy, approvals);
+      return validateExternalAuditApproval(policy, []);
     }
   }
 
   throw new Error(
-    `Security audit external approval lookup exceeded 100 pages for #${policy.trackingIssue}`
+    `Security audit external approval lookup exceeded ${MAX_APPROVAL_COMMENT_PAGES} pages for #${trackingIssue}`
   );
 }
 
@@ -437,17 +589,124 @@ export function formatAdvisoryDiagnostic(advisory, previousSeverity) {
   return `- ${advisory.package} ${severity} ${location}; paths: ${paths}`;
 }
 
+function formatScopedNodes(nodes, nodeScopes, emptyText) {
+  if (nodes.length === 0) {
+    return emptyText;
+  }
+  return nodes
+    .map((node) => `${node} (${nodeScopes?.[node] ?? 'scope not recorded'})`)
+    .join(', ');
+}
+
 export function formatPathChangeDiagnostic(change) {
-  const previous =
-    change.previousNodes.length > 0
-      ? change.previousNodes.join(', ')
-      : '(none recorded)';
-  const current =
-    change.nodes.length > 0 ? change.nodes.join(', ') : '(none reported)';
+  const previous = formatScopedNodes(
+    change.previousNodes,
+    change.previousNodeScopes,
+    '(none recorded)'
+  );
+  const current = formatScopedNodes(
+    change.nodes,
+    change.nodeScopes,
+    '(none reported)'
+  );
   return `- ${change.package} ${change.severity} ${change.url || change.source}; previous paths: ${previous}; current paths: ${current}`;
 }
 
-export function compareAuditAdvisories(baseline, policy, report) {
+function lockEntryName(lockPath, entry) {
+  if (typeof entry.name === 'string') {
+    return entry.name;
+  }
+  const marker = 'node_modules/';
+  return lockPath.slice(lockPath.lastIndexOf(marker) + marker.length);
+}
+
+export function canonicalRegistryTarball(name, version) {
+  const basename = name.startsWith('@')
+    ? name.slice(name.indexOf('/') + 1)
+    : name;
+  return `${NPM_REGISTRY_ORIGIN}${name}/-/${basename}-${version}.tgz`;
+}
+
+// `npm audit --package-lock-only` trusts each lock entry's `version`, while
+// `npm ci` installs whatever `resolved` + `integrity` point at. Every package
+// entry must therefore resolve to the public registry tarball of its own
+// name@version, so the audited version is the installed version.
+export function validateLockfileSources(lock) {
+  if (
+    !lock ||
+    typeof lock !== 'object' ||
+    Array.isArray(lock) ||
+    (lock.lockfileVersion !== 2 && lock.lockfileVersion !== 3) ||
+    !lock.packages ||
+    typeof lock.packages !== 'object' ||
+    Array.isArray(lock.packages)
+  ) {
+    throw new Error(
+      'package-lock.json must be lockfileVersion 2 or 3 with a packages map'
+    );
+  }
+
+  const problems = [];
+  for (const [lockPath, entry] of Object.entries(lock.packages)) {
+    if (lockPath === '') {
+      continue;
+    }
+    const where = JSON.stringify(lockPath);
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      problems.push(`${where}: invalid lock entry`);
+      continue;
+    }
+    if (!LOCK_NODE_PATH_PATTERN.test(lockPath)) {
+      problems.push(`${where}: only node_modules package entries are allowed`);
+      continue;
+    }
+    if (entry.link === true) {
+      problems.push(`${where}: linked local packages are not allowed`);
+      continue;
+    }
+    if (entry.inBundle === true) {
+      problems.push(`${where}: bundled dependencies are not allowed`);
+      continue;
+    }
+    const name = lockEntryName(lockPath, entry);
+    if (!PACKAGE_NAME_PATTERN.test(name)) {
+      problems.push(`${where}: invalid package name`);
+      continue;
+    }
+    if (
+      typeof entry.version !== 'string' ||
+      !PACKAGE_VERSION_PATTERN.test(entry.version)
+    ) {
+      problems.push(`${where}: missing or invalid version`);
+      continue;
+    }
+    if (entry.resolved !== canonicalRegistryTarball(name, entry.version)) {
+      problems.push(
+        `${where}: resolved is not the registry tarball for ${name}@${entry.version}`
+      );
+      continue;
+    }
+    if (
+      typeof entry.integrity !== 'string' ||
+      !SHA512_INTEGRITY_PATTERN.test(entry.integrity)
+    ) {
+      problems.push(`${where}: missing or invalid sha512 integrity`);
+    }
+  }
+
+  if (problems.length > 0) {
+    const shown = problems.slice(0, MAX_REPORTED_LOCK_PROBLEMS);
+    const more =
+      problems.length > shown.length
+        ? `\n- ... and ${problems.length - shown.length} more`
+        : '';
+    throw new Error(
+      `package-lock.json has ${problems.length} entries that do not resolve to canonical npm registry tarballs:\n- ${shown.join('\n- ')}${more}`
+    );
+  }
+}
+
+export function compareAuditAdvisories(baseline, policy, report, lock) {
   if (
     !baseline.trackingIssue ||
     !Array.isArray(baseline.advisories) ||
@@ -466,8 +725,9 @@ export function compareAuditAdvisories(baseline, policy, report) {
     );
   }
 
+  const collected = collectAdvisories(report);
   const current = filterBlockingAdvisories(
-    collectAdvisories(report),
+    lock === undefined ? collected : annotateAdvisoryScopes(collected, lock),
     policy.minimumSeverity
   );
   const blockingBaseline = filterBlockingAdvisories(
@@ -497,7 +757,7 @@ export function compareAuditAdvisories(baseline, policy, report) {
   });
   const pathChanges = current.flatMap((advisory) => {
     const existing = baselineByKey.get(advisoryKey(advisory));
-    if (!existing || sameAuditNodes(existing.nodes, advisory.nodes)) {
+    if (!existing || sameAuditBinding(existing, advisory)) {
       return [];
     }
     return [
@@ -505,6 +765,7 @@ export function compareAuditAdvisories(baseline, policy, report) {
         ...advisory,
         nodes: normalizeAuditNodes(advisory.nodes),
         previousNodes: normalizeAuditNodes(existing.nodes),
+        previousNodeScopes: existing.nodeScopes,
       },
     ];
   });
@@ -520,12 +781,103 @@ export function compareAuditAdvisories(baseline, policy, report) {
   };
 }
 
+// Reads one file from the untrusted data directory without following symlinks
+// (in any path component), without blocking on FIFOs or devices, and without
+// reading more than maxBytes.
+export async function readUntrustedFile(dataDir, relativePath, maxBytes) {
+  const segments = relativePath.split('/');
+  let directory = dataDir;
+  for (const segment of segments.slice(0, -1)) {
+    directory = join(directory, segment);
+    let stats;
+    try {
+      stats = await lstat(directory);
+    } catch {
+      throw new Error(`Audit input directory for ${relativePath} is missing`);
+    }
+    if (!stats.isDirectory()) {
+      throw new Error(
+        `Audit input directory for ${relativePath} must be a real directory, not a symlink`
+      );
+    }
+  }
+
+  let handle;
+  try {
+    handle = await open(
+      join(dataDir, relativePath),
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK
+    );
+  } catch (error) {
+    throw new Error(
+      `Audit input ${relativePath} must be a readable regular file, not a symlink (${error?.code ?? 'open failed'})`
+    );
+  }
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      throw new Error(`Audit input ${relativePath} must be a regular file`);
+    }
+    if (stats.size > maxBytes) {
+      throw new Error(
+        `Audit input ${relativePath} exceeds the ${maxBytes}-byte limit`
+      );
+    }
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        length,
+        buffer.length - length,
+        length
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      length += bytesRead;
+    }
+    if (length > maxBytes) {
+      throw new Error(
+        `Audit input ${relativePath} exceeds the ${maxBytes}-byte limit`
+      );
+    }
+    return buffer.subarray(0, length);
+  } finally {
+    await handle.close();
+  }
+}
+
+// Parse errors from untrusted files are reported without the parser message,
+// because V8 echoes the start of the input into the public job log.
+export function parseUntrustedJson(bytes, relativePath) {
+  let value;
+  try {
+    value = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    throw new Error(`Audit input ${relativePath} is not valid JSON`);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Audit input ${relativePath} must contain a JSON object`);
+  }
+  return value;
+}
+
+async function readUntrustedJson(dataDir, relativePath, maxBytes) {
+  const bytes = await readUntrustedFile(dataDir, relativePath, maxBytes);
+  return { bytes, value: parseUntrustedJson(bytes, relativePath) };
+}
+
 export async function main({ dataDir = scriptRoot } = {}) {
-  const baseline = JSON.parse(
-    await readFile(join(dataDir, 'config/security-audit-baseline.json'), 'utf8')
+  const { value: baseline } = await readUntrustedJson(
+    dataDir,
+    'config/security-audit-baseline.json',
+    MAX_CONFIG_BYTES
   );
-  const policy = JSON.parse(
-    await readFile(join(dataDir, 'config/security-audit-policy.json'), 'utf8')
+  const { value: policy } = await readUntrustedJson(
+    dataDir,
+    'config/security-audit-policy.json',
+    MAX_CONFIG_BYTES
   );
   const today = new Date().toISOString().slice(0, 10);
 
@@ -533,18 +885,28 @@ export async function main({ dataDir = scriptRoot } = {}) {
   validateReviewedPolicyBinding(baseline, policy);
   await verifyExternalAuditApproval(policy);
 
+  const manifest = await readUntrustedJson(
+    dataDir,
+    'package.json',
+    MAX_MANIFEST_BYTES
+  );
+  const lockfile = await readUntrustedJson(
+    dataDir,
+    'package-lock.json',
+    MAX_MANIFEST_BYTES
+  );
+  const lock = lockfile.value;
+  validateLockfileSources(lock);
+
   const auditDir = await mkdtemp(join(tmpdir(), 'terrastories-audit-input-'));
   let audit;
   try {
-    for (const name of ['package.json', 'package-lock.json']) {
-      const input = join(dataDir, name);
-      if (!(await lstat(input)).isFile()) {
-        throw new Error(`Audit input ${name} must be a regular file`);
-      }
-      await writeFile(join(auditDir, name), await readFile(input), {
-        mode: 0o600,
-      });
-    }
+    await writeFile(join(auditDir, 'package.json'), manifest.bytes, {
+      mode: 0o600,
+    });
+    await writeFile(join(auditDir, 'package-lock.json'), lockfile.bytes, {
+      mode: 0o600,
+    });
     audit = spawnSync(
       'npm',
       [
@@ -589,7 +951,7 @@ export async function main({ dataDir = scriptRoot } = {}) {
     newAdvisories,
     severityChanges,
     pathChanges,
-  } = compareAuditAdvisories(baseline, policy, report);
+  } = compareAuditAdvisories(baseline, policy, report, lock);
 
   if (
     newAdvisories.length > 0 ||

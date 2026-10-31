@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { StoryWithRelationsResponseSchema } from '@/shared/schemas/stories.js';
+import {
+  SearchQuerySchema,
+  StoryFiltersSchema,
+  StoryWithRelationsResponseSchema,
+} from '@/shared/schemas/stories.js';
+
+const point = { type: 'Point', coordinates: [-60, -3] };
 
 function createStoryResponse(speaker: Record<string, unknown>) {
   return {
@@ -59,6 +65,71 @@ describe('StoryWithRelationsResponseSchema', () => {
       StoryWithRelationsResponseSchema.parse(
         createStoryResponse({ photoUrl: 'not-a-url' })
       )
+    ).toThrow();
+  });
+});
+
+describe('story filter input regressions', () => {
+  const validGeo = { nearPoint: point, radiusKm: 5 };
+  const orderedDates = { dateFrom: '2024-01-01', dateTo: '2024-12-31' };
+  const reversedDates = { dateFrom: '2024-12-31', dateTo: '2024-01-01' };
+
+  it('StoryFiltersSchema accepts a valid nearPoint/radiusKm pair and ordered dates', () => {
+    expect(() =>
+      StoryFiltersSchema.parse({ ...validGeo, ...orderedDates })
+    ).not.toThrow();
+  });
+
+  it('StoryFiltersSchema rejects nearPoint without radiusKm', () => {
+    expect(() => StoryFiltersSchema.parse({ nearPoint: point })).toThrow();
+  });
+
+  it('StoryFiltersSchema rejects radiusKm without nearPoint', () => {
+    expect(() => StoryFiltersSchema.parse({ radiusKm: 5 })).toThrow();
+  });
+
+  it('StoryFiltersSchema rejects reversed dates', () => {
+    expect(() => StoryFiltersSchema.parse(reversedDates)).toThrow();
+  });
+
+  it('SearchQuerySchema accepts valid q with a valid geo pair and ordered dates', () => {
+    expect(() =>
+      SearchQuerySchema.parse({ q: 'river', ...validGeo, ...orderedDates })
+    ).not.toThrow();
+  });
+
+  it('SearchQuerySchema still accepts one-sided geo input (old omit cleared refinements)', () => {
+    expect(() =>
+      SearchQuerySchema.parse({ q: 'river', nearPoint: point })
+    ).not.toThrow();
+    expect(() =>
+      SearchQuerySchema.parse({ q: 'river', radiusKm: 5 })
+    ).not.toThrow();
+  });
+
+  it('SearchQuerySchema still accepts reversed dates (old omit cleared refinements)', () => {
+    expect(() =>
+      SearchQuerySchema.parse({ q: 'river', ...reversedDates })
+    ).not.toThrow();
+  });
+
+  it('SearchQuerySchema rejects missing q', () => {
+    expect(() => SearchQuerySchema.parse({})).toThrow();
+  });
+
+  it('SearchQuerySchema rejects empty q', () => {
+    expect(() => SearchQuerySchema.parse({ q: '' })).toThrow();
+  });
+
+  it('SearchQuerySchema rejects nonpositive radiusKm', () => {
+    expect(() =>
+      SearchQuerySchema.parse({ q: 'river', nearPoint: point, radiusKm: 0 })
+    ).toThrow();
+  });
+
+  it('SearchQuerySchema rejects unknown fields', () => {
+    expect(() =>
+      SearchQuerySchema.parse({ q: 'river', unknownField: 1 })
     ).toThrow();
   });
 });

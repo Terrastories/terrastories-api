@@ -46,25 +46,68 @@ export function roleCanReadStoryAudience(
 }
 
 /**
- * Transitional mapping from the Fastify V1 story columns to canonical
- * audiences (SPEC-V2 §6.3). The physical columns stay until #145/#146;
- * this function is the single documented mapping and its SQL transcription
- * in `StoryRepository.findMany` must stay in sync:
+ * Runtime read access for a story row on the transitional Fastify schema.
+ * `admin-only` is not a canonical audience (SPEC-V2 §6.3): it is the
+ * fail-closed runtime treatment of Fastify `isRestricted = true` rows, which
+ * in V1 only community admins could read and which stay unavailable to every
+ * other role until the community approves an explicit disposition.
+ */
+export type TransitionalStoryReadAccess = StoryAudience | 'admin-only';
+
+export function roleCanReadStoryAccess(
+  role: V2CommunityRole,
+  access: TransitionalStoryReadAccess
+): boolean {
+  if (access === 'admin-only') {
+    return role === 'admin';
+  }
+  return roleCanReadStoryAudience(role, access);
+}
+
+/**
+ * Every runtime read access a role may hold, used to build list/count
+ * filters (SPEC-V2 §6.2/§6.3). `super_admin` holds none: it has no
+ * authenticated community-content access.
+ */
+export function storyAccessForRole(
+  role: V2CommunityRole
+): readonly TransitionalStoryReadAccess[] {
+  switch (role) {
+    case 'admin':
+      return ['public', 'community', 'editors', 'admin-only'];
+    case 'editor':
+      return ['public', 'community', 'editors'];
+    case 'member':
+      return ['public', 'community'];
+    case 'viewer':
+      return ['public'];
+    case 'super_admin':
+      return [];
+  }
+}
+
+/**
+ * Transitional mapping from the Fastify V1 story columns to runtime read
+ * access (SPEC-V2 §6.3). The physical columns stay until #145/#146; this
+ * function is the single documented mapping and its SQL transcription in
+ * `storyAudienceCondition` (story repository) must stay in sync:
  *
- * - `isRestricted = true` -> `editors`. The Fastify restriction was
- *   elder/admin-only, which has no canonical runtime equivalent; `editors`
- *   is the closest retained audience and the fail-closed default.
+ * - `isRestricted = true` -> `admin-only`. V1 let only community admins
+ *   (and the non-canonical elder role) read restricted stories, so anything
+ *   wider would silently widen access, which SPEC-V2 forbids. Editors,
+ *   members, viewers and super admins never read restricted rows; the
+ *   legacy `elder` path is unchanged until migration dispositions it.
  * - `privacyLevel = 'public'` + unrestricted -> `public`.
  * - `privacyLevel = 'members_only'` + unrestricted -> `community`.
- * - any other `privacyLevel` -> `editors` (fail-closed for unknown legacy
- *   values; migration dispositions them explicitly per §6.3).
+ * - any other `privacyLevel` + unrestricted -> `editors` (fail-closed for
+ *   unknown legacy values; migration dispositions them explicitly).
  */
 export function fastifyStoryToAudience(
   privacyLevel: string,
   isRestricted: boolean
-): StoryAudience {
+): TransitionalStoryReadAccess {
   if (isRestricted) {
-    return 'editors';
+    return 'admin-only';
   }
   if (privacyLevel === 'public') {
     return 'public';

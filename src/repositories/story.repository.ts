@@ -18,7 +18,7 @@ import {
   type AnyColumn,
   type SQL,
 } from 'drizzle-orm';
-import type { StoryAudience } from '../shared/authorization/sovereignty-policy.js';
+import type { TransitionalStoryReadAccess } from '../shared/authorization/sovereignty-policy.js';
 import {
   storiesSqlite,
   communitiesSqlite,
@@ -198,11 +198,12 @@ export interface StoryFilters {
   isRestricted?: boolean;
   privacyLevel?: string;
   /**
-   * Canonical V2 story audiences the caller may read (SPEC-V2 §6.2/§6.3).
-   * Transcribed to SQL exactly as documented on `fastifyStoryToAudience`
-   * in the sovereignty policy; keep both in sync.
+   * Runtime read accesses the caller may hold (SPEC-V2 §6.2/§6.3):
+   * canonical audiences plus `admin-only` for restricted rows. Transcribed
+   * to SQL exactly as documented on `fastifyStoryToAudience` in the
+   * sovereignty policy; keep both in sync.
    */
-  storyAudiences?: StoryAudience[];
+  storyAudiences?: TransitionalStoryReadAccess[];
   tags?: string[];
   createdBy?: number;
   language?: string;
@@ -1216,36 +1217,40 @@ export class StoryRepository {
 
 /**
  * SQL transcription of `fastifyStoryToAudience` (sovereignty policy):
- * - public    = unrestricted + privacyLevel 'public'
- * - community = unrestricted + privacyLevel 'members_only'
- * - editors   = restricted OR any other privacyLevel (fail-closed default)
+ * - public     = unrestricted + privacyLevel 'public'
+ * - community  = unrestricted + privacyLevel 'members_only'
+ * - editors    = unrestricted + any other privacyLevel (fail-closed default)
+ * - admin-only = restricted rows (V1 parity: community admins only)
  *
  * Single source for `findMany` and route-level community story listings so
  * the mapping exists exactly once outside the policy module. Works for both
  * dialect tables because it only references shared column shape.
  */
 export function storyAudienceCondition(
-  audiences: readonly StoryAudience[],
+  accesses: readonly TransitionalStoryReadAccess[],
   storiesTable: {
     isRestricted: AnyColumn;
     privacyLevel: AnyColumn;
   }
 ): SQL | undefined {
-  const conditions = audiences.map((audience) => {
-    if (audience === 'public') {
+  const conditions = accesses.map((access) => {
+    if (access === 'public') {
       return and(
         eq(storiesTable.isRestricted, false),
         eq(storiesTable.privacyLevel, 'public')
       );
     }
-    if (audience === 'community') {
+    if (access === 'community') {
       return and(
         eq(storiesTable.isRestricted, false),
         eq(storiesTable.privacyLevel, 'members_only')
       );
     }
-    return or(
-      eq(storiesTable.isRestricted, true),
+    if (access === 'admin-only') {
+      return eq(storiesTable.isRestricted, true);
+    }
+    return and(
+      eq(storiesTable.isRestricted, false),
       notInArray(storiesTable.privacyLevel, ['public', 'members_only'])
     );
   });

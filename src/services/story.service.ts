@@ -29,10 +29,10 @@ import type { Logger } from '../shared/types/index.js';
 import { getConfig } from '../shared/config/index.js';
 import { fileOperationsMetrics } from '../shared/metrics/file-operations.js';
 import {
-  STORY_AUDIENCES,
   fastifyStoryToAudience,
   isV2CommunityRole,
-  roleCanReadStoryAudience,
+  roleCanReadStoryAccess,
+  storyAccessForRole,
 } from '../shared/authorization/sovereignty-policy.js';
 
 /**
@@ -900,11 +900,10 @@ export class StoryService {
     };
 
     // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): each role sees exactly
-    // its audiences at database level. Legacy `elder` keeps the V1 path.
+    // its runtime read accesses at database level. Legacy `elder` keeps the
+    // V1 path.
     if (isV2CommunityRole(userRole)) {
-      scopedFilters.storyAudiences = STORY_AUDIENCES.filter((audience) =>
-        roleCanReadStoryAudience(userRole, audience)
-      );
+      scopedFilters.storyAudiences = [...storyAccessForRole(userRole)];
     } else if (userRole !== 'elder' && userRole !== 'admin') {
       scopedFilters.isRestricted = false;
     }
@@ -983,9 +982,10 @@ export class StoryService {
 
   /**
    * SPEC-V2 §6.2/§6.3 story-audience gate for authenticated reads on the
-   * transitional Fastify schema (`privacyLevel`/`isRestricted` -> canonical
-   * audience). Non-V2 roles (legacy `elder`) keep their V1 path; super
-   * admins are already denied before callers reach this check.
+   * transitional Fastify schema (`privacyLevel`/`isRestricted` -> runtime
+   * read access; restricted rows are admin-only). Non-V2 roles (legacy
+   * `elder`) keep their V1 path; super admins are already denied before
+   * callers reach this check.
    */
   private storyAudienceDenied(
     story: Pick<StoryWithRelations, 'privacyLevel' | 'isRestricted'>,
@@ -994,7 +994,7 @@ export class StoryService {
     if (!isV2CommunityRole(userRole)) {
       return false;
     }
-    return !roleCanReadStoryAudience(
+    return !roleCanReadStoryAccess(
       userRole,
       fastifyStoryToAudience(story.privacyLevel, story.isRestricted)
     );

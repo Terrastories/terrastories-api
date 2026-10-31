@@ -28,6 +28,7 @@ describe('V2 sovereignty stats audiences', () => {
   let communityId: number;
   let viewerCookie: string;
   let adminCookie: string;
+  let editorCookie: string;
 
   async function loginAs(user: { email: string }, communityId: number) {
     const login = await app.inject({
@@ -71,6 +72,16 @@ describe('V2 sovereignty stats audiences', () => {
         })
       )
       .returning();
+    const [editor] = await db
+      .insert(usersSqlite)
+      .values(
+        TestDataFactory.createUser(communityId, {
+          email: `stats-editor-${timestamp}@example.test`,
+          role: 'editor',
+          passwordHash,
+        })
+      )
+      .returning();
 
     // Places: two unrestricted, one restricted.
     const [publicPlaceWithPublicStory] = await db
@@ -89,6 +100,16 @@ describe('V2 sovereignty stats audiences', () => {
         name: 'Public place linked to a community story',
         latitude: 2,
         longitude: 2,
+        isRestricted: false,
+        communityId,
+      })
+      .returning();
+    const [publicPlaceWithRestrictedStory] = await db
+      .insert(placesSqlite)
+      .values({
+        name: 'Public place linked to a restricted story',
+        latitude: 4,
+        longitude: 4,
         isRestricted: false,
         communityId,
       })
@@ -123,9 +144,24 @@ describe('V2 sovereignty stats audiences', () => {
         privacyLevel: 'members_only',
       })
       .returning();
+    const [restrictedStory] = await db
+      .insert(storiesSqlite)
+      .values({
+        title: 'Restricted story',
+        slug: `stats-restricted-${timestamp}`,
+        communityId,
+        createdBy: admin.id,
+        isRestricted: true,
+        privacyLevel: 'public',
+      })
+      .returning();
     await db.insert(storyPlacesSqlite).values([
       { storyId: publicStory.id, placeId: publicPlaceWithPublicStory.id },
       { storyId: communityStory.id, placeId: publicPlaceWithCommunityStory.id },
+      {
+        storyId: restrictedStory.id,
+        placeId: publicPlaceWithRestrictedStory.id,
+      },
     ]);
 
     // Speakers: two active, one inactive, one active with elderStatus.
@@ -159,6 +195,7 @@ describe('V2 sovereignty stats audiences', () => {
     app = await createTestApp(db);
     viewerCookie = await loginAs(viewer, communityId);
     adminCookie = await loginAs(admin, communityId);
+    editorCookie = await loginAs(editor, communityId);
   });
 
   afterEach(async () => {
@@ -175,8 +212,8 @@ describe('V2 sovereignty stats audiences', () => {
 
     expect(response.statusCode).toBe(200);
     const stats = response.json().data;
-    expect(stats.total).toBe(2);
-    expect(stats.public).toBe(2);
+    expect(stats.total).toBe(3);
+    expect(stats.public).toBe(3);
     expect(stats.restricted).toBeUndefined();
   });
 
@@ -200,8 +237,23 @@ describe('V2 sovereignty stats audiences', () => {
 
     expect(response.statusCode).toBe(200);
     const stats = response.json().data;
-    expect(stats.total).toBe(3);
+    expect(stats.total).toBe(4);
     expect(stats.restricted).toBe(1);
+    expect(stats.withStories).toBe(3);
+  });
+
+  it('counts only editor-readable stories in withStories for an editor', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v1/places/stats',
+      headers: { cookie: editorCookie },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const stats = response.json().data;
+    // Editors see unrestricted places (3) and every unrestricted story
+    // audience, but the restricted story is admin-only (V1 parity).
+    expect(stats.total).toBe(3);
     expect(stats.withStories).toBe(2);
   });
 

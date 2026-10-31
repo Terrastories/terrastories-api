@@ -215,6 +215,16 @@ describe('V2 sovereignty story audiences', () => {
     expect(response.statusCode).toBe(200);
   });
 
+  it('denies a same-community editor a restricted story read (V1 parity: admins only)', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/stories/${restrictedStoryId}`,
+      headers: { cookie: editorCookie },
+    });
+
+    expect(response.statusCode).toBe(404);
+  });
+
   it('lets an admin read editors-audience stories in their own community', async () => {
     const response = await app.inject({
       method: 'GET',
@@ -225,7 +235,7 @@ describe('V2 sovereignty story audiences', () => {
     expect(response.statusCode).toBe(200);
   });
 
-  it('counts every audience for an editor list', async () => {
+  it('counts public and community audiences for an editor list, excluding restricted', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/v1/stories?page=1&limit=50',
@@ -233,6 +243,6 @@ describe('V2 sovereignty story audiences', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().meta.total).toBe(3);
+    expect(response.json().meta.total).toBe(2);
   });
 });

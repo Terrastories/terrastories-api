@@ -27,7 +27,7 @@ import {
 } from '../db/schema/places.js';
 import { storyPlaces } from '../db/schema/story_places.js';
 import { storyAudienceCondition } from './story.repository.js';
-import type { StoryAudience } from '../shared/authorization/sovereignty-policy.js';
+import type { TransitionalStoryReadAccess } from '../shared/authorization/sovereignty-policy.js';
 import { getStoriesTable } from '../db/schema/stories.js';
 import { getCommunitiesTable } from '../db/schema/communities.js';
 import { getConfig } from '../shared/config/index.js';
@@ -693,7 +693,7 @@ export class PlaceRepository {
     communityId: number,
     options: {
       includeRestricted?: boolean;
-      storyAudiences?: readonly StoryAudience[];
+      storyAudiences?: readonly TransitionalStoryReadAccess[];
     } = {}
   ): Promise<{
     total: number;

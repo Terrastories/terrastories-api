@@ -353,14 +353,15 @@ describe('V2 story audiences (SPEC-V2 §6.2/§6.3)', () => {
     expect(roleCanReadStoryAudience('viewer', 'editors')).toBe(false);
   });
 
-  it('maps every Fastify column state to a canonical audience fail-closed', () => {
+  it('maps every Fastify column state to a runtime read access, fail-closed', () => {
     expect(fastifyStoryToAudience('public', false)).toBe('public');
     expect(fastifyStoryToAudience('members_only', false)).toBe('community');
-    // Restriction overrides every privacy level (elder/admin-only has no
-    // canonical runtime equivalent; editors is the closest retained audience).
-    expect(fastifyStoryToAudience('public', true)).toBe('editors');
-    expect(fastifyStoryToAudience('members_only', true)).toBe('editors');
-    // Unknown legacy values never widen access.
+    // Restricted rows are admin-only (V1 parity: only admins read them;
+    // SPEC-V2 keeps them unavailable to every other role pending an
+    // explicit community disposition).
+    expect(fastifyStoryToAudience('public', true)).toBe('admin-only');
+    expect(fastifyStoryToAudience('members_only', true)).toBe('admin-only');
+    // Unknown legacy values never widen access beyond the editors audience.
     expect(fastifyStoryToAudience('private', false)).toBe('editors');
     expect(fastifyStoryToAudience('restricted', false)).toBe('editors');
     expect(fastifyStoryToAudience('', false)).toBe('editors');

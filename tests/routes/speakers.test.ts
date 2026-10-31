@@ -1074,7 +1074,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers/stats',
         headers: {
-          cookie: viewerSessionId,
+          cookie: adminSessionId,
         },
       });
 
@@ -1084,8 +1084,27 @@ describe('Speakers API Routes - Integration Tests', () => {
       expect(body.data.total).toBeGreaterThanOrEqual(3);
       expect(body.data.active).toBeGreaterThanOrEqual(2);
       expect(body.data.inactive).toBeGreaterThanOrEqual(1);
-      expect(body.data.elders).toBeGreaterThanOrEqual(1);
-      expect(body.data.nonElders).toBeGreaterThanOrEqual(2);
+      // Removed V1 scope (elderStatus) never re-enters count projections.
+      expect(body.data).not.toHaveProperty('elders');
+      expect(body.data).not.toHaveProperty('nonElders');
+    });
+
+    test('should count only active speakers for a viewer (SPEC-V2 §6.5)', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/speakers/stats',
+        headers: {
+          cookie: viewerSessionId,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.data.total).toBe(body.data.active);
+      expect(body.data.active).toBeGreaterThanOrEqual(2);
+      expect(body.data).not.toHaveProperty('inactive');
+      expect(body.data).not.toHaveProperty('elders');
+      expect(body.data).not.toHaveProperty('nonElders');
     });
 
     test('should require authentication', async () => {

@@ -20,9 +20,8 @@ import { getDb, type Database } from '../db/index.js';
 import { storiesSqlite, storiesPg } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import {
-  STORY_AUDIENCES,
   isV2CommunityRole,
-  roleCanReadStoryAudience,
+  storyAccessForRole,
 } from '../shared/authorization/sovereignty-policy.js';
 import { storyAudienceCondition } from '../repositories/story.repository.js';
 import {
@@ -584,9 +583,7 @@ export async function communityRoutes(
         // keeps the V1 restriction filter.
         if (isV2CommunityRole(user.role)) {
           const audienceCondition = storyAudienceCondition(
-            STORY_AUDIENCES.filter((audience) =>
-              roleCanReadStoryAudience(user.role, audience)
-            ),
+            storyAccessForRole(user.role),
             storiesTable
           );
           if (!audienceCondition) {

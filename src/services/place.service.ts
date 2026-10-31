@@ -37,9 +37,8 @@ import {
   RequiredFieldError,
 } from '../shared/errors/index.js';
 import {
-  STORY_AUDIENCES,
   isV2CommunityRole,
-  roleCanReadStoryAudience,
+  storyAccessForRole,
 } from '../shared/authorization/sovereignty-policy.js';
 
 /**
@@ -397,9 +396,12 @@ export class PlaceService {
 
   /**
    * Get community place statistics (SPEC-V2 §6.4). `role` decides whether
-   * restricted places are countable: editors/admins manage them, while
-   * viewer/member counts cover unrestricted places and only places linked
-   * to stories that role may read.
+   * restricted places are countable. Restricted Fastify places stay
+   * unavailable in V2 runtime and `editors` is never selected implicitly,
+   * so only community admins (V1 parity) count them. Editor, member and
+   * viewer counts cover unrestricted places only, and `withStories` counts
+   * only places linked to stories that role may read (the intersection of
+   * place and story access).
    */
   async getCommunityPlaceStats(
     communityId: number,
@@ -410,13 +412,8 @@ export class PlaceService {
     public: number;
     withStories: number;
   }> {
-    const fullStats =
-      !isV2CommunityRole(role) || role === 'editor' || role === 'admin';
-    const storyAudiences = fullStats
-      ? undefined
-      : STORY_AUDIENCES.filter((audience) =>
-          roleCanReadStoryAudience(role, audience)
-        );
+    const fullStats = !isV2CommunityRole(role) || role === 'admin';
+    const storyAudiences = fullStats ? undefined : storyAccessForRole(role);
     return await this.repository.getCommunityPlaceStats(communityId, {
       includeRestricted: fullStats,
       storyAudiences,

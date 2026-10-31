@@ -828,7 +828,7 @@ describe('Places API Routes - Integration Tests', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places/stats',
-        headers: { cookie: viewerSessionId },
+        headers: { cookie: adminSessionId },
       });
 
       expect(response.statusCode).toBe(200);
@@ -840,6 +840,19 @@ describe('Places API Routes - Integration Tests', () => {
       expect(typeof body.data.total).toBe('number');
       expect(typeof body.data.restricted).toBe('number');
       expect(typeof body.data.public).toBe('number');
+    });
+
+    test('should omit restricted counts from viewer statistics (SPEC-V2 §6.4)', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/places/stats',
+        headers: { cookie: viewerSessionId },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.data).not.toHaveProperty('restricted');
+      expect(body.data.total).toBe(body.data.public);
     });
 
     test('should require authentication', async () => {

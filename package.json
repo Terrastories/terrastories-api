@@ -116,7 +116,10 @@
   },
   "engineStrict": false,
   "overrides": {
-    "js-yaml": "^4.3.2"
+    "js-yaml": "^4.3.2",
+    "@fastify/static": {
+      "glob": "14.0.3"
+    }
   },
   "allowScripts": {
     "argon2@0.44.0": true,

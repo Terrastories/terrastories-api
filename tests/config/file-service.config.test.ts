@@ -149,6 +149,8 @@ describe('File Service Configuration', () => {
 
     it('should support field-kit specific file service configuration', () => {
       process.env.NODE_ENV = 'field-kit';
+      process.env.SESSION_SECRET =
+        'fixture-installation-session-secret-at-least-32-chars';
       process.env.FILES_ENABLE_VIDEO = 'true';
       process.env.FILES_ENCRYPT_AT_REST = 'true';
 
@@ -162,6 +164,8 @@ describe('File Service Configuration', () => {
 
     it('should support offline specific file service configuration', () => {
       process.env.NODE_ENV = 'offline';
+      process.env.SESSION_SECRET =
+        'fixture-installation-session-secret-at-least-32-chars';
       process.env.FILES_MAX_SIZE_MB = '10';
       process.env.FILES_ENABLE_VIDEO = 'false';
 

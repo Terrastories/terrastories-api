@@ -10,6 +10,7 @@ import { FastifyInstance } from 'fastify';
 import { eq } from 'drizzle-orm';
 import {
   communitiesSqlite,
+  placesSqlite,
   storiesSqlite,
   usersSqlite,
 } from '../../src/db/schema/index.js';
@@ -198,6 +199,37 @@ describe('Public API Routes - Integration Tests', () => {
           expect.objectContaining({ id: testPlaceId, name: 'Test Place 1' }),
         ])
       );
+    });
+
+    it('excludes restricted places from the public list and direct reads (SPEC-V2 §6.4)', async () => {
+      const [restrictedPlace] = await db
+        .insert(placesSqlite)
+        .values({
+          name: 'Restricted Public-API Place',
+          latitude: 49.2827,
+          longitude: -123.1207,
+          isRestricted: true,
+          communityId: testCommunityId,
+        })
+        .returning();
+
+      const listResponse = await app.inject({
+        method: 'GET',
+        url: `/api/communities/${testCommunityId}/places`,
+      });
+
+      expect(listResponse.statusCode).toBe(200);
+      const listIds = listResponse
+        .json()
+        .data.map((place: { id: number }) => place.id);
+      expect(listIds).not.toContain(restrictedPlace.id);
+
+      const readResponse = await app.inject({
+        method: 'GET',
+        url: `/api/communities/${testCommunityId}/places/${restrictedPlace.id}`,
+      });
+
+      expect(readResponse.statusCode).toBe(404);
     });
 
     it('should not expose places for a private community', async () => {

@@ -29,6 +29,7 @@ describe('V2 sovereignty stats audiences', () => {
   let viewerCookie: string;
   let adminCookie: string;
   let editorCookie: string;
+  let elderCookie: string;
 
   async function loginAs(user: { email: string }, communityId: number) {
     const login = await app.inject({
@@ -78,6 +79,16 @@ describe('V2 sovereignty stats audiences', () => {
         TestDataFactory.createUser(communityId, {
           email: `stats-editor-${timestamp}@example.test`,
           role: 'editor',
+          passwordHash,
+        })
+      )
+      .returning();
+    const [elder] = await db
+      .insert(usersSqlite)
+      .values(
+        TestDataFactory.createUser(communityId, {
+          email: `stats-elder-${timestamp}@example.test`,
+          role: 'elder',
           passwordHash,
         })
       )
@@ -196,6 +207,7 @@ describe('V2 sovereignty stats audiences', () => {
     viewerCookie = await loginAs(viewer, communityId);
     adminCookie = await loginAs(admin, communityId);
     editorCookie = await loginAs(editor, communityId);
+    elderCookie = await loginAs(elder, communityId);
   });
 
   afterEach(async () => {
@@ -227,11 +239,11 @@ describe('V2 sovereignty stats audiences', () => {
     expect(response.statusCode).toBe(200);
     // SPEC-V2 §6.2: the physical Fastify viewer has V2 member reach, so
     // places linked to public AND community stories count; the restricted
-    // story stays admin-only and its place stays excluded.
+    // story is unavailable to every role and its place stays excluded.
     expect(response.json().data.withStories).toBe(2);
   });
 
-  it('keeps full place stats for an admin', async () => {
+  it('counts only unrestricted places for an admin and hides the restricted count', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/v1/places/stats',
@@ -240,9 +252,15 @@ describe('V2 sovereignty stats audiences', () => {
 
     expect(response.statusCode).toBe(200);
     const stats = response.json().data;
-    expect(stats.total).toBe(4);
-    expect(stats.restricted).toBe(1);
-    expect(stats.withStories).toBe(3);
+    // SPEC-V2 §6.4: a restricted place is unavailable to every role, admin
+    // included, so `total` counts unrestricted places only and the
+    // `restricted` key never appears.
+    expect(stats.total).toBe(3);
+    expect(stats.public).toBe(3);
+    expect(stats.restricted).toBeUndefined();
+    // The place linked only to the restricted story is not counted either:
+    // the restricted story is unavailable to admin too (§6.3).
+    expect(stats.withStories).toBe(2);
   });
 
   it('counts only editor-readable stories in withStories for an editor', async () => {
@@ -254,9 +272,23 @@ describe('V2 sovereignty stats audiences', () => {
 
     expect(response.statusCode).toBe(200);
     const stats = response.json().data;
-    // Editors see unrestricted places (3) and every unrestricted story
-    // audience, but the restricted story is admin-only (V1 parity).
+    // Editors see unrestricted places (3) and every runtime story audience,
+    // but the restricted story is unavailable to every role (§6.3).
     expect(stats.total).toBe(3);
+    expect(stats.withStories).toBe(2);
+  });
+
+  it('counts only unrestricted places and readable-story places for a legacy elder', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v1/places/stats',
+      headers: { cookie: elderCookie },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const stats = response.json().data;
+    expect(stats.total).toBe(3);
+    expect(stats.restricted).toBeUndefined();
     expect(stats.withStories).toBe(2);
   });
 

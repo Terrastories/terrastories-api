@@ -398,7 +398,7 @@ describe('StoryService', () => {
       );
     });
 
-    it('should allow elder access to elder-only content', async () => {
+    it('should deny an elder access to restricted (unavailable) content', async () => {
       // Arrange
       const elderOnlyStory = createElderOnlyStory();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(
@@ -413,12 +413,19 @@ describe('StoryService', () => {
         testData.community.id
       );
 
-      // Assert
-      expect(result).toEqual(elderOnlyStory);
+      // Assert: restricted rows are unavailable to EVERY role in V2 runtime
+      // (SPEC-V2 §6.3), the legacy elder role included.
+      expect(result).toBeNull();
     });
 
     it('logs authorization metadata without protected story content', async () => {
-      const story = createElderOnlyStory();
+      // Available fixture (unrestricted, community audience): the purpose of
+      // this test is the audit record's shape, not the audience gate.
+      const story = {
+        ...createElderOnlyStory(),
+        isRestricted: false,
+        privacyLevel: 'members_only',
+      };
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
 
       const result = await storyService.getStoryById(
@@ -458,8 +465,9 @@ describe('StoryService', () => {
         testData.community.id
       );
 
-      // Assert: restricted rows are admin-only at the SPEC-V2 §6.3 audience
-      // gate, so the editor is denied before any legacy protocol check.
+      // Assert: restricted rows are unavailable to every role at the
+      // SPEC-V2 §6.3 audience gate, so the editor is denied before any
+      // legacy protocol check.
       expect(result).toBeNull();
       expect(mockLogger.warn).toHaveBeenCalledWith(
         expect.stringContaining('Story audience access denied'),
@@ -544,11 +552,12 @@ describe('StoryService', () => {
   });
 
   describe('story-derived place projection (SPEC-V2 §6.4)', () => {
-    // A readable story does not widen a related place's audience: callers
-    // see the intersection of story and place access. A restricted Fastify
-    // place (places.is_restricted = true) stays readable only by community
-    // admins (plus the legacy elder path), the same rule the place reads
-    // and PlaceService.getCommunityPlaceStats apply.
+    // A readable story does not widen a related place's audience. A
+    // restricted Fastify place (places.is_restricted = true) is unavailable
+    // to EVERY role in V2 runtime — admin, editor, viewer, and the legacy
+    // elder path included — so it is always removed from story.places, the
+    // same rule the place reads and PlaceService.getCommunityPlaceStats
+    // apply.
     const unrestrictedPlace = {
       id: 10,
       name: 'Open River Crossing',
@@ -633,7 +642,7 @@ describe('StoryService', () => {
       ]);
     });
 
-    it('keeps both places for an admin on getStoryById', async () => {
+    it('removes the restricted place for an admin on getStoryById', async () => {
       // Arrange
       const story = createReadableStoryWithMixedPlaces();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
@@ -646,15 +655,54 @@ describe('StoryService', () => {
         testData.community.id
       );
 
+      // Assert: the restricted place is unavailable to admin too (§6.4).
+      expect(result).not.toBeNull();
+      expect(result!.places.map((place) => place.id)).toEqual([
+        unrestrictedPlace.id,
+      ]);
+    });
+
+    it('removes the restricted place for an editor on getStoryById', async () => {
+      // Arrange
+      const story = createReadableStoryWithMixedPlaces();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getStoryById(
+        story.id,
+        testData.users.editor.id,
+        testData.users.editor.role,
+        testData.community.id
+      );
+
       // Assert
       expect(result).not.toBeNull();
       expect(result!.places.map((place) => place.id)).toEqual([
         unrestrictedPlace.id,
-        restrictedPlace.id,
       ]);
     });
 
-    it('filters restricted places per role in listStories', async () => {
+    it('removes the restricted place for an elder on getStoryById', async () => {
+      // Arrange
+      const story = createReadableStoryWithMixedPlaces();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getStoryById(
+        story.id,
+        testData.users.elder.id,
+        testData.users.elder.role,
+        testData.community.id
+      );
+
+      // Assert: the legacy elder path loses restricted places too (§6.4).
+      expect(result).not.toBeNull();
+      expect(result!.places.map((place) => place.id)).toEqual([
+        unrestrictedPlace.id,
+      ]);
+    });
+
+    it('filters restricted places for every role in listStories', async () => {
       // Arrange
       const story = createReadableStoryWithMixedPlaces();
       mockStoryRepository.findMany.mockResolvedValue({
@@ -689,7 +737,6 @@ describe('StoryService', () => {
       ]);
       expect(adminResult.data[0].places.map((place) => place.id)).toEqual([
         unrestrictedPlace.id,
-        restrictedPlace.id,
       ]);
     });
 
@@ -723,6 +770,10 @@ describe('StoryService', () => {
         communityId: testData.community.id,
         createdBy: testData.users.editor.id,
         mediaUrls: ['/uploads/old-image.jpg'],
+        // Available fixture (§6.3): these tests exercise association
+        // management, not the unavailable-row gate.
+        isRestricted: false,
+        privacyLevel: 'members_only',
         places: [testData.places[0]],
         speakers: [testData.speakers[0]],
         culturalProtocols: { permissionLevel: 'community' },
@@ -814,6 +865,29 @@ describe('StoryService', () => {
         )
       ).rejects.toThrow('Insufficient permissions to modify this story');
     });
+
+    it('should reject an admin update of a restricted (unavailable) story with 404 semantics', async () => {
+      // Arrange: a restricted row is not reachable by any role (§6.3).
+      const restrictedStory = {
+        ...createExistingStory(),
+        isRestricted: true,
+        privacyLevel: 'public',
+      };
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        restrictedStory
+      );
+
+      // Act & Assert: the row masks as nonexistent (StoryNotFoundError -> 404).
+      await expect(
+        storyService.updateStory(
+          restrictedStory.id,
+          { title: 'Attempted Update' },
+          testData.users.admin.id,
+          testData.users.admin.role,
+          testData.community.id
+        )
+      ).rejects.toThrow('Story not found');
+    });
   });
 
   describe('deleteStory', () => {
@@ -824,6 +898,10 @@ describe('StoryService', () => {
         communityId: testData.community.id,
         createdBy: testData.users.editor.id,
         mediaUrls: ['/uploads/file-to-cleanup.jpg'],
+        // Available fixture (§6.3): these tests exercise the deletion flow,
+        // not the unavailable-row gate.
+        isRestricted: false,
+        privacyLevel: 'public',
       }) as any;
 
     it('should delete story and clean up media files', async () => {
@@ -883,6 +961,29 @@ describe('StoryService', () => {
           testData.community.id
         )
       ).rejects.toThrow('Insufficient permissions to delete this story');
+    });
+
+    it('should reject an admin deletion of a restricted (unavailable) story with 404 semantics', async () => {
+      // Arrange: a restricted row is not reachable by any role (§6.3).
+      const restrictedStory = {
+        ...createStoryToDelete(),
+        isRestricted: true,
+        privacyLevel: 'public',
+      };
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        restrictedStory
+      );
+
+      // Act & Assert: the row masks as nonexistent (StoryNotFoundError -> 404).
+      await expect(
+        storyService.deleteStory(
+          restrictedStory.id,
+          testData.users.admin.id,
+          testData.users.admin.role,
+          testData.community.id
+        )
+      ).rejects.toThrow('Story not found');
+      expect(mockStoryRepository.delete).not.toHaveBeenCalled();
     });
   });
 
@@ -1008,6 +1109,36 @@ describe('StoryService', () => {
       // Assert
       expect(elderResults.total).toBe(3);
       expect(editorResults.total).toBe(2);
+    });
+
+    it('should apply the member audience filter for the legacy elder role', async () => {
+      // Arrange: restricted rows and non-public/members_only privacy
+      // levels are unavailable to the legacy elder too (SPEC-V2 §6.3), so
+      // elder lists use the same audience reach as V2 member.
+      mockStoryRepository.findMany.mockResolvedValue({
+        data: [],
+        total: 0,
+        page: 1,
+        limit: 10,
+        totalPages: 0,
+      });
+
+      // Act
+      await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.elder.id,
+        testData.users.elder.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(mockStoryRepository.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          storyAudiences: ['public', 'community'],
+        }),
+        { page: 1, limit: 10 }
+      );
     });
 
     it('should support geographic proximity filtering', async () => {
@@ -1155,6 +1286,7 @@ describe('StoryService', () => {
         tags: [],
         culturalProtocols: { permissionLevel: 'public' },
         isRestricted: false,
+        privacyLevel: 'public',
         createdAt: new Date(),
         updatedAt: new Date(),
         places: [],

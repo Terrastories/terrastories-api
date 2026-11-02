@@ -32,7 +32,7 @@ import {
   fastifyRoleToV2Role,
   fastifyStoryToAudience,
   roleCanReadStoryAccess,
-  storyAccessForRole,
+  storyAccessForPhysicalRole,
 } from '../shared/authorization/sovereignty-policy.js';
 
 /**
@@ -403,7 +403,7 @@ export class StoryService {
       userId,
     });
 
-    return this.applyDualRead(story);
+    return this.applyDualRead(this.projectStoryPlaces(story));
   }
 
   /**
@@ -488,7 +488,7 @@ export class StoryService {
       true
     );
 
-    return this.applyDualRead(this.projectStoryPlacesForRole(story, userRole));
+    return this.applyDualRead(this.projectStoryPlaces(story));
   }
 
   /**
@@ -567,7 +567,7 @@ export class StoryService {
       true
     );
 
-    return this.applyDualRead(this.projectStoryPlacesForRole(story, userRole));
+    return this.applyDualRead(this.projectStoryPlaces(story));
   }
 
   /**
@@ -589,6 +589,17 @@ export class StoryService {
       userCommunityId
     );
     if (!existingStory) {
+      throw new StoryNotFoundError();
+    }
+
+    // Unavailable rows (restricted or unknown privacyLevel) are not
+    // reachable by any role (SPEC-V2 §6.3): mutation masks as 404.
+    if (this.storyAudienceDenied(existingStory, userRole)) {
+      this.logger.warn('Story audience access denied', {
+        userId,
+        storyId: id,
+        reason: 'story_audience_denied',
+      });
       throw new StoryNotFoundError();
     }
 
@@ -763,7 +774,7 @@ export class StoryService {
 
     this.logger.info('Story updated successfully', { storyId: id, userId });
 
-    return updatedStory;
+    return this.projectStoryPlaces(updatedStory);
   }
 
   /**
@@ -784,6 +795,17 @@ export class StoryService {
       userCommunityId
     );
     if (!existingStory) {
+      throw new StoryNotFoundError();
+    }
+
+    // Unavailable rows (restricted or unknown privacyLevel) are not
+    // reachable by any role (SPEC-V2 §6.3): deletion masks as 404.
+    if (this.storyAudienceDenied(existingStory, userRole)) {
+      this.logger.warn('Story audience access denied', {
+        userId,
+        storyId: id,
+        reason: 'story_audience_denied',
+      });
       throw new StoryNotFoundError();
     }
 
@@ -899,16 +921,13 @@ export class StoryService {
       communityId: userCommunityId,
     };
 
-    // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): each canonical role
-    // sees exactly its runtime read accesses at database level. A physical
-    // Fastify `viewer` is reasoned about as V2 `member` (§6.2). Legacy
-    // `elder` and unknown roles keep the V1 path.
-    const v2Role = fastifyRoleToV2Role(userRole);
-    if (v2Role) {
-      scopedFilters.storyAudiences = [...storyAccessForRole(v2Role)];
-    } else if (userRole !== 'elder' && userRole !== 'admin') {
-      scopedFilters.isRestricted = false;
-    }
+    // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): each role sees
+    // exactly its runtime read accesses at database level. A physical
+    // Fastify `viewer` is reasoned about as V2 `member` (§6.2); legacy
+    // `elder` keeps member reach (restricted rows and unknown privacy
+    // levels stay unavailable to it, §6.3); unknown roles hold no access,
+    // so the list fails closed.
+    scopedFilters.storyAudiences = [...storyAccessForPhysicalRole(userRole)];
 
     try {
       // Get results with all filtering done at database level
@@ -919,10 +938,10 @@ export class StoryService {
 
       // Return database results directly - no additional in-memory filtering
       // except the story-derived place projection (SPEC-V2 §6.4), applied
-      // per caller role on top of the database-level audience filtering.
+      // on top of the database-level audience filtering.
       return {
         data: result.data.map((story) =>
-          this.applyDualRead(this.projectStoryPlacesForRole(story, userRole))
+          this.applyDualRead(this.projectStoryPlaces(story))
         ),
         total: result.total,
         page: result.page,
@@ -986,48 +1005,45 @@ export class StoryService {
   }
 
   /**
-   * SPEC-V2 §6.2/§6.3 story-audience gate for authenticated reads on the
-   * transitional Fastify schema (`privacyLevel`/`isRestricted` -> runtime
-   * read access; restricted rows are admin-only). Non-V2 roles (legacy
-   * `elder`) keep their V1 path; super admins are already denied before
-   * callers reach this check.
+   * SPEC-V2 §6.2/§6.3 story-audience gate for authenticated reads and
+   * mutations on the transitional Fastify schema (`privacyLevel`/
+   * `isRestricted` -> runtime read access). Unavailable rows (restricted
+   * or unknown privacyLevel) are denied to EVERY role — admin, editor,
+   * member, viewer, super_admin, and the legacy `elder` role too. Available
+   * rows keep the V1 path for non-V2 roles; super admins are already
+   * denied before callers reach this check.
    */
   private storyAudienceDenied(
     story: Pick<StoryWithRelations, 'privacyLevel' | 'isRestricted'>,
     userRole: string
   ): boolean {
+    const access = fastifyStoryToAudience(
+      story.privacyLevel,
+      story.isRestricted
+    );
+    if (access === 'unavailable') {
+      // No role ever reads an unavailable row (SPEC-V2 §6.3).
+      return true;
+    }
     const v2Role = fastifyRoleToV2Role(userRole);
     if (!v2Role) {
+      // Legacy elder path: may read every available row, never unavailable.
       return false;
     }
-    return !roleCanReadStoryAccess(
-      v2Role,
-      fastifyStoryToAudience(story.privacyLevel, story.isRestricted)
-    );
+    return !roleCanReadStoryAccess(v2Role, access);
   }
 
   /**
    * Story-derived place projection (SPEC-V2 §6.4): a readable story does
-   * not widen a related place's audience — callers see the intersection of
-   * story and place access. A restricted Fastify place
-   * (`places.is_restricted = true`) is readable only by community admins
-   * (V1 parity with the place reads and `PlaceService.getCommunityPlaceStats`)
-   * plus the legacy `elder` path, which stays unchanged. Every other caller
-   * (physical Fastify viewer = V2 member, editor, super_admin, unknown
-   * roles) receives only the unrestricted places.
+   * not widen a related place's audience. A restricted Fastify place
+   * (`places.is_restricted = true`) is unavailable to EVERY role — admin
+   * and the legacy `elder` path included — so it is always removed from
+   * `story.places`. The story relation loaders already exclude restricted
+   * places at the data layer; this projection is the second, defensive
+   * layer (it also covers relation data assembled elsewhere).
    */
-  private projectStoryPlacesForRole(
-    story: StoryWithRelations,
-    userRole: string
-  ): StoryWithRelations {
-    // Nothing to project (also tolerates relation data without the flag).
+  private projectStoryPlaces(story: StoryWithRelations): StoryWithRelations {
     if (!story.places?.some((place) => place.isRestricted === true)) {
-      return story;
-    }
-    const v2Role = fastifyRoleToV2Role(userRole);
-    const maySeeRestrictedPlaces =
-      v2Role === 'admin' || (v2Role === null && userRole === 'elder');
-    if (maySeeRestrictedPlaces) {
       return story;
     }
     return {
@@ -1319,7 +1335,9 @@ export class StoryService {
       });
 
       return {
-        stories: publicStories.map((story) => this.applyDualRead(story)),
+        stories: publicStories.map((story) =>
+          this.applyDualRead(this.projectStoryPlaces(story))
+        ),
         total: result.total, // Use actual total from repository
       };
     } catch (error) {
@@ -1383,7 +1401,7 @@ export class StoryService {
         communityId: parseInt(communityId, 10),
       });
 
-      return this.applyDualRead(story);
+      return this.applyDualRead(this.projectStoryPlaces(story));
     } catch (error) {
       this.logger.error('Failed to get public story by ID:', {
         error: error instanceof Error ? error.message : String(error),

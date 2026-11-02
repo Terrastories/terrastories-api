@@ -20,8 +20,8 @@ import { getDb, type Database } from '../db/index.js';
 import { storiesSqlite, storiesPg } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import {
-  fastifyRoleToV2Role,
-  storyAccessForRole,
+  fastifyStoryToAudience,
+  storyAccessForPhysicalRole,
 } from '../shared/authorization/sovereignty-policy.js';
 import { storyAudienceCondition } from '../repositories/story.repository.js';
 import {
@@ -580,23 +580,18 @@ export async function communityRoutes(
         const conditions = [eq(storiesTable.communityId, communityId)];
 
         // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): a physical Fastify
-        // `viewer` reasons as V2 `member` (§6.2); legacy `elder` keeps the V1
-        // restriction filter.
-        const v2Role = fastifyRoleToV2Role(user.role);
-        if (v2Role) {
-          const audienceCondition = storyAudienceCondition(
-            storyAccessForRole(v2Role),
-            storiesTable
-          );
-          if (!audienceCondition) {
-            // No audience grant for this role: expose nothing, fail closed.
-            return reply.status(200).send({ data: [] });
-          }
-          conditions.push(audienceCondition);
-        } else if (user.role !== 'admin') {
-          // Only show non-restricted stories to non-admin users
-          conditions.push(eq(storiesTable.isRestricted, false));
+        // `viewer` reasons as V2 `member` (§6.2); the legacy `elder` keeps
+        // member reach; unknown roles hold no access (fail closed).
+        const audienceCondition = storyAudienceCondition(
+          storyAccessForPhysicalRole(user.role),
+          storiesTable
+        );
+        if (!audienceCondition) {
+          // No audience grant matches any row for this role: expose
+          // nothing, fail closed.
+          return reply.status(200).send({ data: [] });
         }
+        conditions.push(audienceCondition);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- #135 owns backend-specific Drizzle query typing.
         const stories = await (database as any)
@@ -727,6 +722,19 @@ export async function communityRoutes(
         }
 
         const story = storyResult[0];
+
+        // V2 story-audience gate (SPEC-V2 §6.3): unavailable rows (restricted
+        // or unknown privacyLevel) are unreadable by every role — admin and
+        // the legacy `elder` included — and mask as 404, never 403.
+        if (
+          fastifyStoryToAudience(story.privacyLevel, story.isRestricted) ===
+          'unavailable'
+        ) {
+          return reply.status(404).send({
+            error: 'Story not found',
+            statusCode: 404,
+          });
+        }
 
         // @ts-ignore
         if (user && user.role === 'super_admin') {

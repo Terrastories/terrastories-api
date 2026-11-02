@@ -12,8 +12,11 @@ import {
   createAuthorizationAuditEvent,
   fastifyCommunityToGates,
   fastifyRoleToV2Role,
+  storyAccessForPhysicalRole,
   fastifyStoryToAudience,
+  roleCanReadStoryAccess,
   roleCanReadStoryAudience,
+  storyAccessForRole,
   type AuthorizationActor,
   type ContentRouteFamily,
   type ProtectedSurface,
@@ -357,15 +360,37 @@ describe('V2 story audiences (SPEC-V2 §6.2/§6.3)', () => {
   it('maps every Fastify column state to a runtime read access, fail-closed', () => {
     expect(fastifyStoryToAudience('public', false)).toBe('public');
     expect(fastifyStoryToAudience('members_only', false)).toBe('community');
-    // Restricted rows are admin-only (V1 parity: only admins read them;
-    // SPEC-V2 keeps them unavailable to every other role pending an
-    // explicit community disposition).
-    expect(fastifyStoryToAudience('public', true)).toBe('admin-only');
-    expect(fastifyStoryToAudience('members_only', true)).toBe('admin-only');
-    // Unknown legacy values never widen access beyond the editors audience.
-    expect(fastifyStoryToAudience('private', false)).toBe('editors');
-    expect(fastifyStoryToAudience('restricted', false)).toBe('editors');
-    expect(fastifyStoryToAudience('', false)).toBe('editors');
+    // Restricted rows are unavailable to EVERY role (SPEC-V2 §6.3): the
+    // V1 elder/admin audience has no canonical equivalent, so the rows
+    // stay unreadable until a community-approved explicit disposition.
+    expect(fastifyStoryToAudience('public', true)).toBe('unavailable');
+    expect(fastifyStoryToAudience('members_only', true)).toBe('unavailable');
+    // Unknown legacy values follow the same explicit-disposition path:
+    // never `editors`, never `public` (SPEC-V2 §6.3).
+    expect(fastifyStoryToAudience('private', false)).toBe('unavailable');
+    expect(fastifyStoryToAudience('restricted', false)).toBe('unavailable');
+    expect(fastifyStoryToAudience('', false)).toBe('unavailable');
+  });
+
+  it('denies the unavailable access to every V2 role', () => {
+    for (const role of V2_COMMUNITY_ROLES) {
+      expect(roleCanReadStoryAccess(role, 'unavailable')).toBe(false);
+    }
+  });
+
+  it('never grants a role the unavailable access in its list/count filters', () => {
+    for (const role of V2_COMMUNITY_ROLES) {
+      expect(storyAccessForRole(role)).not.toContain('unavailable');
+    }
+    // Canonical audiences stay untouched; on the Fastify schema the
+    // `editors` audience simply matches no row at runtime.
+    expect(storyAccessForRole('admin')).toEqual([
+      'public',
+      'community',
+      'editors',
+    ]);
+    expect(storyAccessForRole('viewer')).toEqual(['public']);
+    expect(storyAccessForRole('super_admin')).toEqual([]);
   });
 });
 
@@ -456,6 +481,25 @@ describe('V2 community gates and super-admin boundary (SPEC-V2 §6.1/§6.2)', ()
 });
 
 describe('Fastify physical role mapping (SPEC-V2 §6.2)', () => {
+  it('derives list/count story accesses from the physical role, fail-closed', () => {
+    expect(storyAccessForPhysicalRole('viewer')).toEqual([
+      'public',
+      'community',
+    ]);
+    // Legacy elder keeps member reach; unavailable rows stay unavailable.
+    expect(storyAccessForPhysicalRole('elder')).toEqual([
+      'public',
+      'community',
+    ]);
+    expect(storyAccessForPhysicalRole('super_admin')).toEqual([]);
+    // Unknown roles hold no access at all.
+    expect(storyAccessForPhysicalRole('unknown')).toEqual([]);
+    expect(storyAccessForPhysicalRole('')).toEqual([]);
+    for (const role of ['viewer', 'editor', 'admin', 'elder']) {
+      expect(storyAccessForPhysicalRole(role)).not.toContain('unavailable');
+    }
+  });
+
   it('maps a physical Fastify viewer to canonical V2 member, never to V2 viewer', () => {
     // §6.2: V1 viewer story reads filtered only `isRestricted = false` and
     // never enforced privacyLevel, so a physical Fastify viewer effectively

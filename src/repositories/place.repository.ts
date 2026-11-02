@@ -686,8 +686,12 @@ export class PlaceRepository {
   /**
    * Get place statistics for a community (SPEC-V2 §6.4). Count metadata is a
    * projection: without `includeRestricted`, counts cover unrestricted
-   * places only and `withStories` counts places joined to stories the caller
-   * may read (`storyAudiences` uses the policy's audience mapping).
+   * places only, the `restricted` key never appears, and `withStories`
+   * counts places joined to stories the caller may read (`storyAudiences`
+   * uses the policy's audience mapping). A defined `storyAudiences` array
+   * that matches no row (e.g. super_admin's empty grant) counts zero —
+   * fail closed, never "no filter". Restricted places are unavailable to
+   * every role in V2 runtime, so callers pass `includeRestricted: false`.
    */
   async getCommunityPlaceStats(
     communityId: number,
@@ -702,7 +706,7 @@ export class PlaceRepository {
     withStories: number;
   }> {
     const placesTable = await getPlacesTable();
-    const includeRestricted = options.includeRestricted ?? true;
+    const includeRestricted = options.includeRestricted ?? false;
     const storiesTable = await getStoriesTable();
     const placeScope = includeRestricted
       ? eq(placesTable.communityId, communityId)
@@ -735,17 +739,24 @@ export class PlaceRepository {
     const storyScope = options.storyAudiences
       ? storyAudienceCondition(options.storyAudiences, storiesTable)
       : undefined;
-    const withStoriesConditions = [placeScope];
-    if (storyScope) {
-      withStoriesConditions.push(storyScope);
-    }
-
-    const [withStoriesResult] = await (this.db as any)
-      .select({ count: count(sql`DISTINCT ${placesTable.id}`) })
-      .from(placesTable)
-      .innerJoin(storyPlaces, eq(placesTable.id, storyPlaces.placeId))
-      .innerJoin(storiesTable, eq(storyPlaces.storyId, storiesTable.id))
-      .where(and(...withStoriesConditions));
+    // The requested story accesses match no row at all: no story-linked
+    // place may count, fail closed instead of dropping the filter.
+    const withStories =
+      options.storyAudiences && !storyScope
+        ? 0
+        : Number(
+            (
+              await (this.db as any)
+                .select({ count: count(sql`DISTINCT ${placesTable.id}`) })
+                .from(placesTable)
+                .innerJoin(storyPlaces, eq(placesTable.id, storyPlaces.placeId))
+                .innerJoin(
+                  storiesTable,
+                  eq(storyPlaces.storyId, storiesTable.id)
+                )
+                .where(storyScope ? and(placeScope, storyScope) : placeScope)
+            )[0].count
+          );
 
     const total = Number(totalResult.count);
 
@@ -753,7 +764,7 @@ export class PlaceRepository {
       total,
       ...(restricted !== undefined ? { restricted } : {}),
       public: restricted !== undefined ? total - restricted : total,
-      withStories: Number(withStoriesResult.count),
+      withStories,
     };
   }
 }

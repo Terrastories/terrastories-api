@@ -47,34 +47,39 @@ export function roleCanReadStoryAudience(
 
 /**
  * Runtime read access for a story row on the transitional Fastify schema.
- * `admin-only` is not a canonical audience (SPEC-V2 §6.3): it is the
- * fail-closed runtime treatment of Fastify `isRestricted = true` rows, which
- * in V1 only community admins could read and which stay unavailable to every
- * other role until the community approves an explicit disposition.
+ * `unavailable` is not a canonical audience (SPEC-V2 §6.3): it is the
+ * fail-closed runtime treatment of rows the Fastify columns cannot map to a
+ * canonical audience — restricted rows and unknown privacy levels. Such rows
+ * are unreadable by EVERY role (admin, editor, member, viewer, super_admin,
+ * and the legacy `elder` role) until the community approves an explicit
+ * disposition (canonical audience or archive-only).
  */
-export type TransitionalStoryReadAccess = StoryAudience | 'admin-only';
+export type TransitionalStoryReadAccess = StoryAudience | 'unavailable';
 
 export function roleCanReadStoryAccess(
   role: V2CommunityRole,
   access: TransitionalStoryReadAccess
 ): boolean {
-  if (access === 'admin-only') {
-    return role === 'admin';
+  if (access === 'unavailable') {
+    return false;
   }
   return roleCanReadStoryAudience(role, access);
 }
 
 /**
  * Every runtime read access a role may hold, used to build list/count
- * filters (SPEC-V2 §6.2/§6.3). `super_admin` holds none: it has no
- * authenticated community-content access.
+ * filters (SPEC-V2 §6.2/§6.3). Never contains `unavailable`: that access is
+ * readable by no role. On the current Fastify schema `editors` matches no
+ * row (unknown privacy levels are unavailable), but the canonical grant
+ * stays so migration can select it explicitly. `super_admin` holds none: it
+ * has no authenticated community-content access.
  */
 export function storyAccessForRole(
   role: V2CommunityRole
 ): readonly TransitionalStoryReadAccess[] {
   switch (role) {
     case 'admin':
-      return ['public', 'community', 'editors', 'admin-only'];
+      return ['public', 'community', 'editors'];
     case 'editor':
       return ['public', 'community', 'editors'];
     case 'member':
@@ -92,22 +97,23 @@ export function storyAccessForRole(
  * function is the single documented mapping and its SQL transcription in
  * `storyAudienceCondition` (story repository) must stay in sync:
  *
- * - `isRestricted = true` -> `admin-only`. V1 let only community admins
- *   (and the non-canonical elder role) read restricted stories, so anything
- *   wider would silently widen access, which SPEC-V2 forbids. Editors,
- *   members, viewers and super admins never read restricted rows; the
- *   legacy `elder` path is unchanged until migration dispositions it.
  * - `privacyLevel = 'public'` + unrestricted -> `public`.
  * - `privacyLevel = 'members_only'` + unrestricted -> `community`.
- * - any other `privacyLevel` + unrestricted -> `editors` (fail-closed for
- *   unknown legacy values; migration dispositions them explicitly).
+ * - `isRestricted = true` -> `unavailable`. V1 limited these rows to
+ *   elder/admin audiences with no exact canonical equivalent (§6.3), so they
+ *   stay unavailable in V2 runtime to every role until a community-approved
+ *   disposition; `editors` is the closest retained audience but is never
+ *   selected implicitly.
+ * - any other `privacyLevel` (e.g. `'restricted'`, `'private'`, `''`,
+ *   unknown) + unrestricted -> `unavailable` via the same
+ *   explicit-disposition path; never `editors`, never `public`.
  */
 export function fastifyStoryToAudience(
   privacyLevel: string,
   isRestricted: boolean
 ): TransitionalStoryReadAccess {
   if (isRestricted) {
-    return 'admin-only';
+    return 'unavailable';
   }
   if (privacyLevel === 'public') {
     return 'public';
@@ -115,7 +121,7 @@ export function fastifyStoryToAudience(
   if (privacyLevel === 'members_only') {
     return 'community';
   }
-  return 'editors';
+  return 'unavailable';
 }
 
 export const CONTENT_ROUTE_FAMILIES = [
@@ -215,6 +221,24 @@ export function fastifyRoleToV2Role(
     default:
       return null;
   }
+}
+
+/**
+ * Runtime story read accesses for a physical Fastify role, used to build
+ * list/count filters. Canonical roles go through `fastifyRoleToV2Role`.
+ * The legacy `elder` role has no canonical equivalent (§6.2); it keeps the
+ * V2 `member` reach, so restricted rows and unknown privacy levels stay
+ * unavailable to it as well (§6.3). Unknown roles hold no access (fail
+ * closed).
+ */
+export function storyAccessForPhysicalRole(
+  physicalRole: string
+): readonly TransitionalStoryReadAccess[] {
+  const v2Role = fastifyRoleToV2Role(physicalRole);
+  if (v2Role) {
+    return storyAccessForRole(v2Role);
+  }
+  return physicalRole === 'elder' ? storyAccessForRole('member') : [];
 }
 
 export interface AuthorizationActor {

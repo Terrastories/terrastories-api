@@ -14,7 +14,6 @@ import {
   sql,
   count,
   inArray,
-  notInArray,
   type AnyColumn,
   type SQL,
 } from 'drizzle-orm';
@@ -205,9 +204,10 @@ export interface StoryFilters {
   privacyLevel?: string;
   /**
    * Runtime read accesses the caller may hold (SPEC-V2 §6.2/§6.3):
-   * canonical audiences plus `admin-only` for restricted rows. Transcribed
-   * to SQL exactly as documented on `fastifyStoryToAudience` in the
-   * sovereignty policy; keep both in sync.
+   * canonical audiences only; `unavailable` rows (restricted or unknown
+   * privacyLevel) are readable by no role. Transcribed to SQL exactly as
+   * documented on `fastifyStoryToAudience` in the sovereignty policy; keep
+   * both in sync. An empty array matches no row (fail closed).
    */
   storyAudiences?: TransitionalStoryReadAccess[];
   tags?: string[];
@@ -422,7 +422,15 @@ export class StoryRepository {
       })
       .from(storyPlacesTable)
       .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
-      .where(eq(storyPlacesTable.storyId, id))
+      // SPEC-V2 §6.4: a restricted Fastify place is unavailable to every
+      // role, so it never appears in story.places — enforced here at the
+      // data layer and again by the StoryService projection.
+      .where(
+        and(
+          eq(storyPlacesTable.storyId, id),
+          eq(placesTable.isRestricted, false)
+        )
+      )
       .orderBy(storyPlacesTable.sortOrder);
 
     const places = placesWithAssociations.map((p) => ({
@@ -630,7 +638,13 @@ export class StoryRepository {
           })
           .from(storyPlacesTable)
           .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
-          .where(inArray(storyPlacesTable.storyId, storyIds))
+          .where(
+            and(
+              inArray(storyPlacesTable.storyId, storyIds),
+              // SPEC-V2 §6.4: restricted places never appear in story.places.
+              eq(placesTable.isRestricted, false)
+            )
+          )
           .orderBy(storyPlacesTable.storyId, storyPlacesTable.sortOrder);
       } catch {
         // Try simpler query without missing columns
@@ -654,7 +668,12 @@ export class StoryRepository {
               placesTable,
               eq(storyPlacesTable.placeId, placesTable.id)
             )
-            .where(inArray(storyPlacesTable.storyId, storyIds));
+            .where(
+              and(
+                inArray(storyPlacesTable.storyId, storyIds),
+                eq(placesTable.isRestricted, false)
+              )
+            );
         } catch {
           allPlaceAssociations = [];
         }
@@ -1015,14 +1034,23 @@ export class StoryRepository {
       conditions.push(eq(storiesTable.privacyLevel, filters.privacyLevel));
     }
 
-    if (filters.storyAudiences) {
+    if (filters.storyAudiences !== undefined) {
       const audienceCondition = storyAudienceCondition(
         filters.storyAudiences,
         storiesTable
       );
-      if (audienceCondition) {
-        conditions.push(audienceCondition);
+      if (!audienceCondition) {
+        // The requested accesses match no row at all (e.g. super_admin's
+        // empty grant): fail closed instead of dropping the filter.
+        return {
+          data: [],
+          total: 0,
+          page: pagination.page,
+          limit: pagination.limit,
+          totalPages: 0,
+        };
       }
+      conditions.push(audienceCondition);
     }
 
     if (filters.createdBy) {
@@ -1234,10 +1262,17 @@ export class StoryRepository {
 
 /**
  * SQL transcription of `fastifyStoryToAudience` (sovereignty policy):
- * - public     = unrestricted + privacyLevel 'public'
- * - community  = unrestricted + privacyLevel 'members_only'
- * - editors    = unrestricted + any other privacyLevel (fail-closed default)
- * - admin-only = restricted rows (V1 parity: community admins only)
+ * - public      = unrestricted + privacyLevel 'public'
+ * - community   = unrestricted + privacyLevel 'members_only'
+ * - editors     = matches no Fastify row at runtime, so it contributes no
+ *                 condition here (SPEC-V2 §6.3: migration may select the
+ *                 editors audience explicitly, never implicitly)
+ * - unavailable = restricted rows and any other privacyLevel; readable by
+ *                 no role, so it contributes no condition either
+ *
+ * A row that maps to no requested access never matches. If no requested
+ * access matches any row, this returns undefined and every caller must
+ * treat that as "no rows" (fail closed), never as "no filter".
  *
  * Single source for `findMany` and route-level community story listings so
  * the mapping exists exactly once outside the policy module. Works for both
@@ -1250,27 +1285,26 @@ export function storyAudienceCondition(
     privacyLevel: AnyColumn;
   }
 ): SQL | undefined {
-  const conditions = accesses.map((access) => {
-    if (access === 'public') {
-      return and(
-        eq(storiesTable.isRestricted, false),
-        eq(storiesTable.privacyLevel, 'public')
-      );
-    }
-    if (access === 'community') {
-      return and(
-        eq(storiesTable.isRestricted, false),
-        eq(storiesTable.privacyLevel, 'members_only')
-      );
-    }
-    if (access === 'admin-only') {
-      return eq(storiesTable.isRestricted, true);
-    }
-    return and(
-      eq(storiesTable.isRestricted, false),
-      notInArray(storiesTable.privacyLevel, ['public', 'members_only'])
-    );
-  });
+  const conditions = accesses
+    .map((access) => {
+      if (access === 'public') {
+        return and(
+          eq(storiesTable.isRestricted, false),
+          eq(storiesTable.privacyLevel, 'public')
+        );
+      }
+      if (access === 'community') {
+        return and(
+          eq(storiesTable.isRestricted, false),
+          eq(storiesTable.privacyLevel, 'members_only')
+        );
+      }
+      // 'editors' matches no Fastify row (unknown privacy levels are
+      // unavailable) and 'unavailable' is readable by no role: neither
+      // contributes a condition.
+      return undefined;
+    })
+    .filter((condition): condition is SQL => condition !== undefined);
   if (conditions.length === 0) {
     return undefined;
   }

@@ -36,7 +36,9 @@ describe('V2 sovereignty audit logging', () => {
       communityId: 7,
       createdBy: 10,
       isRestricted: false,
-      privacyLevel: 'private',
+      // Available fixture (§6.3): this test exercises the audit record's
+      // shape; an unknown privacyLevel would be unavailable to admin too.
+      privacyLevel: 'public',
       mediaUrls: [],
       imageUrl: null,
       audioUrl: null,

@@ -14,7 +14,9 @@ describe('Configuration System', () => {
     delete process.env.PORT;
     delete process.env.HOST;
     delete process.env.DATABASE_URL;
-    delete process.env.JWT_SECRET;
+    process.env.JWT_SECRET = 'test-jwt-secret-at-least-32-characters-long';
+    process.env.SESSION_SECRET =
+      'test-session-secret-at-least-32-characters-long';
     delete process.env.LOG_LEVEL;
   });
 
@@ -56,6 +58,18 @@ describe('Configuration System', () => {
   });
 
   describe('Configuration Loading', () => {
+    it.each(['JWT_SECRET', 'SESSION_SECRET'])(
+      'rejects production startup without %s',
+      (secret) => {
+        process.env.NODE_ENV = 'production';
+        process.env.JWT_SECRET = 'test-jwt-secret-at-least-32-characters-long';
+        delete process.env[secret];
+        expect(() => loadConfig(true, true)).toThrow(
+          'Configuration validation failed'
+        );
+      }
+    );
+
     it('should load valid development configuration', () => {
       process.env.NODE_ENV = 'development';
       process.env.PORT = '3000';

@@ -38,9 +38,10 @@ and roadmap Phase 9; this document does not declare a release ready.
    and resource costs before creating anything; paid resources need approval.
 3. Supply `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` through the operator
    environment. Supply application secrets through Wrangler secrets; never
-   commit their values. The current Node configuration requires `JWT_SECRET`
-   and `SESSION_SECRET` in production; review the final Worker adapter for its
-   exact secret requirements. D1/R2 use bindings rather than `DATABASE_URL` or
+   commit their values. Production Node startup now rejects missing `JWT_SECRET`
+   and `SESSION_SECRET` (minimum 32 characters each). Supply unique values and
+   verify secret presence without printing them; review the final Worker adapter
+   for its exact secret requirements. D1/R2 use bindings rather than `DATABASE_URL` or
    local upload-directory variables.
 4. After those prerequisites exist, use the following command outline from the
    repo root. It is a future procedure, not runnable deployment support shipped

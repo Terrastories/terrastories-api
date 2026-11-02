@@ -103,13 +103,11 @@ export const SecurityConfigSchema = z.object({
 export const ProductionAuthConfigSchema = AuthConfigSchema.extend({
   jwtSecret: z
     .string()
-    .min(32, 'JWT_SECRET must be at least 32 characters in production')
-    .default('insecure-development-jwt-secret-for-testing-purposes-only'),
+    .min(32, 'JWT_SECRET must be at least 32 characters in production'),
   session: AuthConfigSchema.shape.session.extend({
     secret: z
       .string()
-      .min(32, 'SESSION_SECRET must be at least 32 characters in production')
-      .default('insecure-development-session-secret-for-testing-purposes-only'),
+      .min(32, 'SESSION_SECRET must be at least 32 characters in production'),
     secure: booleanFromEnv(true), // Force secure cookies in production
   }),
   rateLimit: z.object({

@@ -1,6 +1,12 @@
 import { defineConfig } from 'vitest/config';
 import * as path from 'path';
 
+const retainedMemoryFiles = [
+  'tests/production/performance.test.ts',
+  'tests/production/performance-optimization.test.ts',
+  'tests/production/database-cleanup.test.ts',
+];
+
 export default defineConfig({
   test: {
     environment: 'node',
@@ -25,6 +31,32 @@ export default defineConfig({
       '**/*.d.ts',
       'src/db/migrations/',
       'tests/routes/member/disabled/**', // Exclude incomplete member CRUD tests
+    ],
+
+    // Only retained-heap checks need explicit GC in their isolated fork.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'default',
+          exclude: [
+            'node_modules/',
+            'dist/',
+            '**/*.d.ts',
+            'src/db/migrations/',
+            'tests/routes/member/disabled/**',
+            ...retainedMemoryFiles,
+          ],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'retained-memory',
+          include: retainedMemoryFiles,
+          execArgv: ['--expose-gc'],
+        },
+      },
     ],
 
     // Coverage configuration with enforced thresholds

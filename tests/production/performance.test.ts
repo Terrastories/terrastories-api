@@ -9,6 +9,7 @@
  * Phase 1: Performance & Load Testing
  */
 
+import { retainedHeapUsed } from '../helpers/retained-heap.js';
 import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
@@ -594,74 +595,50 @@ describe('Production Performance Validation - Phase 1', () => {
     });
 
     test('Memory usage remains stable under load', async () => {
-      const initialMemory = process.memoryUsage();
-
-      // Generate sustained load
-      const loadDuration = 30000; // 30 seconds
-      const requestInterval = 100; // milliseconds between requests
-
-      let requestCount = 0;
-      const memoryMeasurements: Array<{ heapUsed: number; timestamp: number }> =
-        [];
-
-      const loadPromise = new Promise<void>((resolve) => {
-        const interval = setInterval(async () => {
-          try {
-            await app.inject({
-              method: 'GET',
-              url: '/api/communities/2/stories',
-            });
-            requestCount++;
-
-            // Measure memory every 5 seconds
-            if (requestCount % 50 === 0) {
-              const memory = process.memoryUsage();
-              memoryMeasurements.push({
-                heapUsed: memory.heapUsed,
-                timestamp: Date.now(),
-              });
-            }
-          } catch (error) {
-            console.error('Load test request failed:', error);
-          }
-        }, requestInterval);
-
-        setTimeout(() => {
-          clearInterval(interval);
-          resolve();
-        }, loadDuration);
-      });
-
-      await loadPromise;
-
-      const finalMemory = process.memoryUsage();
-      const memoryIncrease = finalMemory.heapUsed - initialMemory.heapUsed;
-      const memoryIncreasePercent =
-        (memoryIncrease / initialMemory.heapUsed) * 100;
-
-      console.log(`Memory usage after ${requestCount} requests:
-        - Initial heap: ${Math.round(initialMemory.heapUsed / 1024 / 1024)}MB
-        - Final heap: ${Math.round(finalMemory.heapUsed / 1024 / 1024)}MB
-        - Increase: ${Math.round(memoryIncrease / 1024 / 1024)}MB (${memoryIncreasePercent.toFixed(2)}%)
-      `);
-
-      // Memory increase should be reasonable (< 50% growth)
-      expect(
-        memoryIncreasePercent,
-        'Memory usage should not increase excessively under load'
-      ).toBeLessThan(50);
-
-      // Check for memory leaks (gradual increase pattern)
-      if (memoryMeasurements.length >= 3) {
-        const first = memoryMeasurements[0].heapUsed;
-        const last = memoryMeasurements[memoryMeasurements.length - 1].heapUsed;
-        const continuousIncrease = ((last - first) / first) * 100;
-
-        expect(
-          continuousIncrease,
-          'Should not show signs of memory leaks (continuous growth)'
-        ).toBeLessThan(30);
+      const requestsPerRound = 50;
+      const rounds = 6;
+      async function runRound(): Promise<void> {
+        for (let request = 0; request < requestsPerRound; request++) {
+          const response = await app.inject({
+            method: 'GET',
+            url: '/api/communities/2/stories',
+          });
+          expect(response.statusCode).toBe(200);
+        }
       }
+
+      // Initialize lazy caches/routes before measuring retained growth.
+      await runRound();
+      const initialHeap = await retainedHeapUsed();
+      const samples: number[] = [];
+      for (let round = 0; round < rounds; round++) {
+        // Await every request; no interval can leave work running after sampling.
+        await runRound();
+        samples.push(await retainedHeapUsed());
+      }
+
+      const finalHeap = samples[samples.length - 1];
+      const growthPercent = ((finalHeap - initialHeap) / initialHeap) * 100;
+      const continuousIncrease = ((finalHeap - samples[0]) / samples[0]) * 100;
+      console.log(
+        `Retained heap after ${rounds * requestsPerRound} requests: ` +
+          JSON.stringify({
+            initialMiB: initialHeap / 1024 / 1024,
+            samplesMiB: samples.map((heap) => heap / 1024 / 1024),
+            growthPercent,
+            continuousIncrease,
+          })
+      );
+
+      // Preserve the existing limits, now applied to live heap after GC.
+      expect(
+        growthPercent,
+        'Retained heap should not increase excessively under load'
+      ).toBeLessThan(50);
+      expect(
+        continuousIncrease,
+        'Retained heap should not show continuous growth across rounds'
+      ).toBeLessThan(30);
     });
   });
 
@@ -843,8 +820,8 @@ describe('Production Performance Validation - Phase 1', () => {
   }
 
   async function collectBaselineMetrics(): Promise<PerformanceMetrics> {
+    const initialHeap = await retainedHeapUsed();
     const start = performance.now();
-    const initialMemory = process.memoryUsage();
 
     // Warm up the application
     await app.inject({ method: 'GET', url: '/api/v1/health' });
@@ -855,13 +832,13 @@ describe('Production Performance Validation - Phase 1', () => {
     });
 
     const responseTime = performance.now() - start;
-    const finalMemory = process.memoryUsage();
+    const finalHeap = await retainedHeapUsed();
 
     return {
       responseTime,
       throughput: 1000 / responseTime, // requests per second
       errorRate: response.statusCode >= 400 ? 1 : 0,
-      memoryUsage: finalMemory.heapUsed - initialMemory.heapUsed,
+      memoryUsage: finalHeap - initialHeap,
     };
   }
 

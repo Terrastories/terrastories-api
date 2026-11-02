@@ -17,6 +17,7 @@ import {
   DuplicateEmailError,
   WeakPasswordError,
   InvalidCommunityError,
+  CommunityAuthorityRequiredError,
   type CreateUserRequest,
 } from '../../src/services/user.service.js';
 import { UserRepository } from '../../src/repositories/user.repository.js';
@@ -41,6 +42,14 @@ describe('User Service', () => {
     passwordService.validatePasswordStrength
   );
   const mockComparePassword = vi.mocked(passwordService.comparePassword);
+
+  // SPEC-V2 §7: enrollment needs a same-community admin actor. The service
+  // only consults the actor fields, so tests pass the actor directly.
+  const communityAdminActor = (communityId: number) => ({
+    id: 1,
+    role: 'admin' as const,
+    communityId,
+  });
 
   beforeEach(async () => {
     const db = await testDb.setup();
@@ -78,7 +87,7 @@ describe('User Service', () => {
   });
 
   describe('registerUser', () => {
-    test('should register a new user successfully', async () => {
+    test('should register a new user successfully for a same-community admin actor', async () => {
       const registrationData: CreateUserRequest = {
         email: 'test@example.com',
         password: 'StrongPassword123@',
@@ -88,7 +97,10 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      const registeredUser = await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
 
       expect(registeredUser).toBeDefined();
       expect(registeredUser.id).toBeDefined();
@@ -111,6 +123,53 @@ describe('User Service', () => {
       expect(mockHashPassword).toHaveBeenCalledWith(registrationData.password);
     });
 
+    test('should reject enrollment without community authority (anonymous caller)', async () => {
+      const registrationData: CreateUserRequest = {
+        email: 'no-authority@example.com',
+        password: 'StrongPassword123@',
+        firstName: 'No',
+        lastName: 'Authority',
+        role: 'viewer',
+        communityId: testCommunityId,
+      };
+
+      // SPEC-V2 §7: open registration is gone; without an actor the request
+      // is denied before any validation or insert runs.
+      await expect(userService.registerUser(registrationData)).rejects.toThrow(
+        CommunityAuthorityRequiredError
+      );
+
+      const created = await userRepository.findByEmail(
+        registrationData.email,
+        testCommunityId
+      );
+      expect(created).toBeNull();
+    });
+
+    test('should reject enrollment by an other-community admin', async () => {
+      const registrationData: CreateUserRequest = {
+        email: 'cross-community@example.com',
+        password: 'StrongPassword123@',
+        firstName: 'Cross',
+        lastName: 'Community',
+        role: 'viewer',
+        communityId: testCommunityId,
+      };
+
+      await expect(
+        userService.registerUser(
+          registrationData,
+          communityAdminActor(otherCommunityId)
+        )
+      ).rejects.toThrow(CommunityAuthorityRequiredError);
+
+      const created = await userRepository.findByEmail(
+        registrationData.email,
+        testCommunityId
+      );
+      expect(created).toBeNull();
+    });
+
     test('should throw DuplicateEmailError for existing email in same community', async () => {
       const registrationData: CreateUserRequest = {
         email: 'duplicate@example.com',
@@ -122,13 +181,24 @@ describe('User Service', () => {
       };
 
       // Register first user
-      await userService.registerUser(registrationData);
+      await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
 
       // Attempt to register duplicate user
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(
-        DuplicateEmailError
-      );
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(
+      await expect(
+        userService.registerUser(
+          registrationData,
+          communityAdminActor(testCommunityId)
+        )
+      ).rejects.toThrow(DuplicateEmailError);
+      await expect(
+        userService.registerUser(
+          registrationData,
+          communityAdminActor(testCommunityId)
+        )
+      ).rejects.toThrow(
         'User with this email already exists in this community'
       );
     });
@@ -153,8 +223,14 @@ describe('User Service', () => {
         communityId: otherCommunityId,
       };
 
-      const user1 = await userService.registerUser(registrationData1);
-      const user2 = await userService.registerUser(registrationData2);
+      const user1 = await userService.registerUser(
+        registrationData1,
+        communityAdminActor(testCommunityId)
+      );
+      const user2 = await userService.registerUser(
+        registrationData2,
+        communityAdminActor(otherCommunityId)
+      );
 
       expect(user1.email).toBe(email);
       expect(user2.email).toBe(email);
@@ -183,10 +259,18 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(
-        WeakPasswordError
-      );
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(
+      await expect(
+        userService.registerUser(
+          registrationData,
+          communityAdminActor(testCommunityId)
+        )
+      ).rejects.toThrow(WeakPasswordError);
+      await expect(
+        userService.registerUser(
+          registrationData,
+          communityAdminActor(testCommunityId)
+        )
+      ).rejects.toThrow(
         'Password requirements not met: Password must be at least 8 characters long, Password must contain uppercase letters'
       );
 
@@ -204,12 +288,12 @@ describe('User Service', () => {
         communityId: 999999, // Non-existent community
       };
 
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(
-        InvalidCommunityError
-      );
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(
-        'Community not found'
-      );
+      await expect(
+        userService.registerUser(registrationData, communityAdminActor(999999))
+      ).rejects.toThrow(InvalidCommunityError);
+      await expect(
+        userService.registerUser(registrationData, communityAdminActor(999999))
+      ).rejects.toThrow('Community not found');
     });
 
     test('should default role to viewer if not specified', async () => {
@@ -222,7 +306,10 @@ describe('User Service', () => {
         // role not specified
       } as CreateUserRequest;
 
-      const registeredUser = await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
 
       expect(registeredUser.role).toBe('viewer');
     });
@@ -241,9 +328,12 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(
-        'Failed to register user: Hashing service unavailable'
-      );
+      await expect(
+        userService.registerUser(
+          registrationData,
+          communityAdminActor(testCommunityId)
+        )
+      ).rejects.toThrow('Failed to register user: Hashing service unavailable');
     });
 
     test('should validate email format', async () => {
@@ -256,9 +346,12 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      await expect(userService.registerUser(registrationData)).rejects.toThrow(
-        'Invalid email format'
-      );
+      await expect(
+        userService.registerUser(
+          registrationData,
+          communityAdminActor(testCommunityId)
+        )
+      ).rejects.toThrow('Invalid email format');
     });
 
     test('should validate required fields', async () => {
@@ -270,7 +363,12 @@ describe('User Service', () => {
         communityId: testCommunityId,
       } as CreateUserRequest;
 
-      await expect(userService.registerUser(incompleteData)).rejects.toThrow();
+      await expect(
+        userService.registerUser(
+          incompleteData,
+          communityAdminActor(testCommunityId)
+        )
+      ).rejects.toThrow();
     });
 
     test('should validate role values', async () => {
@@ -283,7 +381,12 @@ describe('User Service', () => {
         communityId: testCommunityId,
       } as CreateUserRequest;
 
-      await expect(userService.registerUser(invalidRoleData)).rejects.toThrow();
+      await expect(
+        userService.registerUser(
+          invalidRoleData,
+          communityAdminActor(testCommunityId)
+        )
+      ).rejects.toThrow();
     });
   });
 
@@ -298,7 +401,10 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      const registeredUser = await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
       const foundUser = await userService.getUserById(
         registeredUser.id,
         testCommunityId
@@ -320,7 +426,10 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      const registeredUser = await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
 
       // Try to find user in different community
       await expect(
@@ -346,7 +455,10 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      const registeredUser = await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
 
       const updates = {
         firstName: 'Updated',
@@ -376,7 +488,10 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      const registeredUser = await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
 
       const updates = { firstName: 'Should Not Update' };
 
@@ -406,8 +521,14 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      const user1 = await userService.registerUser(user1Data);
-      await userService.registerUser(user2Data);
+      const user1 = await userService.registerUser(
+        user1Data,
+        communityAdminActor(testCommunityId)
+      );
+      await userService.registerUser(
+        user2Data,
+        communityAdminActor(testCommunityId)
+      );
 
       // Try to update user1's email to user2's email
       await expect(
@@ -431,7 +552,10 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      const registeredUser = await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
       await userService.deleteUser(registeredUser.id, testCommunityId);
 
       // Verify user is deleted
@@ -450,7 +574,10 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      const registeredUser = await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
 
       // Try to delete from different community
       await expect(
@@ -477,7 +604,10 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      await userService.registerUser(registrationData);
+      await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
 
       // Configure mock to return true for correct password comparison
       mockComparePassword.mockResolvedValue(true);
@@ -502,7 +632,10 @@ describe('User Service', () => {
         communityId: testCommunityId,
       };
 
-      const registeredUser = await userService.registerUser(registrationData);
+      const registeredUser = await userService.registerUser(
+        registrationData,
+        communityAdminActor(testCommunityId)
+      );
 
       // Configure mock to return false for wrong password
       mockComparePassword.mockResolvedValue(false);
@@ -594,8 +727,14 @@ describe('User Service', () => {
         communityId: otherCommunityId,
       };
 
-      const user1 = await userService.registerUser(user1Data);
-      const user2 = await userService.registerUser(user2Data);
+      const user1 = await userService.registerUser(
+        user1Data,
+        communityAdminActor(testCommunityId)
+      );
+      const user2 = await userService.registerUser(
+        user2Data,
+        communityAdminActor(otherCommunityId)
+      );
 
       // Verify getUserById respects community isolation
       expect(
@@ -656,14 +795,17 @@ describe('User Service', () => {
     });
 
     test('should omit deferred authentication fields from current user records', async () => {
-      const registeredUser = await userService.registerUser({
-        email: 'deferred-auth-fields@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Deferred',
-        lastName: 'Auth',
-        role: 'viewer',
-        communityId: testCommunityId,
-      });
+      const registeredUser = await userService.registerUser(
+        {
+          email: 'deferred-auth-fields@example.com',
+          password: 'StrongPassword123@',
+          firstName: 'Deferred',
+          lastName: 'Auth',
+          role: 'viewer',
+          communityId: testCommunityId,
+        },
+        communityAdminActor(testCommunityId)
+      );
       const user = await userService.getUserById(
         registeredUser.id,
         testCommunityId

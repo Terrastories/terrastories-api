@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   authorizeCommunityEnrollment,
+  authorizeCommunityMembershipChange,
   authorizePublicationChange,
   authorizeSystemAccountProvisioning,
   authorizeSystemAccountUpdate,
@@ -70,6 +71,53 @@ describe('administrative policy', () => {
         ).toEqual({ allowed: true, reason: 'community-admin' });
       }
     );
+  });
+
+  describe('authorizeCommunityMembershipChange', () => {
+    it('lets a same-community admin change membership or role', () => {
+      expect(
+        authorizeCommunityMembershipChange({
+          actor: admin,
+          targetCommunityId: 10,
+          requestedRole: 'editor',
+        })
+      ).toEqual({ allowed: true, reason: 'community-admin' });
+    });
+
+    it.each([
+      [
+        'a same-community editor',
+        { id: 3, role: 'editor', communityId: 10 },
+        'not-community-admin',
+      ],
+      [
+        'a cross-community admin',
+        { id: 7, role: 'admin', communityId: 11 },
+        'cross-community',
+      ],
+      ['an anonymous caller', null, 'anonymous'],
+    ] as const)(
+      'denies %s changing membership (%s)',
+      (_label, actor, reason) => {
+        expect(
+          authorizeCommunityMembershipChange({
+            actor,
+            targetCommunityId: 10,
+            requestedRole: 'editor',
+          })
+        ).toEqual({ allowed: false, reason });
+      }
+    );
+
+    it('denies assigning super_admin through a community path', () => {
+      expect(
+        authorizeCommunityMembershipChange({
+          actor: admin,
+          targetCommunityId: 10,
+          requestedRole: 'super_admin',
+        })
+      ).toEqual({ allowed: false, reason: 'system-role-not-assignable' });
+    });
   });
 
   describe('authorizeSystemAccountProvisioning', () => {
@@ -163,6 +211,44 @@ describe('administrative policy', () => {
         });
       }
     );
+
+    it('denies reactivating a deactivated community account', () => {
+      expect(
+        authorizeSystemAccountUpdate({
+          current: { role: 'viewer', communityId: 10, isActive: false },
+          requested: { isActive: true },
+        })
+      ).toEqual({
+        allowed: false,
+        reason: 'reactivation-requires-community-authority',
+      });
+    });
+
+    it.each([
+      // An active account staying active is not a reactivation.
+      [
+        'an active account staying active',
+        { role: 'viewer', communityId: 10, isActive: true },
+        { isActive: true },
+      ],
+      // System accounts may be reactivated by system administration.
+      [
+        'a deactivated system account',
+        { role: 'super_admin', communityId: 10, isActive: false },
+        { isActive: true },
+      ],
+      // Deactivation never re-admits a member.
+      [
+        'deactivation',
+        { role: 'viewer', communityId: 10, isActive: true },
+        { isActive: false },
+      ],
+    ])('allows %s through the lifecycle path', (_label, current, requested) => {
+      expect(authorizeSystemAccountUpdate({ current, requested })).toEqual({
+        allowed: true,
+        reason: 'lifecycle-fields-only',
+      });
+    });
   });
 
   describe('authorizePublicationChange', () => {

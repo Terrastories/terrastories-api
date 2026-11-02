@@ -1057,9 +1057,12 @@ export class StoryService {
     const restrictedInterviewLocation =
       (story.interviewLocation as { isRestricted?: boolean } | null | undefined)
         ?.isRestricted === true;
+    // The raw ID survives only alongside a loaded, readable relation. List
+    // and search rows (`findMany`) do not load the relation, so their ID is
+    // masked too: the caller cannot tell a restricted place from a readable
+    // one without it (fail closed).
     const masksInterviewLocationId =
       story.interviewLocationId != null &&
-      'interviewLocation' in story &&
       (story.interviewLocation == null || restrictedInterviewLocation);
 
     if (!hasRestrictedPlace && !masksInterviewLocationId) {
@@ -1104,10 +1107,12 @@ export class StoryService {
     // behind: when the relations were loaded and the interviewer is absent
     // (missing row, or withdrawn and dropped above), every role loses the
     // ID too. Editors/admins keep the ID only while they keep the relation.
+    // As for the interview location: the ID survives only alongside a
+    // loaded relation the caller may read, so list/search rows (relation
+    // not loaded) mask it as well.
     const masksInterviewerId =
       story.interviewerId != null &&
-      (('interviewer' in story && story.interviewer == null) ||
-        removesWithdrawnInterviewer);
+      (story.interviewer == null || removesWithdrawnInterviewer);
 
     if (
       !removesWithdrawnSpeakers &&

@@ -1127,8 +1127,10 @@ describe('StoryService', () => {
   describe('withheld relation ID masking in story projections', () => {
     // When a projection withholds a relation (a withdrawn interviewer, a
     // restricted or missing interview location), the raw foreign-key ID
-    // must not outlive the withheld relation. The masking is
-    // projection-only: stored rows, repository writes, and create/update
+    // must not outlive the withheld relation. An ID survives only alongside
+    // a loaded, readable relation, so rows whose relations were never
+    // loaded (list/search `findMany` rows) mask their IDs too. The masking
+    // is projection-only: stored rows, repository writes, and create/update
     // inputs keep their IDs.
     const withdrawnInterviewer = {
       id: 73,
@@ -1352,9 +1354,12 @@ describe('StoryService', () => {
       expect(viewerResult!.interviewerId).toBeNull();
     });
 
-    it('keeps relation IDs when the relations were not loaded (no false masking)', async () => {
+    it('masks relation IDs when the relations were not loaded', async () => {
       // Arrange: no interviewer/interviewLocation keys at all — the raw
-      // IDs are the only data present and must pass through untouched.
+      // IDs are the only data present. The ID survives only alongside a
+      // loaded, readable relation, so a bare ID is masked: without the
+      // relation the caller cannot tell a restricted row from a readable
+      // one (fail closed).
       const bare = createReadableStory({
         interviewerId: 88,
         interviewLocationId: 42,
@@ -1373,10 +1378,118 @@ describe('StoryService', () => {
         testData.community.id
       );
 
+      // Assert: the raw foreign keys do not outlive the absent relations.
+      expect(result).not.toBeNull();
+      expect(result!.interviewerId).toBeNull();
+      expect(result!.interviewLocationId).toBeNull();
+    });
+
+    it('masks both relation IDs in listStories rows without relation keys, for a viewer and an admin', async () => {
+      // Arrange: findMany rows carry the raw FKs but never the relations.
+      const bareRow = createReadableStory({
+        interviewerId: 88,
+        interviewLocationId: 42,
+      });
+      delete (bareRow as any).interviewer;
+      delete (bareRow as any).interviewLocation;
+      mockStoryRepository.findMany.mockResolvedValue({
+        data: [bareRow],
+        total: 1,
+        page: 1,
+        limit: 10,
+        totalPages: 1,
+      });
+
+      // Act
+      const viewerResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+      const adminResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      // Assert: admins keep withdrawn relations, but no relation was loaded
+      // here, so the unloaded IDs are masked for them too.
+      expect(viewerResult.data[0].interviewerId).toBeNull();
+      expect(viewerResult.data[0].interviewLocationId).toBeNull();
+      expect(adminResult.data[0].interviewerId).toBeNull();
+      expect(adminResult.data[0].interviewLocationId).toBeNull();
+    });
+
+    it('masks both relation IDs in searchStories rows without relation keys, for a viewer and an admin', async () => {
+      const bareRow = createReadableStory({
+        interviewerId: 88,
+        interviewLocationId: 42,
+      });
+      delete (bareRow as any).interviewer;
+      delete (bareRow as any).interviewLocation;
+      mockStoryRepository.findMany.mockResolvedValue({
+        data: [bareRow],
+        total: 1,
+        page: 1,
+        limit: 100,
+        totalPages: 1,
+      });
+
+      // Act
+      const viewerResult = await storyService.searchStories(
+        'interview',
+        {},
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+      const adminResult = await storyService.searchStories(
+        'interview',
+        {},
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      // Assert
+      for (const result of [viewerResult, adminResult]) {
+        expect(result[0].interviewerId).toBeNull();
+        expect(result[0].interviewLocationId).toBeNull();
+      }
+    });
+
+    it('keeps interviewerId on a direct read when an admin loads a readable interviewer', async () => {
+      // Arrange: the relation is loaded and readable (active), so the raw
+      // ID may survive alongside it.
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        createReadableStory({
+          interviewerId: 74,
+          interviewer: {
+            id: 74,
+            name: 'Active Interviewer',
+            bio: 'ACTIVE-INTERVIEWER-BIO',
+            elderStatus: false,
+            isActive: true,
+          },
+        })
+      );
+
+      // Act
+      const result = await storyService.getStoryById(
+        45,
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
       // Assert
       expect(result).not.toBeNull();
-      expect(result!.interviewerId).toBe(88);
-      expect(result!.interviewLocationId).toBe(42);
+      expect(result!.interviewer).toMatchObject({ id: 74 });
+      expect(result!.interviewerId).toBe(74);
     });
 
     it('never feeds masked IDs into a repository write from a read path', async () => {

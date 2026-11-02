@@ -15,6 +15,8 @@ describe('File Service Configuration', () => {
 
     // Ensure we have a valid DATABASE_URL for all tests
     process.env.DATABASE_URL = ':memory:';
+    process.env.JWT_SECRET =
+      'fixture-file-service-jwt-secret-at-least-32-characters';
   });
 
   afterEach(() => {

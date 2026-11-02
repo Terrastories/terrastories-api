@@ -661,4 +661,243 @@ describe('V2 sovereignty administrative sequences', () => {
       expect((await readUnpublishedAnonymously()).statusCode).toBe(404);
     });
   });
+
+  describe('reactivation then login then protected read', () => {
+    it('rejects a super admin reactivating an account the community deactivated', async () => {
+      // The community admin revokes a member; system privilege must not
+      // undo that revocation (SPEC-V2 §7 "changing membership").
+      const adminCookie = await cookieFor(
+        privateAdmin.email,
+        privateCommunityId
+      );
+      const deactivate = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/users/${privateViewer.id}`,
+        headers: { cookie: adminCookie },
+        payload: { isActive: false },
+      });
+      expect(deactivate.statusCode).toBe(200);
+      expect(
+        (await login(privateViewer.email, privateCommunityId)).statusCode
+      ).toBe(401);
+
+      const systemCookie = await cookieFor(superAdmin.email, otherCommunityId);
+      const reactivate = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/super_admin/users/${privateViewer.id}`,
+        headers: { cookie: systemCookie },
+        payload: { isActive: true },
+      });
+      expect(reactivate.statusCode).toBe(403);
+
+      expect(
+        (await login(privateViewer.email, privateCommunityId)).statusCode
+      ).toBe(401);
+      const [row] = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.id, privateViewer.id));
+      expect(row.isActive).toBe(false);
+
+      const denial = audit.find(
+        (event) => event.action === 'system_account_update'
+      );
+      expect(denial).toMatchObject({
+        allowed: false,
+        reason: 'reactivation-requires-community-authority',
+        resourceId: privateViewer.id,
+      });
+      expectContentFreeAudit(denial!);
+    });
+
+    it('lets a super admin reactivate a system account', async () => {
+      const [system] = await db
+        .insert(usersSqlite)
+        .values(
+          TestDataFactory.createUser(otherCommunityId, {
+            email: 'seq-inactive-system@example.test',
+            role: 'super_admin',
+            isActive: false,
+            passwordHash: await hashPassword(TEST_PASSWORD),
+          })
+        )
+        .returning();
+      const systemCookie = await cookieFor(superAdmin.email, otherCommunityId);
+      const reactivate = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/super_admin/users/${system.id}`,
+        headers: { cookie: systemCookie },
+        payload: { isActive: true },
+      });
+      expect(reactivate.statusCode).toBe(200);
+    });
+  });
+
+  describe('concurrent first-administrator provisioning', () => {
+    it('provisions exactly one administrator when requests race', async () => {
+      const cookie = await cookieFor(superAdmin.email, otherCommunityId);
+      const responses = await Promise.all(
+        [0, 1, 2, 3, 4].map((index) =>
+          app.inject({
+            method: 'POST',
+            url: '/api/v1/super_admin/users',
+            headers: { cookie },
+            payload: registerPayload(
+              `seq-race-${index}@example.test`,
+              'admin',
+              emptyCommunityId
+            ),
+          })
+        )
+      );
+      const statuses = responses.map((response) => response.statusCode).sort();
+      expect(statuses).toEqual([201, 403, 403, 403, 403]);
+
+      const admins = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.communityId, emptyCommunityId));
+      expect(admins).toHaveLength(1);
+
+      const decisions = audit.filter(
+        (event) => event.action === 'system_account_create'
+      );
+      expect(decisions.filter((event) => event.allowed)).toHaveLength(1);
+      expect(decisions.filter((event) => !event.allowed)).toHaveLength(4);
+    });
+  });
+
+  describe('community-admin enrollment through /api/v1/users', () => {
+    it('audits a community admin creating a member, who then reads the community audience', async () => {
+      const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
+      const email = 'seq-users-route-member@example.test';
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/v1/users',
+        headers: { cookie },
+        payload: {
+          email,
+          password: NEW_PASSWORD,
+          firstName: 'Sequence',
+          lastName: 'Probe',
+          role: 'viewer',
+        },
+      });
+      expect(create.statusCode).toBe(201);
+
+      const grant = audit.find((event) => event.action === 'enrollment');
+      expect(grant).toMatchObject({
+        allowed: true,
+        reason: 'community-admin',
+        actorId: privateAdmin.id,
+        communityId: privateCommunityId,
+      });
+      expectContentFreeAudit(grant!);
+
+      const read = await readProtected(
+        extractSignedSessionCookie(
+          (await login(email, privateCommunityId, NEW_PASSWORD)).headers[
+            'set-cookie'
+          ]
+        )
+      );
+      expect(read.statusCode).toBe(200);
+    });
+
+    it('audits role changes made by a community admin', async () => {
+      const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
+      const promote = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/users/${privateViewer.id}`,
+        headers: { cookie },
+        payload: { role: 'editor' },
+      });
+      expect(promote.statusCode).toBe(200);
+      const change = audit.find(
+        (event) => event.action === 'membership_change'
+      );
+      expect(change).toMatchObject({
+        allowed: true,
+        reason: 'community-admin',
+        actorId: privateAdmin.id,
+        communityId: privateCommunityId,
+        resourceId: privateViewer.id,
+      });
+      expectContentFreeAudit(change!);
+    });
+  });
+
+  describe('community-admin publication then public read', () => {
+    const publication = (
+      cookie: string | undefined,
+      publicStories: boolean,
+      communityId = privateCommunityId
+    ) =>
+      app.inject({
+        method: 'PUT',
+        url: `/api/v1/communities/${communityId}/publication`,
+        headers: cookie ? { cookie } : {},
+        payload: { publicStories },
+      });
+
+    it('lets the community admin publish, after which anonymous callers read public stories', async () => {
+      expect((await readUnpublishedAnonymously()).statusCode).toBe(404);
+
+      const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
+      const publish = await publication(cookie, true);
+      expect(publish.statusCode).toBe(200);
+      expect(publish.json()).toMatchObject({
+        data: { id: privateCommunityId, publicStories: true },
+      });
+
+      const after = await readUnpublishedAnonymously();
+      expect(after.statusCode).toBe(200);
+      expect(after.body).toContain(UNPUBLISHED_TITLE);
+      // Publication never widens a story audience.
+      expect((await readProtected()).statusCode).not.toBe(200);
+
+      const grant = audit.find(
+        (event) => event.action === 'publication_change'
+      );
+      expect(grant).toMatchObject({
+        allowed: true,
+        reason: 'community-admin',
+        actorId: privateAdmin.id,
+        communityId: privateCommunityId,
+      });
+      expectContentFreeAudit(grant!);
+
+      const unpublish = await publication(cookie, false);
+      expect(unpublish.statusCode).toBe(200);
+      expect((await readUnpublishedAnonymously()).statusCode).toBe(404);
+    });
+
+    it('rejects publication by anonymous callers, members, other-community admins and super admins', async () => {
+      expect((await publication(undefined, true)).statusCode).toBe(401);
+      const callers = [
+        { user: privateViewer, communityId: privateCommunityId },
+        { user: otherAdmin, communityId: otherCommunityId },
+        { user: superAdmin, communityId: otherCommunityId },
+      ];
+      for (const caller of callers) {
+        const cookie = await cookieFor(caller.user.email, caller.communityId);
+        expect((await publication(cookie, true)).statusCode).toBe(403);
+      }
+      expect((await readUnpublishedAnonymously()).statusCode).toBe(404);
+      const [community] = await db
+        .select()
+        .from(communitiesSqlite)
+        .where(eq(communitiesSqlite.id, privateCommunityId));
+      expect(community.publicStories).toBe(false);
+      const reasons = audit
+        .filter((event) => event.action === 'publication_change')
+        .map((event) => event.reason);
+      expect(reasons).toEqual([
+        'anonymous',
+        'not-community-admin',
+        'cross-community',
+        'system-privilege-is-not-community-authority',
+      ]);
+    });
+  });
 });

@@ -37,12 +37,19 @@ import {
   InvalidCommunityError,
   UserNotFoundError,
   SuperAdminRoleError,
+  CommunityAuthorityRequiredError,
   SelfDeletionError,
 } from '../services/user.service.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { getDb, type Database } from '../db/index.js';
 import { toISOString } from '../shared/utils/date-transforms.js';
+import {
+  authorizeCommunityEnrollment,
+  authorizeCommunityMembershipChange,
+  createAdministrativeAuditEvent,
+} from '../shared/authorization/administrative-policy.js';
+import { emitAdministrativeAudit } from '../shared/utils/audit-logger.js';
 
 // Validation schemas for community-scoped user operations
 const UserIdParamSchema = z.object({
@@ -146,6 +153,12 @@ const USER_RESPONSE_SCHEMA = {
     updatedAt: { type: 'string', format: 'date-time' },
   },
 };
+
+const toActor = (user: { id: number; role: string; communityId: number }) => ({
+  id: user.id,
+  role: user.role,
+  communityId: user.communityId,
+});
 
 export async function userRoutes(
   app: FastifyInstance,
@@ -441,11 +454,32 @@ export async function userRoutes(
 
         const userData = CreateUserSchema.parse(request.body);
 
-        // Create user in the current user's community
-        const user = await userService.createUserInCommunity({
-          ...userData,
-          communityId: currentUser.communityId,
+        // SPEC-V2 §7: shared enrollment policy and audit, same as
+        // POST /auth/register.
+        const actor = toActor(currentUser);
+        const decision = authorizeCommunityEnrollment({
+          actor,
+          targetCommunityId: currentUser.communityId,
+          requestedRole: userData.role || 'viewer',
         });
+        emitAdministrativeAudit(
+          request.log,
+          createAdministrativeAuditEvent({
+            action: 'enrollment',
+            actor,
+            communityId: currentUser.communityId,
+            decision,
+          })
+        );
+
+        // Create user in the current user's community
+        const user = await userService.createUserInCommunity(
+          {
+            ...userData,
+            communityId: currentUser.communityId,
+          },
+          actor
+        );
 
         const responseData = {
           id: user.id,
@@ -486,6 +520,13 @@ export async function userRoutes(
           return reply.status(400).send({
             error: error.message,
             statusCode: 400,
+          });
+        }
+
+        if (error instanceof CommunityAuthorityRequiredError) {
+          return reply.status(403).send({
+            error: { message: 'Community administrator authority required' },
+            statusCode: 403,
           });
         }
 
@@ -567,6 +608,39 @@ export async function userRoutes(
         const { id } = UserIdParamSchema.parse(request.params);
         const userId = parseInt(id, 10);
         const updateData = UpdateUserSchema.parse(request.body);
+
+        // SPEC-V2 §7: role and activation changes are membership changes,
+        // decided by the shared policy and audited.
+        if (
+          updateData.role !== undefined ||
+          updateData.isActive !== undefined
+        ) {
+          const actor = toActor(currentUser);
+          const decision = authorizeCommunityMembershipChange({
+            actor,
+            targetCommunityId: currentUser.communityId,
+            requestedRole: updateData.role,
+          });
+          emitAdministrativeAudit(
+            request.log,
+            createAdministrativeAuditEvent({
+              action: 'membership_change',
+              actor,
+              communityId: currentUser.communityId,
+              resourceId: userId,
+              decision,
+            })
+          );
+          if (
+            !decision.allowed &&
+            decision.reason !== 'system-role-not-assignable'
+          ) {
+            return reply.status(403).send({
+              error: { message: 'Community administrator authority required' },
+              statusCode: 403,
+            });
+          }
+        }
 
         // Update user in the same community
         const user = await userService.updateUserInCommunity(
@@ -690,6 +764,39 @@ export async function userRoutes(
         const { id } = UserIdParamSchema.parse(request.params);
         const userId = parseInt(id, 10);
         const updateData = UpdateUserSchema.parse(request.body);
+
+        // SPEC-V2 §7: role and activation changes are membership changes,
+        // decided by the shared policy and audited.
+        if (
+          updateData.role !== undefined ||
+          updateData.isActive !== undefined
+        ) {
+          const actor = toActor(currentUser);
+          const decision = authorizeCommunityMembershipChange({
+            actor,
+            targetCommunityId: currentUser.communityId,
+            requestedRole: updateData.role,
+          });
+          emitAdministrativeAudit(
+            request.log,
+            createAdministrativeAuditEvent({
+              action: 'membership_change',
+              actor,
+              communityId: currentUser.communityId,
+              resourceId: userId,
+              decision,
+            })
+          );
+          if (
+            !decision.allowed &&
+            decision.reason !== 'system-role-not-assignable'
+          ) {
+            return reply.status(403).send({
+              error: { message: 'Community administrator authority required' },
+              statusCode: 403,
+            });
+          }
+        }
 
         // Update user in the same community (same logic as PUT)
         const user = await userService.updateUserInCommunity(

@@ -15,7 +15,9 @@
 
 import { UserRepository } from '../repositories/user.repository.js';
 import {
+  authorizeCommunityEnrollment,
   authorizeSystemAccountProvisioning,
+  type AdministrativeActor,
   authorizeSystemAccountUpdate,
   type AdministrativeDecision,
   type AdministrativeDecisionReason,
@@ -179,7 +181,34 @@ export class UserService {
    * @throws InvalidCommunityError - If community doesn't exist
    * @throws Error - For validation or system errors
    */
-  async registerUser(data: CreateUserRequest): Promise<User> {
+  async registerUser(
+    data: CreateUserRequest,
+    actor: AdministrativeActor | null
+  ): Promise<User> {
+    // SPEC-V2 §7: enrollment needs a same-community administrator. The
+    // route checks first; this re-check keeps the service fail-closed for
+    // any other caller.
+    const decision = authorizeCommunityEnrollment({
+      actor,
+      targetCommunityId: data.communityId,
+      requestedRole: data.role || 'viewer',
+    });
+    if (!decision.allowed) {
+      throw new CommunityAuthorityRequiredError(decision.reason);
+    }
+    return this.createValidatedUser(data, (userData) =>
+      this.userRepository.create(userData)
+    );
+  }
+
+  /**
+   * Shared validation, password hashing and insert for enrollment and
+   * system provisioning. Authority is decided by the callers.
+   */
+  private async createValidatedUser(
+    data: CreateUserRequest,
+    insert: (userData: CreateUserData) => Promise<User>
+  ): Promise<User> {
     try {
       // Validate email format
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -249,14 +278,15 @@ export class UserService {
       };
 
       // Create user in database
-      const user = await this.userRepository.create(userData);
+      const user = await insert(userData);
       return user;
     } catch (error) {
       // Re-throw known errors
       if (
         error instanceof DuplicateEmailError ||
         error instanceof WeakPasswordError ||
-        error instanceof InvalidCommunityError
+        error instanceof InvalidCommunityError ||
+        error instanceof CommunityAuthorityRequiredError
       ) {
         throw error;
       }
@@ -787,15 +817,23 @@ export class UserService {
    */
   async authorizeSystemAccountChange(
     id: number,
-    updates: { role?: string; communityId?: number }
+    updates: { role?: string; communityId?: number; isActive?: boolean }
   ): Promise<AdministrativeDecision> {
     const current = await this.userRepository.findByIdAsSuperAdmin(id);
     if (!current) {
       throw new UserNotFoundError();
     }
     return authorizeSystemAccountUpdate({
-      current: { role: current.role, communityId: current.communityId },
-      requested: { role: updates.role, communityId: updates.communityId },
+      current: {
+        role: current.role,
+        communityId: current.communityId,
+        isActive: current.isActive,
+      },
+      requested: {
+        role: updates.role,
+        communityId: updates.communityId,
+        isActive: updates.isActive,
+      },
     });
   }
 
@@ -836,7 +874,26 @@ export class UserService {
         isActive: data.isActive ?? true,
       };
 
-      return await this.registerUser(userData);
+      if (data.role === 'super_admin') {
+        return await this.createValidatedUser(userData, (validated) =>
+          this.userRepository.create(validated)
+        );
+      }
+      // First administrator: claim check and insert are one atomic write
+      // (CommunityRepository.provisionFirstAdministrator), so concurrent
+      // requests cannot each pass the check.
+      return await this.createValidatedUser(userData, async (validated) => {
+        const created =
+          await this.communityRepository.provisionFirstAdministrator({
+            ...validated,
+          });
+        if (!created) {
+          throw new CommunityAuthorityRequiredError(
+            'community-claimed-or-holds-content'
+          );
+        }
+        return created as unknown as User;
+      });
     } catch (error) {
       // Re-throw specific error types for proper HTTP status codes
       if (
@@ -1076,6 +1133,32 @@ export class UserService {
    * Enforces community boundary - user will be created in the admin's community
    */
   async createUserInCommunity(
+    data: Omit<CreateUserRequest, 'communityId'> & { communityId: number },
+    actor: AdministrativeActor | null
+  ): Promise<User> {
+    // SPEC-V2 §7: same shared enrollment policy as POST /auth/register.
+    const decision = authorizeCommunityEnrollment({
+      actor,
+      targetCommunityId: data.communityId,
+      requestedRole: data.role || 'viewer',
+    });
+    if (!decision.allowed) {
+      if (decision.reason === 'system-role-not-assignable') {
+        throw new SuperAdminRoleError(
+          'Cannot create super admin users through community endpoints'
+        );
+      }
+      throw new CommunityAuthorityRequiredError(decision.reason);
+    }
+    return this.seedUserInCommunity(data);
+  }
+
+  /**
+   * Insert a community account without an authority check. Only for the
+   * development/test seed (`/dev/seed`, environment-gated by #175); every
+   * request path uses `createUserInCommunity` or `registerUser`.
+   */
+  async seedUserInCommunity(
     data: Omit<CreateUserRequest, 'communityId'> & { communityId: number }
   ): Promise<User> {
     try {

@@ -26,7 +26,10 @@ import {
   type InvalidCommunityDataError,
 } from '../repositories/community.repository.js';
 import { toISOString } from '../shared/utils/date-transforms.js';
-import { authorizePublicationChange } from '../shared/authorization/administrative-policy.js';
+import {
+  authorizePublicationChange,
+  type AdministrativeActor,
+} from '../shared/authorization/administrative-policy.js';
 import type { CommunityResponse as CommunityResponseSchema } from '../shared/schemas/communities.js';
 import type { CommunityResponse } from '../shared/schemas/super-admin.js';
 
@@ -984,6 +987,39 @@ export class CommunityService {
         }`
       );
     }
+  }
+
+  /**
+   * SPEC-V2 §7 publication change by a community administrator. Only a
+   * same-community admin may change `publicStories`; system privilege may
+   * not. Re-checks the shared policy so the service stays fail-closed for
+   * any caller. Returns null when the community does not exist or is
+   * disabled.
+   */
+  async setPublicationAsCommunityAdmin(
+    id: number,
+    publicStories: boolean,
+    actor: AdministrativeActor | null
+  ): Promise<Community | null> {
+    const existing = await this.communityRepository.findById(id);
+    const decision = authorizePublicationChange({
+      actor,
+      communityId: id,
+      // Treat a missing community as a change so the authority check
+      // still decides before any existence signal.
+      currentPublic: existing ? existing.publicStories : !publicStories,
+      requestedPublic: publicStories,
+    });
+    if (!decision.allowed) {
+      throw new PublicationAuthorityRequiredError();
+    }
+    if (!existing || !existing.isActive) {
+      return null;
+    }
+    if (existing.publicStories === publicStories) {
+      return existing;
+    }
+    return this.communityRepository.update(id, { publicStories });
   }
 
   /**

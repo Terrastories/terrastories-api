@@ -1094,18 +1094,41 @@ export async function superAdminRoutes(
           request.body.role,
           request.body.communityId
         );
+        if (!createDecision.allowed) {
+          auditAdministrativeDecision(
+            request,
+            'system_account_create',
+            request.body.communityId,
+            null,
+            createDecision
+          );
+          return communityAuthorityRequired(reply);
+        }
+
+        let user;
+        try {
+          // The service re-checks atomically with the insert; a request that
+          // lost a provisioning race is refused and audited here.
+          user = await userService.createUserAsSuperAdmin(request.body);
+        } catch (createError) {
+          if (createError instanceof CommunityAuthorityRequiredError) {
+            auditAdministrativeDecision(
+              request,
+              'system_account_create',
+              request.body.communityId,
+              null,
+              { allowed: false, reason: createError.reason }
+            );
+          }
+          throw createError;
+        }
         auditAdministrativeDecision(
           request,
           'system_account_create',
           request.body.communityId,
-          null,
+          user.id,
           createDecision
         );
-        if (!createDecision.allowed) {
-          return communityAuthorityRequired(reply);
-        }
-
-        const user = await userService.createUserAsSuperAdmin(request.body);
 
         // Audit log the user creation
         const authRequest = request as AuthenticatedRequest;
@@ -1247,7 +1270,8 @@ export async function superAdminRoutes(
 
         if (
           request.body.role !== undefined ||
-          request.body.communityId !== undefined
+          request.body.communityId !== undefined ||
+          request.body.isActive !== undefined
         ) {
           const target = await userService.getUserByIdAsSuperAdmin(numericId);
           if (target) {

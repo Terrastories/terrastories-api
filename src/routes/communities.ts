@@ -14,7 +14,10 @@
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { CommunityService } from '../services/community.service.js';
+import {
+  CommunityService,
+  PublicationAuthorityRequiredError,
+} from '../services/community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { getDb, type Database } from '../db/index.js';
 import { storiesSqlite, storiesPg } from '../db/schema/index.js';
@@ -28,10 +31,16 @@ import {
 } from '../shared/authorization/sovereignty-policy.js';
 import { storyAudienceCondition } from '../repositories/story.repository.js';
 import {
+  getCurrentUser,
   getDiscoveryViewer,
   requireAuth,
   requireRole,
 } from '../shared/middleware/auth.middleware.js';
+import {
+  authorizePublicationChange,
+  createAdministrativeAuditEvent,
+} from '../shared/authorization/administrative-policy.js';
+import { emitAdministrativeAudit } from '../shared/utils/audit-logger.js';
 
 // Request validation schemas
 const createCommunitySchema = z
@@ -101,6 +110,106 @@ export async function communityRoutes(
   const getStoriesTable = () => {
     return 'execute' in database ? storiesPg : storiesSqlite;
   };
+
+  /**
+   * Community Publication Endpoint (SPEC-V2 §7)
+   * PUT /communities/:id/publication
+   *
+   * "Community administrators authorize membership, community roles, member
+   * recovery, and publication." Only a same-community admin may change
+   * `publicStories`; system privilege may not (super admin routes refuse it).
+   * Every attempt is audited without content. The authority decision is made
+   * before any community lookup, so a denial carries no existence signal.
+   */
+  fastify.put(
+    '/communities/:id/publication',
+    {
+      schema: {
+        description:
+          'Change community publication (public story projection). Same-community admin only.',
+        tags: ['Communities'],
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string', pattern: '^[0-9]+$' } },
+          required: ['id'],
+        },
+        body: {
+          type: 'object',
+          properties: { publicStories: { type: 'boolean' } },
+          required: ['publicStories'],
+          additionalProperties: false,
+        },
+      },
+    },
+    async (
+      request: FastifyRequest<{
+        Params: { id: string };
+        Body: { publicStories: boolean };
+      }>,
+      reply: FastifyReply
+    ) => {
+      const communityId = Number.parseInt(request.params.id, 10);
+      const sessionUser = getCurrentUser(request);
+      const actor = sessionUser
+        ? {
+            id: sessionUser.id,
+            role: sessionUser.role,
+            communityId: sessionUser.communityId,
+          }
+        : null;
+      const decision = authorizePublicationChange({
+        actor,
+        communityId,
+        currentPublic: !request.body.publicStories,
+        requestedPublic: request.body.publicStories,
+      });
+      emitAdministrativeAudit(
+        request.log,
+        createAdministrativeAuditEvent({
+          action: 'publication_change',
+          actor,
+          communityId,
+          resourceId: communityId,
+          decision,
+        })
+      );
+      if (!actor) {
+        return reply
+          .status(401)
+          .send({ error: 'Authentication required', statusCode: 401 });
+      }
+      if (!decision.allowed) {
+        return reply.status(403).send({
+          error: 'Community administrator authority required',
+          statusCode: 403,
+        });
+      }
+
+      try {
+        const community = await communityService.setPublicationAsCommunityAdmin(
+          communityId,
+          request.body.publicStories,
+          actor
+        );
+        if (!community) {
+          return reply
+            .status(404)
+            .send({ error: 'Community not found', statusCode: 404 });
+        }
+        return reply.status(200).send({
+          data: { id: community.id, publicStories: community.publicStories },
+        });
+      } catch (error) {
+        if (error instanceof PublicationAuthorityRequiredError) {
+          return reply.status(403).send({
+            error: 'Community administrator authority required',
+            statusCode: 403,
+          });
+        }
+        throw error;
+      }
+    }
+  );
 
   /**
    * Create Community Endpoint

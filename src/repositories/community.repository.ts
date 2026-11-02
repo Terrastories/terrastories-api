@@ -25,6 +25,8 @@ import {
   speakersSqlite,
   storiesPg,
   storiesSqlite,
+  themesPg,
+  themesSqlite,
   usersPg,
   usersSqlite,
 } from '../db/schema/index.js';
@@ -659,35 +661,126 @@ export class CommunityRepository {
    * false.
    */
   async getClaimState(communityId: number): Promise<CommunityClaimState> {
-    const isPg = 'execute' in this.database;
-    const users = isPg ? usersPg : usersSqlite;
-    const contentTables = isPg
-      ? [storiesPg, placesPg, speakersPg, filesPg]
-      : [storiesSqlite, placesSqlite, speakersSqlite, filesSqlite];
-
-    const [accounts] = await this.db
-      .select({ count: count() })
-      .from(users)
-      .where(
-        and(eq(users.communityId, communityId), ne(users.role, 'super_admin'))
-      );
-
+    const { users, content } = this.claimTables();
+    const [accounts] = await this.accountCountQuery(
+      this.db,
+      users,
+      communityId
+    );
     let hasContent = false;
-    for (const table of contentTables) {
-      const [rows] = await this.db
-        .select({ count: count() })
-        .from(table)
-        .where(eq(table.communityId, communityId));
+    for (const table of content) {
+      const [rows] = await this.contentCountQuery(this.db, table, communityId);
       if (Number(rows?.count ?? 0) > 0) {
         hasContent = true;
         break;
       }
     }
-
     return {
       hasCommunityAccounts: Number(accounts?.count ?? 0) > 0,
       hasContent,
     };
+  }
+
+  /**
+   * SPEC-V2 §7 first-administrator provisioning, atomic with its claim
+   * check. The claim state is re-read and the account inserted inside one
+   * write transaction, so concurrent requests cannot all pass the check:
+   *
+   * - PostgreSQL: the community row is locked `FOR UPDATE`; a concurrent
+   *   provisioning waits, then re-reads the committed account and refuses.
+   * - SQLite: a synchronous `BEGIN IMMEDIATE` transaction takes the write
+   *   lock before reading, so no other writer (connection or interleaved
+   *   request) runs between the check and the insert.
+   *
+   * Returns the created account, or null when the community already has a
+   * community account or holds content.
+   */
+  async provisionFirstAdministrator(
+    values: Record<string, unknown> & { communityId: number }
+  ): Promise<Record<string, unknown> | null> {
+    const { users, content } = this.claimTables();
+    const communityId = values.communityId;
+    const isClaimed = (accounts: number, contentCounts: number[]) =>
+      accounts > 0 || contentCounts.some((rows) => rows > 0);
+
+    if ('execute' in this.database) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
+      return this.db.transaction(async (tx: any) => {
+        const locked = await tx
+          .select({ id: this.communities.id })
+          .from(this.communities)
+          .where(eq(this.communities.id, communityId))
+          .for('update');
+        if (locked.length === 0) {
+          return null;
+        }
+        const [accounts] = await this.accountCountQuery(tx, users, communityId);
+        const contentCounts: number[] = [];
+        for (const table of content) {
+          const [rows] = await this.contentCountQuery(tx, table, communityId);
+          contentCounts.push(Number(rows?.count ?? 0));
+        }
+        if (isClaimed(Number(accounts?.count ?? 0), contentCounts)) {
+          return null;
+        }
+        const [created] = await tx.insert(users).values(values).returning();
+        return created ?? null;
+      });
+    }
+
+    return this.db.transaction(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
+      (tx: any) => {
+        const [accounts] = this.accountCountQuery(tx, users, communityId).all();
+        const contentCounts = content.map((table) =>
+          Number(
+            this.contentCountQuery(tx, table, communityId).all()[0]?.count ?? 0
+          )
+        );
+        if (isClaimed(Number(accounts?.count ?? 0), contentCounts)) {
+          return null;
+        }
+        return tx.insert(users).values(values).returning().get() ?? null;
+      },
+      { behavior: 'immediate' }
+    );
+  }
+
+  /** Tables that make up the §7 claim state, for the active dialect. */
+  private claimTables() {
+    const isPg = 'execute' in this.database;
+    return {
+      users: isPg ? usersPg : usersSqlite,
+      // Every community-owned content table. Story/place/speaker joins carry
+      // no community column and only exist alongside these rows.
+      content: isPg
+        ? [storiesPg, placesPg, speakersPg, filesPg, themesPg]
+        : [
+            storiesSqlite,
+            placesSqlite,
+            speakersSqlite,
+            filesSqlite,
+            themesSqlite,
+          ],
+    };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
+  private accountCountQuery(executor: any, users: any, communityId: number) {
+    return executor
+      .select({ count: count() })
+      .from(users)
+      .where(
+        and(eq(users.communityId, communityId), ne(users.role, 'super_admin'))
+      );
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
+  private contentCountQuery(executor: any, table: any, communityId: number) {
+    return executor
+      .select({ count: count() })
+      .from(table)
+      .where(eq(table.communityId, communityId));
   }
 
   /**

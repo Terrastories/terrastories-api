@@ -39,7 +39,8 @@ export type AdministrativeDecisionReason =
   | 'system-privilege-is-not-community-authority'
   | 'system-role-not-assignable'
   | 'first-administrator-only'
-  | 'community-claimed-or-holds-content';
+  | 'community-claimed-or-holds-content'
+  | 'reactivation-requires-community-authority';
 
 export interface AdministrativeDecision {
   allowed: boolean;
@@ -102,6 +103,24 @@ export function authorizeCommunityEnrollment(input: {
 }
 
 /**
+ * Membership or role change by a community administrator
+ * (`PUT`/`PATCH /api/v1/users/:id`, including activation status). Only a
+ * same-community administrator decides, and nobody assigns `super_admin`
+ * through a community path.
+ */
+export function authorizeCommunityMembershipChange(input: {
+  actor: AdministrativeActor | null;
+  targetCommunityId: number;
+  requestedRole?: string;
+}): AdministrativeDecision {
+  return authorizeCommunityEnrollment({
+    actor: input.actor,
+    targetCommunityId: input.targetCommunityId,
+    requestedRole: input.requestedRole ?? 'viewer',
+  });
+}
+
+/**
  * System account creation (`POST /api/v1/super_admin/users`). A system
  * administrator may create system (`super_admin`) accounts, and may
  * provision only the first administrator of a community that has never had
@@ -125,15 +144,24 @@ export function authorizeSystemAccountProvisioning(input: {
 }
 
 /**
- * System account update (`PUT /api/v1/super_admin/users/:id`). Profile and
- * lifecycle fields (name, active status) stay available. A role or
- * community change is a membership/role change and needs community
- * authority, except moving a system account between system records.
+ * System account update (`PUT /api/v1/super_admin/users/:id`). Profile
+ * fields and deactivation stay available. A role or community change is a
+ * membership/role change and needs community authority, except moving a
+ * system account between system records. Reactivating a deactivated
+ * community account re-admits a member the community may have revoked, so
+ * it needs community authority too; system accounts may be reactivated.
  */
 export function authorizeSystemAccountUpdate(input: {
-  current: { role: string; communityId: number | null };
-  requested: { role?: string; communityId?: number };
+  current: { role: string; communityId: number | null; isActive?: boolean };
+  requested: { role?: string; communityId?: number; isActive?: boolean };
 }): AdministrativeDecision {
+  if (
+    input.current.role !== 'super_admin' &&
+    input.current.isActive !== true &&
+    input.requested.isActive === true
+  ) {
+    return deny('reactivation-requires-community-authority');
+  }
   const nextRole = input.requested.role ?? input.current.role;
   const nextCommunityId =
     input.requested.communityId ?? input.current.communityId;
@@ -184,6 +212,7 @@ export function authorizePublicationChange(input: {
 
 export type AdministrativeAction =
   | 'enrollment'
+  | 'membership_change'
   | 'system_account_create'
   | 'system_account_update'
   | 'publication_change';

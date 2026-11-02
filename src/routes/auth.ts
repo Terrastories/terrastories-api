@@ -252,7 +252,7 @@ export async function authRoutes(
         }
 
         // Register user
-        const user = await userService.registerUser(validatedData);
+        const user = await userService.registerUser(validatedData, actor);
 
         // Create clean response object (avoiding destructuring issues)
         const userResponse = {
@@ -298,6 +298,10 @@ export async function authRoutes(
             case 'InvalidCommunityError':
               return reply.status(400).send({
                 error: error.message,
+              });
+            case 'CommunityAuthorityRequiredError':
+              return reply.status(403).send({
+                error: 'Community administrator authority required',
               });
             default:
               // Generic user service errors

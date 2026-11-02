@@ -74,4 +74,46 @@ describe('App', () => {
     expect(response.headers['x-frame-options']).toBeDefined();
     expect(response.headers['x-content-type-options']).toBeDefined();
   });
+
+  it('should serve swagger-ui stylesheet from /docs/static', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/docs/static/swagger-ui.css',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toContain('text/css');
+    expect(response.payload.length).toBeGreaterThan(0);
+  });
+
+  it('should serve swagger-ui bundle from /docs/static', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/docs/static/swagger-ui-bundle.js',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toContain('javascript');
+    expect(response.payload.length).toBeGreaterThan(0);
+  });
+
+  it('should return 404 for missing static assets under /docs/static', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/docs/static/does-not-exist.css',
+    });
+
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('should reject encoded path traversal outside the static root', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/docs/static/%2e%2e%2f%2e%2e%2fpackage.json',
+    });
+
+    expect([403, 404]).toContain(response.statusCode);
+    expect(response.payload).not.toContain('"dependencies"');
+    expect(response.payload).not.toContain('"devDependencies"');
+  });
 });

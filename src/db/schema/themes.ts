@@ -172,21 +172,22 @@ export const selectThemePgSchema = createSelectSchema(themesPg);
 export const selectThemeSqliteSchema = createSelectSchema(themesSqlite);
 
 // Enhanced schemas with geographic validation
-export const createThemeSchema = z
-  .object({
-    name: z.string().min(1).max(255),
-    description: z.string().max(1000).optional(),
-    mapboxStyleUrl: MapboxStyleUrlSchema,
-    mapboxAccessToken: z.string().optional(),
-    centerLat: z.number().min(-90).max(90).optional(),
-    centerLong: z.number().min(-180).max(180).optional(),
-    swBoundaryLat: z.number().min(-90).max(90).optional(),
-    swBoundaryLong: z.number().min(-180).max(180).optional(),
-    neBoundaryLat: z.number().min(-90).max(90).optional(),
-    neBoundaryLong: z.number().min(-180).max(180).optional(),
-    active: z.boolean().default(false),
-    communityId: z.number().positive(),
-  })
+const themeFieldsSchema = z.object({
+  name: z.string().min(1).max(255),
+  description: z.string().max(1000).optional(),
+  mapboxStyleUrl: MapboxStyleUrlSchema,
+  mapboxAccessToken: z.string().optional(),
+  centerLat: z.number().min(-90).max(90).optional(),
+  centerLong: z.number().min(-180).max(180).optional(),
+  swBoundaryLat: z.number().min(-90).max(90).optional(),
+  swBoundaryLong: z.number().min(-180).max(180).optional(),
+  neBoundaryLat: z.number().min(-90).max(90).optional(),
+  neBoundaryLong: z.number().min(-180).max(180).optional(),
+  active: z.boolean().default(false),
+  communityId: z.number().positive(),
+});
+
+export const createThemeSchema = themeFieldsSchema
   .refine(
     (data) => {
       if (data.swBoundaryLat && data.neBoundaryLat) {
@@ -214,7 +215,7 @@ export const createThemeSchema = z
     }
   );
 
-export const updateThemeSchema = createThemeSchema
+export const updateThemeSchema = themeFieldsSchema
   .partial()
   .omit({ communityId: true });
 

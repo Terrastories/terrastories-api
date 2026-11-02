@@ -398,4 +398,46 @@ describe('V2 sovereignty story audiences', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().meta.total).toBe(2);
   });
+
+  it('denies an unknown physical role every story read on the community story-by-id route (unknown roles read nothing)', async () => {
+    // A physical Fastify `viewer` maps to V2 member and Fastify rows never
+    // map to the `editors` audience, so admin and member reach coincide on
+    // every unrestricted story — only an UNKNOWN role separates them.
+    // It must read nothing (SPEC-V2 §6.2 fail-closed): even an
+    // unrestricted members_only story and a public story mask as 404.
+    const timestamp = Date.now();
+    const passwordHash = await hashPassword(TEST_PASSWORD);
+    // Unknown role on purpose; Drizzle types the column as its enum union
+    // but SQLite enforces nothing, so cast through the column type.
+    const [guest] = await db
+      .insert(usersSqlite)
+      .values(
+        TestDataFactory.createUser(privateCommunityId, {
+          email: `audience-guest-${timestamp}@example.test`,
+          role: 'guest' as unknown as 'viewer',
+          passwordHash,
+        })
+      )
+      .returning();
+    const guestCookie = await loginAs(guest, privateCommunityId);
+
+    // Unrestricted members_only story in the guest's own community: 404,
+    // and the title never leaks in the body.
+    const membersOnly = await app.inject({
+      method: 'GET',
+      url: `/api/v1/communities/${privateCommunityId}/stories/${communityStoryId}`,
+      headers: { cookie: guestCookie },
+    });
+    expect(membersOnly.statusCode).toBe(404);
+    expect(membersOnly.body).not.toContain('Community audience story');
+
+    // Unknown roles read nothing — not even public stories.
+    const publicRead = await app.inject({
+      method: 'GET',
+      url: `/api/v1/communities/${privateCommunityId}/stories/${publicStoryId}`,
+      headers: { cookie: guestCookie },
+    });
+    expect(publicRead.statusCode).toBe(404);
+    expect(publicRead.body).not.toContain('Public audience story');
+  });
 });

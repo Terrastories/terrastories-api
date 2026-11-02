@@ -1047,12 +1047,34 @@ export class StoryService {
    * layer (it also covers relation data assembled elsewhere).
    */
   private projectStoryPlaces(story: StoryWithRelations): StoryWithRelations {
-    if (!story.places?.some((place) => place.isRestricted === true)) {
+    const hasRestrictedPlace = Boolean(
+      story.places?.some((place) => place.isRestricted === true)
+    );
+    // A withheld interview-location relation must not leave its raw foreign
+    // key behind. The relation loaders already set `interviewLocation =
+    // null` for a restricted or missing place; this defensive layer also
+    // drops a restricted relation assembled elsewhere (§6.4, every role).
+    const restrictedInterviewLocation =
+      (story.interviewLocation as { isRestricted?: boolean } | null | undefined)
+        ?.isRestricted === true;
+    const masksInterviewLocationId =
+      story.interviewLocationId != null &&
+      'interviewLocation' in story &&
+      (story.interviewLocation == null || restrictedInterviewLocation);
+
+    if (!hasRestrictedPlace && !masksInterviewLocationId) {
       return story;
     }
     return {
       ...story,
-      places: story.places.filter((place) => place.isRestricted !== true),
+      ...(hasRestrictedPlace
+        ? {
+            places: story.places.filter((place) => place.isRestricted !== true),
+          }
+        : {}),
+      ...(masksInterviewLocationId
+        ? { interviewLocationId: null, interviewLocation: null }
+        : {}),
     };
   }
 
@@ -1069,19 +1091,34 @@ export class StoryService {
     story: StoryWithRelations,
     userRole: string | null
   ): StoryWithRelations {
-    if (userRole !== null && this.storySpeakerWithdrawalAllowed(userRole)) {
-      return story;
-    }
+    const keepsWithdrawn =
+      userRole !== null && this.storySpeakerWithdrawalAllowed(userRole);
     const hasWithdrawnSpeaker = Boolean(
       story.speakers?.some((speaker) => speaker.isActive === false)
     );
     const hasWithdrawnInterviewer = story.interviewer?.isActive === false;
-    if (!hasWithdrawnSpeaker && !hasWithdrawnInterviewer) {
+    const removesWithdrawnSpeakers = !keepsWithdrawn && hasWithdrawnSpeaker;
+    const removesWithdrawnInterviewer =
+      !keepsWithdrawn && hasWithdrawnInterviewer;
+    // A withheld interviewer relation must not leave its raw foreign key
+    // behind: when the relations were loaded and the interviewer is absent
+    // (missing row, or withdrawn and dropped above), every role loses the
+    // ID too. Editors/admins keep the ID only while they keep the relation.
+    const masksInterviewerId =
+      story.interviewerId != null &&
+      (('interviewer' in story && story.interviewer == null) ||
+        removesWithdrawnInterviewer);
+
+    if (
+      !removesWithdrawnSpeakers &&
+      !removesWithdrawnInterviewer &&
+      !masksInterviewerId
+    ) {
       return story;
     }
     return {
       ...story,
-      ...(hasWithdrawnSpeaker
+      ...(removesWithdrawnSpeakers
         ? {
             speakers: story.speakers.filter(
               (speaker) => speaker.isActive !== false
@@ -1089,7 +1126,8 @@ export class StoryService {
           }
         : {}),
       // The interviewer is a story-derived speaker relation too (§6.5).
-      ...(hasWithdrawnInterviewer ? { interviewer: null } : {}),
+      ...(removesWithdrawnInterviewer ? { interviewer: null } : {}),
+      ...(masksInterviewerId ? { interviewerId: null } : {}),
     };
   }
 

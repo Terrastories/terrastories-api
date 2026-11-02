@@ -1124,6 +1124,294 @@ describe('StoryService', () => {
     });
   });
 
+  describe('withheld relation ID masking in story projections', () => {
+    // When a projection withholds a relation (a withdrawn interviewer, a
+    // restricted or missing interview location), the raw foreign-key ID
+    // must not outlive the withheld relation. The masking is
+    // projection-only: stored rows, repository writes, and create/update
+    // inputs keep their IDs.
+    const withdrawnInterviewer = {
+      id: 73,
+      name: 'Withdrawn Interviewer',
+      bio: 'WITHDRAWN-INTERVIEWER-BIO',
+      elderStatus: false,
+      isActive: false,
+    };
+
+    const createReadableStory = (overrides: object = {}): StoryWithRelations =>
+      ({
+        id: 45,
+        title: 'Public Story With Interview Metadata',
+        description: 'Readable by every same-community role',
+        slug: 'public-story-with-interview-metadata',
+        communityId: testData.community.id,
+        createdBy: testData.users.editor.id,
+        mediaUrls: [],
+        imageUrl: null,
+        audioUrl: null,
+        language: 'en',
+        tags: [],
+        privacyLevel: 'public',
+        isRestricted: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        places: [],
+        speakers: [],
+        community: testData.community,
+        author: testData.users.editor,
+        ...overrides,
+      }) as any;
+
+    it('masks interviewerId for a viewer when the interviewer is withheld on getStoryById', async () => {
+      // Arrange
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        createReadableStory({
+          interviewerId: 73,
+          interviewer: withdrawnInterviewer,
+        })
+      );
+
+      // Act
+      const result = await storyService.getStoryById(
+        45,
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+
+      // Assert: the withheld relation leaves no ID behind.
+      expect(result).not.toBeNull();
+      expect(result!.interviewer).toBeNull();
+      expect(result!.interviewerId).toBeNull();
+    });
+
+    it('masks interviewerId in listStories items for a viewer and keeps it for an editor and an admin', async () => {
+      // Arrange
+      mockStoryRepository.findMany.mockResolvedValue({
+        data: [
+          createReadableStory({
+            interviewerId: 73,
+            interviewer: withdrawnInterviewer,
+          }),
+        ],
+        total: 1,
+        page: 1,
+        limit: 10,
+        totalPages: 1,
+      });
+
+      // Act
+      const viewerResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+      const editorResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.editor.id,
+        testData.users.editor.role,
+        testData.community.id
+      );
+      const adminResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(viewerResult.data[0].interviewer).toBeNull();
+      expect(viewerResult.data[0].interviewerId).toBeNull();
+      // Editors and admins keep the withdrawn interviewer and its ID.
+      expect(editorResult.data[0].interviewer).toMatchObject({ id: 73 });
+      expect(editorResult.data[0].interviewerId).toBe(73);
+      expect(adminResult.data[0].interviewer).toMatchObject({ id: 73 });
+      expect(adminResult.data[0].interviewerId).toBe(73);
+    });
+
+    it('masks interviewerId for anonymous callers on getPublicStoryById', async () => {
+      // Arrange
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        createReadableStory({
+          interviewerId: 73,
+          interviewer: withdrawnInterviewer,
+        })
+      );
+
+      // Act
+      const result = await storyService.getPublicStoryById(
+        '45',
+        String(testData.community.id)
+      );
+
+      // Assert: anonymous callers lose the ID with the relation.
+      expect(result).not.toBeNull();
+      expect(result!.interviewer).toBeNull();
+      expect(result!.interviewerId).toBeNull();
+    });
+
+    it('masks a loaded-but-withheld interview location ID for a viewer and an admin on getStoryById', async () => {
+      // Arrange: the relation loaders set interviewLocation = null when the
+      // place is restricted or missing, while the raw FK stays set.
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        createReadableStory({
+          interviewLocationId: 42,
+          interviewLocation: null,
+        })
+      );
+
+      // Act
+      const viewerResult = await storyService.getStoryById(
+        45,
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        createReadableStory({
+          interviewLocationId: 42,
+          interviewLocation: null,
+        })
+      );
+      const adminResult = await storyService.getStoryById(
+        45,
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      // Assert: a restricted place is unavailable to every role (§6.4).
+      expect(viewerResult!.interviewLocation).toBeNull();
+      expect(viewerResult!.interviewLocationId).toBeNull();
+      expect(adminResult!.interviewLocation).toBeNull();
+      expect(adminResult!.interviewLocationId).toBeNull();
+    });
+
+    it('masks the interview location ID when a loaded interview location is restricted (defensive layer)', async () => {
+      // Arrange: relation data assembled elsewhere may still carry a
+      // restricted interview location; the projection must not leak it or
+      // its ID, for admin just like every other role (§6.4).
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        createReadableStory({
+          interviewLocationId: 42,
+          interviewLocation: {
+            id: 42,
+            name: 'Sacred Interview Site',
+            latitude: 49.5,
+            longitude: -123.3,
+            isRestricted: true,
+          },
+        })
+      );
+
+      // Act
+      const result = await storyService.getStoryById(
+        45,
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(result!.interviewLocation).toBeNull();
+      expect(result!.interviewLocationId).toBeNull();
+    });
+
+    it('masks interviewerId for every role when the loaded interviewer relation is null', async () => {
+      // Arrange: the loader sets interviewer = null when the row is
+      // missing; the stale FK must not survive for any role.
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        createReadableStory({ interviewerId: 77, interviewer: null })
+      );
+
+      // Act
+      const adminResult = await storyService.getStoryById(
+        45,
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        createReadableStory({ interviewerId: 77, interviewer: null })
+      );
+      const viewerResult = await storyService.getStoryById(
+        45,
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(adminResult!.interviewer).toBeNull();
+      expect(adminResult!.interviewerId).toBeNull();
+      expect(viewerResult!.interviewer).toBeNull();
+      expect(viewerResult!.interviewerId).toBeNull();
+    });
+
+    it('keeps relation IDs when the relations were not loaded (no false masking)', async () => {
+      // Arrange: no interviewer/interviewLocation keys at all — the raw
+      // IDs are the only data present and must pass through untouched.
+      const bare = createReadableStory({
+        interviewerId: 88,
+        interviewLocationId: 42,
+      });
+      delete (bare as any).interviewer;
+      delete (bare as any).interviewLocation;
+      expect('interviewer' in bare).toBe(false);
+      expect('interviewLocation' in bare).toBe(false);
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(bare);
+
+      // Act
+      const result = await storyService.getStoryById(
+        45,
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(result).not.toBeNull();
+      expect(result!.interviewerId).toBe(88);
+      expect(result!.interviewLocationId).toBe(42);
+    });
+
+    it('never feeds masked IDs into a repository write from a read path', async () => {
+      // Arrange: reads that mask relation IDs must not trigger any
+      // create/update, let alone one carrying a null ID.
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        createReadableStory({
+          interviewerId: 73,
+          interviewer: withdrawnInterviewer,
+          interviewLocationId: 42,
+          interviewLocation: null,
+        })
+      );
+
+      // Act
+      await storyService.getStoryById(
+        45,
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+      await storyService.getPublicStoryById(
+        '45',
+        String(testData.community.id)
+      );
+
+      // Assert: reads stay reads.
+      const writeCalls = [
+        ...mockStoryRepository.create.mock.calls,
+        ...mockStoryRepository.update.mock.calls,
+      ];
+      expect(writeCalls).toHaveLength(0);
+    });
+  });
+
   describe('updateStory - Association Management', () => {
     const createExistingStory = (): StoryWithRelations =>
       ({

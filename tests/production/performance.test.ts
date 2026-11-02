@@ -820,11 +820,11 @@ describe('Production Performance Validation - Phase 1', () => {
   }
 
   async function collectBaselineMetrics(): Promise<PerformanceMetrics> {
+    // Initialize both routes before the retained-heap and timing baseline.
+    await app.inject({ method: 'GET', url: '/api/v1/health' });
+    await app.inject({ method: 'GET', url: '/api/v1/communities' });
     const initialHeap = await retainedHeapUsed();
     const start = performance.now();
-
-    // Warm up the application
-    await app.inject({ method: 'GET', url: '/api/v1/health' });
 
     const response = await app.inject({
       method: 'GET',

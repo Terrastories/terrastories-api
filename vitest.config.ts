@@ -7,7 +7,7 @@ const retainedMemoryFiles = [
   'tests/production/database-cleanup.test.ts',
 ];
 
-export default defineConfig({
+const baseConfig = defineConfig({
   test: {
     environment: 'node',
     globals: true,
@@ -31,32 +31,6 @@ export default defineConfig({
       '**/*.d.ts',
       'src/db/migrations/',
       'tests/routes/member/disabled/**', // Exclude incomplete member CRUD tests
-    ],
-
-    // Only retained-heap checks need explicit GC in their isolated fork.
-    projects: [
-      {
-        extends: true,
-        test: {
-          name: 'default',
-          exclude: [
-            'node_modules/',
-            'dist/',
-            '**/*.d.ts',
-            'src/db/migrations/',
-            'tests/routes/member/disabled/**',
-            ...retainedMemoryFiles,
-          ],
-        },
-      },
-      {
-        extends: true,
-        test: {
-          name: 'retained-memory',
-          include: retainedMemoryFiles,
-          execArgv: ['--expose-gc'],
-        },
-      },
     ],
 
     // Coverage configuration with enforced thresholds
@@ -126,5 +100,36 @@ export default defineConfig({
   // ESM configuration
   esbuild: {
     target: 'node18',
+  },
+});
+
+// Spread the shared options explicitly: extends:true concatenates include globs
+// and would run the entire suite again in the retained-memory project.
+export default defineConfig({
+  ...baseConfig,
+  test: {
+    ...baseConfig.test,
+    projects: [
+      {
+        ...baseConfig,
+        test: {
+          ...baseConfig.test,
+          name: 'default',
+          exclude: [
+            ...(baseConfig.test?.exclude ?? []),
+            ...retainedMemoryFiles,
+          ],
+        },
+      },
+      {
+        ...baseConfig,
+        test: {
+          ...baseConfig.test,
+          name: 'retained-memory',
+          include: retainedMemoryFiles,
+          execArgv: ['--expose-gc'],
+        },
+      },
+    ],
   },
 });

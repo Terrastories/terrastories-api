@@ -18,8 +18,10 @@ No Cloudflare resources or DNS changes are required for this route restriction.
 Development routes and the demo CLI seeder require exactly `NODE_ENV=development`
 or `NODE_ENV=test`. Unset, staging, production, field-kit, offline and unknown
 values do not enable them. Unset mode selects production; unknown values reject startup.
-For local tooling, run `export NODE_ENV=development` before `npm run dev` or
-`npm run db:seed`; setting it only in a dotenv file does not opt in.
+The development-only npm scripts (`npm run dev`, `npm run db:seed`) set
+`NODE_ENV=development` themselves (POSIX shell syntax; Linux/macOS). Other
+tooling needs `export NODE_ENV=development`; setting it only in a dotenv file
+does not opt in. `npm start`, `build` and `db:migrate` never set it.
 Use `NODE_ENV=production` for staging; `staging` names the deployment environment,
 not the application runtime mode. Never seed staging with demo credentials.
 Field-kit/offline installations also require a unique SESSION_SECRET; generate it

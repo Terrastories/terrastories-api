@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "NODE_ENV=development tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "vitest",
@@ -24,7 +24,7 @@
     "type-check": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
-    "db:seed": "tsx src/db/seed.ts",
+    "db:seed": "NODE_ENV=development tsx src/db/seed.ts",
     "prepare": "npx husky",
     "validate": "npm run validate:ci",
     "validate:ci": "npm run format:check && npm run type-check && npm run lint && npm run test:ci && npm run build",

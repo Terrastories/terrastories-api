@@ -488,7 +488,7 @@ export class StoryService {
       true
     );
 
-    return this.applyDualRead(story);
+    return this.applyDualRead(this.projectStoryPlacesForRole(story, userRole));
   }
 
   /**
@@ -567,7 +567,7 @@ export class StoryService {
       true
     );
 
-    return this.applyDualRead(story);
+    return this.applyDualRead(this.projectStoryPlacesForRole(story, userRole));
   }
 
   /**
@@ -918,9 +918,12 @@ export class StoryService {
       );
 
       // Return database results directly - no additional in-memory filtering
-      // All cultural protocol filtering is now handled by database queries
+      // except the story-derived place projection (SPEC-V2 §6.4), applied
+      // per caller role on top of the database-level audience filtering.
       return {
-        data: result.data.map((story) => this.applyDualRead(story)),
+        data: result.data.map((story) =>
+          this.applyDualRead(this.projectStoryPlacesForRole(story, userRole))
+        ),
         total: result.total,
         page: result.page,
         limit: result.limit,
@@ -1001,6 +1004,36 @@ export class StoryService {
       v2Role,
       fastifyStoryToAudience(story.privacyLevel, story.isRestricted)
     );
+  }
+
+  /**
+   * Story-derived place projection (SPEC-V2 §6.4): a readable story does
+   * not widen a related place's audience — callers see the intersection of
+   * story and place access. A restricted Fastify place
+   * (`places.is_restricted = true`) is readable only by community admins
+   * (V1 parity with the place reads and `PlaceService.getCommunityPlaceStats`)
+   * plus the legacy `elder` path, which stays unchanged. Every other caller
+   * (physical Fastify viewer = V2 member, editor, super_admin, unknown
+   * roles) receives only the unrestricted places.
+   */
+  private projectStoryPlacesForRole(
+    story: StoryWithRelations,
+    userRole: string
+  ): StoryWithRelations {
+    // Nothing to project (also tolerates relation data without the flag).
+    if (!story.places?.some((place) => place.isRestricted === true)) {
+      return story;
+    }
+    const v2Role = fastifyRoleToV2Role(userRole);
+    const maySeeRestrictedPlaces =
+      v2Role === 'admin' || (v2Role === null && userRole === 'elder');
+    if (maySeeRestrictedPlaces) {
+      return story;
+    }
+    return {
+      ...story,
+      places: story.places.filter((place) => place.isRestricted !== true),
+    };
   }
 
   /**

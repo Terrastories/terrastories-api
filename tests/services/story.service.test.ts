@@ -543,6 +543,177 @@ describe('StoryService', () => {
     });
   });
 
+  describe('story-derived place projection (SPEC-V2 §6.4)', () => {
+    // A readable story does not widen a related place's audience: callers
+    // see the intersection of story and place access. A restricted Fastify
+    // place (places.is_restricted = true) stays readable only by community
+    // admins (plus the legacy elder path), the same rule the place reads
+    // and PlaceService.getCommunityPlaceStats apply.
+    const unrestrictedPlace = {
+      id: 10,
+      name: 'Open River Crossing',
+      description: 'Gathering place by the river',
+      latitude: 49.4,
+      longitude: -123.2,
+      storyRelationship: 'mentioned',
+      sortOrder: 0,
+      isRestricted: false,
+    };
+    const restrictedPlace = {
+      id: 11,
+      name: 'Sacred Ceremony Site',
+      description: 'Restricted ceremonial site',
+      latitude: 49.5,
+      longitude: -123.3,
+      storyRelationship: 'mentioned',
+      sortOrder: 1,
+      isRestricted: true,
+    };
+
+    const createReadableStoryWithMixedPlaces = (): StoryWithRelations =>
+      ({
+        id: 42,
+        title: 'Public Story Linking Mixed Places',
+        description: 'Readable by every same-community role',
+        slug: 'public-story-linking-mixed-places',
+        communityId: testData.community.id,
+        createdBy: testData.users.editor.id,
+        mediaUrls: [],
+        imageUrl: null,
+        audioUrl: null,
+        language: 'en',
+        tags: [],
+        privacyLevel: 'public',
+        isRestricted: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        places: [unrestrictedPlace, restrictedPlace],
+        speakers: [],
+        community: testData.community,
+        author: testData.users.editor,
+      }) as any;
+
+    it('hides the restricted place from a physical viewer (V2 member) on getStoryById', async () => {
+      // Arrange
+      const story = createReadableStoryWithMixedPlaces();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getStoryById(
+        story.id,
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(result).not.toBeNull();
+      expect(result!.places.map((place) => place.id)).toEqual([
+        unrestrictedPlace.id,
+      ]);
+    });
+
+    it('hides the restricted place from an editor on getStoryById', async () => {
+      // Arrange
+      const story = createReadableStoryWithMixedPlaces();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getStoryById(
+        story.id,
+        testData.users.editor.id,
+        testData.users.editor.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(result).not.toBeNull();
+      expect(result!.places.map((place) => place.id)).toEqual([
+        unrestrictedPlace.id,
+      ]);
+    });
+
+    it('keeps both places for an admin on getStoryById', async () => {
+      // Arrange
+      const story = createReadableStoryWithMixedPlaces();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getStoryById(
+        story.id,
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(result).not.toBeNull();
+      expect(result!.places.map((place) => place.id)).toEqual([
+        unrestrictedPlace.id,
+        restrictedPlace.id,
+      ]);
+    });
+
+    it('filters restricted places per role in listStories', async () => {
+      // Arrange
+      const story = createReadableStoryWithMixedPlaces();
+      mockStoryRepository.findMany.mockResolvedValue({
+        data: [story],
+        total: 1,
+        page: 1,
+        limit: 10,
+        totalPages: 1,
+      });
+
+      // Act - physical viewer (V2 member)
+      const viewerResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+
+      // Act - admin
+      const adminResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(viewerResult.data[0].places.map((place) => place.id)).toEqual([
+        unrestrictedPlace.id,
+      ]);
+      expect(adminResult.data[0].places.map((place) => place.id)).toEqual([
+        unrestrictedPlace.id,
+        restrictedPlace.id,
+      ]);
+    });
+
+    it('hides the restricted place from a viewer on getStoryBySlug', async () => {
+      // Arrange
+      const story = createReadableStoryWithMixedPlaces();
+      mockStoryRepository.findBySlugWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getStoryBySlug(
+        story.slug,
+        testData.community.id,
+        testData.users.viewer.id,
+        testData.users.viewer.role
+      );
+
+      // Assert
+      expect(result).not.toBeNull();
+      expect(result!.places.map((place) => place.id)).toEqual([
+        unrestrictedPlace.id,
+      ]);
+    });
+  });
+
   describe('updateStory - Association Management', () => {
     const createExistingStory = (): StoryWithRelations =>
       ({

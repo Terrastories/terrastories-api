@@ -84,6 +84,12 @@ export interface StoryWithRelations extends Story {
     culturalContext?: string;
     storyRelationship?: string;
     sortOrder?: number;
+    /**
+     * Physical Fastify restriction flag (places.is_restricted). Carried so
+     * services can apply the story-derived place projection (SPEC-V2 §6.4):
+     * a readable story never widens a restricted place's audience.
+     */
+    isRestricted?: boolean;
   }>;
   speakers: Array<{
     id: number;
@@ -408,6 +414,9 @@ export class StoryRepository {
         longitude: placesTable.longitude,
         region: placesTable.region,
         culturalSignificance: placesTable.culturalSignificance,
+        // SPEC-V2 §6.4: place restriction flag for the story-derived place
+        // projection in StoryService.
+        isRestricted: placesTable.isRestricted,
         culturalContext: storyPlacesTable.culturalContext,
         sortOrder: storyPlacesTable.sortOrder,
       })
@@ -424,6 +433,7 @@ export class StoryRepository {
       longitude: p.longitude,
       region: p.region || undefined,
       culturalSignificance: p.culturalSignificance || undefined,
+      isRestricted: p.isRestricted,
       culturalContext: p.culturalContext || undefined,
       storyRelationship: 'mentioned',
       sortOrder: p.sortOrder || 0,
@@ -596,6 +606,7 @@ export class StoryRepository {
         longitude: number;
         region: string | null;
         culturalSignificance: string | null;
+        isRestricted: boolean;
         culturalContext: string | null;
         sortOrder: number | null;
       }> = [];
@@ -610,6 +621,9 @@ export class StoryRepository {
             longitude: placesTable.longitude,
             region: placesTable.region,
             culturalSignificance: placesTable.culturalSignificance,
+            // SPEC-V2 §6.4: place restriction flag for the story-derived
+            // place projection in StoryService.
+            isRestricted: placesTable.isRestricted,
             // These columns might not exist yet
             culturalContext: storyPlacesTable.culturalContext,
             sortOrder: storyPlacesTable.sortOrder,
@@ -631,6 +645,7 @@ export class StoryRepository {
               longitude: placesTable.longitude,
               region: placesTable.region,
               culturalSignificance: placesTable.culturalSignificance,
+              isRestricted: placesTable.isRestricted,
               culturalContext: sql<string | null>`NULL`,
               sortOrder: sql<number | null>`NULL`,
             })
@@ -722,6 +737,7 @@ export class StoryRepository {
           longitude: number;
           region: string | null;
           culturalSignificance: string | null;
+          isRestricted: boolean;
           culturalContext: string | null;
           sortOrder: number | null;
         }>
@@ -771,6 +787,7 @@ export class StoryRepository {
           longitude: p.longitude,
           region: p.region || undefined,
           culturalSignificance: p.culturalSignificance || undefined,
+          isRestricted: p.isRestricted,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           culturalContext: (p as any).culturalContext || undefined,
           storyRelationship: 'mentioned',

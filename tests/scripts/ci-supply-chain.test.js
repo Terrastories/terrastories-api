@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as auditModule from '../../scripts/trusted-audit-baseline.mjs';
+import { declaredMinimumNode } from '../../scripts/runtime-smoke.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..', '..');
@@ -108,9 +109,59 @@ describe('GitHub Actions supply-chain policy', () => {
     expect(supplyChain).toContain('health.database.connected');
   });
 
-  it('keeps the declared Node runtime compatible with Sharp 0.35', () => {
+  it('declares Node 20.19.0 as the minimum runtime (require(esm) unflagged)', () => {
+    // @fastify/static (via @fastify/swagger-ui) is CommonJS and requires the
+    // ESM-only content-disposition 3; that needs require(esm), which is
+    // unflagged from Node 20.19.0. Sharp 0.35 needs ^20.9.0, so this also
+    // keeps Sharp supported.
     const packageJson = JSON.parse(readRepo('package.json'));
-    expect(packageJson.engines.node).toBe('>=20.9.0');
+    const lockfile = JSON.parse(readRepo('package-lock.json'));
+    expect(packageJson.engines.node).toBe('>=20.19.0');
+    expect(lockfile.packages[''].engines.node).toBe('>=20.19.0');
+    expect(declaredMinimumNode(packageJson)).toBe('20.19.0');
+    expect(readRepo('README.md')).toContain('Node.js 20.19+');
+    expect(readRepo('CONTRIBUTING.md')).toContain('Node.js 20.19+');
+    for (const stage of ['development', 'builder', 'production']) {
+      expect(readRepo('Dockerfile')).toContain(
+        `FROM node:20.19.0-alpine AS ${stage}`
+      );
+    }
+  });
+
+  it('smoke-tests the built app on exactly the declared minimum Node', () => {
+    const packageJson = JSON.parse(readRepo('package.json'));
+    const ci = readRepo('.github/workflows/ci.yml');
+    const job = ci.slice(ci.indexOf('\n  minimum-runtime:'));
+
+    expect(job).toContain('name: Minimum Node runtime smoke');
+    expect(job).toContain(
+      `node-version: ${declaredMinimumNode(packageJson)}\n`
+    );
+    const install = job.indexOf('npm ci --legacy-peer-deps');
+    const build = job.indexOf('npm run build');
+    const smoke = job.indexOf(
+      'node scripts/runtime-smoke.mjs --require-engine-minimum'
+    );
+    expect(install).toBeGreaterThan(-1);
+    expect(build).toBeGreaterThan(install);
+    expect(smoke).toBeGreaterThan(build);
+
+    const script = readRepo('scripts/runtime-smoke.mjs');
+    expect(script).toContain("join(repoRoot, 'dist', 'app.js')");
+    expect(script).toContain('app.listen(');
+    expect(script).toContain('app.close()');
+    expect(script).toContain('/docs/static/index.html');
+  });
+
+  it('parses only an exact ">=X.Y.Z" engines.node minimum', () => {
+    expect(declaredMinimumNode({ engines: { node: '>=20.19.0' } })).toBe(
+      '20.19.0'
+    );
+    for (const range of ['^20.19.0', '>=20.19', '20.x', undefined]) {
+      expect(() => declaredMinimumNode({ engines: { node: range } })).toThrow(
+        'package.json engines.node must be ">=X.Y.Z"'
+      );
+    }
   });
 
   it('keeps production Compose compatible with the package-manager-free runtime', () => {

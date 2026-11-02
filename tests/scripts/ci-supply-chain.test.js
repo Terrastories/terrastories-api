@@ -27,6 +27,26 @@ function externalActionRefs(workflow) {
   ].map((match) => match[1]);
 }
 
+// npm or npx invocations that would run PR-controlled code or config.
+const FORBIDDEN_PACKAGE_COMMAND =
+  /\bnpx\b|\bnpm\s+(?:run|run-script|ci|install|i|exec|x|audit)\b/;
+
+// Drops comment lines and plain echo prose, which may name npm commands
+// (for example "npm ci would read it"). A double-quoted echo argument that
+// contains command substitution, `$(...)` or a backtick, still executes, so
+// it is kept and checked.
+function executableShellText(text) {
+  return text
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .map((line) =>
+      line.replace(/echo\s+"([^"]*)"/g, (match, inner) =>
+        /\$\(|`/.test(inner) ? match : 'echo'
+      )
+    )
+    .join('\n');
+}
+
 function workflowJobBlock(workflow, jobName) {
   const marker = `\n  ${jobName}:\n`;
   const start = workflow.indexOf(marker);
@@ -379,16 +399,20 @@ describe('trusted dependency review gate', () => {
   });
 
   it('executes no npm command and uses no cache inside the PR tree', () => {
-    // Explanatory comments and "::error::" prose may NAME npm commands
-    // (for example "npm ci would read it"); no executable line may run one.
-    const executableLines = block
-      .split('\n')
-      .filter((line) => !line.trimStart().startsWith('#'))
-      .map((line) => line.replace(/echo\s+"[^"]*"/g, 'echo'));
-    expect(executableLines.join('\n')).not.toMatch(
-      /\bnpm\s+(run|ci|install|exec|audit)\b/
-    );
+    expect(executableShellText(block)).not.toMatch(FORBIDDEN_PACKAGE_COMMAND);
     expect(block).not.toContain('cache:');
+  });
+
+  it('still treats command substitution inside echo text as executable', () => {
+    const detected = (text) =>
+      FORBIDDEN_PACKAGE_COMMAND.test(executableShellText(text));
+
+    expect(detected('echo "$(npm run audit:baseline)"')).toBe(true);
+    expect(detected('echo "`npm ci`"')).toBe(true);
+    expect(detected('npx some-package')).toBe(true);
+    expect(detected('echo "$(npx some-package)"')).toBe(true);
+    expect(detected('echo "::error::npm ci would read it"')).toBe(false);
+    expect(detected('# npm ci reads the project .npmrc')).toBe(false);
   });
 
   it('runs the gate with read-only contents and issues permissions', () => {

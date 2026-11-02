@@ -25,7 +25,7 @@ import {
   spatialHelpers,
   validateCoordinates,
 } from '../db/schema/places.js';
-import { storyPlaces } from '../db/schema/story_places.js';
+import { storyPlaces, getStoryPlacesTable } from '../db/schema/story_places.js';
 import { storyAudienceCondition } from './story.repository.js';
 import type { TransitionalStoryReadAccess } from '../shared/authorization/sovereignty-policy.js';
 import { getStoriesTable } from '../db/schema/stories.js';
@@ -708,6 +708,9 @@ export class PlaceRepository {
     const placesTable = await getPlacesTable();
     const includeRestricted = options.includeRestricted ?? false;
     const storiesTable = await getStoriesTable();
+    // Dialect-aware join table: the static `storyPlaces` export is the PG
+    // table on every dialect (SPEC-V2 §8 portability).
+    const storyPlacesTable = await getStoryPlacesTable();
     const placeScope = includeRestricted
       ? eq(placesTable.communityId, communityId)
       : and(
@@ -749,10 +752,13 @@ export class PlaceRepository {
               await (this.db as any)
                 .select({ count: count(sql`DISTINCT ${placesTable.id}`) })
                 .from(placesTable)
-                .innerJoin(storyPlaces, eq(placesTable.id, storyPlaces.placeId))
+                .innerJoin(
+                  storyPlacesTable,
+                  eq(placesTable.id, storyPlacesTable.placeId)
+                )
                 .innerJoin(
                   storiesTable,
-                  eq(storyPlaces.storyId, storiesTable.id)
+                  eq(storyPlacesTable.storyId, storiesTable.id)
                 )
                 .where(storyScope ? and(placeScope, storyScope) : placeScope)
             )[0].count

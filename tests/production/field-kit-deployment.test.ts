@@ -59,6 +59,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
 
     // Initialize app in offline-compatible mode
     process.env.NODE_ENV = 'field-kit';
+    process.env.JWT_SECRET =
+      'fixture-field-kit-jwt-secret-at-least-32-characters';
     process.env.OFFLINE_MODE = 'true';
     process.env.SESSION_SECRET =
       'fixture-field-kit-session-at-least-32-characters';

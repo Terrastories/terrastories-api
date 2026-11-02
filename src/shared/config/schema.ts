@@ -101,7 +101,7 @@ export const SecurityConfigSchema = z.object({
 
 const productionSecret = (name: string) =>
   z
-    .string()
+    .string({ error: `${name} is required` })
     .min(32, `${name} must be at least 32 characters in production`)
     .refine(
       (value) =>
@@ -248,6 +248,7 @@ export const ProductionConfigSchema = AppConfigSchema.extend({
 
 export const FieldKitConfigSchema = AppConfigSchema.extend({
   auth: AuthConfigSchema.extend({
+    jwtSecret: productionSecret('JWT_SECRET'),
     session: AuthConfigSchema.shape.session.extend({
       secret: productionSecret('SESSION_SECRET'),
     }),
@@ -266,6 +267,7 @@ export const FieldKitConfigSchema = AppConfigSchema.extend({
 
 export const OfflineConfigSchema = AppConfigSchema.extend({
   auth: AuthConfigSchema.extend({
+    jwtSecret: productionSecret('JWT_SECRET'),
     session: AuthConfigSchema.shape.session.extend({
       secret: productionSecret('SESSION_SECRET'),
     }),

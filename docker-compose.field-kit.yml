@@ -13,6 +13,7 @@ services:
       target: production
     environment:
       - NODE_ENV=field-kit
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
       - LOG_LEVEL=warn
       - HOT_RELOAD=false
@@ -178,6 +179,8 @@ services:
       - sync_queue:/app/sync-queue
     environment:
       - NODE_ENV=field-kit
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
       - SYNC_MODE=queue
       - OFFLINE_MODE=true
     command: npm run sync:field-kit

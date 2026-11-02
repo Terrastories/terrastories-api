@@ -74,6 +74,44 @@ describe('Configuration System', () => {
   });
 
   describe('Configuration Loading', () => {
+    describe.each(['field-kit', 'offline'])(
+      '%s installation secrets',
+      (mode) => {
+        it.each(['JWT_SECRET', 'SESSION_SECRET'])('requires %s', (secret) => {
+          process.env.NODE_ENV = mode;
+          delete process.env[secret];
+          expect(() => loadConfig(true, true)).toThrow(
+            'Configuration validation failed'
+          );
+        });
+
+        it.each(['JWT_SECRET', 'SESSION_SECRET'])(
+          'rejects weak or placeholder %s',
+          (secret) => {
+            process.env.NODE_ENV = mode;
+            for (const value of [
+              'short',
+              'field-kit-deployment-secret-change-me',
+              'offline-mode-secret-temporary-session',
+            ]) {
+              process.env[secret] = value;
+              expect(() => loadConfig(true, true)).toThrow(
+                'Configuration validation failed'
+              );
+            }
+          }
+        );
+
+        it('accepts installation secrets with local cookie settings', () => {
+          process.env.NODE_ENV = mode;
+          const config = loadConfig(true, true);
+          expect(config.auth.jwtSecret).toBe(process.env.JWT_SECRET);
+          expect(config.auth.session.secret).toBe(process.env.SESSION_SECRET);
+          expect(config.auth.session.secure).toBe(false);
+        });
+      }
+    );
+
     it.each(['field-kit', 'offline'])(
       'requires an installation session secret in %s',
       (mode) => {
@@ -168,7 +206,8 @@ describe('Configuration System', () => {
       process.env.PORT = '3000';
       process.env.HOST = '0.0.0.0';
       process.env.DATABASE_URL = './field-kit-data.db';
-      process.env.JWT_SECRET = 'field-kit-secret';
+      process.env.JWT_SECRET =
+        'field-kit-installation-jwt-secret-at-least-32-characters';
       process.env.LOG_LEVEL = 'info';
 
       const config = loadConfig(true, true);
@@ -183,7 +222,7 @@ describe('Configuration System', () => {
           url: './field-kit-data.db',
         },
         auth: {
-          jwtSecret: 'field-kit-secret',
+          jwtSecret: 'field-kit-installation-jwt-secret-at-least-32-characters',
         },
         logging: {
           level: 'info',
@@ -202,7 +241,8 @@ describe('Configuration System', () => {
       process.env.PORT = '3000';
       process.env.HOST = '127.0.0.1';
       process.env.DATABASE_URL = ':memory:';
-      process.env.JWT_SECRET = 'offline-secret';
+      process.env.JWT_SECRET =
+        'offline-installation-jwt-secret-at-least-32-characters';
       process.env.LOG_LEVEL = 'error';
 
       const config = loadConfig(true, true);
@@ -217,7 +257,7 @@ describe('Configuration System', () => {
           url: ':memory:',
         },
         auth: {
-          jwtSecret: 'offline-secret',
+          jwtSecret: 'offline-installation-jwt-secret-at-least-32-characters',
         },
         logging: {
           level: 'error',

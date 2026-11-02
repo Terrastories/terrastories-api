@@ -39,10 +39,14 @@ jobs:
           else
             # Missing secrets must fail, rather than silently selecting dev config.
             set +e
-            timeout 20s docker run --rm terrastories-api:production-test
+            timeout 20s docker run --name missing-secret-container terrastories-api:production-test
             refusal_status=$?
             set -e
             test "$refusal_status" -eq 1
+            docker logs missing-secret-container > missing-secret.log 2>&1
+            grep -F "Configuration validation failed" missing-secret.log
+            grep -F "JWT_SECRET is required" missing-secret.log
+            grep -F "SESSION_SECRET is required" missing-secret.log
             export JWT_SECRET="$(openssl rand -hex 32)"
             export SESSION_SECRET="$(openssl rand -hex 32)"
             docker run --name test-container -d -e JWT_SECRET -e SESSION_SECRET \

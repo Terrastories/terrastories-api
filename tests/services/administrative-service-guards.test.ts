@@ -665,6 +665,38 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
 
       staleRead.mockRestore();
     });
+
+    it('never asks the repository to write isActive:true for a community account', async () => {
+      // Pins the service layer on its own (the repository's conditional
+      // SQL is the second layer, tested below).
+      const userRepository = new UserRepository(db);
+      const service = new UserService(userRepository, communityRepository);
+      const write = vi.spyOn(userRepository, 'updateByIdAsSuperAdmin');
+
+      await service.updateUserAsSuperAdmin(viewer.id, {
+        firstName: 'StillActive',
+        isActive: true,
+      });
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(write.mock.calls[0][1].isActive).toBeUndefined();
+      expect(write.mock.calls[0][1].firstName).toBe('StillActive');
+
+      const [system] = await db
+        .insert(usersSqlite)
+        .values(
+          TestDataFactory.createUser(otherCommunityId, {
+            email: `guard-strip-system-${stamp}@example.test`,
+            role: 'super_admin',
+            isActive: false,
+            passwordHash,
+          })
+        )
+        .returning();
+      await service.updateUserAsSuperAdmin(system.id, { isActive: true });
+      expect(write.mock.calls[1][1].isActive).toBe(true);
+
+      write.mockRestore();
+    });
   });
 
   describe('updateByIdAsSuperAdmin conditional write (B5)', () => {

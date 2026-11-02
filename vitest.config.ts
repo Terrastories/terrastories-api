@@ -72,11 +72,8 @@ const baseConfig = defineConfig({
       },
     },
 
-    // Reporter configuration
-    reporter: process.env.CI ? ['verbose', 'junit'] : ['verbose'],
-    outputFile: process.env.CI
-      ? { junit: './test-report.junit.xml' }
-      : undefined,
+    // CI workflows consume console results, not JUnit XML. No JUnit reporter
+    // or outputFile is configured; coverage reporters are configured above.
 
     // Performance monitoring
     logHeapUsage: true,
@@ -108,11 +105,10 @@ const baseConfig = defineConfig({
 export default defineConfig({
   ...baseConfig,
   test: {
-    // Root-only reporting/coverage/worker options; discovery and setup belong
+    // Root-only coverage/worker/lifecycle options; discovery and setup belong
     // to each project below, without misleading root include/exclude globs.
     coverage: baseConfig.test?.coverage,
-    reporter: baseConfig.test?.reporter,
-    outputFile: baseConfig.test?.outputFile,
+    teardownTimeout: baseConfig.test?.teardownTimeout,
     maxWorkers: baseConfig.test?.maxWorkers,
     projects: [
       {

@@ -641,6 +641,9 @@ describe('Production Performance Validation - Phase 1', () => {
       // Bound small leaks as well as the original percentage limits. Clean
       // Node 20/22 calibration is emitted by CI; 2 KiB/request allows headroom
       // for test/engine bookkeeping while rejecting a 4 KiB/request leak.
+      // The practical detection floor is ~1.5 KiB/request above clean growth;
+      // a ~1 KiB/request leak can pass. Calibration is isolated (-t); full-file
+      // runs measured ~5–10% higher locally, still with at least ~3.4x headroom.
       expect(
         retainedBytesPerRequest,
         `Retained JS heap growth: ${retainedBytesPerRequest.toFixed(1)} bytes/request`

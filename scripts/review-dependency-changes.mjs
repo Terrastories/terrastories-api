@@ -1,5 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { MAX_MANIFEST_BYTES } from './trusted-audit-baseline.mjs';
+
+// `git show` of a lockfile must fit the same cap the trusted checker applies,
+// instead of Node's 1 MiB spawnSync default.
+const GIT_OUTPUT_MAX_BYTES = MAX_MANIFEST_BYTES;
 
 // Same-version lock fields a reviewer must see: install source, install
 // scripts, executables, and the flags that decide production inclusion.
@@ -82,9 +87,15 @@ function runGit(args, cwd) {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: GIT_OUTPUT_MAX_BYTES,
   });
 
   if (result.error) {
+    if (result.error.code === 'ENOBUFS') {
+      throw new Error(
+        `git ${args.join(' ')} output exceeds the ${GIT_OUTPUT_MAX_BYTES}-byte limit`
+      );
+    }
     throw new Error(`Could not execute git: ${result.error.message}`);
   }
   if (result.status !== 0) {
@@ -119,12 +130,19 @@ export async function main(options = {}) {
       '--',
       'package.json',
       'package-lock.json',
+      'npm-shrinkwrap.json',
     ],
     cwd
   )
     .split('\n')
     .map((entry) => entry.trim())
     .filter(Boolean);
+
+  if (changedManifests.includes('npm-shrinkwrap.json')) {
+    console.log(
+      'Dependency review: npm-shrinkwrap.json changed; npm ci installs from it ahead of package-lock.json, so the trusted audit rejects it.'
+    );
+  }
 
   if (changedManifests.length === 0) {
     console.log('Dependency review: no package manifest or lockfile changes.');

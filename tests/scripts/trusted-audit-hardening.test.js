@@ -12,6 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import * as auditModule from '../../scripts/trusted-audit-baseline.mjs';
 import * as dependencyReview from '../../scripts/review-dependency-changes.mjs';
 
@@ -812,5 +813,110 @@ describe('N5 dependency change fields', () => {
     const beta = changes.find((change) => change.name === 'beta');
     expect(alpha.changedFields).toContain('hasInstallScript');
     expect(beta.changedFields).toContain('dev');
+  });
+});
+
+function git(args, cwd) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+  }
+  return result.stdout.trim();
+}
+
+function createReviewRepo(baseLock) {
+  const cwd = tempDir('terrastories-review-hardening-');
+  writeJson(join(cwd, 'package.json'), { name: 'x', version: '1.0.0' });
+  writeJson(join(cwd, 'package-lock.json'), baseLock);
+  git(['init', '-q'], cwd);
+  git(['config', 'user.name', 'Terrastories Tests'], cwd);
+  git(['config', 'user.email', 'tests@terrastories.invalid'], cwd);
+  git(['add', '.'], cwd);
+  git(['commit', '-q', '-m', 'base'], cwd);
+  return { cwd, baseSha: git(['rev-parse', 'HEAD'], cwd) };
+}
+
+describe('Greptile P1 npm-shrinkwrap.json precedence', () => {
+  it('allows a data checkout without a shrinkwrap file', async () => {
+    await expect(
+      auditModule.assertNoShrinkwrap(tempDir())
+    ).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ['regular file', (path) => writeJson(path, lockOf({}))],
+    ['dangling symlink', (path) => symlinkSync('/nonexistent-target', path)],
+    ['directory', (path) => mkdirSync(path)],
+  ])('rejects a shrinkwrap %s', async (_kind, create) => {
+    const dir = tempDir();
+    create(join(dir, 'npm-shrinkwrap.json'));
+    await expect(auditModule.assertNoShrinkwrap(dir)).rejects.toThrow(
+      /npm-shrinkwrap\.json is not allowed/
+    );
+  });
+
+  it('fails main before approval lookup or npm audit when a shrinkwrap exists', async () => {
+    const dir = tempDir();
+    const marker = join(dir, 'npm-ran.json');
+    writeApprovedFixture(dir, lockOf({}));
+    writeJson(join(dir, 'npm-shrinkwrap.json'), substitutedLodash);
+    writeFakeNpm(dir, marker);
+    vi.stubEnv('PATH', `${join(dir, 'bin')}:${process.env.PATH}`);
+    vi.stubEnv('GITHUB_REPOSITORY', REPO);
+    vi.stubEnv('GITHUB_TOKEN', 'test-token');
+    const fetchImpl = vi.fn();
+    vi.stubGlobal('fetch', fetchImpl);
+
+    await expect(auditModule.main({ dataDir: dir })).rejects.toThrow(
+      /npm-shrinkwrap\.json is not allowed/
+    );
+    expect(existsSync(marker)).toBe(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('reports an added shrinkwrap in dependency review and rejects the PR', async () => {
+    const { cwd, baseSha } = createReviewRepo(lockOf({}));
+    writeJson(join(cwd, 'npm-shrinkwrap.json'), substitutedLodash);
+    git(['add', 'npm-shrinkwrap.json'], cwd);
+    git(['commit', '-q', '-m', 'add shrinkwrap'], cwd);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(dependencyReview.main({ cwd, baseSha })).rejects.toThrow(
+      /dependency audit rejected/i
+    );
+    expect(log.mock.calls.flat().join('\n')).toMatch(
+      /npm-shrinkwrap\.json changed.*trusted audit rejects it/
+    );
+  });
+});
+
+describe('Greptile P2 large lockfiles in dependency review', () => {
+  it('summarizes a lockfile larger than 1 MiB', async () => {
+    const { cwd, baseSha } = createReviewRepo(lockOf({}));
+    const packages = {};
+    for (let index = 0; index < 6000; index += 1) {
+      const name = `pkg-${index}`;
+      packages[`node_modules/${name}`] = registryEntry(name, '1.0.0', {
+        license: 'x'.repeat(40),
+      });
+    }
+    writeJson(join(cwd, 'package-lock.json'), lockOf(packages));
+    expect(readFileSync(join(cwd, 'package-lock.json')).length).toBeGreaterThan(
+      1024 * 1024
+    );
+    git(['add', 'package-lock.json'], cwd);
+    git(['commit', '-q', '-m', 'large lock'], cwd);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(
+      dependencyReview.main({
+        cwd,
+        baseSha,
+        auditCommand: [process.execPath, '-e', 'process.exit(0)'],
+      })
+    ).resolves.toBeUndefined();
+    expect(log.mock.calls.flat().join('\n')).toMatch(
+      /6000 locked dependency changes detected/
+    );
   });
 });

@@ -868,7 +868,27 @@ async function readUntrustedJson(dataDir, relativePath, maxBytes) {
   return { bytes, value: parseUntrustedJson(bytes, relativePath) };
 }
 
+// `npm ci` installs from npm-shrinkwrap.json ahead of package-lock.json. The
+// repository does not use one, so any shrinkwrap entry (file, symlink or
+// directory) in the data checkout fails closed instead of being ignored.
+export async function assertNoShrinkwrap(dataDir) {
+  try {
+    await lstat(join(dataDir, 'npm-shrinkwrap.json'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return;
+    }
+    throw new Error(
+      `Could not check for npm-shrinkwrap.json (${error?.code ?? 'lstat failed'})`
+    );
+  }
+  throw new Error(
+    'npm-shrinkwrap.json is not allowed: npm ci would install from it instead of the audited package-lock.json'
+  );
+}
+
 export async function main({ dataDir = scriptRoot } = {}) {
+  await assertNoShrinkwrap(dataDir);
   const { value: baseline } = await readUntrustedJson(
     dataDir,
     'config/security-audit-baseline.json',

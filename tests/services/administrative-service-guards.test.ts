@@ -326,6 +326,38 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
   });
 
   describe('updateCommunityAsSuperAdmin', () => {
+    it('does not let a stale no-op publicStories resend overwrite a community unpublish', async () => {
+      // Deterministic replay of the race: the system request read the
+      // community while it was public (so `publicStories: true` looked like
+      // a no-op), then the community admin unpublished it before the write.
+      const [stored] = await db
+        .select()
+        .from(communitiesSqlite)
+        .where(eq(communitiesSqlite.id, privateCommunityId));
+      expect(stored.publicStories).toBe(false);
+      const staleRead = vi
+        .spyOn(communityRepository, 'findById')
+        .mockResolvedValueOnce({ ...stored, publicStories: true });
+      const write = vi.spyOn(communityRepository, 'update');
+
+      await communityService.updateCommunityAsSuperAdmin(privateCommunityId, {
+        name: 'GUARD-STALE-RENAME',
+        publicStories: true,
+      });
+
+      const [row] = await db
+        .select()
+        .from(communitiesSqlite)
+        .where(eq(communitiesSqlite.id, privateCommunityId));
+      expect(row.publicStories).toBe(false);
+      expect(row.name).toBe('GUARD-STALE-RENAME');
+      for (const call of write.mock.calls) {
+        expect(call[1]).not.toHaveProperty('publicStories');
+      }
+      staleRead.mockRestore();
+      write.mockRestore();
+    });
+
     it('rejects a publicStories flip and leaves the row unchanged', async () => {
       await expect(
         communityService.updateCommunityAsSuperAdmin(privateCommunityId, {

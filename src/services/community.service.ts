@@ -1053,7 +1053,13 @@ export class CommunityService {
           throw new PublicationAuthorityRequiredError();
         }
       }
-      return await this.updateCommunity(id, updates);
+      // Never write `publicStories` through system authority: the only
+      // allowed value equals the one just read, and a community admin may
+      // change it before this write lands. Dropping it keeps a concurrent
+      // unpublish (or publish) from being overwritten by a stale no-op.
+      const { publicStories: _checked, ...lifecycleUpdates } = updates;
+      void _checked;
+      return await this.updateCommunity(id, lifecycleUpdates);
     } catch (error) {
       // Re-throw specific error types for proper HTTP status codes
       if (

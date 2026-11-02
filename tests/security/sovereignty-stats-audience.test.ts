@@ -166,7 +166,25 @@ describe('V2 sovereignty stats audiences', () => {
         privacyLevel: 'public',
       })
       .returning();
+    // Restricted row whose privacyLevel would otherwise map to the community
+    // audience, linked to the same place: pins the `isRestricted = false`
+    // clause of the community branch in storyAudienceCondition.
+    const [restrictedCommunityStory] = await db
+      .insert(storiesSqlite)
+      .values({
+        title: 'Restricted members_only story',
+        slug: `stats-restricted-community-${timestamp}`,
+        communityId,
+        createdBy: admin.id,
+        isRestricted: true,
+        privacyLevel: 'members_only',
+      })
+      .returning();
     await db.insert(storyPlacesSqlite).values([
+      {
+        storyId: restrictedCommunityStory.id,
+        placeId: publicPlaceWithRestrictedStory.id,
+      },
       { storyId: publicStory.id, placeId: publicPlaceWithPublicStory.id },
       { storyId: communityStory.id, placeId: publicPlaceWithCommunityStory.id },
       {

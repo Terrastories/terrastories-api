@@ -40,6 +40,7 @@ describe('V2 sovereignty story audiences', () => {
   let communityStoryId: number;
   let unknownPrivacyStoryId: number;
   let restrictedStoryId: number;
+  let restrictedCommunityStoryId: number;
 
   async function loginAs(user: { email: string }, communityId: number) {
     const login = await app.inject({
@@ -153,6 +154,20 @@ describe('V2 sovereignty story audiences', () => {
         privacyLevel: 'public',
       })
       .returning();
+    // Restricted row whose privacyLevel would otherwise map to the community
+    // audience: pins the `isRestricted = false` clause of the community
+    // branch in storyAudienceCondition (lists, meta.total, withStories).
+    const [restrictedCommunityStory] = await db
+      .insert(storiesSqlite)
+      .values({
+        ...baseStory,
+        title: 'Restricted members_only story (unavailable)',
+        slug: `audience-restricted-community-${timestamp}`,
+        isRestricted: true,
+        privacyLevel: 'members_only',
+      })
+      .returning();
+    restrictedCommunityStoryId = restrictedCommunityStory.id;
     publicStoryId = publicStory.id;
     communityStoryId = communityStory.id;
     unknownPrivacyStoryId = unknownPrivacyStory.id;
@@ -188,6 +203,7 @@ describe('V2 sovereignty story audiences', () => {
     expect(ids).toContain(communityStoryId);
     expect(ids).not.toContain(unknownPrivacyStoryId);
     expect(ids).not.toContain(restrictedStoryId);
+    expect(ids).not.toContain(restrictedCommunityStoryId);
   });
 
   it('lets a Fastify viewer (V2 member) read a community-audience story', async () => {
@@ -204,6 +220,16 @@ describe('V2 sovereignty story audiences', () => {
     const response = await app.inject({
       method: 'GET',
       url: `/api/v1/stories/${unknownPrivacyStoryId}`,
+      headers: { cookie: viewerCookie },
+    });
+
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('denies a Fastify viewer (V2 member) a restricted members_only story read (unavailable)', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/stories/${restrictedCommunityStoryId}`,
       headers: { cookie: viewerCookie },
     });
 
@@ -359,6 +385,7 @@ describe('V2 sovereignty story audiences', () => {
     expect(ids).toContain(communityStoryId);
     expect(ids).not.toContain(restrictedStoryId);
     expect(ids).not.toContain(unknownPrivacyStoryId);
+    expect(ids).not.toContain(restrictedCommunityStoryId);
   });
 
   it('counts only public and community audiences for a legacy elder list', async () => {

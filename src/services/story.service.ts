@@ -29,8 +29,8 @@ import type { Logger } from '../shared/types/index.js';
 import { getConfig } from '../shared/config/index.js';
 import { fileOperationsMetrics } from '../shared/metrics/file-operations.js';
 import {
+  fastifyRoleToV2Role,
   fastifyStoryToAudience,
-  isV2CommunityRole,
   roleCanReadStoryAccess,
   storyAccessForRole,
 } from '../shared/authorization/sovereignty-policy.js';
@@ -899,11 +899,13 @@ export class StoryService {
       communityId: userCommunityId,
     };
 
-    // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): each role sees exactly
-    // its runtime read accesses at database level. Legacy `elder` keeps the
-    // V1 path.
-    if (isV2CommunityRole(userRole)) {
-      scopedFilters.storyAudiences = [...storyAccessForRole(userRole)];
+    // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): each canonical role
+    // sees exactly its runtime read accesses at database level. A physical
+    // Fastify `viewer` is reasoned about as V2 `member` (§6.2). Legacy
+    // `elder` and unknown roles keep the V1 path.
+    const v2Role = fastifyRoleToV2Role(userRole);
+    if (v2Role) {
+      scopedFilters.storyAudiences = [...storyAccessForRole(v2Role)];
     } else if (userRole !== 'elder' && userRole !== 'admin') {
       scopedFilters.isRestricted = false;
     }
@@ -991,11 +993,12 @@ export class StoryService {
     story: Pick<StoryWithRelations, 'privacyLevel' | 'isRestricted'>,
     userRole: string
   ): boolean {
-    if (!isV2CommunityRole(userRole)) {
+    const v2Role = fastifyRoleToV2Role(userRole);
+    if (!v2Role) {
       return false;
     }
     return !roleCanReadStoryAccess(
-      userRole,
+      v2Role,
       fastifyStoryToAudience(story.privacyLevel, story.isRestricted)
     );
   }

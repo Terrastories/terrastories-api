@@ -17,7 +17,7 @@ import { FastifyRequest, FastifyReply } from 'fastify';
 import {
   authorizeCommunityContent,
   createAuthorizationAuditEvent,
-  isV2CommunityRole,
+  fastifyRoleToV2Role,
   type ContentRouteFamily,
   type ProtectedSurface,
 } from '../authorization/sovereignty-policy.js';
@@ -410,16 +410,21 @@ export function requireV2CommunityContentAccess(
       });
     }
 
-    if (!isV2CommunityRole(user.role)) {
+    // SPEC-V2 §6.2: the policy reasons about the canonical V2 role. A
+    // physical Fastify `viewer` is authorized as V2 `member` (mapping it to
+    // V2 `viewer` would silently narrow its effective access); `elder` and
+    // unknown roles keep the legacy V1 guard.
+    const v2Role = fastifyRoleToV2Role(user.role);
+    if (!v2Role) {
       await legacyGuard(request, reply);
       return;
     }
 
-    if (user.role === 'super_admin') {
+    if (v2Role === 'super_admin') {
       const decision = authorizeCommunityContent({
         actor: {
           id: user.id,
-          role: user.role,
+          role: v2Role,
           communityId: user.communityId,
           active: true,
         },
@@ -433,7 +438,7 @@ export function requireV2CommunityContentAccess(
         createAuthorizationAuditEvent({
           actor: {
             id: user.id,
-            role: user.role,
+            role: v2Role,
             communityId: user.communityId,
             active: true,
           },
@@ -485,7 +490,7 @@ export function requireV2CommunityContentAccess(
         createAuthorizationAuditEvent({
           actor: {
             id: user.id,
-            role: user.role,
+            role: v2Role,
             communityId: user.communityId,
             active: true,
           },
@@ -506,7 +511,7 @@ export function requireV2CommunityContentAccess(
     const decision = authorizeCommunityContent({
       actor: {
         id: user.id,
-        role: user.role,
+        role: v2Role,
         communityId: user.communityId,
         // Login now fails closed for disabled users/inactive communities. #137
         // owns revalidation of already-issued sessions after state changes.
@@ -526,7 +531,7 @@ export function requireV2CommunityContentAccess(
       createAuthorizationAuditEvent({
         actor: {
           id: user.id,
-          role: user.role,
+          role: v2Role,
           communityId: user.communityId,
           active: true,
         },

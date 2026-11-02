@@ -627,8 +627,10 @@ describe('SpeakerService', () => {
       const result = await service.getCommunityStats(testCommunityId);
 
       expect(result).toEqual(mockStats);
+      // No role passed -> legacy path -> withdrawn speakers stay countable.
       expect(mockRepository.getCommunityStats).toHaveBeenCalledWith(
-        testCommunityId
+        testCommunityId,
+        { includeInactive: true }
       );
     });
   });

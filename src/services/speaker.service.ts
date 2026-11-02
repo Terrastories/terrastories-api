@@ -32,7 +32,7 @@ import {
   InvalidSearchQueryError,
   InvalidBirthYearError,
 } from '../shared/errors/index.js';
-import { isV2CommunityRole } from '../shared/authorization/sovereignty-policy.js';
+import { fastifyRoleToV2Role } from '../shared/authorization/sovereignty-policy.js';
 
 /**
  * Request data for speaker creation
@@ -322,8 +322,11 @@ export class SpeakerService {
     communityId: number,
     role: string
   ): Promise<SpeakerStats> {
+    // Map the physical role to its canonical V2 role first (SPEC-V2 §6.2:
+    // Fastify `viewer` reasons as V2 `member`); null keeps the V1 path.
+    const v2Role = fastifyRoleToV2Role(role);
     const includeInactive =
-      !isV2CommunityRole(role) || role === 'editor' || role === 'admin';
+      !v2Role || v2Role === 'editor' || v2Role === 'admin';
     return await this.repository.getCommunityStats(communityId, {
       includeInactive,
     });

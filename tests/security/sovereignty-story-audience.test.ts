@@ -16,6 +16,9 @@ import { TEST_PASSWORD } from '../constants/field-kit-test-constants.js';
  * schema: `privacyLevel`/`isRestricted` map to canonical audiences
  * (public | community | editors) and each role may read only its audience:
  * viewer -> public, member -> public+community, editor/admin -> all.
+ * A physical Fastify `viewer` is treated as canonical V2 `member` (§6.2), so
+ * the seeded viewer below exercises member reach, while the canonical
+ * viewer semantics stay covered by the sovereignty-policy unit tests.
  * An active private community does NOT block these authenticated reads.
  *
  * The transitional V1 response schemas on these routes serialize `data` as an
@@ -31,6 +34,7 @@ describe('V2 sovereignty story audiences', () => {
   let adminCookie: string;
   let publicStoryId: number;
   let communityStoryId: number;
+  let editorsStoryId: number;
   let restrictedStoryId: number;
 
   async function loginAs(user: { email: string }, communityId: number) {
@@ -115,18 +119,29 @@ describe('V2 sovereignty story audiences', () => {
         privacyLevel: 'members_only',
       })
       .returning();
-    const [restrictedStory] = await db
+    const [editorsStory] = await db
       .insert(storiesSqlite)
       .values({
         ...baseStory,
         title: 'Editors audience story',
         slug: `audience-editors-${timestamp}`,
+        isRestricted: false,
+        privacyLevel: 'private',
+      })
+      .returning();
+    const [restrictedStory] = await db
+      .insert(storiesSqlite)
+      .values({
+        ...baseStory,
+        title: 'Restricted (admin-only) story',
+        slug: `audience-restricted-${timestamp}`,
         isRestricted: true,
         privacyLevel: 'public',
       })
       .returning();
     publicStoryId = publicStory.id;
     communityStoryId = communityStory.id;
+    editorsStoryId = editorsStory.id;
     restrictedStoryId = restrictedStory.id;
 
     app = await createTestApp(db);
@@ -140,7 +155,7 @@ describe('V2 sovereignty story audiences', () => {
     await testDb.teardown();
   });
 
-  it('omits non-public audiences from the viewer community-stories list', async () => {
+  it('includes public and community audiences in the Fastify viewer (V2 member) community-stories list', async () => {
     const response = await app.inject({
       method: 'GET',
       url: `/api/v1/communities/${privateCommunityId}/stories`,
@@ -149,21 +164,38 @@ describe('V2 sovereignty story audiences', () => {
 
     expect(response.statusCode).toBe(200);
     const items = response.json().data;
-    expect(items).toHaveLength(1);
-    expect(items[0].id).toBe(publicStoryId);
+    // SPEC-V2 §6.2: a physical Fastify viewer is a canonical V2 member, so
+    // the community-stories list covers public + community audiences, while
+    // the editors-audience and restricted (admin-only) stories stay excluded.
+    expect(items).toHaveLength(2);
+    const ids = items.map((item: { id: number }) => item.id);
+    expect(ids).toContain(publicStoryId);
+    expect(ids).toContain(communityStoryId);
+    expect(ids).not.toContain(editorsStoryId);
+    expect(ids).not.toContain(restrictedStoryId);
   });
 
-  it('denies a same-community viewer a community-audience story read', async () => {
+  it('lets a Fastify viewer (V2 member) read a community-audience story', async () => {
     const response = await app.inject({
       method: 'GET',
       url: `/api/v1/stories/${communityStoryId}`,
       headers: { cookie: viewerCookie },
     });
 
+    expect(response.statusCode).toBe(200);
+  });
+
+  it('denies a Fastify viewer (V2 member) an editors-audience story read', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/stories/${editorsStoryId}`,
+      headers: { cookie: viewerCookie },
+    });
+
     expect(response.statusCode).toBe(404);
   });
 
-  it('denies a same-community viewer an editors-audience story read', async () => {
+  it('denies a Fastify viewer (V2 member) a restricted (admin-only) story read', async () => {
     const response = await app.inject({
       method: 'GET',
       url: `/api/v1/stories/${restrictedStoryId}`,
@@ -173,17 +205,17 @@ describe('V2 sovereignty story audiences', () => {
     expect(response.statusCode).toBe(404);
   });
 
-  it('denies a same-community viewer a community-audience story on the member surface', async () => {
+  it('lets a Fastify viewer (V2 member) read a community-audience story on the member surface', async () => {
     const response = await app.inject({
       method: 'GET',
       url: `/api/v1/member/stories/${communityStoryId}`,
       headers: { cookie: viewerCookie },
     });
 
-    expect(response.statusCode).toBe(404);
+    expect(response.statusCode).toBe(200);
   });
 
-  it('lets a viewer read a public-audience story inside their own active private community', async () => {
+  it('lets a Fastify viewer (V2 member) read a public-audience story inside their own active private community', async () => {
     const response = await app.inject({
       method: 'GET',
       url: `/api/v1/stories/${publicStoryId}`,
@@ -193,7 +225,7 @@ describe('V2 sovereignty story audiences', () => {
     expect(response.statusCode).toBe(200);
   });
 
-  it('counts only public-audience stories for a same-community viewer list', async () => {
+  it('counts public and community audiences for a Fastify viewer (V2 member) list, excluding editors-audience', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/v1/stories?page=1&limit=50',
@@ -201,8 +233,18 @@ describe('V2 sovereignty story audiences', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().meta.total).toBe(1);
-    expect(response.json().data).toHaveLength(1);
+    expect(response.json().meta.total).toBe(2);
+    expect(response.json().data).toHaveLength(2);
+  });
+
+  it('lets an editor read editors-audience stories in their own community', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/stories/${editorsStoryId}`,
+      headers: { cookie: editorCookie },
+    });
+
+    expect(response.statusCode).toBe(200);
   });
 
   it('lets an editor read community-audience stories in their own community', async () => {
@@ -228,6 +270,16 @@ describe('V2 sovereignty story audiences', () => {
   it('lets an admin read editors-audience stories in their own community', async () => {
     const response = await app.inject({
       method: 'GET',
+      url: `/api/v1/stories/${editorsStoryId}`,
+      headers: { cookie: adminCookie },
+    });
+
+    expect(response.statusCode).toBe(200);
+  });
+
+  it('lets an admin read restricted (admin-only) stories in their own community', async () => {
+    const response = await app.inject({
+      method: 'GET',
       url: `/api/v1/stories/${restrictedStoryId}`,
       headers: { cookie: adminCookie },
     });
@@ -235,7 +287,7 @@ describe('V2 sovereignty story audiences', () => {
     expect(response.statusCode).toBe(200);
   });
 
-  it('counts public and community audiences for an editor list, excluding restricted', async () => {
+  it('counts public, community and editors audiences for an editor list, excluding restricted', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/v1/stories?page=1&limit=50',
@@ -243,6 +295,17 @@ describe('V2 sovereignty story audiences', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().meta.total).toBe(2);
+    expect(response.json().meta.total).toBe(3);
+  });
+
+  it('counts every story, restricted included, for an admin list', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v1/stories?page=1&limit=50',
+      headers: { cookie: adminCookie },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().meta.total).toBe(4);
   });
 });

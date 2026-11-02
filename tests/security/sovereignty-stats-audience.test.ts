@@ -203,7 +203,7 @@ describe('V2 sovereignty stats audiences', () => {
     await testDb.teardown();
   });
 
-  it('counts only unrestricted places for a viewer and hides the restricted count', async () => {
+  it('counts only unrestricted places for a Fastify viewer (V2 member) and hides the restricted count', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/v1/places/stats',
@@ -217,7 +217,7 @@ describe('V2 sovereignty stats audiences', () => {
     expect(stats.restricted).toBeUndefined();
   });
 
-  it('counts only viewer-readable stories in withStories for a viewer', async () => {
+  it('counts public and community story places in withStories for a Fastify viewer (V2 member)', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/v1/places/stats',
@@ -225,7 +225,10 @@ describe('V2 sovereignty stats audiences', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().data.withStories).toBe(1);
+    // SPEC-V2 §6.2: the physical Fastify viewer has V2 member reach, so
+    // places linked to public AND community stories count; the restricted
+    // story stays admin-only and its place stays excluded.
+    expect(response.json().data.withStories).toBe(2);
   });
 
   it('keeps full place stats for an admin', async () => {
@@ -257,7 +260,7 @@ describe('V2 sovereignty stats audiences', () => {
     expect(stats.withStories).toBe(2);
   });
 
-  it('counts only active speakers for a viewer and hides the inactive count', async () => {
+  it('counts only active speakers for a Fastify viewer (V2 member) and hides the inactive count', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/v1/speakers/stats',

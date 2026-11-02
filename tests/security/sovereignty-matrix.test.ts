@@ -11,6 +11,7 @@ import {
   canExposeField,
   createAuthorizationAuditEvent,
   fastifyCommunityToGates,
+  fastifyRoleToV2Role,
   fastifyStoryToAudience,
   roleCanReadStoryAudience,
   type AuthorizationActor,
@@ -451,6 +452,30 @@ describe('V2 community gates and super-admin boundary (SPEC-V2 §6.1/§6.2)', ()
       allowed: false,
       reason: 'cross-community-denied',
     });
+  });
+});
+
+describe('Fastify physical role mapping (SPEC-V2 §6.2)', () => {
+  it('maps a physical Fastify viewer to canonical V2 member, never to V2 viewer', () => {
+    // §6.2: V1 viewer story reads filtered only `isRestricted = false` and
+    // never enforced privacyLevel, so a physical Fastify viewer effectively
+    // reads members_only stories — the audience V2 grants to `member`.
+    // Mapping to V2 viewer would silently narrow that user's access.
+    expect(fastifyRoleToV2Role('viewer')).toBe('member');
+    expect(fastifyRoleToV2Role('viewer')).not.toBe('viewer');
+  });
+
+  it('maps the other canonical roles identity', () => {
+    expect(fastifyRoleToV2Role('member')).toBe('member');
+    expect(fastifyRoleToV2Role('editor')).toBe('editor');
+    expect(fastifyRoleToV2Role('admin')).toBe('admin');
+    expect(fastifyRoleToV2Role('super_admin')).toBe('super_admin');
+  });
+
+  it('returns null for elder, empty, and unknown physical roles (legacy V1 path)', () => {
+    expect(fastifyRoleToV2Role('elder')).toBeNull();
+    expect(fastifyRoleToV2Role('')).toBeNull();
+    expect(fastifyRoleToV2Role('unknown')).toBeNull();
   });
 });
 

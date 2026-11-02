@@ -186,6 +186,37 @@ export function fastifyCommunityToGates(
   };
 }
 
+/**
+ * Transitional mapping from a physical Fastify role to the canonical V2 role
+ * the policy must reason with (SPEC-V2 §6.2). A Fastify `viewer` maps to V2
+ * `member`, not `viewer`: the pinned Fastify V1 story reads for
+ * non-`elder`/`admin` users filtered only on `isRestricted = false` and never
+ * enforced `privacyLevel`, so a Fastify `viewer` effectively read
+ * `members_only` stories — the audience V2 grants to `member`. Feeding the
+ * physical `viewer` string into the policy would map it to V2 `viewer`
+ * semantics (public only) and silently narrow that user's effective access,
+ * which SPEC-V2 §4 forbids without an explicit product decision. The legacy
+ * `elder` role and unknown values return null: callers keep the legacy V1
+ * path for them (community-approved disposition pending, §6.2).
+ */
+export function fastifyRoleToV2Role(
+  physicalRole: string
+): V2CommunityRole | null {
+  switch (physicalRole) {
+    case 'viewer':
+    case 'member':
+      return 'member';
+    case 'editor':
+      return 'editor';
+    case 'admin':
+      return 'admin';
+    case 'super_admin':
+      return 'super_admin';
+    default:
+      return null;
+  }
+}
+
 export interface AuthorizationActor {
   id: number;
   role: V2CommunityRole;

@@ -37,7 +37,7 @@ import {
   RequiredFieldError,
 } from '../shared/errors/index.js';
 import {
-  isV2CommunityRole,
+  fastifyRoleToV2Role,
   storyAccessForRole,
 } from '../shared/authorization/sovereignty-policy.js';
 
@@ -412,8 +412,11 @@ export class PlaceService {
     public: number;
     withStories: number;
   }> {
-    const fullStats = !isV2CommunityRole(role) || role === 'admin';
-    const storyAudiences = fullStats ? undefined : storyAccessForRole(role);
+    // Map the physical role to its canonical V2 role first (SPEC-V2 §6.2:
+    // Fastify `viewer` reasons as V2 `member`); null keeps the V1 path.
+    const v2Role = fastifyRoleToV2Role(role);
+    const fullStats = !v2Role || v2Role === 'admin';
+    const storyAudiences = fullStats ? undefined : storyAccessForRole(v2Role);
     return await this.repository.getCommunityPlaceStats(communityId, {
       includeRestricted: fullStats,
       storyAudiences,

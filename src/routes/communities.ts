@@ -20,7 +20,7 @@ import { getDb, type Database } from '../db/index.js';
 import { storiesSqlite, storiesPg } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import {
-  isV2CommunityRole,
+  fastifyRoleToV2Role,
   storyAccessForRole,
 } from '../shared/authorization/sovereignty-policy.js';
 import { storyAudienceCondition } from '../repositories/story.repository.js';
@@ -579,11 +579,13 @@ export async function communityRoutes(
         const storiesTable = getStoriesTable();
         const conditions = [eq(storiesTable.communityId, communityId)];
 
-        // V2 story-audience filtering (SPEC-V2 §6.2/§6.3); legacy `elder`
-        // keeps the V1 restriction filter.
-        if (isV2CommunityRole(user.role)) {
+        // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): a physical Fastify
+        // `viewer` reasons as V2 `member` (§6.2); legacy `elder` keeps the V1
+        // restriction filter.
+        const v2Role = fastifyRoleToV2Role(user.role);
+        if (v2Role) {
           const audienceCondition = storyAudienceCondition(
-            storyAccessForRole(user.role),
+            storyAccessForRole(v2Role),
             storiesTable
           );
           if (!audienceCondition) {

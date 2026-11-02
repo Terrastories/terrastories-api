@@ -458,10 +458,11 @@ describe('StoryService', () => {
         testData.community.id
       );
 
-      // Assert
+      // Assert: restricted rows are admin-only at the SPEC-V2 §6.3 audience
+      // gate, so the editor is denied before any legacy protocol check.
       expect(result).toBeNull();
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Cultural protocol access denied'),
+        expect.stringContaining('Story audience access denied'),
         expect.any(Object)
       );
     });

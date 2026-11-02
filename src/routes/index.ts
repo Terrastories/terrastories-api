@@ -5,7 +5,7 @@ import {
   type ResourceCommunityResolver,
 } from '../shared/middleware/auth.middleware.js';
 import {
-  isV2CommunityRole,
+  fastifyRoleToV2Role,
   projectCommunityResourceFields,
   type AuthorizationActor,
   type ContentRouteFamily,
@@ -119,11 +119,15 @@ async function registerCommunityContentRoutes(
 
       const authRequest = request as AuthenticatedRequest;
       const user = authRequest.user || authRequest.session?.user;
-      if (!user || !isV2CommunityRole(user.role)) return payload;
+      // SPEC-V2 §6.2: the policy reasons about the canonical V2 role; a
+      // physical Fastify `viewer` projects as V2 `member`. Null (elder,
+      // unknown) keeps the legacy unprojected V1 path.
+      const v2Role = user ? fastifyRoleToV2Role(user.role) : null;
+      if (!user || !v2Role) return payload;
 
       const actor: AuthorizationActor = {
         id: user.id,
-        role: user.role,
+        role: v2Role,
         communityId: user.communityId,
         // #137 owns revalidation of already-issued sessions. This hook only
         // projects responses after the authenticated route guard has succeeded.

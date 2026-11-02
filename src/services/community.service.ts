@@ -1001,18 +1001,21 @@ export class CommunityService {
     publicStories: boolean,
     actor: AdministrativeActor | null
   ): Promise<Community | null> {
-    const existing = await this.communityRepository.findById(id);
+    // Authority first, before any lookup, no-ops included: the
+    // community-admin path never treats "same value" as permission, so a
+    // null or other-community actor gets no row and no existence signal.
+    // (The system route's no-op behaviour is separate:
+    // updateCommunityAsSuperAdmin.)
     const decision = authorizePublicationChange({
       actor,
       communityId: id,
-      // Treat a missing community as a change so the authority check
-      // still decides before any existence signal.
-      currentPublic: existing ? existing.publicStories : !publicStories,
+      currentPublic: !publicStories,
       requestedPublic: publicStories,
     });
     if (!decision.allowed) {
       throw new PublicationAuthorityRequiredError();
     }
+    const existing = await this.communityRepository.findById(id);
     if (!existing || !existing.isActive) {
       return null;
     }

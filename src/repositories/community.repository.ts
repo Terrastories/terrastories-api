@@ -136,6 +136,25 @@ export class InvalidCommunityDataError extends Error {
 }
 
 /**
+ * SPEC-V2 §7 first-administrator lock (PostgreSQL): `SELECT id FROM
+ * communities WHERE id = ? FOR UPDATE`. Exported so a test can pin the
+ * lock without a PostgreSQL CI lane (a PG lane is tracked in #161).
+ */
+/* eslint-disable @typescript-eslint/no-explicit-any -- dialect union (#135). */
+export function provisioningLockQuery(
+  executor: any,
+  communities: any,
+  communityId: number
+) {
+  return executor
+    .select({ id: communities.id })
+    .from(communities)
+    .where(eq(communities.id, communityId))
+    .for('update');
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+/**
  * Community Repository class providing database operations
  */
 export class CommunityRepository {
@@ -656,7 +675,7 @@ export class CommunityRepository {
   /**
    * SPEC-V2 §7 claim state: whether the community has any community account
    * (any role except a system `super_admin` row, any status) and whether it
-   * holds community content (stories, places, speakers or files). A system
+   * holds community content (stories, places, speakers, files or themes). A system
    * lifecycle action may provision a first administrator only when both are
    * false.
    */
@@ -688,6 +707,11 @@ export class CommunityRepository {
    *
    * - PostgreSQL: the community row is locked `FOR UPDATE`; a concurrent
    *   provisioning waits, then re-reads the committed account and refuses.
+   *   This relies on READ COMMITTED (the PostgreSQL default): each statement
+   *   after the lock takes a fresh snapshot, so the waiter's counts see the
+   *   winner's insert. Under REPEATABLE READ or SERIALIZABLE the waiter would
+   *   instead fail with a serialization error; if the default isolation level
+   *   ever changes, revisit this method.
    * - SQLite: a synchronous `BEGIN IMMEDIATE` transaction takes the write
    *   lock before reading, so no other writer (connection or interleaved
    *   request) runs between the check and the insert.
@@ -706,11 +730,11 @@ export class CommunityRepository {
     if ('execute' in this.database) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
       return this.db.transaction(async (tx: any) => {
-        const locked = await tx
-          .select({ id: this.communities.id })
-          .from(this.communities)
-          .where(eq(this.communities.id, communityId))
-          .for('update');
+        const locked = await provisioningLockQuery(
+          tx,
+          this.communities,
+          communityId
+        );
         if (locked.length === 0) {
           return null;
         }

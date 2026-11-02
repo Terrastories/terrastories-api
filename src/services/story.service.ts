@@ -1107,12 +1107,18 @@ export class StoryService {
     // behind: when the relations were loaded and the interviewer is absent
     // (missing row, or withdrawn and dropped above), every role loses the
     // ID too. Editors/admins keep the ID only while they keep the relation.
-    // As for the interview location: the ID survives only alongside a
-    // loaded relation the caller may read, so list/search rows (relation
-    // not loaded) mask it as well.
+    // The interviewer ID survives only when the caller may read that
+    // speaker. When the relation was loaded, it must be present and kept.
+    // When it was not loaded (list/search rows from `findMany`), only a
+    // canonical editor/admin keeps the ID: they may read every
+    // same-community speaker, withdrawn ones included (§6.5); every other
+    // role cannot tell a withdrawn interviewer from a readable one, so the
+    // ID is masked (fail closed).
+    const interviewerLoaded = 'interviewer' in story;
     const masksInterviewerId =
       story.interviewerId != null &&
-      (story.interviewer == null || removesWithdrawnInterviewer);
+      (removesWithdrawnInterviewer ||
+        (interviewerLoaded ? story.interviewer == null : !keepsWithdrawn));
 
     if (
       !removesWithdrawnSpeakers &&

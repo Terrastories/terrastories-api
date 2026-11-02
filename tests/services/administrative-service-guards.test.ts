@@ -1,6 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
 import {
+  communitiesPg,
   communitiesSqlite,
   filesSqlite,
   placesSqlite,
@@ -11,9 +14,13 @@ import {
 } from '../../src/db/schema/index.js';
 import { hashPassword } from '../../src/services/password.service.js';
 import { UserRepository } from '../../src/repositories/user.repository.js';
-import { CommunityRepository } from '../../src/repositories/community.repository.js';
+import {
+  CommunityRepository,
+  provisioningLockQuery,
+} from '../../src/repositories/community.repository.js';
 import {
   CommunityAuthorityRequiredError,
+  LastActiveAdministratorError,
   UserService,
 } from '../../src/services/user.service.js';
 import {
@@ -599,6 +606,279 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
       });
       expect(created.role).toBe('admin');
       expect(created.communityId).toBe(communityId);
+    });
+  });
+
+  describe('updateUserAsSuperAdmin stale-read reactivation (B5)', () => {
+    it('does not let a stale active read reactivate a row the community deactivated', async () => {
+      // Deterministic replay of the race: the super admin's read saw the
+      // account while it was still active, then the community deactivated
+      // it before the write landed. The write must not resurrect it.
+      await db
+        .update(usersSqlite)
+        .set({ isActive: false })
+        .where(eq(usersSqlite.id, viewer.id));
+      const [deactivatedRow] = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.id, viewer.id));
+      expect(deactivatedRow.isActive).toBe(false);
+
+      const userRepository = new UserRepository(db);
+      const staleService = new UserService(userRepository, communityRepository);
+      const staleRead = vi
+        .spyOn(userRepository, 'findByIdAsSuperAdmin')
+        .mockResolvedValueOnce({ ...deactivatedRow, isActive: true })
+        .mockResolvedValueOnce({ ...deactivatedRow, isActive: true });
+
+      // The call may resolve or reject; either way the stored row must not
+      // be reactivated.
+      await staleService
+        .updateUserAsSuperAdmin(viewer.id, { isActive: true })
+        .catch(() => undefined);
+      let [row] = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.id, viewer.id));
+      expect(row.isActive).toBe(false);
+
+      // A profile field bundled onto the stale reactivation must not
+      // smuggle isActive back in either.
+      const second = await staleService
+        .updateUserAsSuperAdmin(viewer.id, {
+          firstName: 'Stale',
+          isActive: true,
+        })
+        .then(
+          () => true,
+          () => false
+        );
+      [row] = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.id, viewer.id));
+      expect(row.isActive).toBe(false);
+      // The profile write is only observable when the call resolved.
+      if (second) {
+        expect(row.firstName).toBe('Stale');
+      }
+
+      staleRead.mockRestore();
+    });
+  });
+
+  describe('updateByIdAsSuperAdmin conditional write (B5)', () => {
+    it('refuses to reactivate a deactivated community account but reactivates a super_admin row', async () => {
+      const userRepository = new UserRepository(db);
+      const inactiveViewer = await insertUser(
+        privateCommunityId,
+        'viewer',
+        'conditional-viewer',
+        { isActive: false }
+      );
+
+      // The repository write must not reactivate a community account on its
+      // own; it may throw instead.
+      await userRepository
+        .updateByIdAsSuperAdmin(inactiveViewer.id, { isActive: true })
+        .catch(() => undefined);
+      const [viewerRow] = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.id, inactiveViewer.id));
+      expect(viewerRow.isActive).toBe(false);
+
+      // The same write on a system account is a lifecycle record: it may
+      // reactivate it.
+      const inactiveSystem = await insertUser(
+        otherCommunityId,
+        'super_admin',
+        'conditional-system',
+        { isActive: false }
+      );
+      await userRepository.updateByIdAsSuperAdmin(inactiveSystem.id, {
+        isActive: true,
+      });
+      const [systemRow] = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.id, inactiveSystem.id));
+      expect(systemRow.isActive).toBe(true);
+    });
+  });
+
+  describe('setPublicationAsCommunityAdmin no-op authority (Sol)', () => {
+    // Re-sending the stored publicStories value is still a publication
+    // decision: the no-op shortcut must not hand the community row to a
+    // caller without community authority. privateCommunity stores
+    // publicStories = false.
+    it('rejects a null actor even for the stored value, and a missing community does not soften the check', async () => {
+      await expect(
+        communityService.setPublicationAsCommunityAdmin(
+          privateCommunityId,
+          false,
+          null
+        )
+      ).rejects.toThrow(PublicationAuthorityRequiredError);
+
+      await expect(
+        communityService.setPublicationAsCommunityAdmin(
+          999_999_999,
+          false,
+          null
+        )
+      ).rejects.toThrow(PublicationAuthorityRequiredError);
+    });
+
+    it('rejects an other-community admin for the stored value and returns no row', async () => {
+      await expect(
+        communityService.setPublicationAsCommunityAdmin(
+          privateCommunityId,
+          false,
+          adminActor(otherCommunityId, otherAdmin.id)
+        )
+      ).rejects.toThrow(PublicationAuthorityRequiredError);
+    });
+
+    it('rejects a same-community viewer for the stored value and returns no row', async () => {
+      await expect(
+        communityService.setPublicationAsCommunityAdmin(
+          privateCommunityId,
+          false,
+          { id: viewer.id, role: 'viewer', communityId: privateCommunityId }
+        )
+      ).rejects.toThrow(PublicationAuthorityRequiredError);
+    });
+
+    it('resolves the no-op to the community row for a same-community admin', async () => {
+      const updated = await communityService.setPublicationAsCommunityAdmin(
+        privateCommunityId,
+        false,
+        adminActor()
+      );
+      expect(updated?.id).toBe(privateCommunityId);
+      expect(updated?.publicStories).toBe(false);
+    });
+  });
+
+  describe('first-administrator provisioning lock pins (Nit 1)', () => {
+    it('locks the community row with SELECT ... FOR UPDATE on PostgreSQL', async () => {
+      // Lazy client on an unroutable address: toSQL() only renders SQL, so
+      // it never connects and there is nothing to close.
+      //
+      // The real PG concurrency run lives in the parity script; a PG CI lane
+      // is #161.
+      const lazyClient = postgres('postgres://u:p@127.0.0.1:1/x', { max: 1 });
+      const pgDb = drizzle(lazyClient);
+
+      const query = provisioningLockQuery(pgDb, communitiesPg, 7);
+      const { sql, params } = query.toSQL();
+
+      expect(sql).toMatch(/for update/i);
+      expect(params).toContain(7);
+    });
+
+    it('runs SQLite provisioning in a BEGIN IMMEDIATE transaction', async () => {
+      const txSpy = vi.spyOn(db, 'transaction');
+
+      const values = TestDataFactory.createUser(emptyCommunityId, {
+        email: `guard-provision-${stamp}@example.test`,
+        role: 'admin',
+        passwordHash,
+        isActive: true,
+      });
+      const created =
+        await communityRepository.provisionFirstAdministrator(values);
+
+      expect(created).not.toBeNull();
+      expect(created).toMatchObject({
+        communityId: emptyCommunityId,
+        role: 'admin',
+      });
+      expect(txSpy).toHaveBeenCalledWith(expect.any(Function), {
+        behavior: 'immediate',
+      });
+
+      txSpy.mockRestore();
+    });
+  });
+
+  describe('last active administrator recoverability (Nit 2)', () => {
+    // A community must never lose its last active administrator: neither
+    // system privilege nor the administrator themself may remove it.
+    const rowFor = async (id: number) => {
+      const [row] = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.id, id));
+      return row;
+    };
+
+    it('rejects a super admin deactivating the only active administrator, who stays active', async () => {
+      await expect(
+        userService.updateUserAsSuperAdmin(admin.id, { isActive: false })
+      ).rejects.toThrow(LastActiveAdministratorError);
+      expect((await rowFor(admin.id)).isActive).toBe(true);
+    });
+
+    it('rejects a super admin deactivating the only active administrator through the delete path', async () => {
+      await expect(
+        userService.deactivateUserAsSuperAdmin(admin.id)
+      ).rejects.toThrow(LastActiveAdministratorError);
+    });
+
+    it('rejects the sole administrator deactivating themself in their own community', async () => {
+      await expect(
+        userService.updateUserInCommunity(
+          admin.id,
+          { isActive: false },
+          privateCommunityId
+        )
+      ).rejects.toThrow();
+    });
+
+    it('rejects the sole administrator demoting themself, keeping the role', async () => {
+      await expect(
+        userService.updateUserInCommunity(
+          admin.id,
+          { role: 'editor' },
+          privateCommunityId
+        )
+      ).rejects.toThrow();
+      expect((await rowFor(admin.id)).role).toBe('admin');
+    });
+
+    it('allows deactivating one administrator once a second active administrator exists', async () => {
+      await insertUser(privateCommunityId, 'admin', 'second-admin');
+      const updated = await userService.updateUserAsSuperAdmin(admin.id, {
+        isActive: false,
+      });
+      expect(updated.isActive).toBe(false);
+      expect((await rowFor(admin.id)).isActive).toBe(false);
+    });
+
+    it('does not count an inactive second administrator', async () => {
+      await insertUser(privateCommunityId, 'admin', 'inactive-second-admin', {
+        isActive: false,
+      });
+      await expect(
+        userService.updateUserAsSuperAdmin(admin.id, { isActive: false })
+      ).rejects.toThrow(LastActiveAdministratorError);
+    });
+
+    it('refuses to provision an inactive first administrator and creates no row', async () => {
+      await expect(
+        userService.createUserAsSuperAdmin({
+          email: `guard-inactive-first-${stamp}@example.test`,
+          password: STRONG_PASSWORD,
+          firstName: 'Inactive',
+          lastName: 'First',
+          role: 'admin',
+          isActive: false,
+          communityId: emptyCommunityId,
+        })
+      ).rejects.toThrow(LastActiveAdministratorError);
+      expect(await usersInCommunity(emptyCommunityId)).toHaveLength(0);
     });
   });
 });

@@ -29,6 +29,7 @@ import {
   InvalidCommunityError,
   UserNotFoundError,
   CommunityAuthorityRequiredError,
+  LastActiveAdministratorError,
 } from '../services/user.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
@@ -1330,6 +1331,13 @@ export async function superAdminRoutes(
           'Failed to update user'
         );
 
+        if (error instanceof LastActiveAdministratorError) {
+          return reply.code(409).send({
+            error: { message: error.message },
+            statusCode: 409,
+          });
+        }
+
         if (error instanceof CommunityAuthorityRequiredError) {
           return communityAuthorityRequired(reply);
         }
@@ -1407,6 +1415,13 @@ export async function superAdminRoutes(
           { error: errorMessage, id: request.params.id },
           'Failed to deactivate user'
         );
+
+        if (error instanceof LastActiveAdministratorError) {
+          return reply.code(409).send({
+            error: { message: error.message },
+            statusCode: 409,
+          });
+        }
 
         if (error instanceof UserNotFoundError) {
           return reply.code(404).send({

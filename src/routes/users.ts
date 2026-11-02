@@ -38,6 +38,7 @@ import {
   UserNotFoundError,
   SuperAdminRoleError,
   CommunityAuthorityRequiredError,
+  LastActiveAdministratorError,
   SelfDeletionError,
 } from '../services/user.service.js';
 import { UserRepository } from '../repositories/user.repository.js';
@@ -687,6 +688,13 @@ export async function userRoutes(
           });
         }
 
+        if (error instanceof LastActiveAdministratorError) {
+          return reply.status(409).send({
+            error: { message: error.message },
+            statusCode: 409,
+          });
+        }
+
         if (error instanceof SuperAdminRoleError) {
           return reply.status(403).send({
             error: { message: error.message },
@@ -839,6 +847,13 @@ export async function userRoutes(
         if (error instanceof DuplicateEmailError) {
           return reply.status(409).send({
             error: error.message,
+            statusCode: 409,
+          });
+        }
+
+        if (error instanceof LastActiveAdministratorError) {
+          return reply.status(409).send({
+            error: { message: error.message },
             statusCode: 409,
           });
         }

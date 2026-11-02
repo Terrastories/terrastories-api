@@ -1384,8 +1384,13 @@ describe('StoryService', () => {
       expect(result!.interviewLocationId).toBeNull();
     });
 
-    it('masks both relation IDs in listStories rows without relation keys, for a viewer and an admin', async () => {
+    it('keeps interviewerId for an editor and an admin but masks interviewLocationId in listStories rows; a viewer loses both', async () => {
       // Arrange: findMany rows carry the raw FKs but never the relations.
+      // List/search rules: a canonical V2 editor or admin may read every
+      // same-community speaker, including a withdrawn one, so the bare
+      // interviewerId is kept for them; a restricted place is unavailable to
+      // every role and the row does not say whether the place is restricted,
+      // so the bare interviewLocationId is masked for every role.
       const bareRow = createReadableStory({
         interviewerId: 88,
         interviewLocationId: 42,
@@ -1408,6 +1413,13 @@ describe('StoryService', () => {
         testData.users.viewer.role,
         testData.community.id
       );
+      const editorResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.editor.id,
+        testData.users.editor.role,
+        testData.community.id
+      );
       const adminResult = await storyService.listStories(
         {},
         { page: 1, limit: 10 },
@@ -1416,15 +1428,16 @@ describe('StoryService', () => {
         testData.community.id
       );
 
-      // Assert: admins keep withdrawn relations, but no relation was loaded
-      // here, so the unloaded IDs are masked for them too.
+      // Assert
       expect(viewerResult.data[0].interviewerId).toBeNull();
       expect(viewerResult.data[0].interviewLocationId).toBeNull();
-      expect(adminResult.data[0].interviewerId).toBeNull();
+      expect(editorResult.data[0].interviewerId).toBe(88);
+      expect(editorResult.data[0].interviewLocationId).toBeNull();
+      expect(adminResult.data[0].interviewerId).toBe(88);
       expect(adminResult.data[0].interviewLocationId).toBeNull();
     });
 
-    it('masks both relation IDs in searchStories rows without relation keys, for a viewer and an admin', async () => {
+    it('keeps interviewerId for an editor and an admin but masks interviewLocationId in searchStories rows; a viewer loses both', async () => {
       const bareRow = createReadableStory({
         interviewerId: 88,
         interviewLocationId: 42,
@@ -1447,6 +1460,13 @@ describe('StoryService', () => {
         testData.users.viewer.role,
         testData.community.id
       );
+      const editorResult = await storyService.searchStories(
+        'interview',
+        {},
+        testData.users.editor.id,
+        testData.users.editor.role,
+        testData.community.id
+      );
       const adminResult = await storyService.searchStories(
         'interview',
         {},
@@ -1456,10 +1476,12 @@ describe('StoryService', () => {
       );
 
       // Assert
-      for (const result of [viewerResult, adminResult]) {
-        expect(result[0].interviewerId).toBeNull();
-        expect(result[0].interviewLocationId).toBeNull();
-      }
+      expect(viewerResult[0].interviewerId).toBeNull();
+      expect(viewerResult[0].interviewLocationId).toBeNull();
+      expect(editorResult[0].interviewerId).toBe(88);
+      expect(editorResult[0].interviewLocationId).toBeNull();
+      expect(adminResult[0].interviewerId).toBe(88);
+      expect(adminResult[0].interviewLocationId).toBeNull();
     });
 
     it('keeps interviewerId on a direct read when an admin loads a readable interviewer', async () => {

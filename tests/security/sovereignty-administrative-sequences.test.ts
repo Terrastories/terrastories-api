@@ -900,4 +900,57 @@ describe('V2 sovereignty administrative sequences', () => {
       ]);
     });
   });
+
+  describe('community lockout protection (last active administrator)', () => {
+    // A community must never lose its only active administrator: system
+    // privilege cannot lock the community out, and the sole administrator
+    // cannot remove or demote themself (SPEC-V2 §7 recoverability).
+    it('rejects a super admin deactivating or deleting the only community administrator, who still logs in', async () => {
+      const systemCookie = await cookieFor(superAdmin.email, otherCommunityId);
+
+      const deactivate = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/super_admin/users/${privateAdmin.id}`,
+        headers: { cookie: systemCookie },
+        payload: { isActive: false },
+      });
+      expect(deactivate.statusCode).toBe(409);
+      expect(deactivate.json()).toMatchObject({
+        error: { message: expect.any(String) },
+        statusCode: 409,
+      });
+
+      const remove = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/super_admin/users/${privateAdmin.id}`,
+        headers: { cookie: systemCookie },
+      });
+      expect(remove.statusCode).toBe(409);
+
+      // After both attempts the administrator still authenticates.
+      expect(
+        (await login(privateAdmin.email, privateCommunityId)).statusCode
+      ).toBe(200);
+    });
+
+    it('rejects the sole community administrator deactivating or demoting themself', async () => {
+      const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
+
+      const deactivate = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/users/${privateAdmin.id}`,
+        headers: { cookie },
+        payload: { isActive: false },
+      });
+      expect(deactivate.statusCode).toBe(409);
+
+      const demote = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/users/${privateAdmin.id}`,
+        headers: { cookie },
+        payload: { role: 'editor' },
+      });
+      expect(demote.statusCode).toBe(409);
+    });
+  });
 });

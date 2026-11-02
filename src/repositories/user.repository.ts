@@ -13,7 +13,7 @@
  * - Pagination and filtering support
  */
 
-import { eq, and, like, desc, asc, count, or, sql } from 'drizzle-orm';
+import { eq, and, like, desc, asc, count, or, sql, ne } from 'drizzle-orm';
 import {
   getUsersTable,
   type User,
@@ -703,6 +703,31 @@ export class UserRepository {
   }
 
   /**
+   * Number of active `admin` accounts in a community, optionally excluding
+   * one account. Used to refuse a change that would leave a community with
+   * no active administrator (unrecoverable lockout).
+   */
+  async countActiveAdmins(
+    communityId: number,
+    excludeUserId?: number
+  ): Promise<number> {
+    const usersTable = await getUsersTable();
+    const conditions = [
+      eq(usersTable.communityId, communityId),
+      eq(usersTable.role, 'admin'),
+      eq(usersTable.isActive, true),
+    ];
+    if (excludeUserId !== undefined) {
+      conditions.push(ne(usersTable.id, excludeUserId));
+    }
+    const [row] = await this.database
+      .select({ n: count() })
+      .from(usersTable)
+      .where(and(...conditions));
+    return Number(row?.n ?? 0);
+  }
+
+  /**
    * Update user by ID across all communities (super admin only)
    * @param id - User ID
    * @param data - Update data
@@ -720,6 +745,40 @@ export class UserRepository {
         ...data,
         updatedAt: new Date(),
       };
+
+      // SPEC-V2 §7 (B5): system authority never reactivates a community
+      // account. The reactivation is conditional in SQL, so a concurrent
+      // community deactivation committed after the caller's read is never
+      // undone; the remaining fields still apply.
+      if (data.isActive === true) {
+        const reactivated = await this.database
+          .update(usersTable)
+          .set(updateData)
+          .where(
+            and(
+              eq(usersTable.id, id),
+              or(
+                eq(usersTable.role, 'super_admin'),
+                eq(usersTable.isActive, true)
+              )
+            )
+          )
+          .returning();
+        if (reactivated && reactivated.length > 0) {
+          return reactivated[0];
+        }
+        const { isActive: _ignored, ...withoutStatus } = updateData;
+        void _ignored;
+        const updated = await this.database
+          .update(usersTable)
+          .set(withoutStatus)
+          .where(eq(usersTable.id, id))
+          .returning();
+        if (!updated || updated.length === 0) {
+          throw new Error('User not found');
+        }
+        return updated[0];
+      }
 
       const updatedUsers = await this.database
         .update(usersTable)

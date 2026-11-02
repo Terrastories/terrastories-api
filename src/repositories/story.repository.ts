@@ -100,6 +100,13 @@ export interface StoryWithRelations extends Story {
     culturalRole?: string;
     storyRole?: string;
     sortOrder?: number;
+    /**
+     * Physical Fastify withdrawal flag (speakers.is_active). Carried so
+     * services can apply the story-derived speaker projection (SPEC-V2
+     * §6.5): callers without the editor/admin gate never see a withdrawn
+     * speaker inside a readable story. Not a DTO field.
+     */
+    isActive?: boolean;
   }>;
   community: {
     id: number;
@@ -132,6 +139,7 @@ export interface StoryWithRelations extends Story {
     birthYear?: number;
     elderStatus: boolean;
     culturalRole?: string;
+    isActive?: boolean;
   } | null;
 }
 
@@ -459,6 +467,9 @@ export class StoryRepository {
         birthYear: speakersTable.birthYear,
         elderStatus: speakersTable.elderStatus,
         culturalRole: speakersTable.culturalRole,
+        // SPEC-V2 §6.5: speaker withdrawal flag for the story-derived
+        // speaker projection in StoryService.
+        isActive: speakersTable.isActive,
         storyRole: storySpeakersTable.storyRole,
         sortOrder: storySpeakersTable.sortOrder,
       })
@@ -480,6 +491,7 @@ export class StoryRepository {
       culturalRole: s.storyRole || s.culturalRole || undefined,
       storyRole: s.storyRole || 'narrator',
       sortOrder: s.sortOrder || 0,
+      isActive: s.isActive,
     }));
 
     // Get interview location if specified
@@ -492,7 +504,10 @@ export class StoryRepository {
         .where(
           and(
             eq(placesTable.id, story.interviewLocationId),
-            eq(placesTable.communityId, story.communityId)
+            eq(placesTable.communityId, story.communityId),
+            // SPEC-V2 §6.4: a restricted place is unavailable to every role
+            // and never appears in a story-derived projection.
+            eq(placesTable.isRestricted, false)
           )
         )
         .limit(1);
@@ -534,6 +549,9 @@ export class StoryRepository {
           birthYear: speaker.birthYear || undefined,
           elderStatus: speaker.elderStatus,
           culturalRole: speaker.culturalRole || undefined,
+          // SPEC-V2 §6.5: the service drops withdrawn interviewers for
+          // callers without the editor/admin gate.
+          isActive: speaker.isActive,
         };
       }
     }
@@ -692,6 +710,7 @@ export class StoryRepository {
         birthYear: number | null;
         elderStatus: boolean;
         culturalRole: string | null;
+        isActive: boolean;
         storyRole: string | null;
         sortOrder: number | null;
       }> = [];
@@ -706,6 +725,9 @@ export class StoryRepository {
             birthYear: speakersTable.birthYear,
             elderStatus: speakersTable.elderStatus,
             culturalRole: speakersTable.culturalRole,
+            // SPEC-V2 §6.5: speaker withdrawal flag for the story-derived
+            // speaker projection in StoryService.
+            isActive: speakersTable.isActive,
             // These columns might not exist yet
             storyRole: storySpeakersTable.storyRole,
             sortOrder: storySpeakersTable.sortOrder,
@@ -730,6 +752,7 @@ export class StoryRepository {
               birthYear: speakersTable.birthYear,
               elderStatus: speakersTable.elderStatus,
               culturalRole: speakersTable.culturalRole,
+              isActive: speakersTable.isActive,
               storyRole: sql<string | null>`NULL`,
               sortOrder: sql<number | null>`NULL`,
             })
@@ -772,6 +795,7 @@ export class StoryRepository {
           birthYear: number | null;
           elderStatus: boolean;
           culturalRole: string | null;
+          isActive: boolean;
           storyRole: string | null;
           sortOrder: number | null;
         }>
@@ -829,6 +853,9 @@ export class StoryRepository {
           storyRole: (s as any).storyRole || 'narrator',
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           sortOrder: (s as any).sortOrder || 0,
+          // SPEC-V2 §6.5: withdrawal flag for the StoryService projection.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          isActive: (s as any).isActive,
         }));
 
         return {

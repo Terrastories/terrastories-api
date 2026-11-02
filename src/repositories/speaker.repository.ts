@@ -92,6 +92,11 @@ export interface CommunitySpeakerParams {
 export interface SpeakerSearchParams {
   page: number;
   limit: number;
+  /**
+   * Exclude withdrawn (inactive) speakers at the database level (SPEC-V2
+   * §6.5); set by the service's role-aware gate, never by raw caller input.
+   */
+  activeOnly?: boolean;
 }
 
 /**
@@ -515,7 +520,9 @@ export class SpeakerRepository {
   }
 
   /**
-   * Search speakers by name
+   * Search speakers by name. With `activeOnly`, withdrawn (inactive) speakers
+   * are excluded at the database level (SPEC-V2 §6.5) so non-gated callers
+   * cannot discover them through search either.
    */
   async searchByName(
     communityId: number,
@@ -523,7 +530,7 @@ export class SpeakerRepository {
     params: SpeakerSearchParams
   ): Promise<PaginatedResponse<Speaker>> {
     const speakersTable = await getSpeakersTable();
-    const { page, limit } = params;
+    const { page, limit, activeOnly = false } = params;
     const offset = (page - 1) * limit;
 
     // Use case-insensitive search for Postgres, case-sensitive for SQLite
@@ -531,10 +538,16 @@ export class SpeakerRepository {
       ? ilike(speakersTable.name, `%${query}%`)
       : like(speakersTable.name, `%${query.toLowerCase()}%`);
 
-    const whereCondition = and(
+    const whereConditions = [
       eq(speakersTable.communityId, communityId),
-      searchCondition
-    );
+      searchCondition,
+    ];
+
+    if (activeOnly) {
+      whereConditions.push(eq(speakersTable.isActive, true));
+    }
+
+    const whereCondition = and(...whereConditions);
 
     // Get total count
     const [{ count: total }] = await (this.db as any)

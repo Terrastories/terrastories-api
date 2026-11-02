@@ -761,6 +761,335 @@ describe('StoryService', () => {
     });
   });
 
+  describe('story-derived speaker withdrawal projection (SPEC-V2 §6.5)', () => {
+    // A withdrawn (inactive) speaker is absent from story.speakers for every
+    // caller without the canonical editor/admin gate — the physical Fastify
+    // viewer (V2 member), the legacy elder path, and anonymous/public
+    // callers. Editors and admins keep the full relation, exactly like the
+    // §6.4 place projection above but role-aware.
+    const activeStorySpeaker = {
+      id: 71,
+      name: 'Active Speaker',
+      bio: 'Still recording stories',
+      elderStatus: false,
+      isActive: true,
+      storyRole: 'narrator',
+      sortOrder: 0,
+    };
+    const withdrawnStorySpeaker = {
+      id: 72,
+      name: 'Withdrawn Speaker',
+      bio: 'WITHDRAWN-BIO',
+      elderStatus: false,
+      isActive: false,
+      storyRole: 'narrator',
+      sortOrder: 1,
+    };
+
+    const createReadableStoryWithWithdrawnSpeaker = (): StoryWithRelations =>
+      ({
+        id: 43,
+        title: 'Public Story Linking Withdrawn Speaker',
+        description: 'Readable by every same-community role',
+        slug: 'public-story-linking-withdrawn-speaker',
+        communityId: testData.community.id,
+        createdBy: testData.users.editor.id,
+        mediaUrls: [],
+        imageUrl: null,
+        audioUrl: null,
+        language: 'en',
+        tags: [],
+        privacyLevel: 'public',
+        isRestricted: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        places: [],
+        speakers: [activeStorySpeaker, withdrawnStorySpeaker],
+        community: testData.community,
+        author: testData.users.editor,
+      }) as any;
+
+    it('drops a withdrawn interviewer for a physical viewer (V2 member) and keeps it for an editor', async () => {
+      const withInterviewer = () =>
+        ({
+          ...createReadableStoryWithWithdrawnSpeaker(),
+          interviewer: {
+            id: 73,
+            name: 'Withdrawn Interviewer',
+            bio: 'WITHDRAWN-INTERVIEWER-BIO',
+            elderStatus: false,
+            isActive: false,
+          },
+        }) as any;
+
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        withInterviewer()
+      );
+      const viewerResult = await storyService.getStoryById(
+        43,
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+      expect(viewerResult).not.toBeNull();
+      expect(viewerResult!.interviewer).toBeNull();
+      expect(JSON.stringify(viewerResult)).not.toContain(
+        'WITHDRAWN-INTERVIEWER-BIO'
+      );
+
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        withInterviewer()
+      );
+      const editorResult = await storyService.getStoryById(
+        43,
+        testData.users.editor.id,
+        testData.users.editor.role,
+        testData.community.id
+      );
+      expect(editorResult!.interviewer).toMatchObject({ id: 73 });
+    });
+
+    it('removes the withdrawn speaker for a physical viewer (V2 member) on getStoryById', async () => {
+      // Arrange
+      const story = createReadableStoryWithWithdrawnSpeaker();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getStoryById(
+        story.id,
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(result).not.toBeNull();
+      expect(result!.speakers.map((speaker) => speaker.id)).toEqual([
+        activeStorySpeaker.id,
+      ]);
+      expect(JSON.stringify(result)).not.toContain('WITHDRAWN-BIO');
+    });
+
+    it('removes the withdrawn speaker for the legacy elder role on getStoryById', async () => {
+      // Arrange
+      const story = createReadableStoryWithWithdrawnSpeaker();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getStoryById(
+        story.id,
+        testData.users.elder.id,
+        testData.users.elder.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(result).not.toBeNull();
+      expect(result!.speakers.map((speaker) => speaker.id)).toEqual([
+        activeStorySpeaker.id,
+      ]);
+    });
+
+    it('keeps the withdrawn speaker for an editor and an admin on getStoryById', async () => {
+      // Arrange
+      const story = createReadableStoryWithWithdrawnSpeaker();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      // Act
+      const editorResult = await storyService.getStoryById(
+        story.id,
+        testData.users.editor.id,
+        testData.users.editor.role,
+        testData.community.id
+      );
+      const adminResult = await storyService.getStoryById(
+        story.id,
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(editorResult!.speakers.map((speaker) => speaker.id)).toEqual([
+        activeStorySpeaker.id,
+        withdrawnStorySpeaker.id,
+      ]);
+      expect(adminResult!.speakers.map((speaker) => speaker.id)).toEqual([
+        activeStorySpeaker.id,
+        withdrawnStorySpeaker.id,
+      ]);
+    });
+
+    it('removes the withdrawn speaker for a viewer on getStoryBySlug', async () => {
+      // Arrange
+      const story = createReadableStoryWithWithdrawnSpeaker();
+      mockStoryRepository.findBySlugWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getStoryBySlug(
+        story.slug,
+        testData.community.id,
+        testData.users.viewer.id,
+        testData.users.viewer.role
+      );
+
+      // Assert
+      expect(result).not.toBeNull();
+      expect(result!.speakers.map((speaker) => speaker.id)).toEqual([
+        activeStorySpeaker.id,
+      ]);
+    });
+
+    it('filters the withdrawn speaker for a viewer in listStories and keeps it for an editor', async () => {
+      // Arrange
+      const story = createReadableStoryWithWithdrawnSpeaker();
+      mockStoryRepository.findMany.mockResolvedValue({
+        data: [story],
+        total: 1,
+        page: 1,
+        limit: 10,
+        totalPages: 1,
+      });
+
+      // Act
+      const viewerResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.viewer.id,
+        testData.users.viewer.role,
+        testData.community.id
+      );
+      const editorResult = await storyService.listStories(
+        {},
+        { page: 1, limit: 10 },
+        testData.users.editor.id,
+        testData.users.editor.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(viewerResult.data[0].speakers.map((s) => s.id)).toEqual([
+        activeStorySpeaker.id,
+      ]);
+      expect(editorResult.data[0].speakers.map((s) => s.id)).toEqual([
+        activeStorySpeaker.id,
+        withdrawnStorySpeaker.id,
+      ]);
+    });
+
+    it('keeps inactive speakers on createStory results for an admin and removes them for an elder', async () => {
+      // Arrange
+      const baseStory = createReadableStoryWithWithdrawnSpeaker();
+      mockStoryRepository.generateUniqueSlug.mockResolvedValue(
+        'created-story-with-withdrawn-speaker'
+      );
+      mockStoryRepository.validateSpeakersInCommunity.mockResolvedValue(true);
+      mockStoryRepository.create.mockResolvedValue({
+        ...baseStory,
+        id: 44,
+        title: 'Created Story With Withdrawn Speaker',
+      });
+
+      // Act
+      const adminResult = await storyService.createStory(
+        {
+          title: 'Created Story With Withdrawn Speaker',
+          communityId: testData.community.id,
+          createdBy: testData.users.admin.id,
+          speakerIds: [activeStorySpeaker.id, withdrawnStorySpeaker.id],
+        },
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+      const elderResult = await storyService.createStory(
+        {
+          title: 'Created Story With Withdrawn Speaker',
+          communityId: testData.community.id,
+          createdBy: testData.users.elder.id,
+          speakerIds: [activeStorySpeaker.id, withdrawnStorySpeaker.id],
+        },
+        testData.users.elder.id,
+        testData.users.elder.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(adminResult.speakers.map((s) => s.id)).toEqual([
+        activeStorySpeaker.id,
+        withdrawnStorySpeaker.id,
+      ]);
+      expect(elderResult.speakers.map((s) => s.id)).toEqual([
+        activeStorySpeaker.id,
+      ]);
+    });
+
+    it('keeps inactive speakers on updateStory results for an admin', async () => {
+      // Arrange
+      const existingStory = createReadableStoryWithWithdrawnSpeaker();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(
+        existingStory
+      );
+      mockStoryRepository.update.mockResolvedValue({
+        ...existingStory,
+        title: 'Updated Story With Withdrawn Speaker',
+      });
+
+      // Act
+      const result = await storyService.updateStory(
+        existingStory.id,
+        { title: 'Updated Story With Withdrawn Speaker' },
+        testData.users.admin.id,
+        testData.users.admin.role,
+        testData.community.id
+      );
+
+      // Assert
+      expect(result.speakers.map((s) => s.id)).toEqual([
+        activeStorySpeaker.id,
+        withdrawnStorySpeaker.id,
+      ]);
+    });
+
+    it('removes the withdrawn speaker for anonymous callers on getPublicStoryById', async () => {
+      // Arrange
+      const story = createReadableStoryWithWithdrawnSpeaker();
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+
+      // Act
+      const result = await storyService.getPublicStoryById(
+        String(story.id),
+        String(testData.community.id)
+      );
+
+      // Assert: public/anonymous callers never get inactive speakers.
+      expect(result).not.toBeNull();
+      expect(result!.speakers.map((speaker) => speaker.id)).toEqual([
+        activeStorySpeaker.id,
+      ]);
+    });
+
+    it('removes the withdrawn speaker for anonymous callers on getPublicStoriesByCommunity', async () => {
+      // Arrange
+      const story = createReadableStoryWithWithdrawnSpeaker();
+      mockStoryRepository.findMany.mockResolvedValue({
+        data: [story],
+        total: 1,
+      });
+
+      // Act
+      const result = await storyService.getPublicStoriesByCommunity(
+        String(testData.community.id),
+        { page: 1, limit: 10 }
+      );
+
+      // Assert
+      expect(result.stories[0].speakers.map((speaker) => speaker.id)).toEqual([
+        activeStorySpeaker.id,
+      ]);
+    });
+  });
+
   describe('updateStory - Association Management', () => {
     const createExistingStory = (): StoryWithRelations =>
       ({

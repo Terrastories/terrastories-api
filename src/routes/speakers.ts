@@ -88,13 +88,28 @@ const PaginationSchema = z.object({
     .describe('Items per page'),
 });
 
+// SPEC-V2 §6.5: `activeOnly` accepts only the explicit strings 'true'/'false'
+// (or real booleans). An empty query value is ignored-as-default; anything
+// else fails validation. `z.coerce.boolean` is forbidden here: it maps '' and
+// every other non-empty string to a hard boolean and let a query like
+// `?activeOnly=` widen a caller's reach.
+const ActiveOnlyQuerySchema = z.preprocess(
+  (value) => (value === '' || value === null ? undefined : value),
+  z
+    .union([z.boolean(), z.enum(['true', 'false'])])
+    .optional()
+    .transform((value) => {
+      if (value === undefined) {
+        return undefined;
+      }
+      return typeof value === 'boolean' ? value : value === 'true';
+    })
+);
+
 const SpeakerListQuerySchema = PaginationSchema.extend({
   elderOnly: z.coerce.boolean().optional().describe('Filter elders only'),
   culturalRole: z.string().optional().describe('Filter by cultural role'),
-  activeOnly: z.coerce
-    .boolean()
-    .optional()
-    .describe('Filter active speakers only'),
+  activeOnly: ActiveOnlyQuerySchema.describe('Filter active speakers only'),
   sortBy: z
     .enum(['name', 'created_at', 'updated_at'])
     .optional()
@@ -165,7 +180,11 @@ export async function speakerRoutes(
         const { id } = SpeakerIdSchema.parse(request.params);
         const { user } = request as AuthenticatedRequest;
 
-        const speaker = await service.getSpeakerById(id, user.communityId);
+        const speaker = await service.getSpeakerById(
+          id,
+          user.communityId,
+          user.role
+        );
 
         return reply.send({
           data: speaker,

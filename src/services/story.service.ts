@@ -403,7 +403,9 @@ export class StoryService {
       userId,
     });
 
-    return this.applyDualRead(this.projectStoryPlaces(story));
+    return this.applyDualRead(
+      this.projectStorySpeakers(this.projectStoryPlaces(story), userRole)
+    );
   }
 
   /**
@@ -488,7 +490,9 @@ export class StoryService {
       true
     );
 
-    return this.applyDualRead(this.projectStoryPlaces(story));
+    return this.applyDualRead(
+      this.projectStorySpeakers(this.projectStoryPlaces(story), userRole)
+    );
   }
 
   /**
@@ -567,7 +571,9 @@ export class StoryService {
       true
     );
 
-    return this.applyDualRead(this.projectStoryPlaces(story));
+    return this.applyDualRead(
+      this.projectStorySpeakers(this.projectStoryPlaces(story), userRole)
+    );
   }
 
   /**
@@ -774,7 +780,10 @@ export class StoryService {
 
     this.logger.info('Story updated successfully', { storyId: id, userId });
 
-    return this.projectStoryPlaces(updatedStory);
+    return this.projectStorySpeakers(
+      this.projectStoryPlaces(updatedStory),
+      userRole
+    );
   }
 
   /**
@@ -937,11 +946,14 @@ export class StoryService {
       );
 
       // Return database results directly - no additional in-memory filtering
-      // except the story-derived place projection (SPEC-V2 §6.4), applied
-      // on top of the database-level audience filtering.
+      // except the story-derived place (SPEC-V2 §6.4) and speaker
+      // withdrawal (§6.5) projections, applied on top of the database-level
+      // audience filtering.
       return {
         data: result.data.map((story) =>
-          this.applyDualRead(this.projectStoryPlaces(story))
+          this.applyDualRead(
+            this.projectStorySpeakers(this.projectStoryPlaces(story), userRole)
+          )
         ),
         total: result.total,
         page: result.page,
@@ -1050,6 +1062,54 @@ export class StoryService {
       ...story,
       places: story.places.filter((place) => place.isRestricted !== true),
     };
+  }
+
+  /**
+   * Story-derived speaker withdrawal projection (SPEC-V2 §6.5): a readable
+   * story does not widen a withdrawn speaker's audience. A speaker with
+   * `speakers.is_active = false` is removed from `story.speakers` for every
+   * caller without the canonical editor/admin gate — the physical Fastify
+   * viewer (V2 member), super_admin, the legacy `elder` path, and anonymous
+   * public callers (`userRole = null`). Editors and admins keep the full
+   * relation. Applied in the same place and style as `projectStoryPlaces`.
+   */
+  private projectStorySpeakers(
+    story: StoryWithRelations,
+    userRole: string | null
+  ): StoryWithRelations {
+    if (userRole !== null && this.storySpeakerWithdrawalAllowed(userRole)) {
+      return story;
+    }
+    const hasWithdrawnSpeaker = Boolean(
+      story.speakers?.some((speaker) => speaker.isActive === false)
+    );
+    const hasWithdrawnInterviewer = story.interviewer?.isActive === false;
+    if (!hasWithdrawnSpeaker && !hasWithdrawnInterviewer) {
+      return story;
+    }
+    return {
+      ...story,
+      ...(hasWithdrawnSpeaker
+        ? {
+            speakers: story.speakers.filter(
+              (speaker) => speaker.isActive !== false
+            ),
+          }
+        : {}),
+      // The interviewer is a story-derived speaker relation too (§6.5).
+      ...(hasWithdrawnInterviewer ? { interviewer: null } : {}),
+    };
+  }
+
+  /**
+   * §6.5 gate for story-derived speaker relations, mirroring the speaker
+   * service: only a physical role mapping to canonical V2 `editor`/`admin`
+   * keeps withdrawn speakers. A null v2Role (legacy `elder`, unknown roles)
+   * never grants them.
+   */
+  private storySpeakerWithdrawalAllowed(userRole: string): boolean {
+    const v2Role = fastifyRoleToV2Role(userRole);
+    return v2Role === 'editor' || v2Role === 'admin';
   }
 
   /**
@@ -1336,7 +1396,10 @@ export class StoryService {
 
       return {
         stories: publicStories.map((story) =>
-          this.applyDualRead(this.projectStoryPlaces(story))
+          this.applyDualRead(
+            // Anonymous callers never receive withdrawn speakers (§6.5).
+            this.projectStorySpeakers(this.projectStoryPlaces(story), null)
+          )
         ),
         total: result.total, // Use actual total from repository
       };
@@ -1401,7 +1464,10 @@ export class StoryService {
         communityId: parseInt(communityId, 10),
       });
 
-      return this.applyDualRead(this.projectStoryPlaces(story));
+      // Anonymous callers never receive withdrawn speakers (§6.5).
+      return this.applyDualRead(
+        this.projectStorySpeakers(this.projectStoryPlaces(story), null)
+      );
     } catch (error) {
       this.logger.error('Failed to get public story by ID:', {
         error: error instanceof Error ? error.message : String(error),

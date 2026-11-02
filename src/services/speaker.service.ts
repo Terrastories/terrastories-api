@@ -79,6 +79,11 @@ export interface ListSpeakersRequest {
 export interface SearchSpeakersRequest {
   page?: number;
   limit?: number;
+  /**
+   * Request filter, honored for callers holding the §6.5 editor/admin gate
+   * only; never widens anyone else's reach.
+   */
+  activeOnly?: boolean;
 }
 
 /**
@@ -134,15 +139,25 @@ export class SpeakerService {
   }
 
   /**
-   * Get speaker by ID with community isolation
+   * Get speaker by ID with community isolation. A withdrawn (inactive)
+   * speaker is indistinguishable from a missing one for callers without the
+   * editor/admin gate (SPEC-V2 §6.5): same 404, no existence signal.
    */
-  async getSpeakerById(id: number, communityId: number): Promise<Speaker> {
+  async getSpeakerById(
+    id: number,
+    communityId: number,
+    userRole: UserRole | string
+  ): Promise<Speaker> {
     const speaker = await this.repository.getByIdWithCommunityCheck(
       id,
       communityId
     );
 
     if (!speaker) {
+      throw new SpeakerNotFoundError();
+    }
+
+    if (speaker.isActive === false && !this.maySeeInactiveSpeakers(userRole)) {
       throw new SpeakerNotFoundError();
     }
 
@@ -169,15 +184,22 @@ export class SpeakerService {
     }
 
     // Build repository parameters
+    //
+    // SPEC-V2 §6.5: `activeOnly` is a request filter, never a grant. Callers
+    // without the editor/admin gate are excluded from withdrawn speakers at
+    // the database level (isActive filter) regardless of the parameter;
+    // gated callers keep the explicit value and the legacy default.
+    const includeInactive = this.maySeeInactiveSpeakers(userRole);
     const repositoryParams: CommunitySpeakerParams = {
       page,
       limit,
       elderOnly: params.elderOnly || false,
       culturalRole: params.culturalRole,
-      activeOnly:
-        params.activeOnly !== undefined
+      activeOnly: includeInactive
+        ? params.activeOnly !== undefined
           ? params.activeOnly
-          : !['admin', 'super_admin'].includes(userRole),
+          : !['admin', 'super_admin'].includes(userRole)
+        : true,
       sortBy: params.sortBy || 'name',
       sortOrder: params.sortOrder || 'asc',
     };
@@ -280,14 +302,16 @@ export class SpeakerService {
   }
 
   /**
-   * Search speakers by name
+   * Search speakers by name. Withdrawn (inactive) speakers stay hidden from
+   * callers without the editor/admin gate (SPEC-V2 §6.5), enforced at the
+   * database level.
    */
   async searchSpeakers(
     communityId: number,
     query: string,
     params: SearchSpeakersRequest,
     _userId: number,
-    _userRole: UserRole
+    userRole: UserRole
   ): Promise<PaginatedResponse<Speaker>> {
     // Validate search query
     if (!query || query.trim().length === 0) {
@@ -302,9 +326,11 @@ export class SpeakerService {
     const page = params.page || 1;
     const limit = params.limit || 20;
 
+    const includeInactive = this.maySeeInactiveSpeakers(userRole);
     const searchParams: SpeakerSearchParams = {
       page,
       limit,
+      activeOnly: includeInactive ? (params.activeOnly ?? false) : true,
     };
 
     return await this.repository.searchByName(
@@ -316,20 +342,29 @@ export class SpeakerService {
 
   /**
    * Get community speaker statistics. `role` decides whether withdrawn
-   * speakers are countable (editors/admins manage them; SPEC-V2 §6.5).
+   * speakers are countable: only canonical V2 editors/admins manage them
+   * (SPEC-V2 §6.5). A null v2Role — the legacy `elder` role and unknown
+   * values — must never grant the inactive view.
    */
   async getCommunityStats(
     communityId: number,
     role: string
   ): Promise<SpeakerStats> {
-    // Map the physical role to its canonical V2 role first (SPEC-V2 §6.2:
-    // Fastify `viewer` reasons as V2 `member`); null keeps the V1 path.
-    const v2Role = fastifyRoleToV2Role(role);
-    const includeInactive =
-      !v2Role || v2Role === 'editor' || v2Role === 'admin';
+    const includeInactive = this.maySeeInactiveSpeakers(role);
     return await this.repository.getCommunityStats(communityId, {
       includeInactive,
     });
+  }
+
+  /**
+   * The single §6.5 speaker-withdrawal gate: only a physical role mapping to
+   * the canonical V2 `editor`/`admin` may ever see inactive (withdrawn)
+   * speakers. Everyone else — Fastify viewer/member (V2 member), super_admin,
+   * the legacy `elder` role, and unknown roles (null v2Role) — never does.
+   */
+  private maySeeInactiveSpeakers(userRole: UserRole | string): boolean {
+    const v2Role = fastifyRoleToV2Role(userRole);
+    return v2Role === 'editor' || v2Role === 'admin';
   }
 
   /**

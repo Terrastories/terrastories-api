@@ -91,6 +91,9 @@ jobs:
     env:
       DATABASE_URL: postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test
       ALLOW_POSTGRES_TEST_RESET: 'true'
+      # Non-UTC host time zone: timestamp decoding must not depend on the
+      # runner being UTC (the gate once passed only on UTC hosts).
+      TZ: America/Sao_Paulo
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

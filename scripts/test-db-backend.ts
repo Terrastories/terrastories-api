@@ -172,6 +172,29 @@ function timestamp(value: string): number {
   return new Date(value).getTime();
 }
 
+/**
+ * Decode a raw PostgreSQL `timestamp without time zone` value as UTC.
+ *
+ * drizzlePostgres() installs a transparent parser for OID 1114 on the shared
+ * postgres.js client, so raw `client.unsafe()` reads return the server text
+ * (for example `2024-01-10 12:00:00`). `new Date()` would parse that text in the
+ * host time zone and make the gate pass only on UTC hosts. Mirror Drizzle's
+ * own `timestamp` decoding (`value + '+0000'`) so the gate checks what the
+ * application reads, on any host time zone.
+ */
+function postgresTimestamp(value: unknown): number {
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+  assert.equal(typeof value, 'string', 'expected a PostgreSQL timestamp value');
+  const decoded = new Date(`${value as string}+0000`).getTime();
+  assert.ok(
+    Number.isFinite(decoded),
+    `unparseable PostgreSQL timestamp ${String(value)}`
+  );
+  return decoded;
+}
+
 function seedPreviousReleaseSqlite(sqlite: Database.Database): void {
   const c = fixture.community;
   sqlite
@@ -677,11 +700,11 @@ async function verifyPostgresPreservation(
   assert.equal(community.country, null);
   assert.equal(community.beta, false);
   assert.equal(
-    new Date(community.created_at).getTime(),
+    postgresTimestamp(community.created_at),
     timestamp(fixture.community.createdAt)
   );
   assert.equal(
-    new Date(community.updated_at).getTime(),
+    postgresTimestamp(community.updated_at),
     timestamp(fixture.community.updatedAt)
   );
 
@@ -694,11 +717,11 @@ async function verifyPostgresPreservation(
   assert.equal(user.reset_password_token, null);
   assert.equal(user.sign_in_count, 0);
   assert.equal(
-    new Date(user.created_at).getTime(),
+    postgresTimestamp(user.created_at),
     timestamp(fixture.user.createdAt)
   );
   assert.equal(
-    new Date(user.updated_at).getTime(),
+    postgresTimestamp(user.updated_at),
     timestamp(fixture.user.updatedAt)
   );
 

@@ -30,7 +30,7 @@ npm run test:db:postgres
 
 The PostgreSQL gate is destructive and refuses to run unless the database name follows the dedicated test-database convention (for example `terrastories_test`, ending in `_test`) and `ALLOW_POSTGRES_TEST_RESET=true` is set. A substring such as `latest` is never considered a test database.
 
-Both gates are mandatory pull-request CI jobs (`.github/workflows/ci.yml`, jobs `database-sqlite` and `database-postgres`). The PostgreSQL gate deliberately uses plain `postgres:13-alpine`; passing it proves that application and migration behavior does not depend on PostGIS or another database-specific spatial extension.
+Both gates are mandatory pull-request CI jobs (`.github/workflows/ci.yml`, jobs `database-sqlite` and `database-postgres`). The PostgreSQL gate deliberately uses plain `postgres:13-alpine`; passing it proves that application and migration behavior does not depend on PostGIS or another database-specific spatial extension. The CI job also sets a non-UTC `TZ`, so the gate must pass on any host time zone; run it locally without overriding `TZ`.
 
 ## Docker persisted-volume compatibility
 

@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  issues: read
 
 jobs:
   # Trusted gate: the checker runs from the BASE branch checkout; the PR tree
@@ -40,6 +39,23 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.x
+
+      # `npm ci` in ci.yml, api-comparison.yml and user-workflow-test.yml reads
+      # the project .npmrc. Its `registry=` (with npm's default
+      # `replace-registry-host=npmjs`) would fetch other bytes than the audited
+      # lockfile names, so any .npmrc in the PR tree fails closed here.
+      - name: Reject PR-controlled npm configuration
+        working-directory: pr
+        run: |
+          if [ -e .npmrc ] || [ -L .npmrc ]; then
+            echo "::error::.npmrc is not allowed: npm ci would read it and could install other bytes than the audited package-lock.json."
+            exit 1
+          fi
+          nested="$(git ls-files | grep -cE '(^|/)\.npmrc"?$' || true)"
+          if [ "$nested" != "0" ]; then
+            echo "::error::$nested committed .npmrc file(s) found; .npmrc is not allowed anywhere in the repository."
+            exit 1
+          fi
 
       - name: Require a compatible trusted checker on the base branch
         run: |
@@ -75,7 +91,9 @@ jobs:
       - name: Scan changed history for secrets
         uses: trufflesecurity/trufflehog@1ea7fc1960b818e3c3ac3984f85922e3acba4061 # pinned main
         with:
-          version: 3.99.2
+          # The action runs "${image}:${version}", so the tag plus index
+          # digest pins the exact multi-arch image.
+          version: 3.99.2@sha256:47a84bc18a0d04a165498bbbd3bacfd84176661cbc91f8e0f85467f6a771e99a
           extra_args: --results=verified,unknown
 
   secret-scan-regression:
@@ -89,7 +107,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Detect an early-branch secret after merging main
-        run: bash scripts/secret-scan-merge-regression.sh 3.99.2
+        run: bash scripts/secret-scan-merge-regression.sh 3.99.2@sha256:47a84bc18a0d04a165498bbbd3bacfd84176661cbc91f8e0f85467f6a771e99a
 
   production_image:
     name: Production image evidence

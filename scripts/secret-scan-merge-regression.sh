@@ -10,7 +10,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <trufflehog-version>   (e.g. 3.99.2)" >&2
+  echo "usage: $0 <trufflehog-version>[@sha256:<digest>]   (e.g. 3.99.2@sha256:...)" >&2
 }
 
 if [[ $# -ne 1 ]]; then
@@ -19,7 +19,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 version=$1
-if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(@sha256:[0-9a-f]{64})?$ ]]; then
   usage
   exit 1
 fi

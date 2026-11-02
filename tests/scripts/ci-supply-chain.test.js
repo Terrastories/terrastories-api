@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import * as auditModule from '../../scripts/trusted-audit-baseline.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -378,7 +379,15 @@ describe('trusted dependency review gate', () => {
   });
 
   it('executes no npm command and uses no cache inside the PR tree', () => {
-    expect(block).not.toMatch(/\bnpm\s+(run|ci|install|exec|audit)\b/);
+    // Explanatory comments and "::error::" prose may NAME npm commands
+    // (for example "npm ci would read it"); no executable line may run one.
+    const executableLines = block
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .map((line) => line.replace(/echo\s+"[^"]*"/g, 'echo'));
+    expect(executableLines.join('\n')).not.toMatch(
+      /\bnpm\s+(run|ci|install|exec|audit)\b/
+    );
     expect(block).not.toContain('cache:');
   });
 
@@ -391,6 +400,24 @@ describe('trusted dependency review gate', () => {
 
   it('never grants the PR tree pull_request_target-style code access', () => {
     expect(workflow).not.toContain('pull_request_target');
+  });
+
+  it('rejects PR-controlled npm configuration inside the PR tree', () => {
+    expect(block).toContain('- name: Reject PR-controlled npm configuration');
+    expect(block).toContain('[ -e .npmrc ] || [ -L .npmrc ]');
+    expect(block).toContain("git ls-files | grep -cE '(^|/)\\.npmrc");
+  });
+
+  it('tracks no .npmrc anywhere in the repository itself', () => {
+    const tracked = spawnSync('git', ['ls-files'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    expect(tracked.status).toBe(0);
+    const npmrcFiles = (tracked.stdout || '')
+      .split('\n')
+      .filter((line) => /(^|\/)\.npmrc$/.test(line));
+    expect(npmrcFiles).toEqual([]);
   });
 });
 
@@ -443,21 +470,23 @@ describe('secret scan regression', () => {
   const regression = workflowJobBlock(workflow, 'secret-scan-regression');
 
   it('pins trufflehog at or above the early-branch-secret regression fix', () => {
-    const versionMatch = secretScan.match(
-      /version:\s*(\d+)\.(\d+)\.(\d+)\s*$/m
-    );
+    const versionMatch = secretScan.match(/^\s*version:\s*(\S+)\s*$/m);
     expect(versionMatch).not.toBeNull();
-    const version = versionMatch.slice(1, 4).join('.');
-    const [major, minor, patch] = versionMatch
-      .slice(1, 4)
-      .map((part) => Number(part));
+    const version = versionMatch[1];
+    // The action runs "${image}:${version}", so only the tag plus index
+    // digest pins the exact multi-arch image; a bare tag stays mutable.
+    expect(version).toMatch(/^(\d+)\.(\d+)\.(\d+)@sha256:[0-9a-f]{64}$/);
+    const [, major, minor, patch] = version.match(
+      /^(\d+)\.(\d+)\.(\d+)@sha256:[0-9a-f]{64}$/
+    );
     // TruffleHog 3.97.1 missed secrets committed early on a PR branch after
     // merging main; anything below 3.97.9 must not be pinned.
     const numeric = (a, b, c) => a * 1_000_000 + b * 1_000 + c;
-    expect(numeric(major, minor, patch)).toBeGreaterThanOrEqual(
-      numeric(3, 97, 9)
-    );
+    expect(
+      numeric(Number(major), Number(minor), Number(patch))
+    ).toBeGreaterThanOrEqual(numeric(3, 97, 9));
 
+    // The regression job must scan with the exact same pinned reference.
     expect(regression).toContain(
       `scripts/secret-scan-merge-regression.sh ${version}`
     );
@@ -475,6 +504,8 @@ describe('secret scan regression', () => {
     const script = readFileSync(scriptPath, 'utf8');
     expect(script).toContain('--network none');
     expect(script).toContain('--results=verified,unknown');
+    // The script must accept the digest-suffixed pins the workflow passes.
+    expect(script).toContain('(@sha256:[0-9a-f]{64})?');
     expect(script).not.toMatch(/AKIA[A-Z2-7]{16}/);
   });
 });
@@ -507,6 +538,24 @@ describe('workflow permissions', () => {
     }
   });
 
+  it('keeps supply-chain top-level permissions to contents: read only', () => {
+    const workflow = readRepo('.github/workflows/supply-chain.yml');
+    const topLevel = workflow.search(/^permissions:/m);
+    expect(topLevel).not.toBe(-1);
+    const topPermissions = yamlMappingBlock(
+      workflow.slice(topLevel),
+      'permissions'
+    );
+    expect(topPermissions).toContain('contents: read');
+    expect(topPermissions).not.toContain('issues:');
+
+    // The job-level grant survives: only dependency-review widens its own
+    // permissions beyond the workflow default.
+    expect(workflowJobBlock(workflow, 'dependency-review')).toContain(
+      'issues: read'
+    );
+  });
+
   it('lets only the api-comparison job write PR comments', () => {
     const workflow = readRepo('.github/workflows/api-comparison.yml');
     const block = workflowJobBlock(workflow, 'api-comparison');
@@ -534,6 +583,11 @@ describe('pinned scanners and owners', () => {
       '/config/security-audit-*',
       '/scripts/*audit*',
       '/scripts/review-dependency-changes.mjs',
+      '/.npmrc',
+      '/Dockerfile',
+      '/package-lock.json',
+      '/scripts/secret-scan-merge-regression.sh',
+      '/tests/scripts/trusted-gate-workflow.test.js',
     ]) {
       expect(codeowners).toContain(`${ownedPath} @luandro`);
     }

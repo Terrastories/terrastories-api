@@ -4,3 +4,11 @@
 /config/security-audit-* @luandro
 /scripts/*audit* @luandro
 /scripts/review-dependency-changes.mjs @luandro
+/.npmrc @luandro
+/.dockerignore @luandro
+/Dockerfile @luandro
+/package.json @luandro
+/package-lock.json @luandro
+/scripts/secret-scan-merge-regression.sh @luandro
+/tests/scripts/ci-supply-chain.test.js @luandro
+/tests/scripts/trusted-gate-workflow.test.js @luandro

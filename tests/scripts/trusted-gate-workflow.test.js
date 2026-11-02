@@ -26,6 +26,7 @@ const workflow = readFileSync(
 
 const GUARD_STEP = 'Require a compatible trusted checker on the base branch';
 const REVIEW_STEP = 'Review dependency changes with the trusted checker';
+const NPMRC_STEP = 'Reject PR-controlled npm configuration';
 
 // Returns the body of a step's `run:` key: either the inline single-line
 // value or the block scalar that follows `run: |`, dedented. Workflow text
@@ -328,4 +329,105 @@ describe('trusted dependency review gate workflow', () => {
     expect(result.status).toBe(1);
     expect(outputOf(result)).toContain('refusing to fall back to PR code');
   }, 30_000);
+});
+
+describe('PR-controlled npm configuration', () => {
+  it('accepts a clean PR tree', () => {
+    const { pr } = createTrustedGateFixture();
+
+    const result = runWorkflowStep(NPMRC_STEP, {
+      cwd: pr,
+      env: { ...process.env },
+    });
+
+    expect(result.status).toBe(0);
+  }, 30_000);
+
+  it('rejects a root .npmrc file pointing at another registry', () => {
+    const { pr } = createTrustedGateFixture();
+    writeFileSync(join(pr, '.npmrc'), 'registry=http://127.0.0.1:48731/\n');
+
+    const result = runWorkflowStep(NPMRC_STEP, {
+      cwd: pr,
+      env: { ...process.env },
+    });
+
+    expect(result.status).toBe(1);
+    expect(outputOf(result)).toContain('.npmrc is not allowed');
+  }, 30_000);
+
+  it('rejects a dangling .npmrc symlink', () => {
+    const { pr } = createTrustedGateFixture();
+    symlinkSync('/nonexistent-npmrc-target', join(pr, '.npmrc'));
+
+    const result = runWorkflowStep(NPMRC_STEP, {
+      cwd: pr,
+      env: { ...process.env },
+    });
+
+    expect(result.status).toBe(1);
+    expect(outputOf(result)).toContain('.npmrc is not allowed');
+  }, 30_000);
+
+  it('rejects a .npmrc directory', () => {
+    const { pr } = createTrustedGateFixture();
+    mkdirSync(join(pr, '.npmrc'));
+
+    const result = runWorkflowStep(NPMRC_STEP, {
+      cwd: pr,
+      env: { ...process.env },
+    });
+
+    expect(result.status).toBe(1);
+    expect(outputOf(result)).toContain('.npmrc is not allowed');
+  }, 30_000);
+
+  it('rejects a committed nested .npmrc even without a root .npmrc', () => {
+    const { pr } = createTrustedGateFixture();
+    mkdirSync(join(pr, 'sub'));
+    writeFileSync(
+      join(pr, 'sub', '.npmrc'),
+      'registry=http://127.0.0.1:48731/\n'
+    );
+    runGit(pr, ['add', '-A']);
+    runGit(pr, ['commit', '-m', 'sneak in a nested .npmrc']);
+
+    const result = runWorkflowStep(NPMRC_STEP, {
+      cwd: pr,
+      env: { ...process.env },
+    });
+
+    expect(result.status).toBe(1);
+    expect(outputOf(result)).toContain('committed .npmrc');
+  }, 30_000);
+
+  it('rejects npm configuration before the trusted checker runs the review', () => {
+    const lines = workflow.split('\n');
+    const stepLine = (name) =>
+      lines.findIndex((line) => line.trim() === `- name: ${name}`);
+
+    // The dependency-review job spans from its key to the next key at the
+    // same two-space indentation.
+    const jobStart = lines.findIndex((line) =>
+      /^  dependency-review:\s*$/.test(line)
+    );
+    expect(jobStart).not.toBe(-1);
+    let jobEnd = lines.length;
+    for (let index = jobStart + 1; index < lines.length; index += 1) {
+      if (/^  [A-Za-z0-9_-]+:\s*$/.test(lines[index])) {
+        jobEnd = index;
+        break;
+      }
+    }
+
+    const npmrcLine = stepLine(NPMRC_STEP);
+    const reviewLine = stepLine(REVIEW_STEP);
+    expect(npmrcLine).not.toBe(-1);
+    expect(reviewLine).not.toBe(-1);
+    expect(npmrcLine).toBeGreaterThan(jobStart);
+    expect(npmrcLine).toBeLessThan(jobEnd);
+    expect(reviewLine).toBeGreaterThan(jobStart);
+    expect(reviewLine).toBeLessThan(jobEnd);
+    expect(npmrcLine).toBeLessThan(reviewLine);
+  });
 });

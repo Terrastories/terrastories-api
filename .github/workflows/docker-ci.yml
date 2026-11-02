@@ -47,18 +47,22 @@ jobs:
             export SESSION_SECRET="$(openssl rand -hex 32)"
             docker run --name test-container -d -e JWT_SECRET -e SESSION_SECRET \
               -e DATABASE_URL=:memory: terrastories-api:production-test
+            # Busybox wget resolves localhost to ::1 first; the server binds IPv4.
             ready=false
             for attempt in $(seq 1 30); do
-              if docker exec test-container wget -q -O /dev/null http://localhost:3000/health; then
+              if docker exec test-container wget -q -O /dev/null http://127.0.0.1:3000/health; then
                 ready=true
                 break
               fi
               sleep 1
             done
-            test "$ready" = true
+            if [ "$ready" != true ]; then
+              docker logs test-container
+              exit 1
+            fi
             docker exec test-container node --input-type=module -e '
               for (const method of ["GET", "HEAD"]) {
-                const response = await fetch("http://localhost:3000/dev/seed", {method});
+                const response = await fetch("http://127.0.0.1:3000/dev/seed", {method});
                 if (response.status !== 404) process.exit(1);
               }'
             docker stop test-container

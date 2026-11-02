@@ -37,11 +37,32 @@ jobs:
             echo "Testing development image dependencies..."
             docker run --rm terrastories-api:${{ matrix.target }}-test npm list --depth=0 | grep -E "(typescript|eslint|vitest)" || echo "Dev dependencies check completed"
           else
-            # Production image should start correctly
-            echo "Testing production image startup..."
-            docker run --rm --name test-container -d terrastories-api:${{ matrix.target }}-test || echo "Production startup test completed"
-            sleep 5
-            docker stop test-container 2>/dev/null || true
+            # Missing secrets must fail, rather than silently selecting dev config.
+            set +e
+            timeout 20s docker run --rm terrastories-api:production-test
+            refusal_status=$?
+            set -e
+            test "$refusal_status" -eq 1
+            export JWT_SECRET="$(openssl rand -hex 32)"
+            export SESSION_SECRET="$(openssl rand -hex 32)"
+            docker run --name test-container -d -e JWT_SECRET -e SESSION_SECRET \
+              -e DATABASE_URL=:memory: terrastories-api:production-test
+            ready=false
+            for attempt in $(seq 1 30); do
+              if docker exec test-container wget -q -O /dev/null http://localhost:3000/health; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            test "$ready" = true
+            docker exec test-container node --input-type=module -e '
+              for (const method of ["GET", "HEAD"]) {
+                const response = await fetch("http://localhost:3000/dev/seed", {method});
+                if (response.status !== 404) process.exit(1);
+              }'
+            docker stop test-container
+
           fi
 
   # =============================================================================
@@ -62,6 +83,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Test Docker Compose configuration syntax
+        env:
+          JWT_SECRET: ci-fixture-jwt-secret-at-least-32-characters
+          SESSION_SECRET: ci-fixture-session-secret-at-least-32-characters
         run: |
           echo "Testing ${{ matrix.compose-file }} configuration..."
 
@@ -71,6 +95,15 @@ jobs:
           else
             # Test with base configuration for overrides
             docker compose -f docker-compose.yml -f ${{ matrix.compose-file }} config > /dev/null
+          fi
+
+          if [ "${{ matrix.compose-file }}" = "docker-compose.prod.yml" ]; then
+            for missing in JWT_SECRET SESSION_SECRET; do
+              if env -u "$missing" docker compose --env-file /dev/null -f docker-compose.yml -f docker-compose.prod.yml config --quiet; then
+                echo "Production Compose accepted missing $missing"
+                exit 1
+              fi
+            done
           fi
 
           echo "✅ ${{ matrix.compose-file }} syntax is valid"

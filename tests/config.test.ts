@@ -10,7 +10,7 @@ describe('Configuration System', () => {
     process.env = { ...originalEnv };
 
     // Clear any environment files that might interfere with tests
-    delete process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
     delete process.env.PORT;
     delete process.env.HOST;
     delete process.env.DATABASE_URL;
@@ -26,10 +26,10 @@ describe('Configuration System', () => {
   });
 
   describe('Environment Detection', () => {
-    it('should detect development environment by default', () => {
+    it('should select production when runtime mode is unset', () => {
       delete process.env.NODE_ENV;
       const config = loadConfig(true, true);
-      expect(config.environment).toBe('development');
+      expect(config.environment).toBe('production');
     });
 
     it('should detect production environment when NODE_ENV=production', () => {
@@ -50,14 +50,41 @@ describe('Configuration System', () => {
       expect(config.environment).toBe('offline');
     });
 
-    it('should fallback to development for unknown environments', () => {
-      process.env.NODE_ENV = 'unknown';
-      const config = loadConfig(true, true);
-      expect(config.environment).toBe('development');
+    it.each(['unknown', 'staging', '', 'test '])('rejects mode %s', (mode) => {
+      process.env.NODE_ENV = mode;
+      expect(() => loadConfig(true, true)).toThrow('NODE_ENV must name');
+    });
+
+    it('caches configuration when runtime mode is unset', () => {
+      delete process.env.NODE_ENV;
+      expect(loadConfig(true, true)).toBe(loadConfig(false, true));
+    });
+
+    it.each([
+      'your-session-secret-minimum-32-characters-required-for-cookies',
+      'your-super-secret-jwt-key-change-this-in-production',
+      'insecure-development-session-secret-for-testing-purposes-only',
+      'field-kit-deployment-secret-change-me',
+      'offline-mode-secret-temporary-session',
+    ])('rejects shipped production placeholder %s', (value) => {
+      process.env.NODE_ENV = 'production';
+      process.env.SESSION_SECRET = value;
+      expect(() => loadConfig(true, true)).toThrow('shipped placeholder');
     });
   });
 
   describe('Configuration Loading', () => {
+    it.each(['field-kit', 'offline'])(
+      'requires an installation session secret in %s',
+      (mode) => {
+        process.env.NODE_ENV = mode;
+        delete process.env.SESSION_SECRET;
+        expect(() => loadConfig(true, true)).toThrow(
+          'Configuration validation failed'
+        );
+      }
+    );
+
     it.each(['JWT_SECRET', 'SESSION_SECRET'])(
       'rejects production startup without %s',
       (secret) => {

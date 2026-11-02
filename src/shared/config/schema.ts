@@ -26,7 +26,7 @@ const booleanFromEnv = (defaultValue: boolean) =>
 // Environment validation
 export const EnvironmentSchema = z
   .enum(['development', 'production', 'field-kit', 'offline', 'test'])
-  .default('development' as Environment);
+  .default('production' as Environment);
 
 // Log level validation
 export const LogLevelSchema = z
@@ -99,15 +99,23 @@ export const SecurityConfigSchema = z.object({
   }),
 });
 
+const productionSecret = (name: string) =>
+  z
+    .string()
+    .min(32, `${name} must be at least 32 characters in production`)
+    .refine(
+      (value) =>
+        !/^(your-|insecure-development-|development-|field-kit-deployment-|offline-mode-|CHANGE[_-]?ME)/i.test(
+          value
+        ),
+      `${name} must not use a shipped placeholder`
+    );
+
 // Production-specific auth validation
 export const ProductionAuthConfigSchema = AuthConfigSchema.extend({
-  jwtSecret: z
-    .string()
-    .min(32, 'JWT_SECRET must be at least 32 characters in production'),
+  jwtSecret: productionSecret('JWT_SECRET'),
   session: AuthConfigSchema.shape.session.extend({
-    secret: z
-      .string()
-      .min(32, 'SESSION_SECRET must be at least 32 characters in production'),
+    secret: productionSecret('SESSION_SECRET'),
     secure: booleanFromEnv(true), // Force secure cookies in production
   }),
   rateLimit: z.object({
@@ -239,6 +247,11 @@ export const ProductionConfigSchema = AppConfigSchema.extend({
 });
 
 export const FieldKitConfigSchema = AppConfigSchema.extend({
+  auth: AuthConfigSchema.extend({
+    session: AuthConfigSchema.shape.session.extend({
+      secret: productionSecret('SESSION_SECRET'),
+    }),
+  }),
   features: FeatureConfigSchema.extend({
     offlineMode: z.boolean().default(true),
     syncEnabled: z.boolean().default(false),
@@ -252,6 +265,11 @@ export const FieldKitConfigSchema = AppConfigSchema.extend({
 });
 
 export const OfflineConfigSchema = AppConfigSchema.extend({
+  auth: AuthConfigSchema.extend({
+    session: AuthConfigSchema.shape.session.extend({
+      secret: productionSecret('SESSION_SECRET'),
+    }),
+  }),
   server: ServerConfigSchema.extend({
     host: z.string().default('127.0.0.1'),
   }),

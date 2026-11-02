@@ -22,36 +22,66 @@ const deniedEnvironments = [
 afterEach(() => vi.unstubAllEnvs());
 
 describe('Development route environment boundary', () => {
-  it('does not let dotenv enable routes when runtime NODE_ENV is unset', async () => {
-    const previousCwd = process.cwd();
-    const directory = mkdtempSync(join(tmpdir(), 'terrastories-env-'));
-    writeFileSync(join(directory, '.env'), 'NODE_ENV=development\n');
-    vi.stubEnv('NODE_ENV', undefined);
-    vi.stubEnv('DATABASE_URL', ':memory:');
-    try {
-      process.chdir(directory);
-      loadConfig(true);
-      const app = await buildApp();
+  it.each(['.env', '.env.development', '.env.production'])(
+    'does not let %s enable routes with unset mode',
+    async (filename) => {
+      const previousCwd = process.cwd();
+      const directory = mkdtempSync(join(tmpdir(), 'terrastories-env-'));
+      writeFileSync(join(directory, filename), 'NODE_ENV=development\n');
+      vi.stubEnv('NODE_ENV', undefined);
+      vi.stubEnv('DATABASE_URL', ':memory:');
+      vi.stubEnv('JWT_SECRET', 'fixture-jwt-key-with-at-least-32-characters');
+      vi.stubEnv(
+        'SESSION_SECRET',
+        'fixture-session-key-with-at-least-32-characters'
+      );
       try {
-        expect((await app.inject('/dev/seed')).statusCode).toBe(404);
+        process.chdir(directory);
+        loadConfig(true);
+        const app = await buildApp();
+        try {
+          expect((await app.inject('/dev/seed')).statusCode).toBe(404);
+        } finally {
+          await app.close();
+        }
       } finally {
-        await app.close();
+        process.chdir(previousCwd);
       }
-    } finally {
-      process.chdir(previousCwd);
     }
-  });
+  );
 
   it.each(deniedEnvironments)(
     'omits development routes for NODE_ENV=%s',
     async (environment) => {
-      // Cache valid app configuration first: its development/test defaults
-      // must never authorize routes for an unknown runtime environment.
-      const warmup = await buildApp();
-      await warmup.close();
       vi.stubEnv('NODE_ENV', environment);
+      vi.stubEnv('DATABASE_URL', ':memory:');
+      vi.stubEnv('JWT_SECRET', 'fixture-jwt-key-with-at-least-32-characters');
+      vi.stubEnv(
+        'SESSION_SECRET',
+        'fixture-session-key-with-at-least-32-characters'
+      );
+      if (
+        environment !== undefined &&
+        !['production', 'field-kit', 'offline'].includes(environment)
+      ) {
+        expect(() => loadConfig(true, true)).toThrow('NODE_ENV must name');
+        await expect(buildApp()).rejects.toThrow('NODE_ENV must name');
+        return;
+      }
+      loadConfig(true, true);
       const app = await buildApp();
       try {
+        for (const url of [
+          '/dev/seed',
+          '/dev/seed/',
+          '/DEV/SEED',
+          '/api/dev/seed',
+          '/api/v1/dev/seed',
+        ]) {
+          for (const method of ['GET', 'HEAD'] as const) {
+            expect((await app.inject({ method, url })).statusCode).toBe(404);
+          }
+        }
         const response = await app.inject('/dev/seed');
         expect(response.statusCode).toBe(404);
         expect(

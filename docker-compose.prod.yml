@@ -16,6 +16,8 @@ services:
       - uploads_data:/app/uploads
     environment:
       - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
       - LOG_LEVEL=warn
       - HOT_RELOAD=false
       # Use PostgreSQL for production

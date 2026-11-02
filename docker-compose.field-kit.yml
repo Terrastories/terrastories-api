@@ -13,6 +13,7 @@ services:
       target: production
     environment:
       - NODE_ENV=field-kit
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
       - LOG_LEVEL=warn
       - HOT_RELOAD=false
       # Enable offline mode

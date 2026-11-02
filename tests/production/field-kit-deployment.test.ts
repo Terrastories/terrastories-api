@@ -60,6 +60,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     // Initialize app in offline-compatible mode
     process.env.NODE_ENV = 'field-kit';
     process.env.OFFLINE_MODE = 'true';
+    process.env.SESSION_SECRET =
+      'fixture-field-kit-session-at-least-32-characters';
     process.env.DATABASE_URL = ':memory:';
 
     console.log('🔄 Initializing Field Kit app...');
@@ -75,6 +77,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       app = await createTestApp(db.db);
       await app.ready();
 
+      const fixtureSession = await createOfflineSession();
+
       // Create test community for field kit operations
       const communityResponse = await app.inject({
         method: 'POST',
@@ -84,8 +88,7 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
           locale: 'en',
         },
         headers: {
-          Authorization: 'Bearer field-kit-admin-token',
-          Cookie: 'sessionId=field-kit-session-12345; Path=/; HttpOnly',
+          Cookie: fixtureSession.cookie,
         },
       });
 
@@ -1026,8 +1029,8 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
     // Use the real session data from login response
     const responseData = JSON.parse(loginResponse.body);
     return {
-      token: responseData.sessionId || 'field-kit-admin-token',
-      cookie: sessionCookie || 'field-kit-session=active',
+      token: responseData.sessionId,
+      cookie: sessionCookie,
     };
   }
 

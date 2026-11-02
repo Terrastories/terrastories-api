@@ -63,6 +63,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Production runtime - minimal footprint
 FROM node:20.19.0-alpine AS production
 
+ENV NODE_ENV=production
+
 # Install system dependencies for runtime
 RUN apk add --no-cache \
     sqlite \

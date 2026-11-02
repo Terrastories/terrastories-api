@@ -218,8 +218,15 @@ describe('V2 sovereignty release gate', () => {
     expect(command).toContain(
       'tests/shared/middleware/data-sovereignty.test.ts'
     );
+    expect(command).toContain(
+      'tests/security/sovereignty-story-audience.test.ts'
+    );
+    expect(command).toContain(
+      'tests/security/sovereignty-stats-audience.test.ts'
+    );
     expect(command).toContain('--maxWorkers=2');
-    expect(command).toContain('--minWorkers=2');
+    // Vitest 4 rejects --minWorkers.
+    expect(command).not.toContain('--minWorkers');
     expect(command).not.toContain('cultural-roles.test.ts');
   });
 

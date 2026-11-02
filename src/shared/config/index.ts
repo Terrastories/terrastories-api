@@ -71,12 +71,17 @@ function loadEnvironmentFile(
 
   // Explicit process.env values must win over dotenv files so CI/runtime
   // configuration cannot be silently replaced by local development defaults.
+  const runtimeEnvironment = process.env.NODE_ENV;
   const envFile = `.env.${environment}`;
   dotenv.config({ path: envFile });
 
   // Base .env only fills values that remain unset after the environment-specific
   // file, preserving precedence: process.env > .env.{environment} > .env.
   dotenv.config();
+
+  // Runtime mode is an operator opt-in. Files may fill configuration defaults,
+  // but must not turn an unset NODE_ENV into development-tool authorization.
+  if (runtimeEnvironment === undefined) delete process.env.NODE_ENV;
 }
 
 /**

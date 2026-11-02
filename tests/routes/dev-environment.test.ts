@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildApp } from '../../src/app.js';
 import Fastify from 'fastify';
 import { loadConfig } from '../../src/shared/config/index.js';
@@ -19,6 +22,26 @@ const deniedEnvironments = [
 afterEach(() => vi.unstubAllEnvs());
 
 describe('Development route environment boundary', () => {
+  it('does not let dotenv enable routes when runtime NODE_ENV is unset', async () => {
+    const previousCwd = process.cwd();
+    const directory = mkdtempSync(join(tmpdir(), 'terrastories-env-'));
+    writeFileSync(join(directory, '.env'), 'NODE_ENV=development\n');
+    vi.stubEnv('NODE_ENV', undefined);
+    vi.stubEnv('DATABASE_URL', ':memory:');
+    try {
+      process.chdir(directory);
+      loadConfig(true);
+      const app = await buildApp();
+      try {
+        expect((await app.inject('/dev/seed')).statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
   it.each(deniedEnvironments)(
     'omits development routes for NODE_ENV=%s',
     async (environment) => {

@@ -85,6 +85,8 @@ jobs:
           echo "✅ Database migrations completed"
 
       - name: Run database seeding
+        env:
+          NODE_ENV: development
         run: |
           echo "🌱 Seeding database with test data..."
           npm run db:seed
@@ -102,6 +104,8 @@ jobs:
           fi
 
       - name: Start server in background
+        env:
+          NODE_ENV: development
         run: |
           echo "🚀 Starting Terrastories API server..."
           # Use development server if build failed, otherwise use built version

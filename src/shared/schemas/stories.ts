@@ -64,8 +64,8 @@ export const StoryUpdateInputSchema = StoryCreateInputSchema.partial()
   })
   .strict();
 
-// Story filters schema for search and listing
-export const StoryFiltersSchema = z
+// Story filter fields (unrefined) for search and listing
+const storyFilterFieldsSchema = z
   .object({
     search: z.string().max(200).optional(),
     isRestricted: z.boolean().optional(),
@@ -77,7 +77,10 @@ export const StoryFiltersSchema = z
     dateFrom: z.coerce.date().optional(),
     dateTo: z.coerce.date().optional(),
   })
-  .strict()
+  .strict();
+
+// Story filters schema for search and listing
+export const StoryFiltersSchema = storyFilterFieldsSchema
   .refine(
     (data) => {
       // If nearPoint is provided, radiusKm must also be provided
@@ -148,7 +151,7 @@ export const SearchQuerySchema = z
   .object({
     q: z.string().min(1).max(200),
   })
-  .merge(StoryFiltersSchema.omit({ search: true }))
+  .merge(storyFilterFieldsSchema.omit({ search: true }))
   .strict();
 
 // Bulk operation schemas

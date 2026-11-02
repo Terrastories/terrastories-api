@@ -108,7 +108,12 @@ const baseConfig = defineConfig({
 export default defineConfig({
   ...baseConfig,
   test: {
-    ...baseConfig.test,
+    // Root-only reporting/coverage/worker options; discovery and setup belong
+    // to each project below, without misleading root include/exclude globs.
+    coverage: baseConfig.test?.coverage,
+    reporter: baseConfig.test?.reporter,
+    outputFile: baseConfig.test?.outputFile,
+    maxWorkers: baseConfig.test?.maxWorkers,
     projects: [
       {
         ...baseConfig,

@@ -75,6 +75,7 @@ describe('Production Performance Optimization', () => {
         processedSizes.push(stats.size);
       }
 
+      // Retained JS heap only; Buffer's off-heap working set is not measured.
       const retainedMemory = await retainedHeapUsed();
       const memoryUsed = retainedMemory - initialMemory;
 
@@ -342,10 +343,11 @@ describe('Production Performance Optimization', () => {
       expect(results.length).toBe(peakOperations);
       expect(totalTime).toBeLessThan(15000); // Should complete in under 15 seconds
 
-      // Memory usage should be reasonable across all operations
+      // Retained JS heap only; this does not bound peak/off-heap Buffer RAM.
       const totalMemoryUsed = (await retainedHeapUsed()) - startMemory;
-      const averageMemoryPerOperation = totalMemoryUsed / peakOperations;
-      expect(averageMemoryPerOperation).toBeLessThan(10 * 1024 * 1024); // <10MB per operation
+      const averageRetainedJsHeapPerOperation =
+        totalMemoryUsed / peakOperations;
+      expect(averageRetainedJsHeapPerOperation).toBeLessThan(10 * 1024 * 1024); // <10MB per operation
     });
   });
 });

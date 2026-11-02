@@ -47,6 +47,10 @@ describe('Production Performance Validation - Phase 1', () => {
 
     // Collect baseline performance metrics
     baselineMetrics = await collectBaselineMetrics();
+    expect(
+      baselineMetrics.memoryUsage,
+      'A warmed baseline request should retain less than 1 MiB of JS heap'
+    ).toBeLessThan(1024 * 1024);
 
     console.log('Performance validation setup complete');
   });
@@ -620,15 +624,27 @@ describe('Production Performance Validation - Phase 1', () => {
       const finalHeap = samples[samples.length - 1];
       const growthPercent = ((finalHeap - initialHeap) / initialHeap) * 100;
       const continuousIncrease = ((finalHeap - samples[0]) / samples[0]) * 100;
+      const retainedBytesPerRequest =
+        (finalHeap - samples[0]) / ((rounds - 1) * requestsPerRound);
       console.log(
         `Retained heap after ${rounds * requestsPerRound} requests: ` +
           JSON.stringify({
+            node: process.version,
             initialMiB: initialHeap / 1024 / 1024,
             samplesMiB: samples.map((heap) => heap / 1024 / 1024),
             growthPercent,
             continuousIncrease,
+            retainedBytesPerRequest,
           })
       );
+
+      // Bound small leaks as well as the original percentage limits. Clean
+      // Node 20/22 calibration is emitted by CI; 2 KiB/request allows headroom
+      // for test/engine bookkeeping while rejecting a 4 KiB/request leak.
+      expect(
+        retainedBytesPerRequest,
+        `Retained JS heap growth: ${retainedBytesPerRequest.toFixed(1)} bytes/request`
+      ).toBeLessThan(2048);
 
       // Preserve the existing limits, now applied to live heap after GC.
       expect(
@@ -821,17 +837,18 @@ describe('Production Performance Validation - Phase 1', () => {
 
   async function collectBaselineMetrics(): Promise<PerformanceMetrics> {
     // Initialize both routes before the retained-heap and timing baseline.
-    await app.inject({ method: 'GET', url: '/api/v1/health' });
-    await app.inject({ method: 'GET', url: '/api/v1/communities' });
+    await app.inject({ method: 'GET', url: '/health' });
+    await app.inject({ method: 'GET', url: '/api/communities' });
     const initialHeap = await retainedHeapUsed();
     const start = performance.now();
 
     const response = await app.inject({
       method: 'GET',
-      url: '/api/v1/communities',
+      url: '/api/communities',
     });
 
     const responseTime = performance.now() - start;
+    expect(response.statusCode).toBe(200);
     const finalHeap = await retainedHeapUsed();
 
     return {

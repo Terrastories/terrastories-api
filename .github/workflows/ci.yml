@@ -7,6 +7,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -34,10 +37,10 @@ jobs:
             echo "Dependencies already available or GitHub-hosted runner detected"
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -52,9 +55,38 @@ jobs:
         run: npm run test:coverage
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+      # Quick PR-side check only. The approval gate is the base-branch
+      # trusted checker in supply-chain.yml "Dependency review".
       - name: Enforce dependency audit baseline
         run: npm run audit:baseline
+
+  # The 20.x matrix leg floats to the newest 20.x release, so it cannot prove
+  # the declared minimum. This job runs exactly package.json engines.node and
+  # starts the built app, so ERR_REQUIRE_ESM-class load failures fail CI.
+  minimum-runtime:
+    name: Minimum Node runtime smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Use the declared minimum Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.19.0
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build
+        run: npm run build
+
+      - name: Load and start the built app on the minimum runtime
+        run: node scripts/runtime-smoke.mjs --require-engine-minimum

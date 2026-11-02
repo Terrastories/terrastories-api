@@ -18,9 +18,15 @@ on:
         required: false
         default: ''
 
+permissions:
+  contents: read
+
 jobs:
   api-comparison:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
 
     steps:
       - name: Checkout code

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
-import * as auditModule from '../../scripts/check-audit-baseline.mjs';
+import * as auditModule from '../../scripts/trusted-audit-baseline.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..', '..');
@@ -138,6 +138,23 @@ describe('dependency audit exception policy', () => {
     expect(policy.expires).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
+  it('binds the accepted baseline to the reviewed policy with path-aware scopes', () => {
+    expect(() =>
+      auditModule.validateReviewedPolicyBinding(baseline, policy)
+    ).not.toThrow();
+    expect(baseline.expires).toBe(policy.expires);
+    expect(baseline.trackingIssue).toBe(141);
+    expect(policy.trackingIssue).toBe(141);
+
+    for (const advisory of baseline.advisories) {
+      if (!advisory.nodes) continue;
+      expect(advisory.nodeScopes).toEqual(expect.any(Object));
+      for (const node of advisory.nodes) {
+        expect(typeof advisory.nodeScopes[node]).toBe('string');
+      }
+    }
+  });
+
   it('validates policy metadata and rejects expired exceptions', () => {
     expect(typeof auditModule.validateBaselinePolicy).toBe('function');
     if (typeof auditModule.validateBaselinePolicy !== 'function') return;
@@ -249,7 +266,12 @@ describe('release evidence workflow', () => {
     if (!existsSync(path)) return;
 
     const workflow = readFileSync(path, 'utf8');
-    expect(workflow).toContain('node scripts/review-dependency-changes.mjs');
+    expect(workflow).toContain(
+      'node "$GITHUB_WORKSPACE/trusted/scripts/review-dependency-changes.mjs"'
+    );
+    // The dependency review must execute the trusted (base-branch) checker,
+    // never a script resolved from the PR checkout.
+    expect(workflow).not.toMatch(/run:\s*node scripts\//);
     expect(workflow).toContain(
       'BASE_SHA: ${{ github.event.pull_request.base.sha }}'
     );
@@ -308,5 +330,212 @@ describe('release evidence workflow', () => {
     expect(provenance).toContain(
       'subject-digest: ${{ needs.production_image.outputs.image_archive_sha256 }}'
     );
+  });
+});
+
+// Returns the indented lines that belong to a mapping key (for example
+// `permissions:`) until the next line at the same or lower indentation,
+// so nested blocks can be inspected without a YAML parser.
+function yamlMappingBlock(text, key) {
+  const lines = text.split('\n');
+  const startIndex = lines.findIndex((line) =>
+    new RegExp(`^\\s*${key}:\\s*$`).test(line)
+  );
+  if (startIndex === -1) return '';
+
+  const keyIndent =
+    lines[startIndex].length - lines[startIndex].trimStart().length;
+  const collected = [];
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.trim() === '') continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= keyIndent) break;
+    collected.push(line);
+  }
+  return collected.join('\n');
+}
+
+describe('trusted dependency review gate', () => {
+  const workflow = readRepo('.github/workflows/supply-chain.yml');
+  const block = workflowJobBlock(workflow, 'dependency-review');
+
+  it('runs the checker from the base branch and treats the PR tree as data', () => {
+    expect(block).not.toBe('');
+    expect(block).toContain('ref: ${{ github.event.pull_request.base.sha }}');
+    expect(block).toContain('path: trusted');
+    expect(block).toContain('path: pr');
+    expect(block).toContain('working-directory: pr');
+    expect(block).toContain('AUDIT_DATA_DIR: ${{ github.workspace }}/pr');
+    expect(block).toContain('--trusted-audit-version');
+    expect(block).toContain('!= "3"');
+    expect(block).toContain('refusing to fall back to PR code');
+  });
+
+  it('never persists credentials from either checkout', () => {
+    const persisted = block.match(/persist-credentials:\s*false/g) || [];
+    expect(persisted.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('executes no npm command and uses no cache inside the PR tree', () => {
+    expect(block).not.toMatch(/\bnpm\s+(run|ci|install|exec|audit)\b/);
+    expect(block).not.toContain('cache:');
+  });
+
+  it('runs the gate with read-only contents and issues permissions', () => {
+    const permissions = yamlMappingBlock(block, 'permissions');
+    expect(permissions).toContain('contents: read');
+    expect(permissions).toContain('issues: read');
+    expect(permissions).not.toContain('write');
+  });
+
+  it('never grants the PR tree pull_request_target-style code access', () => {
+    expect(workflow).not.toContain('pull_request_target');
+  });
+});
+
+describe('npm cache cannot serve unaudited tarballs (R1)', () => {
+  const workflowsDir = join(repoRoot, '.github', 'workflows');
+  const workflowFiles = readdirSync(workflowsDir).filter((file) =>
+    /\.ya?ml$/.test(file)
+  );
+
+  it('never restores caches by falling back to stale keys', () => {
+    expect(workflowFiles.length).toBeGreaterThan(0);
+    for (const file of workflowFiles) {
+      const workflow = readFileSync(join(workflowsDir, file), 'utf8');
+      expect(workflow, file).not.toContain('restore-keys');
+      expect(workflow, file).not.toContain('actions/cache@');
+      expect(workflow, file).not.toContain('cache-from');
+      expect(workflow, file).not.toContain('cache-dependency-path');
+    }
+  });
+
+  it("limits every workflow-managed cache to setup-node's npm lockfile cache", () => {
+    // actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+    // (src/cache-restore.ts:60) restores npm caches by the exact
+    // lockfile-hash primary key with no restore-keys, so a PR cannot
+    // repopulate the shared cache with unaudited tarballs under a key a
+    // later `npm ci` would hit.
+    for (const file of workflowFiles) {
+      const workflow = readFileSync(join(workflowsDir, file), 'utf8');
+      const cacheValues = [...workflow.matchAll(/^\s*cache:\s*(.+)$/gm)].map(
+        (match) => match[1].trim()
+      );
+      for (const value of cacheValues) {
+        expect(
+          value === "'npm'" || value === 'npm',
+          `${file} sets cache: ${value}`
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('keeps the Dockerfile free of BuildKit cache mounts', () => {
+    const dockerfile = readRepo('Dockerfile');
+    expect(dockerfile).not.toContain('--mount=type=cache');
+  });
+});
+
+describe('secret scan regression', () => {
+  const workflow = readRepo('.github/workflows/supply-chain.yml');
+  const secretScan = workflowJobBlock(workflow, 'secret-scan');
+  const regression = workflowJobBlock(workflow, 'secret-scan-regression');
+
+  it('pins trufflehog at or above the early-branch-secret regression fix', () => {
+    const versionMatch = secretScan.match(
+      /version:\s*(\d+)\.(\d+)\.(\d+)\s*$/m
+    );
+    expect(versionMatch).not.toBeNull();
+    const version = versionMatch.slice(1, 4).join('.');
+    const [major, minor, patch] = versionMatch
+      .slice(1, 4)
+      .map((part) => Number(part));
+    // TruffleHog 3.97.1 missed secrets committed early on a PR branch after
+    // merging main; anything below 3.97.9 must not be pinned.
+    const numeric = (a, b, c) => a * 1_000_000 + b * 1_000 + c;
+    expect(numeric(major, minor, patch)).toBeGreaterThanOrEqual(
+      numeric(3, 97, 9)
+    );
+
+    expect(regression).toContain(
+      `scripts/secret-scan-merge-regression.sh ${version}`
+    );
+    expect(regression).toContain('persist-credentials: false');
+  });
+
+  it('ships an executable offline regression script with no literal secret', () => {
+    const scriptPath = join(
+      repoRoot,
+      'scripts/secret-scan-merge-regression.sh'
+    );
+    expect(existsSync(scriptPath)).toBe(true);
+    expect(statSync(scriptPath).mode & 0o111).not.toBe(0);
+
+    const script = readFileSync(scriptPath, 'utf8');
+    expect(script).toContain('--network none');
+    expect(script).toContain('--results=verified,unknown');
+    expect(script).not.toMatch(/AKIA[A-Z2-7]{16}/);
+  });
+});
+
+describe('workflow permissions', () => {
+  const workflowsDir = join(repoRoot, '.github', 'workflows');
+
+  it('declares least-privilege top-level permissions before jobs in every workflow', () => {
+    const files = readdirSync(workflowsDir).filter((file) =>
+      /\.ya?ml$/.test(file)
+    );
+    expect(files.length).toBeGreaterThan(0);
+
+    for (const file of files) {
+      const workflow = readFileSync(join(workflowsDir, file), 'utf8');
+      const permissionsIndex = workflow.search(/^permissions:/m);
+      const jobsIndex = workflow.search(/^jobs:/m);
+      expect(permissionsIndex, `${file} has no top-level permissions`).not.toBe(
+        -1
+      );
+      expect(jobsIndex, `${file} has no jobs`).not.toBe(-1);
+      expect(permissionsIndex, file).toBeLessThan(jobsIndex);
+
+      const topPermissions = yamlMappingBlock(
+        workflow.slice(permissionsIndex),
+        'permissions'
+      );
+      expect(topPermissions, file).not.toBe('');
+      expect(topPermissions, file).not.toContain('write');
+    }
+  });
+
+  it('lets only the api-comparison job write PR comments', () => {
+    const workflow = readRepo('.github/workflows/api-comparison.yml');
+    const block = workflowJobBlock(workflow, 'api-comparison');
+    expect(block).not.toBe('');
+    expect(block).toContain('pull-requests: write');
+  });
+});
+
+describe('pinned scanners and owners', () => {
+  it('pins every trivy scan to the same reviewed scanner version', () => {
+    const workflow = readRepo('.github/workflows/supply-chain.yml');
+    const actionCount = (workflow.match(/aquasecurity\/trivy-action@/g) || [])
+      .length;
+    const versionCount = (workflow.match(/version:\s*v0\.74\.0/g) || []).length;
+
+    expect(actionCount).toBe(2);
+    expect(versionCount).toBe(2);
+    expect(actionCount).toBe(versionCount);
+  });
+
+  it('requests code-owner review for security-sensitive paths', () => {
+    const codeowners = readRepo('.github/CODEOWNERS');
+    for (const ownedPath of [
+      '/.github/',
+      '/config/security-audit-*',
+      '/scripts/*audit*',
+      '/scripts/review-dependency-changes.mjs',
+    ]) {
+      expect(codeowners).toContain(`${ownedPath} @luandro`);
+    }
   });
 });

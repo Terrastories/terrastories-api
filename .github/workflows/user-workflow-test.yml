@@ -19,6 +19,9 @@ on:
       - 'package.json'
       - 'package-lock.json'
 
+permissions:
+  contents: read
+
 jobs:
   user-workflow-test:
     name: Test User Workflow Script

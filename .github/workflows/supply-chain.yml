@@ -12,22 +12,56 @@ permissions:
   issues: read
 
 jobs:
+  # Trusted gate: the checker runs from the BASE branch checkout; the PR tree
+  # is only data. No PR script, npm lifecycle hook or `npm run` executes here.
   dependency-review:
     name: Dependency review
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
     steps:
-      - name: Checkout repository history
+      - name: Checkout trusted base checker
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
 
-      - name: Review dependency changes
+      - name: Checkout PR merge tree as data
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.x
+
+      - name: Require a compatible trusted checker on the base branch
+        run: |
+          checker="$GITHUB_WORKSPACE/trusted/scripts/trusted-audit-baseline.mjs"
+          review="$GITHUB_WORKSPACE/trusted/scripts/review-dependency-changes.mjs"
+          if [ ! -f "$checker" ] || [ -L "$checker" ] || [ ! -f "$review" ] || [ -L "$review" ]; then
+            echo "::error::The base branch has no trusted audit checker; refusing to fall back to PR code."
+            exit 1
+          fi
+          version="$(node "$checker" --trusted-audit-version)"
+          if [ "$version" != "3" ]; then
+            echo "::error::Unsupported trusted audit checker version on the base branch: ${version:-none}"
+            exit 1
+          fi
+
+      - name: Review dependency changes with the trusted checker
+        working-directory: pr
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          AUDIT_DATA_DIR: ${{ github.workspace }}/pr
           GITHUB_TOKEN: ${{ github.token }}
-          REQUIRE_EXTERNAL_AUDIT_APPROVAL: 1
-        run: node scripts/review-dependency-changes.mjs
+        run: node "$GITHUB_WORKSPACE/trusted/scripts/review-dependency-changes.mjs"
 
   secret-scan:
     name: Secret scan
@@ -41,8 +75,21 @@ jobs:
       - name: Scan changed history for secrets
         uses: trufflesecurity/trufflehog@1ea7fc1960b818e3c3ac3984f85922e3acba4061 # pinned main
         with:
-          version: 3.97.1
+          version: 3.99.2
           extra_args: --results=verified,unknown
+
+  secret-scan-regression:
+    name: Secret scan merged-main regression
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Detect an early-branch secret after merging main
+        run: bash scripts/secret-scan-merge-regression.sh 3.99.2
 
   production_image:
     name: Production image evidence
@@ -135,6 +182,7 @@ jobs:
       - name: Record production image vulnerability report
         uses: aquasecurity/trivy-action@d2a0b60797ff03db6132bd4e2b293f9b37081297 # pinned master
         with:
+          version: v0.74.0
           scan-type: image
           image-ref: terrastories-api:ci-${{ github.sha }}
           format: json
@@ -182,6 +230,7 @@ jobs:
       - name: Enforce production image vulnerability policy
         uses: aquasecurity/trivy-action@d2a0b60797ff03db6132bd4e2b293f9b37081297 # pinned master
         with:
+          version: v0.74.0
           scan-type: image
           image-ref: terrastories-api:ci-${{ github.sha }}
           format: table

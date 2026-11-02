@@ -630,7 +630,11 @@ export function canonicalRegistryTarball(name, version) {
 // `npm audit --package-lock-only` trusts each lock entry's `version`, while
 // `npm ci` installs whatever `resolved` + `integrity` point at. Every package
 // entry must therefore resolve to the public registry tarball of its own
-// name@version, so the audited version is the installed version.
+// name@version. The integrity value is format-checked, not fetched: with a
+// cold npm cache, or one keyed on the exact lockfile hash (setup-node's npm
+// cache), a mismatched integrity makes `npm ci` fail with EINTEGRITY. A warm
+// cache restored by a looser key could serve other content by digest, so CI
+// must not use one (tests/scripts/ci-supply-chain.test.js pins that).
 export function validateLockfileSources(lock) {
   if (
     !lock ||

@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  issues: read
 
 jobs:
   test:
@@ -60,8 +59,7 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+      # Quick PR-side check only. The approval gate is the base-branch
+      # trusted checker in supply-chain.yml "Dependency review".
       - name: Enforce dependency audit baseline
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          REQUIRE_EXTERNAL_AUDIT_APPROVAL: 1
         run: npm run audit:baseline

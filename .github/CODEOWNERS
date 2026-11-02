@@ -1,0 +1,6 @@
+# Security-sensitive paths (issue #141). CODEOWNERS only requests review;
+# enforcing it needs the "Require review from Code Owners" branch setting.
+/.github/ @luandro
+/config/security-audit-* @luandro
+/scripts/*audit* @luandro
+/scripts/review-dependency-changes.mjs @luandro

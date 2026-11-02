@@ -11,6 +11,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { eq } from 'drizzle-orm';
 import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
 import { migrate as migrateSqlite } from 'drizzle-orm/better-sqlite3/migrator';
 import { drizzle as drizzlePostgres } from 'drizzle-orm/postgres-js';
@@ -52,29 +53,59 @@ function validateMigrationText(
   );
 }
 
-async function verifyStaticPortabilityContract(): Promise<void> {
-  for (const file of [
-    '0000_glamorous_guardsmen.sql',
-    '0001_authentication_fields.sql',
-    '0002_community_rails_fields.sql',
-    '0003_file_indexes.sql',
-  ]) {
+/**
+ * Validate every migration registered in a folder's Drizzle journal, so a new
+ * migration cannot be applied by Drizzle without this guard inspecting it.
+ */
+async function validateJournalMigrations(
+  dialect: Dialect,
+  folder: string
+): Promise<void> {
+  const journal = JSON.parse(
+    await readFile(path.join(folder, 'meta', '_journal.json'), 'utf8')
+  ) as { dialect?: string; entries?: Array<{ tag?: unknown }> };
+  assert.equal(
+    journal.dialect,
+    dialect,
+    `${folder} journal must declare the ${dialect} dialect`
+  );
+  assert.ok(
+    Array.isArray(journal.entries) && journal.entries.length > 0,
+    `${folder} journal must register at least one migration`
+  );
+  for (const entry of journal.entries) {
+    assert.equal(
+      typeof entry.tag,
+      'string',
+      `${folder} journal entry is missing its tag`
+    );
+    const file = `${entry.tag as string}.sql`;
     validateMigrationText(
-      'sqlite',
-      await readFile(path.join(sqliteMigrations, file), 'utf8'),
+      dialect,
+      await readFile(path.join(folder, file), 'utf8'),
       file
     );
   }
+}
 
-  for (const file of [
-    '0000_current_compat_baseline.sql',
-    '0001_theme_ownership_fk.sql',
-  ]) {
-    validateMigrationText(
-      'postgresql',
-      await readFile(path.join(postgresMigrations, file), 'utf8'),
-      file
+async function verifyStaticPortabilityContract(): Promise<void> {
+  await validateJournalMigrations('sqlite', sqliteMigrations);
+  await validateJournalMigrations('postgresql', postgresMigrations);
+
+  const extensionProbe = await createTemporaryMigrationFolder(
+    'postgresql',
+    '0000_extension_probe',
+    'CREATE EXTENSION IF NOT EXISTS postgis;',
+    Date.UTC(2026, 0, 1)
+  );
+  try {
+    await assert.rejects(
+      validateJournalMigrations('postgresql', extensionProbe),
+      /requires a spatial extension/,
+      'a journal-registered migration with a spatial extension must be rejected'
     );
+  } finally {
+    await rm(extensionProbe, { recursive: true, force: true });
   }
 
   for (const file of [
@@ -173,6 +204,21 @@ function timestamp(value: string): number {
 }
 
 /**
+ * SQLite date columns use Drizzle `integer(..., { mode: 'timestamp' })`, which
+ * stores Unix seconds. Seed and compare raw SQLite values in seconds so the
+ * fixture matches what the previous release actually wrote.
+ */
+function sqliteTimestamp(value: string): number {
+  const milliseconds = timestamp(value);
+  assert.equal(
+    milliseconds % 1000,
+    0,
+    `SQLite fixture timestamp ${value} must be whole seconds`
+  );
+  return milliseconds / 1000;
+}
+
+/**
  * Decode a raw PostgreSQL `timestamp without time zone` value as UTC.
  *
  * drizzlePostgres() installs a transparent parser for OID 1114 on the shared
@@ -212,8 +258,8 @@ function seedPreviousReleaseSqlite(sqlite: Database.Database): void {
       c.locale,
       c.culturalSettings,
       Number(c.isActive),
-      timestamp(c.createdAt),
-      timestamp(c.updatedAt)
+      sqliteTimestamp(c.createdAt),
+      sqliteTimestamp(c.updatedAt)
     );
 
   const u = fixture.user;
@@ -232,8 +278,8 @@ function seedPreviousReleaseSqlite(sqlite: Database.Database): void {
       u.role,
       u.communityId,
       Number(u.isActive),
-      timestamp(u.createdAt),
-      timestamp(u.updatedAt)
+      sqliteTimestamp(u.createdAt),
+      sqliteTimestamp(u.updatedAt)
     );
 
   const insertPlace = sqlite.prepare(
@@ -255,8 +301,8 @@ function seedPreviousReleaseSqlite(sqlite: Database.Database): void {
       place.photoUrl,
       place.culturalSignificance,
       Number(place.isRestricted),
-      timestamp('2024-02-01T10:00:00.000Z'),
-      timestamp('2025-06-01T10:00:00.000Z')
+      sqliteTimestamp('2024-02-01T10:00:00.000Z'),
+      sqliteTimestamp('2025-06-01T10:00:00.000Z')
     );
   }
 
@@ -279,8 +325,8 @@ function seedPreviousReleaseSqlite(sqlite: Database.Database): void {
       Number(speaker.elderStatus),
       speaker.culturalRole,
       Number(speaker.isActive),
-      timestamp('2024-03-01T10:00:00.000Z'),
-      timestamp('2025-06-04T10:00:00.000Z')
+      sqliteTimestamp('2024-03-01T10:00:00.000Z'),
+      sqliteTimestamp('2025-06-04T10:00:00.000Z')
     );
 
   const story = fixture.story;
@@ -305,8 +351,8 @@ function seedPreviousReleaseSqlite(sqlite: Database.Database): void {
       story.audioUrl,
       story.language,
       JSON.stringify(story.tags),
-      timestamp('2024-04-01T10:00:00.000Z'),
-      timestamp('2025-06-05T10:00:00.000Z')
+      sqliteTimestamp('2024-04-01T10:00:00.000Z'),
+      sqliteTimestamp('2025-06-05T10:00:00.000Z')
     );
 
   const file = fixture.file;
@@ -330,8 +376,8 @@ function seedPreviousReleaseSqlite(sqlite: Database.Database): void {
       JSON.stringify(file.metadata),
       JSON.stringify(file.culturalRestrictions),
       Number(file.isActive),
-      timestamp('2024-04-02T10:00:00.000Z'),
-      timestamp('2025-06-06T10:00:00.000Z')
+      sqliteTimestamp('2024-04-02T10:00:00.000Z'),
+      sqliteTimestamp('2025-06-06T10:00:00.000Z')
     );
 
   sqlite
@@ -346,8 +392,8 @@ function seedPreviousReleaseSqlite(sqlite: Database.Database): void {
       fixture.storyPlace.placeId,
       'restricted-context',
       0,
-      timestamp('2024-04-03T10:00:00.000Z'),
-      timestamp('2025-06-07T10:00:00.000Z')
+      sqliteTimestamp('2024-04-03T10:00:00.000Z'),
+      sqliteTimestamp('2025-06-07T10:00:00.000Z')
     );
 
   sqlite
@@ -362,8 +408,8 @@ function seedPreviousReleaseSqlite(sqlite: Database.Database): void {
       fixture.storySpeaker.speakerId,
       'narrator',
       0,
-      timestamp('2024-04-04T10:00:00.000Z'),
-      timestamp('2025-06-08T10:00:00.000Z')
+      sqliteTimestamp('2024-04-04T10:00:00.000Z'),
+      sqliteTimestamp('2025-06-08T10:00:00.000Z')
     );
 }
 
@@ -522,6 +568,43 @@ function verifySqliteSchema(sqlite: Database.Database): void {
   assert.ok(themeFks.some((row) => row.table === 'communities'));
 }
 
+/**
+ * Read upgraded rows through Drizzle, as the application does, so the gate
+ * checks the dates the application receives and not only the raw integers.
+ */
+async function verifySqliteApplicationDates(
+  database: ReturnType<typeof drizzleSqlite>
+): Promise<void> {
+  const { communitiesSqlite } = await import('../src/db/schema/communities.js');
+  const { usersSqlite } = await import('../src/db/schema/users.js');
+
+  const [community] = await database
+    .select({
+      createdAt: communitiesSqlite.createdAt,
+      updatedAt: communitiesSqlite.updatedAt,
+    })
+    .from(communitiesSqlite)
+    .where(eq(communitiesSqlite.id, fixture.community.id));
+  assert.equal(
+    community.createdAt.getTime(),
+    timestamp(fixture.community.createdAt)
+  );
+  assert.equal(
+    community.updatedAt.getTime(),
+    timestamp(fixture.community.updatedAt)
+  );
+
+  const [user] = await database
+    .select({
+      createdAt: usersSqlite.createdAt,
+      updatedAt: usersSqlite.updatedAt,
+    })
+    .from(usersSqlite)
+    .where(eq(usersSqlite.id, fixture.user.id));
+  assert.equal(user.createdAt.getTime(), timestamp(fixture.user.createdAt));
+  assert.equal(user.updatedAt.getTime(), timestamp(fixture.user.updatedAt));
+}
+
 function verifySqlitePreservation(sqlite: Database.Database): void {
   const community = sqlite
     .prepare(
@@ -532,8 +615,14 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
   assert.equal(community.name, fixture.community.name);
   assert.equal(community.country, null);
   assert.equal(community.beta, 0);
-  assert.equal(community.created_at, timestamp(fixture.community.createdAt));
-  assert.equal(community.updated_at, timestamp(fixture.community.updatedAt));
+  assert.equal(
+    community.created_at,
+    sqliteTimestamp(fixture.community.createdAt)
+  );
+  assert.equal(
+    community.updated_at,
+    sqliteTimestamp(fixture.community.updatedAt)
+  );
 
   const user = sqlite
     .prepare(
@@ -545,8 +634,8 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
   assert.equal(user.community_id, fixture.user.communityId);
   assert.equal(user.reset_password_token, null);
   assert.equal(user.sign_in_count, 0);
-  assert.equal(user.created_at, timestamp(fixture.user.createdAt));
-  assert.equal(user.updated_at, timestamp(fixture.user.updatedAt));
+  assert.equal(user.created_at, sqliteTimestamp(fixture.user.createdAt));
+  assert.equal(user.updated_at, sqliteTimestamp(fixture.user.updatedAt));
 
   const place = sqlite
     .prepare(
@@ -1190,6 +1279,7 @@ async function runSqliteGate(): Promise<void> {
   await migrateSqlite(upgradeDb, { migrationsFolder: sqliteMigrations });
   verifySqliteSchema(upgradeSqlite);
   verifySqlitePreservation(upgradeSqlite);
+  await verifySqliteApplicationDates(upgradeDb);
   upgradeSqlite.close();
 
   console.log('  3/4 deliberate dialect incompatibility rejection');

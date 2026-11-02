@@ -27,34 +27,31 @@ export function declaredMinimumNode(packageJson) {
   return match[1];
 }
 
-async function main() {
-  const packageJson = JSON.parse(
-    readFileSync(join(repoRoot, 'package.json'), 'utf8')
-  );
+export async function runRuntimeSmoke({
+  packageJson,
+  appModuleUrl = pathToFileURL(join(repoRoot, 'dist', 'app.js')).href,
+  requireEngineMinimum = false,
+  runningNode = process.versions.node,
+  env = process.env,
+} = {}) {
   const minimum = declaredMinimumNode(packageJson);
-  const running = process.versions.node;
 
-  if (
-    process.argv.includes('--require-engine-minimum') &&
-    running !== minimum
-  ) {
+  if (requireEngineMinimum && runningNode !== minimum) {
     throw new Error(
-      `Expected exactly the declared minimum Node ${minimum}; running ${running}`
+      `Expected exactly the declared minimum Node ${minimum}; running ${runningNode}`
     );
   }
 
   const dataDir = mkdtempSync(join(tmpdir(), 'terrastories-runtime-smoke-'));
-  process.env.NODE_ENV ??= 'production';
-  process.env.DATABASE_URL ??= join(dataDir, 'runtime-smoke.db');
-  process.env.JWT_SECRET ??= randomBytes(32).toString('hex');
-  process.env.SESSION_SECRET ??= randomBytes(32).toString('hex');
-  process.env.LOG_LEVEL ??= 'warn';
+  env.NODE_ENV ??= 'production';
+  env.DATABASE_URL ??= join(dataDir, 'runtime-smoke.db');
+  env.JWT_SECRET ??= randomBytes(32).toString('hex');
+  env.SESSION_SECRET ??= randomBytes(32).toString('hex');
+  env.LOG_LEVEL ??= 'warn';
 
   let app;
   try {
-    const { buildApp } = await import(
-      pathToFileURL(join(repoRoot, 'dist', 'app.js')).href
-    );
+    const { buildApp } = await import(appModuleUrl);
     app = await buildApp();
     const address = await app.listen({ port: 0, host: '127.0.0.1' });
 
@@ -73,9 +70,7 @@ async function main() {
       throw new Error(`Swagger UI static assets returned HTTP ${docs.status}`);
     }
 
-    process.stdout.write(
-      `Runtime smoke passed on Node ${running} (declared minimum ${minimum})\n`
-    );
+    return `Runtime smoke passed on Node ${runningNode} (declared minimum ${minimum})`;
   } finally {
     if (app) await app.close();
     rmSync(dataDir, { recursive: true, force: true });
@@ -83,8 +78,17 @@ async function main() {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().catch((error) => {
-    process.stderr.write(`Runtime smoke failed: ${error?.stack ?? error}\n`);
-    process.exit(1);
-  });
+  const packageJson = JSON.parse(
+    readFileSync(join(repoRoot, 'package.json'), 'utf8')
+  );
+  runRuntimeSmoke({
+    packageJson,
+    requireEngineMinimum: process.argv.includes('--require-engine-minimum'),
+  }).then(
+    (message) => process.stdout.write(`${message}\n`),
+    (error) => {
+      process.stderr.write(`Runtime smoke failed: ${error?.stack ?? error}\n`);
+      process.exit(1);
+    }
+  );
 }

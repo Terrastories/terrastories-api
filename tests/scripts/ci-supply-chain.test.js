@@ -148,6 +148,7 @@ describe('GitHub Actions supply-chain policy', () => {
 
     const script = readRepo('scripts/runtime-smoke.mjs');
     expect(script).toContain("join(repoRoot, 'dist', 'app.js')");
+    expect(script).toContain('await import(appModuleUrl)');
     expect(script).toContain('app.listen(');
     expect(script).toContain('app.close()');
     expect(script).toContain('/docs/static/index.html');

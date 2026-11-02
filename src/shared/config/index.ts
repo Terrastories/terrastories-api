@@ -26,6 +26,13 @@ import { ZodError, ZodIssue } from 'zod';
 import { EnvironmentSchemas, EnvironmentSchema } from './schema.js';
 import type { AppConfig, Environment } from './types.js';
 
+/** Development tooling requires an explicit runtime opt-in, never config defaults. */
+export function isDevelopmentEnvironment(): boolean {
+  return (
+    process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test'
+  );
+}
+
 // Global config instance (singleton pattern)
 let configInstance: AppConfig | null = null;
 

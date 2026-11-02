@@ -12,7 +12,7 @@ import {
   type Place,
   type Speaker,
 } from './schema/index.js';
-import { getConfig } from '../shared/config/index.js';
+import { getConfig, isDevelopmentEnvironment } from '../shared/config/index.js';
 import { hashPassword } from '../services/password.service.js';
 
 /**
@@ -47,6 +47,11 @@ interface SeedData {
 }
 
 async function seedDatabase(): Promise<SeedData> {
+  if (!isDevelopmentEnvironment()) {
+    throw new Error(
+      'Demo seeding requires NODE_ENV=development or NODE_ENV=test'
+    );
+  }
   const config = getConfig();
   console.log('🌱 Starting database seeding...');
   console.log(`📊 Database: ${config.database.url}`);

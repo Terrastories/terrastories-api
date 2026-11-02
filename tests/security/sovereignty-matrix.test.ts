@@ -13,6 +13,7 @@ import {
   fastifyCommunityToGates,
   fastifyRoleToV2Role,
   storyAccessForPhysicalRole,
+  physicalRoleCanReadStoryAccess,
   fastifyStoryToAudience,
   roleCanReadStoryAccess,
   roleCanReadStoryAudience,
@@ -481,6 +482,20 @@ describe('V2 community gates and super-admin boundary (SPEC-V2 §6.1/§6.2)', ()
 });
 
 describe('Fastify physical role mapping (SPEC-V2 §6.2)', () => {
+  it('decides direct reads from the physical role, denying unknown roles', () => {
+    expect(physicalRoleCanReadStoryAccess('viewer', 'community')).toBe(true);
+    expect(physicalRoleCanReadStoryAccess('elder', 'community')).toBe(true);
+    expect(physicalRoleCanReadStoryAccess('elder', 'editors')).toBe(false);
+    expect(physicalRoleCanReadStoryAccess('admin', 'editors')).toBe(true);
+    for (const role of ['viewer', 'editor', 'admin', 'elder']) {
+      expect(physicalRoleCanReadStoryAccess(role, 'unavailable')).toBe(false);
+    }
+    // Unknown roles never read anything, not even public rows.
+    expect(physicalRoleCanReadStoryAccess('guest', 'public')).toBe(false);
+    expect(physicalRoleCanReadStoryAccess('', 'public')).toBe(false);
+    expect(physicalRoleCanReadStoryAccess('super_admin', 'public')).toBe(false);
+  });
+
   it('derives list/count story accesses from the physical role, fail-closed', () => {
     expect(storyAccessForPhysicalRole('viewer')).toEqual([
       'public',

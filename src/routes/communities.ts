@@ -23,6 +23,7 @@ import {
   canDiscoverCommunity,
   fastifyCommunityToGates,
   fastifyStoryToAudience,
+  physicalRoleCanReadStoryAccess,
   storyAccessForPhysicalRole,
 } from '../shared/authorization/sovereignty-policy.js';
 import { storyAudienceCondition } from '../repositories/story.repository.js';
@@ -761,9 +762,12 @@ export async function communityRoutes(
         // V2 story-audience gate (SPEC-V2 §6.3): unavailable rows (restricted
         // or unknown privacyLevel) are unreadable by every role — admin and
         // the legacy `elder` included — and mask as 404, never 403.
+        // The caller's role audience applies too; unknown roles read nothing.
         if (
-          fastifyStoryToAudience(story.privacyLevel, story.isRestricted) ===
-          'unavailable'
+          !physicalRoleCanReadStoryAccess(
+            user.role,
+            fastifyStoryToAudience(story.privacyLevel, story.isRestricted)
+          )
         ) {
           return reply.status(404).send({
             error: 'Story not found',

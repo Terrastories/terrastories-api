@@ -499,6 +499,40 @@ describe('StoryService', () => {
     });
   });
 
+  describe('unknown physical roles (fail closed)', () => {
+    it('denies an unknown role a public story read by id and by slug', async () => {
+      const story = {
+        id: 9,
+        title: 'Public Story',
+        slug: 'public-story-unknown-role',
+        communityId: testData.community.id,
+        privacyLevel: 'public',
+        isRestricted: false,
+        places: [],
+        speakers: [],
+      } as any;
+      mockStoryRepository.findByIdWithRelations.mockResolvedValue(story);
+      mockStoryRepository.findBySlugWithRelations.mockResolvedValue(story);
+
+      const byId = await storyService.getStoryById(
+        story.id,
+        testData.users.viewer.id,
+        'guest' as any,
+        testData.community.id
+      );
+      expect(byId).toBeNull();
+
+      await expect(
+        storyService.getStoryBySlug(
+          story.slug,
+          testData.community.id,
+          testData.users.viewer.id,
+          'guest' as any
+        )
+      ).resolves.toBeNull();
+    });
+  });
+
   describe('getStoryBySlug', () => {
     it('should retrieve story by slug with community scoping', async () => {
       // Arrange

@@ -280,6 +280,25 @@ export function storyAccessForPhysicalRole(
   return physicalRole === 'elder' ? storyAccessForRole('member') : [];
 }
 
+/**
+ * Direct-read decision for a physical Fastify role (SPEC-V2 §6.2/§6.3):
+ * canonical roles go through `fastifyRoleToV2Role`, the legacy `elder` role
+ * reads as V2 `member`, and unknown roles read nothing (fail closed).
+ * `unavailable` rows are readable by no role.
+ */
+export function physicalRoleCanReadStoryAccess(
+  physicalRole: string,
+  access: TransitionalStoryReadAccess
+): boolean {
+  const v2Role =
+    fastifyRoleToV2Role(physicalRole) ??
+    (physicalRole === 'elder' ? 'member' : null);
+  if (!v2Role) {
+    return false;
+  }
+  return roleCanReadStoryAccess(v2Role, access);
+}
+
 export interface AuthorizationActor {
   id: number;
   role: V2CommunityRole;

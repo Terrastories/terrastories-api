@@ -31,7 +31,7 @@ import { fileOperationsMetrics } from '../shared/metrics/file-operations.js';
 import {
   fastifyRoleToV2Role,
   fastifyStoryToAudience,
-  roleCanReadStoryAccess,
+  physicalRoleCanReadStoryAccess,
   storyAccessForPhysicalRole,
 } from '../shared/authorization/sovereignty-policy.js';
 
@@ -1029,20 +1029,12 @@ export class StoryService {
     story: Pick<StoryWithRelations, 'privacyLevel' | 'isRestricted'>,
     userRole: string
   ): boolean {
-    const access = fastifyStoryToAudience(
-      story.privacyLevel,
-      story.isRestricted
+    // Unavailable rows are readable by no role (SPEC-V2 §6.3); the legacy
+    // elder role reads as V2 member; unknown roles read nothing.
+    return !physicalRoleCanReadStoryAccess(
+      userRole,
+      fastifyStoryToAudience(story.privacyLevel, story.isRestricted)
     );
-    if (access === 'unavailable') {
-      // No role ever reads an unavailable row (SPEC-V2 §6.3).
-      return true;
-    }
-    const v2Role = fastifyRoleToV2Role(userRole);
-    if (!v2Role) {
-      // Legacy elder path: may read every available row, never unavailable.
-      return false;
-    }
-    return !roleCanReadStoryAccess(v2Role, access);
   }
 
   /**

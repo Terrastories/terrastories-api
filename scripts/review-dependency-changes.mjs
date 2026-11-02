@@ -1,7 +1,27 @@
-import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { MAX_MANIFEST_BYTES } from './trusted-audit-baseline.mjs';
+
+// `git show` of a lockfile must fit the same cap the trusted checker applies,
+// instead of Node's 1 MiB spawnSync default.
+const GIT_OUTPUT_MAX_BYTES = MAX_MANIFEST_BYTES;
+
+// Same-version lock fields a reviewer must see: install source, install
+// scripts, executables, and the flags that decide production inclusion.
+const REVIEWED_LOCK_FIELDS = [
+  'resolved',
+  'integrity',
+  'hasInstallScript',
+  'bin',
+  'link',
+  'dependencies',
+  'optionalDependencies',
+  'peerDependencies',
+  'dev',
+  'devOptional',
+  'optional',
+  'peer',
+];
 
 function dependencyName(lockPath) {
   const marker = 'node_modules/';
@@ -27,8 +47,10 @@ export function summarizeDependencyChanges(baseLock, currentLock) {
     const after = afterPackage?.version ?? null;
 
     if (before === after && beforePackage && afterPackage) {
-      const changedFields = ['resolved', 'integrity'].filter(
-        (field) => beforePackage[field] !== afterPackage[field]
+      const changedFields = REVIEWED_LOCK_FIELDS.filter(
+        (field) =>
+          JSON.stringify(beforePackage[field]) !==
+          JSON.stringify(afterPackage[field])
       );
       if (changedFields.length === 0) continue;
 
@@ -65,9 +87,15 @@ function runGit(args, cwd) {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: GIT_OUTPUT_MAX_BYTES,
   });
 
   if (result.error) {
+    if (result.error.code === 'ENOBUFS') {
+      throw new Error(
+        `git ${args.join(' ')} output exceeds the ${GIT_OUTPUT_MAX_BYTES}-byte limit`
+      );
+    }
     throw new Error(`Could not execute git: ${result.error.message}`);
   }
   if (result.status !== 0) {
@@ -82,7 +110,12 @@ function runGit(args, cwd) {
 export async function main(options = {}) {
   const cwd = options.cwd || process.cwd();
   const baseSha = options.baseSha || process.env.BASE_SHA || process.argv[2];
-  const auditCommand = options.auditCommand || ['npm', 'run', 'audit:baseline'];
+  const auditCommand = options.auditCommand || [
+    process.execPath,
+    fileURLToPath(new URL('./trusted-audit-baseline.mjs', import.meta.url)),
+    '--data-dir',
+    options.dataDir || process.env.AUDIT_DATA_DIR || cwd,
+  ];
 
   if (!baseSha || !/^[0-9a-f]{40}$/i.test(baseSha)) {
     throw new Error('BASE_SHA must be a full 40-character commit SHA');
@@ -97,6 +130,7 @@ export async function main(options = {}) {
       '--',
       'package.json',
       'package-lock.json',
+      'npm-shrinkwrap.json',
     ],
     cwd
   )
@@ -104,29 +138,41 @@ export async function main(options = {}) {
     .map((entry) => entry.trim())
     .filter(Boolean);
 
-  if (changedManifests.length === 0) {
-    console.log('Dependency review: no package manifest or lockfile changes.');
-    return;
+  if (changedManifests.includes('npm-shrinkwrap.json')) {
+    console.log(
+      'Dependency review: npm-shrinkwrap.json changed; npm ci installs from it ahead of package-lock.json, so the trusted audit rejects it.'
+    );
   }
 
-  const baseLock = JSON.parse(
-    runGit(['show', `${baseSha}:package-lock.json`], cwd)
-  );
-  const currentLock = JSON.parse(
-    await readFile(join(cwd, 'package-lock.json'), 'utf8')
-  );
-  const changes = summarizeDependencyChanges(baseLock, currentLock);
-
-  console.log(
-    `Dependency review: ${changedManifests.join(', ')} changed; ${changes.length} locked dependency changes detected.`
-  );
-  for (const change of changes) {
-    const changedFields = change.changedFields?.length
-      ? ` [${change.changedFields.join(', ')}]`
-      : '';
-    console.log(
-      `- ${change.type}: ${change.name} ${change.before ?? 'none'} -> ${change.after ?? 'none'}${changedFields}`
+  if (changedManifests.length === 0) {
+    console.log('Dependency review: no package manifest or lockfile changes.');
+  } else {
+    const baseLock = JSON.parse(
+      runGit(['show', `${baseSha}:package-lock.json`], cwd)
     );
+    const lockMode = runGit(
+      ['ls-tree', 'HEAD', '--', 'package-lock.json'],
+      cwd
+    ).split(' ')[0];
+    if (lockMode !== '100644' && lockMode !== '100755') {
+      throw new Error('The committed package-lock.json must be a regular file');
+    }
+    const currentLock = JSON.parse(
+      runGit(['show', 'HEAD:package-lock.json'], cwd)
+    );
+    const changes = summarizeDependencyChanges(baseLock, currentLock);
+
+    console.log(
+      `Dependency review: ${changedManifests.join(', ')} changed; ${changes.length} locked dependency changes detected.`
+    );
+    for (const change of changes) {
+      const changedFields = change.changedFields?.length
+        ? ` [${change.changedFields.join(', ')}]`
+        : '';
+      console.log(
+        `- ${change.type}: ${change.name} ${change.before ?? 'none'} -> ${change.after ?? 'none'}${changedFields}`
+      );
+    }
   }
 
   const [auditExecutable, ...auditArgs] = auditCommand;

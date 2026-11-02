@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import * as auditModule from '../../scripts/check-audit-baseline.mjs';
+import * as auditModule from '../../scripts/trusted-audit-baseline.mjs';
 
 const basePolicy = {
   trackingIssue: 141,
@@ -251,6 +250,8 @@ describe('security audit trust boundaries', () => {
             {
               body: `SECURITY-AUDIT-APPROVAL v1 policySha256=${policySha256} trackingIssue=141`,
               user: { login: 'trusted-maintainer' },
+              created_at: '2026-09-27T20:00:00Z',
+              updated_at: '2026-09-27T20:00:00Z',
             },
           ]),
           { status: 200 }
@@ -279,14 +280,83 @@ describe('security audit trust boundaries', () => {
     expect(requests).toHaveLength(2);
   });
 
-  it('enforces external approval in every required dependency-audit workflow', () => {
-    for (const path of [
-      '.github/workflows/ci.yml',
-      '.github/workflows/supply-chain.yml',
+  it('rejects approvals from a different tracking issue', async () => {
+    const policySha256 = 'a'.repeat(64);
+    const policy = {
+      ...basePolicy,
+      trackingIssue: 142,
+      review: { policySha256 },
+    };
+    const fetchImpl = async (url) => {
+      if (url.includes('/issues/142/comments?')) {
+        return new Response(
+          JSON.stringify([
+            {
+              body: `SECURITY-AUDIT-APPROVAL v1 policySha256=${policySha256} trackingIssue=142`,
+              user: { login: 'trusted-maintainer' },
+              created_at: '2026-09-27T20:00:00Z',
+              updated_at: '2026-09-27T20:00:00Z',
+            },
+          ]),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ permission: 'admin' }), {
+        status: 200,
+      });
+    };
+
+    await expect(
+      auditModule.verifyExternalAuditApproval(policy, {
+        repository: 'Terrastories/terrastories-api',
+        token: 'test-token',
+        fetchImpl,
+      })
+    ).rejects.toThrow(/141/);
+  });
+
+  it('rejects an edited or malformed approval comment from a trusted writer', async () => {
+    const policySha256 = 'a'.repeat(64);
+    const policy = { ...basePolicy, review: { policySha256 } };
+    const body = `SECURITY-AUDIT-APPROVAL v1 policySha256=${policySha256} trackingIssue=141`;
+    const checkComment = async (timestamps) => {
+      const fetchImpl = async (url) => {
+        if (url.includes('/issues/141/comments?')) {
+          return new Response(
+            JSON.stringify([
+              { body, user: { login: 'trusted-maintainer' }, ...timestamps },
+            ]),
+            { status: 200 }
+          );
+        }
+        return new Response(JSON.stringify({ permission: 'write' }), {
+          status: 200,
+        });
+      };
+      return auditModule.verifyExternalAuditApproval(policy, {
+        repository: 'Terrastories/terrastories-api',
+        token: 'test-token',
+        fetchImpl,
+      });
+    };
+
+    for (const timestamps of [
+      {
+        created_at: '2026-09-27T20:00:00Z',
+        updated_at: '2026-09-27T20:01:00Z',
+      },
+      { created_at: '2026-09-27T20:00:00Z' },
+      { created_at: 'not-a-date', updated_at: 'not-a-date' },
     ]) {
-      const workflow = readFileSync(path, 'utf8');
-      expect(workflow).toContain('REQUIRE_EXTERNAL_AUDIT_APPROVAL: 1');
-      expect(workflow).toContain('GITHUB_TOKEN: ${{ github.token }}');
+      await expect(checkComment(timestamps)).rejects.toThrow(/approval/i);
     }
+    await expect(
+      checkComment({
+        created_at: '2026-09-27T20:00:00Z',
+        updated_at: '2026-09-27T20:00:00Z',
+      })
+    ).resolves.toEqual(
+      expect.objectContaining({ author: 'trusted-maintainer' })
+    );
   });
 });

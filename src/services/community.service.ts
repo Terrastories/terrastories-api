@@ -472,6 +472,69 @@ export class CommunityService {
   }
 
   /**
+   * Discover communities on the unauthenticated public/v1 surfaces
+   * (SPEC-V2 §4/§6.1): public+active only, optionally widened to the
+   * viewer's own active-but-private community. `viewerCommunityId` must be
+   * null for anonymous callers and `super_admin` sessions. The gate is
+   * applied at the database level before pagination and totals; a caller's
+   * `isActive` filter can never widen it, which is why it is not a
+   * parameter here.
+   *
+   * @param params.query - Optional name/description search term
+   * @param params.locale - Optional locale filter
+   * @param params.viewerCommunityId - Same-community widening, or null
+   * @param params.limit - Maximum communities to return
+   * @param params.offset - Number of communities to skip
+   * @returns Promise<CommunitySearchResponse> - Gated page with full gated total
+   */
+  async discoverCommunities(
+    params: {
+      query?: string;
+      locale?: string;
+      viewerCommunityId?: number | null;
+      limit?: number;
+      offset?: number;
+    } = {}
+  ): Promise<CommunitySearchResponse> {
+    try {
+      const { limit = 20, offset = 0 } = params;
+
+      if (limit < 1 || limit > 100) {
+        throw new CommunityValidationError('Limit must be between 1 and 100');
+      }
+
+      if (offset < 0) {
+        throw new CommunityValidationError('Offset must be non-negative');
+      }
+
+      const { communities, total } =
+        await this.communityRepository.findDiscoverable({
+          query: params.query,
+          locale: params.locale,
+          viewerCommunityId: params.viewerCommunityId ?? null,
+          limit,
+          offset,
+        });
+
+      return {
+        communities,
+        total,
+        limit,
+        offset,
+        hasMore: offset + communities.length < total,
+      };
+    } catch (error) {
+      if (error instanceof CommunityValidationError) {
+        throw error;
+      }
+
+      throw new CommunityOperationError(
+        `Failed to discover communities: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
    * Update community with validation
    * @param id - Community ID
    * @param updates - Update data

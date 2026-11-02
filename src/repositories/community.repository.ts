@@ -400,6 +400,92 @@ export class CommunityRepository {
   }
 
   /**
+   * Discoverable communities for the unauthenticated public/v1 community
+   * surfaces (SPEC-V2 §4/§6.1): public (`publicStories = true`) AND active
+   * (`isActive = true`) only, optionally widened to one viewer's own
+   * active-but-private community. `viewerCommunityId` must be null for
+   * anonymous callers and for `super_admin` sessions (no widening on these
+   * routes). This is the SQL transcription of `canDiscoverCommunity`
+   * (sovereignty-policy); the two must stay in sync. The gate filters at the
+   * database level before pagination and totals so lists and `total` always
+   * agree. Works on both SQLite and PostgreSQL via the dialect-aware
+   * `communities` getter.
+   *
+   * @param params.query - Optional name/description search term
+   * @param params.locale - Optional locale filter
+   * @param params.viewerCommunityId - Same-community widening, or null
+   * @param params.limit - Maximum number of communities to return
+   * @param params.offset - Number of communities to skip
+   * @returns Promise<{ communities: Community[]; total: number }> - Gated page and full gated count
+   */
+  async findDiscoverable(params: {
+    query?: string;
+    locale?: string;
+    viewerCommunityId?: number | null;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ communities: Community[]; total: number }> {
+    try {
+      const {
+        query,
+        locale,
+        viewerCommunityId = null,
+        limit = 50,
+        offset = 0,
+      } = params;
+
+      const conditions = [
+        // §6.1 status gate: disabled communities close every public path.
+        eq(this.communities.isActive, true),
+        // §4/§6.1 visibility gate: private communities are discoverable
+        // only by their own members (same-community widening).
+        viewerCommunityId !== null
+          ? or(
+              eq(this.communities.publicStories, true),
+              eq(this.communities.id, viewerCommunityId)
+            )
+          : eq(this.communities.publicStories, true),
+      ];
+
+      if (query?.trim()) {
+        const searchTerm = `%${query.trim()}%`;
+        conditions.push(
+          or(
+            like(this.communities.name, searchTerm),
+            like(this.communities.description, searchTerm)
+          )
+        );
+      }
+
+      if (locale) {
+        conditions.push(eq(this.communities.locale, locale));
+      }
+
+      const whereClause = and(...conditions);
+
+      const [communities, totalRows] = await Promise.all([
+        this.db
+          .select()
+          .from(this.communities)
+          .where(whereClause)
+          .orderBy(desc(this.communities.createdAt))
+          .limit(limit)
+          .offset(offset),
+        this.db
+          .select({ count: count() })
+          .from(this.communities)
+          .where(whereClause),
+      ]);
+
+      return { communities, total: Number(totalRows[0]?.count || 0) };
+    } catch (error) {
+      throw new Error(
+        `Failed to find discoverable communities: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
    * Update community by ID
    * @param id - Community ID
    * @param updates - Partial community data to update

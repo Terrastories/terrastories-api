@@ -20,11 +20,14 @@ import { getDb, type Database } from '../db/index.js';
 import { storiesSqlite, storiesPg } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import {
+  canDiscoverCommunity,
+  fastifyCommunityToGates,
   fastifyStoryToAudience,
   storyAccessForPhysicalRole,
 } from '../shared/authorization/sovereignty-policy.js';
 import { storyAudienceCondition } from '../repositories/story.repository.js';
 import {
+  getDiscoveryViewer,
   requireAuth,
   requireRole,
 } from '../shared/middleware/auth.middleware.js';
@@ -360,6 +363,35 @@ export async function communityRoutes(
           });
         }
 
+        // SPEC-V2 §4/§6.1 discovery gate on this unauthenticated route: a
+        // community is discoverable only while active, and anonymous or
+        // other-community callers additionally need it public; a
+        // same-community session user may also read their own active but
+        // private community. super_admin sees what anonymous sees. Denials
+        // stay 404 so the response carries no existence signal.
+        const viewer = getDiscoveryViewer(request);
+        const { visibility, status } = fastifyCommunityToGates(
+          community.publicStories,
+          community.isActive
+        );
+        if (
+          !canDiscoverCommunity({ visibility, status }, communityId, viewer)
+        ) {
+          return reply.status(404).send({
+            error: 'Community not found',
+            statusCode: 404,
+          });
+        }
+
+        // culturalSettings is removed V1 cultural metadata: anonymous and
+        // other-community callers never receive it or its parsed form.
+        if (!viewer || viewer.communityId !== communityId) {
+          const data: Record<string, unknown> = { ...community };
+          delete data.culturalSettings;
+          delete data.culturalProtocols;
+          return reply.status(200).send({ data });
+        }
+
         return reply.status(200).send({ data: community });
       } catch (error) {
         fastify.log.error({ error, url: request.url }, 'Get community error');
@@ -447,7 +479,6 @@ export async function communityRoutes(
         const {
           limit = 20,
           offset = 0,
-          isActive,
           search,
         } = request.query as {
           limit?: number;
@@ -456,14 +487,18 @@ export async function communityRoutes(
           search?: string;
         };
 
-        const searchParams = {
+        // SPEC-V2 §4/§6.1 discovery gate on this unauthenticated route: the
+        // database filter admits only public+active communities, widened to
+        // the session viewer's own active-but-private community. `isActive`
+        // is deliberately not forwarded — a caller filter must never widen
+        // the gate, so `?isActive=false` returns the same discoverable set.
+        const viewer = getDiscoveryViewer(request);
+        const result = await communityService.discoverCommunities({
+          query: search,
+          viewerCommunityId: viewer?.communityId ?? null,
           limit,
           offset,
-          isActive,
-          search,
-        };
-
-        const result = await communityService.searchCommunities(searchParams);
+        });
 
         // Transform response to match pagination format expected by tests
         const page = Math.floor(offset / limit) + 1;

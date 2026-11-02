@@ -20,7 +20,10 @@ import { PlaceService } from '../services/place.service.js';
 import { CommunityService } from '../services/community.service.js';
 import { StoryRepository } from '../repositories/story.repository.js';
 import { PlaceRepository } from '../repositories/place.repository.js';
-import { CommunityRepository } from '../repositories/community.repository.js';
+import {
+  CommunityRepository,
+  type Community,
+} from '../repositories/community.repository.js';
 import { FileRepository } from '../repositories/file.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { getDb, type Database } from '../db/index.js';
@@ -36,6 +39,26 @@ import {
   fastifyCommunityToGates,
   type ContentRouteFamily,
 } from '../shared/authorization/sovereignty-policy.js';
+import { getDiscoveryViewer } from '../shared/middleware/auth.middleware.js';
+
+/**
+ * Public projection of a community row for the anonymous discovery list
+ * (SPEC-V2 §4): cultural metadata (`culturalSettings`) and any other
+ * community-only column stay off the public surface.
+ */
+function toPublicCommunitySummary(community: Community) {
+  return {
+    id: community.id,
+    name: community.name,
+    description: community.description,
+    slug: community.slug,
+    publicStories: community.publicStories,
+    locale: community.locale,
+    isActive: community.isActive,
+    createdAt: community.createdAt,
+    updatedAt: community.updatedAt,
+  };
+}
 
 // Note: Request validation schemas removed as they're not currently used
 // in favor of simple parameter validation within route handlers
@@ -109,7 +132,7 @@ export async function publicApiRoutes(
     };
   }
 
-  // GET /communities - List all communities
+  // GET /communities - List discoverable communities (SPEC-V2 §4/§6.1)
   fastify.get<{
     Querystring: { page?: string; limit?: string };
   }>('/communities', async (request, reply) => {
@@ -120,28 +143,26 @@ export async function publicApiRoutes(
       const limit = parseInt(query.limit, 10);
 
       const communityRepository = new CommunityRepository(database);
+      const viewer = getDiscoveryViewer(request);
 
-      // Get active communities directly from repository (simpler for public API)
-      const communities = await communityRepository.findAllActive();
-
-      // Simple pagination on results
-      const startIndex = (page - 1) * limit;
-      const endIndex = startIndex + limit;
-      const paginatedCommunities = communities.slice(startIndex, endIndex);
-
-      const result = {
-        data: paginatedCommunities,
-        page,
-        limit,
-        total: communities.length,
-      };
+      // Discovery gate (public+active, plus the session viewer's own active
+      // community) is applied in SQL before pagination and totals: private
+      // and disabled communities never reach the response, and meta.total
+      // counts only discoverable communities.
+      const { communities, total } = await communityRepository.findDiscoverable(
+        {
+          viewerCommunityId: viewer?.communityId ?? null,
+          limit,
+          offset: (page - 1) * limit,
+        }
+      );
 
       return {
-        data: result.data,
+        data: communities.map(toPublicCommunitySummary),
         meta: {
-          page: result.page,
-          limit: result.limit,
-          total: result.total,
+          page,
+          limit,
+          total,
         },
       };
     } catch (error) {

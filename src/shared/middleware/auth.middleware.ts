@@ -18,6 +18,7 @@ import {
   authorizeCommunityContent,
   createAuthorizationAuditEvent,
   fastifyRoleToV2Role,
+  type CommunityDiscoveryViewer,
   type ContentRouteFamily,
   type ProtectedSurface,
 } from '../authorization/sovereignty-policy.js';
@@ -581,6 +582,26 @@ export async function requireCommunityScope(
   // Use new enhanced middleware for consistency
   const middleware = requireCommunityAccess();
   await middleware(request, reply);
+}
+
+/**
+ * Session viewer for the unauthenticated community discovery surfaces
+ * (`GET /api/communities`, `GET /api/v1/communities`,
+ * `GET /api/v1/communities/:id`). The session plugin is registered app-wide,
+ * so these routes can read `request.session?.user` without `requireAuth`.
+ * Returns null for anonymous requests and for `super_admin` sessions (they
+ * see what anonymous sees on these routes); community sessions keep their
+ * `communityId` for same-community widening of active-but-private
+ * communities (SPEC-V2 §4/§6.1).
+ */
+export function getDiscoveryViewer(
+  request: FastifyRequest
+): CommunityDiscoveryViewer | null {
+  const user = (request as AuthenticatedRequest).session?.user;
+  if (!user || user.role === 'super_admin') {
+    return null;
+  }
+  return { communityId: user.communityId, role: user.role };
 }
 
 /**

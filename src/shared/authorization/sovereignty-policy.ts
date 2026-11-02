@@ -193,6 +193,45 @@ export function fastifyCommunityToGates(
 }
 
 /**
+ * Session viewer context for the unauthenticated community discovery
+ * surfaces (`GET /api/communities`, `GET /api/v1/communities`,
+ * `GET /api/v1/communities/:id`). Physical Fastify role/session shape.
+ */
+export interface CommunityDiscoveryViewer {
+  communityId: number;
+  role: string;
+}
+
+/**
+ * SPEC-V2 §4/§6.1 community discoverability on the unauthenticated public/v1
+ * community surfaces: a community is discoverable only while active, and
+ * anonymous or other-community callers additionally require `visibility:
+ * 'public'` (Fastify `publicStories = true`). A same-community session user
+ * may also discover their own active-but-private community; `super_admin`
+ * never widens discovery on these routes (it sees what anonymous sees —
+ * management routes under `super_admin.ts` are a separate surface). Disabled
+ * communities are undiscoverable for everyone. The SQL transcription of this
+ * gate lives in `CommunityRepository.findDiscoverable` and must stay in sync.
+ */
+export function canDiscoverCommunity(
+  gates: { visibility: CommunityVisibility; status: CommunityStatus },
+  resourceCommunityId: number,
+  viewer: CommunityDiscoveryViewer | null
+): boolean {
+  if (gates.status !== 'active') {
+    return false;
+  }
+  if (gates.visibility === 'public') {
+    return true;
+  }
+  return Boolean(
+    viewer &&
+      viewer.role !== 'super_admin' &&
+      viewer.communityId === resourceCommunityId
+  );
+}
+
+/**
  * Transitional mapping from a physical Fastify role to the canonical V2 role
  * the policy must reason with (SPEC-V2 §6.2). A Fastify `viewer` maps to V2
  * `member`, not `viewer`: the pinned Fastify V1 story reads for

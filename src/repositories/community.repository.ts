@@ -13,8 +13,22 @@
  * - Performance-optimized queries with proper indexing
  */
 
-import { eq, and, like, desc, or, sql, count } from 'drizzle-orm';
-import { communitiesSqlite, communitiesPg } from '../db/schema/index.js';
+import { eq, and, like, desc, or, sql, count, ne } from 'drizzle-orm';
+import {
+  communitiesSqlite,
+  communitiesPg,
+  filesPg,
+  filesSqlite,
+  placesPg,
+  placesSqlite,
+  speakersPg,
+  speakersSqlite,
+  storiesPg,
+  storiesSqlite,
+  usersPg,
+  usersSqlite,
+} from '../db/schema/index.js';
+import type { CommunityClaimState } from '../shared/authorization/administrative-policy.js';
 import type { Community } from '../db/schema/communities.js';
 import type { Database } from '../db/index.js';
 
@@ -635,6 +649,45 @@ export class CommunityRepository {
         `Failed to count communities: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
+  }
+
+  /**
+   * SPEC-V2 §7 claim state: whether the community has any community account
+   * (any role except a system `super_admin` row, any status) and whether it
+   * holds community content (stories, places, speakers or files). A system
+   * lifecycle action may provision a first administrator only when both are
+   * false.
+   */
+  async getClaimState(communityId: number): Promise<CommunityClaimState> {
+    const isPg = 'execute' in this.database;
+    const users = isPg ? usersPg : usersSqlite;
+    const contentTables = isPg
+      ? [storiesPg, placesPg, speakersPg, filesPg]
+      : [storiesSqlite, placesSqlite, speakersSqlite, filesSqlite];
+
+    const [accounts] = await this.db
+      .select({ count: count() })
+      .from(users)
+      .where(
+        and(eq(users.communityId, communityId), ne(users.role, 'super_admin'))
+      );
+
+    let hasContent = false;
+    for (const table of contentTables) {
+      const [rows] = await this.db
+        .select({ count: count() })
+        .from(table)
+        .where(eq(table.communityId, communityId));
+      if (Number(rows?.count ?? 0) > 0) {
+        hasContent = true;
+        break;
+      }
+    }
+
+    return {
+      hasCommunityAccounts: Number(accounts?.count ?? 0) > 0,
+      hasContent,
+    };
   }
 
   /**

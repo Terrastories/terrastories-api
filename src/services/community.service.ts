@@ -26,6 +26,7 @@ import {
   type InvalidCommunityDataError,
 } from '../repositories/community.repository.js';
 import { toISOString } from '../shared/utils/date-transforms.js';
+import { authorizePublicationChange } from '../shared/authorization/administrative-policy.js';
 import type { CommunityResponse as CommunityResponseSchema } from '../shared/schemas/communities.js';
 import type { CommunityResponse } from '../shared/schemas/super-admin.js';
 
@@ -100,6 +101,16 @@ export class CommunityOperationError extends Error {
 /**
  * Community Service class providing business logic
  */
+/**
+ * SPEC-V2 §7: publication changes need community administrator authority.
+ */
+export class PublicationAuthorityRequiredError extends Error {
+  constructor(message = 'Community administrator authority required') {
+    super(message);
+    this.name = 'PublicationAuthorityRequiredError';
+  }
+}
+
 export class CommunityService {
   constructor(private communityRepository: CommunityRepository) {}
 
@@ -986,11 +997,30 @@ export class CommunityService {
     updates: UpdateCommunityRequest
   ): Promise<Community> {
     try {
-      // Super admin can update any community
+      // SPEC-V2 §7: publication is community authority. A system
+      // administrator may update lifecycle fields but never change
+      // `publicStories`; re-sending the current value is not a change.
+      if (updates.publicStories !== undefined) {
+        const existing = await this.communityRepository.findById(id);
+        if (
+          existing &&
+          !authorizePublicationChange({
+            actor: { id: 0, role: 'super_admin', communityId: null },
+            communityId: id,
+            currentPublic: existing.publicStories,
+            requestedPublic: updates.publicStories,
+          }).allowed
+        ) {
+          throw new PublicationAuthorityRequiredError();
+        }
+      }
       return await this.updateCommunity(id, updates);
     } catch (error) {
       // Re-throw specific error types for proper HTTP status codes
-      if (error instanceof CommunityValidationError) {
+      if (
+        error instanceof CommunityValidationError ||
+        error instanceof PublicationAuthorityRequiredError
+      ) {
         throw error;
       }
       if (

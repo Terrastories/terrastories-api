@@ -20,6 +20,7 @@ import {
   CommunityService,
   CommunityValidationError,
   CommunityOperationError,
+  PublicationAuthorityRequiredError,
 } from '../services/community.service.js';
 import {
   UserService,
@@ -27,12 +28,20 @@ import {
   WeakPasswordError,
   InvalidCommunityError,
   UserNotFoundError,
+  CommunityAuthorityRequiredError,
 } from '../services/user.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { getDb, type Database } from '../db/index.js';
 import {
+  authorizePublicationChange,
+  createAdministrativeAuditEvent,
+  type AdministrativeAction,
+  type AdministrativeDecision,
+} from '../shared/authorization/administrative-policy.js';
+import {
   getAuditLogger,
+  emitAdministrativeAudit,
   SuperAdminAuditLogger,
 } from '../shared/utils/audit-logger.js';
 import {
@@ -235,6 +244,35 @@ export async function superAdminRoutes(
   auditLogger.addLogger((entry) => {
     app.log.warn(entry, 'Super Admin Action Audit');
   });
+
+  // SPEC-V2 §7: membership, role and publication decisions are audited,
+  // allowed or denied, with IDs and outcome only.
+  const auditAdministrativeDecision = (
+    request: FastifyRequest,
+    action: AdministrativeAction,
+    communityId: number | null,
+    resourceId: number | null,
+    decision: AdministrativeDecision
+  ) => {
+    const user = (request as AuthenticatedRequest).user;
+    emitAdministrativeAudit(
+      request.log,
+      createAdministrativeAuditEvent({
+        action,
+        actor: user
+          ? { id: user.id, role: user.role, communityId: user.communityId }
+          : null,
+        communityId,
+        resourceId,
+        decision,
+      })
+    );
+  };
+  const communityAuthorityRequired = (reply: FastifyReply) =>
+    reply.code(403).send({
+      error: { message: 'Community administrator authority required' },
+      statusCode: 403,
+    });
 
   // Add super admin role protection to all routes
   // NOTE: Data sovereignty enforcement is NOT needed here because:
@@ -633,6 +671,35 @@ export async function superAdminRoutes(
         const { id } = request.params;
         const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
+        if (request.body.publicStories !== undefined) {
+          const existing = await communityRepository.findById(numericId);
+          if (existing) {
+            const user = (request as AuthenticatedRequest).user;
+            const decision = authorizePublicationChange({
+              actor: user
+                ? {
+                    id: user.id,
+                    role: user.role,
+                    communityId: user.communityId,
+                  }
+                : null,
+              communityId: numericId,
+              currentPublic: existing.publicStories,
+              requestedPublic: request.body.publicStories,
+            });
+            auditAdministrativeDecision(
+              request,
+              'publication_change',
+              numericId,
+              numericId,
+              decision
+            );
+            if (!decision.allowed) {
+              return communityAuthorityRequired(reply);
+            }
+          }
+        }
+
         const community = await communityService.updateCommunityAsSuperAdmin(
           numericId,
           request.body
@@ -684,6 +751,10 @@ export async function superAdminRoutes(
           { error: errorMessage, id: request.params.id },
           'Failed to update community'
         );
+
+        if (error instanceof PublicationAuthorityRequiredError) {
+          return communityAuthorityRequired(reply);
+        }
 
         if (error instanceof CommunityValidationError) {
           return reply.code(400).send({
@@ -1019,6 +1090,21 @@ export async function superAdminRoutes(
       reply: FastifyReply
     ) => {
       try {
+        const createDecision = await userService.authorizeSystemAccountCreate(
+          request.body.role,
+          request.body.communityId
+        );
+        auditAdministrativeDecision(
+          request,
+          'system_account_create',
+          request.body.communityId,
+          null,
+          createDecision
+        );
+        if (!createDecision.allowed) {
+          return communityAuthorityRequired(reply);
+        }
+
         const user = await userService.createUserAsSuperAdmin(request.body);
 
         // Audit log the user creation
@@ -1067,6 +1153,10 @@ export async function superAdminRoutes(
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
         request.log.error({ error: errorMessage }, 'Failed to create user');
+
+        if (error instanceof CommunityAuthorityRequiredError) {
+          return communityAuthorityRequired(reply);
+        }
 
         if (error instanceof DuplicateEmailError) {
           return reply.code(409).send({
@@ -1155,6 +1245,30 @@ export async function superAdminRoutes(
         const { id } = request.params;
         const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
+        if (
+          request.body.role !== undefined ||
+          request.body.communityId !== undefined
+        ) {
+          const target = await userService.getUserByIdAsSuperAdmin(numericId);
+          if (target) {
+            const updateDecision =
+              await userService.authorizeSystemAccountChange(
+                numericId,
+                request.body
+              );
+            auditAdministrativeDecision(
+              request,
+              'system_account_update',
+              target.communityId,
+              numericId,
+              updateDecision
+            );
+            if (!updateDecision.allowed) {
+              return communityAuthorityRequired(reply);
+            }
+          }
+        }
+
         const user = await userService.updateUserAsSuperAdmin(
           numericId,
           request.body
@@ -1191,6 +1305,10 @@ export async function superAdminRoutes(
           { error: errorMessage, id: request.params.id },
           'Failed to update user'
         );
+
+        if (error instanceof CommunityAuthorityRequiredError) {
+          return communityAuthorityRequired(reply);
+        }
 
         if (error instanceof UserNotFoundError) {
           return reply.code(404).send({

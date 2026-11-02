@@ -14,6 +14,12 @@
  */
 
 import { UserRepository } from '../repositories/user.repository.js';
+import {
+  authorizeSystemAccountProvisioning,
+  authorizeSystemAccountUpdate,
+  type AdministrativeDecision,
+  type AdministrativeDecisionReason,
+} from '../shared/authorization/administrative-policy.js';
 import * as passwordService from './password.service.js';
 import { CommunityService } from './community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
@@ -123,6 +129,17 @@ export class SuperAdminRoleError extends Error {
 /**
  * Custom error for self-deletion attempts
  */
+/**
+ * SPEC-V2 §7: the requested membership, role or account change needs
+ * community authority, which system privilege does not provide.
+ */
+export class CommunityAuthorityRequiredError extends Error {
+  constructor(public readonly reason: AdministrativeDecisionReason) {
+    super('Community administrator authority required');
+    this.name = 'CommunityAuthorityRequiredError';
+  }
+}
+
 export class SelfDeletionError extends Error {
   constructor(message = 'Users cannot delete themselves') {
     super(message);
@@ -139,7 +156,7 @@ export class UserService {
 
   constructor(
     private userRepository: UserRepository,
-    communityRepository: CommunityRepository
+    private communityRepository: CommunityRepository
   ) {
     // Always require community repository for proper validation
     this.communityService = new CommunityService(communityRepository);
@@ -746,6 +763,43 @@ export class UserService {
   }
 
   /**
+   * SPEC-V2 §7 decision for a system account creation. A `super_admin`
+   * account needs no claim-state lookup; any community role reads the
+   * target community's claim state.
+   */
+  async authorizeSystemAccountCreate(
+    role: string,
+    communityId: number
+  ): Promise<AdministrativeDecision> {
+    const community =
+      role === 'super_admin'
+        ? { hasCommunityAccounts: false, hasContent: false }
+        : await this.communityRepository.getClaimState(communityId);
+    return authorizeSystemAccountProvisioning({
+      requestedRole: role,
+      community,
+    });
+  }
+
+  /**
+   * SPEC-V2 §7 decision for a system account update, against the stored
+   * account. Throws UserNotFoundError when the account does not exist.
+   */
+  async authorizeSystemAccountChange(
+    id: number,
+    updates: { role?: string; communityId?: number }
+  ): Promise<AdministrativeDecision> {
+    const current = await this.userRepository.findByIdAsSuperAdmin(id);
+    if (!current) {
+      throw new UserNotFoundError();
+    }
+    return authorizeSystemAccountUpdate({
+      current: { role: current.role, communityId: current.communityId },
+      requested: { role: updates.role, communityId: updates.communityId },
+    });
+  }
+
+  /**
    * Create user in any community as super admin
    * @param data - User creation data
    * @returns Promise<User> - Created user
@@ -760,8 +814,18 @@ export class UserService {
     isActive?: boolean;
   }): Promise<User> {
     try {
-      // Super admin can create users in any community
-      // Use the existing registerUser method but bypass community restrictions
+      // SPEC-V2 §7: system privilege provisions system accounts and only
+      // the first administrator of an unclaimed, empty community. Every
+      // other community account is membership and needs community
+      // authority. Checked here as well as in the route (defense in depth).
+      const decision = await this.authorizeSystemAccountCreate(
+        data.role,
+        data.communityId
+      );
+      if (!decision.allowed) {
+        throw new CommunityAuthorityRequiredError(decision.reason);
+      }
+
       const userData: CreateUserRequest = {
         email: data.email,
         password: data.password,
@@ -778,7 +842,8 @@ export class UserService {
       if (
         error instanceof DuplicateEmailError ||
         error instanceof WeakPasswordError ||
-        error instanceof InvalidCommunityError
+        error instanceof InvalidCommunityError ||
+        error instanceof CommunityAuthorityRequiredError
       ) {
         throw error;
       }
@@ -807,7 +872,14 @@ export class UserService {
     }
   ): Promise<User> {
     try {
-      // Super admin can update any user including cross-community changes
+      // SPEC-V2 §7: a role or community change is a membership/role change
+      // and needs community authority; profile and lifecycle fields stay
+      // available to system administration.
+      const decision = await this.authorizeSystemAccountChange(id, updates);
+      if (!decision.allowed) {
+        throw new CommunityAuthorityRequiredError(decision.reason);
+      }
+
       const updateData: Partial<UpdateUserData> = {
         firstName: updates.firstName,
         lastName: updates.lastName,
@@ -827,7 +899,10 @@ export class UserService {
       if (error instanceof Error && error.message.includes('User not found')) {
         throw new UserNotFoundError();
       }
-      if (error instanceof UserNotFoundError) {
+      if (
+        error instanceof UserNotFoundError ||
+        error instanceof CommunityAuthorityRequiredError
+      ) {
         throw error;
       }
       throw new Error(

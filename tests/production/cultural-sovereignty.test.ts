@@ -24,6 +24,7 @@ import {
 
 import { randomUUID } from 'crypto';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 interface TestUser {
   id: string;
@@ -729,13 +730,9 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
           : parseInt(communityId),
     };
 
-    // Register user
+    // Seed user directly (registration requires community-admin authority)
     try {
-      const registerResponse = await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: testUser,
-      });
+      await seedRegisteredUser(await db.getDb(), testUser);
     } catch (error) {
       // User might already exist, which is fine
     }

@@ -450,6 +450,31 @@ describe('V2 sovereignty administrative sequences', () => {
       ]);
     });
 
+    it('does not count a Fastify super_admin row as a community account', async () => {
+      // Fastify V1 super_admin rows carry a NOT NULL communityId; SPEC-V2
+      // maps them to communityId-free system accounts, so they never claim
+      // the community they happen to sit in.
+      await db.insert(usersSqlite).values(
+        TestDataFactory.createUser(emptyCommunityId, {
+          email: 'seq-resident-system@example.test',
+          role: 'super_admin',
+          passwordHash: await hashPassword(TEST_PASSWORD),
+        })
+      );
+      const cookie = await cookieFor(superAdmin.email, otherCommunityId);
+      const first = await app.inject({
+        method: 'POST',
+        url: '/api/v1/super_admin/users',
+        headers: { cookie },
+        payload: registerPayload(
+          'seq-first-admin-beside-system@example.test',
+          'admin',
+          emptyCommunityId
+        ),
+      });
+      expect(first.statusCode).toBe(201);
+    });
+
     it('creates system accounts that still cannot read protected community content', async () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
       const email = 'seq-new-system@example.test';

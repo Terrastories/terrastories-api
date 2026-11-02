@@ -24,6 +24,7 @@ import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 describe('Places API Routes - Integration Tests', () => {
   let app: FastifyInstance;
@@ -82,30 +83,11 @@ describe('Places API Routes - Integration Tests', () => {
       communityId: testCommunityId,
     };
 
-    // Register and login users to get session cookies
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: adminUser,
-    });
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: editorUser,
-    });
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: viewerUser,
-    });
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: elderUser,
-    });
+    // Seed users (registration requires community-admin authority)
+    await seedRegisteredUser(testDb.db, adminUser);
+    await seedRegisteredUser(testDb.db, editorUser);
+    await seedRegisteredUser(testDb.db, viewerUser);
+    await seedRegisteredUser(testDb.db, elderUser);
 
     // Get session cookies
     const adminLogin = await app.inject({

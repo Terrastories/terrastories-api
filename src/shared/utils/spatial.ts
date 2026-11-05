@@ -8,14 +8,16 @@
 
 import { z } from 'zod';
 
+// GeoJSON Point interface
 export interface GeoJSONPoint {
   type: 'Point';
-  coordinates: [number, number];
+  coordinates: [number, number]; // [longitude, latitude]
 }
 
+// GeoJSON Polygon interface
 export interface GeoJSONPolygon {
   type: 'Polygon';
-  coordinates: number[][][];
+  coordinates: number[][][]; // Array of linear rings
 }
 
 export interface GeographicBoundingBox {
@@ -27,6 +29,7 @@ export interface GeographicBoundingBox {
   includesAllLongitudes: boolean;
 }
 
+// Coordinate validation schemas
 export const CoordinateSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
@@ -34,7 +37,7 @@ export const CoordinateSchema = z.object({
 
 export const GeometryPointSchema = z.object({
   type: z.literal('Point'),
-  coordinates: z.tuple([z.number(), z.number()]),
+  coordinates: z.tuple([z.number(), z.number()]), // [lng, lat] GeoJSON format
 });
 
 export const GeometryPolygonSchema = z.object({
@@ -49,7 +52,13 @@ function normalizeLongitudeRadians(radians: number): number {
   return ((((radians + Math.PI) % fullTurn) + fullTurn) % fullTurn) - Math.PI;
 }
 
+/**
+ * Spatial utility functions for creating and parsing geographic data
+ */
 export const SpatialUtils = {
+  /**
+   * Create a GeoJSON Point geometry from latitude and longitude
+   */
   createPoint(latitude: number, longitude: number): string {
     const point: GeoJSONPoint = {
       type: 'Point',
@@ -58,6 +67,9 @@ export const SpatialUtils = {
     return JSON.stringify(point);
   },
 
+  /**
+   * Parse a GeoJSON Point geometry string to extract coordinates
+   */
   parsePoint(
     geometryString: string | null
   ): { latitude: number; longitude: number } | null {
@@ -82,6 +94,9 @@ export const SpatialUtils = {
     }
   },
 
+  /**
+   * Create a GeoJSON Polygon geometry from coordinate array
+   */
   createPolygon(coordinates: number[][][]): string {
     const polygon: GeoJSONPolygon = {
       type: 'Polygon',
@@ -90,6 +105,9 @@ export const SpatialUtils = {
     return JSON.stringify(polygon);
   },
 
+  /**
+   * Parse a GeoJSON Polygon geometry string
+   */
   parsePolygon(geometryString: string | null): number[][][] | null {
     if (!geometryString) return null;
 
@@ -106,6 +124,9 @@ export const SpatialUtils = {
     }
   },
 
+  /**
+   * Validate if a geometry string is valid GeoJSON
+   */
   validateGeometry(geometryString: string | null): boolean {
     if (!geometryString) return false;
 
@@ -116,6 +137,7 @@ export const SpatialUtils = {
         return false;
       }
 
+      // Basic validation for Point and Polygon types
       if (geometry.type === 'Point') {
         return GeometryPointSchema.safeParse(geometry).success;
       }
@@ -130,6 +152,9 @@ export const SpatialUtils = {
     }
   },
 
+  /**
+   * Validate latitude and longitude coordinates
+   */
   validateCoordinates(latitude: number, longitude: number): boolean {
     return CoordinateSchema.safeParse({ latitude, longitude }).success;
   },
@@ -248,6 +273,9 @@ export const SpatialUtils = {
     };
   },
 
+  /**
+   * Check if a point is within a bounding box
+   */
   isPointInBounds(
     latitude: number,
     longitude: number,
@@ -261,11 +289,19 @@ export const SpatialUtils = {
     );
   },
 
+  /**
+   * Convert degrees to radians
+   */
   toRadians(degrees: number): number {
     return (degrees * Math.PI) / 180;
   },
 
+  /**
+   * Convert radians to degrees
+   */
   toDegrees(radians: number): number {
     return (radians * 180) / Math.PI;
   },
 };
+
+// Types are already exported above as interfaces

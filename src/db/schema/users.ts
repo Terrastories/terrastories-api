@@ -33,6 +33,7 @@ export const UserRoleSchema = z.enum([
 ]);
 export type UserRole = z.infer<typeof UserRoleSchema>;
 
+// PostgreSQL table for production
 export const usersPg = pgTable(
   'users',
   {
@@ -61,6 +62,7 @@ export const usersPg = pgTable(
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
   (table) => ({
+    // Email must be unique within each community, but can be shared across communities
     emailCommunityUnique: unique('users_email_community_unique').on(
       table.email,
       table.communityId
@@ -75,6 +77,7 @@ export const usersPg = pgTable(
   })
 );
 
+// SQLite table for development/testing
 export const usersSqlite = sqliteTable(
   'users',
   {
@@ -109,6 +112,7 @@ export const usersSqlite = sqliteTable(
       .$defaultFn(() => new Date()),
   },
   (table) => ({
+    // Email must be unique within each community, but can be shared across communities
     emailCommunityUnique: sqliteUnique('users_email_community_unique').on(
       table.email,
       table.communityId
@@ -123,7 +127,10 @@ export const usersSqlite = sqliteTable(
   })
 );
 
+// Dynamic table selection based on database type (for runtime use)
+// Note: This function imports getConfig at runtime to avoid circular dependencies during migration
 export async function getUsersTable() {
+  // Dynamic import to avoid issues with Drizzle Kit during migration generation
   const { getConfig } = await import('../../shared/config/index.js');
   const config = getConfig();
   const isPostgres =
@@ -133,6 +140,7 @@ export async function getUsersTable() {
   return isPostgres ? usersPg : usersSqlite;
 }
 
+// Relations - Users belong to one community
 export const usersRelations = relations(usersPg, ({ one }) => ({
   community: one(communitiesPg, {
     fields: [usersPg.communityId],
@@ -140,10 +148,12 @@ export const usersRelations = relations(usersPg, ({ one }) => ({
   }),
 }));
 
+// Communities have many users (reverse relation)
 export const communitiesRelations = relations(communitiesPg, ({ many }) => ({
   users: many(usersPg),
 }));
 
+// SQLite relations (same structure)
 export const usersSqliteRelations = relations(usersSqlite, ({ one }) => ({
   community: one(communitiesSqlite, {
     fields: [usersSqlite.communityId],
@@ -151,6 +161,7 @@ export const usersSqliteRelations = relations(usersSqlite, ({ one }) => ({
   }),
 }));
 
+// Zod schemas for validation - using PostgreSQL table as base for consistency
 export const insertUserSchema = createInsertSchema(usersPg, {
   email: z.string().email('Invalid email format'),
   role: UserRoleSchema.default('viewer'),
@@ -166,11 +177,13 @@ export const insertUserSchema = createInsertSchema(usersPg, {
 
 export const selectUserSchema = createSelectSchema(usersPg);
 
+// TypeScript types - Use SQLite for consistency with current deployment
 export type User = typeof usersSqlite.$inferSelect;
 export type NewUser = typeof usersSqlite.$inferInsert;
 export type CreateUserData = NewUser;
 export type UpdateUserData = Partial<NewUser>;
 
+// Additional validation schemas for specific use cases
 export const createUserSchema = insertUserSchema.omit({
   id: true,
   createdAt: true,
@@ -182,4 +195,6 @@ export const updateUserSchema = insertUserSchema.partial().omit({
   createdAt: true,
 });
 
+// Export table variants for migration generation
+// Use SQLite table for Drizzle Kit (config determines which is used)
 export const users = usersSqlite;

@@ -27,6 +27,7 @@ import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
 import { usersPg, usersSqlite } from './users.js';
 
+// PostgreSQL table for production
 export const filesPg = pgTable(
   'files',
   {
@@ -43,27 +44,34 @@ export const filesPg = pgTable(
     uploadedBy: pgInteger('uploaded_by')
       .notNull()
       .references(() => usersPg.id),
-    metadata: pgJsonb('metadata'),
+    metadata: pgJsonb('metadata'), // { width, height, duration, etc. }
     culturalRestrictions: pgJsonb('cultural_restrictions'),
     isActive: pgBoolean('is_active').default(true).notNull(),
     createdAt: timestamp('created_at').notNull(),
     updatedAt: timestamp('updated_at').notNull(),
   },
   (table) => ({
+    // Community isolation index for data sovereignty
     communityIdx: pgIndex('files_community_idx').on(table.communityId),
+    // User files index for performance
     userIdx: pgIndex('files_user_idx').on(table.uploadedBy),
+    // MIME type index for filtering
     mimeTypeIdx: pgIndex('files_mime_type_idx').on(table.mimeType),
+    // Active files index
     activeIdx: pgIndex('files_active_idx').on(table.isActive),
+    // Created date index for ordering
     createdAtIdx: pgIndex('files_created_at_idx').on(table.createdAt),
   })
 );
 
+// SQLite table for development/testing
 export const filesSqlite = sqliteTable(
   'files',
   {
     id: sqliteText('id')
       .primaryKey()
       .$defaultFn(() => {
+        // Generate UUID for SQLite
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(
           /[xy]/g,
           function (c) {
@@ -85,7 +93,7 @@ export const filesSqlite = sqliteTable(
     uploadedBy: integer('uploaded_by')
       .notNull()
       .references(() => usersSqlite.id),
-    metadata: sqliteText('metadata'),
+    metadata: sqliteText('metadata'), // JSON string for SQLite
     culturalRestrictions: sqliteText('cultural_restrictions'),
     isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
     createdAt: integer('created_at', { mode: 'timestamp' })
@@ -104,6 +112,7 @@ export const filesSqlite = sqliteTable(
   })
 );
 
+// Dynamic table selection based on database type
 export async function getFilesTable() {
   const { getConfig } = await import('../../shared/config/index.js');
   const config = getConfig();
@@ -113,6 +122,7 @@ export async function getFilesTable() {
   return isPostgres ? filesPg : filesSqlite;
 }
 
+// File metadata schema for validation
 export const FileMetadataSchema = z
   .object({
     width: z.number().optional(),
@@ -149,6 +159,7 @@ export const CulturalRestrictionsSchema = z
   })
   .strict();
 
+// Zod schemas for validation - use SQLite schema for broader compatibility
 export const insertFileSchema = createInsertSchema(filesSqlite, {
   filename: z
     .string()
@@ -176,17 +187,20 @@ export const insertFileSchema = createInsertSchema(filesSqlite, {
 
 export const selectFileSchema = createSelectSchema(filesSqlite);
 
+// Update schema (all fields optional except ID)
 export const updateFileSchema = insertFileSchema.partial().extend({
   id: z.string().uuid('Invalid file ID'),
   updatedAt: z.date().optional(),
 });
 
+// TypeScript types
 export type File = typeof filesSqlite.$inferSelect;
 export type NewFile = typeof filesSqlite.$inferInsert;
 export type UpdateFile = z.infer<typeof updateFileSchema>;
 export type FileMetadata = z.infer<typeof FileMetadataSchema>;
 export type CulturalRestrictions = z.infer<typeof CulturalRestrictionsSchema>;
 
+// Helper type for file upload results
 export interface FileUploadResult {
   id: string;
   filename: string;
@@ -202,6 +216,7 @@ export interface FileUploadResult {
   createdAt: Date;
 }
 
+// Helper type for file upload options
 export interface FileUploadOptions {
   maxSize?: number;
   allowedTypes?: string[];
@@ -211,5 +226,7 @@ export interface FileUploadOptions {
   culturalRestrictions?: CulturalRestrictions;
 }
 
+// Use SQLite table as default export for Drizzle Kit compatibility
 export const files = filesSqlite;
+// Export the PostgreSQL table for production use
 export { filesPg as filesPostgres };

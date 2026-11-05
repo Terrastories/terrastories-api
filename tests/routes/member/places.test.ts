@@ -7,9 +7,11 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FastifyInstance } from 'fastify';
+import { placesSqlite } from '../../../src/db/schema/index.js';
 import { testDb } from '../../helpers/database.js';
 import { createTestApp } from '../../helpers/api-client.js';
 import { extractSignedSessionCookie } from '../../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../../helpers/community-authority.js';
 
 describe('Member Places API - GET Endpoints', () => {
   let app: FastifyInstance;
@@ -34,12 +36,8 @@ describe('Member Places API - GET Endpoints', () => {
       communityId: testCommunityId,
     };
 
-    // Register user
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: editorUser,
-    });
+    // Seed user directly (registration requires community-admin authority)
+    await seedRegisteredUser(testDb.db, editorUser);
 
     // Login and get session cookie
     const editorLogin = await app.inject({
@@ -138,6 +136,69 @@ describe('Member Places API - GET Endpoints', () => {
       const body = JSON.parse(response.body);
       expect(body).toHaveProperty('data');
       expect(body).toHaveProperty('meta');
+    });
+  });
+
+  describe('GET /api/v1/member/places/:id - restricted places (SPEC-V2 §6.4)', () => {
+    it('should return 404 for a restricted place for an editor', async () => {
+      const [restrictedPlace] = await testDb.db
+        .insert(placesSqlite)
+        .values({
+          name: 'Restricted Member Place',
+          latitude: 49.2827,
+          longitude: -123.1207,
+          isRestricted: true,
+          communityId: testCommunityId,
+        })
+        .returning();
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/member/places/${restrictedPlace.id}`,
+        headers: { cookie: editorSessionId },
+      });
+
+      // A restricted place is unavailable to every role: the member
+      // surface must mask it as nonexistent, never 403.
+      expect(response.statusCode).toBe(404);
+    });
+
+    it('should exclude restricted places from the member list', async () => {
+      await testDb.db
+        .insert(placesSqlite)
+        .values({
+          name: 'Hidden Restricted Member Place',
+          latitude: 49.2827,
+          longitude: -123.1207,
+          isRestricted: true,
+          communityId: testCommunityId,
+        })
+        .returning();
+      const [openPlace] = await testDb.db
+        .insert(placesSqlite)
+        .values({
+          name: 'Open Member Place',
+          latitude: 49.2828,
+          longitude: -123.1208,
+          isRestricted: false,
+          communityId: testCommunityId,
+        })
+        .returning();
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/member/places?page=1&limit=50',
+        headers: { cookie: editorSessionId },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      // The transitional member-list response schema strips item fields, so
+      // exclusion is asserted through the count projection: only the one
+      // unrestricted place exists in this community.
+      expect(body.meta.total).toBe(1);
+      expect(body.data).toHaveLength(1);
+      expect(openPlace.id).toBeDefined();
     });
   });
 

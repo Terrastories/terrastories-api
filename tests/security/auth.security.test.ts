@@ -3,6 +3,10 @@ import { buildApp } from '../../src/app.js';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import {
+  communityAdminCookie,
+  seedRegisteredUser,
+} from '../helpers/community-authority.js';
 
 describe('Authentication Security Tests', () => {
   let app: FastifyInstance;
@@ -24,17 +28,13 @@ describe('Authentication Security Tests', () => {
   describe('Session Security', () => {
     it('should create secure session cookies', async () => {
       // Register and login
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'secure@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Secure',
-          lastName: 'Test',
-          communityId: 1,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'secure@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Secure',
+        lastName: 'Test',
+        communityId: 1,
+        role: 'viewer',
       });
 
       const loginResponse = await app.inject({
@@ -68,17 +68,13 @@ describe('Authentication Security Tests', () => {
       const sessionIds = new Set<string>();
 
       for (let i = 0; i < 5; i++) {
-        await app.inject({
-          method: 'POST',
-          url: '/api/v1/auth/register',
-          payload: {
-            email: `unique${i}@test.com`,
-            password: 'SecurePassword123!',
-            firstName: 'Unique',
-            lastName: `Test${i}`,
-            communityId: 1,
-            role: 'viewer',
-          },
+        await seedRegisteredUser(testDb.db, {
+          email: `unique${i}@test.com`,
+          password: 'SecurePassword123!',
+          firstName: 'Unique',
+          lastName: `Test${i}`,
+          communityId: 1,
+          role: 'viewer',
         });
 
         const loginResponse = await app.inject({
@@ -111,17 +107,13 @@ describe('Authentication Security Tests', () => {
 
     it('should prevent session fixation attacks', async () => {
       // Register and login
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'fixation@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Fixation',
-          lastName: 'Test',
-          communityId: 1,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'fixation@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Fixation',
+        lastName: 'Test',
+        communityId: 1,
+        role: 'viewer',
       });
 
       const loginResponse = await app.inject({
@@ -151,17 +143,13 @@ describe('Authentication Security Tests', () => {
   describe('Rate Limiting Security', () => {
     it('should prevent brute force attacks on login', async () => {
       // Register user
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'bruteforce@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'BruteForce',
-          lastName: 'Test',
-          communityId: 1,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'bruteforce@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'BruteForce',
+        lastName: 'Test',
+        communityId: 1,
+        role: 'viewer',
       });
 
       // Attempt multiple failed logins
@@ -241,10 +229,14 @@ describe('Authentication Security Tests', () => {
         'user@test.com\x00admin@test.com',
       ];
 
+      // Authenticate as a community admin so validation, not the anonymous
+      // 401, decides the outcome (SPEC-V2 §7 enrollment authority).
+      const cookie = await communityAdminCookie(app, testDb.db, 1);
       for (const maliciousEmail of maliciousEmails) {
         const response = await app.inject({
           method: 'POST',
           url: '/api/v1/auth/register',
+          headers: { cookie },
           payload: {
             email: maliciousEmail,
             password: 'SecurePassword123!',
@@ -263,9 +255,11 @@ describe('Authentication Security Tests', () => {
     it('should serve user-controlled text only as JSON data', async () => {
       const xssPayload = '<script>alert("xss")</script>';
 
+      const cookie = await communityAdminCookie(app, testDb.db, 1);
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie },
         payload: {
           email: 'xss@test.com',
           password: 'SecurePassword123!',
@@ -328,17 +322,13 @@ describe('Authentication Security Tests', () => {
 
     it('should make known-user and missing-user login failures indistinguishable', async () => {
       const password = 'TimingEqualizer123!';
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'timing@test.com',
-          password,
-          firstName: 'Timing',
-          lastName: 'Test',
-          communityId: 1,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'timing@test.com',
+        password,
+        firstName: 'Timing',
+        lastName: 'Test',
+        communityId: 1,
+        role: 'viewer',
       });
 
       const knownUserResponse = await app.inject({
@@ -372,17 +362,13 @@ describe('Authentication Security Tests', () => {
     it('should invalidate sessions on password change', async () => {
       // This test would require password change endpoint
       // For now, test that sessions can be invalidated
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'password@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Password',
-          lastName: 'Test',
-          communityId: 1,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'password@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Password',
+        lastName: 'Test',
+        communityId: 1,
+        role: 'viewer',
       });
 
       const loginResponse = await app.inject({
@@ -424,17 +410,13 @@ describe('Authentication Security Tests', () => {
 
     it('should prevent concurrent session vulnerabilities', async () => {
       // Register user
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'concurrent@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Concurrent',
-          lastName: 'Test',
-          communityId: 1,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'concurrent@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Concurrent',
+        lastName: 'Test',
+        communityId: 1,
+        role: 'viewer',
       });
 
       // Create multiple sessions

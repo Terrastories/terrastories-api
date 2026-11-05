@@ -92,6 +92,11 @@ export interface CommunitySpeakerParams {
 export interface SpeakerSearchParams {
   page: number;
   limit: number;
+  /**
+   * Exclude withdrawn (inactive) speakers at the database level (SPEC-V2
+   * §6.5); set by the service's role-aware gate, never by raw caller input.
+   */
+  activeOnly?: boolean;
 }
 
 /**
@@ -106,14 +111,15 @@ export interface PaginatedResponse<T> {
 }
 
 /**
- * Community speaker statistics
+ * Community speaker statistics (SPEC-V2 §6.5). `inactive` is management
+ * metadata for editors/admins only; viewer/member counts cover active
+ * speakers exclusively. Elder-status counts are removed V1 scope and never
+ * appear in V2 projections.
  */
 export interface SpeakerStats {
   total: number;
   active: number;
-  inactive: number;
-  elders: number;
-  nonElders: number;
+  inactive?: number;
 }
 
 /**
@@ -514,7 +520,9 @@ export class SpeakerRepository {
   }
 
   /**
-   * Search speakers by name
+   * Search speakers by name. With `activeOnly`, withdrawn (inactive) speakers
+   * are excluded at the database level (SPEC-V2 §6.5) so non-gated callers
+   * cannot discover them through search either.
    */
   async searchByName(
     communityId: number,
@@ -522,7 +530,7 @@ export class SpeakerRepository {
     params: SpeakerSearchParams
   ): Promise<PaginatedResponse<Speaker>> {
     const speakersTable = await getSpeakersTable();
-    const { page, limit } = params;
+    const { page, limit, activeOnly = false } = params;
     const offset = (page - 1) * limit;
 
     // Use case-insensitive search for Postgres, case-sensitive for SQLite
@@ -530,10 +538,16 @@ export class SpeakerRepository {
       ? ilike(speakersTable.name, `%${query}%`)
       : like(speakersTable.name, `%${query.toLowerCase()}%`);
 
-    const whereCondition = and(
+    const whereConditions = [
       eq(speakersTable.communityId, communityId),
-      searchCondition
-    );
+      searchCondition,
+    ];
+
+    if (activeOnly) {
+      whereConditions.push(eq(speakersTable.isActive, true));
+    }
+
+    const whereCondition = and(...whereConditions);
 
     // Get total count
     const [{ count: total }] = await (this.db as any)
@@ -560,15 +574,27 @@ export class SpeakerRepository {
   }
 
   /**
-   * Get speaker statistics for a community
+   * Get speaker statistics for a community (SPEC-V2 §6.5). Without
+   * `includeInactive` the counts cover active speakers only, so viewer/member
+   * callers learn nothing about withdrawn speakers.
    */
-  async getCommunityStats(communityId: number): Promise<SpeakerStats> {
+  async getCommunityStats(
+    communityId: number,
+    options: { includeInactive?: boolean } = {}
+  ): Promise<SpeakerStats> {
     const speakersTable = await getSpeakersTable();
+
+    const scope = options.includeInactive
+      ? eq(speakersTable.communityId, communityId)
+      : and(
+          eq(speakersTable.communityId, communityId),
+          eq(speakersTable.isActive, true)
+        );
 
     const [totalResult] = await (this.db as any)
       .select({ count: count() })
       .from(speakersTable)
-      .where(eq(speakersTable.communityId, communityId));
+      .where(scope);
 
     const [activeResult] = await (this.db as any)
       .select({ count: count() })
@@ -580,26 +606,13 @@ export class SpeakerRepository {
         )
       );
 
-    const [eldersResult] = await (this.db as any)
-      .select({ count: count() })
-      .from(speakersTable)
-      .where(
-        and(
-          eq(speakersTable.communityId, communityId),
-          eq(speakersTable.elderStatus, true)
-        )
-      );
-
     const total = Number(totalResult.count);
     const active = Number(activeResult.count);
-    const elders = Number(eldersResult.count);
 
     return {
       total,
       active,
-      inactive: total - active,
-      elders,
-      nonElders: total - elders,
+      ...(options.includeInactive ? { inactive: total - active } : {}),
     };
   }
 }

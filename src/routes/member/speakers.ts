@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { SpeakerService } from '../../services/speaker.service.js';
 import { SpeakerRepository } from '../../repositories/speaker.repository.js';
 import { getDb, type Database } from '../../db/index.js';
+import { AppError } from '../../shared/errors/index.js';
 import {
   toMemberSpeaker,
   createPaginationMeta,
@@ -199,7 +200,8 @@ export async function memberSpeakersRoutes(
 
         const speaker = await speakerService.getSpeakerById(
           speakerId,
-          userCommunityId
+          userCommunityId,
+          userRole
         );
 
         if (!speaker) {
@@ -220,6 +222,18 @@ export async function memberSpeakersRoutes(
               code: 'VALIDATION_ERROR',
               message: 'Invalid parameters',
               details: error.issues,
+            },
+          });
+        }
+
+        // Operational AppErrors keep their HTTP status here: a withdrawn
+        // speaker must map to the same 404 as a missing one (SPEC-V2 §6.5,
+        // no existence signal) instead of surfacing as a 500.
+        if (error instanceof AppError) {
+          return reply.code(error.statusCode).send({
+            error: {
+              code: error.statusCode === 404 ? 'NOT_FOUND' : error.name,
+              message: error.message,
             },
           });
         }

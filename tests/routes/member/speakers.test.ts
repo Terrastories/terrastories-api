@@ -10,6 +10,7 @@ import { FastifyInstance } from 'fastify';
 import { testDb } from '../../helpers/database.js';
 import { createTestApp } from '../../helpers/api-client.js';
 import { extractSignedSessionCookie } from '../../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../../helpers/community-authority.js';
 
 describe('Member Speakers API - GET Endpoints', () => {
   let app: FastifyInstance;
@@ -34,12 +35,8 @@ describe('Member Speakers API - GET Endpoints', () => {
       communityId: testCommunityId,
     };
 
-    // Register user
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: editorUser,
-    });
+    // Seed user directly (registration requires community-admin authority)
+    await seedRegisteredUser(testDb.db, editorUser);
 
     // Login and get session cookie
     const editorLogin = await app.inject({

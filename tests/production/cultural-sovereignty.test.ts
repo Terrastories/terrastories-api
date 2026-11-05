@@ -24,6 +24,7 @@ import {
 
 import { randomUUID } from 'crypto';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 interface TestUser {
   id: string;
@@ -286,7 +287,11 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
   });
 
   describe('Elder-Only Content Access Controls', () => {
-    test('Non-elder users receive 403 for elder-restricted content', async () => {
+    // SPEC-V2 §6.3 (user ruling): restricted Fastify rows are unavailable in
+    // V2 runtime to every role, elder included, until a community-approved
+    // disposition exists. Unavailable rows are masked as 404 (no existence
+    // signal).
+    test('Non-elder users get 404 for elder-restricted content (unavailable)', async () => {
       const community = testCommunities[0];
 
       // Create elder-only story
@@ -312,14 +317,11 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
         headers: { cookie: regularUserSessionCookie },
       });
 
-      expect(response.statusCode).toBe(403);
-      expect(response.json().error).toContain('elder access required');
-      expect(response.json().culturalProtocol).toBe(
-        'elder_restriction_enforced'
-      );
+      expect(response.statusCode).toBe(404);
+      expect(response.body).not.toContain('Sacred Elder Story');
     });
 
-    test('Elder users can access elder-restricted content', async () => {
+    test('Elder users also get 404 for elder-restricted content (unavailable)', async () => {
       const community = testCommunities[0];
 
       // Create elder-only content
@@ -342,10 +344,8 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
         },
       });
 
-      expect(response.statusCode).toBe(200);
-      const responseData = response.json();
-      expect(responseData.data.title).toBe('Elder Traditional Knowledge');
-      expect(responseData.data.traditional_knowledge).toBe(true);
+      expect(response.statusCode).toBe(404);
+      expect(response.body).not.toContain('Elder Traditional Knowledge');
     });
 
     test('Cultural protocol enforcement logs all elder content access', async () => {
@@ -730,13 +730,9 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
           : parseInt(communityId),
     };
 
-    // Register user
+    // Seed user directly (registration requires community-admin authority)
     try {
-      const registerResponse = await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: testUser,
-      });
+      await seedRegisteredUser(await db.getDb(), testUser);
     } catch (error) {
       // User might already exist, which is fine
     }

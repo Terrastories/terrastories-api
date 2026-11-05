@@ -31,6 +31,7 @@ import {
 } from '../shared/utils/date-transforms.js';
 import type {
   User,
+  NewUser,
   CreateUserData,
   UpdateUserData,
   UserRole,
@@ -147,6 +148,20 @@ export class CommunityAuthorityRequiredError extends Error {
  * nobody could recover: system authority may not reactivate or provision
  * into a claimed community (SPEC-V2 §7). Recovery is tracked with #134.
  */
+/**
+ * The membership decision was made on a snapshot the row no longer matches
+ * (a concurrent role / activation / community change landed first). Nothing
+ * was written; the caller must re-read and decide again (409).
+ */
+export class MembershipConflictError extends Error {
+  constructor(
+    message = 'The account changed since it was read; nothing was written'
+  ) {
+    super(message);
+    this.name = 'MembershipConflictError';
+  }
+}
+
 export class LastActiveAdministratorError extends Error {
   constructor(
     message = 'A community must keep at least one active administrator'
@@ -476,9 +491,27 @@ export class UserService {
       }
     }
 
+    // Role / activation / community changes use the single
+    // compare-and-set path (SPEC-V2 §7); the rest is a profile write.
+    const {
+      role: requestedRole,
+      isActive: requestedActive,
+      communityId: _ignoredCommunity,
+      ...profileUpdates
+    } = updates as UpdateUserData & { communityId?: number };
+    void _ignoredCommunity;
+    const changed = await this.applyMembershipChange(
+      existingUser,
+      { role: requestedRole, isActive: requestedActive },
+      profileUpdates
+    );
+    if (changed) {
+      return changed;
+    }
+
     // Prepare update data
     const updateData: UpdateUserData = {
-      ...updates,
+      ...profileUpdates,
       updatedAt: new Date(),
     };
 
@@ -674,6 +707,12 @@ export class UserService {
       throw new UserNotFoundError();
     }
 
+    // An active admin is first deactivated through the compare-and-set
+    // path, so a hard delete can never remove a community's last active
+    // administrator.
+    if (existingUser.role === 'admin' && existingUser.isActive) {
+      await this.applyMembershipChange(existingUser, { isActive: false });
+    }
     await this.userRepository.delete(id, communityId);
   }
 
@@ -807,25 +846,67 @@ export class UserService {
   }
 
   /**
-   * Refuse a change that would leave the target's community without an
-   * active administrator: deactivating, or demoting, its last active admin.
+   * The single write path for role, activation and community changes
+   * (SPEC-V2 §7). Fields equal to the caller's snapshot are stripped, so a
+   * same-value resend writes nothing. Any remaining change is a
+   * compare-and-set on the snapshot (role, isActive, communityId): a stale
+   * decision writes nothing and throws MembershipConflictError. Removing the
+   * last active admin of a community (deactivation, demotion or move) is
+   * refused atomically with the write (LastActiveAdministratorError).
+   *
+   * Returns null when no membership field changes; the caller then applies
+   * its profile-only write.
    */
-  private async assertNotLastActiveAdmin(target: {
-    id: number;
-    role: string;
-    isActive: boolean;
-    communityId: number;
-  }): Promise<void> {
-    if (target.role !== 'admin' || !target.isActive) {
-      return;
+  private async applyMembershipChange(
+    snapshot: User,
+    change: { role?: string; isActive?: boolean; communityId?: number },
+    profile: Partial<NewUser> = {}
+  ): Promise<User | null> {
+    const membership: Partial<NewUser> = {};
+    if (change.role !== undefined && change.role !== snapshot.role) {
+      membership.role = change.role as User['role'];
     }
-    const others = await this.userRepository.countActiveAdmins(
-      target.communityId,
-      target.id
+    if (
+      change.isActive !== undefined &&
+      change.isActive !== snapshot.isActive
+    ) {
+      membership.isActive = change.isActive;
+    }
+    if (
+      change.communityId !== undefined &&
+      change.communityId !== snapshot.communityId
+    ) {
+      membership.communityId = change.communityId;
+    }
+    if (Object.keys(membership).length === 0) {
+      return null;
+    }
+    const removesAdmin =
+      snapshot.role === 'admin' &&
+      snapshot.isActive === true &&
+      (membership.isActive === false ||
+        (membership.role !== undefined && membership.role !== 'admin') ||
+        membership.communityId !== undefined);
+    const cleanProfile = Object.fromEntries(
+      Object.entries(profile).filter(([, value]) => value !== undefined)
     );
-    if (others === 0) {
+    const result = await this.userRepository.compareAndSetMembership(
+      snapshot.id,
+      {
+        role: snapshot.role,
+        isActive: snapshot.isActive,
+        communityId: snapshot.communityId,
+      },
+      { ...cleanProfile, ...membership },
+      { requireOtherActiveAdmin: removesAdmin }
+    );
+    if (result.status === 'last-admin') {
       throw new LastActiveAdministratorError();
     }
+    if (result.status === 'conflict') {
+      throw new MembershipConflictError();
+    }
+    return result.user;
   }
 
   /**
@@ -995,27 +1076,29 @@ export class UserService {
       if (!decision.allowed) {
         throw new CommunityAuthorityRequiredError(decision.reason);
       }
-      if (updates.isActive === false) {
-        await this.assertNotLastActiveAdmin(current);
+      // B5: system authority never writes isActive:true for a community
+      // account; a stale read must not undo a community deactivation.
+      const requestedActive =
+        updates.isActive === true && current.role !== 'super_admin'
+          ? undefined
+          : updates.isActive;
+      const changed = await this.applyMembershipChange(
+        current,
+        {
+          role: updates.role,
+          communityId: updates.communityId,
+          isActive: requestedActive,
+        },
+        { firstName: updates.firstName, lastName: updates.lastName }
+      );
+      if (changed) {
+        return changed;
       }
 
+      // Profile-only write (no membership field changed).
       const updateData: Partial<UpdateUserData> = {
         firstName: updates.firstName,
         lastName: updates.lastName,
-        role: updates.role as
-          | 'super_admin'
-          | 'admin'
-          | 'editor'
-          | 'viewer'
-          | undefined,
-        communityId: updates.communityId,
-        // B5: system authority never writes isActive:true for a community
-        // account (a read may be stale; the community may have deactivated
-        // it since). The repository write is also conditional in SQL.
-        isActive:
-          updates.isActive === true && current.role !== 'super_admin'
-            ? undefined
-            : updates.isActive,
         updatedAt: new Date(),
       };
 
@@ -1027,7 +1110,8 @@ export class UserService {
       if (
         error instanceof UserNotFoundError ||
         error instanceof CommunityAuthorityRequiredError ||
-        error instanceof LastActiveAdministratorError
+        error instanceof LastActiveAdministratorError ||
+        error instanceof MembershipConflictError
       ) {
         throw error;
       }
@@ -1081,8 +1165,7 @@ export class UserService {
       }
 
       // Deactivate the user
-      await this.assertNotLastActiveAdmin(user);
-      await this.userRepository.updateByIdAsSuperAdmin(id, { isActive: false });
+      await this.applyMembershipChange(user, { isActive: false });
 
       return {
         message: 'User deactivated successfully',
@@ -1090,6 +1173,9 @@ export class UserService {
       };
     } catch (error) {
       // Re-throw specific error types
+      if (error instanceof MembershipConflictError) {
+        throw error;
+      }
       if (error instanceof LastActiveAdministratorError) {
         throw error;
       }
@@ -1343,15 +1429,6 @@ export class UserService {
         );
       }
 
-      // A community must keep an active administrator: refuse
-      // deactivating or demoting its last active admin (self included).
-      if (
-        data.isActive === false ||
-        (data.role !== undefined && data.role !== 'admin')
-      ) {
-        await this.assertNotLastActiveAdmin(existingUser);
-      }
-
       // Check for duplicate email if email is being updated
       if (data.email && data.email !== existingUser.email) {
         const duplicateUser = await this.userRepository.findByEmailInCommunity(
@@ -1365,13 +1442,27 @@ export class UserService {
         }
       }
 
-      // Create update data
+      // Role and activation go through the single compare-and-set path
+      // (stale decisions conflict; the last active admin cannot be
+      // deactivated or demoted, self included).
+      const changed = await this.applyMembershipChange(
+        existingUser,
+        { role: data.role, isActive: data.isActive },
+        {
+          email: data.email,
+          firstName: data.firstName,
+          lastName: data.lastName,
+        }
+      );
+      if (changed) {
+        return changed;
+      }
+
+      // Profile-only write (no membership field changed).
       const updateData: UpdateUserData = {
         email: data.email,
         firstName: data.firstName,
         lastName: data.lastName,
-        role: data.role,
-        isActive: data.isActive,
       };
 
       // Remove undefined values
@@ -1392,7 +1483,10 @@ export class UserService {
       }
       return updatedUser;
     } catch (error) {
-      if (error instanceof LastActiveAdministratorError) {
+      if (
+        error instanceof LastActiveAdministratorError ||
+        error instanceof MembershipConflictError
+      ) {
         throw error;
       }
       // Re-throw known error types
@@ -1445,12 +1539,9 @@ export class UserService {
         throw new UserNotFoundError('User not found');
       }
 
-      // Deactivate the user (soft delete)
-      await this.userRepository.update(
-        userId,
-        { isActive: false },
-        communityId
-      );
+      // Deactivate the user (soft delete) through the compare-and-set path,
+      // so two admins removing each other cannot leave no active admin.
+      await this.applyMembershipChange(existingUser, { isActive: false });
 
       return {
         message: 'User deleted successfully',
@@ -1460,7 +1551,9 @@ export class UserService {
       // Re-throw known error types
       if (
         error instanceof UserNotFoundError ||
-        error instanceof SelfDeletionError
+        error instanceof SelfDeletionError ||
+        error instanceof LastActiveAdministratorError ||
+        error instanceof MembershipConflictError
       ) {
         throw error;
       }

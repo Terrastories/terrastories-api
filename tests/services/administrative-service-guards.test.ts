@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
@@ -23,6 +24,7 @@ import {
   LastActiveAdministratorError,
   UserService,
 } from '../../src/services/user.service.js';
+import * as UserServiceModule from '../../src/services/user.service.js';
 import {
   CommunityService,
   PublicationAuthorityRequiredError,
@@ -724,9 +726,16 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
           })
         )
         .returning();
+      // A system account's reactivation is a membership change: it goes
+      // through the compare-and-set path with isActive:true.
+      const cas = vi.spyOn(userRepository, 'compareAndSetMembership');
       await service.updateUserAsSuperAdmin(system.id, { isActive: true });
-      expect(write.mock.calls[1][1].isActive).toBe(true);
+      expect(cas).toHaveBeenCalledTimes(1);
+      expect(cas.mock.calls[0][2].isActive).toBe(true);
+      // ...and the community account above never reached it.
+      expect(write).toHaveBeenCalledTimes(1);
 
+      cas.mockRestore();
       write.mockRestore();
     });
   });
@@ -943,6 +952,506 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
         })
       ).rejects.toThrow(LastActiveAdministratorError);
       expect(await usersInCommunity(emptyCommunityId)).toHaveLength(0);
+    });
+  });
+
+  describe('membership compare-and-set (round 6)', () => {
+    // Reviewer round 6: every write of role, isActive or communityId on a
+    // user must compare-and-set against the snapshot the decision was made
+    // on. A decision taken from a stale snapshot must not land, and two
+    // decisions that each pass on their own must not together break the
+    // last-active-admin invariant.
+    const rowFor = async (id: number) => {
+      const [row] = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.id, id));
+      return row;
+    };
+
+    const activeAdminsIn = async (communityId: number) =>
+      (await usersInCommunity(communityId)).filter(
+        (row) => row.role === 'admin' && row.isActive
+      );
+
+    /**
+     * MembershipConflictError is not exported yet (round 6 RED step); reach
+     * it through the module namespace so the file still loads and each test
+     * fails on its own assertion.
+     */
+    function membershipConflictError(): new (...args: never[]) => Error {
+      const type = (UserServiceModule as unknown as Record<string, unknown>)
+        .MembershipConflictError;
+      if (typeof type !== 'function') {
+        throw new Error(
+          'MembershipConflictError is not exported from src/services/user.service.ts yet (round 6)'
+        );
+      }
+      return type as unknown as new (...args: never[]) => Error;
+    }
+
+    /** Expects the attempt to reject with MembershipConflictError. */
+    async function expectMembershipConflict(attempt: Promise<unknown>) {
+      const thrown = await attempt.then(
+        () => null,
+        (error: unknown) => error
+      );
+      if (thrown === null) {
+        throw new Error(
+          'expected MembershipConflictError, but the update resolved'
+        );
+      }
+      expect(thrown).toBeInstanceOf(membershipConflictError());
+    }
+
+    type CasExpected = { role: string; isActive: boolean; communityId: number };
+    type CasOutcome =
+      | { status: 'updated'; user: User }
+      | { status: 'conflict' }
+      | { status: 'last-admin' };
+
+    /** Calls UserRepository.compareAndSetMembership (round 6 contract). */
+    async function compareAndSet(
+      repository: UserRepository,
+      id: number,
+      expected: CasExpected,
+      patch: Record<string, unknown>,
+      options?: { requireOtherActiveAdmin?: boolean }
+    ): Promise<CasOutcome> {
+      const method = (
+        repository as unknown as {
+          compareAndSetMembership?: (
+            id: number,
+            expected: CasExpected,
+            patch: Record<string, unknown>,
+            options?: { requireOtherActiveAdmin?: boolean }
+          ) => Promise<CasOutcome>;
+        }
+      ).compareAndSetMembership;
+      if (typeof method !== 'function') {
+        throw new Error(
+          'UserRepository.compareAndSetMembership is not implemented yet (round 6)'
+        );
+      }
+      return method.call(repository, id, expected, patch, options);
+    }
+
+    it('system stale same-role resend cannot undo a community demotion (Sol P1)', async () => {
+      // A second active administrator keeps the community demotion of this
+      // admin otherwise allowed.
+      await insertUser(privateCommunityId, 'admin', 'round6-remaining');
+
+      const repository = new UserRepository(db);
+      const service = new UserService(repository, communityRepository);
+      const realFind = repository.findByIdAsSuperAdmin.bind(repository);
+      vi.spyOn(repository, 'findByIdAsSuperAdmin').mockImplementationOnce(
+        async (id: number) => {
+          const snapshot = await realFind(id);
+          // The community demotes the admin after the system read.
+          await userService.updateUserInCommunity(
+            id,
+            { role: 'viewer' },
+            privateCommunityId
+          );
+          return snapshot;
+        }
+      );
+
+      // The system re-sends the role it read (admin), renaming as it goes.
+      const resolved = await service
+        .updateUserAsSuperAdmin(admin.id, {
+          role: 'admin',
+          firstName: 'System rename',
+        })
+        .then(
+          () => true,
+          () => false
+        );
+
+      const current = await realFind(admin.id);
+      expect(current?.role).toBe('viewer');
+      if (resolved) {
+        expect(current?.firstName).toBe('System rename');
+      }
+    });
+
+    it('two system deactivations must preserve one active admin (Sol P2)', async () => {
+      const second = await insertUser(
+        privateCommunityId,
+        'admin',
+        'round6-second'
+      );
+      const repository = new UserRepository(db);
+      const service = new UserService(repository, communityRepository);
+      const realFind = repository.findByIdAsSuperAdmin.bind(repository);
+
+      // Both snapshot reads observe both administrators still active.
+      let arrivals = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(repository, 'findByIdAsSuperAdmin').mockImplementation(
+        async (...args: Parameters<typeof realFind>) => {
+          const snapshot = await realFind(...args);
+          if (++arrivals === 2) release();
+          await gate;
+          return snapshot;
+        }
+      );
+
+      const outcomes = await Promise.allSettled([
+        service.updateUserAsSuperAdmin(admin.id, { isActive: false }),
+        service.updateUserAsSuperAdmin(second.id, { isActive: false }),
+      ]);
+
+      expect(await activeAdminsIn(privateCommunityId)).toHaveLength(1);
+      const rejected = outcomes.filter(
+        (outcome) => outcome.status === 'rejected'
+      );
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+        LastActiveAdministratorError
+      );
+    });
+
+    it('two delete-path deactivations must preserve one active admin', async () => {
+      const second = await insertUser(
+        privateCommunityId,
+        'admin',
+        'round6-delete-second'
+      );
+      const repository = new UserRepository(db);
+      const service = new UserService(repository, communityRepository);
+      const realFind = repository.findByIdAsSuperAdmin.bind(repository);
+
+      let arrivals = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(repository, 'findByIdAsSuperAdmin').mockImplementation(
+        async (...args: Parameters<typeof realFind>) => {
+          const snapshot = await realFind(...args);
+          if (++arrivals === 2) release();
+          await gate;
+          return snapshot;
+        }
+      );
+
+      const outcomes = await Promise.allSettled([
+        service.deactivateUserAsSuperAdmin(admin.id),
+        service.deactivateUserAsSuperAdmin(second.id),
+      ]);
+
+      expect(await activeAdminsIn(privateCommunityId)).toHaveLength(1);
+      const rejected = outcomes.filter(
+        (outcome) => outcome.status === 'rejected'
+      );
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+        LastActiveAdministratorError
+      );
+    });
+
+    it('two community admins deactivating each other must preserve one active admin', async () => {
+      const peer = await insertUser(privateCommunityId, 'admin', 'round6-peer');
+      const service = new UserService(
+        new UserRepository(db),
+        communityRepository
+      );
+      const realGet = service.getUserByIdInCommunity.bind(service);
+
+      let arrivals = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(service, 'getUserByIdInCommunity').mockImplementation(
+        async (...args: Parameters<typeof realGet>) => {
+          const snapshot = await realGet(...args);
+          if (++arrivals === 2) release();
+          await gate;
+          return snapshot;
+        }
+      );
+
+      await Promise.allSettled([
+        service.updateUserInCommunity(
+          peer.id,
+          { isActive: false },
+          privateCommunityId
+        ),
+        service.updateUserInCommunity(
+          admin.id,
+          { isActive: false },
+          privateCommunityId
+        ),
+      ]);
+
+      expect(await activeAdminsIn(privateCommunityId)).toHaveLength(1);
+    });
+
+    it('a system deactivation racing an admin self-deactivation must preserve one active admin', async () => {
+      const second = await insertUser(
+        privateCommunityId,
+        'admin',
+        'round6-mixed-second'
+      );
+      const repository = new UserRepository(db);
+      const systemService = new UserService(repository, communityRepository);
+      const communityService = new UserService(repository, communityRepository);
+      const realCount = repository.countActiveAdmins.bind(repository);
+
+      // Both last-admin checks pass on their own: each count still sees the
+      // other administrator active.
+      let arrivals = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(repository, 'countActiveAdmins').mockImplementation(
+        async (...args: Parameters<typeof realCount>) => {
+          const count = await realCount(...args);
+          if (++arrivals === 2) release();
+          await gate;
+          return count;
+        }
+      );
+
+      await Promise.allSettled([
+        systemService.updateUserAsSuperAdmin(admin.id, { isActive: false }),
+        communityService.updateUserInCommunity(
+          second.id,
+          { isActive: false },
+          privateCommunityId
+        ),
+      ]);
+
+      expect(await activeAdminsIn(privateCommunityId)).toHaveLength(1);
+    });
+
+    it('rejects a community-admin stale role write with MembershipConflictError', async () => {
+      const target = await insertUser(
+        privateCommunityId,
+        'viewer',
+        'round6-stale-role',
+        { firstName: 'Stale' }
+      );
+      const service = new UserService(
+        new UserRepository(db),
+        communityRepository
+      );
+      const realGet = service.getUserByIdInCommunity.bind(service);
+      vi.spyOn(service, 'getUserByIdInCommunity').mockImplementationOnce(
+        async (userId: number, communityId: number) => {
+          const snapshot = await realGet(userId, communityId);
+          // Admin B promotes the target before admin A's write lands.
+          await userService.updateUserInCommunity(
+            userId,
+            { role: 'editor' },
+            communityId
+          );
+          return snapshot;
+        }
+      );
+
+      // A decides from the stale viewer snapshot to promote to admin.
+      await expectMembershipConflict(
+        service.updateUserInCommunity(
+          target.id,
+          { role: 'admin' },
+          privateCommunityId
+        )
+      );
+
+      const row = await rowFor(target.id);
+      expect(row.role).toBe('editor');
+    });
+
+    it('a community-admin same-value resend writes nothing over a newer role', async () => {
+      const target = await insertUser(
+        privateCommunityId,
+        'viewer',
+        'round6-resend',
+        { firstName: 'Resend-Before' }
+      );
+      const service = new UserService(
+        new UserRepository(db),
+        communityRepository
+      );
+      const realGet = service.getUserByIdInCommunity.bind(service);
+      vi.spyOn(service, 'getUserByIdInCommunity').mockImplementationOnce(
+        async (userId: number, communityId: number) => {
+          const snapshot = await realGet(userId, communityId);
+          await userService.updateUserInCommunity(
+            userId,
+            { role: 'editor' },
+            communityId
+          );
+          return snapshot;
+        }
+      );
+
+      // A re-sends the role it read (viewer); only the rename is new.
+      await service.updateUserInCommunity(
+        target.id,
+        { role: 'viewer', firstName: 'Resend' },
+        privateCommunityId
+      );
+
+      const row = await rowFor(target.id);
+      expect(row.role).toBe('editor');
+      expect(row.firstName).toBe('Resend');
+    });
+
+    it('rejects a super-admin stale deactivation after a community demotion', async () => {
+      await insertUser(privateCommunityId, 'admin', 'round6-demote-second');
+      const repository = new UserRepository(db);
+      const service = new UserService(repository, communityRepository);
+      const realFind = repository.findByIdAsSuperAdmin.bind(repository);
+      vi.spyOn(repository, 'findByIdAsSuperAdmin').mockImplementationOnce(
+        async (id: number) => {
+          const snapshot = await realFind(id);
+          // A community admin demotes the target to viewer after the read.
+          await userService.updateUserInCommunity(
+            id,
+            { role: 'viewer' },
+            privateCommunityId
+          );
+          return snapshot;
+        }
+      );
+
+      await expectMembershipConflict(
+        service.updateUserAsSuperAdmin(admin.id, { isActive: false })
+      );
+
+      const row = await rowFor(admin.id);
+      expect(row.role).toBe('viewer');
+      expect(row.isActive).toBe(true);
+    });
+
+    describe('repository contract', () => {
+      it('returns updated and writes when expected matches the row', async () => {
+        const repository = new UserRepository(db);
+        const outcome = await compareAndSet(
+          repository,
+          viewer.id,
+          { role: 'viewer', isActive: true, communityId: privateCommunityId },
+          { role: 'editor' }
+        );
+        expect(outcome.status).toBe('updated');
+        expect((await rowFor(viewer.id)).role).toBe('editor');
+      });
+
+      it('returns conflict and writes nothing when expected.role mismatches', async () => {
+        const target = await insertUser(
+          privateCommunityId,
+          'viewer',
+          'round6-conflict',
+          { firstName: 'Before' }
+        );
+        const repository = new UserRepository(db);
+        const outcome = await compareAndSet(
+          repository,
+          target.id,
+          { role: 'admin', isActive: true, communityId: privateCommunityId },
+          { role: 'admin', firstName: 'Must Not Land' }
+        );
+        expect(outcome.status).toBe('conflict');
+        const row = await rowFor(target.id);
+        expect(row.role).toBe('viewer');
+        expect(row.firstName).toBe('Before');
+      });
+
+      it('returns last-admin and writes nothing when it would drop the only active admin', async () => {
+        const communityId = await insertCommunity('GUARD-CAS-SOLO');
+        const solo = await insertUser(communityId, 'admin', 'cas-solo');
+        const repository = new UserRepository(db);
+        const outcome = await compareAndSet(
+          repository,
+          solo.id,
+          { role: 'admin', isActive: true, communityId },
+          { isActive: false },
+          { requireOtherActiveAdmin: true }
+        );
+        expect(outcome.status).toBe('last-admin');
+        expect((await rowFor(solo.id)).isActive).toBe(true);
+      });
+
+      it('returns updated with requireOtherActiveAdmin when another active admin exists', async () => {
+        const communityId = await insertCommunity('GUARD-CAS-PAIR');
+        const first = await insertUser(communityId, 'admin', 'cas-first');
+        await insertUser(communityId, 'admin', 'cas-second');
+        const repository = new UserRepository(db);
+        const outcome = await compareAndSet(
+          repository,
+          first.id,
+          { role: 'admin', isActive: true, communityId },
+          { isActive: false },
+          { requireOtherActiveAdmin: true }
+        );
+        expect(outcome.status).toBe('updated');
+        expect((await rowFor(first.id)).isActive).toBe(false);
+      });
+
+      it('does not count an inactive other admin', async () => {
+        const communityId = await insertCommunity('GUARD-CAS-INACTIVE');
+        const solo = await insertUser(communityId, 'admin', 'cas-active-solo');
+        await insertUser(communityId, 'admin', 'cas-inactive-peer', {
+          isActive: false,
+        });
+        const repository = new UserRepository(db);
+        const outcome = await compareAndSet(
+          repository,
+          solo.id,
+          { role: 'admin', isActive: true, communityId },
+          { isActive: false },
+          { requireOtherActiveAdmin: true }
+        );
+        expect(outcome.status).toBe('last-admin');
+        expect((await rowFor(solo.id)).isActive).toBe(true);
+      });
+    });
+
+    describe('locking pins', () => {
+      it('runs compareAndSetMembership in a BEGIN IMMEDIATE transaction on SQLite', async () => {
+        const repository = new UserRepository(db);
+        const txSpy = vi.spyOn(db, 'transaction');
+
+        const outcome = await compareAndSet(
+          repository,
+          viewer.id,
+          { role: 'viewer', isActive: true, communityId: privateCommunityId },
+          { firstName: 'Cas Locked' }
+        );
+        expect(outcome.status).toBe('updated');
+        expect(txSpy).toHaveBeenCalledWith(expect.any(Function), {
+          behavior: 'immediate',
+        });
+
+        txSpy.mockRestore();
+      });
+
+      it('locks the community row through provisioningLockQuery on PostgreSQL', async () => {
+        // Source pin: the PG branch of compareAndSetMembership must take the
+        // same community-row lock the provisioning path uses. The real PG
+        // concurrency run lives in the parity script; a PG CI lane is #161.
+        const source = readFileSync(
+          new URL('../../src/repositories/user.repository.ts', import.meta.url),
+          'utf8'
+        );
+        const start = source.indexOf('compareAndSetMembership');
+        expect(
+          start,
+          'UserRepository.compareAndSetMembership must exist'
+        ).toBeGreaterThanOrEqual(0);
+        const rest = source.slice(start);
+        const nextMember = rest.search(/\n  [a-zA-Z]/);
+        const body = nextMember === -1 ? rest : rest.slice(0, nextMember);
+        expect(body).toContain('provisioningLockQuery(');
+      });
     });
   });
 });

@@ -24,6 +24,7 @@ import {
   getCommunitiesTable,
   type Community,
 } from '../db/schema/communities.js';
+import { provisioningLockQuery } from './community.repository.js';
 
 // Database type - using any temporarily to resolve union type incompatibility
 // TODO: Implement proper database abstraction layer for SQLite/PostgreSQL compatibility
@@ -701,6 +702,105 @@ export class UserRepository {
       );
     }
   }
+
+  /* eslint-disable @typescript-eslint/no-explicit-any -- dialect union (#135). */
+  /**
+   * SPEC-V2 §7 compare-and-set for every role / activation / community write.
+   *
+   * The write applies only if the row still holds the values the caller's
+   * decision was based on (`expected`), so a stale decision changes nothing
+   * and returns `conflict`. With `requireOtherActiveAdmin`, the write also
+   * requires another active admin in `expected.communityId`, checked in the
+   * same transaction, so no pair of concurrent changes can leave a community
+   * without an active administrator (`last-admin`).
+   *
+   * Every writer locks the community row first: PostgreSQL `SELECT ... FOR
+   * UPDATE` (READ COMMITTED: statements after the lock see committed rows),
+   * SQLite a synchronous `BEGIN IMMEDIATE` transaction. A PostgreSQL CI lane
+   * is tracked in #161; the concurrent PG proof lives in the parity script.
+   */
+  async compareAndSetMembership(
+    id: number,
+    expected: { role: string; isActive: boolean; communityId: number },
+    patch: Partial<NewUser>,
+    options: { requireOtherActiveAdmin?: boolean } = {}
+  ): Promise<
+    | { status: 'updated'; user: User }
+    | { status: 'conflict' }
+    | { status: 'last-admin' }
+  > {
+    const usersTable = await getUsersTable();
+    const communitiesTable = await getCommunitiesTable();
+    const values = {
+      ...patch,
+      ...(patch.email !== undefined
+        ? { email: patch.email.toLowerCase().trim() }
+        : {}),
+      updatedAt: new Date(),
+    };
+    const matchesSnapshot = and(
+      eq(usersTable.id, id),
+      eq(usersTable.role, expected.role as User['role']),
+      eq(usersTable.isActive, expected.isActive),
+      eq(usersTable.communityId, expected.communityId)
+    );
+    const otherActiveAdmins = (executor: any) =>
+      executor
+        .select({ n: count() })
+        .from(usersTable)
+        .where(
+          and(
+            eq(usersTable.communityId, expected.communityId),
+            eq(usersTable.role, 'admin'),
+            eq(usersTable.isActive, true),
+            ne(usersTable.id, id)
+          )
+        );
+    const db = this.database as any;
+
+    if ('execute' in this.database) {
+      return db.transaction(async (tx: any) => {
+        await provisioningLockQuery(tx, communitiesTable, expected.communityId);
+        if (options.requireOtherActiveAdmin) {
+          const [others] = await otherActiveAdmins(tx);
+          if (Number(others?.n ?? 0) === 0) {
+            return { status: 'last-admin' as const };
+          }
+        }
+        const rows = await tx
+          .update(usersTable)
+          .set(values)
+          .where(matchesSnapshot)
+          .returning();
+        return rows.length > 0
+          ? { status: 'updated' as const, user: rows[0] as User }
+          : { status: 'conflict' as const };
+      });
+    }
+
+    return db.transaction(
+      (tx: any) => {
+        if (options.requireOtherActiveAdmin) {
+          const [others] = otherActiveAdmins(tx).all();
+          if (Number(others?.n ?? 0) === 0) {
+            return { status: 'last-admin' as const };
+          }
+        }
+        const rows = tx
+          .update(usersTable)
+          .set(values)
+          .where(matchesSnapshot)
+          .returning()
+          .all();
+        return rows.length > 0
+          ? { status: 'updated' as const, user: rows[0] as User }
+          : { status: 'conflict' as const };
+      },
+      { behavior: 'immediate' }
+    );
+  }
+
+  /* eslint-enable @typescript-eslint/no-explicit-any */
 
   /**
    * Number of active `admin` accounts in a community, optionally excluding

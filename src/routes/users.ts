@@ -39,6 +39,7 @@ import {
   SuperAdminRoleError,
   CommunityAuthorityRequiredError,
   LastActiveAdministratorError,
+  MembershipConflictError,
   SelfDeletionError,
 } from '../services/user.service.js';
 import { UserRepository } from '../repositories/user.repository.js';
@@ -688,6 +689,26 @@ export async function userRoutes(
           });
         }
 
+        if (error instanceof MembershipConflictError) {
+          emitAdministrativeAudit(
+            request.log,
+            createAdministrativeAuditEvent({
+              action: 'membership_change',
+              actor: (request as AuthenticatedRequest).user
+                ? toActor((request as AuthenticatedRequest).user!)
+                : null,
+              communityId:
+                (request as AuthenticatedRequest).user?.communityId ?? null,
+              resourceId: Number((request.params as { id?: string }).id),
+              decision: { allowed: false, reason: 'stale-membership-decision' },
+            })
+          );
+          return reply.status(409).send({
+            error: { message: error.message },
+            statusCode: 409,
+          });
+        }
+
         if (error instanceof LastActiveAdministratorError) {
           return reply.status(409).send({
             error: { message: error.message },
@@ -851,6 +872,26 @@ export async function userRoutes(
           });
         }
 
+        if (error instanceof MembershipConflictError) {
+          emitAdministrativeAudit(
+            request.log,
+            createAdministrativeAuditEvent({
+              action: 'membership_change',
+              actor: (request as AuthenticatedRequest).user
+                ? toActor((request as AuthenticatedRequest).user!)
+                : null,
+              communityId:
+                (request as AuthenticatedRequest).user?.communityId ?? null,
+              resourceId: Number((request.params as { id?: string }).id),
+              decision: { allowed: false, reason: 'stale-membership-decision' },
+            })
+          );
+          return reply.status(409).send({
+            error: { message: error.message },
+            statusCode: 409,
+          });
+        }
+
         if (error instanceof LastActiveAdministratorError) {
           return reply.status(409).send({
             error: { message: error.message },
@@ -946,6 +987,16 @@ export async function userRoutes(
           return reply.status(404).send({
             error: 'User not found',
             statusCode: 404,
+          });
+        }
+
+        if (
+          error instanceof LastActiveAdministratorError ||
+          error instanceof MembershipConflictError
+        ) {
+          return reply.status(409).send({
+            error: { message: error.message },
+            statusCode: 409,
           });
         }
 

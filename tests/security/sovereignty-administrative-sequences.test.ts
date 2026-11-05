@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { eq } from 'drizzle-orm';
 import {
@@ -6,6 +6,7 @@ import {
   storiesSqlite,
   usersSqlite,
 } from '../../src/db/schema/index.js';
+import { UserRepository } from '../../src/repositories/user.repository.js';
 import { hashPassword } from '../../src/services/password.service.js';
 import { onAdministrativeAudit } from '../../src/shared/utils/audit-logger.js';
 import type { AdministrativeAuditEvent } from '../../src/shared/authorization/administrative-policy.js';
@@ -951,6 +952,73 @@ describe('V2 sovereignty administrative sequences', () => {
         payload: { role: 'editor' },
       });
       expect(demote.statusCode).toBe(409);
+    });
+  });
+
+  describe('super-admin stale membership decision (round 6)', () => {
+    it('maps a stale super-admin PUT to 409 and audits the denied decision', async () => {
+      // A second active administrator keeps the deactivation otherwise
+      // allowed, so the 409 can only come from the stale decision.
+      await db.insert(usersSqlite).values(
+        TestDataFactory.createUser(privateCommunityId, {
+          email: `seq-round6-second-${Date.now()}@example.test`,
+          role: 'admin',
+          passwordHash: await hashPassword(TEST_PASSWORD),
+        })
+      );
+
+      // The route reads the target before the service does, so every read of
+      // this row serves the same stale snapshot: the community demotion
+      // lands between the first read and the system write.
+      const realFind = UserRepository.prototype.findByIdAsSuperAdmin;
+      let staleSnapshot: Awaited<ReturnType<typeof realFind>> | undefined;
+      const spy = vi
+        .spyOn(UserRepository.prototype, 'findByIdAsSuperAdmin')
+        .mockImplementation(async function (this: UserRepository, id: number) {
+          if (id !== privateAdmin.id) {
+            return realFind.call(this, id);
+          }
+          if (staleSnapshot !== undefined) {
+            return staleSnapshot;
+          }
+          const snapshot = await realFind.call(this, id);
+          await db
+            .update(usersSqlite)
+            .set({ role: 'viewer' })
+            .where(eq(usersSqlite.id, privateAdmin.id));
+          staleSnapshot = snapshot;
+          return snapshot;
+        });
+
+      try {
+        const cookie = await cookieFor(superAdmin.email, otherCommunityId);
+        const response = await app.inject({
+          method: 'PUT',
+          url: `/api/v1/super_admin/users/${privateAdmin.id}`,
+          headers: { cookie },
+          payload: { isActive: false },
+        });
+        expect(response.statusCode).toBe(409);
+
+        const denial = audit.find(
+          (event) =>
+            event.event === 'administrative_decision' &&
+            event.reason === 'stale-membership-decision'
+        );
+        expect(denial).toBeDefined();
+        expect(denial).toMatchObject({ allowed: false });
+        expectContentFreeAudit(denial!);
+
+        // The stale decision wrote nothing: the admin stays an active viewer.
+        const [row] = await db
+          .select()
+          .from(usersSqlite)
+          .where(eq(usersSqlite.id, privateAdmin.id));
+        expect(row.role).toBe('viewer');
+        expect(row.isActive).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 });

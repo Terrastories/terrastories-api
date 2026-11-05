@@ -40,7 +40,8 @@ export type AdministrativeDecisionReason =
   | 'system-role-not-assignable'
   | 'first-administrator-only'
   | 'community-claimed-or-holds-content'
-  | 'reactivation-requires-community-authority';
+  | 'reactivation-requires-community-authority'
+  | 'stale-membership-decision';
 
 export interface AdministrativeDecision {
   allowed: boolean;

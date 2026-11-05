@@ -30,6 +30,7 @@ import {
   UserNotFoundError,
   CommunityAuthorityRequiredError,
   LastActiveAdministratorError,
+  MembershipConflictError,
 } from '../services/user.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
@@ -1331,6 +1332,20 @@ export async function superAdminRoutes(
           'Failed to update user'
         );
 
+        if (error instanceof MembershipConflictError) {
+          auditAdministrativeDecision(
+            request,
+            'system_account_update',
+            null,
+            Number(request.params.id),
+            { allowed: false, reason: 'stale-membership-decision' }
+          );
+          return reply.code(409).send({
+            error: { message: error.message },
+            statusCode: 409,
+          });
+        }
+
         if (error instanceof LastActiveAdministratorError) {
           return reply.code(409).send({
             error: { message: error.message },
@@ -1415,6 +1430,13 @@ export async function superAdminRoutes(
           { error: errorMessage, id: request.params.id },
           'Failed to deactivate user'
         );
+
+        if (error instanceof MembershipConflictError) {
+          return reply.code(409).send({
+            error: { message: error.message },
+            statusCode: 409,
+          });
+        }
 
         if (error instanceof LastActiveAdministratorError) {
           return reply.code(409).send({

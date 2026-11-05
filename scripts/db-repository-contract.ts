@@ -571,6 +571,64 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   assert.equal(await stories.delete(mountainStory.id), true);
   assert.equal(await stories.findById(mountainStory.id), null);
 
+  // Story-derived projections must not widen a restricted place's audience
+  // (SPEC-V2 §6.4), and a withdrawn interviewer must carry isActive = false
+  // so callers can withhold it.
+  const restrictedInterviewPlace = await places.create({
+    name: 'Restricted Interview Place',
+    communityId: storyCommunity.id,
+    latitude: -1.6,
+    longitude: -48.6,
+    isRestricted: true,
+  });
+  const withdrawnInterviewer = await speakers.create({
+    name: 'Withdrawn Interviewer',
+    communityId: storyCommunity.id,
+    isActive: false,
+  });
+  const restrictedInterviewStory = await stories.create({
+    title: 'Restricted Interview Story',
+    slug: 'restricted-interview-story',
+    communityId: storyCommunity.id,
+    createdBy: storyAuthor.id,
+    interviewLocationId: restrictedInterviewPlace.id,
+    interviewerId: withdrawnInterviewer.id,
+  });
+  const restrictedInterviewRead = await stories.findByIdWithRelations(
+    restrictedInterviewStory.id
+  );
+  assert.ok(restrictedInterviewRead, 'restricted-interview story must load');
+  assert.equal(
+    restrictedInterviewRead.interviewLocation ?? null,
+    null,
+    'a restricted interview location must not be hydrated into a story'
+  );
+  assert.equal(
+    restrictedInterviewRead.interviewer?.id,
+    withdrawnInterviewer.id
+  );
+  assert.equal(
+    restrictedInterviewRead.interviewer?.isActive,
+    false,
+    'a withdrawn interviewer must carry isActive = false'
+  );
+
+  const openInterviewStory = await stories.create({
+    title: 'Open Interview Story',
+    slug: 'open-interview-story',
+    communityId: storyCommunity.id,
+    createdBy: storyAuthor.id,
+    interviewLocationId: storyPlaceAlpha.id,
+    interviewerId: storySpeaker.id,
+  });
+  const openInterviewRead = await stories.findByIdWithRelations(
+    openInterviewStory.id
+  );
+  assert.equal(openInterviewRead?.interviewLocation?.id, storyPlaceAlpha.id);
+  assert.equal(openInterviewRead?.interviewLocation?.latitude, -1.4);
+  assert.equal(openInterviewRead?.interviewer?.id, storySpeaker.id);
+  assert.equal(openInterviewRead?.interviewer?.isActive, true);
+
   // --- ThemesRepository ------------------------------------------------
 
   const themeCommunity = await communities.create({
@@ -700,6 +758,118 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   assert.deepEqual(
     themesDesc.data.map((theme) => theme.name),
     ['apple', 'Zebra', 'Banana']
+  );
+
+  // Theme coordinates must be numbers on every return path, and zero must
+  // survive (not become null or a string). PostgreSQL numeric decodes through
+  // Drizzle mode 'number'; SQLite stores real.
+  const coordinateCommunity = await communities.create({
+    name: 'Theme Coordinate Community',
+  });
+  const zeroCoordinates = {
+    centerLat: 0,
+    centerLong: 0,
+    swBoundaryLat: -1,
+    swBoundaryLong: 0,
+    neBoundaryLat: 0,
+    neBoundaryLong: 1,
+  };
+  const assertThemeCoordinates = (
+    theme: Record<string, unknown> | null | undefined,
+    expected: Record<string, number>,
+    label: string
+  ): void => {
+    assert.ok(theme, `${label} must return a theme`);
+    for (const [key, value] of Object.entries(expected)) {
+      assert.equal(typeof theme[key], 'number', `${label} ${key} type`);
+      assert.equal(theme[key], value, `${label} ${key} value`);
+    }
+  };
+  const zeroTheme = await themes.create({
+    name: 'Zero Meridian Theme',
+    description: 'equator and prime meridian',
+    active: true,
+    communityId: coordinateCommunity.id,
+    ...zeroCoordinates,
+  });
+  const cid = coordinateCommunity.id;
+  assertThemeCoordinates(zeroTheme, zeroCoordinates, 'create');
+  assertThemeCoordinates(
+    await themes.findById(zeroTheme.id),
+    zeroCoordinates,
+    'findById'
+  );
+  assertThemeCoordinates(
+    await themes.findByIdAndCommunity(zeroTheme.id, cid),
+    zeroCoordinates,
+    'findByIdAndCommunity'
+  );
+  assertThemeCoordinates(
+    (await themes.findByCommunityId(cid))[0],
+    zeroCoordinates,
+    'findByCommunityId'
+  );
+  assertThemeCoordinates(
+    (await themes.findByCommunityId(cid, { page: 1, limit: 10 })).data[0],
+    zeroCoordinates,
+    'findByCommunityId paginated'
+  );
+  assertThemeCoordinates(
+    (await themes.findByCommunityIdPaginated(cid, { page: 1, limit: 10 }))
+      .themes[0],
+    zeroCoordinates,
+    'findByCommunityIdPaginated'
+  );
+  assertThemeCoordinates(
+    (await themes.findActiveThemes(cid))[0],
+    zeroCoordinates,
+    'findActiveThemes'
+  );
+  assertThemeCoordinates(
+    (await themes.searchByName(cid, 'meridian'))[0],
+    zeroCoordinates,
+    'searchByName'
+  );
+  assertThemeCoordinates(
+    (await themes.searchByDescription(cid, 'equator'))[0],
+    zeroCoordinates,
+    'searchByDescription'
+  );
+  assertThemeCoordinates(
+    (await themes.searchThemes(cid, { query: 'meridian', page: 1, limit: 10 }))
+      .data[0],
+    zeroCoordinates,
+    'searchThemes'
+  );
+  assertThemeCoordinates(
+    (await themes.searchActiveThemes(cid, 'meridian'))[0],
+    zeroCoordinates,
+    'searchActiveThemes'
+  );
+  const shifted = { ...zeroCoordinates, centerLat: 0.5, centerLong: -0.25 };
+  assertThemeCoordinates(
+    await themes.update(zeroTheme.id, { centerLat: 0.5, centerLong: -0.25 }),
+    shifted,
+    'update'
+  );
+  assertThemeCoordinates(
+    await themes.updateByCommunity(zeroTheme.id, cid, {
+      centerLat: 0,
+      centerLong: 0,
+    }),
+    zeroCoordinates,
+    'updateByCommunity'
+  );
+  assertThemeCoordinates(
+    // Bounds are validated as a set, so update all four together.
+    await themes.updateWithCommunityCheck(zeroTheme.id, cid, {
+      swBoundaryLat: zeroCoordinates.swBoundaryLat,
+      swBoundaryLong: zeroCoordinates.swBoundaryLong,
+      neBoundaryLat: zeroCoordinates.neBoundaryLat,
+      neBoundaryLong: zeroCoordinates.neBoundaryLong,
+    }),
+    zeroCoordinates,
+    'updateWithCommunityCheck'
   );
 
   assert.equal(await themes.delete(mountainTheme.id), true);

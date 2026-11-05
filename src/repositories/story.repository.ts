@@ -111,6 +111,7 @@ export interface StoryWithRelations extends Story {
     birthYear?: number;
     elderStatus: boolean;
     culturalRole?: string;
+    isActive: boolean;
   } | null;
 }
 
@@ -479,7 +480,10 @@ export class StoryRepository {
         .where(
           and(
             eq(placesTable.id, story.interviewLocationId),
-            eq(placesTable.communityId, story.communityId)
+            eq(placesTable.communityId, story.communityId),
+            // A readable story must not widen a restricted place's audience
+            // (SPEC-V2 Section 6.4): never hydrate a restricted location.
+            eq(placesTable.isRestricted, false)
           )
         )
         .limit(1);
@@ -521,6 +525,8 @@ export class StoryRepository {
           birthYear: speaker.birthYear || undefined,
           elderStatus: speaker.elderStatus,
           culturalRole: speaker.culturalRole || undefined,
+          // Carried so callers can withhold a withdrawn interviewer.
+          isActive: speaker.isActive,
         };
       }
     }

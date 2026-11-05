@@ -1244,21 +1244,32 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
       const repository = new UserRepository(db);
       const systemService = new UserService(repository, communityRepository);
       const communityService = new UserService(repository, communityRepository);
-      const realCount = repository.countActiveAdmins.bind(repository);
+      const realFind = repository.findByIdAsSuperAdmin.bind(repository);
+      const realGet =
+        communityService.getUserByIdInCommunity.bind(communityService);
 
-      // Both last-admin checks pass on their own: each count still sees the
-      // other administrator active.
+      // Both snapshot reads observe both administrators still active: the
+      // system path reads through the repository, the community path through
+      // the service, and one shared gate releases when both have arrived.
       let arrivals = 0;
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
       });
-      vi.spyOn(repository, 'countActiveAdmins').mockImplementation(
-        async (...args: Parameters<typeof realCount>) => {
-          const count = await realCount(...args);
+      vi.spyOn(repository, 'findByIdAsSuperAdmin').mockImplementation(
+        async (...args: Parameters<typeof realFind>) => {
+          const snapshot = await realFind(...args);
           if (++arrivals === 2) release();
           await gate;
-          return count;
+          return snapshot;
+        }
+      );
+      vi.spyOn(communityService, 'getUserByIdInCommunity').mockImplementation(
+        async (...args: Parameters<typeof realGet>) => {
+          const snapshot = await realGet(...args);
+          if (++arrivals === 2) release();
+          await gate;
+          return snapshot;
         }
       );
 
@@ -1348,6 +1359,30 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
       expect(row.firstName).toBe('Resend');
     });
 
+    it('a same-value isActive resend performs no compare-and-set write', async () => {
+      const target = await insertUser(
+        privateCommunityId,
+        'viewer',
+        'round6-resend-active',
+        { firstName: 'Before' }
+      );
+      const repository = new UserRepository(db);
+      const service = new UserService(repository, communityRepository);
+      const cas = vi.spyOn(repository, 'compareAndSetMembership');
+
+      // Re-sends the isActive value already stored on the row; only the
+      // rename is new, so no membership CAS write may happen.
+      await service.updateUserInCommunity(
+        target.id,
+        { isActive: (await rowFor(target.id)).isActive, firstName: 'Same' },
+        privateCommunityId
+      );
+
+      expect(cas).not.toHaveBeenCalled();
+      const row = await rowFor(target.id);
+      expect(row.firstName).toBe('Same');
+    });
+
     it('rejects a super-admin stale deactivation after a community demotion', async () => {
       await insertUser(privateCommunityId, 'admin', 'round6-demote-second');
       const repository = new UserRepository(db);
@@ -1405,6 +1440,46 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
         expect(outcome.status).toBe('conflict');
         const row = await rowFor(target.id);
         expect(row.role).toBe('viewer');
+        expect(row.firstName).toBe('Before');
+      });
+
+      it('returns conflict and writes nothing when expected.isActive mismatches', async () => {
+        const target = await insertUser(
+          privateCommunityId,
+          'viewer',
+          'round6-conflict-active',
+          { firstName: 'Before' }
+        );
+        const repository = new UserRepository(db);
+        const outcome = await compareAndSet(
+          repository,
+          target.id,
+          { role: 'viewer', isActive: false, communityId: privateCommunityId },
+          { isActive: false, firstName: 'Must Not Land' }
+        );
+        expect(outcome.status).toBe('conflict');
+        const row = await rowFor(target.id);
+        expect(row.isActive).toBe(true);
+        expect(row.firstName).toBe('Before');
+      });
+
+      it('returns conflict and writes nothing when expected.communityId mismatches', async () => {
+        const target = await insertUser(
+          privateCommunityId,
+          'viewer',
+          'round6-conflict-community',
+          { firstName: 'Before' }
+        );
+        const repository = new UserRepository(db);
+        const outcome = await compareAndSet(
+          repository,
+          target.id,
+          { role: 'viewer', isActive: true, communityId: otherCommunityId },
+          { communityId: otherCommunityId, firstName: 'Must Not Land' }
+        );
+        expect(outcome.status).toBe('conflict');
+        const row = await rowFor(target.id);
+        expect(row.communityId).toBe(privateCommunityId);
         expect(row.firstName).toBe('Before');
       });
 

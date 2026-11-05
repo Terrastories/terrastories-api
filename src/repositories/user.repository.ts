@@ -803,31 +803,6 @@ export class UserRepository {
   /* eslint-enable @typescript-eslint/no-explicit-any */
 
   /**
-   * Number of active `admin` accounts in a community, optionally excluding
-   * one account. Used to refuse a change that would leave a community with
-   * no active administrator (unrecoverable lockout).
-   */
-  async countActiveAdmins(
-    communityId: number,
-    excludeUserId?: number
-  ): Promise<number> {
-    const usersTable = await getUsersTable();
-    const conditions = [
-      eq(usersTable.communityId, communityId),
-      eq(usersTable.role, 'admin'),
-      eq(usersTable.isActive, true),
-    ];
-    if (excludeUserId !== undefined) {
-      conditions.push(ne(usersTable.id, excludeUserId));
-    }
-    const [row] = await this.database
-      .select({ n: count() })
-      .from(usersTable)
-      .where(and(...conditions));
-    return Number(row?.n ?? 0);
-  }
-
-  /**
    * Update user by ID across all communities (super admin only)
    * @param id - User ID
    * @param data - Update data

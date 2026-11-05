@@ -41,7 +41,8 @@ export type AdministrativeDecisionReason =
   | 'first-administrator-only'
   | 'community-claimed-or-holds-content'
   | 'reactivation-requires-community-authority'
-  | 'stale-membership-decision';
+  | 'stale-membership-decision'
+  | 'last-active-administrator';
 
 export interface AdministrativeDecision {
   allowed: boolean;

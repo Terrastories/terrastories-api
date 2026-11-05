@@ -1021,4 +1021,161 @@ describe('V2 sovereignty administrative sequences', () => {
       }
     });
   });
+  describe('round 7: super_admin rows and DELETE audit (Opus t-0036)', () => {
+    const fresh = async () => {
+      const [second] = await db
+        .insert(usersSqlite)
+        .values(
+          TestDataFactory.createUser(privateCommunityId, {
+            email: `r7-second-${Date.now()}@example.test`,
+            role: 'admin',
+            passwordHash: await hashPassword(TEST_PASSWORD),
+          })
+        )
+        .returning();
+      return second;
+    };
+    it('r7: community DELETE of a member emits an audit event', async () => {
+      const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
+      audit.length = 0;
+      const r = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/users/${privateViewer.id}`,
+        headers: { cookie },
+      });
+      expect(r.statusCode).toBe(200);
+      expect(
+        audit.some(
+          (e: any) => e.resourceId === privateViewer.id && e.allowed === true
+        )
+      ).toBe(true);
+    });
+    it('r7: system DELETE of a member emits an audit event', async () => {
+      const c = await cookieFor(superAdmin.email, otherCommunityId);
+      audit.length = 0;
+      const r = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/super_admin/users/${privateViewer.id}`,
+        headers: { cookie: c },
+      });
+      expect(r.statusCode).toBe(200);
+      expect(
+        audit.some(
+          (e: any) => e.resourceId === privateViewer.id && e.allowed === true
+        )
+      ).toBe(true);
+    });
+    it('r7: stale community DELETE audits the denied decision', async () => {
+      const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
+      const spy = vi
+        .spyOn(UserRepository.prototype, 'compareAndSetMembership')
+        .mockResolvedValue({ status: 'conflict' } as any);
+      audit.length = 0;
+      const r = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/users/${privateViewer.id}`,
+        headers: { cookie },
+      });
+      spy.mockRestore();
+      expect(r.statusCode).toBe(409);
+      expect(
+        audit.some(
+          (e: any) =>
+            e.allowed === false && e.reason === 'stale-membership-decision'
+        )
+      ).toBe(true);
+    });
+    it('r7: stale system DELETE audits the denied decision', async () => {
+      const c = await cookieFor(superAdmin.email, otherCommunityId);
+      const spy = vi
+        .spyOn(UserRepository.prototype, 'compareAndSetMembership')
+        .mockResolvedValue({ status: 'conflict' } as any);
+      audit.length = 0;
+      const r = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/super_admin/users/${privateViewer.id}`,
+        headers: { cookie: c },
+      });
+      spy.mockRestore();
+      expect(r.statusCode).toBe(409);
+      expect(
+        audit.some(
+          (e: any) =>
+            e.allowed === false && e.reason === 'stale-membership-decision'
+        )
+      ).toBe(true);
+    });
+    it('r7: last-admin refusal is audited as denied, not only allowed', async () => {
+      const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
+      audit.length = 0;
+      const r = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/users/${privateAdmin.id}`,
+        headers: { cookie },
+        payload: { isActive: false },
+      });
+      expect(r.statusCode).toBe(409);
+      expect(audit.some((e: any) => e.allowed === false)).toBe(true);
+    });
+    it('r7: community admin cannot demote a super_admin row stored in their community', async () => {
+      const cookie = await cookieFor(otherAdmin.email, otherCommunityId);
+      const r = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/users/${superAdmin.id}`,
+        headers: { cookie },
+        payload: { role: 'viewer' },
+      });
+      expect(r.statusCode).toBeGreaterThanOrEqual(400);
+      const [row] = await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.id, superAdmin.id));
+      expect(row.role).toBe('super_admin');
+    });
+    it('r7: community admin cannot deactivate a super_admin row stored in their community', async () => {
+      const cookie = await cookieFor(otherAdmin.email, otherCommunityId);
+      const r = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/users/${superAdmin.id}`,
+        headers: { cookie },
+      });
+      expect(r.statusCode).toBeGreaterThanOrEqual(400);
+      expect((await login(superAdmin.email, otherCommunityId)).statusCode).toBe(
+        200
+      );
+    });
+    it('r7 control: stale community PUT and PATCH map to 409 with audit', async () => {
+      await fresh();
+      const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
+      const spy = vi
+        .spyOn(UserRepository.prototype, 'compareAndSetMembership')
+        .mockResolvedValue({ status: 'conflict' } as any);
+      for (const method of ['PUT', 'PATCH'] as const) {
+        audit.length = 0;
+        const r = await app.inject({
+          method,
+          url: `/api/v1/users/${privateViewer.id}`,
+          headers: { cookie },
+          payload: {
+            firstName: 'P',
+            lastName: 'Q',
+            email: privateViewer.email,
+            role: 'editor',
+            isActive: true,
+          },
+        });
+        process.stderr.write(
+          `CONTROL ${method} ${r.statusCode} ${r.body.slice(0, 120)}\n`
+        );
+        expect(r.statusCode).toBe(409);
+        expect(
+          audit.some(
+            (e: any) =>
+              e.allowed === false && e.reason === 'stale-membership-decision'
+          )
+        ).toBe(true);
+      }
+      spy.mockRestore();
+    });
+  });
 });

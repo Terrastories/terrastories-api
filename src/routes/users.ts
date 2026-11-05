@@ -50,6 +50,7 @@ import {
   authorizeCommunityEnrollment,
   authorizeCommunityMembershipChange,
   createAdministrativeAuditEvent,
+  type AdministrativeDecisionReason,
 } from '../shared/authorization/administrative-policy.js';
 import { emitAdministrativeAudit } from '../shared/utils/audit-logger.js';
 
@@ -161,6 +162,25 @@ const toActor = (user: { id: number; role: string; communityId: number }) => ({
   role: user.role,
   communityId: user.communityId,
 });
+
+/** SPEC-V2 §7: audit a community membership decision, content-free. */
+const auditMembership = (
+  request: FastifyRequest,
+  resourceId: number,
+  decision: { allowed: boolean; reason: AdministrativeDecisionReason }
+) => {
+  const user = (request as AuthenticatedRequest).user;
+  emitAdministrativeAudit(
+    request.log,
+    createAdministrativeAuditEvent({
+      action: 'membership_change',
+      actor: user ? toActor(user) : null,
+      communityId: user?.communityId ?? null,
+      resourceId,
+      decision,
+    })
+  );
+};
 
 export async function userRoutes(
   app: FastifyInstance,
@@ -710,6 +730,11 @@ export async function userRoutes(
         }
 
         if (error instanceof LastActiveAdministratorError) {
+          auditMembership(
+            request,
+            Number((request.params as { id?: string }).id),
+            { allowed: false, reason: 'last-active-administrator' }
+          );
           return reply.status(409).send({
             error: { message: error.message },
             statusCode: 409,
@@ -893,6 +918,11 @@ export async function userRoutes(
         }
 
         if (error instanceof LastActiveAdministratorError) {
+          auditMembership(
+            request,
+            Number((request.params as { id?: string }).id),
+            { allowed: false, reason: 'last-active-administrator' }
+          );
           return reply.status(409).send({
             error: { message: error.message },
             statusCode: 409,
@@ -974,6 +1004,10 @@ export async function userRoutes(
           currentUser.id
         );
 
+        auditMembership(request, result.id, {
+          allowed: true,
+          reason: 'community-admin',
+        });
         return reply.status(200).send({ data: result });
       } catch (error) {
         const errorMessage =
@@ -994,6 +1028,17 @@ export async function userRoutes(
           error instanceof LastActiveAdministratorError ||
           error instanceof MembershipConflictError
         ) {
+          auditMembership(
+            request,
+            Number((request.params as { id?: string }).id),
+            {
+              allowed: false,
+              reason:
+                error instanceof MembershipConflictError
+                  ? 'stale-membership-decision'
+                  : 'last-active-administrator',
+            }
+          );
           return reply.status(409).send({
             error: { message: error.message },
             statusCode: 409,

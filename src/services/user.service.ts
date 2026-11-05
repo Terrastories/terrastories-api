@@ -1275,8 +1275,15 @@ export class UserService {
         throw new Error('Invalid community ID');
       }
 
-      // Get user in the specified community
+      // Get user in the specified community. A super_admin row is a system
+      // account, not a community member (SPEC-V2 §6.2: canonical
+      // super_admin has no community), even though Fastify stores a
+      // community_id on it: community paths never see, edit or deactivate
+      // it, and answer as for a missing user.
       const user = await this.userRepository.findById(userId, communityId);
+      if (user && user.role === 'super_admin') {
+        return null;
+      }
       return user;
     } catch (error) {
       throw new Error(

@@ -1347,6 +1347,13 @@ export async function superAdminRoutes(
         }
 
         if (error instanceof LastActiveAdministratorError) {
+          auditAdministrativeDecision(
+            request,
+            'system_account_update',
+            null,
+            Number((request.params as { id?: string | number }).id),
+            { allowed: false, reason: 'last-active-administrator' }
+          );
           return reply.code(409).send({
             error: { message: error.message },
             statusCode: 409,
@@ -1421,6 +1428,13 @@ export async function superAdminRoutes(
         const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
 
         const result = await userService.deactivateUserAsSuperAdmin(numericId);
+        auditAdministrativeDecision(
+          request,
+          'system_account_update',
+          null,
+          numericId,
+          { allowed: true, reason: 'lifecycle-fields-only' }
+        );
 
         return reply.code(200).send({ data: result });
       } catch (error) {
@@ -1432,6 +1446,13 @@ export async function superAdminRoutes(
         );
 
         if (error instanceof MembershipConflictError) {
+          auditAdministrativeDecision(
+            request,
+            'system_account_update',
+            null,
+            Number((request.params as { id?: string | number }).id),
+            { allowed: false, reason: 'stale-membership-decision' }
+          );
           return reply.code(409).send({
             error: { message: error.message },
             statusCode: 409,
@@ -1439,6 +1460,13 @@ export async function superAdminRoutes(
         }
 
         if (error instanceof LastActiveAdministratorError) {
+          auditAdministrativeDecision(
+            request,
+            'system_account_update',
+            null,
+            Number((request.params as { id?: string | number }).id),
+            { allowed: false, reason: 'last-active-administrator' }
+          );
           return reply.code(409).send({
             error: { message: error.message },
             statusCode: 409,

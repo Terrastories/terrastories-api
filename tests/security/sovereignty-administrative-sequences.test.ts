@@ -1178,4 +1178,43 @@ describe('V2 sovereignty administrative sequences', () => {
       spy.mockRestore();
     });
   });
+
+  describe('round 8: system rows in community lists (Sol)', () => {
+    it('community user list HTTP excludes system account identity', async () => {
+      // A super_admin row stored inside the community is a system record,
+      // not a member: neither its identity nor its count may surface in
+      // GET /api/v1/users.
+      const [system] = await db
+        .insert(usersSqlite)
+        .values(
+          TestDataFactory.createUser(privateCommunityId, {
+            email: `seq-resident-system-${Date.now()}@example.test`,
+            role: 'super_admin',
+            passwordHash: await hashPassword(TEST_PASSWORD),
+          })
+        )
+        .returning();
+
+      // Expected total comes from the fixture's non-super_admin rows.
+      const expectedTotal = (
+        await db
+          .select()
+          .from(usersSqlite)
+          .where(eq(usersSqlite.communityId, privateCommunityId))
+      ).filter((row) => row.role !== 'super_admin').length;
+
+      const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/users',
+        headers: { cookie },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(
+        body.data.some((row: { id: number }) => row.id === system.id)
+      ).toBe(false);
+      expect(body.meta.total).toBe(expectedTotal);
+    });
+  });
 });

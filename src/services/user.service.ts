@@ -695,28 +695,6 @@ export class UserService {
   // }
 
   /**
-   * Delete user within community scope
-   *
-   * @param id - User ID
-   * @param communityId - Community scope
-   * @throws UserNotFoundError - If user not found in community
-   */
-  async deleteUser(id: number, communityId: number): Promise<void> {
-    const existingUser = await this.userRepository.findById(id, communityId);
-    if (!existingUser) {
-      throw new UserNotFoundError();
-    }
-
-    // An active admin is first deactivated through the compare-and-set
-    // path, so a hard delete can never remove a community's last active
-    // administrator.
-    if (existingUser.role === 'admin' && existingUser.isActive) {
-      await this.applyMembershipChange(existingUser, { isActive: false });
-    }
-    await this.userRepository.delete(id, communityId);
-  }
-
-  /**
    * Super Admin Methods
    * These methods provide cross-community access for super admin users only
    */

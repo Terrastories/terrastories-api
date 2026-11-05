@@ -65,6 +65,16 @@ export interface PaginatedResult<T> {
  * All operations enforce community-level data isolation to ensure
  * Indigenous communities maintain sovereignty over their data.
  */
+/**
+ * Profile fields only. Role, activation and community change exclusively
+ * through compareAndSetMembership (SPEC-V2 §7), so these generic writers
+ * cannot carry them.
+ */
+export type UserProfileUpdate = Omit<
+  Partial<NewUser>,
+  'role' | 'isActive' | 'communityId'
+>;
+
 export class UserRepository {
   constructor(private database: DatabaseType) {}
 
@@ -251,7 +261,7 @@ export class UserRepository {
    */
   async update(
     id: number,
-    updates: Partial<NewUser>,
+    updates: UserProfileUpdate,
     communityId: number
   ): Promise<User | null> {
     try {
@@ -292,33 +302,6 @@ export class UserRepository {
   }
 
   /**
-   * Delete user within a specific community
-   *
-   * @param id - User ID
-   * @param communityId - Community ID for scoping
-   * @returns True if deleted, false if not found
-   */
-  async delete(id: number, communityId: number): Promise<boolean> {
-    try {
-      const usersTable = await getUsersTable();
-
-      const deletedUsers = await this.database
-        .delete(usersTable)
-        .where(
-          and(eq(usersTable.id, id), eq(usersTable.communityId, communityId))
-        )
-        .returning();
-      const deletedUser = deletedUsers[0] as User | undefined;
-
-      return !!deletedUser;
-    } catch (error: unknown) {
-      const errorMessage =
-        error instanceof Error ? error.message : 'Unknown error';
-      throw new Error(`Failed to delete user: ${errorMessage}`);
-    }
-  }
-
-  /**
    * List users with filtering and pagination within a specific community
    *
    * @param options - Filtering and pagination options
@@ -344,7 +327,13 @@ export class UserRepository {
       const offset = (page - 1) * limit;
 
       // Build where conditions
-      const whereConditions = [eq(usersTable.communityId, communityId)];
+      // SPEC-V2 §6.2: system (super_admin) rows are not community members,
+      // even though Fastify stores a community_id on them. Excluded in SQL
+      // before pagination and counts.
+      const whereConditions = [
+        eq(usersTable.communityId, communityId),
+        ne(usersTable.role, 'super_admin'),
+      ];
 
       if (search) {
         // Use case-insensitive search that works with both PostgreSQL and SQLite
@@ -439,7 +428,13 @@ export class UserRepository {
     try {
       const usersTable = await getUsersTable();
 
-      const whereConditions = [eq(usersTable.communityId, communityId)];
+      // SPEC-V2 §6.2: system (super_admin) rows are not community members,
+      // even though Fastify stores a community_id on them. Excluded in SQL
+      // before pagination and counts.
+      const whereConditions = [
+        eq(usersTable.communityId, communityId),
+        ne(usersTable.role, 'super_admin'),
+      ];
 
       if (filters.role) {
         whereConditions.push(eq(usersTable.role, filters.role as User['role']));
@@ -623,7 +618,13 @@ export class UserRepository {
       const query = this.database
         .select({ count: count() })
         .from(usersTable)
-        .where(eq(usersTable.communityId, communityId));
+        // Community member count: system (super_admin) rows excluded.
+        .where(
+          and(
+            eq(usersTable.communityId, communityId),
+            ne(usersTable.role, 'super_admin')
+          )
+        );
 
       const countResults = await query;
       const countResult = countResults[0] as { count: number };
@@ -810,7 +811,7 @@ export class UserRepository {
    */
   async updateByIdAsSuperAdmin(
     id: number,
-    data: Partial<NewUser>
+    data: UserProfileUpdate
   ): Promise<User> {
     try {
       const usersTable = await getUsersTable();
@@ -821,40 +822,9 @@ export class UserRepository {
         updatedAt: new Date(),
       };
 
-      // SPEC-V2 §7 (B5): system authority never reactivates a community
-      // account. The reactivation is conditional in SQL, so a concurrent
-      // community deactivation committed after the caller's read is never
-      // undone; the remaining fields still apply.
-      if (data.isActive === true) {
-        const reactivated = await this.database
-          .update(usersTable)
-          .set(updateData)
-          .where(
-            and(
-              eq(usersTable.id, id),
-              or(
-                eq(usersTable.role, 'super_admin'),
-                eq(usersTable.isActive, true)
-              )
-            )
-          )
-          .returning();
-        if (reactivated && reactivated.length > 0) {
-          return reactivated[0];
-        }
-        const { isActive: _ignored, ...withoutStatus } = updateData;
-        void _ignored;
-        const updated = await this.database
-          .update(usersTable)
-          .set(withoutStatus)
-          .where(eq(usersTable.id, id))
-          .returning();
-        if (!updated || updated.length === 0) {
-          throw new Error('User not found');
-        }
-        return updated[0];
-      }
-
+      // Profile fields only (UserProfileUpdate): activation, role and
+      // community go through compareAndSetMembership, which also refuses a
+      // stale reactivation (B5).
       const updatedUsers = await this.database
         .update(usersTable)
         .set(updateData)
@@ -905,7 +875,13 @@ export class UserRepository {
       const usersTable = await getUsersTable();
 
       // Build where conditions
-      const conditions = [eq(usersTable.communityId, communityId)];
+      // SPEC-V2 §6.2: system (super_admin) rows are not community members,
+      // even though Fastify stores a community_id on them. Excluded in SQL
+      // before pagination and counts.
+      const conditions = [
+        eq(usersTable.communityId, communityId),
+        ne(usersTable.role, 'super_admin'),
+      ];
 
       if (search) {
         conditions.push(

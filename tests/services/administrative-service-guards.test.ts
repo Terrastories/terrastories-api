@@ -741,7 +741,7 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
   });
 
   describe('updateByIdAsSuperAdmin conditional write (B5)', () => {
-    it('refuses to reactivate a deactivated community account but reactivates a super_admin row', async () => {
+    it('compareAndSetMembership refuses a stale reactivation; a system account reactivates through updateUserAsSuperAdmin', async () => {
       const userRepository = new UserRepository(db);
       const inactiveViewer = await insertUser(
         privateCommunityId,
@@ -750,33 +750,105 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
         { isActive: false }
       );
 
-      // The repository write must not reactivate a community account on its
-      // own; it may throw instead.
-      await userRepository
-        .updateByIdAsSuperAdmin(inactiveViewer.id, { isActive: true })
-        .catch(() => undefined);
+      // The decision was taken from a snapshot that still read active; the
+      // row has since been deactivated. The compare-and-set must refuse the
+      // write, so a stale system decision cannot resurrect the account.
+      const outcome = await userRepository.compareAndSetMembership(
+        inactiveViewer.id,
+        { role: 'viewer', isActive: true, communityId: privateCommunityId },
+        { isActive: true }
+      );
+      expect(outcome.status).toBe('conflict');
       const [viewerRow] = await db
         .select()
         .from(usersSqlite)
         .where(eq(usersSqlite.id, inactiveViewer.id));
       expect(viewerRow.isActive).toBe(false);
 
-      // The same write on a system account is a lifecycle record: it may
-      // reactivate it.
+      // The system account's reactivation remains allowed, but only through
+      // the service's compare-and-set path.
       const inactiveSystem = await insertUser(
         otherCommunityId,
         'super_admin',
         'conditional-system',
         { isActive: false }
       );
-      await userRepository.updateByIdAsSuperAdmin(inactiveSystem.id, {
-        isActive: true,
+      const updated = await userService.updateUserAsSuperAdmin(
+        inactiveSystem.id,
+        { isActive: true }
+      );
+      expect(updated.isActive).toBe(true);
+    });
+  });
+
+  describe('system rows in community lists (round 8)', () => {
+    // SPEC-V2 §6.2: a super_admin row stored inside a community is a system
+    // record, not a community member. Every community-scoped list and count
+    // must drop it in SQL, before pagination and totals.
+    const repository = () => new UserRepository(db);
+
+    it('community user list excludes system accounts and their count (Sol)', async () => {
+      const system = await insertUser(
+        privateCommunityId,
+        'super_admin',
+        'system-list'
+      );
+      const result = await userService.getAllUsersByCommunity({
+        communityId: privateCommunityId,
       });
-      const [systemRow] = await db
-        .select()
-        .from(usersSqlite)
-        .where(eq(usersSqlite.id, inactiveSystem.id));
-      expect(systemRow.isActive).toBe(true);
+      expect(result.data.some((row) => row.id === system.id)).toBe(false);
+      expect(result.meta.total).toBe(2);
+    });
+
+    it('userRepository.findMany excludes a super_admin row stored in the community', async () => {
+      const system = await insertUser(
+        privateCommunityId,
+        'super_admin',
+        'system-findmany'
+      );
+      const result = await repository().findMany({}, privateCommunityId);
+      expect(result.data.some((row) => row.id === system.id)).toBe(false);
+      expect(result.meta.total).toBe(2);
+    });
+
+    it('userRepository.count excludes a super_admin row stored in the community', async () => {
+      await insertUser(privateCommunityId, 'super_admin', 'system-count');
+      expect(await repository().count(privateCommunityId)).toBe(2);
+    });
+
+    it('countUsersByCommunity excludes a super_admin row stored in the community', async () => {
+      await insertUser(
+        privateCommunityId,
+        'super_admin',
+        'system-count-community'
+      );
+      expect(await repository().countUsersByCommunity(privateCommunityId)).toBe(
+        2
+      );
+    });
+
+    it('getAllUsersByCommunity filtering for role super_admin returns no rows and total 0', async () => {
+      await insertUser(privateCommunityId, 'super_admin', 'system-role-filter');
+      const result = await userService.getAllUsersByCommunity({
+        communityId: privateCommunityId,
+        role: 'super_admin',
+      });
+      expect(result.data).toHaveLength(0);
+      expect(result.meta.total).toBe(0);
+    });
+
+    it('a search term matching the system account email returns nothing', async () => {
+      const system = await insertUser(
+        privateCommunityId,
+        'super_admin',
+        'system-search'
+      );
+      const result = await userService.getAllUsersByCommunity({
+        communityId: privateCommunityId,
+        search: system.email,
+      });
+      expect(result.data).toHaveLength(0);
+      expect(result.meta.total).toBe(0);
     });
   });
 
@@ -1560,7 +1632,9 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
           new URL('../../src/repositories/user.repository.ts', import.meta.url),
           'utf8'
         );
-        const start = source.indexOf('compareAndSetMembership');
+        // Anchor on the method definition: a doc comment above it
+        // (UserProfileUpdate) also names compareAndSetMembership.
+        const start = source.indexOf('async compareAndSetMembership(');
         expect(
           start,
           'UserRepository.compareAndSetMembership must exist'

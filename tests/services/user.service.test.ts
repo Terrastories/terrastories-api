@@ -541,58 +541,6 @@ describe('User Service', () => {
     });
   });
 
-  describe('deleteUser', () => {
-    test('should delete user successfully', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'delete@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Delete',
-        lastName: 'Me',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(
-        registrationData,
-        communityAdminActor(testCommunityId)
-      );
-      await userService.deleteUser(registeredUser.id, testCommunityId);
-
-      // Verify user is deleted
-      await expect(
-        userService.getUserById(registeredUser.id, testCommunityId)
-      ).rejects.toThrow('User not found');
-    });
-
-    test('should throw error when deleting user from wrong community', async () => {
-      const registrationData: CreateUserRequest = {
-        email: 'wrongdelete@example.com',
-        password: 'StrongPassword123@',
-        firstName: 'Wrong',
-        lastName: 'Delete',
-        role: 'viewer',
-        communityId: testCommunityId,
-      };
-
-      const registeredUser = await userService.registerUser(
-        registrationData,
-        communityAdminActor(testCommunityId)
-      );
-
-      // Try to delete from different community
-      await expect(
-        userService.deleteUser(registeredUser.id, otherCommunityId)
-      ).rejects.toThrow('User not found');
-
-      // Verify user still exists
-      const foundUser = await userService.getUserById(
-        registeredUser.id,
-        testCommunityId
-      );
-      expect(foundUser).toBeDefined();
-    });
-  });
-
   describe('authentication methods', () => {
     test('should authenticate user with valid credentials', async () => {
       const registrationData: CreateUserRequest = {
@@ -765,14 +713,6 @@ describe('User Service', () => {
           { firstName: 'Updated' },
           testCommunityId
         )
-      ).rejects.toThrow();
-
-      // Verify delete respects community isolation
-      await expect(
-        userService.deleteUser(user1.id, otherCommunityId)
-      ).rejects.toThrow();
-      await expect(
-        userService.deleteUser(user2.id, testCommunityId)
       ).rejects.toThrow();
     });
   });

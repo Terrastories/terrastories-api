@@ -144,11 +144,6 @@ export class CommunityAuthorityRequiredError extends Error {
 }
 
 /**
- * The change would leave a community with no active administrator, which
- * nobody could recover: system authority may not reactivate or provision
- * into a claimed community (SPEC-V2 §7). Recovery is tracked with #134.
- */
-/**
  * The membership decision was made on a snapshot the row no longer matches
  * (a concurrent role / activation / community change landed first). Nothing
  * was written; the caller must re-read and decide again (409).
@@ -162,6 +157,11 @@ export class MembershipConflictError extends Error {
   }
 }
 
+/**
+ * The change would leave a community with no active administrator, which
+ * nobody could recover: system authority may not reactivate or provision
+ * into a claimed community (SPEC-V2 §7). Recovery is tracked with #134.
+ */
 export class LastActiveAdministratorError extends Error {
   constructor(
     message = 'A community must keep at least one active administrator'

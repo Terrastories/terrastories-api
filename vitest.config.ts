@@ -1,7 +1,13 @@
 import { defineConfig } from 'vitest/config';
 import * as path from 'path';
 
-export default defineConfig({
+const retainedMemoryFiles = [
+  'tests/production/performance.test.ts',
+  'tests/production/performance-optimization.test.ts',
+  'tests/production/database-cleanup.test.ts',
+];
+
+const baseConfig = defineConfig({
   test: {
     environment: 'node',
     globals: true,
@@ -66,11 +72,8 @@ export default defineConfig({
       },
     },
 
-    // Reporter configuration
-    reporter: process.env.CI ? ['verbose', 'junit'] : ['verbose'],
-    outputFile: process.env.CI
-      ? { junit: './test-report.junit.xml' }
-      : undefined,
+    // CI workflows consume console results, not JUnit XML. No JUnit reporter
+    // or outputFile is configured; coverage reporters are configured above.
 
     // Performance monitoring
     logHeapUsage: true,
@@ -94,5 +97,40 @@ export default defineConfig({
   // ESM configuration
   esbuild: {
     target: 'node18',
+  },
+});
+
+// Spread the shared options explicitly: extends:true concatenates include globs
+// and would run the entire suite again in the retained-memory project.
+export default defineConfig({
+  ...baseConfig,
+  test: {
+    // Root-only coverage/worker/lifecycle options; discovery and setup belong
+    // to each project below, without misleading root include/exclude globs.
+    coverage: baseConfig.test?.coverage,
+    teardownTimeout: baseConfig.test?.teardownTimeout,
+    maxWorkers: baseConfig.test?.maxWorkers,
+    projects: [
+      {
+        ...baseConfig,
+        test: {
+          ...baseConfig.test,
+          name: 'default',
+          exclude: [
+            ...(baseConfig.test?.exclude ?? []),
+            ...retainedMemoryFiles,
+          ],
+        },
+      },
+      {
+        ...baseConfig,
+        test: {
+          ...baseConfig.test,
+          name: 'retained-memory',
+          include: retainedMemoryFiles,
+          execArgv: ['--expose-gc'],
+        },
+      },
+    ],
   },
 });

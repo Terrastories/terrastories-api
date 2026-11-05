@@ -43,6 +43,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
+      - name: Calibrate retained heap on this Node version
+        run: npx vitest run tests/production/performance.test.ts -t 'Memory usage remains stable under load' --maxWorkers=1 --silent=false
+
       - name: Run canonical CI validation
         run: npm run validate:ci
 

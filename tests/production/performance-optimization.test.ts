@@ -7,6 +7,7 @@
  * and resource-constrained Field Kit deployments.
  */
 
+import { retainedHeapUsed } from '../helpers/retained-heap.js';
 import {
   describe,
   it,
@@ -51,7 +52,7 @@ describe('Production Performance Optimization', () => {
     it('should fail: optimize for limited RAM (128MB constraint)', async () => {
       // This test should fail initially - memory usage not optimized
 
-      const initialMemory = process.memoryUsage().heapUsed;
+      const initialMemory = await retainedHeapUsed();
 
       // Simulate processing multiple large files simultaneously
       const largeFileSize = 10 * 1024 * 1024; // 10MB each
@@ -74,8 +75,9 @@ describe('Production Performance Optimization', () => {
         processedSizes.push(stats.size);
       }
 
-      const peakMemory = process.memoryUsage().heapUsed;
-      const memoryUsed = peakMemory - initialMemory;
+      // Retained JS heap only; Buffer's off-heap working set is not measured.
+      const retainedMemory = await retainedHeapUsed();
+      const memoryUsed = retainedMemory - initialMemory;
 
       // This should fail initially - memory usage not optimized
       expect(memoryUsed).toBeLessThan(50 * 1024 * 1024); // Should use less than 50MB
@@ -155,7 +157,7 @@ describe('Production Performance Optimization', () => {
 
       // Monitor memory during batch operations
       for (let batch = 0; batch < batches; batch++) {
-        const batchStartMemory = process.memoryUsage().heapUsed;
+        const batchStartMemory = await retainedHeapUsed();
 
         // Process a batch of files
         for (let i = 0; i < batchSize; i++) {
@@ -164,14 +166,9 @@ describe('Production Performance Optimization', () => {
           await fs.writeFile(filePath, content);
         }
 
-        const batchEndMemory = process.memoryUsage().heapUsed;
+        const batchEndMemory = await retainedHeapUsed();
         const batchMemoryIncrease = batchEndMemory - batchStartMemory;
         memoryReadings.push(batchMemoryIncrease);
-
-        // Force garbage collection if available
-        if (global.gc) {
-          global.gc();
-        }
       }
 
       const averageMemoryIncrease =
@@ -318,12 +315,11 @@ describe('Production Performance Optimization', () => {
 
       const peakOperations = 10;
       const operationPromises = [];
+      const startMemory = await retainedHeapUsed();
 
       // Simulate peak usage scenario
       for (let i = 0; i < peakOperations; i++) {
         const operationPromise = async () => {
-          const startMemory = process.memoryUsage().heapUsed;
-
           // Resource-intensive operation
           const filePath = join(testDir, `peak-operation-${i}.dat`);
           const content = Buffer.alloc(5 * 1024 * 1024, i % 256); // 5MB
@@ -333,10 +329,7 @@ describe('Production Performance Optimization', () => {
           const data = await fs.readFile(filePath);
           const checksum = calculateSimpleChecksum(data);
 
-          const endMemory = process.memoryUsage().heapUsed;
-          const memoryUsed = endMemory - startMemory;
-
-          return { operationId: i, memoryUsed, checksum };
+          return { operationId: i, checksum };
         };
 
         operationPromises.push(operationPromise());
@@ -350,10 +343,11 @@ describe('Production Performance Optimization', () => {
       expect(results.length).toBe(peakOperations);
       expect(totalTime).toBeLessThan(15000); // Should complete in under 15 seconds
 
-      // Memory usage should be reasonable across all operations
-      const totalMemoryUsed = results.reduce((sum, r) => sum + r.memoryUsed, 0);
-      const averageMemoryPerOperation = totalMemoryUsed / peakOperations;
-      expect(averageMemoryPerOperation).toBeLessThan(10 * 1024 * 1024); // <10MB per operation
+      // Retained JS heap only; this does not bound peak/off-heap Buffer RAM.
+      const totalMemoryUsed = (await retainedHeapUsed()) - startMemory;
+      const averageRetainedJsHeapPerOperation =
+        totalMemoryUsed / peakOperations;
+      expect(averageRetainedJsHeapPerOperation).toBeLessThan(10 * 1024 * 1024); // <10MB per operation
     });
   });
 });

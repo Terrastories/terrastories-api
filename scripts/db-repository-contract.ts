@@ -400,4 +400,416 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   }
   assert.equal(precisionById.latitude, 45.123456);
   assert.equal(precisionById.longitude, -123.456789);
+
+  // Issue #178: these compatibility repositories must select their schema
+  // from the supplied database, just like every other repository above.
+  const { StoryRepository } = await import(
+    '../src/repositories/story.repository.js'
+  );
+  const { ThemesRepository } = await import(
+    '../src/repositories/themes.repository.js'
+  );
+  const stories = new StoryRepository(database as any);
+  const themes = new ThemesRepository(database as any);
+  const storyPlace = await places.create({
+    name: 'Story Contract Place',
+    communityId: riverCommunity.id,
+    latitude: 45.123456,
+    longitude: -123.456789,
+  });
+  const relatedStory = await stories.create({
+    title: 'River Journey',
+    description: 'Mixed Case Ceremony',
+    communityId: riverCommunity.id,
+    createdBy: ana.id,
+    tags: ['Forest', 'ÁRVORE'],
+    placeIds: [storyPlace.id],
+    speakerIds: [riverSpeaker.id],
+    speakerRoles: ['narrator'],
+    interviewLocationId: storyPlace.id,
+    interviewerId: riverSpeaker.id,
+  });
+  const assertStoryRelations = (story: typeof relatedStory | null) => {
+    assert.ok(story);
+    assert.deepEqual(
+      story.places.map((row) => row.id),
+      [storyPlace.id]
+    );
+    assert.equal(story.places[0].latitude, 45.123456);
+    assert.equal(story.places[0].longitude, -123.456789);
+    assert.deepEqual(
+      story.speakers.map((row) => row.id),
+      [riverSpeaker.id]
+    );
+    assert.equal(story.speakers[0].storyRole, 'narrator');
+    assert.equal(story.interviewLocation?.id, storyPlace.id);
+    assert.equal(story.interviewer?.id, riverSpeaker.id);
+    assertValidDate(story.createdAt, 'stories relations createdAt');
+  };
+  assertStoryRelations(relatedStory);
+  assertStoryRelations(await stories.findByIdWithRelations(relatedStory.id));
+  assert.equal(
+    (await stories.findById(relatedStory.id))?.title,
+    'River Journey'
+  );
+  const secondStory = await stories.create({
+    title: 'Second Journey',
+    communityId: riverCommunity.id,
+    createdBy: ana.id,
+    tags: ['Water'],
+  });
+  const thirdStory = await stories.create({
+    title: 'Third Journey',
+    communityId: riverCommunity.id,
+    createdBy: ana.id,
+    tags: ['Forest'],
+  });
+  const updatedStory = await stories.update(secondStory.id, {
+    title: 'Updated Journey',
+    description: 'Fresh Description',
+    tags: ['Water', 'Forest'],
+    placeIds: [storyPlace.id],
+    speakerIds: [riverSpeaker.id],
+    speakerRoles: ['interviewee'],
+  });
+  assert.equal(updatedStory?.title, 'Updated Journey');
+  assert.deepEqual(updatedStory?.tags, ['Water', 'Forest']);
+  assert.deepEqual(
+    updatedStory?.places.map((row) => row.id),
+    [storyPlace.id]
+  );
+  assert.equal(updatedStory?.speakers[0].storyRole, 'interviewee');
+  assertValidDate(updatedStory?.updatedAt, 'stories.update updatedAt');
+  const storyPage1 = await stories.findMany(
+    { communityId: riverCommunity.id },
+    { page: 1, limit: 2 }
+  );
+  const storyPage2 = await stories.findMany(
+    { communityId: riverCommunity.id },
+    { page: 2, limit: 2 }
+  );
+  assert.equal(storyPage1.total, 3);
+  assert.equal(storyPage2.total, 3);
+  assert.equal(storyPage1.totalPages, 2);
+  assert.deepEqual(
+    storyPage1.data.map((row) => row.id),
+    [thirdStory.id, secondStory.id]
+  );
+  assert.deepEqual(
+    storyPage2.data.map((row) => row.id),
+    [relatedStory.id]
+  );
+  assertStoryRelations(storyPage2.data[0]);
+  for (const search of ['river', 'RIVER', 'ceremony', 'CEREMONY']) {
+    const found = await stories.findMany(
+      { communityId: riverCommunity.id, search },
+      { page: 1, limit: 10 }
+    );
+    assert.deepEqual(
+      found.data.map((row) => row.id),
+      [relatedStory.id]
+    );
+    assert.equal(found.total, 1);
+  }
+  // SPEC-V2 §6.3: application-normalized match-any, with totals computed
+  // after filtering, never a backend-specific JSON containment operation.
+  const tagsPage1 = await stories.findMany(
+    { communityId: riverCommunity.id, tags: ['missing', 'FOREST'] },
+    { page: 1, limit: 2 }
+  );
+  const tagsPage2 = await stories.findMany(
+    { communityId: riverCommunity.id, tags: ['missing', 'forest'] },
+    { page: 2, limit: 2 }
+  );
+  assert.equal(tagsPage1.total, 3);
+  assert.equal(tagsPage2.total, 3);
+  assert.deepEqual(
+    tagsPage1.data.map((row) => row.id),
+    [thirdStory.id, secondStory.id]
+  );
+  assert.deepEqual(
+    tagsPage2.data.map((row) => row.id),
+    [relatedStory.id]
+  );
+  const unicodeTags = await stories.findMany(
+    { communityId: riverCommunity.id, tags: ['árvore'] },
+    { page: 1, limit: 10 }
+  );
+  assert.deepEqual(
+    unicodeTags.data.map((row) => row.id),
+    [relatedStory.id]
+  );
+  assert.equal(
+    (
+      await stories.findMany(
+        { communityId: community.id, tags: ['Forest'] },
+        { page: 1, limit: 10 }
+      )
+    ).total,
+    0
+  );
+  assert.equal(
+    await stories.validatePlacesInCommunity([storyPlace.id], community.id),
+    false
+  );
+  assert.equal(
+    await stories.validateSpeakersInCommunity(
+      [riverSpeaker.id],
+      riverCommunity.id
+    ),
+    true
+  );
+  assert.equal(
+    await stories.validateSpeakersInCommunity([riverSpeaker.id], community.id),
+    false
+  );
+  assert.equal(
+    await stories.validateSpeakersInCommunity([2147483647], riverCommunity.id),
+    false
+  );
+  assert.equal(
+    await stories.validateSpeakersInCommunity([], riverCommunity.id),
+    true
+  );
+  const clearedStory = await stories.update(secondStory.id, {
+    placeIds: [],
+    speakerIds: [],
+  });
+  assert.deepEqual(clearedStory?.places, []);
+  assert.deepEqual(clearedStory?.speakers, []);
+
+  // SPEC-V2 §§2/11 drops elder-only list policy on both backends;
+  // compatibility filter input must not select or discard legacy metadata.
+  const otherFileUser = await users.create({
+    email: 'other-file-contract@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Other',
+    lastName: 'Uploader',
+    communityId: community.id,
+  });
+  const policyFileIds: string[] = [];
+  for (const [name, tenant, uploader, elderOnly] of [
+    ['Legacy Policy Elder', riverCommunity.id, ana.id, true],
+    ['Legacy Policy Ordinary', riverCommunity.id, ana.id, false],
+    ['Legacy Policy Foreign', community.id, otherFileUser.id, true],
+  ] as const) {
+    const file = await files.create({
+      filename: name,
+      originalName: name,
+      path: `contract/${name}.mp3`,
+      url: 'https://example.test/policy.mp3',
+      mimeType: 'audio/mpeg',
+      size: 123,
+      communityId: tenant,
+      uploadedBy: uploader,
+      culturalRestrictions: JSON.stringify({ elderOnly }),
+    });
+    policyFileIds.push(file.id);
+  }
+  for (const elderOnly of [true, false]) {
+    const result = await files.findByCommunity(riverCommunity.id, {
+      search: 'Legacy Policy',
+      culturalRestrictions: { elderOnly },
+      orderBy: 'filename',
+      orderDirection: 'asc',
+    });
+    assert.deepEqual(
+      result.data.map((row) => row.id),
+      policyFileIds.slice(0, 2)
+    );
+    assert.equal(result.meta.total, 2);
+    // SQLite stores legacy metadata as text; PostgreSQL jsonb decodes it.
+    // Compare the preserved values independently of the storage representation.
+    for (const [index, expected] of [true, false].entries()) {
+      const metadata = result.data[index].culturalRestrictions;
+      assert.deepEqual(
+        typeof metadata === 'string' ? JSON.parse(metadata) : metadata,
+        { elderOnly: expected }
+      );
+    }
+  }
+
+  // Multiple themes remain a coexistence-only surface (SPEC-V2 §6.6).
+  const coordinates = {
+    centerLat: 0,
+    centerLong: -48.490201,
+    swBoundaryLat: -1.455801,
+    swBoundaryLong: -49.123456,
+    neBoundaryLat: 1.123456,
+    neBoundaryLong: -47.123456,
+  };
+  const assertCoordinates = (theme: any, expected = coordinates) => {
+    assert.ok(theme);
+    for (const key of Object.keys(expected) as Array<
+      keyof typeof coordinates
+    >) {
+      assert.equal(
+        theme[key],
+        expected[key],
+        `theme.${key} must round-trip as a number`
+      );
+      assert.equal(typeof theme[key], 'number');
+    }
+    assertValidDate(theme.createdAt, 'themes createdAt');
+  };
+  const coordinateTheme = await themes.create({
+    name: 'River Map',
+    description: 'Ceremony Map',
+    active: true,
+    communityId: riverCommunity.id,
+    ...coordinates,
+  });
+  assertCoordinates(coordinateTheme);
+  assertCoordinates(await themes.findById(coordinateTheme.id));
+  assertCoordinates(
+    await themes.findByIdWithCommunityCheck(
+      coordinateTheme.id,
+      riverCommunity.id
+    )
+  );
+  assert.equal(
+    await themes.findByIdWithCommunityCheck(coordinateTheme.id, community.id),
+    null
+  );
+  assert.equal(
+    await themes.existsInCommunity(coordinateTheme.id, community.id),
+    false
+  );
+  assert.equal(
+    await themes.updateByCommunity(coordinateTheme.id, community.id, {
+      name: 'Forbidden',
+    }),
+    null
+  );
+  assert.equal(
+    await themes.deleteByCommunity(coordinateTheme.id, community.id),
+    false
+  );
+  const updatedCoordinates = {
+    ...coordinates,
+    centerLat: -1.123456,
+    centerLong: 0,
+  };
+  assertCoordinates(
+    await themes.update(coordinateTheme.id, updatedCoordinates),
+    updatedCoordinates
+  );
+  await themes.create({
+    name: 'River Inactive',
+    communityId: riverCommunity.id,
+    active: false,
+  });
+  const nullTheme = await themes.create({
+    name: 'Other Active',
+    communityId: riverCommunity.id,
+    active: true,
+  });
+  for (const row of [nullTheme, await themes.findById(nullTheme.id)]) {
+    for (const key of Object.keys(coordinates))
+      assert.equal((row as any)[key], null);
+  }
+  assert.equal(
+    await themes.countByCommunityId(riverCommunity.id, {
+      activeOnly: true,
+      searchTerm: 'RIVER',
+    }),
+    1
+  );
+  const themePage1 = await themes.findByCommunityId(riverCommunity.id, {
+    page: 1,
+    limit: 2,
+    sortBy: 'name',
+  });
+  const themePage2 = await themes.findByCommunityId(riverCommunity.id, {
+    page: 2,
+    limit: 2,
+    sortBy: 'name',
+  });
+  assert.equal(themePage1.total, 3);
+  assert.equal(themePage2.total, 3);
+  assert.equal(themePage1.pages, 2);
+  assert.deepEqual(
+    themePage1.data.map((row) => row.name),
+    ['Other Active', 'River Inactive']
+  );
+  assert.deepEqual(
+    themePage2.data.map((row) => row.id),
+    [coordinateTheme.id]
+  );
+  assertCoordinates(themePage2.data[0], updatedCoordinates);
+  for (const query of ['river', 'RIVER', 'ceremony', 'CEREMONY']) {
+    const found = await themes.searchThemes(riverCommunity.id, {
+      query,
+      page: 1,
+      limit: 10,
+    });
+    assert.equal(found.total, query.toLowerCase() === 'river' ? 2 : 1);
+    assertCoordinates(
+      found.data.find((row) => row.id === coordinateTheme.id),
+      updatedCoordinates
+    );
+  }
+  for (const rows of [
+    await themes.findByCommunityId(riverCommunity.id),
+    await themes.findActiveThemes(riverCommunity.id),
+    await themes.searchByName(riverCommunity.id, 'RIVER'),
+    await themes.searchByDescription(riverCommunity.id, 'CEREMONY'),
+    await themes.searchActiveThemes(riverCommunity.id, 'RIVER'),
+    (
+      await themes.findByCommunityIdPaginated(riverCommunity.id, {
+        page: 1,
+        limit: 10,
+      })
+    ).themes,
+  ])
+    assertCoordinates(
+      rows.find((row) => row.id === coordinateTheme.id),
+      updatedCoordinates
+    );
+
+  const themeOrderCommunity = await communities.create({
+    name: 'Theme Byte Order Community',
+  });
+  const themeOrderIds: number[] = [];
+  for (const name of [
+    'cherry',
+    'Banana',
+    'Álamo',
+    'apple',
+    'Zebra',
+    'Twin',
+    'Twin',
+  ]) {
+    const theme = await themes.create({
+      name,
+      communityId: themeOrderCommunity.id,
+      active: false,
+    });
+    themeOrderIds.push(theme.id);
+  }
+  for (const sortOrder of ['asc', 'desc'] as const) {
+    const result = await themes.findByCommunityId(themeOrderCommunity.id, {
+      page: 1,
+      limit: 20,
+      sortBy: 'name',
+      sortOrder,
+    });
+    const expectedIds = [
+      themeOrderIds[1],
+      themeOrderIds[5],
+      themeOrderIds[6],
+      themeOrderIds[4],
+      themeOrderIds[3],
+      themeOrderIds[0],
+      themeOrderIds[2],
+    ];
+    assert.deepEqual(
+      result.data.map((row) => row.id),
+      sortOrder === 'asc' ? expectedIds : expectedIds.reverse()
+    );
+  }
+  assert.equal(await stories.delete(thirdStory.id), true);
+  assert.equal(await stories.findById(thirdStory.id), null);
+  assert.equal(await themes.delete(nullTheme.id), true);
+  assert.equal(await themes.findById(nullTheme.id), null);
 }

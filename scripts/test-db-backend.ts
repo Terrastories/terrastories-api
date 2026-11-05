@@ -17,6 +17,11 @@ import { migrate as migrateSqlite } from 'drizzle-orm/better-sqlite3/migrator';
 import { drizzle as drizzlePostgres } from 'drizzle-orm/postgres-js';
 import { migrate as migratePostgres } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
+import { createPostgresClient } from '../src/db/index.js';
+import {
+  assertValidDate,
+  runRepositoryContract,
+} from './db-repository-contract.js';
 import { portableMigrationFixture as fixture } from '../tests/fixtures/db/portable-migration-fixture.js';
 
 const rootDir = process.cwd();
@@ -614,6 +619,7 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
   assert.equal(community.id, fixture.community.id);
   assert.equal(community.name, fixture.community.name);
   assert.equal(community.country, null);
+  // Compatibility-only V1 field (not canonical per SPEC-V2 §6.1); asserted to keep the coexistence surface stable.
   assert.equal(community.beta, 0);
   assert.equal(
     community.created_at,
@@ -704,7 +710,7 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
 
 async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   const columns = await client.unsafe(
-    `SELECT table_name, column_name, column_default
+    `SELECT table_name, column_name, column_default, data_type
      FROM information_schema.columns
      WHERE table_schema = 'public'`
   );
@@ -724,6 +730,28 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     assert.ok(names.has(required), `missing ${required}`);
   }
   assert.equal(names.has('places.location'), false);
+
+  // S3: coordinates must be 8-byte doubles on PostgreSQL, matching SQLite
+  // REAL precision, on both the fresh schema and the upgraded one.
+  const coordinateTypes = new Map(
+    columns
+      .filter(
+        (row: any) =>
+          row.table_name === 'places' &&
+          (row.column_name === 'latitude' || row.column_name === 'longitude')
+      )
+      .map((row: any) => [String(row.column_name), String(row.data_type)])
+  );
+  assert.equal(
+    coordinateTypes.get('latitude'),
+    'double precision',
+    'places.latitude must be double precision'
+  );
+  assert.equal(
+    coordinateTypes.get('longitude'),
+    'double precision',
+    'places.longitude must be double precision'
+  );
 
   const lastLoginColumn = columns.find(
     (row: any) =>
@@ -787,6 +815,7 @@ async function verifyPostgresPreservation(
   assert.equal(community.id, fixture.community.id);
   assert.equal(community.name, fixture.community.name);
   assert.equal(community.country, null);
+  // Compatibility-only V1 field (not canonical per SPEC-V2 §6.1); asserted to keep the coexistence surface stable.
   assert.equal(community.beta, false);
   assert.equal(
     postgresTimestamp(community.created_at),
@@ -819,8 +848,12 @@ async function verifyPostgresPreservation(
   );
   assert.equal(place.id, fixture.places[0].id);
   assert.equal(place.community_id, fixture.community.id);
-  assert.equal(place.latitude, fixture.places[0].latitude);
-  assert.equal(place.longitude, fixture.places[0].longitude);
+  // The previous release stored coordinates as 4-byte real. Migration 0002
+  // widens them to double precision without changing the stored value, so
+  // upgraded rows keep their float32 value (new rows round-trip exactly; the
+  // shared contract checks that).
+  assert.equal(place.latitude, Math.fround(fixture.places[0].latitude));
+  assert.equal(place.longitude, Math.fround(fixture.places[0].longitude));
   assert.deepEqual(place.media_urls, fixture.places[0].mediaUrls);
   assert.equal(place.is_restricted, true);
 
@@ -886,208 +919,131 @@ async function verifyPostgresPreservation(
   );
 }
 
-async function runRepositoryContract(database: unknown): Promise<void> {
-  const { CommunityRepository } = await import(
-    '../src/repositories/community.repository.js'
+/**
+ * Read upgraded rows through Drizzle, as the application does, so the gate
+ * checks the dates the application receives and not only the raw column text.
+ */
+async function verifyPostgresApplicationDates(
+  database: ReturnType<typeof drizzlePostgres>
+): Promise<void> {
+  const { communitiesPg } = await import('../src/db/schema/communities.js');
+  const { usersPg } = await import('../src/db/schema/users.js');
+
+  const [community] = await database
+    .select({
+      createdAt: communitiesPg.createdAt,
+      updatedAt: communitiesPg.updatedAt,
+    })
+    .from(communitiesPg)
+    .where(eq(communitiesPg.id, fixture.community.id));
+  assertValidDate(community.createdAt, 'communitiesPg.createdAt');
+  assertValidDate(community.updatedAt, 'communitiesPg.updatedAt');
+  assert.equal(
+    community.createdAt.getTime(),
+    timestamp(fixture.community.createdAt)
   );
-  const { PlaceRepository } = await import(
-    '../src/repositories/place.repository.js'
-  );
-
-  const communities = new CommunityRepository(database as any);
-  const places = new PlaceRepository(database as any);
-
-  const community = await communities.create({
-    name: 'Repository Contract Community',
-    country: 'BR',
-    beta: true,
-  });
-  assert.equal(community.country, 'BR');
-  assert.equal(community.beta, true);
-  assert.ok(community.createdAt instanceof Date);
-
-  await assert.rejects(
-    communities.create({
-      name: 'Duplicate Slug Community',
-      slug: community.slug,
-    }),
-    /slug already exists/i
-  );
-
-  const first = await places.create({
-    name: 'A Nearby Public',
-    communityId: community.id,
-    latitude: -1.4558,
-    longitude: -48.4902,
-    mediaUrls: ['https://example.test/nearby.jpg'],
-    isRestricted: false,
-  });
-  const second = await places.create({
-    name: 'B Nearby Restricted',
-    communityId: community.id,
-    latitude: -1.456,
-    longitude: -48.4901,
-    isRestricted: true,
-  });
-  await places.create({
-    name: 'C Far Public',
-    communityId: community.id,
-    latitude: -3.119,
-    longitude: -60.0217,
-    isRestricted: false,
-  });
-
-  assert.deepEqual(first.mediaUrls, ['https://example.test/nearby.jpg']);
-  assert.ok(first.createdAt instanceof Date);
-
-  const publicNear = await places.searchNear({
-    communityId: community.id,
-    latitude: -1.4558,
-    longitude: -48.4902,
-    radiusKm: 1,
-    page: 1,
-    limit: 20,
-  });
-  assert.deepEqual(
-    publicNear.data.map((place) => place.id),
-    [first.id]
+  assert.equal(
+    community.updatedAt.getTime(),
+    timestamp(fixture.community.updatedAt)
   );
 
-  const allNear = await places.searchNear({
-    communityId: community.id,
-    latitude: -1.4558,
-    longitude: -48.4902,
-    radiusKm: 1,
-    page: 1,
-    limit: 20,
-    includeRestricted: true,
-  });
-  assert.deepEqual(
-    new Set(allNear.data.map((place) => place.id)),
-    new Set([first.id, second.id])
-  );
+  const [user] = await database
+    .select({
+      createdAt: usersPg.createdAt,
+      updatedAt: usersPg.updatedAt,
+    })
+    .from(usersPg)
+    .where(eq(usersPg.id, fixture.user.id));
+  assertValidDate(user.createdAt, 'usersPg.createdAt');
+  assertValidDate(user.updatedAt, 'usersPg.updatedAt');
+  assert.equal(user.createdAt.getTime(), timestamp(fixture.user.createdAt));
+  assert.equal(user.updatedAt.getTime(), timestamp(fixture.user.updatedAt));
+}
 
-  const bounded = await places.searchInBounds({
-    communityId: community.id,
-    north: -1.45,
-    south: -1.46,
-    east: -48.48,
-    west: -48.5,
-    page: 1,
-    limit: 20,
-    includeRestricted: true,
-  });
-  assert.deepEqual(
-    new Set(bounded.data.map((place) => place.id)),
-    new Set([first.id, second.id])
-  );
+function quotePostgresIdentifier(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
 
-  const ordered = await places.getByCommunity(community.id, {
-    page: 1,
-    limit: 20,
-    includeRestricted: true,
-    sortBy: 'name',
-    sortOrder: 'asc',
+/**
+ * S4: database-default timestamps must stay UTC even when the database (or
+ * server) default timezone is not UTC.
+ *
+ * `timestamp without time zone` columns hold UTC, and defaultNow() writes the
+ * session's local wall clock. A client created through createPostgresClient
+ * pins every session to UTC, so omitted createdAt/updatedAt defaults land on
+ * UTC regardless of the database default; a plain postgres() client inherits
+ * the database default and its defaults drift by the database's UTC offset,
+ * which the negative control must detect.
+ */
+async function verifyPostgresTimezoneSafeDefaults(
+  databaseUrl: string
+): Promise<void> {
+  const setupClient = createPostgresClient(databaseUrl, {
+    max: 2,
+    onnotice: () => undefined,
   });
-  assert.deepEqual(
-    ordered.data.map((place) => place.name),
-    ['A Nearby Public', 'B Nearby Restricted', 'C Far Public']
-  );
+  let databaseName = '';
+  try {
+    const [{ name }] = await setupClient`SELECT current_database() AS name`;
+    databaseName = String(name);
+    await setupClient.unsafe(
+      `ALTER DATABASE ${quotePostgresIdentifier(databaseName)} SET timezone TO 'America/Sao_Paulo'`
+    );
+  } finally {
+    await setupClient.end();
+  }
 
-  const firstPage = await places.getByCommunity(community.id, {
-    page: 1,
-    limit: 2,
-    includeRestricted: true,
-    sortBy: 'name',
-    sortOrder: 'asc',
+  const pinnedClient = createPostgresClient(databaseUrl, {
+    max: 2,
+    onnotice: () => undefined,
   });
-  const secondPage = await places.getByCommunity(community.id, {
-    page: 2,
-    limit: 2,
-    includeRestricted: true,
-    sortBy: 'name',
-    sortOrder: 'asc',
-  });
-  assert.equal(firstPage.total, 3);
-  assert.equal(firstPage.pages, 2);
-  assert.deepEqual(
-    firstPage.data.map((place) => place.name),
-    ['A Nearby Public', 'B Nearby Restricted']
-  );
-  assert.deepEqual(
-    secondPage.data.map((place) => place.name),
-    ['C Far Public']
-  );
+  // Plain client on purpose: no session settings, so the database default applies.
+  let unpinnedClient: PostgresClient | null = null;
+  try {
+    const { communitiesPg } = await import('../src/db/schema/communities.js');
 
-  const countryResults = await communities.search({
-    country: 'BR',
-    beta: true,
-  });
-  assert.ok(countryResults.some((row) => row.id === community.id));
+    const pinnedDb = drizzlePostgres(pinnedClient);
+    const [pinned] = await pinnedDb
+      .insert(communitiesPg)
+      .values({
+        name: 'Timezone Pinned Community',
+        slug: 'timezone-pinned-community',
+      })
+      .returning({
+        createdAt: communitiesPg.createdAt,
+        updatedAt: communitiesPg.updatedAt,
+      });
+    assertValidDate(pinned.createdAt, 'pinned communitiesPg.createdAt');
+    assertValidDate(pinned.updatedAt, 'pinned communitiesPg.updatedAt');
+    assert.ok(
+      Math.abs(pinned.createdAt.getTime() - Date.now()) < 120000,
+      'createPostgresClient defaults must be written as UTC (drift < 120000 ms)'
+    );
 
-  const datelineCommunity = await communities.create({
-    name: 'Dateline Radius Community',
-  });
-  const datelineEast = await places.create({
-    name: 'Dateline East',
-    communityId: datelineCommunity.id,
-    latitude: 0,
-    longitude: 179.9,
-  });
-  const datelineWest = await places.create({
-    name: 'Dateline West',
-    communityId: datelineCommunity.id,
-    latitude: 0,
-    longitude: -179.9,
-  });
-  await places.create({
-    name: 'Dateline Far',
-    communityId: datelineCommunity.id,
-    latitude: 0,
-    longitude: 170,
-  });
-  const datelineResults = await places.searchNear({
-    communityId: datelineCommunity.id,
-    latitude: 0,
-    longitude: 179.95,
-    radiusKm: 30,
-    page: 1,
-    limit: 10,
-    includeRestricted: true,
-  });
-  assert.deepEqual(
-    new Set(datelineResults.data.map((place) => place.id)),
-    new Set([datelineEast.id, datelineWest.id])
-  );
-
-  const polarCommunity = await communities.create({
-    name: 'Polar Radius Community',
-  });
-  const polarNear = await places.create({
-    name: 'Polar Near',
-    communityId: polarCommunity.id,
-    latitude: 89.9,
-    longitude: 120,
-  });
-  await places.create({
-    name: 'Polar Far',
-    communityId: polarCommunity.id,
-    latitude: 88,
-    longitude: 0,
-  });
-  const polarResults = await places.searchNear({
-    communityId: polarCommunity.id,
-    latitude: 89.9,
-    longitude: 0,
-    radiusKm: 30,
-    page: 1,
-    limit: 10,
-    includeRestricted: true,
-  });
-  assert.deepEqual(
-    polarResults.data.map((place) => place.id),
-    [polarNear.id]
-  );
+    unpinnedClient = postgres(databaseUrl);
+    const unpinnedDb = drizzlePostgres(unpinnedClient);
+    const [unpinned] = await unpinnedDb
+      .insert(communitiesPg)
+      .values({
+        name: 'Timezone Unpinned Community',
+        slug: 'timezone-unpinned-community',
+      })
+      .returning({ createdAt: communitiesPg.createdAt });
+    assert.ok(
+      Math.abs(unpinned.createdAt.getTime() - Date.now()) >= 3600000,
+      'negative control must detect the Sao Paulo drift (>= 3600000 ms)'
+    );
+  } finally {
+    if (unpinnedClient) {
+      await unpinnedClient.end();
+    }
+    if (databaseName) {
+      await pinnedClient.unsafe(
+        `ALTER DATABASE ${quotePostgresIdentifier(databaseName)} RESET timezone`
+      );
+    }
+    await pinnedClient.end();
+  }
 }
 
 function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {
@@ -1100,7 +1056,7 @@ function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {
         `INSERT INTO communities (name, slug, created_at, updated_at)
          VALUES ('Rollback Probe', 'rollback-probe', ?, ?)`
       )
-      .run(Date.now(), Date.now());
+      .run(Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000));
     throw new Error('rollback probe');
   });
   assert.throws(transaction, /rollback probe/);
@@ -1116,7 +1072,7 @@ function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {
          (email, password_hash, first_name, last_name, community_id, created_at, updated_at)
          VALUES ('orphan@example.test', 'hash', 'Orphan', 'User', 999999, ?, ?)`
       )
-      .run(Date.now(), Date.now())
+      .run(Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000))
   );
 
   sqlite.exec('CREATE TEMP TABLE null_unique_probe (value TEXT UNIQUE)');
@@ -1318,13 +1274,19 @@ async function runPostgresGate(): Promise<void> {
 
   console.log('🐘 PostgreSQL integration gate');
   await verifyStaticPortabilityContract();
-  const client = postgres(databaseUrl, { max: 2, onnotice: () => undefined });
+  const client = createPostgresClient(databaseUrl, {
+    max: 2,
+    onnotice: () => undefined,
+  });
   try {
     console.log('  1/4 fresh migration + shared repository contract');
     await resetPostgres(client);
     const freshDb = drizzlePostgres(client);
     await migratePostgres(freshDb, { migrationsFolder: postgresMigrations });
     await verifyPostgresSchema(client);
+    // Before the contract runs, make a non-UTC database default so the S4
+    // probe proves the session pin rather than a lucky UTC server default.
+    await verifyPostgresTimezoneSafeDefaults(databaseUrl);
     await runRepositoryContract(freshDb);
     await verifyPostgresTransactionAndForeignKey(client);
     await migratePostgres(freshDb, { migrationsFolder: postgresMigrations });
@@ -1337,6 +1299,7 @@ async function runPostgresGate(): Promise<void> {
     await migratePostgres(upgradeDb, { migrationsFolder: postgresMigrations });
     await verifyPostgresSchema(client);
     await verifyPostgresPreservation(client);
+    await verifyPostgresApplicationDates(upgradeDb);
 
     console.log('  3/4 deliberate dialect incompatibility rejection');
     validateMigrationText(

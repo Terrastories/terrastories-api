@@ -30,6 +30,17 @@ describe('database migration dialect guard', () => {
     ).toThrow(/Unsupported database URL dialect/);
   });
 
+  it('reports only the unsupported dialect scheme, never the URL credentials', () => {
+    let message = '';
+    try {
+      getMigrationPlan('mysql://user:s3cret-pass@db.example/terrastories');
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain('mysql://');
+    expect(message).not.toContain('s3cret-pass');
+  });
+
   it('keeps a Drizzle snapshot for every registered migration state', () => {
     for (const migrationsFolder of [
       path.join(process.cwd(), 'src/db/migrations'),

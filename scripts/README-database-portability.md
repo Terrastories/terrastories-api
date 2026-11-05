@@ -17,7 +17,8 @@ docker run --rm --name terrastories-postgres-test \
   -e POSTGRES_DB=terrastories_test \
   -e POSTGRES_USER=terrastories \
   -e POSTGRES_PASSWORD=terrastories-test \
-  -p 5432:5432 postgres:13-alpine
+  -e TZ=America/Sao_Paulo \
+  -p 127.0.0.1:5432:5432 postgres:13
 ```
 
 Then, in another shell:
@@ -30,7 +31,9 @@ npm run test:db:postgres
 
 The PostgreSQL gate is destructive and refuses to run unless the database name follows the dedicated test-database convention (for example `terrastories_test`, ending in `_test`) and `ALLOW_POSTGRES_TEST_RESET=true` is set. A substring such as `latest` is never considered a test database.
 
-Both gates are mandatory pull-request CI jobs (`.github/workflows/ci.yml`, jobs `database-sqlite` and `database-postgres`). The PostgreSQL gate deliberately uses plain `postgres:13-alpine`; passing it proves that application and migration behavior does not depend on PostGIS or another database-specific spatial extension. The CI job also sets a non-UTC `TZ`, so the gate must pass on any host time zone; run it locally without overriding `TZ`.
+Both gates are mandatory pull-request CI jobs (`.github/workflows/ci.yml`, jobs `database-sqlite` and `database-postgres`). The PostgreSQL gate deliberately uses plain `postgres:13`; passing it proves that application and migration behavior does not depend on PostGIS or another database-specific spatial extension. It uses the Debian (glibc) image because musl-based Alpine images sort text by bytes even under `en_US.utf8`, which hides collation drift from SQLite. The CI job sets a non-UTC `TZ` for both the Node process and the database server, and the gate also sets a non-UTC database time zone itself, so the gate must pass on any host or server time zone; run it locally without overriding `TZ`.
+
+If port 5432 is taken on your machine, bind another free port (for example `-p 127.0.0.1:55491:5432`) and change `DATABASE_URL` to match.
 
 ## Docker persisted-volume compatibility
 

@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   );
   await assertAuthIndexesInSnapshot(
     'PostgreSQL',
-    'src/db/migrations/postgres/meta/0001_snapshot.json',
+    'src/db/migrations/postgres/meta/0002_snapshot.json',
     'public.users'
   );
   console.log('✅ Migration metadata regression gate passed');

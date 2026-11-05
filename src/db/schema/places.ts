@@ -167,11 +167,17 @@ export const createPlaceSchema = insertPlaceSchema.omit({
   updatedAt: true,
 });
 
-export const updatePlaceSchema = insertPlaceSchema.partial().omit({
-  id: true,
-  createdAt: true,
-  communityId: true, // Don't allow changing community
-});
+export const updatePlaceSchema = insertPlaceSchema
+  .extend({
+    mediaUrls: insertPlaceSchema.shape.mediaUrls.removeDefault(),
+    isRestricted: insertPlaceSchema.shape.isRestricted.removeDefault(),
+  })
+  .partial()
+  .omit({
+    id: true,
+    createdAt: true,
+    communityId: true, // Don't allow changing community
+  });
 
 /**
  * Validates and sanitizes coordinate values to prevent SQL injection

@@ -169,11 +169,17 @@ export const createSpeakerSchema = insertSpeakerSchema.omit({
   updatedAt: true,
 });
 
-export const updateSpeakerSchema = insertSpeakerSchema.partial().omit({
-  id: true,
-  createdAt: true,
-  communityId: true, // Don't allow changing community
-});
+export const updateSpeakerSchema = insertSpeakerSchema
+  .extend({
+    elderStatus: insertSpeakerSchema.shape.elderStatus.removeDefault(),
+    isActive: insertSpeakerSchema.shape.isActive.removeDefault(),
+  })
+  .partial()
+  .omit({
+    id: true,
+    createdAt: true,
+    communityId: true, // Don't allow changing community
+  });
 
 // Export table variants for migration generation
 // The default export uses PostgreSQL table for Drizzle Kit

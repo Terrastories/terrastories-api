@@ -190,7 +190,10 @@ const themeFieldsSchema = z.object({
 export const createThemeSchema = themeFieldsSchema
   .refine(
     (data) => {
-      if (data.swBoundaryLat && data.neBoundaryLat) {
+      if (
+        data.swBoundaryLat !== undefined &&
+        data.neBoundaryLat !== undefined
+      ) {
         return data.swBoundaryLat <= data.neBoundaryLat;
       }
       return true;
@@ -203,7 +206,10 @@ export const createThemeSchema = themeFieldsSchema
   )
   .refine(
     (data) => {
-      if (data.swBoundaryLong && data.neBoundaryLong) {
+      if (
+        data.swBoundaryLong !== undefined &&
+        data.neBoundaryLong !== undefined
+      ) {
         return data.swBoundaryLong <= data.neBoundaryLong;
       }
       return true;
@@ -216,8 +222,33 @@ export const createThemeSchema = themeFieldsSchema
   );
 
 export const updateThemeSchema = themeFieldsSchema
+  .extend({
+    active: z.boolean(),
+  })
   .partial()
-  .omit({ communityId: true });
+  .omit({ communityId: true })
+  .refine(
+    (data) =>
+      data.swBoundaryLat === undefined ||
+      data.neBoundaryLat === undefined ||
+      data.swBoundaryLat <= data.neBoundaryLat,
+    {
+      message:
+        'Southwest boundary latitude must be less than or equal to northeast boundary latitude',
+      path: ['swBoundaryLat'],
+    }
+  )
+  .refine(
+    (data) =>
+      data.swBoundaryLong === undefined ||
+      data.neBoundaryLong === undefined ||
+      data.swBoundaryLong <= data.neBoundaryLong,
+    {
+      message:
+        'Southwest boundary longitude must be less than or equal to northeast boundary longitude',
+      path: ['swBoundaryLong'],
+    }
+  );
 
 // TypeScript types - Use SQLite for consistency with current deployment
 export type ThemePg = typeof themesPg.$inferSelect;

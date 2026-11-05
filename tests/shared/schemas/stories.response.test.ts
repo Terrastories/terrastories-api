@@ -98,19 +98,32 @@ describe('story filter input regressions', () => {
     ).not.toThrow();
   });
 
-  it('SearchQuerySchema still accepts one-sided geo input (old omit cleared refinements)', () => {
+  it('SearchQuerySchema rejects nearPoint without radiusKm', () => {
     expect(() =>
       SearchQuerySchema.parse({ q: 'river', nearPoint: point })
-    ).not.toThrow();
-    expect(() =>
-      SearchQuerySchema.parse({ q: 'river', radiusKm: 5 })
-    ).not.toThrow();
+    ).toThrow();
   });
 
-  it('SearchQuerySchema still accepts reversed dates (old omit cleared refinements)', () => {
+  it('SearchQuerySchema rejects radiusKm without nearPoint', () => {
+    expect(() =>
+      SearchQuerySchema.parse({ q: 'river', radiusKm: 5 })
+    ).toThrow();
+  });
+
+  it('SearchQuerySchema rejects reversed dates', () => {
     expect(() =>
       SearchQuerySchema.parse({ q: 'river', ...reversedDates })
-    ).not.toThrow();
+    ).toThrow();
+  });
+
+  it('SearchQuerySchema rejects a nearPoint without both lng and lat coordinates', () => {
+    expect(() =>
+      SearchQuerySchema.parse({
+        q: 'river',
+        nearPoint: { type: 'Point', coordinates: [-60] },
+        radiusKm: 5,
+      })
+    ).toThrow();
   });
 
   it('SearchQuerySchema rejects missing q', () => {

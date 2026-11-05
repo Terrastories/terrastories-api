@@ -57,7 +57,13 @@ export const StoryCreateInputSchema = createStorySchema
   .strict();
 
 // Story update schema
-export const StoryUpdateInputSchema = StoryCreateInputSchema.partial()
+export const StoryUpdateInputSchema = StoryCreateInputSchema.extend({
+  mediaUrls: StoryCreateInputSchema.shape.mediaUrls.removeDefault(),
+  language: StoryCreateInputSchema.shape.language.removeDefault(),
+  tags: StoryCreateInputSchema.shape.tags.removeDefault(),
+  isRestricted: StoryCreateInputSchema.shape.isRestricted.removeDefault(),
+})
+  .partial()
   .omit({
     communityId: true, // Cannot change community
     createdBy: true, // Cannot change creator
@@ -152,7 +158,18 @@ export const SearchQuerySchema = z
     q: z.string().min(1).max(200),
   })
   .merge(storyFilterFieldsSchema.omit({ search: true }))
-  .strict();
+  .strict()
+  .refine(
+    (data) => (data.nearPoint === undefined) === (data.radiusKm === undefined),
+    {
+      message:
+        'nearPoint and radiusKm must be provided together for geographic filtering',
+    }
+  )
+  .refine(
+    (data) => !data.dateFrom || !data.dateTo || data.dateFrom <= data.dateTo,
+    { message: 'dateFrom must be before dateTo' }
+  );
 
 // Bulk operation schemas
 export const BulkUpdateSchema = z

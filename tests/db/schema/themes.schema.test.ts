@@ -465,6 +465,23 @@ describe('Themes Schema', () => {
       expect(result.data).not.toHaveProperty('communityId');
     });
 
+    it('should not emit active or other defaults from a name-only update', () => {
+      const result = updateThemeSchema.parse({ name: 'Renamed Theme' });
+
+      expect(result).toEqual({ name: 'Renamed Theme' });
+      expect(result).not.toHaveProperty('active');
+      expect(result).not.toHaveProperty('communityId');
+    });
+
+    it('should preserve an explicitly supplied active value in update input', () => {
+      expect(updateThemeSchema.parse({ active: false })).toEqual({
+        active: false,
+      });
+      expect(updateThemeSchema.parse({ active: true })).toEqual({
+        active: true,
+      });
+    });
+
     it('should validate geographic bounds in createThemeSchema', () => {
       const invalidBoundsData: CreateTheme = {
         name: 'Invalid Bounds Theme',
@@ -560,13 +577,16 @@ describe('Themes Schema', () => {
       { swBoundaryLat: 5, neBoundaryLat: 0 },
       { swBoundaryLong: 5, neBoundaryLong: 0 },
     ])(
-      'should skip reversed-bounds check when a boundary is zero %j',
+      'should reject reversed bounds that include zero in create %j',
       (bounds) => {
         const result = createThemeSchema.safeParse({
           ...baseCreateData,
           ...bounds,
         });
-        expect(result.success).toBe(true);
+        expect(result.success).toBe(false);
+        expect(result.error?.issues.map((issue) => issue.path[0])).toContain(
+          Object.keys(bounds)[0]
+        );
       }
     );
 
@@ -599,11 +619,18 @@ describe('Themes Schema', () => {
     it.each([
       { swBoundaryLat: 47.0, neBoundaryLat: 46.0 },
       { swBoundaryLong: -121.0, neBoundaryLong: -122.0 },
+      { swBoundaryLat: 0, neBoundaryLat: -5 },
+      { swBoundaryLong: 0, neBoundaryLong: -5 },
+      { swBoundaryLat: 5, neBoundaryLat: 0 },
+      { swBoundaryLong: 5, neBoundaryLong: 0 },
     ])(
-      'should accept reversed bounds in update (create-only check) %j',
+      'should reject reversed bounds including zero in update %j',
       (bounds) => {
         const result = updateThemeSchema.safeParse(bounds);
-        expect(result.success).toBe(true);
+        expect(result.success).toBe(false);
+        expect(result.error?.issues.map((issue) => issue.path[0])).toContain(
+          Object.keys(bounds)[0]
+        );
       }
     );
   });

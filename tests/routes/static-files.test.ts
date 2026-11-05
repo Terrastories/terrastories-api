@@ -1,16 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Fastify, { FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+const SENTINEL_CONTENTS = 'sentinel outside static root must never be served';
+
 describe('Static file routing (wildcard: false)', () => {
   let app: FastifyInstance | undefined;
+  let parentDir: string | undefined;
   let rootDir: string | undefined;
+  let sentinelPath: string | undefined;
 
   beforeEach(async () => {
-    rootDir = await mkdtemp(join(tmpdir(), 'static-files-test-'));
+    parentDir = await mkdtemp(join(tmpdir(), 'static-files-test-'));
+    rootDir = join(parentDir, 'public');
+    sentinelPath = join(parentDir, 'traversal-sentinel.txt');
+
+    await mkdir(rootDir);
     await writeFile(join(rootDir, 'index.html'), '<html>index</html>');
     await mkdir(join(rootDir, 'nested'));
     await writeFile(join(rootDir, 'nested', 'visible.txt'), 'visible');
@@ -19,6 +27,8 @@ describe('Static file routing (wildcard: false)', () => {
       'restricted fixture contents'
     );
     await writeFile(join(rootDir, '.hidden'), 'dotfile fixture contents');
+    // Real sibling file outside the static root, used as the traversal target.
+    await writeFile(sentinelPath, SENTINEL_CONTENTS);
 
     app = Fastify();
     await app.register(fastifyStatic, {
@@ -36,9 +46,11 @@ describe('Static file routing (wildcard: false)', () => {
       await app.close();
       app = undefined;
     }
-    if (rootDir) {
-      await rm(rootDir, { recursive: true, force: true });
+    if (parentDir) {
+      await rm(parentDir, { recursive: true, force: true });
+      parentDir = undefined;
       rootDir = undefined;
+      sentinelPath = undefined;
     }
   });
 
@@ -90,13 +102,19 @@ describe('Static file routing (wildcard: false)', () => {
     expect(response.statusCode).toBe(404);
   });
 
-  it('should reject encoded parent traversal outside the static root', async () => {
-    const response = await app!.inject({
-      method: 'GET',
-      url: '/assets/%2e%2e%2f%2e%2e%2fpackage.json',
-    });
+  it('should reject parent traversal and never serve a sibling sentinel file', async () => {
+    expect(await readFile(sentinelPath!, 'utf8')).toBe(SENTINEL_CONTENTS);
 
-    expect([403, 404]).toContain(response.statusCode);
-    expect(response.payload).not.toContain('"dependencies"');
+    const traversalUrls = [
+      '/assets/../traversal-sentinel.txt',
+      '/assets/%2e%2e%2ftraversal-sentinel.txt',
+      '/assets/%2e%2e%2f%2e%2e%2ftraversal-sentinel.txt',
+    ];
+
+    for (const url of traversalUrls) {
+      const response = await app!.inject({ method: 'GET', url });
+      expect([403, 404]).toContain(response.statusCode);
+      expect(response.payload).not.toContain(SENTINEL_CONTENTS);
+    }
   });
 });

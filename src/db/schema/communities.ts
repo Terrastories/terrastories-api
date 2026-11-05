@@ -116,11 +116,18 @@ export const createCommunitySchema = insertCommunitySchema.omit({
   updatedAt: true,
 });
 
-export const updateCommunitySchema = insertCommunitySchema.partial().omit({
-  id: true,
-  createdAt: true,
-  slug: true, // Don't allow changing slug
-});
+export const updateCommunitySchema = insertCommunitySchema
+  .extend({
+    locale: insertCommunitySchema.shape.locale.removeDefault(),
+    publicStories: insertCommunitySchema.shape.publicStories.removeDefault(),
+    isActive: insertCommunitySchema.shape.isActive.removeDefault(),
+  })
+  .partial()
+  .omit({
+    id: true,
+    createdAt: true,
+    slug: true, // Don't allow changing slug
+  });
 
 // Export table variants for migration generation
 // The default export uses PostgreSQL table for Drizzle Kit

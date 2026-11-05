@@ -9,6 +9,28 @@ export type Database =
   | ReturnType<typeof drizzleSqlite>
   | ReturnType<typeof drizzlePostgres>;
 
+/**
+ * Session settings every application PostgreSQL connection must use.
+ *
+ * Timestamp columns are `timestamp without time zone` holding UTC, and
+ * Drizzle decodes them as UTC. `defaultNow()` writes the session's local wall
+ * clock, so the session time zone is pinned to UTC; otherwise a server whose
+ * default time zone is not UTC (common on native installs) stores defaults
+ * offset by its UTC offset.
+ */
+export const postgresSessionSettings = { TimeZone: 'UTC' } as const;
+
+/** Create a postgres.js client with the required session settings. */
+export function createPostgresClient(
+  url: string,
+  options: postgres.Options<Record<string, postgres.PostgresType>> = {}
+): postgres.Sql {
+  return postgres(url, {
+    ...options,
+    connection: { ...options.connection, ...postgresSessionSettings },
+  });
+}
+
 let db: Database | null = null;
 let connectionProbe: (() => Promise<void>) | null = null;
 
@@ -16,12 +38,13 @@ export async function getDb(): Promise<Database> {
   if (db) return db;
 
   const config = getConfig();
+  // Determine database type from URL
   const isPostgres =
     config.database.url.startsWith('postgresql://') ||
     config.database.url.startsWith('postgres://');
 
   if (isPostgres) {
-    const queryClient = postgres(config.database.url, {
+    const queryClient = createPostgresClient(config.database.url, {
       max: config.database.poolSize,
       ssl: config.database.ssl ? 'require' : false,
     });

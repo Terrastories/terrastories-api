@@ -9,16 +9,19 @@
 // NOTE: Many 'any' types in this file are unavoidable due to Drizzle ORM's
 // complex typing with multi-database compatibility.
 
-import { eq, and, desc, sql, count } from 'drizzle-orm';
+import { eq, and, asc, desc, sql, count, type SQL } from 'drizzle-orm';
 import {
   type Place,
   type NewPlace,
-  getPlacesTable,
   validateCoordinates,
 } from '../db/schema/places.js';
-import { storyPlaces } from '../db/schema/story_places.js';
-import { stories } from '../db/schema/stories.js';
-import { getCommunitiesTable } from '../db/schema/communities.js';
+import {
+  dialectOf,
+  tablesFor,
+  textOrder,
+  type Dialect,
+  type DialectTables,
+} from '../db/dialect.js';
 import type { Database } from '../db/index.js';
 import { SpatialUtils } from '../shared/utils/spatial.js';
 import {
@@ -28,10 +31,15 @@ import {
   CommunityNotFoundError,
 } from '../shared/errors/index.js';
 
+// Re-export Place type for other modules
 export type { Place } from '../db/schema/places.js';
 
+// Database type union for compatibility - use the same type as db/index.ts
 type DatabaseType = Database;
 
+/**
+ * Request parameters for place creation
+ */
 export interface CreatePlaceData {
   name: string;
   description?: string;
@@ -43,6 +51,9 @@ export interface CreatePlaceData {
   isRestricted?: boolean;
 }
 
+/**
+ * Request parameters for place updates
+ */
 export interface UpdatePlaceData {
   name?: string;
   description?: string;
@@ -55,6 +66,9 @@ export interface UpdatePlaceData {
   updatedAt?: Date;
 }
 
+/**
+ * Parameters for geographic proximity search
+ */
 export interface NearbySearchParams {
   communityId: number;
   latitude: number;
@@ -65,6 +79,9 @@ export interface NearbySearchParams {
   includeRestricted?: boolean;
 }
 
+/**
+ * Parameters for bounding box search
+ */
 export interface BoundsSearchParams {
   communityId: number;
   north: number;
@@ -76,6 +93,9 @@ export interface BoundsSearchParams {
   includeRestricted?: boolean;
 }
 
+/**
+ * Parameters for community place listing
+ */
 export interface CommunityPlaceParams {
   page: number;
   limit: number;
@@ -84,6 +104,9 @@ export interface CommunityPlaceParams {
   sortOrder?: 'asc' | 'desc';
 }
 
+/**
+ * Paginated response structure
+ */
 export interface PaginatedResponse<T> {
   data: T[];
   total: number;
@@ -94,19 +117,45 @@ export interface PaginatedResponse<T> {
 
 export class PlaceRepository {
   private db: DatabaseType;
+  private readonly dialect: Dialect;
+  private readonly tables: DialectTables;
 
   constructor(database: DatabaseType) {
     this.db = database;
+    // Tables come from this Drizzle instance, so story/place joins use the
+    // matching dialect (previously PostgreSQL join tables on every backend).
+    this.dialect = dialectOf(database);
+    this.tables = tablesFor(database);
   }
 
+  /** Requested sort column, then id, so pages are deterministic. */
+  private sortOrder(sortBy: string, sortOrder: 'asc' | 'desc'): SQL[] {
+    const places = this.tables.places;
+    if (sortBy === 'name') {
+      return [
+        textOrder(this.dialect, places.name, sortOrder),
+        sortOrder === 'desc' ? desc(places.id) : asc(places.id),
+      ];
+    }
+    const column =
+      sortBy === 'created_at' ? places.createdAt : places.updatedAt;
+    return sortOrder === 'desc'
+      ? [desc(column), desc(places.id)]
+      : [asc(column), asc(places.id)];
+  }
+
+  /**
+   * Create a new place with coordinate validation
+   */
   async create(
     data: CreatePlaceData & { communityId: number }
   ): Promise<Place> {
+    // Validate coordinates
     if (!validateCoordinates(data.latitude, data.longitude)) {
       throw new InvalidCoordinatesError(data.latitude, data.longitude);
     }
 
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const now = new Date();
     const placeData: NewPlace = {
       name: data.name,
@@ -123,7 +172,8 @@ export class PlaceRepository {
     };
 
     try {
-      const communityTable = await getCommunitiesTable();
+      // Check if community exists first (SQLite doesn't enforce foreign keys in tests)
+      const communityTable = this.tables.communities;
       const [existingCommunity] = await (this.db as any)
         .select({ id: communityTable.id })
         .from(communityTable)
@@ -152,8 +202,11 @@ export class PlaceRepository {
     }
   }
 
+  /**
+   * Get place by ID without community check (internal use)
+   */
   async getById(id: number): Promise<Place | null> {
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const [place] = await (this.db as any)
       .select()
       .from(placesTable)
@@ -163,12 +216,15 @@ export class PlaceRepository {
     return place || null;
   }
 
+  /**
+   * Get place by ID with community isolation
+   */
   async getByIdWithCommunityCheck(
     id: number,
     communityId: number
   ): Promise<Place | null> {
     try {
-      const placesTable = await getPlacesTable();
+      const placesTable = this.tables.places;
       const [place] = await (this.db as any)
         .select()
         .from(placesTable)
@@ -179,7 +235,9 @@ export class PlaceRepository {
 
       return place || null;
     } catch (error) {
+      // Handle database errors gracefully
       if (error instanceof Error) {
+        // Handle SQLite function errors (like "no such function: now")
         if (error.message.includes('no such function')) {
           throw new DatabaseError(
             'Database compatibility error during place lookup',
@@ -192,6 +250,7 @@ export class PlaceRepository {
           );
         }
 
+        // Handle other database errors
         throw new DatabaseError(
           'Failed to retrieve place due to database error',
           {
@@ -212,11 +271,14 @@ export class PlaceRepository {
     }
   }
 
+  /**
+   * Get paginated places for a community
+   */
   async getByCommunity(
     communityId: number,
     params: CommunityPlaceParams
   ): Promise<PaginatedResponse<Place>> {
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const {
       page,
       limit,
@@ -226,30 +288,27 @@ export class PlaceRepository {
     } = params;
     const offset = (page - 1) * limit;
 
+    // Build where condition
     const whereConditions = [eq(placesTable.communityId, communityId)];
     if (!includeRestricted) {
       whereConditions.push(eq(placesTable.isRestricted, false));
     }
     const whereCondition = and(...whereConditions);
 
-    const sortColumn =
-      sortBy === 'name'
-        ? placesTable.name
-        : sortBy === 'created_at'
-          ? placesTable.createdAt
-          : placesTable.updatedAt;
-    const orderBy = sortOrder === 'desc' ? desc(sortColumn) : sortColumn;
+    const orderBy = this.sortOrder(sortBy, sortOrder);
 
+    // Get total count
     const [{ count: total }] = await (this.db as any)
       .select({ count: count() })
       .from(placesTable)
       .where(whereCondition);
 
+    // Get paginated data
     const places = await (this.db as any)
       .select()
       .from(placesTable)
       .where(whereCondition)
-      .orderBy(orderBy)
+      .orderBy(...orderBy)
       .limit(limit)
       .offset(offset);
 
@@ -262,14 +321,18 @@ export class PlaceRepository {
     };
   }
 
+  /**
+   * Update place by ID
+   */
   async update(id: number, data: UpdatePlaceData): Promise<Place | null> {
+    // Validate coordinates if provided
     if (data.latitude !== undefined && data.longitude !== undefined) {
       if (!validateCoordinates(data.latitude, data.longitude)) {
         throw new InvalidCoordinatesError(data.latitude, data.longitude);
       }
     }
 
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const updateData: Partial<UpdatePlaceData> = {
       ...(data.name !== undefined && { name: data.name }),
       ...(data.description !== undefined && { description: data.description }),
@@ -296,9 +359,11 @@ export class PlaceRepository {
   }
 
   async delete(id: number): Promise<boolean> {
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
 
     try {
+      // For now, we'll do hard delete since soft delete isn't in schema
+      // In production, this would be a soft delete with a deletedAt timestamp
       const [deleted] = await (this.db as any)
         .delete(placesTable)
         .where(eq(placesTable.id, id))
@@ -327,6 +392,7 @@ export class PlaceRepository {
       includeRestricted = false,
     } = params;
 
+    // Validate search coordinates
     if (!validateCoordinates(latitude, longitude)) {
       throw new InvalidCoordinatesError(latitude, longitude);
     }
@@ -336,7 +402,7 @@ export class PlaceRepository {
       );
     }
 
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const offset = (page - 1) * limit;
     const bounds = SpatialUtils.calculateBoundingBox(
       latitude,
@@ -376,9 +442,12 @@ export class PlaceRepository {
         ),
       }))
       .filter(({ distance }: { distance: number }) => distance <= radiusKm)
+      // Distance, then id, so equal distances page deterministically.
       .sort(
-        (a: { distance: number }, b: { distance: number }) =>
-          a.distance - b.distance
+        (
+          a: { distance: number; place: Place },
+          b: { distance: number; place: Place }
+        ) => a.distance - b.distance || a.place.id - b.place.id
       );
 
     const total = nearbyPlaces.length;
@@ -395,6 +464,9 @@ export class PlaceRepository {
     };
   }
 
+  /**
+   * Search places within bounding box
+   */
   async searchInBounds(
     params: BoundsSearchParams
   ): Promise<PaginatedResponse<Place>> {
@@ -409,6 +481,7 @@ export class PlaceRepository {
       includeRestricted = false,
     } = params;
 
+    // Validate bounds
     if (north <= south || east <= west) {
       throw new InvalidBoundsError(
         'Invalid bounding box: north must be > south, east must be > west'
@@ -422,7 +495,7 @@ export class PlaceRepository {
       throw new InvalidCoordinatesError();
     }
 
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const offset = (page - 1) * limit;
     const boundsCondition = and(
       sql`${placesTable.latitude} BETWEEN ${south} AND ${north}`,
@@ -438,16 +511,18 @@ export class PlaceRepository {
       whereCondition = and(whereCondition, eq(placesTable.isRestricted, false));
     }
 
+    // Get total count
     const [{ count: total }] = await (this.db as any)
       .select({ count: count() })
       .from(placesTable)
       .where(whereCondition);
 
+    // Get paginated data
     const places = await (this.db as any)
       .select()
       .from(placesTable)
       .where(whereCondition)
-      .orderBy(placesTable.name)
+      .orderBy(...this.sortOrder('name', 'asc'))
       .limit(limit)
       .offset(offset);
 
@@ -460,8 +535,11 @@ export class PlaceRepository {
     };
   }
 
+  /**
+   * Get places associated with a story
+   */
   async getPlacesByStory(storyId: number): Promise<Place[]> {
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const places = await (this.db as any)
       .select({
         ...(Object.fromEntries(
@@ -472,24 +550,33 @@ export class PlaceRepository {
         ) as { [K in keyof Place]: any }),
       })
       .from(placesTable)
-      .innerJoin(storyPlaces, eq(placesTable.id, storyPlaces.placeId))
-      .where(eq(storyPlaces.storyId, storyId));
+      .innerJoin(
+        this.tables.storyPlaces,
+        eq(placesTable.id, this.tables.storyPlaces.placeId)
+      )
+      .where(eq(this.tables.storyPlaces.storyId, storyId));
 
     return places as Place[];
   }
 
+  /**
+   * Get stories associated with a place
+   */
   async getStoriesByPlace(
     placeId: number,
     communityId: number
   ): Promise<any[]> {
-    const storiesTable = stories;
+    const storiesTable = this.tables.stories;
     const placeStories = await (this.db as any)
       .select()
       .from(storiesTable)
-      .innerJoin(storyPlaces, eq(storiesTable.id, storyPlaces.storyId))
+      .innerJoin(
+        this.tables.storyPlaces,
+        eq(storiesTable.id, this.tables.storyPlaces.storyId)
+      )
       .where(
         and(
-          eq(storyPlaces.placeId, placeId),
+          eq(this.tables.storyPlaces.placeId, placeId),
           eq(storiesTable.communityId, communityId)
         )
       );
@@ -497,24 +584,33 @@ export class PlaceRepository {
     return placeStories;
   }
 
+  /**
+   * Associate place with story
+   */
   async addStoryPlaceAssociation(
     storyId: number,
     placeId: number
   ): Promise<void> {
     await (this.db as any)
-      .insert(storyPlaces)
+      .insert(this.tables.storyPlaces)
       .values({ storyId, placeId })
-      .onConflictDoNothing();
+      .onConflictDoNothing(); // Prevent duplicate associations
   }
 
+  /**
+   * Remove story-place association
+   */
   async removeStoryPlaceAssociation(
     storyId: number,
     placeId: number
   ): Promise<void> {
     await (this.db as any)
-      .delete(storyPlaces)
+      .delete(this.tables.storyPlaces)
       .where(
-        and(eq(storyPlaces.storyId, storyId), eq(storyPlaces.placeId, placeId))
+        and(
+          eq(this.tables.storyPlaces.storyId, storyId),
+          eq(this.tables.storyPlaces.placeId, placeId)
+        )
       );
   }
 
@@ -524,7 +620,7 @@ export class PlaceRepository {
     lat2: number,
     lon2: number
   ): number {
-    const R = 6371;
+    const R = 6371; // Earth's radius in kilometers
     const dLat = this.toRadians(lat2 - lat1);
     const dLon = this.toRadians(lon2 - lon1);
 
@@ -539,17 +635,23 @@ export class PlaceRepository {
     return R * c;
   }
 
+  /**
+   * Convert degrees to radians
+   */
   private toRadians(degrees: number): number {
     return degrees * (Math.PI / 180);
   }
 
+  /**
+   * Get place statistics for a community
+   */
   async getCommunityPlaceStats(communityId: number): Promise<{
     total: number;
     restricted: number;
     public: number;
     withStories: number;
   }> {
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
 
     const [totalResult] = await (this.db as any)
       .select({ count: count() })
@@ -569,7 +671,10 @@ export class PlaceRepository {
     const [withStoriesResult] = await (this.db as any)
       .select({ count: count(sql`DISTINCT ${placesTable.id}`) })
       .from(placesTable)
-      .innerJoin(storyPlaces, eq(placesTable.id, storyPlaces.placeId))
+      .innerJoin(
+        this.tables.storyPlaces,
+        eq(placesTable.id, this.tables.storyPlaces.placeId)
+      )
       .where(eq(placesTable.communityId, communityId));
 
     const total = Number(totalResult.count);

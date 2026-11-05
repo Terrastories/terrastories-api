@@ -17,7 +17,7 @@ import {
   serial,
   text as pgText,
   integer as pgInteger,
-  real as pgReal,
+  doublePrecision,
   boolean,
   timestamp,
   jsonb,
@@ -36,6 +36,7 @@ import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
 import { SpatialUtils } from '../../shared/utils/spatial.js';
 
+// Coordinate validation schemas
 export const CoordinateSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
@@ -43,7 +44,7 @@ export const CoordinateSchema = z.object({
 
 export const GeometryPointSchema = z.object({
   type: z.literal('Point'),
-  coordinates: z.tuple([z.number(), z.number()]),
+  coordinates: z.tuple([z.number(), z.number()]), // [lng, lat] GeoJSON format
 });
 
 export const placesPg = pgTable(
@@ -55,10 +56,11 @@ export const placesPg = pgTable(
     communityId: pgInteger('community_id')
       .notNull()
       .references(() => communitiesPg.id),
-    latitude: pgReal('latitude').notNull(),
-    longitude: pgReal('longitude').notNull(),
+    latitude: doublePrecision('latitude').notNull(),
+    longitude: doublePrecision('longitude').notNull(),
     region: pgText('region'),
     mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
+    // Direct file URL column for dual-read capability (Issue #89)
     photoUrl: pgText('photo_url'),
     culturalSignificance: pgText('cultural_significance'),
     isRestricted: boolean('is_restricted').notNull().default(false),
@@ -66,7 +68,9 @@ export const placesPg = pgTable(
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
   (table) => ({
+    // Standard indexes for filtering
     communityIdx: index('places_community_id_idx').on(table.communityId),
+    // Index for photo URL queries (for media management)
     photoUrlIdx: index('places_photo_url_idx').on(table.photoUrl),
   })
 );
@@ -86,6 +90,7 @@ export const placesSqlite = sqliteTable(
     mediaUrls: sqliteText('media_urls', { mode: 'json' })
       .$type<string[]>()
       .default([]),
+    // Direct file URL column for dual-read capability (Issue #89)
     photoUrl: sqliteText('photo_url'),
     culturalSignificance: sqliteText('cultural_significance'),
     isRestricted: integer('is_restricted', { mode: 'boolean' })
@@ -99,12 +104,17 @@ export const placesSqlite = sqliteTable(
       .$defaultFn(() => new Date()),
   },
   (table) => ({
+    // Standard indexes for filtering
     communityIdx: sqliteIndex('places_community_id_idx').on(table.communityId),
+    // Index for photo URL queries (for media management)
     photoUrlIdx: sqliteIndex('places_photo_url_idx').on(table.photoUrl),
   })
 );
 
+// Dynamic table selection based on database type (for runtime use)
+// Note: This function imports getConfig at runtime to avoid circular dependencies during migration
 export async function getPlacesTable() {
+  // Dynamic import to avoid issues with Drizzle Kit during migration generation
   const { getConfig } = await import('../../shared/config/index.js');
   const config = getConfig();
   const isPostgres =
@@ -114,6 +124,7 @@ export async function getPlacesTable() {
   return isPostgres ? placesPg : placesSqlite;
 }
 
+// Relations - Places belong to one community
 export const placesRelations = relations(placesPg, ({ one }) => ({
   community: one(communitiesPg, {
     fields: [placesPg.communityId],
@@ -121,6 +132,7 @@ export const placesRelations = relations(placesPg, ({ one }) => ({
   }),
 }));
 
+// SQLite relations (same structure)
 export const placesSqliteRelations = relations(placesSqlite, ({ one }) => ({
   community: one(communitiesSqlite, {
     fields: [placesSqlite.communityId],
@@ -128,6 +140,7 @@ export const placesSqliteRelations = relations(placesSqlite, ({ one }) => ({
   }),
 }));
 
+// Zod schemas for validation - using PostgreSQL table as base for consistency
 export const insertPlaceSchema = createInsertSchema(placesPg, {
   name: z.string().min(1, 'Name is required').max(200, 'Name too long'),
   description: z.string().max(2000, 'Description too long').optional(),
@@ -142,9 +155,11 @@ export const insertPlaceSchema = createInsertSchema(placesPg, {
 
 export const selectPlaceSchema = createSelectSchema(placesPg);
 
+// TypeScript types - Use SQLite for consistency with current deployment
 export type Place = typeof placesSqlite.$inferSelect;
 export type NewPlace = typeof placesSqlite.$inferInsert;
 
+// Additional validation schemas for specific use cases
 export const createPlaceSchema = insertPlaceSchema.omit({
   id: true,
   createdAt: true,
@@ -154,13 +169,17 @@ export const createPlaceSchema = insertPlaceSchema.omit({
 export const updatePlaceSchema = insertPlaceSchema.partial().omit({
   id: true,
   createdAt: true,
-  communityId: true,
+  communityId: true, // Don't allow changing community
 });
 
+// Export table variants for migration generation
+// The default export uses PostgreSQL table for Drizzle Kit
 export const places = placesPg;
 
+// Re-export SpatialUtils for backward compatibility with tests
 export { SpatialUtils };
 
+// Add validateCoordinates function for backward compatibility
 export const validateCoordinates = (lat: number, lng: number): boolean => {
   return SpatialUtils.validateCoordinates(lat, lng);
 };

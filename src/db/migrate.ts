@@ -28,7 +28,9 @@ export function getMigrationPlan(databaseUrl: string): {
     databaseUrl.startsWith('postgres://');
 
   if (!isPostgres && /^[a-z][a-z0-9+.-]*:\/\//i.test(databaseUrl)) {
-    throw new Error(`Unsupported database URL dialect: ${databaseUrl}`);
+    // Report only the scheme: the full URL can carry credentials.
+    const scheme = databaseUrl.slice(0, databaseUrl.indexOf('://') + 3);
+    throw new Error(`Unsupported database URL dialect: ${scheme}`);
   }
 
   if (isPostgres) {

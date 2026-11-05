@@ -1192,6 +1192,49 @@ describe('administrative service guards (SPEC-V2 §7)', () => {
       expect(await activeAdminsIn(privateCommunityId)).toHaveLength(1);
     });
 
+    it('two community admins deleting each other must preserve one active admin', async () => {
+      const second = await insertUser(
+        privateCommunityId,
+        'admin',
+        'round6-delete-peer'
+      );
+      const service = new UserService(
+        new UserRepository(db),
+        communityRepository
+      );
+      const realGet = service.getUserByIdInCommunity.bind(service);
+
+      // Both delete-path snapshot reads observe both administrators still
+      // active before either write runs.
+      let arrivals = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(service, 'getUserByIdInCommunity').mockImplementation(
+        async (...args: Parameters<typeof realGet>) => {
+          const snapshot = await realGet(...args);
+          if (++arrivals === 2) release();
+          await gate;
+          return snapshot;
+        }
+      );
+
+      const outcomes = await Promise.allSettled([
+        service.deleteUserInCommunity(second.id, privateCommunityId, admin.id),
+        service.deleteUserInCommunity(admin.id, privateCommunityId, second.id),
+      ]);
+
+      expect(await activeAdminsIn(privateCommunityId)).toHaveLength(1);
+      const rejected = outcomes.filter(
+        (outcome) => outcome.status === 'rejected'
+      );
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+        LastActiveAdministratorError
+      );
+    });
+
     it('a system deactivation racing an admin self-deactivation must preserve one active admin', async () => {
       const second = await insertUser(
         privateCommunityId,

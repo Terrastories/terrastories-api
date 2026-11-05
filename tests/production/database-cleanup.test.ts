@@ -7,6 +7,7 @@
  * and ensuring test data isolation between performance test runs.
  */
 
+import { retainedHeapUsed } from '../helpers/retained-heap.js';
 import {
   describe,
   it,
@@ -398,7 +399,7 @@ describe('Production Database Cleanup', () => {
       // This test should fail initially - memory usage not optimized
       const db = await productionTestDb.getDb();
 
-      const initialMemory = process.memoryUsage().heapUsed;
+      const initialMemory = await retainedHeapUsed();
 
       // Create and cleanup large dataset multiple times
       for (let i = 0; i < 10; i++) {
@@ -406,7 +407,7 @@ describe('Production Database Cleanup', () => {
         await productionTestDb.clearData();
       }
 
-      const finalMemory = process.memoryUsage().heapUsed;
+      const finalMemory = await retainedHeapUsed();
       const memoryIncrease = finalMemory - initialMemory;
 
       // This should fail initially - memory may leak during repeated cleanup operations

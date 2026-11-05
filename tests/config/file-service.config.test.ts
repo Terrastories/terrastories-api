@@ -15,6 +15,8 @@ describe('File Service Configuration', () => {
 
     // Ensure we have a valid DATABASE_URL for all tests
     process.env.DATABASE_URL = ':memory:';
+    process.env.JWT_SECRET =
+      'fixture-file-service-jwt-secret-at-least-32-characters';
   });
 
   afterEach(() => {
@@ -149,6 +151,8 @@ describe('File Service Configuration', () => {
 
     it('should support field-kit specific file service configuration', () => {
       process.env.NODE_ENV = 'field-kit';
+      process.env.SESSION_SECRET =
+        'fixture-installation-session-secret-at-least-32-chars';
       process.env.FILES_ENABLE_VIDEO = 'true';
       process.env.FILES_ENCRYPT_AT_REST = 'true';
 
@@ -162,6 +166,8 @@ describe('File Service Configuration', () => {
 
     it('should support offline specific file service configuration', () => {
       process.env.NODE_ENV = 'offline';
+      process.env.SESSION_SECRET =
+        'fixture-installation-session-secret-at-least-32-chars';
       process.env.FILES_MAX_SIZE_MB = '10';
       process.env.FILES_ENABLE_VIDEO = 'false';
 

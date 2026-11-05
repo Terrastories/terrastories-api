@@ -2,11 +2,12 @@
  * Development Routes
  *
  * Development-only endpoints for seeding test data and debugging.
- * Only available in development environment.
+ * Only available with explicit development or test NODE_ENV.
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import { isDevelopmentEnvironment } from '../shared/config/index.js';
 import { getDb } from '../db/index.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { UserService } from '../services/user.service.js';
@@ -15,7 +16,8 @@ import { PlaceRepository } from '../repositories/place.repository.js';
 import { StoryRepository } from '../repositories/story.repository.js';
 
 export async function devRoutes(fastify: FastifyInstance) {
-  // Note: Available in all environments for development and testing
+  // Also protect callers that register this plugin directly.
+  if (!isDevelopmentEnvironment()) return;
 
   /**
    * GET /dev/seed - Seed development test data

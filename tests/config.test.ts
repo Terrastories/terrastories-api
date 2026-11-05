@@ -10,11 +10,13 @@ describe('Configuration System', () => {
     process.env = { ...originalEnv };
 
     // Clear any environment files that might interfere with tests
-    delete process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
     delete process.env.PORT;
     delete process.env.HOST;
     delete process.env.DATABASE_URL;
-    delete process.env.JWT_SECRET;
+    process.env.JWT_SECRET = 'test-jwt-secret-at-least-32-characters-long';
+    process.env.SESSION_SECRET =
+      'test-session-secret-at-least-32-characters-long';
     delete process.env.LOG_LEVEL;
   });
 
@@ -24,10 +26,10 @@ describe('Configuration System', () => {
   });
 
   describe('Environment Detection', () => {
-    it('should detect development environment by default', () => {
+    it('should select production when runtime mode is unset', () => {
       delete process.env.NODE_ENV;
       const config = loadConfig(true, true);
-      expect(config.environment).toBe('development');
+      expect(config.environment).toBe('production');
     });
 
     it('should detect production environment when NODE_ENV=production', () => {
@@ -48,14 +50,91 @@ describe('Configuration System', () => {
       expect(config.environment).toBe('offline');
     });
 
-    it('should fallback to development for unknown environments', () => {
-      process.env.NODE_ENV = 'unknown';
-      const config = loadConfig(true, true);
-      expect(config.environment).toBe('development');
+    it.each(['unknown', 'staging', '', 'test '])('rejects mode %s', (mode) => {
+      process.env.NODE_ENV = mode;
+      expect(() => loadConfig(true, true)).toThrow('NODE_ENV must name');
+    });
+
+    it('caches configuration when runtime mode is unset', () => {
+      delete process.env.NODE_ENV;
+      expect(loadConfig(true, true)).toBe(loadConfig(false, true));
+    });
+
+    it.each([
+      'your-session-secret-minimum-32-characters-required-for-cookies',
+      'your-super-secret-jwt-key-change-this-in-production',
+      'insecure-development-session-secret-for-testing-purposes-only',
+      'field-kit-deployment-secret-change-me',
+      'offline-mode-secret-temporary-session',
+    ])('rejects shipped production placeholder %s', (value) => {
+      process.env.NODE_ENV = 'production';
+      process.env.SESSION_SECRET = value;
+      expect(() => loadConfig(true, true)).toThrow('shipped placeholder');
     });
   });
 
   describe('Configuration Loading', () => {
+    describe.each(['field-kit', 'offline'])(
+      '%s installation secrets',
+      (mode) => {
+        it.each(['JWT_SECRET', 'SESSION_SECRET'])('requires %s', (secret) => {
+          process.env.NODE_ENV = mode;
+          delete process.env[secret];
+          expect(() => loadConfig(true, true)).toThrow(
+            'Configuration validation failed'
+          );
+        });
+
+        it.each(['JWT_SECRET', 'SESSION_SECRET'])(
+          'rejects weak or placeholder %s',
+          (secret) => {
+            process.env.NODE_ENV = mode;
+            for (const value of [
+              'short',
+              'field-kit-deployment-secret-change-me',
+              'offline-mode-secret-temporary-session',
+            ]) {
+              process.env[secret] = value;
+              expect(() => loadConfig(true, true)).toThrow(
+                'Configuration validation failed'
+              );
+            }
+          }
+        );
+
+        it('accepts installation secrets with local cookie settings', () => {
+          process.env.NODE_ENV = mode;
+          const config = loadConfig(true, true);
+          expect(config.auth.jwtSecret).toBe(process.env.JWT_SECRET);
+          expect(config.auth.session.secret).toBe(process.env.SESSION_SECRET);
+          expect(config.auth.session.secure).toBe(false);
+        });
+      }
+    );
+
+    it.each(['field-kit', 'offline'])(
+      'requires an installation session secret in %s',
+      (mode) => {
+        process.env.NODE_ENV = mode;
+        delete process.env.SESSION_SECRET;
+        expect(() => loadConfig(true, true)).toThrow(
+          'Configuration validation failed'
+        );
+      }
+    );
+
+    it.each(['JWT_SECRET', 'SESSION_SECRET'])(
+      'rejects production startup without %s',
+      (secret) => {
+        process.env.NODE_ENV = 'production';
+        process.env.JWT_SECRET = 'test-jwt-secret-at-least-32-characters-long';
+        delete process.env[secret];
+        expect(() => loadConfig(true, true)).toThrow(
+          'Configuration validation failed'
+        );
+      }
+    );
+
     it('should load valid development configuration', () => {
       process.env.NODE_ENV = 'development';
       process.env.PORT = '3000';
@@ -127,7 +206,8 @@ describe('Configuration System', () => {
       process.env.PORT = '3000';
       process.env.HOST = '0.0.0.0';
       process.env.DATABASE_URL = './field-kit-data.db';
-      process.env.JWT_SECRET = 'field-kit-secret';
+      process.env.JWT_SECRET =
+        'field-kit-installation-jwt-secret-at-least-32-characters';
       process.env.LOG_LEVEL = 'info';
 
       const config = loadConfig(true, true);
@@ -142,7 +222,7 @@ describe('Configuration System', () => {
           url: './field-kit-data.db',
         },
         auth: {
-          jwtSecret: 'field-kit-secret',
+          jwtSecret: 'field-kit-installation-jwt-secret-at-least-32-characters',
         },
         logging: {
           level: 'info',
@@ -161,7 +241,8 @@ describe('Configuration System', () => {
       process.env.PORT = '3000';
       process.env.HOST = '127.0.0.1';
       process.env.DATABASE_URL = ':memory:';
-      process.env.JWT_SECRET = 'offline-secret';
+      process.env.JWT_SECRET =
+        'offline-installation-jwt-secret-at-least-32-characters';
       process.env.LOG_LEVEL = 'error';
 
       const config = loadConfig(true, true);
@@ -176,7 +257,7 @@ describe('Configuration System', () => {
           url: ':memory:',
         },
         auth: {
-          jwtSecret: 'offline-secret',
+          jwtSecret: 'offline-installation-jwt-secret-at-least-32-characters',
         },
         logging: {
           level: 'error',

@@ -12,6 +12,7 @@ import { publicApiRoutes } from './public-api.js';
 import { memberRoutes } from './member/index.js';
 import { superAdminRoutes } from './super_admin.js';
 import { devRoutes } from './dev.js';
+import { isDevelopmentEnvironment } from '../shared/config/index.js';
 
 export interface RegisterRoutesOptions {
   database?: unknown;
@@ -27,7 +28,9 @@ export async function registerRoutes(
   await app.register(healthRoute, opts);
 
   // Development routes (no authentication required, development only)
-  await app.register(devRoutes, opts);
+  if (isDevelopmentEnvironment()) {
+    await app.register(devRoutes, opts);
+  }
 
   // Public API routes (no authentication required)
   await app.register(publicApiRoutes, { prefix: '/api', ...opts });

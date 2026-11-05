@@ -24,6 +24,11 @@ jobs:
     name: Test User Workflow Script
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Runtime mode is an explicit opt-in: dotenv files cannot set NODE_ENV, and
+    # an unset NODE_ENV means production. Every step (migrate, seed, server)
+    # must resolve the same development config and database.
+    env:
+      NODE_ENV: development
 
     strategy:
       matrix:

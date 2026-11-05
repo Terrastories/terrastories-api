@@ -26,21 +26,23 @@ import { ZodError, ZodIssue } from 'zod';
 import { EnvironmentSchemas, EnvironmentSchema } from './schema.js';
 import type { AppConfig, Environment } from './types.js';
 
-// Global config instance (singleton pattern)
+/** Resolve runtime mode once for both configuration and development-tool policy. */
+function parseEnvironment() {
+  return EnvironmentSchema.safeParse(process.env.NODE_ENV ?? 'production');
+}
+
+export function isDevelopmentEnvironment(): boolean {
+  const result = parseEnvironment();
+  return result.success && ['development', 'test'].includes(result.data);
+}
+
 let configInstance: AppConfig | null = null;
 
-/**
- * Detects the current environment from NODE_ENV
- *
- * Validates against supported environments and provides safe fallback.
- * Supported environments: development, production, field-kit, offline, test
- *
- * @returns {Environment} The detected environment or 'development' as fallback
- */
 function detectEnvironment(): Environment {
-  const nodeEnv = process.env.NODE_ENV;
-  const result = EnvironmentSchema.safeParse(nodeEnv);
-  return result.success ? result.data : 'development';
+  const result = parseEnvironment();
+  if (!result.success)
+    throw new Error('NODE_ENV must name a supported runtime environment');
+  return result.data;
 }
 
 /**
@@ -64,12 +66,17 @@ function loadEnvironmentFile(
 
   // Explicit process.env values must win over dotenv files so CI/runtime
   // configuration cannot be silently replaced by local development defaults.
+  const runtimeEnvironment = process.env.NODE_ENV;
   const envFile = `.env.${environment}`;
   dotenv.config({ path: envFile });
 
   // Base .env only fills values that remain unset after the environment-specific
   // file, preserving precedence: process.env > .env.{environment} > .env.
   dotenv.config();
+
+  // Runtime mode is an operator opt-in. Files may fill configuration defaults,
+  // but must not turn an unset NODE_ENV into development-tool authorization.
+  if (runtimeEnvironment === undefined) delete process.env.NODE_ENV;
 }
 
 /**
@@ -179,8 +186,8 @@ export function loadConfig(
   forceReload = false,
   skipEnvFiles = false
 ): AppConfig {
-  // Always reload in tests when environment changes
-  if (forceReload || process.env.NODE_ENV !== configInstance?.environment) {
+  const environment = detectEnvironment();
+  if (forceReload || environment !== configInstance?.environment) {
     configInstance = null;
   }
 
@@ -189,9 +196,7 @@ export function loadConfig(
   }
 
   try {
-    // Step 1: Detect environment (before loading files)
-    const environment = detectEnvironment();
-
+    // Runtime mode was validated before consulting the cache or dotenv files.
     // Step 2: Load environment files (environment-specific overrides base)
     loadEnvironmentFile(environment, skipEnvFiles);
 
@@ -240,10 +245,7 @@ export function loadConfig(
  * ```
  */
 export function getConfig(): AppConfig {
-  if (!configInstance) {
-    return loadConfig();
-  }
-  return configInstance;
+  return loadConfig();
 }
 
 /**

@@ -16,6 +16,8 @@ services:
       - uploads_data:/app/uploads
     environment:
       - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
       - LOG_LEVEL=warn
       - HOT_RELOAD=false
       # Use PostgreSQL for production
@@ -44,7 +46,7 @@ services:
           '--no-verbose',
           '--tries=1',
           '--spider',
-          'http://localhost:3000${HEALTH_CHECK_ENDPOINT:-/health}',
+          'http://127.0.0.1:3000${HEALTH_CHECK_ENDPOINT:-/health}',
         ]
       interval: 30s
       timeout: 10s

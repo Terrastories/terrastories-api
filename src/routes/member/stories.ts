@@ -17,7 +17,6 @@ import { StoryRepository } from '../../repositories/story.repository.js';
 import { FileRepository } from '../../repositories/file.repository.js';
 import { UserRepository } from '../../repositories/user.repository.js';
 import { getDb, type Database } from '../../db/index.js';
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import {
   toMemberStory,
   createPaginationMeta,
@@ -50,10 +49,7 @@ export async function memberStoriesRoutes(
   options?: MemberStoriesRoutesOptions
 ) {
   const db = options?.database || (await getDb());
-  // StoryRepository requires BetterSQLite3Database, using type casting
-  const storyRepository = new StoryRepository(
-    db as unknown as BetterSQLite3Database<Record<string, unknown>>
-  );
+  const storyRepository = new StoryRepository(db);
   const fileRepository = new FileRepository(db);
   const userRepository = new UserRepository(db);
   const storyService = new StoryService(

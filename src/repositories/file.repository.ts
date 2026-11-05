@@ -47,6 +47,7 @@ export interface FileListOptions {
     start: Date;
     end: Date;
   };
+  /** @deprecated Ignored compatibility input. Elder-only policy is DROP in SPEC-V2 §11. */
   culturalRestrictions?: {
     elderOnly?: boolean;
     public?: boolean;
@@ -178,7 +179,6 @@ export class FileRepository {
       mimeTypeFilter,
       uploadedBy,
       dateRange,
-      culturalRestrictions,
       orderBy = 'createdAt',
       orderDirection = 'desc',
       includeInactive = false,
@@ -223,19 +223,8 @@ export class FileRepository {
         );
       }
 
-      // Cultural restrictions filter
-      if (culturalRestrictions) {
-        if (culturalRestrictions.elderOnly !== undefined) {
-          // TODO(#135 follow-up): SQLite-only JSON_EXTRACT; PostgreSQL path unported (V1 cultural-restriction filter).
-          const elderOnlyCondition = culturalRestrictions.elderOnly
-            ? sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') = 1`
-            : or(
-                sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') = 0`,
-                sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') IS NULL`
-              )!;
-          conditions.push(elderOnlyCondition);
-        }
-      }
+      // SPEC-V2 §§2/11 drops elder-only list policy. Legacy metadata stays
+      // stored for migration evidence; it does not define a V2 list filter.
 
       // Build ORDER BY clause
       const isTextColumn = orderBy === 'filename' || orderBy === 'originalName';

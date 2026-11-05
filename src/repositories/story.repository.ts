@@ -5,17 +5,21 @@
  * community isolation, search capabilities, and association handling.
  */
 
-import { eq, and, like, desc, or, sql, count, inArray } from 'drizzle-orm';
+import { eq, and, desc, or, sql, count, inArray } from 'drizzle-orm';
 import {
-  storiesSqlite,
+  containsInsensitive,
+  dialectOf,
+  tablesFor,
+  type Dialect,
+  type DialectTables,
+} from '../db/dialect.js';
+import type {
   communitiesSqlite,
   usersSqlite,
   placesSqlite,
   speakersSqlite,
-  storyPlacesSqlite,
-  storySpeakersSqlite,
 } from '../db/schema/index.js';
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import type { Database } from '../db/index.js';
 
 /**
  * Core story data structure
@@ -217,37 +221,51 @@ export interface PaginatedResult<T> {
  * Database-driven Story Repository with proper join table associations
  */
 export class StoryRepository {
-  constructor(
-    private readonly db: BetterSQLite3Database<Record<string, unknown>>
-  ) {}
+  private readonly dialect: Dialect;
+  private readonly tables: DialectTables;
+  private readonly database: Database;
 
-  // Helper method to get the appropriate table based on database type
+  constructor(database: Database) {
+    this.database = database;
+    this.dialect = dialectOf(database);
+    this.tables = tablesFor(database);
+  }
+
+  // Both Drizzle instances expose the same query-builder surface; the union
+  // type is not callable directly, so queries go through a widened handle.
+  private get db() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- cross-dialect Drizzle query interfaces are behaviorally equivalent
+    return this.database as any;
+  }
+
+  // Tables come from the Drizzle instance this repository was given, so the
+  // same code runs against SQLite/D1 and PostgreSQL.
   private getStoriesTable() {
-    return storiesSqlite;
+    return this.tables.stories;
   }
 
   private getCommunitiesTable() {
-    return communitiesSqlite;
+    return this.tables.communities;
   }
 
   private getUsersTable() {
-    return usersSqlite;
+    return this.tables.users;
   }
 
   private getPlacesTable() {
-    return placesSqlite;
+    return this.tables.places;
   }
 
   private getSpeakersTable() {
-    return speakersSqlite;
+    return this.tables.speakers;
   }
 
   private getStoryPlacesTable() {
-    return storyPlacesSqlite;
+    return this.tables.storyPlaces;
   }
 
   private getStorySpeakersTable() {
-    return storySpeakersSqlite;
+    return this.tables.storySpeakers;
   }
 
   /**
@@ -385,18 +403,30 @@ export class StoryRepository {
       .where(eq(storyPlacesTable.storyId, id))
       .orderBy(storyPlacesTable.sortOrder);
 
-    const places = placesWithAssociations.map((p) => ({
-      id: p.id,
-      name: p.name,
-      description: p.description || undefined,
-      latitude: p.latitude,
-      longitude: p.longitude,
-      region: p.region || undefined,
-      culturalSignificance: p.culturalSignificance || undefined,
-      culturalContext: p.culturalContext || undefined,
-      storyRelationship: 'mentioned',
-      sortOrder: p.sortOrder || 0,
-    }));
+    const places = placesWithAssociations.map(
+      (p: {
+        id: number;
+        name: string;
+        description: string | null;
+        latitude: number;
+        longitude: number;
+        region: string | null;
+        culturalSignificance: string | null;
+        culturalContext: string | null;
+        sortOrder: number | null;
+      }) => ({
+        id: p.id,
+        name: p.name,
+        description: p.description || undefined,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        region: p.region || undefined,
+        culturalSignificance: p.culturalSignificance || undefined,
+        culturalContext: p.culturalContext || undefined,
+        storyRelationship: 'mentioned',
+        sortOrder: p.sortOrder || 0,
+      })
+    );
 
     // Get speakers through proper database joins
     const storySpeakersTable = this.getStorySpeakersTable();
@@ -421,17 +451,29 @@ export class StoryRepository {
       .where(eq(storySpeakersTable.storyId, id))
       .orderBy(storySpeakersTable.sortOrder);
 
-    const speakers = speakersWithAssociations.map((s) => ({
-      id: s.id,
-      name: s.name,
-      bio: s.bio || undefined,
-      photoUrl: s.photoUrl || undefined,
-      birthYear: s.birthYear || undefined,
-      elderStatus: s.elderStatus,
-      culturalRole: s.storyRole || s.culturalRole || undefined,
-      storyRole: s.storyRole || 'narrator',
-      sortOrder: s.sortOrder || 0,
-    }));
+    const speakers = speakersWithAssociations.map(
+      (s: {
+        id: number;
+        name: string;
+        bio: string | null;
+        photoUrl: string | null;
+        birthYear: number | null;
+        elderStatus: boolean;
+        culturalRole: string | null;
+        storyRole: string | null;
+        sortOrder: number | null;
+      }) => ({
+        id: s.id,
+        name: s.name,
+        bio: s.bio || undefined,
+        photoUrl: s.photoUrl || undefined,
+        birthYear: s.birthYear || undefined,
+        elderStatus: s.elderStatus,
+        culturalRole: s.storyRole || s.culturalRole || undefined,
+        storyRole: s.storyRole || 'narrator',
+        sortOrder: s.sortOrder || 0,
+      })
+    );
 
     // Get interview location if specified
     let interviewLocation = null;
@@ -523,7 +565,7 @@ export class StoryRepository {
     try {
       // Bulk load stories using proper Drizzle IN clause
       const storiesTable = this.getStoriesTable();
-      const stories = await this.db
+      const stories: Story[] = await this.db
         .select()
         .from(storiesTable)
         .where(inArray(storiesTable.id, storyIds))
@@ -532,16 +574,17 @@ export class StoryRepository {
       // Bulk load communities for all stories
       const communityIds = [...new Set(stories.map((s) => s.communityId))];
       const communitiesTable = this.getCommunitiesTable();
-      const communities = await this.db
-        .select()
-        .from(communitiesTable)
-        .where(inArray(communitiesTable.id, communityIds))
-        .execute();
+      const communities: (typeof communitiesSqlite.$inferSelect)[] =
+        await this.db
+          .select()
+          .from(communitiesTable)
+          .where(inArray(communitiesTable.id, communityIds))
+          .execute();
 
       // Bulk load authors for all stories
       const authorIds = [...new Set(stories.map((s) => s.createdBy))];
       const usersTable = this.getUsersTable();
-      const authors = await this.db
+      const authors: (typeof usersSqlite.$inferSelect)[] = await this.db
         .select()
         .from(usersTable)
         .where(inArray(usersTable.id, authorIds))
@@ -725,63 +768,129 @@ export class StoryRepository {
         speakersByStory.get(speaker.storyId)!.push(speaker);
       });
 
-      // Build stories with relations
-      return stories.map((story) => {
-        const community = communityMap.get(story.communityId);
-        const author = authorMap.get(story.createdBy);
+      // Interview references are independent of story-place/speaker joins.
+      const locationIds = stories.flatMap((story) =>
+        story.interviewLocationId == null ? [] : [story.interviewLocationId]
+      );
+      const interviewerIds = stories.flatMap((story) =>
+        story.interviewerId == null ? [] : [story.interviewerId]
+      );
+      const locations: (typeof placesSqlite.$inferSelect)[] = locationIds.length
+        ? await this.db
+            .select()
+            .from(placesTable)
+            .where(inArray(placesTable.id, locationIds))
+        : [];
+      const interviewers: (typeof speakersSqlite.$inferSelect)[] =
+        interviewerIds.length
+          ? await this.db
+              .select()
+              .from(speakersTable)
+              .where(inArray(speakersTable.id, interviewerIds))
+          : [];
+      const locationsById = new Map(
+        locations.map((location) => [location.id, location])
+      );
+      const interviewersById = new Map(
+        interviewers.map((speaker) => [speaker.id, speaker])
+      );
 
-        // Get places for this story
-        const storyPlaces = placesByStory.get(story.id) || [];
-        const places = storyPlaces.map((p) => ({
-          id: p.placeId,
-          name: p.name,
-          description: p.description || undefined,
-          latitude: p.latitude,
-          longitude: p.longitude,
-          region: p.region || undefined,
-          culturalSignificance: p.culturalSignificance || undefined,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          culturalContext: (p as any).culturalContext || undefined,
-          storyRelationship: 'mentioned',
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          sortOrder: (p as any).sortOrder || 0,
-        }));
+      // IN queries do not preserve the caller's paginated order.
+      const storiesById = new Map(stories.map((story) => [story.id, story]));
+      return storyIds
+        .map((id) => storiesById.get(id))
+        .filter((story): story is Story => story !== undefined)
+        .map((story) => {
+          const community = communityMap.get(story.communityId);
+          const author = authorMap.get(story.createdBy);
 
-        // Get speakers for this story
-        const storySpeakers = speakersByStory.get(story.id) || [];
-        const speakers = storySpeakers.map((s) => ({
-          id: s.speakerId,
-          name: s.name,
-          bio: s.bio || undefined,
-          photoUrl: s.photoUrl || undefined,
-          birthYear: s.birthYear || undefined,
-          elderStatus: s.elderStatus,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          culturalRole: (s as any).storyRole || s.culturalRole || undefined,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          storyRole: (s as any).storyRole || 'narrator',
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          sortOrder: (s as any).sortOrder || 0,
-        }));
+          // Get places for this story
+          const storyPlaces = placesByStory.get(story.id) || [];
+          const places = storyPlaces.map((p) => ({
+            id: p.placeId,
+            name: p.name,
+            description: p.description || undefined,
+            latitude: p.latitude,
+            longitude: p.longitude,
+            region: p.region || undefined,
+            culturalSignificance: p.culturalSignificance || undefined,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            culturalContext: (p as any).culturalContext || undefined,
+            storyRelationship: 'mentioned',
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            sortOrder: (p as any).sortOrder || 0,
+          }));
 
-        return {
-          ...story,
-          community: community || null,
-          author: author || null,
-          places,
-          speakers,
-          culturalProtocols: {
-            permissionLevel: story.isRestricted ? 'restricted' : 'public',
-            culturalSignificance: 'Standard story',
-            restrictions: story.isRestricted ? ['Community members only'] : [],
-            ceremonialContent: false,
-            elderApprovalRequired: false,
-            accessNotes: story.isRestricted
-              ? 'Restricted access'
-              : 'Public access',
-          },
-        };
-      }) as StoryWithRelations[];
+          // Get speakers for this story
+          const storySpeakers = speakersByStory.get(story.id) || [];
+          const speakers = storySpeakers.map((s) => ({
+            id: s.speakerId,
+            name: s.name,
+            bio: s.bio || undefined,
+            photoUrl: s.photoUrl || undefined,
+            birthYear: s.birthYear || undefined,
+            elderStatus: s.elderStatus,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            culturalRole: (s as any).storyRole || s.culturalRole || undefined,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            storyRole: (s as any).storyRole || 'narrator',
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            sortOrder: (s as any).sortOrder || 0,
+          }));
+
+          const location =
+            story.interviewLocationId == null
+              ? undefined
+              : locationsById.get(story.interviewLocationId);
+          const interviewer =
+            story.interviewerId == null
+              ? undefined
+              : interviewersById.get(story.interviewerId);
+          return {
+            ...story,
+            interviewLocation:
+              location?.communityId === story.communityId
+                ? {
+                    id: location.id,
+                    name: location.name,
+                    description: location.description || undefined,
+                    latitude: location.latitude,
+                    longitude: location.longitude,
+                    region: location.region || undefined,
+                    culturalSignificance:
+                      location.culturalSignificance || undefined,
+                  }
+                : null,
+            interviewer:
+              interviewer?.communityId === story.communityId
+                ? {
+                    id: interviewer.id,
+                    name: interviewer.name,
+                    bio: interviewer.bio || undefined,
+                    photoUrl: interviewer.photoUrl || undefined,
+                    birthYear: interviewer.birthYear || undefined,
+                    elderStatus: interviewer.elderStatus,
+                    culturalRole: interviewer.culturalRole || undefined,
+                  }
+                : null,
+            community: community || null,
+            author: author || null,
+            places,
+            speakers,
+            culturalProtocols: {
+              permissionLevel: story.isRestricted ? 'restricted' : 'public',
+              culturalSignificance: 'Standard story',
+              restrictions: story.isRestricted
+                ? ['Community members only']
+                : [],
+              ceremonialContent: false,
+              elderApprovalRequired: false,
+              accessNotes: story.isRestricted
+                ? 'Restricted access'
+                : 'Public access',
+            },
+          };
+        }) as StoryWithRelations[];
     } catch (error) {
       throw error;
     }
@@ -953,8 +1062,12 @@ export class StoryRepository {
     if (filters.search) {
       conditions.push(
         or(
-          like(storiesTable.title, `%${filters.search}%`),
-          like(storiesTable.description, `%${filters.search}%`)
+          containsInsensitive(this.dialect, storiesTable.title, filters.search),
+          containsInsensitive(
+            this.dialect,
+            storiesTable.description,
+            filters.search
+          )
         )
       );
     }
@@ -976,12 +1089,31 @@ export class StoryRepository {
     }
 
     if (filters.tags?.length) {
-      // For SQLite JSON arrays, check if any of the filter tags exist in the story tags
-      const tagConditions = filters.tags.map(
-        (tag) =>
-          sql`EXISTS (SELECT 1 FROM json_each(${storiesTable.tags}) WHERE value = ${tag})`
+      // JSON is a storage container only (SPEC-V2 Sections 6.3 and 8).
+      // Apply the same Unicode normalization/case comparison in JavaScript on
+      // both backends, before counting or slicing the matching page.
+      const normalizeTag = (tag: string) => tag.normalize('NFC').toLowerCase();
+      const requested = new Set(filters.tags.map(normalizeTag));
+      const candidates: Story[] = await baseQuery
+        .where(and(...conditions))
+        .orderBy(desc(storiesTable.createdAt), desc(storiesTable.id))
+        .execute();
+      const matches = candidates.filter((story) =>
+        story.tags?.some((tag) => requested.has(normalizeTag(tag)))
       );
-      conditions.push(or(...tagConditions));
+      const offset = (pagination.page - 1) * pagination.limit;
+      const data = await this.loadStoriesWithRelationsBulk(
+        matches
+          .slice(offset, offset + pagination.limit)
+          .map((story) => story.id)
+      );
+      return {
+        data,
+        total: matches.length,
+        page: pagination.page,
+        limit: pagination.limit,
+        totalPages: Math.ceil(matches.length / pagination.limit),
+      };
     }
 
     // Build final queries with proper typing
@@ -992,9 +1124,9 @@ export class StoryRepository {
 
       // Apply pagination and sorting to filtered results
       const offset = (pagination.page - 1) * pagination.limit;
-      const paginatedStories = await baseQuery
+      const paginatedStories: Story[] = await baseQuery
         .where(whereClause)
-        .orderBy(desc(storiesTable.createdAt))
+        .orderBy(desc(storiesTable.createdAt), desc(storiesTable.id))
         .limit(pagination.limit)
         .offset(offset)
         .execute();
@@ -1017,8 +1149,8 @@ export class StoryRepository {
     } else {
       // No filters - handle separately
       const offset = (pagination.page - 1) * pagination.limit;
-      const paginatedStories = await baseQuery
-        .orderBy(desc(storiesTable.createdAt))
+      const paginatedStories: Story[] = await baseQuery
+        .orderBy(desc(storiesTable.createdAt), desc(storiesTable.id))
         .limit(pagination.limit)
         .offset(offset)
         .execute();
@@ -1098,14 +1230,24 @@ export class StoryRepository {
    */
   async validateSpeakersInCommunity(
     speakerIds: number[],
-    _communityId: number
+    communityId: number
   ): Promise<boolean> {
     if (!speakerIds.length) return true;
-
-    // For now, since speakers table may not exist yet, use mock logic
-    // For test failure scenario, return false if speakerIds includes 999 (non-existent speaker)
-    // For successful cases, return true for valid speaker IDs (1, 2, etc.)
-    return !speakerIds.includes(999);
+    try {
+      const speakersTable = this.getSpeakersTable();
+      const speakers = await this.db
+        .select({ id: speakersTable.id })
+        .from(speakersTable)
+        .where(
+          and(
+            inArray(speakersTable.id, speakerIds),
+            eq(speakersTable.communityId, communityId)
+          )
+        );
+      return speakers.length === new Set(speakerIds).size;
+    } catch {
+      return false;
+    }
   }
 
   /**

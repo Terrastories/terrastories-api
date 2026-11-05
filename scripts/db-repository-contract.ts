@@ -35,12 +35,20 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   const { FileRepository } = await import(
     '../src/repositories/file.repository.js'
   );
+  const { StoryRepository } = await import(
+    '../src/repositories/story.repository.js'
+  );
+  const { ThemesRepository } = await import(
+    '../src/repositories/themes.repository.js'
+  );
 
   const communities = new CommunityRepository(database as any);
   const places = new PlaceRepository(database as any);
   const users = new UserRepository(database as any);
   const speakers = new SpeakerRepository(database as any);
   const files = new FileRepository(database as any);
+  const stories = new StoryRepository(database as any);
+  const themes = new ThemesRepository(database as any);
 
   const community = await communities.create({
     name: 'Repository Contract Community',
@@ -400,4 +408,300 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   }
   assert.equal(precisionById.latitude, 45.123456);
   assert.equal(precisionById.longitude, -123.456789);
+
+  // --- StoryRepository -------------------------------------------------
+
+  const storyCommunity = await communities.create({
+    name: 'Story Contract Community',
+  });
+  const storyAuthor = await users.create({
+    email: 'story.contract@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Story',
+    lastName: 'Author',
+    communityId: storyCommunity.id,
+  });
+  const storyPlaceAlpha = await places.create({
+    name: 'Story Place Alpha',
+    communityId: storyCommunity.id,
+    latitude: -1.4,
+    longitude: -48.4,
+  });
+  const storyPlaceBeta = await places.create({
+    name: 'Story Place Beta',
+    communityId: storyCommunity.id,
+    latitude: -1.5,
+    longitude: -48.5,
+  });
+  const storySpeaker = await speakers.create({
+    name: 'Story Speaker Mana',
+    communityId: storyCommunity.id,
+  });
+
+  // placeIds deliberately reverse the creation order so the read-back proves
+  // associations follow the given array order (sortOrder), not place id order.
+  const riverStory = await stories.create({
+    title: 'River Song Story',
+    description: 'A story about the great river',
+    slug: 'river-song-story',
+    communityId: storyCommunity.id,
+    createdBy: storyAuthor.id,
+    mediaUrls: [
+      'https://example.test/river-song.mp3',
+      'https://example.test/river-song.jpg',
+    ],
+    language: 'pt',
+    tags: ['Water'],
+    placeIds: [storyPlaceBeta.id, storyPlaceAlpha.id],
+    speakerIds: [storySpeaker.id],
+  });
+  const mountainStory = await stories.create({
+    title: 'Mountain Tale',
+    description: 'A tale of high peaks',
+    slug: 'mountain-tale',
+    communityId: storyCommunity.id,
+    createdBy: storyAuthor.id,
+    tags: ['Land'],
+  });
+  const forestStory = await stories.create({
+    title: 'Forest Chant',
+    description: 'A chant under the trees',
+    slug: 'forest-chant',
+    communityId: storyCommunity.id,
+    createdBy: storyAuthor.id,
+    tags: ['Water', 'Sacred'],
+  });
+
+  const readStory = await stories.findByIdWithRelations(riverStory.id);
+  if (!readStory) {
+    throw new Error(
+      'stories.findByIdWithRelations must return the river story'
+    );
+  }
+  assert.equal(readStory.title, 'River Song Story');
+  assert.equal(readStory.description, 'A story about the great river');
+  assert.equal(readStory.slug, 'river-song-story');
+  assert.equal(readStory.communityId, storyCommunity.id);
+  assert.equal(readStory.createdBy, storyAuthor.id);
+  assert.deepEqual(readStory.mediaUrls, [
+    'https://example.test/river-song.mp3',
+    'https://example.test/river-song.jpg',
+  ]);
+  assert.equal(readStory.language, 'pt');
+  assert.deepEqual(readStory.tags, ['Water']);
+  assert.deepEqual(
+    readStory.places.map((place) => place.id),
+    [storyPlaceBeta.id, storyPlaceAlpha.id]
+  );
+  assert.deepEqual(
+    readStory.speakers.map((speaker) => speaker.id),
+    [storySpeaker.id]
+  );
+  assertValidDate(readStory.createdAt, 'stories.create createdAt');
+
+  // Case-insensitive title search must behave identically on both backends.
+  for (const search of ['river', 'RIVER']) {
+    const found = await stories.findMany(
+      { communityId: storyCommunity.id, search },
+      { page: 1, limit: 10 }
+    );
+    assert.equal(found.total, 1);
+    assert.deepEqual(
+      found.data.map((story) => story.id),
+      [riverStory.id],
+      `stories.findMany({ search: '${search}' }) must find only the river story`
+    );
+  }
+
+  // Tag filter matches stories whose tags array contains the exact element.
+  const waterTagged = await stories.findMany(
+    { communityId: storyCommunity.id, tags: ['Water'] },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(waterTagged.total, 2);
+  assert.deepEqual(
+    new Set(waterTagged.data.map((story) => story.id)),
+    new Set([riverStory.id, forestStory.id])
+  );
+
+  // The create API does not accept timestamps, but ordering is still
+  // deterministic: createdAt never decreases across the three inserts and
+  // findMany sorts by createdAt desc with an id-desc tiebreak, so the pages
+  // are exactly newest-first no matter whether timestamps collide.
+  const storyPageOne = await stories.findMany(
+    { communityId: storyCommunity.id },
+    { page: 1, limit: 2 }
+  );
+  const storyPageTwo = await stories.findMany(
+    { communityId: storyCommunity.id },
+    { page: 2, limit: 2 }
+  );
+  assert.equal(storyPageOne.total, 3);
+  assert.equal(storyPageOne.totalPages, 2);
+  assert.deepEqual(
+    storyPageOne.data.map((story) => story.id),
+    [forestStory.id, mountainStory.id]
+  );
+  assert.deepEqual(
+    storyPageTwo.data.map((story) => story.id),
+    [riverStory.id]
+  );
+
+  const updatedStory = await stories.update(riverStory.id, {
+    title: 'River Song Story Amended',
+    tags: ['Water', 'Flood'],
+  });
+  if (!updatedStory) {
+    throw new Error('stories.update must return the amended story');
+  }
+  assert.equal(updatedStory.title, 'River Song Story Amended');
+  assert.deepEqual(updatedStory.tags, ['Water', 'Flood']);
+  assertValidDate(updatedStory.updatedAt, 'stories.update updatedAt');
+  assert.ok(
+    updatedStory.updatedAt.getTime() >= updatedStory.createdAt.getTime(),
+    'stories.update updatedAt must not be older than createdAt'
+  );
+  const rereadStory = await stories.findById(riverStory.id);
+  if (!rereadStory) {
+    throw new Error('stories.findById must return the amended story');
+  }
+  assert.equal(rereadStory.title, 'River Song Story Amended');
+  assert.deepEqual(rereadStory.tags, ['Water', 'Flood']);
+
+  assert.equal(await stories.delete(mountainStory.id), true);
+  assert.equal(await stories.findById(mountainStory.id), null);
+
+  // --- ThemesRepository ------------------------------------------------
+
+  const themeCommunity = await communities.create({
+    name: 'Theme Contract Community',
+  });
+  const riverTheme = await themes.create({
+    name: 'River Theme',
+    description: 'Map theme for the river basin',
+    active: true,
+    centerLat: 45.123456,
+    centerLong: -123.456789,
+    swBoundaryLat: 44.111111,
+    swBoundaryLong: -124.222222,
+    neBoundaryLat: 46.333333,
+    neBoundaryLong: -122.444444,
+    communityId: themeCommunity.id,
+  });
+  const sleepyRiverTheme = await themes.create({
+    name: 'Sleepy River Theme',
+    active: false,
+    communityId: themeCommunity.id,
+  });
+  const mountainTheme = await themes.create({
+    name: 'Mountain Theme',
+    description: 'High peaks basemap',
+    active: true,
+    communityId: themeCommunity.id,
+  });
+
+  const readTheme = await themes.findById(riverTheme.id);
+  if (!readTheme) {
+    throw new Error('themes.findById must return the river theme');
+  }
+  assert.equal(readTheme.name, 'River Theme');
+  assert.equal(readTheme.description, 'Map theme for the river basin');
+  assert.equal(readTheme.active, true);
+  const expectedCoordinates: Array<[string, number]> = [
+    ['centerLat', 45.123456],
+    ['centerLong', -123.456789],
+    ['swBoundaryLat', 44.111111],
+    ['swBoundaryLong', -124.222222],
+    ['neBoundaryLat', 46.333333],
+    ['neBoundaryLong', -122.444444],
+  ];
+  for (const [field, written] of expectedCoordinates) {
+    const coordinate = (readTheme as any)[field];
+    assert.equal(
+      typeof coordinate,
+      'number',
+      `themes.create ${field} must read back as a number, got ${typeof coordinate}`
+    );
+    assert.equal(
+      coordinate,
+      written,
+      `themes.create ${field} must round-trip exactly`
+    );
+  }
+
+  // Case-insensitive search must behave identically on both backends. The
+  // community also holds the inactive 'Sleepy River Theme' used by the count
+  // case below, so 'river' correctly matches two names; both spellings must
+  // at least find the active 'River Theme'.
+  for (const query of ['river', 'RIVER']) {
+    const byName = await themes.searchByName(themeCommunity.id, query);
+    assert.deepEqual(
+      new Set(byName.map((theme) => theme.id)),
+      new Set([riverTheme.id, sleepyRiverTheme.id]),
+      `themes.searchByName('${query}') must find both river-named themes`
+    );
+    const paged = await themes.searchThemes(themeCommunity.id, {
+      query,
+      page: 1,
+      limit: 10,
+    });
+    assert.equal(paged.total, 2);
+    assert.deepEqual(
+      new Set(paged.data.map((theme) => theme.id)),
+      new Set([riverTheme.id, sleepyRiverTheme.id]),
+      `themes.searchThemes('${query}') must find both river-named themes`
+    );
+  }
+
+  assert.equal(await themes.countByCommunityId(themeCommunity.id), 3);
+  assert.equal(
+    await themes.countByCommunityId(themeCommunity.id, {
+      activeOnly: true,
+      searchTerm: 'river',
+    }),
+    1
+  );
+
+  const renamedTheme = await themes.update(riverTheme.id, {
+    name: 'River Theme Renamed',
+  });
+  if (!renamedTheme) {
+    throw new Error('themes.update must return the renamed theme');
+  }
+  assert.equal(renamedTheme.name, 'River Theme Renamed');
+  const rereadTheme = await themes.findById(riverTheme.id);
+  assert.equal(rereadTheme?.name, 'River Theme Renamed');
+  assertValidDate(renamedTheme.updatedAt, 'themes.update updatedAt');
+
+  // Name ordering must be collation-independent byte order on both backends.
+  const themeOrderCommunity = await communities.create({
+    name: 'Theme Byte Order Community',
+  });
+  for (const name of ['Banana', 'Zebra', 'apple']) {
+    await themes.create({ name, communityId: themeOrderCommunity.id });
+  }
+  const themesAsc = await themes.findByCommunityId(themeOrderCommunity.id, {
+    page: 1,
+    limit: 10,
+    sortBy: 'name',
+    sortOrder: 'asc',
+  });
+  assert.equal(themesAsc.total, 3);
+  assert.deepEqual(
+    themesAsc.data.map((theme) => theme.name),
+    ['Banana', 'Zebra', 'apple']
+  );
+  const themesDesc = await themes.findByCommunityId(themeOrderCommunity.id, {
+    page: 1,
+    limit: 10,
+    sortBy: 'name',
+    sortOrder: 'desc',
+  });
+  assert.deepEqual(
+    themesDesc.data.map((theme) => theme.name),
+    ['apple', 'Zebra', 'Banana']
+  );
+
+  assert.equal(await themes.delete(mountainTheme.id), true);
+  assert.equal(await themes.findById(mountainTheme.id), null);
 }

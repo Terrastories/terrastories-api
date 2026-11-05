@@ -23,11 +23,15 @@ describe('field-kit file sovereignty', () => {
   let originalNodeEnv: string | undefined;
   let originalUploadDir: string | undefined;
   let originalDatabaseUrl: string | undefined;
+  let originalJwtSecret: string | undefined;
+  let originalSessionSecret: string | undefined;
 
   beforeAll(async () => {
     originalNodeEnv = process.env.NODE_ENV;
     originalUploadDir = process.env.UPLOAD_DIR;
     originalDatabaseUrl = process.env.DATABASE_URL;
+    originalJwtSecret = process.env.JWT_SECRET;
+    originalSessionSecret = process.env.SESSION_SECRET;
 
     uploadDir = join(process.cwd(), 'test-uploads-field-kit-sovereignty');
     await mkdir(uploadDir, { recursive: true });
@@ -35,6 +39,12 @@ describe('field-kit file sovereignty', () => {
     process.env.NODE_ENV = 'field-kit';
     process.env.UPLOAD_DIR = uploadDir;
     process.env.DATABASE_URL = './field-kit-sovereignty-test.db';
+    // Non-development profiles require explicit secrets (#175); fixed
+    // test-only values, restored after the suite.
+    process.env.JWT_SECRET =
+      'fixture-field-kit-jwt-secret-at-least-32-characters';
+    process.env.SESSION_SECRET =
+      'fixture-field-kit-session-at-least-32-characters';
     const fieldKitConfig = loadConfig(true, true);
     expect(fieldKitConfig.environment).toBe('field-kit');
     expect(fieldKitConfig.fileUpload.uploadDir).toBe(uploadDir);
@@ -55,6 +65,10 @@ describe('field-kit file sovereignty', () => {
     else process.env.UPLOAD_DIR = originalUploadDir;
     if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = originalDatabaseUrl;
+    if (originalJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalJwtSecret;
+    if (originalSessionSecret === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = originalSessionSecret;
     loadConfig(true, true);
   });
 

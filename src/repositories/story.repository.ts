@@ -5,17 +5,15 @@
  * community isolation, search capabilities, and association handling.
  */
 
-import { eq, and, like, desc, or, sql, count, inArray } from 'drizzle-orm';
+import { eq, and, desc, or, sql, count, inArray } from 'drizzle-orm';
 import {
-  storiesSqlite,
-  communitiesSqlite,
-  usersSqlite,
-  placesSqlite,
-  speakersSqlite,
-  storyPlacesSqlite,
-  storySpeakersSqlite,
-} from '../db/schema/index.js';
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+  containsInsensitive,
+  dialectOf,
+  tablesFor,
+  type Dialect,
+  type DialectTables,
+} from '../db/dialect.js';
+import type { Database } from '../db/index.js';
 
 /**
  * Core story data structure
@@ -217,37 +215,51 @@ export interface PaginatedResult<T> {
  * Database-driven Story Repository with proper join table associations
  */
 export class StoryRepository {
-  constructor(
-    private readonly db: BetterSQLite3Database<Record<string, unknown>>
-  ) {}
+  private readonly dialect: Dialect;
+  private readonly tables: DialectTables;
+  private readonly database: Database;
 
-  // Helper method to get the appropriate table based on database type
+  constructor(database: Database) {
+    this.database = database;
+    this.dialect = dialectOf(database);
+    this.tables = tablesFor(database);
+  }
+
+  // Both Drizzle instances expose the same query-builder surface; the union
+  // type is not callable directly, so queries go through a widened handle.
+  private get db() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- cross-dialect Drizzle query interfaces are behaviorally equivalent
+    return this.database as any;
+  }
+
+  // Tables come from the Drizzle instance this repository was given, so the
+  // same code runs against SQLite/D1 and PostgreSQL.
   private getStoriesTable() {
-    return storiesSqlite;
+    return this.tables.stories;
   }
 
   private getCommunitiesTable() {
-    return communitiesSqlite;
+    return this.tables.communities;
   }
 
   private getUsersTable() {
-    return usersSqlite;
+    return this.tables.users;
   }
 
   private getPlacesTable() {
-    return placesSqlite;
+    return this.tables.places;
   }
 
   private getSpeakersTable() {
-    return speakersSqlite;
+    return this.tables.speakers;
   }
 
   private getStoryPlacesTable() {
-    return storyPlacesSqlite;
+    return this.tables.storyPlaces;
   }
 
   private getStorySpeakersTable() {
-    return storySpeakersSqlite;
+    return this.tables.storySpeakers;
   }
 
   /**
@@ -385,18 +397,30 @@ export class StoryRepository {
       .where(eq(storyPlacesTable.storyId, id))
       .orderBy(storyPlacesTable.sortOrder);
 
-    const places = placesWithAssociations.map((p) => ({
-      id: p.id,
-      name: p.name,
-      description: p.description || undefined,
-      latitude: p.latitude,
-      longitude: p.longitude,
-      region: p.region || undefined,
-      culturalSignificance: p.culturalSignificance || undefined,
-      culturalContext: p.culturalContext || undefined,
-      storyRelationship: 'mentioned',
-      sortOrder: p.sortOrder || 0,
-    }));
+    const places = placesWithAssociations.map(
+      (p: {
+        id: number;
+        name: string;
+        description: string | null;
+        latitude: number;
+        longitude: number;
+        region: string | null;
+        culturalSignificance: string | null;
+        culturalContext: string | null;
+        sortOrder: number | null;
+      }) => ({
+        id: p.id,
+        name: p.name,
+        description: p.description || undefined,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        region: p.region || undefined,
+        culturalSignificance: p.culturalSignificance || undefined,
+        culturalContext: p.culturalContext || undefined,
+        storyRelationship: 'mentioned',
+        sortOrder: p.sortOrder || 0,
+      })
+    );
 
     // Get speakers through proper database joins
     const storySpeakersTable = this.getStorySpeakersTable();
@@ -421,17 +445,29 @@ export class StoryRepository {
       .where(eq(storySpeakersTable.storyId, id))
       .orderBy(storySpeakersTable.sortOrder);
 
-    const speakers = speakersWithAssociations.map((s) => ({
-      id: s.id,
-      name: s.name,
-      bio: s.bio || undefined,
-      photoUrl: s.photoUrl || undefined,
-      birthYear: s.birthYear || undefined,
-      elderStatus: s.elderStatus,
-      culturalRole: s.storyRole || s.culturalRole || undefined,
-      storyRole: s.storyRole || 'narrator',
-      sortOrder: s.sortOrder || 0,
-    }));
+    const speakers = speakersWithAssociations.map(
+      (s: {
+        id: number;
+        name: string;
+        bio: string | null;
+        photoUrl: string | null;
+        birthYear: number | null;
+        elderStatus: boolean;
+        culturalRole: string | null;
+        storyRole: string | null;
+        sortOrder: number | null;
+      }) => ({
+        id: s.id,
+        name: s.name,
+        bio: s.bio || undefined,
+        photoUrl: s.photoUrl || undefined,
+        birthYear: s.birthYear || undefined,
+        elderStatus: s.elderStatus,
+        culturalRole: s.storyRole || s.culturalRole || undefined,
+        storyRole: s.storyRole || 'narrator',
+        sortOrder: s.sortOrder || 0,
+      })
+    );
 
     // Get interview location if specified
     let interviewLocation = null;
@@ -529,8 +565,18 @@ export class StoryRepository {
         .where(inArray(storiesTable.id, storyIds))
         .execute();
 
+      // IN (...) returns rows in no defined order. Callers pass ids already
+      // sorted and paginated, so keep their order (was lost on both backends).
+      const position = new Map(storyIds.map((id, index) => [id, index]));
+      stories.sort(
+        (a: Story, b: Story) =>
+          (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0)
+      );
+
       // Bulk load communities for all stories
-      const communityIds = [...new Set(stories.map((s) => s.communityId))];
+      const communityIds = [
+        ...new Set<number>(stories.map((s: Story) => s.communityId)),
+      ];
       const communitiesTable = this.getCommunitiesTable();
       const communities = await this.db
         .select()
@@ -539,7 +585,9 @@ export class StoryRepository {
         .execute();
 
       // Bulk load authors for all stories
-      const authorIds = [...new Set(stories.map((s) => s.createdBy))];
+      const authorIds = [
+        ...new Set<number>(stories.map((s: Story) => s.createdBy)),
+      ];
       const usersTable = this.getUsersTable();
       const authors = await this.db
         .select()
@@ -548,8 +596,10 @@ export class StoryRepository {
         .execute();
 
       // Create lookup maps for efficient joins
-      const communityMap = new Map(communities.map((c) => [c.id, c]));
-      const authorMap = new Map(authors.map((a) => [a.id, a]));
+      const communityMap = new Map(
+        communities.map((c: { id: number }) => [c.id, c])
+      );
+      const authorMap = new Map(authors.map((a: { id: number }) => [a.id, a]));
 
       // Bulk load story associations through proper database joins
       const storyPlacesTable = this.getStoryPlacesTable();
@@ -726,7 +776,7 @@ export class StoryRepository {
       });
 
       // Build stories with relations
-      return stories.map((story) => {
+      return stories.map((story: Story) => {
         const community = communityMap.get(story.communityId);
         const author = authorMap.get(story.createdBy);
 
@@ -953,8 +1003,12 @@ export class StoryRepository {
     if (filters.search) {
       conditions.push(
         or(
-          like(storiesTable.title, `%${filters.search}%`),
-          like(storiesTable.description, `%${filters.search}%`)
+          containsInsensitive(this.dialect, storiesTable.title, filters.search),
+          containsInsensitive(
+            this.dialect,
+            storiesTable.description,
+            filters.search
+          )
         )
       );
     }
@@ -976,10 +1030,14 @@ export class StoryRepository {
     }
 
     if (filters.tags?.length) {
-      // For SQLite JSON arrays, check if any of the filter tags exist in the story tags
-      const tagConditions = filters.tags.map(
-        (tag) =>
-          sql`EXISTS (SELECT 1 FROM json_each(${storiesTable.tags}) WHERE value = ${tag})`
+      // V1 coexistence: tags are a JSON array on both backends. Match any
+      // requested tag by exact element value with each backend's array
+      // iterator (same semantics, no containment operator). V2 replaces this
+      // with the portable StoryTag relation (SPEC-V2 Section 6.3).
+      const tagConditions = filters.tags.map((tag) =>
+        this.dialect === 'postgresql'
+          ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${storiesTable.tags}) AS tag(value) WHERE tag.value = ${tag})`
+          : sql`EXISTS (SELECT 1 FROM json_each(${storiesTable.tags}) WHERE value = ${tag})`
       );
       conditions.push(or(...tagConditions));
     }
@@ -994,7 +1052,7 @@ export class StoryRepository {
       const offset = (pagination.page - 1) * pagination.limit;
       const paginatedStories = await baseQuery
         .where(whereClause)
-        .orderBy(desc(storiesTable.createdAt))
+        .orderBy(desc(storiesTable.createdAt), desc(storiesTable.id))
         .limit(pagination.limit)
         .offset(offset)
         .execute();
@@ -1004,7 +1062,7 @@ export class StoryRepository {
 
       // Convert to StoryWithRelations using bulk loading (fixes N+1 queries)
       const storiesWithRelations = await this.loadStoriesWithRelationsBulk(
-        paginatedStories.map((story) => story.id)
+        paginatedStories.map((story: Story) => story.id)
       );
 
       return {
@@ -1018,7 +1076,7 @@ export class StoryRepository {
       // No filters - handle separately
       const offset = (pagination.page - 1) * pagination.limit;
       const paginatedStories = await baseQuery
-        .orderBy(desc(storiesTable.createdAt))
+        .orderBy(desc(storiesTable.createdAt), desc(storiesTable.id))
         .limit(pagination.limit)
         .offset(offset)
         .execute();
@@ -1029,7 +1087,7 @@ export class StoryRepository {
 
       // Convert to StoryWithRelations using bulk loading (fixes N+1 queries)
       const storiesWithRelations = await this.loadStoriesWithRelationsBulk(
-        paginatedStories.map((story) => story.id)
+        paginatedStories.map((story: Story) => story.id)
       );
 
       return {

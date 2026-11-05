@@ -74,12 +74,39 @@ export const themesPg = pgTable(
     description: pgText('description'),
     mapboxStyleUrl: pgText('mapbox_style_url'),
     mapboxAccessToken: pgText('mapbox_access_token'),
-    centerLat: decimal('center_lat', { precision: 10, scale: 6 }),
-    centerLong: decimal('center_long', { precision: 10, scale: 6 }),
-    swBoundaryLat: decimal('sw_boundary_lat', { precision: 10, scale: 6 }),
-    swBoundaryLong: decimal('sw_boundary_long', { precision: 10, scale: 6 }),
-    neBoundaryLat: decimal('ne_boundary_lat', { precision: 10, scale: 6 }),
-    neBoundaryLong: decimal('ne_boundary_long', { precision: 10, scale: 6 }),
+    // mode 'number': postgres.js returns numeric as strings; decode to numbers
+    // so themes read the same as the SQLite real columns (issue #135).
+    // numeric(10,6) keeps 6 decimal places.
+    centerLat: decimal('center_lat', {
+      precision: 10,
+      scale: 6,
+      mode: 'number',
+    }),
+    centerLong: decimal('center_long', {
+      precision: 10,
+      scale: 6,
+      mode: 'number',
+    }),
+    swBoundaryLat: decimal('sw_boundary_lat', {
+      precision: 10,
+      scale: 6,
+      mode: 'number',
+    }),
+    swBoundaryLong: decimal('sw_boundary_long', {
+      precision: 10,
+      scale: 6,
+      mode: 'number',
+    }),
+    neBoundaryLat: decimal('ne_boundary_lat', {
+      precision: 10,
+      scale: 6,
+      mode: 'number',
+    }),
+    neBoundaryLong: decimal('ne_boundary_long', {
+      precision: 10,
+      scale: 6,
+      mode: 'number',
+    }),
     active: boolean('active').notNull().default(false),
     communityId: bigint('community_id', { mode: 'number' })
       .notNull()

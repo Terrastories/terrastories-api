@@ -181,7 +181,7 @@ export async function memberStoriesRoutes(
       params: {
         type: 'object',
         properties: {
-          id: { type: 'integer', minimum: 1 },
+          id: { type: 'integer', minimum: 1, maximum: 2147483647 },
         },
         required: ['id'],
       },
@@ -288,13 +288,23 @@ export async function memberStoriesRoutes(
             default: 'en',
           },
           tags: { type: 'array', items: { type: 'string' } },
-          placeIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
-          speakerIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
+          placeIds: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 2147483647 },
+          },
+          speakerIds: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 2147483647 },
+          },
           isRestricted: { type: 'boolean', default: false },
           // Interview metadata for Indigenous storytelling context
           dateInterviewed: { type: 'string', format: 'date-time' },
-          interviewLocationId: { type: 'integer', minimum: 1 },
-          interviewerId: { type: 'integer', minimum: 1 },
+          interviewLocationId: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 2147483647,
+          },
+          interviewerId: { type: 'integer', minimum: 1, maximum: 2147483647 },
         },
       },
       response: {
@@ -374,7 +384,7 @@ export async function memberStoriesRoutes(
       params: {
         type: 'object',
         properties: {
-          id: { type: 'integer', minimum: 1 },
+          id: { type: 'integer', minimum: 1, maximum: 2147483647 },
         },
         required: ['id'],
       },
@@ -390,8 +400,14 @@ export async function memberStoriesRoutes(
           },
           language: { type: 'string', minLength: 2, maxLength: 10 },
           tags: { type: 'array', items: { type: 'string' } },
-          placeIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
-          speakerIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
+          placeIds: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 2147483647 },
+          },
+          speakerIds: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 2147483647 },
+          },
           isRestricted: { type: 'boolean' },
         },
       },
@@ -471,7 +487,7 @@ export async function memberStoriesRoutes(
       params: {
         type: 'object',
         properties: {
-          id: { type: 'integer', minimum: 1 },
+          id: { type: 'integer', minimum: 1, maximum: 2147483647 },
         },
         required: ['id'],
       },

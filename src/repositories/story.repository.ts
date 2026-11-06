@@ -9,6 +9,7 @@ import {
   eq,
   and,
   desc,
+  lt,
   or,
   sql,
   count,
@@ -36,6 +37,14 @@ function associationOrder(table: {
   id: AnyColumn;
 }): SQL[] {
   return [sql`${table.sortOrder} IS NULL`, asc(table.sortOrder), asc(table.id)];
+}
+
+/**
+ * Distinct ids in first-seen order. Association lists are sets: a repeated
+ * id is the same link (the join tables are unique on story + target).
+ */
+function distinctIds(ids: number[]): number[] {
+  return [...new Set(ids)];
 }
 
 /** or() of at least one condition is always defined. */
@@ -338,14 +347,16 @@ export class StoryRepository {
     // Create place associations using proper join table
     if (data.placeIds?.length) {
       const associationTimestamp = new Date();
-      const placeAssociations = data.placeIds.map((placeId, index) => ({
-        storyId: story.id,
-        placeId,
-        culturalContext: data.placeContexts?.[index] || undefined,
-        sortOrder: index,
-        createdAt: associationTimestamp,
-        updatedAt: associationTimestamp,
-      }));
+      const placeAssociations = distinctIds(data.placeIds).map(
+        (placeId, index) => ({
+          storyId: story.id,
+          placeId,
+          culturalContext: data.placeContexts?.[index] || undefined,
+          sortOrder: index,
+          createdAt: associationTimestamp,
+          updatedAt: associationTimestamp,
+        })
+      );
 
       await this.db
         .insert(this.getStoryPlacesTable())
@@ -355,14 +366,16 @@ export class StoryRepository {
     // Create speaker associations using proper join table
     if (data.speakerIds?.length) {
       const speakerTimestamp = new Date();
-      const speakerAssociations = data.speakerIds.map((speakerId, index) => ({
-        storyId: story.id,
-        speakerId,
-        storyRole: data.speakerRoles?.[index] || undefined,
-        sortOrder: index,
-        createdAt: speakerTimestamp,
-        updatedAt: speakerTimestamp,
-      }));
+      const speakerAssociations = distinctIds(data.speakerIds).map(
+        (speakerId, index) => ({
+          storyId: story.id,
+          speakerId,
+          storyRole: data.speakerRoles?.[index] || undefined,
+          sortOrder: index,
+          createdAt: speakerTimestamp,
+          updatedAt: speakerTimestamp,
+        })
+      );
 
       await this.db
         .insert(this.getStorySpeakersTable())
@@ -900,14 +913,16 @@ export class StoryRepository {
       // Add new place associations
       if (data.placeIds.length > 0) {
         const updateTimestamp = new Date();
-        const placeAssociations = data.placeIds.map((placeId, index) => ({
-          storyId: id,
-          placeId,
-          culturalContext: data.placeContexts?.[index] || undefined,
-          sortOrder: index,
-          createdAt: updateTimestamp,
-          updatedAt: updateTimestamp,
-        }));
+        const placeAssociations = distinctIds(data.placeIds).map(
+          (placeId, index) => ({
+            storyId: id,
+            placeId,
+            culturalContext: data.placeContexts?.[index] || undefined,
+            sortOrder: index,
+            createdAt: updateTimestamp,
+            updatedAt: updateTimestamp,
+          })
+        );
         await this.db.insert(storyPlacesTable).values(placeAssociations);
       }
     }
@@ -924,14 +939,16 @@ export class StoryRepository {
       // Add new speaker associations
       if (data.speakerIds.length > 0) {
         const speakerUpdateTimestamp = new Date();
-        const speakerAssociations = data.speakerIds.map((speakerId, index) => ({
-          storyId: id,
-          speakerId,
-          storyRole: data.speakerRoles?.[index] || undefined,
-          sortOrder: index,
-          createdAt: speakerUpdateTimestamp,
-          updatedAt: speakerUpdateTimestamp,
-        }));
+        const speakerAssociations = distinctIds(data.speakerIds).map(
+          (speakerId, index) => ({
+            storyId: id,
+            speakerId,
+            storyRole: data.speakerRoles?.[index] || undefined,
+            sortOrder: index,
+            createdAt: speakerUpdateTimestamp,
+            updatedAt: speakerUpdateTimestamp,
+          })
+        );
         await this.db.insert(storySpeakersTable).values(speakerAssociations);
       }
     }
@@ -971,9 +988,6 @@ export class StoryRepository {
   }
 
   /**
-   * Find many stories with filtering and pagination
-   */
-  /**
    * Match-any tag filter with application-normalized comparison. Keeps at
    * most one scan batch and the requested page ids in memory.
    */
@@ -988,14 +1002,36 @@ export class StoryRepository {
     const pageIds: number[] = [];
     let total = 0;
     const batchSize = 128;
-    for (let scanOffset = 0; ; scanOffset += batchSize) {
-      const candidates: Array<{ id: number; tags: unknown }> = await this.db
-        .select({ id: storiesTable.id, tags: storiesTable.tags })
+    // Keyset scan on (createdAt, id), the same order as the page: unlike
+    // OFFSET, a row inserted or deleted mid-scan cannot shift later batches.
+    let cursor: { createdAt: Date; id: number } | null = null;
+    for (;;) {
+      const batchConditions: SQL[] = [...conditions];
+      if (cursor) {
+        batchConditions.push(
+          sqlOr(
+            lt(storiesTable.createdAt, cursor.createdAt),
+            and(
+              eq(storiesTable.createdAt, cursor.createdAt),
+              lt(storiesTable.id, cursor.id)
+            ) as SQL
+          )
+        );
+      }
+      const candidates: Array<{
+        id: number;
+        tags: unknown;
+        createdAt: Date;
+      }> = await this.db
+        .select({
+          id: storiesTable.id,
+          tags: storiesTable.tags,
+          createdAt: storiesTable.createdAt,
+        })
         .from(storiesTable)
-        .where(conditions.length > 0 ? and(...conditions) : undefined)
+        .where(batchConditions.length > 0 ? and(...batchConditions) : undefined)
         .orderBy(desc(storiesTable.createdAt), desc(storiesTable.id))
         .limit(batchSize)
-        .offset(scanOffset)
         .execute();
       for (const story of candidates) {
         // Imported rows may hold a non-array or non-string JSON value; such a
@@ -1011,6 +1047,8 @@ export class StoryRepository {
         total++;
       }
       if (candidates.length < batchSize) break;
+      const last = candidates[candidates.length - 1];
+      cursor = { createdAt: last.createdAt, id: last.id };
     }
 
     const data = await this.loadStoriesWithRelationsBulk(pageIds);
@@ -1023,6 +1061,9 @@ export class StoryRepository {
     };
   }
 
+  /**
+   * Find many stories with filtering and pagination
+   */
   async findMany(
     filters: StoryFilters,
     pagination: PaginationOptions
@@ -1186,7 +1227,7 @@ export class StoryRepository {
       );
 
     // All places must exist and belong to the community
-    return places.length === placeIds.length;
+    return places.length === new Set(placeIds).size;
   }
 
   /**

@@ -874,4 +874,562 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
 
   assert.equal(await themes.delete(mountainTheme.id), true);
   assert.equal(await themes.findById(mountainTheme.id), null);
+
+  // --- Dual-backend additions: tenancy, normalized tags, deterministic
+  // ordering, coordinate rounding and association ties. Each case uses fresh
+  // communities and slugs so the totals asserted above never change.
+
+  const { eq, sql } = await import('drizzle-orm');
+  const { dialectOf, tablesFor } = await import('../src/db/dialect.js');
+  const dialectTables = tablesFor(database as any);
+
+  // 1. Speaker tenancy: validation is scoped to one community, tolerates
+  // duplicate ids, and rejects unknown ids (SPEC-V2 Section 6.3).
+  const tenancyCommunity = await communities.create({
+    name: 'Speaker Tenancy Community',
+  });
+  const tenancyOtherCommunity = await communities.create({
+    name: 'Speaker Tenancy Other Community',
+  });
+  const tenancySpeaker = await speakers.create({
+    name: 'Tenancy Speaker Mana',
+    communityId: tenancyCommunity.id,
+  });
+  const tenancyForeignSpeaker = await speakers.create({
+    name: 'Tenancy Foreign Speaker',
+    communityId: tenancyOtherCommunity.id,
+  });
+  assert.equal(
+    await stories.validateSpeakersInCommunity(
+      [tenancyForeignSpeaker.id],
+      tenancyCommunity.id
+    ),
+    false,
+    'a speaker from another community must not validate'
+  );
+  assert.equal(
+    await stories.validateSpeakersInCommunity(
+      [tenancySpeaker.id],
+      tenancyCommunity.id
+    ),
+    true
+  );
+  assert.equal(
+    await stories.validateSpeakersInCommunity(
+      [tenancySpeaker.id, tenancySpeaker.id],
+      tenancyCommunity.id
+    ),
+    true,
+    'duplicate speaker ids must still validate'
+  );
+  assert.equal(
+    await stories.validateSpeakersInCommunity([999999], tenancyCommunity.id),
+    false,
+    'a nonexistent speaker id must not validate'
+  );
+
+  // 2. Normalized tag matching (SPEC-V2 Section 6.3): NFC + lower-case on the
+  // application side, so case and combining-mark variants match identically
+  // on both backends. 'Café' is composed (NFC), 'Café' decomposed.
+  const tagCommunity = await communities.create({
+    name: 'Normalized Tag Community',
+  });
+  const tagAuthor = await users.create({
+    email: 'normalized-tags@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Normalized',
+    lastName: 'Tags',
+    communityId: tagCommunity.id,
+  });
+  const tagWater = await stories.create({
+    title: 'Tag Water Exact',
+    slug: 'tag-water-exact',
+    communityId: tagCommunity.id,
+    createdBy: tagAuthor.id,
+    tags: ['Water'],
+  });
+  const tagLower = await stories.create({
+    title: 'Tag Water Lower',
+    slug: 'tag-water-lower',
+    communityId: tagCommunity.id,
+    createdBy: tagAuthor.id,
+    tags: ['water'],
+  });
+  const tagMixed = await stories.create({
+    title: 'Tag Water Upper Land',
+    slug: 'tag-water-upper-land',
+    communityId: tagCommunity.id,
+    createdBy: tagAuthor.id,
+    tags: ['WATER', 'Land'],
+  });
+  const tagComposed = await stories.create({
+    title: 'Tag Cafe Composed',
+    slug: 'tag-cafe-composed',
+    communityId: tagCommunity.id,
+    createdBy: tagAuthor.id,
+    // Composed (NFC) accent: e-acute as a single code point.
+    tags: ['Café'],
+  });
+  const tagDecomposed = await stories.create({
+    title: 'Tag Cafe Decomposed',
+    slug: 'tag-cafe-decomposed',
+    communityId: tagCommunity.id,
+    createdBy: tagAuthor.id,
+    // Decomposed (NFD) accent: 'e' plus combining acute.
+    tags: ['Café'],
+  });
+  await stories.create({
+    title: 'Tag Untagged Story',
+    slug: 'tag-untagged-story',
+    communityId: tagCommunity.id,
+    createdBy: tagAuthor.id,
+  });
+
+  const tagWaterStories = await stories.findMany(
+    { communityId: tagCommunity.id, tags: ['water'] },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(
+    tagWaterStories.total,
+    3,
+    "tags ['water'] must match case variants"
+  );
+  assert.deepEqual(
+    new Set(tagWaterStories.data.map((story) => story.id)),
+    new Set([tagWater.id, tagLower.id, tagMixed.id])
+  );
+
+  const tagCafeStories = await stories.findMany(
+    { communityId: tagCommunity.id, tags: ['CAFÉ'] },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(
+    tagCafeStories.total,
+    2,
+    "tags ['CAFÉ'] (composed) must match both café stories"
+  );
+  assert.deepEqual(
+    new Set(tagCafeStories.data.map((story) => story.id)),
+    new Set([tagComposed.id, tagDecomposed.id])
+  );
+
+  const tagAnyStories = await stories.findMany(
+    { communityId: tagCommunity.id, tags: ['Land', 'café'] },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(tagAnyStories.total, 3, 'tag filter is match-any');
+  assert.deepEqual(
+    new Set(tagAnyStories.data.map((story) => story.id)),
+    new Set([tagMixed.id, tagComposed.id, tagDecomposed.id])
+  );
+
+  // Paged tag queries page the full match set in newest-first order
+  // (createdAt desc, id desc) without duplicating or skipping rows.
+  for (let index = 1; index < tagWaterStories.data.length; index += 1) {
+    const previous = tagWaterStories.data[index - 1];
+    const current = tagWaterStories.data[index];
+    assert.ok(
+      previous.createdAt.getTime() > current.createdAt.getTime() ||
+        (previous.createdAt.getTime() === current.createdAt.getTime() &&
+          previous.id > current.id),
+      'tag query order must be createdAt desc, then id desc'
+    );
+  }
+  const tagPageOne = await stories.findMany(
+    { communityId: tagCommunity.id, tags: ['water'] },
+    { page: 1, limit: 2 }
+  );
+  const tagPageTwo = await stories.findMany(
+    { communityId: tagCommunity.id, tags: ['water'] },
+    { page: 2, limit: 2 }
+  );
+  assert.equal(tagPageOne.total, 3);
+  assert.equal(tagPageOne.totalPages, 2);
+  assert.equal(tagPageTwo.total, 3);
+  assert.equal(tagPageTwo.totalPages, 2);
+  assert.equal(tagPageOne.data.length, 2);
+  assert.equal(tagPageTwo.data.length, 1);
+  assert.deepEqual(
+    [...tagPageOne.data, ...tagPageTwo.data].map((story) => story.id),
+    tagWaterStories.data.map((story) => story.id),
+    'paged tag rows must be the full set in the same newest-first order'
+  );
+  assert.equal(
+    new Set([...tagPageOne.data, ...tagPageTwo.data].map((story) => story.id))
+      .size,
+    3,
+    'paged tag rows must not duplicate'
+  );
+
+  // An imported row whose tags column holds valid JSON that is not an array
+  // must match no tag on either backend, without throwing.
+  const malformedTagsStory = await stories.create({
+    title: 'Malformed Tags Story',
+    slug: 'malformed-tags-story',
+    communityId: tagCommunity.id,
+    createdBy: tagAuthor.id,
+    tags: ['water'],
+  });
+  if (dialectOf(database) === 'postgresql') {
+    await (database as any).execute(
+      sql`UPDATE stories SET tags = '5'::jsonb WHERE id = ${malformedTagsStory.id}`
+    );
+  } else {
+    await (database as any).run(
+      sql`UPDATE stories SET tags = '5' WHERE id = ${malformedTagsStory.id}`
+    );
+  }
+  const malformedTagQuery = await stories.findMany(
+    { communityId: tagCommunity.id, tags: ['water'] },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(
+    malformedTagQuery.total,
+    3,
+    'a non-array tags value must contribute no matches'
+  );
+  assert.equal(
+    malformedTagQuery.data.some((story) => story.id === malformedTagsStory.id),
+    false,
+    'the malformed-tags story must match no tag query'
+  );
+  const malformedSoloQuery = await stories.findMany(
+    { communityId: tagCommunity.id, tags: ['5'] },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(
+    malformedSoloQuery.total,
+    0,
+    'a numeric tags value must not match a string tag'
+  );
+
+  // 3. findMany list rows (not findById) must carry associations in the
+  // created placeIds order, and the speaker association.
+  const listRowCommunity = await communities.create({
+    name: 'List Row Relations Community',
+  });
+  const listRowAuthor = await users.create({
+    email: 'list-row-relations@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'List',
+    lastName: 'Row',
+    communityId: listRowCommunity.id,
+  });
+  const listRowPlaceOne = await places.create({
+    name: 'List Row Place One',
+    communityId: listRowCommunity.id,
+    latitude: -1.1,
+    longitude: -48.1,
+  });
+  const listRowPlaceTwo = await places.create({
+    name: 'List Row Place Two',
+    communityId: listRowCommunity.id,
+    latitude: -1.2,
+    longitude: -48.2,
+  });
+  const listRowSpeaker = await speakers.create({
+    name: 'List Row Speaker',
+    communityId: listRowCommunity.id,
+  });
+  await stories.create({
+    title: 'List Row Story',
+    slug: 'list-row-story',
+    communityId: listRowCommunity.id,
+    createdBy: listRowAuthor.id,
+    // Deliberately reversed place order so the read-back proves sortOrder.
+    placeIds: [listRowPlaceTwo.id, listRowPlaceOne.id],
+    speakerIds: [listRowSpeaker.id],
+  });
+  const listRowFound = await stories.findMany(
+    { communityId: listRowCommunity.id },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(listRowFound.total, 1);
+  const listRow = listRowFound.data[0];
+  assert.deepEqual(
+    listRow.places.map((place) => place.id),
+    [listRowPlaceTwo.id, listRowPlaceOne.id],
+    'findMany rows must keep the created place order'
+  );
+  assert.deepEqual(
+    listRow.speakers.map((speaker) => speaker.id),
+    [listRowSpeaker.id],
+    'findMany rows must carry the speaker association'
+  );
+
+  // 4. Search matches the title or description branch alone.
+  const searchBranchCommunity = await communities.create({
+    name: 'Search Branch Community',
+  });
+  const searchBranchAuthor = await users.create({
+    email: 'search-branch@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Search',
+    lastName: 'Branch',
+    communityId: searchBranchCommunity.id,
+  });
+  const titleOnlyStory = await stories.create({
+    title: 'Heron Morning',
+    description: 'An ordinary morning by the water',
+    slug: 'heron-morning',
+    communityId: searchBranchCommunity.id,
+    createdBy: searchBranchAuthor.id,
+  });
+  const descriptionOnlyStory = await stories.create({
+    title: 'Raptor Watch',
+    description: 'A kestrel hovers over the field',
+    slug: 'raptor-watch',
+    communityId: searchBranchCommunity.id,
+    createdBy: searchBranchAuthor.id,
+  });
+  const heronFound = await stories.findMany(
+    { communityId: searchBranchCommunity.id, search: 'heron' },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(heronFound.total, 1);
+  assert.deepEqual(
+    heronFound.data.map((story) => story.id),
+    [titleOnlyStory.id],
+    "search 'heron' must match only the title branch"
+  );
+  const kestrelFound = await stories.findMany(
+    { communityId: searchBranchCommunity.id, search: 'KESTREL' },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(kestrelFound.total, 1);
+  assert.deepEqual(
+    kestrelFound.data.map((story) => story.id),
+    [descriptionOnlyStory.id],
+    "search 'KESTREL' must match only the description branch"
+  );
+
+  // 5. Equal createdAt values must fall back to descending id so pages
+  // neither duplicate nor skip rows.
+  const equalTimeCommunity = await communities.create({
+    name: 'Equal Timestamp Community',
+  });
+  const equalTimeAuthor = await users.create({
+    email: 'equal-timestamps@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Equal',
+    lastName: 'Timestamp',
+    communityId: equalTimeCommunity.id,
+  });
+  const equalTimeStories: Array<{ id: number }> = [];
+  for (const [title, slug] of [
+    ['Equal Timestamp One', 'equal-timestamp-one'],
+    ['Equal Timestamp Two', 'equal-timestamp-two'],
+    ['Equal Timestamp Three', 'equal-timestamp-three'],
+  ]) {
+    equalTimeStories.push(
+      await stories.create({
+        title,
+        slug,
+        communityId: equalTimeCommunity.id,
+        createdBy: equalTimeAuthor.id,
+      })
+    );
+  }
+  const equalInstant = new Date('2026-03-15T12:00:00Z');
+  await (database as any)
+    .update(dialectTables.stories)
+    .set({ createdAt: equalInstant })
+    .where(eq(dialectTables.stories.communityId, equalTimeCommunity.id));
+  const equalTimePage = await stories.findMany(
+    { communityId: equalTimeCommunity.id },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(equalTimePage.total, 3);
+  for (const story of equalTimePage.data) {
+    assert.equal(
+      story.createdAt.getTime(),
+      equalInstant.getTime(),
+      'forced createdAt must round-trip identically'
+    );
+  }
+  const expectedDescendingIds = equalTimeStories
+    .map((story) => story.id)
+    .sort((left, right) => right - left);
+  assert.deepEqual(
+    equalTimePage.data.map((story) => story.id),
+    expectedDescendingIds,
+    'equal createdAt must order by descending id'
+  );
+  const equalPageOne = await stories.findMany(
+    { communityId: equalTimeCommunity.id },
+    { page: 1, limit: 2 }
+  );
+  const equalPageTwo = await stories.findMany(
+    { communityId: equalTimeCommunity.id },
+    { page: 2, limit: 2 }
+  );
+  assert.deepEqual(
+    [...equalPageOne.data, ...equalPageTwo.data].map((story) => story.id),
+    expectedDescendingIds,
+    'paged equal-timestamp rows must not duplicate or skip'
+  );
+
+  // 6. Equal theme names tiebreak by id in both sort directions.
+  const twinThemeCommunity = await communities.create({
+    name: 'Twin Theme Community',
+  });
+  const twinThemes: Array<{ id: number }> = [
+    await themes.create({
+      name: 'Twin Theme',
+      communityId: twinThemeCommunity.id,
+    }),
+    await themes.create({
+      name: 'Twin Theme',
+      communityId: twinThemeCommunity.id,
+    }),
+    await themes.create({
+      name: 'Twin Theme',
+      communityId: twinThemeCommunity.id,
+    }),
+  ];
+  const twinThemeAsc = await themes.findByCommunityId(twinThemeCommunity.id, {
+    page: 1,
+    limit: 10,
+    sortBy: 'name',
+    sortOrder: 'asc',
+  });
+  assert.equal(twinThemeAsc.total, 3);
+  assert.deepEqual(
+    twinThemeAsc.data.map((theme) => theme.id),
+    twinThemes.map((theme) => theme.id),
+    'equal names must tiebreak by ascending id'
+  );
+  const twinThemeDesc = await themes.findByCommunityId(twinThemeCommunity.id, {
+    page: 1,
+    limit: 10,
+    sortBy: 'name',
+    sortOrder: 'desc',
+  });
+  assert.deepEqual(
+    twinThemeDesc.data.map((theme) => theme.id),
+    [...twinThemes].reverse().map((theme) => theme.id),
+    'equal names must tiebreak by descending id in desc order'
+  );
+
+  // 7. countByCommunityId must keep the community predicate when combined
+  // with active and search-term filters; a matching active theme in another
+  // community must not leak into the count.
+  const countedCommunity = await communities.create({
+    name: 'Counted Themes Community',
+  });
+  const rivalCountedCommunity = await communities.create({
+    name: 'Rival Counted Themes Community',
+  });
+  await themes.create({
+    name: 'Estuary Active Theme',
+    active: true,
+    communityId: countedCommunity.id,
+  });
+  await themes.create({
+    name: 'Estuary Dormant Theme',
+    active: false,
+    communityId: countedCommunity.id,
+  });
+  await themes.create({
+    name: 'Estuary Rival Theme',
+    active: true,
+    communityId: rivalCountedCommunity.id,
+  });
+  assert.equal(await themes.countByCommunityId(countedCommunity.id), 2);
+  assert.equal(
+    await themes.countByCommunityId(countedCommunity.id, {
+      activeOnly: true,
+      searchTerm: 'estuary',
+    }),
+    1,
+    "the rival community's active matching theme must not be counted"
+  );
+  assert.equal(
+    await themes.countByCommunityId(rivalCountedCommunity.id, {
+      activeOnly: true,
+      searchTerm: 'estuary',
+    }),
+    1
+  );
+
+  // 8. Theme coordinates round to 6 decimals in the application so both
+  // backends store and return the same value.
+  const roundingCommunity = await communities.create({
+    name: 'Rounding Coordinates Community',
+  });
+  const roundedTheme = await themes.create({
+    name: 'Rounded Coordinates Theme',
+    communityId: roundingCommunity.id,
+    centerLat: 1.23456789,
+  });
+  assert.equal(
+    (roundedTheme as any).centerLat,
+    1.234568,
+    'themes.create must round centerLat to 6 decimals'
+  );
+  const roundedRead = await themes.findById(roundedTheme.id);
+  assert.ok(roundedRead, 'themes.findById must return the rounded theme');
+  assert.equal(
+    (roundedRead as any).centerLat,
+    1.234568,
+    'themes.findById must read the rounded centerLat back'
+  );
+  const roundedUpdate = await themes.update(roundedTheme.id, {
+    centerLong: -2.0000004,
+  });
+  assert.ok(roundedUpdate, 'themes.update must return the rounded theme');
+  assert.equal(
+    (roundedUpdate as any).centerLong,
+    -2,
+    'themes.update must round centerLong -2.0000004 to -2'
+  );
+  const roundedReread = await themes.findById(roundedTheme.id);
+  assert.ok(roundedReread, 'themes.findById must reread the rounded theme');
+  assert.equal((roundedReread as any).centerLat, 1.234568);
+  assert.equal((roundedReread as any).centerLong, -2);
+
+  // 9. Association rows with equal sortOrder fall back to join-row id order,
+  // which is not necessarily place id order.
+  const tieOrderCommunity = await communities.create({
+    name: 'Association Tie Order Community',
+  });
+  const tieOrderAuthor = await users.create({
+    email: 'tie-order@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Tie',
+    lastName: 'Order',
+    communityId: tieOrderCommunity.id,
+  });
+  const tiePlaceLow = await places.create({
+    name: 'Tie Place Low Id',
+    communityId: tieOrderCommunity.id,
+    latitude: -1.7,
+    longitude: -48.7,
+  });
+  const tiePlaceHigh = await places.create({
+    name: 'Tie Place High Id',
+    communityId: tieOrderCommunity.id,
+    latitude: -1.8,
+    longitude: -48.8,
+  });
+  const tieStory = await stories.create({
+    title: 'Tie Order Story',
+    slug: 'tie-order-story',
+    communityId: tieOrderCommunity.id,
+    createdBy: tieOrderAuthor.id,
+    // The higher place id is inserted first, so its join row has the lower
+    // join-row id.
+    placeIds: [tiePlaceHigh.id, tiePlaceLow.id],
+  });
+  await (database as any)
+    .update(dialectTables.storyPlaces)
+    .set({ sortOrder: 7 })
+    .where(eq(dialectTables.storyPlaces.storyId, tieStory.id));
+  const tieRead = await stories.findByIdWithRelations(tieStory.id);
+  assert.ok(tieRead, 'the tie-order story must load with relations');
+  assert.deepEqual(
+    tieRead.places.map((place) => place.id),
+    [tiePlaceHigh.id, tiePlaceLow.id],
+    'equal sortOrder must fall back to join-row id order'
+  );
 }

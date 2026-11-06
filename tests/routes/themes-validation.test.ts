@@ -192,12 +192,171 @@ describe('theme boundary validation through real route handlers', () => {
     expect(rejectedPut.body).not.toContain('[object Object]');
     expect(rejectedPut.body.toLowerCase()).toContain('latitude');
   });
+
+  it('rejects explicit null boundary coordinates and never coerces stored coordinates to zero', async () => {
+    const theme = await createTheme({
+      swBoundaryLat: 5,
+      swBoundaryLong: 10,
+      neBoundaryLat: 10,
+      neBoundaryLong: 20,
+    });
+
+    const boundaryFields = [
+      'swBoundaryLat',
+      'swBoundaryLong',
+      'neBoundaryLat',
+      'neBoundaryLong',
+    ] as const;
+
+    for (const field of boundaryFields) {
+      const rejectedPost = await app.inject({
+        method: 'POST',
+        url: '/api/v1/themes',
+        headers: { cookie },
+        payload: {
+          name: 'Null coordinate theme',
+          communityId,
+          [field]: null,
+        },
+      });
+      expect(rejectedPost.statusCode, rejectedPost.body).toBe(400);
+      expect(rejectedPost.body).not.toContain('[object Object]');
+      expect(rejectedPost.json().error).toBeDefined();
+
+      const rejectedPut = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/themes/${theme.id}`,
+        headers: { cookie },
+        payload: { [field]: null },
+      });
+      expect(rejectedPut.statusCode, rejectedPut.body).toBe(400);
+      expect(rejectedPut.body).not.toContain('[object Object]');
+      expect(rejectedPut.json().error).toBeDefined();
+    }
+
+    const saved = await savedTheme(theme.id);
+    expect(saved.swBoundaryLat).toBe(5);
+    expect(saved.swBoundaryLat).not.toBe(0);
+    expect(saved.neBoundaryLat).toBe(10);
+    expect(saved.swBoundaryLong).toBe(10);
+    expect(saved.neBoundaryLong).toBe(20);
+  });
+
+  it.each([
+    { field: 'swBoundaryLat' as const, value: 5 },
+    { field: 'neBoundaryLat' as const, value: -5 },
+  ])(
+    'keeps the other three bounds null for a single-coordinate PUT of $field',
+    async ({ field, value }) => {
+      const theme = await createTheme();
+      const boundaryFields = [
+        'swBoundaryLat',
+        'swBoundaryLong',
+        'neBoundaryLat',
+        'neBoundaryLong',
+      ] as const;
+      const untouchedFields = boundaryFields.filter(
+        (candidate) => candidate !== field
+      );
+
+      const updated = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/themes/${theme.id}`,
+        headers: { cookie },
+        payload: { [field]: value },
+      });
+      expect(updated.statusCode, updated.body).toBe(200);
+
+      const updatedData = updated.json().data;
+      expect(updatedData[field]).toBe(value);
+      for (const other of untouchedFields) {
+        expect(updatedData[other]).toBeNull();
+      }
+
+      const saved = await savedTheme(theme.id);
+      expect(saved[field]).toBe(value);
+      for (const other of untouchedFields) {
+        expect(saved[other]).toBeNull();
+      }
+
+      const fetched = await app.inject({
+        method: 'GET',
+        url: `/api/v1/themes/${theme.id}`,
+        headers: { cookie },
+      });
+      expect(fetched.statusCode, fetched.body).toBe(200);
+
+      const fetchedData = fetched.json().data;
+      expect(fetchedData[field]).toBe(value);
+      for (const other of untouchedFields) {
+        expect(fetchedData[other]).toBeNull();
+      }
+    }
+  );
+
+  it('returns a meaningful 404 for a PUT against a missing theme id', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/themes/999999',
+      headers: { cookie },
+      payload: { name: 'Nowhere theme' },
+    });
+
+    expect(response.statusCode, response.body).toBe(404);
+    expect(response.body).not.toContain('[object Object]');
+
+    const body = response.json();
+    const message =
+      typeof body.error === 'string' ? body.error : body.error?.message;
+    expect(typeof message).toBe('string');
+    expect(message.toLowerCase()).toContain('theme');
+    expect(message.toLowerCase()).toContain('not found');
+  });
+
   it.each([
     { label: 'POST missing name', method: 'POST' as const, payload: {} },
     {
       label: 'POST invalid name type',
       method: 'POST' as const,
       payload: { name: {} },
+    },
+    {
+      label: 'POST out-of-range latitude',
+      method: 'POST' as const,
+      payload: { name: 'Validation case', swBoundaryLat: 200 },
+    },
+    {
+      label: 'PUT out-of-range latitude',
+      method: 'PUT' as const,
+      payload: { swBoundaryLat: 200 },
+    },
+    {
+      label: 'POST out-of-range longitude',
+      method: 'POST' as const,
+      payload: { name: 'Validation case', swBoundaryLong: 200 },
+    },
+    {
+      label: 'PUT out-of-range longitude',
+      method: 'PUT' as const,
+      payload: { swBoundaryLong: 200 },
+    },
+    {
+      label: 'POST non-numeric latitude',
+      method: 'POST' as const,
+      payload: { name: 'Validation case', swBoundaryLat: 'x' },
+    },
+    {
+      label: 'POST invalid mapboxStyleUrl',
+      method: 'POST' as const,
+      payload: {
+        name: 'Validation case',
+        mapboxStyleUrl: 'https://example.com/styles/test',
+      },
+    },
+    {
+      label: 'PUT invalid mapboxStyleUrl',
+      method: 'PUT' as const,
+      payload: { mapboxStyleUrl: 'https://example.com/styles/test' },
     },
     {
       label: 'PUT invalid latitude type',
@@ -216,6 +375,28 @@ describe('theme boundary validation through real route handlers', () => {
         url,
         headers: { cookie },
         payload: method === 'POST' ? { communityId, ...payload } : payload,
+      });
+      expect(response.statusCode, response.body).toBe(400);
+      expect(response.json().error).toBe('Request validation failed');
+      expect(response.json().issues.length).toBeGreaterThan(0);
+      const invalidField =
+        Object.keys(payload).find((key) => key !== 'name') ?? 'name';
+      expect(JSON.stringify(response.json().issues)).toContain(invalidField);
+      expect(response.body).not.toContain('[object Object]');
+    }
+  );
+  it.each(['POST', 'PUT'] as const)(
+    'returns 400 for malformed JSON on %s',
+    async (method) => {
+      const url =
+        method === 'POST'
+          ? '/api/v1/themes'
+          : `/api/v1/themes/${(await createTheme()).id}`;
+      const response = await app.inject({
+        method,
+        url,
+        headers: { cookie, 'content-type': 'application/json' },
+        payload: '{"name":',
       });
       expect(response.statusCode, response.body).toBe(400);
       expect(response.json().error).toBe('Request validation failed');

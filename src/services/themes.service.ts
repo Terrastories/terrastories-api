@@ -23,7 +23,7 @@ import type {
 } from '../repositories/themes.repository.js';
 import type { Theme, CreateTheme, UpdateTheme } from '../db/schema/themes.js';
 import type { Logger } from '../shared/types/index.js';
-import { ValidationError } from '../shared/errors/index.js';
+import { NotFoundError, ValidationError } from '../shared/errors/index.js';
 
 /**
  * Cultural protocols for theme access and modifications
@@ -100,7 +100,7 @@ export class ThemeServiceError extends Error {
   }
 }
 
-export class ThemeNotFoundServiceError extends Error {
+export class ThemeNotFoundServiceError extends NotFoundError {
   constructor(message = 'Theme not found') {
     super(message);
     this.name = 'ThemeNotFoundServiceError';

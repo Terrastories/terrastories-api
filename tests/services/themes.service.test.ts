@@ -250,6 +250,25 @@ describe('ThemesService', () => {
       ).rejects.toThrow(InvalidGeographicBoundsError);
     });
 
+    it('should throw InvalidGeographicBoundsError when only one boundary latitude is supplied', async () => {
+      // Arrange - a single supplied coordinate must still trigger bounds validation
+      const createInput: ThemeCreateInput = {
+        name: 'Single Invalid Bounds Theme',
+        communityId: testCommunityId,
+        swBoundaryLat: 200, // Out of range without any other boundary coordinate
+      };
+
+      // Act & Assert
+      await expect(
+        themesService.createTheme(
+          createInput,
+          testUserId,
+          'admin',
+          testCommunityId
+        )
+      ).rejects.toThrow(InvalidGeographicBoundsError);
+    });
+
     it('should throw InvalidGeographicBoundsError for invalid coordinates', async () => {
       // Arrange
       const createInput: ThemeCreateInput = {

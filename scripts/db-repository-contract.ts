@@ -879,7 +879,7 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   // ordering, coordinate rounding and association ties. Each case uses fresh
   // communities and slugs so the totals asserted above never change.
 
-  const { eq, sql } = await import('drizzle-orm');
+  const { and, eq, sql } = await import('drizzle-orm');
   const { dialectOf, tablesFor } = await import('../src/db/dialect.js');
   const dialectTables = tablesFor(database as any);
 
@@ -926,6 +926,56 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     await stories.validateSpeakersInCommunity([999999], tenancyCommunity.id),
     false,
     'a nonexistent speaker id must not validate'
+  );
+
+  // Association id lists are sets: duplicate ids validate against the distinct
+  // count and create exactly one join row each (the join tables are unique on
+  // story + target), on both backends.
+  const tenancyPlace = await places.create({
+    name: 'Tenancy Place Igarape',
+    communityId: tenancyCommunity.id,
+    latitude: -1.9,
+    longitude: -48.9,
+  });
+  assert.equal(
+    await stories.validatePlacesInCommunity(
+      [tenancyPlace.id, tenancyPlace.id],
+      tenancyCommunity.id
+    ),
+    true,
+    'duplicate place ids must still validate against the distinct count'
+  );
+  const tenancyAuthor = await users.create({
+    email: 'tenancy-duplicates@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Tenancy',
+    lastName: 'Duplicates',
+    communityId: tenancyCommunity.id,
+  });
+  const duplicateAssociationStory = await stories.create({
+    title: 'Duplicate Association Story',
+    slug: 'duplicate-association-story',
+    communityId: tenancyCommunity.id,
+    createdBy: tenancyAuthor.id,
+    placeIds: [tenancyPlace.id, tenancyPlace.id],
+    speakerIds: [tenancySpeaker.id, tenancySpeaker.id],
+  });
+  const duplicateAssociationRead = await stories.findByIdWithRelations(
+    duplicateAssociationStory.id
+  );
+  assert.ok(
+    duplicateAssociationRead,
+    'the duplicate-association story must load with relations'
+  );
+  assert.equal(
+    duplicateAssociationRead.places.length,
+    1,
+    'duplicate placeIds must read back exactly one place association'
+  );
+  assert.equal(
+    duplicateAssociationRead.speakers.length,
+    1,
+    'duplicate speakerIds must read back exactly one speaker association'
   );
 
   // 2. Normalized tag matching (SPEC-V2 Section 6.3): NFC + lower-case on the
@@ -1432,4 +1482,250 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     [tiePlaceHigh.id, tiePlaceLow.id],
     'equal sortOrder must fall back to join-row id order'
   );
+
+  // 10. Multi-batch tag scan: 300 stories exceed the 128-row keyset batch, so
+  // the tag filter must carry its cursor across batches without duplicating or
+  // skipping matches on later pages, on both backends.
+  const batchScanCommunity = await communities.create({
+    name: 'Batch Tag Scan Community',
+  });
+  const batchScanAuthor = await users.create({
+    email: 'batch-tag-scan@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Batch',
+    lastName: 'Scan',
+    communityId: batchScanCommunity.id,
+  });
+  const batchScanStories: Array<{ id: number }> = [];
+  for (let index = 0; index < 300; index += 1) {
+    const isBatchMatch = index % 3 === 0;
+    batchScanStories.push(
+      await stories.create({
+        title: `Batch Scan ${index}`,
+        slug: `batch-scan-${index}`,
+        communityId: batchScanCommunity.id,
+        createdBy: batchScanAuthor.id,
+        tags: [isBatchMatch ? 'Batch' : 'Other'],
+      })
+    );
+  }
+  // The create API takes no timestamps, so force distinct descending instants
+  // (one second per story, creation order) to keep the page order known:
+  // story N is always newer than story N - 1.
+  const batchBaseInstant = new Date('2026-06-01T00:00:00Z').getTime();
+  for (const [index, story] of batchScanStories.entries()) {
+    await (database as any)
+      .update(dialectTables.stories)
+      .set({ createdAt: new Date(batchBaseInstant + index * 1000) })
+      .where(eq(dialectTables.stories.id, story.id));
+  }
+  // Newest-first match order: every 3rd story, newest (highest index) first.
+  const batchMatchIdsNewestFirst = batchScanStories
+    .filter((_, index) => index % 3 === 0)
+    .map((story) => story.id)
+    .reverse();
+  assert.equal(batchMatchIdsNewestFirst.length, 100);
+
+  const batchFirstPage = await stories.findMany(
+    { communityId: batchScanCommunity.id, tags: ['batch'] },
+    { page: 1, limit: 20 }
+  );
+  assert.equal(
+    batchFirstPage.total,
+    100,
+    "tags ['batch'] must count all 100 case-insensitive matches"
+  );
+  assert.equal(batchFirstPage.totalPages, 5);
+
+  // Page 5 must hold the 20 oldest matches, still in newest-first order.
+  const batchLastPage = await stories.findMany(
+    { communityId: batchScanCommunity.id, tags: ['batch'] },
+    { page: 5, limit: 20 }
+  );
+  assert.deepEqual(
+    batchLastPage.data.map((story) => story.id),
+    batchMatchIdsNewestFirst.slice(80),
+    'page 5 must be the 20 oldest matches, exact ids, newest-first'
+  );
+
+  const batchBeyondEnd = await stories.findMany(
+    { communityId: batchScanCommunity.id, tags: ['batch'] },
+    { page: 6, limit: 20 }
+  );
+  assert.deepEqual(
+    batchBeyondEnd.data,
+    [],
+    'a page beyond the end must return no rows'
+  );
+  assert.equal(
+    batchBeyondEnd.total,
+    100,
+    'a page beyond the end must keep the full total'
+  );
+
+  // The union of every page is exactly the full match set, with no duplicates.
+  const batchUnionIds: number[] = [];
+  for (let page = 1; page <= 5; page += 1) {
+    const pageResult = await stories.findMany(
+      { communityId: batchScanCommunity.id, tags: ['batch'] },
+      { page, limit: 20 }
+    );
+    assert.equal(pageResult.total, 100, `page ${page} must keep the total`);
+    batchUnionIds.push(...pageResult.data.map((story) => story.id));
+  }
+  assert.deepEqual(
+    new Set(batchUnionIds),
+    new Set(batchMatchIdsNewestFirst),
+    'the union of all 5 pages must equal the 100 matching ids'
+  );
+  assert.equal(
+    batchUnionIds.length,
+    new Set(batchUnionIds).size,
+    'no page may repeat a matching id'
+  );
+
+  // 11. NULL sortOrder sorts after every numeric sortOrder on both backends
+  // (SQLite natively sorts NULL first, PostgreSQL last), in both the
+  // findByIdWithRelations and the findMany list rows.
+  const nullSortCommunity = await communities.create({
+    name: 'Null Sort Order Community',
+  });
+  const nullSortAuthor = await users.create({
+    email: 'null-sort-order@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Null',
+    lastName: 'Sort',
+    communityId: nullSortCommunity.id,
+  });
+  const nullSortPlaceA = await places.create({
+    name: 'Null Sort Place A',
+    communityId: nullSortCommunity.id,
+    latitude: -2.1,
+    longitude: -48.1,
+  });
+  const nullSortPlaceB = await places.create({
+    name: 'Null Sort Place B',
+    communityId: nullSortCommunity.id,
+    latitude: -2.2,
+    longitude: -48.2,
+  });
+  const nullSortPlaceC = await places.create({
+    name: 'Null Sort Place C',
+    communityId: nullSortCommunity.id,
+    latitude: -2.3,
+    longitude: -48.3,
+  });
+  const nullSortStory = await stories.create({
+    title: 'Null Sort Order Story',
+    slug: 'null-sort-order-story',
+    communityId: nullSortCommunity.id,
+    createdBy: nullSortAuthor.id,
+    placeIds: [nullSortPlaceA.id, nullSortPlaceB.id, nullSortPlaceC.id],
+  });
+  // Created sortOrder values are 0, 1, 2; rewrite them to null, 0, 1.
+  const nullSortAssignments: Array<[typeof nullSortPlaceA, number | null]> = [
+    [nullSortPlaceA, null],
+    [nullSortPlaceB, 0],
+    [nullSortPlaceC, 1],
+  ];
+  for (const [place, sortOrder] of nullSortAssignments) {
+    await (database as any)
+      .update(dialectTables.storyPlaces)
+      .set({ sortOrder })
+      .where(
+        and(
+          eq(dialectTables.storyPlaces.storyId, nullSortStory.id),
+          eq(dialectTables.storyPlaces.placeId, place.id)
+        )
+      );
+  }
+  const nullSortRead = await stories.findByIdWithRelations(nullSortStory.id);
+  assert.ok(nullSortRead, 'the null-sort story must load with relations');
+  assert.deepEqual(
+    nullSortRead.places.map((place) => place.id),
+    [nullSortPlaceB.id, nullSortPlaceC.id, nullSortPlaceA.id],
+    'findByIdWithRelations must order sortOrder 0, 1 first and NULL last'
+  );
+  const nullSortList = await stories.findMany(
+    { communityId: nullSortCommunity.id },
+    { page: 1, limit: 10 }
+  );
+  assert.equal(nullSortList.total, 1);
+  assert.deepEqual(
+    nullSortList.data[0].places.map((place) => place.id),
+    [nullSortPlaceB.id, nullSortPlaceC.id, nullSortPlaceA.id],
+    'findMany list rows must also order the NULL sortOrder last'
+  );
+
+  // 12. SPEC-V2 §§2/11 drops the elder-only list policy on both backends:
+  // the deprecated culturalRestrictions filter input must not select or
+  // discard legacy metadata, so elderOnly true and false rows are both kept
+  // (ported from the elder-only file list contract case).
+  const policyCommunity = await communities.create({
+    name: 'Elder Policy Community',
+  });
+  const policyOtherCommunity = await communities.create({
+    name: 'Elder Policy Other Community',
+  });
+  const policyUploader = await users.create({
+    email: 'elder-policy@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Elder',
+    lastName: 'Policy',
+    communityId: policyCommunity.id,
+  });
+  const policyOtherUploader = await users.create({
+    email: 'elder-policy-other@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Other',
+    lastName: 'Uploader',
+    communityId: policyOtherCommunity.id,
+  });
+  const policyFileIds: string[] = [];
+  for (const [name, tenant, uploader, elderOnly] of [
+    ['Elder Policy Ordinary', policyCommunity.id, policyUploader.id, false],
+    ['Elder Policy Restricted', policyCommunity.id, policyUploader.id, true],
+    [
+      'Elder Policy Foreign',
+      policyOtherCommunity.id,
+      policyOtherUploader.id,
+      true,
+    ],
+  ] as const) {
+    const file = await files.create({
+      filename: name,
+      originalName: name,
+      path: `contract/${name}.mp3`,
+      url: 'https://example.test/elder-policy.mp3',
+      mimeType: 'audio/mpeg',
+      size: 123,
+      communityId: tenant,
+      uploadedBy: uploader,
+      culturalRestrictions: JSON.stringify({ elderOnly }),
+    });
+    policyFileIds.push(file.id);
+  }
+  for (const elderOnly of [true, false]) {
+    const policyResult = await files.findByCommunity(policyCommunity.id, {
+      search: 'Elder Policy',
+      culturalRestrictions: { elderOnly },
+      orderBy: 'filename',
+      orderDirection: 'asc',
+    });
+    assert.deepEqual(
+      policyResult.data.map((row) => row.id),
+      policyFileIds.slice(0, 2),
+      `culturalRestrictions { elderOnly: ${elderOnly} } must not filter the file list`
+    );
+    assert.equal(policyResult.meta.total, 2);
+    // SQLite stores legacy metadata as text; PostgreSQL jsonb decodes it.
+    // Compare the preserved values independently of the storage representation.
+    for (const [index, expected] of [false, true].entries()) {
+      const metadata = policyResult.data[index].culturalRestrictions;
+      assert.deepEqual(
+        typeof metadata === 'string' ? JSON.parse(metadata) : metadata,
+        { elderOnly: expected }
+      );
+    }
+  }
 }

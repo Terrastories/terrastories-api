@@ -48,11 +48,6 @@ export const GeographicBoundsSchema = z
     message:
       'Southwest boundary latitude must be less than or equal to northeast boundary latitude',
     path: ['swBoundaryLat'],
-  })
-  .refine((data) => data.swBoundaryLong <= data.neBoundaryLong, {
-    message:
-      'Southwest boundary longitude must be less than or equal to northeast boundary longitude',
-    path: ['swBoundaryLong'],
   });
 
 // Mapbox URL validation
@@ -187,37 +182,37 @@ const themeFieldsSchema = z.object({
   communityId: z.number().positive(),
 });
 
-export const createThemeSchema = themeFieldsSchema
+export const createThemeSchema = themeFieldsSchema.refine(
+  (data) => {
+    if (data.swBoundaryLat !== undefined && data.neBoundaryLat !== undefined) {
+      return data.swBoundaryLat <= data.neBoundaryLat;
+    }
+    return true;
+  },
+  {
+    message:
+      'Southwest boundary latitude must be less than or equal to northeast boundary latitude',
+    path: ['swBoundaryLat'],
+  }
+);
+
+export const updateThemeSchema = themeFieldsSchema
+  .extend({
+    active: z.boolean(),
+  })
+  .partial()
+  .omit({ communityId: true })
   .refine(
-    (data) => {
-      if (data.swBoundaryLat && data.neBoundaryLat) {
-        return data.swBoundaryLat <= data.neBoundaryLat;
-      }
-      return true;
-    },
+    (data) =>
+      data.swBoundaryLat === undefined ||
+      data.neBoundaryLat === undefined ||
+      data.swBoundaryLat <= data.neBoundaryLat,
     {
       message:
         'Southwest boundary latitude must be less than or equal to northeast boundary latitude',
       path: ['swBoundaryLat'],
     }
-  )
-  .refine(
-    (data) => {
-      if (data.swBoundaryLong && data.neBoundaryLong) {
-        return data.swBoundaryLong <= data.neBoundaryLong;
-      }
-      return true;
-    },
-    {
-      message:
-        'Southwest boundary longitude must be less than or equal to northeast boundary longitude',
-      path: ['swBoundaryLong'],
-    }
   );
-
-export const updateThemeSchema = themeFieldsSchema
-  .partial()
-  .omit({ communityId: true });
 
 // TypeScript types - Use SQLite for consistency with current deployment
 export type ThemePg = typeof themesPg.$inferSelect;

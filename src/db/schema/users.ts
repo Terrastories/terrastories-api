@@ -186,10 +186,16 @@ export const createUserSchema = insertUserSchema.omit({
   updatedAt: true,
 });
 
-export const updateUserSchema = insertUserSchema.partial().omit({
-  id: true,
-  createdAt: true,
-});
+export const updateUserSchema = insertUserSchema
+  .extend({
+    role: insertUserSchema.shape.role.removeDefault(),
+    isActive: insertUserSchema.shape.isActive.removeDefault(),
+  })
+  .partial()
+  .omit({
+    id: true,
+    createdAt: true,
+  });
 
 // Export table variants for migration generation
 // Use SQLite table for Drizzle Kit (config determines which is used)

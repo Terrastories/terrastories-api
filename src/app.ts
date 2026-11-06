@@ -139,10 +139,17 @@ export async function buildApp(options?: BuildAppOptions) {
     if (error.statusCode && error.statusCode < 500) {
       // Handle schema validation errors - all 400 errors are validation errors in this context
       if (error.statusCode === 400) {
+        const malformedJson =
+          error.code === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
+          error.code === 'FST_ERR_CTP_EMPTY_JSON_BODY';
         return reply.status(error.statusCode).send({
-          error: 'Request validation failed',
+          error: malformedJson
+            ? 'Malformed JSON body'
+            : 'Request validation failed',
           statusCode: error.statusCode,
-          issues: error.validation || error.validationContext || undefined,
+          issues: malformedJson
+            ? undefined
+            : error.validation || error.validationContext || undefined,
         });
       }
 

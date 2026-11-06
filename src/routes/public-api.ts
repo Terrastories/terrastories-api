@@ -29,6 +29,7 @@ import {
   toPublicPlace,
   CommunityIdParamSchema,
   PaginationQuerySchema,
+  isDatabaseIdString,
 } from '../shared/types/public.js';
 
 // Note: Request validation schemas removed as they're not currently used
@@ -50,6 +51,12 @@ export async function publicApiRoutes(
     reply: FastifyReply
   ) {
     const { community_id } = request.params;
+
+    // An id outside 1..2147483647 cannot exist on either backend: answer
+    // "not found" without querying (PostgreSQL would fail on overflow).
+    if (!isDatabaseIdString(community_id)) {
+      return reply.status(404).send({ error: 'Community not found' });
+    }
 
     try {
       const communityRepository = new CommunityRepository(database);
@@ -195,6 +202,12 @@ export async function publicApiRoutes(
     async (request, reply) => {
       const { community_id, id } = request.params;
 
+      if (!isDatabaseIdString(id)) {
+        return reply
+          .status(404)
+          .send({ error: 'Story not found or not public' });
+      }
+
       try {
         const storyRepository = new StoryRepository(database as any);
         const fileRepository = new FileRepository(database as any);
@@ -294,6 +307,10 @@ export async function publicApiRoutes(
     },
     async (request, reply) => {
       const { community_id, id } = request.params;
+
+      if (!isDatabaseIdString(id)) {
+        return reply.status(404).send({ error: 'Place not found' });
+      }
 
       try {
         const placeRepository = new PlaceRepository(database);

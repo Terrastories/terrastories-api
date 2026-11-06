@@ -40,11 +40,23 @@ function associationOrder(table: {
 }
 
 /**
- * Distinct ids in first-seen order. Association lists are sets: a repeated
- * id is the same link (the join tables are unique on story + target).
+ * Distinct ids in first-seen order, with the index of their first
+ * occurrence. Association lists are sets: a repeated id is the same link (the
+ * join tables are unique on story + target), and per-id inputs
+ * given in parallel arrays (placeContexts, speakerRoles) stay aligned after
+ * duplicates are dropped.
  */
-function distinctIds(ids: number[]): number[] {
-  return [...new Set(ids)];
+function distinctIdEntries(
+  ids: number[]
+): Array<{ id: number; sourceIndex: number }> {
+  const seen = new Set<number>();
+  const entries: Array<{ id: number; sourceIndex: number }> = [];
+  ids.forEach((id, sourceIndex) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    entries.push({ id, sourceIndex });
+  });
+  return entries;
 }
 
 /** or() of at least one condition is always defined. */
@@ -347,11 +359,11 @@ export class StoryRepository {
     // Create place associations using proper join table
     if (data.placeIds?.length) {
       const associationTimestamp = new Date();
-      const placeAssociations = distinctIds(data.placeIds).map(
-        (placeId, index) => ({
+      const placeAssociations = distinctIdEntries(data.placeIds).map(
+        ({ id: placeId, sourceIndex }, index) => ({
           storyId: story.id,
           placeId,
-          culturalContext: data.placeContexts?.[index] || undefined,
+          culturalContext: data.placeContexts?.[sourceIndex] || undefined,
           sortOrder: index,
           createdAt: associationTimestamp,
           updatedAt: associationTimestamp,
@@ -366,11 +378,11 @@ export class StoryRepository {
     // Create speaker associations using proper join table
     if (data.speakerIds?.length) {
       const speakerTimestamp = new Date();
-      const speakerAssociations = distinctIds(data.speakerIds).map(
-        (speakerId, index) => ({
+      const speakerAssociations = distinctIdEntries(data.speakerIds).map(
+        ({ id: speakerId, sourceIndex }, index) => ({
           storyId: story.id,
           speakerId,
-          storyRole: data.speakerRoles?.[index] || undefined,
+          storyRole: data.speakerRoles?.[sourceIndex] || undefined,
           sortOrder: index,
           createdAt: speakerTimestamp,
           updatedAt: speakerTimestamp,
@@ -913,11 +925,11 @@ export class StoryRepository {
       // Add new place associations
       if (data.placeIds.length > 0) {
         const updateTimestamp = new Date();
-        const placeAssociations = distinctIds(data.placeIds).map(
-          (placeId, index) => ({
+        const placeAssociations = distinctIdEntries(data.placeIds).map(
+          ({ id: placeId, sourceIndex }, index) => ({
             storyId: id,
             placeId,
-            culturalContext: data.placeContexts?.[index] || undefined,
+            culturalContext: data.placeContexts?.[sourceIndex] || undefined,
             sortOrder: index,
             createdAt: updateTimestamp,
             updatedAt: updateTimestamp,
@@ -939,11 +951,11 @@ export class StoryRepository {
       // Add new speaker associations
       if (data.speakerIds.length > 0) {
         const speakerUpdateTimestamp = new Date();
-        const speakerAssociations = distinctIds(data.speakerIds).map(
-          (speakerId, index) => ({
+        const speakerAssociations = distinctIdEntries(data.speakerIds).map(
+          ({ id: speakerId, sourceIndex }, index) => ({
             storyId: id,
             speakerId,
-            storyRole: data.speakerRoles?.[index] || undefined,
+            storyRole: data.speakerRoles?.[sourceIndex] || undefined,
             sortOrder: index,
             createdAt: speakerUpdateTimestamp,
             updatedAt: speakerUpdateTimestamp,
@@ -1004,15 +1016,22 @@ export class StoryRepository {
     const batchSize = 128;
     // Keyset scan on (createdAt, id), the same order as the page: unlike
     // OFFSET, a row inserted or deleted mid-scan cannot shift later batches.
-    let cursor: { createdAt: Date; id: number } | null = null;
+    // The cursor carries created_at exactly as the database stores it (not a
+    // JS Date): PostgreSQL timestamps keep microseconds, which a millisecond
+    // Date would truncate, skipping rows that share a millisecond.
+    const createdAtRaw = sql<string | number>`${storiesTable.createdAt}`;
+    const cursorValue = (raw: string | number) =>
+      this.dialect === 'postgresql' ? sql`${raw}::timestamp` : sql`${raw}`;
+    let cursor: { createdAt: string | number; id: number } | null = null;
     for (;;) {
       const batchConditions: SQL[] = [...conditions];
       if (cursor) {
+        const createdAt = cursorValue(cursor.createdAt);
         batchConditions.push(
           sqlOr(
-            lt(storiesTable.createdAt, cursor.createdAt),
+            sql`${storiesTable.createdAt} < ${createdAt}`,
             and(
-              eq(storiesTable.createdAt, cursor.createdAt),
+              sql`${storiesTable.createdAt} = ${createdAt}`,
               lt(storiesTable.id, cursor.id)
             ) as SQL
           )
@@ -1021,12 +1040,12 @@ export class StoryRepository {
       const candidates: Array<{
         id: number;
         tags: unknown;
-        createdAt: Date;
+        createdAt: string | number;
       }> = await this.db
         .select({
           id: storiesTable.id,
           tags: storiesTable.tags,
-          createdAt: storiesTable.createdAt,
+          createdAt: createdAtRaw,
         })
         .from(storiesTable)
         .where(batchConditions.length > 0 ? and(...batchConditions) : undefined)

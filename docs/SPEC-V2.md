@@ -373,6 +373,7 @@ CommunityMapConfig
 ```
 
 - One configuration per community.
+- Map bounds order latitude southwest <= northeast; equal latitudes are allowed. Longitude bounds may wrap across the antimeridian (southwest > northeast). Missing coordinates remain absent rather than being replaced with zero.
 - Provider credentials/tokens are deployment secrets, not domain data.
 - Map configuration is provider-neutral; Mapbox/Protomaps-specific naming must not leak into the canonical model unless required by an adapter.
 - Rails Theme `static_map` is a data-bearing ActiveStorage attachment and must migrate through the canonical File/media system.

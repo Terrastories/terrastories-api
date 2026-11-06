@@ -213,8 +213,15 @@ export async function themesRoutes(
             type: 'object',
             properties: {
               error: {
-                type: 'string',
-                example: 'Invalid geographic boundaries',
+                type: 'object',
+                properties: {
+                  message: { type: 'string' },
+                  details: {
+                    type: 'array',
+                    items: { type: 'object', additionalProperties: true },
+                  },
+                },
+                required: ['message'],
               },
             },
           },
@@ -684,8 +691,15 @@ export async function themesRoutes(
             type: 'object',
             properties: {
               error: {
-                type: 'string',
-                example: 'Invalid geographic boundaries',
+                type: 'object',
+                properties: {
+                  message: { type: 'string' },
+                  details: {
+                    type: 'array',
+                    items: { type: 'object', additionalProperties: true },
+                  },
+                },
+                required: ['message'],
               },
             },
           },

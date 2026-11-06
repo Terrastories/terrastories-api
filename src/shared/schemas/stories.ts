@@ -152,25 +152,6 @@ export const CommunityIdParamSchema = z
   })
   .strict();
 
-// Search query schema
-export const SearchQuerySchema = z
-  .object({
-    q: z.string().min(1).max(200),
-  })
-  .merge(storyFilterFieldsSchema.omit({ search: true }))
-  .strict()
-  .refine(
-    (data) => (data.nearPoint === undefined) === (data.radiusKm === undefined),
-    {
-      message:
-        'nearPoint and radiusKm must be provided together for geographic filtering',
-    }
-  )
-  .refine(
-    (data) => !data.dateFrom || !data.dateTo || data.dateFrom <= data.dateTo,
-    { message: 'dateFrom must be before dateTo' }
-  );
-
 // Bulk operation schemas
 export const BulkUpdateSchema = z
   .object({
@@ -386,10 +367,6 @@ export const validateStoryUpdate = (input: unknown) => {
   return StoryUpdateInputSchema.parse(input);
 };
 
-export const validateSearchQuery = (query: unknown) => {
-  return SearchQuerySchema.parse(query);
-};
-
 // Cultural protocol validation helpers
 export const validateCulturalProtocols = (protocols: unknown) => {
   return CulturalProtocolsSchema.parse(protocols);
@@ -429,7 +406,6 @@ export type PaginatedStoriesResponse = z.infer<
 export type StoryIdParam = z.infer<typeof StoryIdParamSchema>;
 export type StorySlugParam = z.infer<typeof StorySlugParamSchema>;
 export type CommunityIdParam = z.infer<typeof CommunityIdParamSchema>;
-export type SearchQuery = z.infer<typeof SearchQuerySchema>;
 
 // Association types
 export type StoryPlaceAssociation = z.infer<typeof StoryPlaceAssociationSchema>;

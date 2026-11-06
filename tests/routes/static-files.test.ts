@@ -102,19 +102,26 @@ describe('Static file routing (wildcard: false)', () => {
     expect(response.statusCode).toBe(404);
   });
 
-  it('should reject parent traversal and never serve a sibling sentinel file', async () => {
-    expect(await readFile(sentinelPath!, 'utf8')).toBe(SENTINEL_CONTENTS);
-
-    const traversalUrls = [
-      '/assets/../traversal-sentinel.txt',
-      '/assets/%2e%2e%2ftraversal-sentinel.txt',
-      '/assets/%2e%2e%2f%2e%2e%2ftraversal-sentinel.txt',
-    ];
-
-    for (const url of traversalUrls) {
-      const response = await app!.inject({ method: 'GET', url });
-      expect([403, 404]).toContain(response.statusCode);
-      expect(response.payload).not.toContain(SENTINEL_CONTENTS);
+  it.each([false, true])(
+    'rejects traversal of a real sibling with wildcard %s',
+    async (wildcard) => {
+      expect(await readFile(sentinelPath!, 'utf8')).toBe(SENTINEL_CONTENTS);
+      const traversalApp = Fastify();
+      try {
+        await traversalApp.register(fastifyStatic, {
+          root: rootDir!,
+          prefix: '/assets/',
+          wildcard,
+        });
+        const response = await traversalApp.inject({
+          method: 'GET',
+          url: '/assets/%2e%2e%2ftraversal-sentinel.txt',
+        });
+        expect(response.statusCode).toBe(wildcard ? 403 : 404);
+        expect(response.payload).not.toContain(SENTINEL_CONTENTS);
+      } finally {
+        await traversalApp.close();
+      }
     }
-  });
+  );
 });

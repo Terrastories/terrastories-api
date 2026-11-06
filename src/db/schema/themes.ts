@@ -48,11 +48,6 @@ export const GeographicBoundsSchema = z
     message:
       'Southwest boundary latitude must be less than or equal to northeast boundary latitude',
     path: ['swBoundaryLat'],
-  })
-  .refine((data) => data.swBoundaryLong <= data.neBoundaryLong, {
-    message:
-      'Southwest boundary longitude must be less than or equal to northeast boundary longitude',
-    path: ['swBoundaryLong'],
   });
 
 // Mapbox URL validation
@@ -187,39 +182,19 @@ const themeFieldsSchema = z.object({
   communityId: z.number().positive(),
 });
 
-export const createThemeSchema = themeFieldsSchema
-  .refine(
-    (data) => {
-      if (
-        data.swBoundaryLat !== undefined &&
-        data.neBoundaryLat !== undefined
-      ) {
-        return data.swBoundaryLat <= data.neBoundaryLat;
-      }
-      return true;
-    },
-    {
-      message:
-        'Southwest boundary latitude must be less than or equal to northeast boundary latitude',
-      path: ['swBoundaryLat'],
+export const createThemeSchema = themeFieldsSchema.refine(
+  (data) => {
+    if (data.swBoundaryLat !== undefined && data.neBoundaryLat !== undefined) {
+      return data.swBoundaryLat <= data.neBoundaryLat;
     }
-  )
-  .refine(
-    (data) => {
-      if (
-        data.swBoundaryLong !== undefined &&
-        data.neBoundaryLong !== undefined
-      ) {
-        return data.swBoundaryLong <= data.neBoundaryLong;
-      }
-      return true;
-    },
-    {
-      message:
-        'Southwest boundary longitude must be less than or equal to northeast boundary longitude',
-      path: ['swBoundaryLong'],
-    }
-  );
+    return true;
+  },
+  {
+    message:
+      'Southwest boundary latitude must be less than or equal to northeast boundary latitude',
+    path: ['swBoundaryLat'],
+  }
+);
 
 export const updateThemeSchema = themeFieldsSchema
   .extend({
@@ -236,17 +211,6 @@ export const updateThemeSchema = themeFieldsSchema
       message:
         'Southwest boundary latitude must be less than or equal to northeast boundary latitude',
       path: ['swBoundaryLat'],
-    }
-  )
-  .refine(
-    (data) =>
-      data.swBoundaryLong === undefined ||
-      data.neBoundaryLong === undefined ||
-      data.swBoundaryLong <= data.neBoundaryLong,
-    {
-      message:
-        'Southwest boundary longitude must be less than or equal to northeast boundary longitude',
-      path: ['swBoundaryLong'],
     }
   );
 

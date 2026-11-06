@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SearchQuerySchema,
   StoryFiltersSchema,
   StoryWithRelationsResponseSchema,
 } from '@/shared/schemas/stories.js';
@@ -90,59 +89,5 @@ describe('story filter input regressions', () => {
 
   it('StoryFiltersSchema rejects reversed dates', () => {
     expect(() => StoryFiltersSchema.parse(reversedDates)).toThrow();
-  });
-
-  it('SearchQuerySchema accepts valid q with a valid geo pair and ordered dates', () => {
-    expect(() =>
-      SearchQuerySchema.parse({ q: 'river', ...validGeo, ...orderedDates })
-    ).not.toThrow();
-  });
-
-  it('SearchQuerySchema rejects nearPoint without radiusKm', () => {
-    expect(() =>
-      SearchQuerySchema.parse({ q: 'river', nearPoint: point })
-    ).toThrow();
-  });
-
-  it('SearchQuerySchema rejects radiusKm without nearPoint', () => {
-    expect(() =>
-      SearchQuerySchema.parse({ q: 'river', radiusKm: 5 })
-    ).toThrow();
-  });
-
-  it('SearchQuerySchema rejects reversed dates', () => {
-    expect(() =>
-      SearchQuerySchema.parse({ q: 'river', ...reversedDates })
-    ).toThrow();
-  });
-
-  it('SearchQuerySchema rejects a nearPoint without both lng and lat coordinates', () => {
-    expect(() =>
-      SearchQuerySchema.parse({
-        q: 'river',
-        nearPoint: { type: 'Point', coordinates: [-60] },
-        radiusKm: 5,
-      })
-    ).toThrow();
-  });
-
-  it('SearchQuerySchema rejects missing q', () => {
-    expect(() => SearchQuerySchema.parse({})).toThrow();
-  });
-
-  it('SearchQuerySchema rejects empty q', () => {
-    expect(() => SearchQuerySchema.parse({ q: '' })).toThrow();
-  });
-
-  it('SearchQuerySchema rejects nonpositive radiusKm', () => {
-    expect(() =>
-      SearchQuerySchema.parse({ q: 'river', nearPoint: point, radiusKm: 0 })
-    ).toThrow();
-  });
-
-  it('SearchQuerySchema rejects unknown fields', () => {
-    expect(() =>
-      SearchQuerySchema.parse({ q: 'river', unknownField: 1 })
-    ).toThrow();
   });
 });

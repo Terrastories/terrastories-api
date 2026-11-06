@@ -5,7 +5,18 @@
  * community isolation, search capabilities, and association handling.
  */
 
-import { eq, and, desc, or, sql, count, inArray } from 'drizzle-orm';
+import {
+  eq,
+  and,
+  desc,
+  or,
+  sql,
+  count,
+  inArray,
+  asc,
+  type AnyColumn,
+  type SQL,
+} from 'drizzle-orm';
 import {
   containsInsensitive,
   dialectOf,
@@ -14,6 +25,28 @@ import {
   type DialectTables,
 } from '../db/dialect.js';
 import type { Database } from '../db/index.js';
+
+/**
+ * Association order, identical on both backends: sortOrder ascending with
+ * NULLs last (SQLite sorts NULL first, PostgreSQL last by default), then the
+ * join row id so equal sortOrder values keep a stable order.
+ */
+function associationOrder(table: {
+  sortOrder: AnyColumn;
+  id: AnyColumn;
+}): SQL[] {
+  return [sql`${table.sortOrder} IS NULL`, asc(table.sortOrder), asc(table.id)];
+}
+
+/** or() of at least one condition is always defined. */
+function sqlOr(...conditions: [SQL, ...SQL[]]): SQL {
+  return or(...conditions) as SQL;
+}
+
+/** SPEC-V2 Section 6.3 application-defined tag comparison key. */
+export function normalizeTag(tag: string): string {
+  return tag.normalize('NFC').toLowerCase();
+}
 
 /**
  * Core story data structure
@@ -396,7 +429,7 @@ export class StoryRepository {
       .from(storyPlacesTable)
       .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
       .where(eq(storyPlacesTable.storyId, id))
-      .orderBy(storyPlacesTable.sortOrder);
+      .orderBy(...associationOrder(storyPlacesTable));
 
     const places = placesWithAssociations.map(
       (p: {
@@ -444,7 +477,7 @@ export class StoryRepository {
         eq(storySpeakersTable.speakerId, speakersTable.id)
       )
       .where(eq(storySpeakersTable.storyId, id))
-      .orderBy(storySpeakersTable.sortOrder);
+      .orderBy(...associationOrder(storySpeakersTable));
 
     const speakers = speakersWithAssociations.map(
       (s: {
@@ -624,51 +657,29 @@ export class StoryRepository {
         culturalContext: string | null;
         sortOrder: number | null;
       }> = [];
-      try {
-        allPlaceAssociations = await this.db
-          .select({
-            storyId: storyPlacesTable.storyId,
-            placeId: placesTable.id,
-            name: placesTable.name,
-            description: placesTable.description,
-            latitude: placesTable.latitude,
-            longitude: placesTable.longitude,
-            region: placesTable.region,
-            culturalSignificance: placesTable.culturalSignificance,
-            // These columns might not exist yet
-            culturalContext: storyPlacesTable.culturalContext,
-            sortOrder: storyPlacesTable.sortOrder,
-          })
-          .from(storyPlacesTable)
-          .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
-          .where(inArray(storyPlacesTable.storyId, storyIds))
-          .orderBy(storyPlacesTable.storyId, storyPlacesTable.sortOrder);
-      } catch {
-        // Try simpler query without missing columns
-        try {
-          allPlaceAssociations = await this.db
-            .select({
-              storyId: storyPlacesTable.storyId,
-              placeId: placesTable.id,
-              name: placesTable.name,
-              description: placesTable.description,
-              latitude: placesTable.latitude,
-              longitude: placesTable.longitude,
-              region: placesTable.region,
-              culturalSignificance: placesTable.culturalSignificance,
-              culturalContext: sql<string | null>`NULL`,
-              sortOrder: sql<number | null>`NULL`,
-            })
-            .from(storyPlacesTable)
-            .innerJoin(
-              placesTable,
-              eq(storyPlacesTable.placeId, placesTable.id)
-            )
-            .where(inArray(storyPlacesTable.storyId, storyIds));
-        } catch {
-          allPlaceAssociations = [];
-        }
-      }
+      // Database failures propagate: an empty relation list must mean "no
+      // associations", never "the query failed" (issue #135 review).
+      allPlaceAssociations = await this.db
+        .select({
+          storyId: storyPlacesTable.storyId,
+          placeId: placesTable.id,
+          name: placesTable.name,
+          description: placesTable.description,
+          latitude: placesTable.latitude,
+          longitude: placesTable.longitude,
+          region: placesTable.region,
+          culturalSignificance: placesTable.culturalSignificance,
+          // These columns might not exist yet
+          culturalContext: storyPlacesTable.culturalContext,
+          sortOrder: storyPlacesTable.sortOrder,
+        })
+        .from(storyPlacesTable)
+        .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
+        .where(inArray(storyPlacesTable.storyId, storyIds))
+        .orderBy(
+          storyPlacesTable.storyId,
+          ...associationOrder(storyPlacesTable)
+        );
 
       const storySpeakersTable = this.getStorySpeakersTable();
       const speakersTable = this.getSpeakersTable();
@@ -686,54 +697,30 @@ export class StoryRepository {
         storyRole: string | null;
         sortOrder: number | null;
       }> = [];
-      try {
-        allSpeakerAssociations = await this.db
-          .select({
-            storyId: storySpeakersTable.storyId,
-            speakerId: speakersTable.id,
-            name: speakersTable.name,
-            bio: speakersTable.bio,
-            photoUrl: speakersTable.photoUrl,
-            birthYear: speakersTable.birthYear,
-            elderStatus: speakersTable.elderStatus,
-            culturalRole: speakersTable.culturalRole,
-            // These columns might not exist yet
-            storyRole: storySpeakersTable.storyRole,
-            sortOrder: storySpeakersTable.sortOrder,
-          })
-          .from(storySpeakersTable)
-          .innerJoin(
-            speakersTable,
-            eq(storySpeakersTable.speakerId, speakersTable.id)
-          )
-          .where(inArray(storySpeakersTable.storyId, storyIds))
-          .orderBy(storySpeakersTable.storyId, storySpeakersTable.sortOrder);
-      } catch {
-        // Try simpler query without missing columns
-        try {
-          allSpeakerAssociations = await this.db
-            .select({
-              storyId: storySpeakersTable.storyId,
-              speakerId: speakersTable.id,
-              name: speakersTable.name,
-              bio: speakersTable.bio,
-              photoUrl: speakersTable.photoUrl,
-              birthYear: speakersTable.birthYear,
-              elderStatus: speakersTable.elderStatus,
-              culturalRole: speakersTable.culturalRole,
-              storyRole: sql<string | null>`NULL`,
-              sortOrder: sql<number | null>`NULL`,
-            })
-            .from(storySpeakersTable)
-            .innerJoin(
-              speakersTable,
-              eq(storySpeakersTable.speakerId, speakersTable.id)
-            )
-            .where(inArray(storySpeakersTable.storyId, storyIds));
-        } catch {
-          allSpeakerAssociations = [];
-        }
-      }
+      allSpeakerAssociations = await this.db
+        .select({
+          storyId: storySpeakersTable.storyId,
+          speakerId: speakersTable.id,
+          name: speakersTable.name,
+          bio: speakersTable.bio,
+          photoUrl: speakersTable.photoUrl,
+          birthYear: speakersTable.birthYear,
+          elderStatus: speakersTable.elderStatus,
+          culturalRole: speakersTable.culturalRole,
+          // These columns might not exist yet
+          storyRole: storySpeakersTable.storyRole,
+          sortOrder: storySpeakersTable.sortOrder,
+        })
+        .from(storySpeakersTable)
+        .innerJoin(
+          speakersTable,
+          eq(storySpeakersTable.speakerId, speakersTable.id)
+        )
+        .where(inArray(storySpeakersTable.storyId, storyIds))
+        .orderBy(
+          storySpeakersTable.storyId,
+          ...associationOrder(storySpeakersTable)
+        );
 
       // Create lookup maps for associations
       const placesByStory = new Map<
@@ -957,38 +944,85 @@ export class StoryRepository {
    * Delete story
    */
   async delete(id: number): Promise<boolean> {
-    try {
-      // First check if the story exists
-      const existingStory = await this.findById(id);
-      if (!existingStory) {
-        return false;
-      }
-
-      // Delete story associations first (foreign key constraints will prevent deletion otherwise)
-      const storyPlacesTable = this.getStoryPlacesTable();
-      const storySpeakersTable = this.getStorySpeakersTable();
-
-      await this.db
-        .delete(storyPlacesTable)
-        .where(eq(storyPlacesTable.storyId, id));
-
-      await this.db
-        .delete(storySpeakersTable)
-        .where(eq(storySpeakersTable.storyId, id));
-
-      // Now delete the story itself
-      const storiesTable = this.getStoriesTable();
-      await this.db.delete(storiesTable).where(eq(storiesTable.id, id));
-
-      return true;
-    } catch {
+    // Database failures propagate; they are not reported as "not found"/"invalid".
+    // First check if the story exists
+    const existingStory = await this.findById(id);
+    if (!existingStory) {
       return false;
     }
+
+    // Delete story associations first (foreign key constraints will prevent deletion otherwise)
+    const storyPlacesTable = this.getStoryPlacesTable();
+    const storySpeakersTable = this.getStorySpeakersTable();
+
+    await this.db
+      .delete(storyPlacesTable)
+      .where(eq(storyPlacesTable.storyId, id));
+
+    await this.db
+      .delete(storySpeakersTable)
+      .where(eq(storySpeakersTable.storyId, id));
+
+    // Now delete the story itself
+    const storiesTable = this.getStoriesTable();
+    await this.db.delete(storiesTable).where(eq(storiesTable.id, id));
+
+    return true;
   }
 
   /**
    * Find many stories with filtering and pagination
    */
+  /**
+   * Match-any tag filter with application-normalized comparison. Keeps at
+   * most one scan batch and the requested page ids in memory.
+   */
+  private async findManyByNormalizedTags(
+    tags: string[],
+    conditions: SQL[],
+    pagination: PaginationOptions
+  ): Promise<PaginatedResult<StoryWithRelations>> {
+    const storiesTable = this.getStoriesTable();
+    const requested = new Set(tags.map(normalizeTag));
+    const pageStart = (pagination.page - 1) * pagination.limit;
+    const pageIds: number[] = [];
+    let total = 0;
+    const batchSize = 128;
+    for (let scanOffset = 0; ; scanOffset += batchSize) {
+      const candidates: Array<{ id: number; tags: unknown }> = await this.db
+        .select({ id: storiesTable.id, tags: storiesTable.tags })
+        .from(storiesTable)
+        .where(conditions.length > 0 ? and(...conditions) : undefined)
+        .orderBy(desc(storiesTable.createdAt), desc(storiesTable.id))
+        .limit(batchSize)
+        .offset(scanOffset)
+        .execute();
+      for (const story of candidates) {
+        // Imported rows may hold a non-array or non-string JSON value; such a
+        // row matches no tag on either backend.
+        const storyTags = Array.isArray(story.tags) ? story.tags : [];
+        const matches = storyTags.some(
+          (tag) => typeof tag === 'string' && requested.has(normalizeTag(tag))
+        );
+        if (!matches) continue;
+        if (total >= pageStart && pageIds.length < pagination.limit) {
+          pageIds.push(story.id);
+        }
+        total++;
+      }
+      if (candidates.length < batchSize) break;
+    }
+
+    const data = await this.loadStoriesWithRelationsBulk(pageIds);
+    return {
+      data,
+      total,
+      page: pagination.page,
+      limit: pagination.limit,
+      totalPages: Math.ceil(total / pagination.limit),
+    };
+  }
+
   async findMany(
     filters: StoryFilters,
     pagination: PaginationOptions
@@ -1000,7 +1034,7 @@ export class StoryRepository {
       .from(storiesTable);
 
     // Apply filters
-    const conditions = [];
+    const conditions: SQL[] = [];
 
     if (filters.communityId) {
       conditions.push(eq(storiesTable.communityId, filters.communityId));
@@ -1008,7 +1042,7 @@ export class StoryRepository {
 
     if (filters.search) {
       conditions.push(
-        or(
+        sqlOr(
           containsInsensitive(this.dialect, storiesTable.title, filters.search),
           containsInsensitive(
             this.dialect,
@@ -1036,16 +1070,17 @@ export class StoryRepository {
     }
 
     if (filters.tags?.length) {
-      // V1 coexistence: tags are a JSON array on both backends. Match any
-      // requested tag by exact element value with each backend's array
-      // iterator (same semantics, no containment operator). V2 replaces this
-      // with the portable StoryTag relation (SPEC-V2 Section 6.3).
-      const tagConditions = filters.tags.map((tag) =>
-        this.dialect === 'postgresql'
-          ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${storiesTable.tags}) AS tag(value) WHERE tag.value = ${tag})`
-          : sql`EXISTS (SELECT 1 FROM json_each(${storiesTable.tags}) WHERE value = ${tag})`
+      // SPEC-V2 Section 6.3: tag matching is application-normalized (NFC +
+      // lower-case), never database case-folding or JSON containment, so it
+      // matches identically on SQLite/D1 and PostgreSQL. Other filters stay in
+      // SQL; tags are matched in bounded batches of the id/tags projection,
+      // in the same order as the unfiltered page. V2 replaces this with the
+      // portable StoryTag(valueNormalized) relation.
+      return this.findManyByNormalizedTags(
+        filters.tags,
+        conditions,
+        pagination
       );
-      conditions.push(or(...tagConditions));
     }
 
     // Build final queries with proper typing
@@ -1138,23 +1173,20 @@ export class StoryRepository {
   ): Promise<boolean> {
     if (!placeIds.length) return true;
 
-    try {
-      const placesTable = this.getPlacesTable();
-      const places = await this.db
-        .select()
-        .from(placesTable)
-        .where(
-          and(
-            inArray(placesTable.id, placeIds),
-            eq(placesTable.communityId, communityId)
-          )
-        );
+    // Database failures propagate; they are not reported as "not found"/"invalid".
+    const placesTable = this.getPlacesTable();
+    const places = await this.db
+      .select()
+      .from(placesTable)
+      .where(
+        and(
+          inArray(placesTable.id, placeIds),
+          eq(placesTable.communityId, communityId)
+        )
+      );
 
-      // All places must exist and belong to the community
-      return places.length === placeIds.length;
-    } catch {
-      return false;
-    }
+    // All places must exist and belong to the community
+    return places.length === placeIds.length;
   }
 
   /**
@@ -1162,14 +1194,24 @@ export class StoryRepository {
    */
   async validateSpeakersInCommunity(
     speakerIds: number[],
-    _communityId: number
+    communityId: number
   ): Promise<boolean> {
     if (!speakerIds.length) return true;
 
-    // For now, since speakers table may not exist yet, use mock logic
-    // For test failure scenario, return false if speakerIds includes 999 (non-existent speaker)
-    // For successful cases, return true for valid speaker IDs (1, 2, etc.)
-    return !speakerIds.includes(999);
+    // Every speaker must exist in this community (SPEC-V2 Section 6.3: both
+    // relationship endpoints belong to one community). Database failures
+    // propagate; they are not treated as "invalid".
+    const speakersTable = this.getSpeakersTable();
+    const speakers = await this.db
+      .select({ id: speakersTable.id })
+      .from(speakersTable)
+      .where(
+        and(
+          inArray(speakersTable.id, speakerIds),
+          eq(speakersTable.communityId, communityId)
+        )
+      );
+    return speakers.length === new Set(speakerIds).size;
   }
 
   /**
@@ -1179,23 +1221,20 @@ export class StoryRepository {
     interviewLocationId: number,
     communityId: number
   ): Promise<boolean> {
-    try {
-      const placesTable = this.getPlacesTable();
-      const [place] = await this.db
-        .select()
-        .from(placesTable)
-        .where(
-          and(
-            eq(placesTable.id, interviewLocationId),
-            eq(placesTable.communityId, communityId)
-          )
+    // Database failures propagate; they are not reported as "not found"/"invalid".
+    const placesTable = this.getPlacesTable();
+    const [place] = await this.db
+      .select()
+      .from(placesTable)
+      .where(
+        and(
+          eq(placesTable.id, interviewLocationId),
+          eq(placesTable.communityId, communityId)
         )
-        .limit(1);
+      )
+      .limit(1);
 
-      return !!place;
-    } catch {
-      return false;
-    }
+    return !!place;
   }
 
   /**
@@ -1205,23 +1244,20 @@ export class StoryRepository {
     interviewerId: number,
     communityId: number
   ): Promise<boolean> {
-    try {
-      const speakersTable = this.getSpeakersTable();
-      const [speaker] = await this.db
-        .select()
-        .from(speakersTable)
-        .where(
-          and(
-            eq(speakersTable.id, interviewerId),
-            eq(speakersTable.communityId, communityId)
-          )
+    // Database failures propagate; they are not reported as "not found"/"invalid".
+    const speakersTable = this.getSpeakersTable();
+    const [speaker] = await this.db
+      .select()
+      .from(speakersTable)
+      .where(
+        and(
+          eq(speakersTable.id, interviewerId),
+          eq(speakersTable.communityId, communityId)
         )
-        .limit(1);
+      )
+      .limit(1);
 
-      return !!speaker;
-    } catch {
-      return false;
-    }
+    return !!speaker;
   }
 
   /**

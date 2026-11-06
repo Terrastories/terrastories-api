@@ -76,7 +76,8 @@ export const themesPg = pgTable(
     mapboxAccessToken: pgText('mapbox_access_token'),
     // mode 'number': postgres.js returns numeric as strings; decode to numbers
     // so themes read the same as the SQLite real columns (issue #135).
-    // numeric(10,6) keeps 6 decimal places.
+    // numeric(10,6) keeps 6 decimal places; ThemesRepository rounds every
+    // write to 6 decimals so SQLite (real) stores the same value.
     centerLat: decimal('center_lat', {
       precision: 10,
       scale: 6,

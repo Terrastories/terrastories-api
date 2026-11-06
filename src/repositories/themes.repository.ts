@@ -116,6 +116,16 @@ function validateMapboxUrl(url: string): boolean {
 }
 
 /**
+ * PostgreSQL stores theme coordinates as numeric(10,6) and rounds to 6
+ * decimals; SQLite real keeps the full double. Round in the application on
+ * every write so both backends store and return the same value.
+ */
+function roundCoordinate<T extends number | null | undefined>(value: T): T {
+  if (value === null || value === undefined) return value;
+  return (Math.round(value * 1e6) / 1e6) as T;
+}
+
+/**
  * Validate geographic bounds
  */
 function validateGeographicBounds(
@@ -228,12 +238,12 @@ export class ThemesRepository {
       mapboxStyleUrl: data.mapboxStyleUrl || null,
       mapboxAccessToken: data.mapboxAccessToken || null,
       // ?? (not ||): a 0 coordinate (equator, prime meridian) is a value.
-      centerLat: data.centerLat ?? null,
-      centerLong: data.centerLong ?? null,
-      swBoundaryLat: data.swBoundaryLat ?? null,
-      swBoundaryLong: data.swBoundaryLong ?? null,
-      neBoundaryLat: data.neBoundaryLat ?? null,
-      neBoundaryLong: data.neBoundaryLong ?? null,
+      centerLat: roundCoordinate(data.centerLat) ?? null,
+      centerLong: roundCoordinate(data.centerLong) ?? null,
+      swBoundaryLat: roundCoordinate(data.swBoundaryLat) ?? null,
+      swBoundaryLong: roundCoordinate(data.swBoundaryLong) ?? null,
+      neBoundaryLat: roundCoordinate(data.neBoundaryLat) ?? null,
+      neBoundaryLong: roundCoordinate(data.neBoundaryLong) ?? null,
       active: data.active || false,
       communityId: data.communityId,
       createdAt: now,
@@ -505,19 +515,23 @@ export class ThemesRepository {
       ...(data.mapboxAccessToken !== undefined && {
         mapboxAccessToken: data.mapboxAccessToken,
       }),
-      ...(data.centerLat !== undefined && { centerLat: data.centerLat }),
-      ...(data.centerLong !== undefined && { centerLong: data.centerLong }),
+      ...(data.centerLat !== undefined && {
+        centerLat: roundCoordinate(data.centerLat),
+      }),
+      ...(data.centerLong !== undefined && {
+        centerLong: roundCoordinate(data.centerLong),
+      }),
       ...(data.swBoundaryLat !== undefined && {
-        swBoundaryLat: data.swBoundaryLat,
+        swBoundaryLat: roundCoordinate(data.swBoundaryLat),
       }),
       ...(data.swBoundaryLong !== undefined && {
-        swBoundaryLong: data.swBoundaryLong,
+        swBoundaryLong: roundCoordinate(data.swBoundaryLong),
       }),
       ...(data.neBoundaryLat !== undefined && {
-        neBoundaryLat: data.neBoundaryLat,
+        neBoundaryLat: roundCoordinate(data.neBoundaryLat),
       }),
       ...(data.neBoundaryLong !== undefined && {
-        neBoundaryLong: data.neBoundaryLong,
+        neBoundaryLong: roundCoordinate(data.neBoundaryLong),
       }),
       ...(data.active !== undefined && { active: data.active }),
       updatedAt: new Date(Date.now() + 100), // Ensure it's different from creation time

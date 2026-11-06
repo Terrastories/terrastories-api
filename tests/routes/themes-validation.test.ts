@@ -3,7 +3,8 @@ import type { FastifyInstance } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { ThemesRepository } from '../../src/repositories/themes.repository.js';
 import { themesSqlite } from '../../src/db/schema/themes.js';
-import { createTestApp, ApiTestClient } from '../helpers/api-client.js';
+import { ApiTestClient } from '../helpers/api-client.js';
+import { buildApp } from '../../src/app.js';
 import { createTestData, testDb } from '../helpers/database.js';
 
 /**
@@ -24,7 +25,7 @@ describe('theme boundary validation through real route handlers', () => {
     const db = await testDb.setup();
     const fixtures = await createTestData();
     communityId = fixtures.community.id;
-    app = await createTestApp(db);
+    app = await buildApp({ database: db });
     cookie = await new ApiTestClient(app).getTestSessionId(
       1,
       communityId,
@@ -191,4 +192,34 @@ describe('theme boundary validation through real route handlers', () => {
     expect(rejectedPut.body).not.toContain('[object Object]');
     expect(rejectedPut.body.toLowerCase()).toContain('latitude');
   });
+  it.each([
+    { label: 'POST missing name', method: 'POST' as const, payload: {} },
+    {
+      label: 'POST invalid name type',
+      method: 'POST' as const,
+      payload: { name: {} },
+    },
+    {
+      label: 'PUT invalid latitude type',
+      method: 'PUT' as const,
+      payload: { swBoundaryLat: 'bad' },
+    },
+  ])(
+    'returns 400 through the global handler for $label',
+    async ({ method, payload }) => {
+      const url =
+        method === 'POST'
+          ? '/api/v1/themes'
+          : `/api/v1/themes/${(await createTheme()).id}`;
+      const response = await app.inject({
+        method,
+        url,
+        headers: { cookie },
+        payload: method === 'POST' ? { communityId, ...payload } : payload,
+      });
+      expect(response.statusCode, response.body).toBe(400);
+      expect(response.json().error).toBe('Request validation failed');
+      expect(response.body).not.toContain('[object Object]');
+    }
+  );
 });

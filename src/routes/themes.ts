@@ -68,6 +68,29 @@ const ThemeIdParamSchema = z.object({
   id: z.coerce.number().int().min(1).describe('Theme ID'),
 });
 
+// Fastify's global handler uses a string; handler validation errors include details.
+const ThemeValidationErrorResponseSchema = {
+  type: 'object',
+  properties: {
+    error: {
+      anyOf: [
+        { type: 'string' },
+        {
+          type: 'object',
+          properties: {
+            message: { type: 'string' },
+            details: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+            },
+          },
+          required: ['message'],
+        },
+      ],
+    },
+  },
+};
+
 export async function themesRoutes(
   app: FastifyInstance,
   options?: { database?: Database }
@@ -209,22 +232,7 @@ export async function themesRoutes(
               },
             },
           },
-          400: {
-            type: 'object',
-            properties: {
-              error: {
-                type: 'object',
-                properties: {
-                  message: { type: 'string' },
-                  details: {
-                    type: 'array',
-                    items: { type: 'object', additionalProperties: true },
-                  },
-                },
-                required: ['message'],
-              },
-            },
-          },
+          400: ThemeValidationErrorResponseSchema,
           401: {
             type: 'object',
             properties: {
@@ -687,22 +695,7 @@ export async function themesRoutes(
               },
             },
           },
-          400: {
-            type: 'object',
-            properties: {
-              error: {
-                type: 'object',
-                properties: {
-                  message: { type: 'string' },
-                  details: {
-                    type: 'array',
-                    items: { type: 'object', additionalProperties: true },
-                  },
-                },
-                required: ['message'],
-              },
-            },
-          },
+          400: ThemeValidationErrorResponseSchema,
           404: {
             type: 'object',
             properties: {

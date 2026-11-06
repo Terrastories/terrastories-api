@@ -38,16 +38,13 @@ describe('CommunityRepository', () => {
 
   describe('create', () => {
     it('should create community with minimal required fields', async () => {
-      // Arrange
       const communityData: CreateCommunityData = {
         name: 'Test Community',
         description: 'A test community for unit testing',
       };
 
-      // Act
       const result = await communityRepository.create(communityData);
 
-      // Assert
       expect(result).toBeDefined();
       expect(result.id).toBeTypeOf('number');
       expect(result.name).toBe('Test Community');
@@ -61,7 +58,6 @@ describe('CommunityRepository', () => {
     });
 
     it('should create community with all fields including cultural settings', async () => {
-      // Arrange
       const culturalProtocols: CulturalProtocols = {
         languagePreferences: ['en', 'es', 'mic'],
         elderContentRestrictions: true,
@@ -86,10 +82,8 @@ describe('CommunityRepository', () => {
         isActive: true,
       };
 
-      // Act
       const result = await communityRepository.create(communityData);
 
-      // Assert
       expect(result).toBeDefined();
       expect(result.name).toBe("Mi'kmaq Heritage Community");
       expect(result.slug).toBe('mikmaq-heritage');
@@ -99,94 +93,79 @@ describe('CommunityRepository', () => {
     });
 
     it('should generate unique slug when slug is not provided', async () => {
-      // Arrange
       const communityData: CreateCommunityData = {
         name: 'Auto Slug Community',
       };
 
-      // Act
       const result = await communityRepository.create(communityData);
 
-      // Assert
       expect(result.slug).toBe('auto-slug-community');
     });
 
     it('should generate unique slug when provided slug already exists', async () => {
-      // Arrange
       const firstCommunity: CreateCommunityData = {
         name: 'First Community',
         slug: 'test-slug',
       };
       const secondCommunity: CreateCommunityData = {
         name: 'Second Community',
-        // Don't provide slug, let it auto-generate from name
       };
 
-      // Act
       await communityRepository.create(firstCommunity);
       const result = await communityRepository.create(secondCommunity);
 
-      // Assert
       expect(result.slug).toBe('second-community');
     });
 
-    it('should keep Rails country/beta persistence deferred to #135', async () => {
+    it('should persist Rails-compatible country/beta fields', async () => {
       const result = await communityRepository.create({
-        name: 'Deferred Rails Fields Community',
+        name: 'Rails Fields Community',
         country: 'CA',
         beta: true,
       });
 
-      expect(result.name).toBe('Deferred Rails Fields Community');
-      expect(result).not.toHaveProperty('country');
-      expect(result).not.toHaveProperty('beta');
+      expect(result.name).toBe('Rails Fields Community');
+      expect(result.country).toBe('CA');
+      expect(result.beta).toBe(true);
     });
 
     it('should throw error for invalid community data', async () => {
-      // Arrange
       const invalidData: CreateCommunityData = {
-        name: '', // Empty name
+        name: '',
       };
 
-      // Act & Assert
       await expect(communityRepository.create(invalidData)).rejects.toThrow(
         InvalidCommunityDataError
       );
     });
 
     it('should throw error for name that is too long', async () => {
-      // Arrange
       const invalidData: CreateCommunityData = {
-        name: 'A'.repeat(101), // Too long
+        name: 'A'.repeat(101),
       };
 
-      // Act & Assert
       await expect(communityRepository.create(invalidData)).rejects.toThrow(
         InvalidCommunityDataError
       );
     });
 
     it('should throw error for description that is too long', async () => {
-      // Arrange
       const invalidData: CreateCommunityData = {
         name: 'Valid Name',
-        description: 'A'.repeat(1001), // Too long
+        description: 'A'.repeat(1001),
       };
 
-      // Act & Assert
       await expect(communityRepository.create(invalidData)).rejects.toThrow(
         InvalidCommunityDataError
       );
     });
 
     it('should throw error for invalid cultural settings JSON', async () => {
-      // Arrange
       const invalidData: CreateCommunityData = {
         name: 'Valid Name',
         culturalSettings: 'invalid-json{',
       };
 
-      // Act & Assert
       await expect(communityRepository.create(invalidData)).rejects.toThrow(
         InvalidCommunityDataError
       );
@@ -195,17 +174,14 @@ describe('CommunityRepository', () => {
 
   describe('findById', () => {
     it('should find community by ID', async () => {
-      // Arrange
       const communityData: CreateCommunityData = {
         name: 'Findable Community',
         description: 'A community to test finding by ID',
       };
       const created = await communityRepository.create(communityData);
 
-      // Act
       const result = await communityRepository.findById(created.id);
 
-      // Assert
       expect(result).toBeDefined();
       expect(result!.id).toBe(created.id);
       expect(result!.name).toBe('Findable Community');
@@ -213,44 +189,34 @@ describe('CommunityRepository', () => {
     });
 
     it('should return null for non-existent ID', async () => {
-      // Act
       const result = await communityRepository.findById(99999);
-
-      // Assert
       expect(result).toBeNull();
     });
   });
 
   describe('findBySlug', () => {
     it('should find community by slug', async () => {
-      // Arrange
       const communityData: CreateCommunityData = {
         name: 'Slug Community',
         slug: 'find-by-slug-test',
       };
       const created = await communityRepository.create(communityData);
 
-      // Act
       const result = await communityRepository.findBySlug('find-by-slug-test');
 
-      // Assert
       expect(result).toBeDefined();
       expect(result!.id).toBe(created.id);
       expect(result!.slug).toBe('find-by-slug-test');
     });
 
     it('should return null for non-existent slug', async () => {
-      // Act
       const result = await communityRepository.findBySlug('non-existent-slug');
-
-      // Assert
       expect(result).toBeNull();
     });
   });
 
   describe('search', () => {
     beforeEach(async () => {
-      // Create test communities for search testing
       await communityRepository.create({
         name: 'Indigenous Heritage Community',
         description: 'Preserving traditional knowledge and stories',
@@ -289,99 +255,75 @@ describe('CommunityRepository', () => {
     });
 
     it('should search communities by name', async () => {
-      // Arrange
       const searchParams: CommunitySearchParams = {
         query: 'Indigenous',
       };
 
-      // Act
       const results = await communityRepository.search(searchParams);
 
-      // Assert
       expect(results).toHaveLength(1);
       expect(results[0].name).toBe('Indigenous Heritage Community');
     });
 
     it('should search communities by description', async () => {
-      // Arrange
       const searchParams: CommunitySearchParams = {
         query: 'Arctic',
       };
 
-      // Act
       const results = await communityRepository.search(searchParams);
 
-      // Assert
       expect(results).toHaveLength(1);
       expect(results[0].name).toBe('Inuit Arctic Community');
     });
 
     it('should filter communities by locale', async () => {
-      // Arrange
       const searchParams: CommunitySearchParams = {
         locale: 'iu',
       };
 
-      // Act
       const results = await communityRepository.search(searchParams);
 
-      // Assert
       expect(results).toHaveLength(1);
       expect(results[0].locale).toBe('iu');
     });
 
     it('should filter communities by active status', async () => {
-      // Arrange
       const searchParams: CommunitySearchParams = {
         isActive: false,
       };
 
-      // Act
       const results = await communityRepository.search(searchParams);
 
-      // Assert
       expect(results).toHaveLength(1);
       expect(results[0].name).toBe('Inactive Test Community');
       expect(results[0].isActive).toBe(false);
     });
 
     it('should respect limit and offset parameters', async () => {
-      // Arrange
       const searchParams: CommunitySearchParams = {
         limit: 1,
         offset: 1,
       };
 
-      // Act
       const results = await communityRepository.search(searchParams);
-
-      // Assert
       expect(results).toHaveLength(1);
     });
 
     it('should return all communities when no filters are provided', async () => {
-      // Act
       const results = await communityRepository.search();
-
-      // Assert
-      expect(results.length).toBeGreaterThanOrEqual(4); // Updated count for new test data
+      expect(results.length).toBeGreaterThanOrEqual(4);
     });
 
-    it('should keep country/beta search filters deferred to #135', async () => {
-      const unfiltered = await communityRepository.search();
+    it('should filter communities by country and beta status', async () => {
       const countryFiltered = await communityRepository.search({
         country: 'CA',
       });
       const betaFiltered = await communityRepository.search({ beta: true });
 
-      expect(countryFiltered).toEqual(unfiltered);
-      expect(betaFiltered).toEqual(unfiltered);
-      expect(unfiltered.every((community) => !('country' in community))).toBe(
-        true
-      );
-      expect(unfiltered.every((community) => !('beta' in community))).toBe(
-        true
-      );
+      expect(countryFiltered).toHaveLength(1);
+      expect(countryFiltered[0].country).toBe('CA');
+      expect(betaFiltered).toHaveLength(2);
+      expect(betaFiltered.every((community) => community.beta)).toBe(true);
     });
   });
 
@@ -404,10 +346,8 @@ describe('CommunityRepository', () => {
     });
 
     it('should return only active communities', async () => {
-      // Act
       const results = await communityRepository.findAllActive();
 
-      // Assert
       expect(results.length).toBeGreaterThanOrEqual(2);
       results.forEach((community) => {
         expect(community.isActive).toBe(true);
@@ -417,7 +357,6 @@ describe('CommunityRepository', () => {
 
   describe('update', () => {
     it('should update community fields', async () => {
-      // Arrange
       const original = await communityRepository.create({
         name: 'Original Name',
         description: 'Original description',
@@ -431,10 +370,8 @@ describe('CommunityRepository', () => {
         publicStories: true,
       };
 
-      // Act
       const result = await communityRepository.update(original.id, updates);
 
-      // Assert
       expect(result).toBeDefined();
       expect(result!.name).toBe('Updated Name');
       expect(result!.description).toBe('Updated description');
@@ -446,7 +383,6 @@ describe('CommunityRepository', () => {
     });
 
     it('should update cultural settings', async () => {
-      // Arrange
       const original = await communityRepository.create({
         name: 'Cultural Community',
       });
@@ -465,29 +401,25 @@ describe('CommunityRepository', () => {
         culturalSettings: JSON.stringify(culturalProtocols),
       };
 
-      // Act
       const result = await communityRepository.update(original.id, updates);
 
-      // Assert
       expect(result).toBeDefined();
       expect(result!.culturalSettings).toBe(JSON.stringify(culturalProtocols));
     });
 
     it('should throw error when updating non-existent community', async () => {
-      // Arrange
       const updates: UpdateCommunityData = {
         name: 'Non-existent',
       };
 
-      // Act & Assert
       await expect(communityRepository.update(99999, updates)).rejects.toThrow(
         CommunityNotFoundError
       );
     });
 
-    it('should keep Rails country/beta updates deferred to #135', async () => {
+    it('should update Rails-compatible country/beta fields', async () => {
       const original = await communityRepository.create({
-        name: 'Deferred Update Community',
+        name: 'Rails Update Community',
       });
 
       const result = await communityRepository.update(original.id, {
@@ -496,22 +428,20 @@ describe('CommunityRepository', () => {
       });
 
       expect(result).toBeDefined();
-      expect(result!.name).toBe('Deferred Update Community');
-      expect(result).not.toHaveProperty('country');
-      expect(result).not.toHaveProperty('beta');
+      expect(result!.name).toBe('Rails Update Community');
+      expect(result!.country).toBe('CA');
+      expect(result!.beta).toBe(true);
     });
 
     it('should throw error for invalid update data', async () => {
-      // Arrange
       const original = await communityRepository.create({
         name: 'Valid Community',
       });
 
       const invalidUpdates: UpdateCommunityData = {
-        name: '', // Empty name
+        name: '',
       };
 
-      // Act & Assert
       await expect(
         communityRepository.update(original.id, invalidUpdates)
       ).rejects.toThrow(InvalidCommunityDataError);
@@ -520,27 +450,19 @@ describe('CommunityRepository', () => {
 
   describe('delete', () => {
     it('should delete community successfully', async () => {
-      // Arrange
       const community = await communityRepository.create({
         name: 'Deletable Community',
       });
 
-      // Act
       const result = await communityRepository.delete(community.id);
 
-      // Assert
       expect(result).toBe(true);
-
-      // Verify deletion
       const found = await communityRepository.findById(community.id);
       expect(found).toBeNull();
     });
 
     it('should return false when deleting non-existent community', async () => {
-      // Act
       const result = await communityRepository.delete(99999);
-
-      // Assert
       expect(result).toBe(false);
     });
   });
@@ -564,26 +486,17 @@ describe('CommunityRepository', () => {
     });
 
     it('should count all communities', async () => {
-      // Act
       const result = await communityRepository.count();
-
-      // Assert
       expect(result).toBeGreaterThanOrEqual(3);
     });
 
     it('should count only active communities', async () => {
-      // Act
       const result = await communityRepository.count(true);
-
-      // Assert
       expect(result).toBeGreaterThanOrEqual(2);
     });
 
     it('should count only inactive communities', async () => {
-      // Act
       const result = await communityRepository.count(false);
-
-      // Assert
       expect(result).toBeGreaterThanOrEqual(1);
     });
   });
@@ -597,107 +510,79 @@ describe('CommunityRepository', () => {
     });
 
     it('should return false for existing slug', async () => {
-      // Act
       const result = await communityRepository.isSlugAvailable('existing-slug');
-
-      // Assert
       expect(result).toBe(false);
     });
 
     it('should return true for available slug', async () => {
-      // Act
       const result =
         await communityRepository.isSlugAvailable('available-slug');
-
-      // Assert
       expect(result).toBe(true);
     });
 
     it('should exclude specified ID from check', async () => {
-      // Arrange
       const community = await communityRepository.create({
         name: 'Test Community',
         slug: 'test-slug-exclude',
       });
 
-      // Act
       const result = await communityRepository.isSlugAvailable(
         'test-slug-exclude',
         community.id
       );
 
-      // Assert
       expect(result).toBe(true);
     });
   });
 
   describe('deactivate', () => {
     it('should deactivate community', async () => {
-      // Arrange
       const community = await communityRepository.create({
         name: 'Active Community',
         isActive: true,
       });
 
-      // Act
       const result = await communityRepository.deactivate(community.id);
 
-      // Assert
       expect(result).toBe(true);
-
-      // Verify deactivation
       const updated = await communityRepository.findById(community.id);
       expect(updated!.isActive).toBe(false);
     });
 
     it('should return false for non-existent community', async () => {
-      // Act
       const result = await communityRepository.deactivate(99999);
-
-      // Assert
       expect(result).toBe(false);
     });
   });
 
   describe('reactivate', () => {
     it('should reactivate community', async () => {
-      // Arrange
       const community = await communityRepository.create({
         name: 'Inactive Community',
         isActive: false,
       });
 
-      // Act
       const result = await communityRepository.reactivate(community.id);
 
-      // Assert
       expect(result).toBe(true);
-
-      // Verify reactivation
       const updated = await communityRepository.findById(community.id);
       expect(updated!.isActive).toBe(true);
     });
 
     it('should return false for non-existent community', async () => {
-      // Act
       const result = await communityRepository.reactivate(99999);
-
-      // Assert
       expect(result).toBe(false);
     });
   });
 
   describe('slug generation edge cases', () => {
     it('should handle special characters in name', async () => {
-      // Arrange
       const communityData: CreateCommunityData = {
         name: 'Community with Special Characters! @#$%',
       };
 
-      // Act
       const result = await communityRepository.create(communityData);
 
-      // Assert
       expect(result.slug).toMatch(/^community-with-special-characters/);
       expect(result.slug).not.toContain('!');
       expect(result.slug).not.toContain('@');
@@ -705,49 +590,38 @@ describe('CommunityRepository', () => {
     });
 
     it('should handle very short names', async () => {
-      // Arrange
       const communityData: CreateCommunityData = {
         name: 'AB',
       };
 
-      // Act
       const result = await communityRepository.create(communityData);
 
-      // Assert
       expect(result.slug).toBe('community-ab');
       expect(result.slug.length).toBeGreaterThanOrEqual(3);
     });
 
     it('should handle names with multiple spaces', async () => {
-      // Arrange
       const communityData: CreateCommunityData = {
         name: 'Community   With    Multiple     Spaces',
       };
 
-      // Act
       const result = await communityRepository.create(communityData);
-
-      // Assert
       expect(result.slug).toBe('community-with-multiple-spaces');
     });
 
     it('should handle names starting/ending with spaces and hyphens', async () => {
-      // Arrange
       const communityData: CreateCommunityData = {
         name: '  -Community Name-  ',
       };
 
-      // Act
       const result = await communityRepository.create(communityData);
 
-      // Assert
       expect(result.slug).toBe('community-name');
       expect(result.slug.startsWith('-')).toBe(false);
       expect(result.slug.endsWith('-')).toBe(false);
     });
 
     it('should generate multiple unique variants', async () => {
-      // Arrange & Act
       const community1 = await communityRepository.create({
         name: 'Same Name',
       });
@@ -758,7 +632,6 @@ describe('CommunityRepository', () => {
         name: 'Same Name',
       });
 
-      // Assert
       expect(community1.slug).toBe('same-name');
       expect(community2.slug).toBe('same-name-1');
       expect(community3.slug).toBe('same-name-2');

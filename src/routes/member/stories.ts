@@ -17,7 +17,6 @@ import { StoryRepository } from '../../repositories/story.repository.js';
 import { FileRepository } from '../../repositories/file.repository.js';
 import { UserRepository } from '../../repositories/user.repository.js';
 import { getDb, type Database } from '../../db/index.js';
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import {
   toMemberStory,
   createPaginationMeta,
@@ -50,10 +49,7 @@ export async function memberStoriesRoutes(
   options?: MemberStoriesRoutesOptions
 ) {
   const db = options?.database || (await getDb());
-  // StoryRepository requires BetterSQLite3Database, using type casting
-  const storyRepository = new StoryRepository(
-    db as unknown as BetterSQLite3Database<Record<string, unknown>>
-  );
+  const storyRepository = new StoryRepository(db);
   const fileRepository = new FileRepository(db);
   const userRepository = new UserRepository(db);
   const storyService = new StoryService(
@@ -185,7 +181,7 @@ export async function memberStoriesRoutes(
       params: {
         type: 'object',
         properties: {
-          id: { type: 'integer', minimum: 1 },
+          id: { type: 'integer', minimum: 1, maximum: 2147483647 },
         },
         required: ['id'],
       },
@@ -292,13 +288,23 @@ export async function memberStoriesRoutes(
             default: 'en',
           },
           tags: { type: 'array', items: { type: 'string' } },
-          placeIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
-          speakerIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
+          placeIds: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 2147483647 },
+          },
+          speakerIds: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 2147483647 },
+          },
           isRestricted: { type: 'boolean', default: false },
           // Interview metadata for Indigenous storytelling context
           dateInterviewed: { type: 'string', format: 'date-time' },
-          interviewLocationId: { type: 'integer', minimum: 1 },
-          interviewerId: { type: 'integer', minimum: 1 },
+          interviewLocationId: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 2147483647,
+          },
+          interviewerId: { type: 'integer', minimum: 1, maximum: 2147483647 },
         },
       },
       response: {
@@ -378,7 +384,7 @@ export async function memberStoriesRoutes(
       params: {
         type: 'object',
         properties: {
-          id: { type: 'integer', minimum: 1 },
+          id: { type: 'integer', minimum: 1, maximum: 2147483647 },
         },
         required: ['id'],
       },
@@ -394,8 +400,14 @@ export async function memberStoriesRoutes(
           },
           language: { type: 'string', minLength: 2, maxLength: 10 },
           tags: { type: 'array', items: { type: 'string' } },
-          placeIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
-          speakerIds: { type: 'array', items: { type: 'integer', minimum: 1 } },
+          placeIds: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 2147483647 },
+          },
+          speakerIds: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 2147483647 },
+          },
           isRestricted: { type: 'boolean' },
         },
       },
@@ -475,7 +487,7 @@ export async function memberStoriesRoutes(
       params: {
         type: 'object',
         properties: {
-          id: { type: 'integer', minimum: 1 },
+          id: { type: 'integer', minimum: 1, maximum: 2147483647 },
         },
         required: ['id'],
       },

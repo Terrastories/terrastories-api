@@ -240,18 +240,8 @@ export async function themesRoutes(
             },
           },
           400: ThemeErrorResponseSchema,
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
-          403: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Forbidden' },
-            },
-          },
+          401: ThemeErrorResponseSchema,
+          403: ThemeErrorResponseSchema,
         },
       },
     },
@@ -382,12 +372,7 @@ export async function themesRoutes(
               },
             },
           },
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
+          401: ThemeErrorResponseSchema,
         },
       },
     },
@@ -471,12 +456,7 @@ export async function themesRoutes(
               },
             },
           },
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
+          401: ThemeErrorResponseSchema,
         },
       },
     },
@@ -548,12 +528,7 @@ export async function themesRoutes(
             },
           },
           404: ThemeErrorResponseSchema,
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
+          401: ThemeErrorResponseSchema,
         },
       },
     },
@@ -699,18 +674,8 @@ export async function themesRoutes(
           },
           400: ThemeErrorResponseSchema,
           404: ThemeErrorResponseSchema,
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
-          403: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Forbidden' },
-            },
-          },
+          401: ThemeErrorResponseSchema,
+          403: ThemeErrorResponseSchema,
         },
       },
     },
@@ -784,18 +749,8 @@ export async function themesRoutes(
             description: 'Theme deleted successfully',
           },
           404: ThemeErrorResponseSchema,
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
-          403: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Forbidden' },
-            },
-          },
+          401: ThemeErrorResponseSchema,
+          403: ThemeErrorResponseSchema,
         },
       },
     },

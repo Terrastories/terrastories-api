@@ -399,7 +399,8 @@ describe('theme boundary validation through real route handlers', () => {
         payload: '{"name":',
       });
       expect(response.statusCode, response.body).toBe(400);
-      expect(response.json().error).toBe('Request validation failed');
+      expect(response.json().error).toBe('Malformed JSON body');
+      expect(response.json()).not.toHaveProperty('issues');
       expect(response.body).not.toContain('[object Object]');
     }
   );

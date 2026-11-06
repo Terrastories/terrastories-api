@@ -23,7 +23,11 @@ import type {
 } from '../repositories/themes.repository.js';
 import type { Theme, CreateTheme, UpdateTheme } from '../db/schema/themes.js';
 import type { Logger } from '../shared/types/index.js';
-import { NotFoundError, ValidationError } from '../shared/errors/index.js';
+import {
+  AuthorizationError,
+  NotFoundError,
+  ValidationError,
+} from '../shared/errors/index.js';
 
 /**
  * Cultural protocols for theme access and modifications
@@ -114,14 +118,14 @@ export class CulturalProtocolViolationError extends Error {
   }
 }
 
-export class DataSovereigntyViolationError extends Error {
+export class DataSovereigntyViolationError extends AuthorizationError {
   constructor(message = 'Data sovereignty violation') {
     super(message);
     this.name = 'DataSovereigntyViolationError';
   }
 }
 
-export class InsufficientPermissionsError extends Error {
+export class InsufficientPermissionsError extends AuthorizationError {
   constructor(message = 'Insufficient permissions') {
     super(message);
     this.name = 'InsufficientPermissionsError';

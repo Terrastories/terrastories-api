@@ -1728,4 +1728,357 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
       );
     }
   }
+
+  // 13. Keyset cursor across a full tie: 300 stories share one identical
+  // whole-second instant, and matches/non-matches alternate so both sides of
+  // the 128-row scan batch boundary are mixed. The cursor must carry
+  // (createdAt equal, id < cursorId) rows into later batches without
+  // duplicating or skipping matches on any page, on both backends.
+  const tieCursorCommunity = await communities.create({
+    name: 'Tie Cursor Community',
+  });
+  const tieCursorAuthor = await users.create({
+    email: 'tie-cursor@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Tie',
+    lastName: 'Cursor',
+    communityId: tieCursorCommunity.id,
+  });
+  const tieCursorStories: Array<{ id: number }> = [];
+  for (let index = 0; index < 300; index += 1) {
+    const isTieMatch = index % 2 === 0;
+    tieCursorStories.push(
+      await stories.create({
+        title: `Tie Cursor ${index}`,
+        slug: `tie-cursor-${index}`,
+        communityId: tieCursorCommunity.id,
+        createdBy: tieCursorAuthor.id,
+        tags: [isTieMatch ? 'Tie' : 'Other'],
+      })
+    );
+  }
+  // Every one of the 300 shares one identical whole-second instant T...
+  const tieInstant = new Date('2026-01-01T00:00:00Z');
+  await (database as any)
+    .update(dialectTables.stories)
+    .set({ createdAt: tieInstant })
+    .where(eq(dialectTables.stories.communityId, tieCursorCommunity.id));
+  // ...and one newer non-matching story sits one hour above the tie, so the
+  // scan must step over it into the tied block and back out again.
+  const tieNewerStory = await stories.create({
+    title: 'Tie Cursor Newer Untagged',
+    slug: 'tie-cursor-newer-untagged',
+    communityId: tieCursorCommunity.id,
+    createdBy: tieCursorAuthor.id,
+    tags: ['Untagged-other'],
+  });
+  await (database as any)
+    .update(dialectTables.stories)
+    .set({ createdAt: new Date(tieInstant.getTime() + 60 * 60 * 1000) })
+    .where(eq(dialectTables.stories.id, tieNewerStory.id));
+
+  const tieMatchIds = tieCursorStories
+    .filter((_, index) => index % 2 === 0)
+    .map((story) => story.id);
+  assert.equal(tieMatchIds.length, 150);
+  const tieExpectedDescending = [...tieMatchIds].sort(
+    (left, right) => right - left
+  );
+
+  const tieFirstPage = await stories.findMany(
+    { communityId: tieCursorCommunity.id, tags: ['tie'] },
+    { page: 1, limit: 40 }
+  );
+  assert.equal(tieFirstPage.total, 150);
+  assert.equal(tieFirstPage.totalPages, 4);
+
+  const tiePagedIds: number[] = [];
+  let tiePageFourIds: number[] = [];
+  for (let page = 1; page <= 4; page += 1) {
+    const pageResult = await stories.findMany(
+      { communityId: tieCursorCommunity.id, tags: ['tie'] },
+      { page, limit: 40 }
+    );
+    assert.equal(pageResult.total, 150, `tie page ${page} must keep the total`);
+    const pageIds = pageResult.data.map((story) => story.id);
+    assert.deepEqual(
+      pageIds,
+      [...pageIds].sort((left, right) => right - left),
+      `tie page ${page} must be in descending id order (all share one instant)`
+    );
+    tiePagedIds.push(...pageIds);
+    if (page === 4) {
+      tiePageFourIds = pageIds;
+    }
+  }
+  assert.equal(
+    new Set(tiePagedIds).size,
+    150,
+    'tied pages must not repeat a matching id'
+  );
+  assert.deepEqual(
+    new Set(tiePagedIds),
+    new Set(tieMatchIds),
+    'the union of the 4 tied pages must be exactly the 150 matching ids'
+  );
+  assert.deepEqual(
+    tiePagedIds,
+    tieExpectedDescending,
+    'tied pages concatenated must be the full id-descending order'
+  );
+  assert.deepEqual(
+    tiePageFourIds,
+    tieExpectedDescending.slice(120),
+    'tie page 4 must be exactly the 30 lowest matching ids'
+  );
+
+  // 14. PostgreSQL keeps microseconds in created_at; the keyset cursor must
+  // carry them exactly as the database stores them (raw text, not a truncated
+  // millisecond JS Date) so 200 rows inside ONE millisecond are neither
+  // skipped nor duplicated. SQLite timestamps are whole seconds (integer
+  // storage), so microsecond fidelity cannot be expressed there; case 13
+  // covers shared-instant ties on SQLite instead.
+  if (dialectOf(database) === 'postgresql') {
+    const microCommunity = await communities.create({
+      name: 'Microsecond Community',
+    });
+    const microAuthor = await users.create({
+      email: 'microsecond-cursor@example.test',
+      passwordHash: 'repository-contract-hash',
+      firstName: 'Micro',
+      lastName: 'Cursor',
+      communityId: microCommunity.id,
+    });
+    const microStoryIds: number[] = [];
+    for (let index = 0; index < 200; index += 1) {
+      const created = await stories.create({
+        title: `Micro Precision ${index}`,
+        slug: `micro-precision-${index}`,
+        communityId: microCommunity.id,
+        createdBy: microAuthor.id,
+        tags: ['Micro'],
+      });
+      microStoryIds.push(created.id);
+    }
+    // All 200 land inside one millisecond: one distinct microsecond per id...
+    await (database as any).execute(sql`
+      UPDATE stories
+      SET created_at =
+        timestamp '2026-02-01 00:00:00' + ((id % 1000) * interval '1 microsecond')
+      WHERE community_id = ${microCommunity.id}
+    `);
+    // ...and the 50 lowest ids collapse onto one identical microsecond value,
+    // mixing exact ties with sub-millisecond differences.
+    await (database as any).execute(sql`
+      UPDATE stories
+      SET created_at = timestamp '2026-02-01 00:00:00'
+      WHERE community_id = ${microCommunity.id}
+        AND id IN (
+          SELECT id FROM stories
+          WHERE community_id = ${microCommunity.id}
+          ORDER BY id ASC
+          LIMIT 50
+        )
+    `);
+    // Expected order read straight from the database as stored text.
+    const microRowsResult = await (database as any).execute(sql`
+      SELECT id, created_at::text AS created_at_text
+      FROM stories
+      WHERE community_id = ${microCommunity.id}
+      ORDER BY created_at DESC, id DESC
+    `);
+    const microExpected: Array<{ id: number; text: string }> = (
+      Array.isArray(microRowsResult) ? microRowsResult : microRowsResult.rows
+    ).map((row: any) => ({
+      id: Number(row.id),
+      text: String(row.created_at_text),
+    }));
+    assert.equal(microExpected.length, 200);
+    // Sanity: every timestamp stays inside the same millisecond, the
+    // sub-millisecond offsets really differ, and 50 rows share one value.
+    const microValueCounts = new Map<string, number>();
+    for (const { text } of microExpected) {
+      assert.match(
+        text,
+        /^2026-02-01 00:00:00(\.\d{1,6})?$/,
+        `created_at must stay inside the 2026-02-01 00:00:00 millisecond, got ${text}`
+      );
+      const dot = text.indexOf('.');
+      if (dot >= 0) {
+        const digits = text.length - dot - 1;
+        const micros = Number(text.slice(dot + 1)) * 10 ** (6 - digits);
+        assert.ok(
+          micros > 0 && micros <= 999,
+          `sub-millisecond microsecond offset expected, got ${text}`
+        );
+      }
+      microValueCounts.set(text, (microValueCounts.get(text) ?? 0) + 1);
+    }
+    assert.ok(
+      microValueCounts.size > 100,
+      'the 200 rows must carry mostly distinct microsecond offsets'
+    );
+    assert.ok(
+      Math.max(...microValueCounts.values()) >= 50,
+      '50 rows must share one identical microsecond value'
+    );
+
+    const microFirstPage = await stories.findMany(
+      { communityId: microCommunity.id, tags: ['micro'] },
+      { page: 1, limit: 50 }
+    );
+    assert.equal(microFirstPage.total, 200);
+    assert.equal(microFirstPage.totalPages, 4);
+    const microPagedIds: number[] = [];
+    for (let page = 1; page <= 4; page += 1) {
+      const pageResult = await stories.findMany(
+        { communityId: microCommunity.id, tags: ['micro'] },
+        { page, limit: 50 }
+      );
+      assert.equal(
+        pageResult.total,
+        200,
+        `microsecond page ${page} must keep the total`
+      );
+      microPagedIds.push(...pageResult.data.map((story) => story.id));
+    }
+    assert.equal(
+      new Set(microPagedIds).size,
+      200,
+      'microsecond pages must not repeat an id'
+    );
+    assert.deepEqual(
+      new Set(microPagedIds),
+      new Set(microStoryIds),
+      'the union of all microsecond pages must be exactly the 200 story ids'
+    );
+    assert.deepEqual(
+      microPagedIds,
+      microExpected.map((row) => row.id),
+      'microsecond pages must follow createdAt desc then id desc, matching the raw-SQL order'
+    );
+  } else {
+    // Skipped on SQLite: its timestamps are whole seconds, so rows can never
+    // differ only below one second (see the storage note above).
+  }
+
+  // 15. Association metadata stays aligned with the deduped id: a repeated id
+  // contributes its FIRST parallel-array entry (placeContexts / speakerRoles
+  // index of the first occurrence), for both create and update, on both
+  // backends. Read back through findByIdWithRelations, whose fields are
+  // places[].culturalContext and speakers[].storyRole.
+  const metadataCommunity = await communities.create({
+    name: 'Association Metadata Community',
+  });
+  const metadataAuthor = await users.create({
+    email: 'association-metadata@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Association',
+    lastName: 'Metadata',
+    communityId: metadataCommunity.id,
+  });
+  const metadataPlaceA = await places.create({
+    name: 'Metadata Place A',
+    communityId: metadataCommunity.id,
+    latitude: -2.5,
+    longitude: -48.5,
+  });
+  const metadataPlaceB = await places.create({
+    name: 'Metadata Place B',
+    communityId: metadataCommunity.id,
+    latitude: -2.6,
+    longitude: -48.6,
+  });
+  const metadataSpeakerS = await speakers.create({
+    name: 'Metadata Speaker S',
+    communityId: metadataCommunity.id,
+  });
+  const metadataSpeakerT = await speakers.create({
+    name: 'Metadata Speaker T',
+    communityId: metadataCommunity.id,
+  });
+  const assertMetadataAlignment = (
+    story: any,
+    placeContexts: string[],
+    speakerRoles: string[],
+    label: string
+  ): void => {
+    assert.deepEqual(
+      story.places.map((place: any) => place.id),
+      [metadataPlaceA.id, metadataPlaceB.id],
+      `${label} must store exactly the two distinct places, first-seen order`
+    );
+    assert.equal(
+      story.places[0].culturalContext,
+      placeContexts[0],
+      `${label} must keep place A's first-occurrence context`
+    );
+    assert.equal(
+      story.places[1].culturalContext,
+      placeContexts[1],
+      `${label} must keep place B's first-occurrence context`
+    );
+    assert.deepEqual(
+      story.speakers.map((speaker: any) => speaker.id),
+      [metadataSpeakerS.id, metadataSpeakerT.id],
+      `${label} must store exactly the two distinct speakers, first-seen order`
+    );
+    assert.equal(
+      story.speakers[0].storyRole,
+      speakerRoles[0],
+      `${label} must keep speaker S's first-occurrence role`
+    );
+    assert.equal(
+      story.speakers[1].storyRole,
+      speakerRoles[1],
+      `${label} must keep speaker T's first-occurrence role`
+    );
+  };
+  const metadataStory = await stories.create({
+    title: 'Association Metadata Story',
+    slug: 'association-metadata-story',
+    communityId: metadataCommunity.id,
+    createdBy: metadataAuthor.id,
+    placeIds: [metadataPlaceA.id, metadataPlaceA.id, metadataPlaceB.id],
+    placeContexts: ['A original', 'A duplicate', 'B original'],
+    speakerIds: [metadataSpeakerS.id, metadataSpeakerS.id, metadataSpeakerT.id],
+    speakerRoles: ['S original', 'S duplicate', 'T original'],
+  });
+  const metadataCreated = await stories.findByIdWithRelations(metadataStory.id);
+  assert.ok(metadataCreated, 'the association-metadata story must load');
+  assertMetadataAlignment(
+    metadataCreated,
+    ['A original', 'B original'],
+    ['S original', 'T original'],
+    'stories.create'
+  );
+  const metadataUpdated = await stories.update(metadataStory.id, {
+    placeIds: [metadataPlaceA.id, metadataPlaceA.id, metadataPlaceB.id],
+    placeContexts: [
+      'A original update',
+      'A duplicate update',
+      'B original update',
+    ],
+    speakerIds: [metadataSpeakerS.id, metadataSpeakerS.id, metadataSpeakerT.id],
+    speakerRoles: [
+      'S original update',
+      'S duplicate update',
+      'T original update',
+    ],
+  });
+  assert.ok(metadataUpdated, 'stories.update must return the metadata story');
+  assertMetadataAlignment(
+    metadataUpdated,
+    ['A original update', 'B original update'],
+    ['S original update', 'T original update'],
+    'stories.update'
+  );
+  const metadataReread = await stories.findByIdWithRelations(metadataStory.id);
+  assert.ok(metadataReread, 'the metadata story must reload after update');
+  assertMetadataAlignment(
+    metadataReread,
+    ['A original update', 'B original update'],
+    ['S original update', 'T original update'],
+    'findByIdWithRelations after stories.update'
+  );
 }

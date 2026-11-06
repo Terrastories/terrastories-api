@@ -22,6 +22,7 @@ import {
   type StoryCreateInput,
 } from '../services/story.service.js';
 import { AppError } from '../shared/errors/index.js';
+import { MAX_DATABASE_ID } from '../shared/types/public.js';
 import {
   StoryRepository,
   type StoryWithRelations,
@@ -36,12 +37,8 @@ import {
 } from '../shared/middleware/auth.middleware.js';
 import { getConfig } from '../shared/config/index.js';
 
-/**
- * Largest id both backends accept. PostgreSQL integer ids overflow above
- * 2^31 - 1 (the query fails) while SQLite simply finds no row, so request
- * schemas cap ids here to give the same 400 on SQLite/D1 and PostgreSQL.
- */
-export const MAX_DATABASE_ID = 2147483647;
+// Request schemas cap ids at MAX_DATABASE_ID (PostgreSQL integer range) so
+// out-of-range ids get the same 400 on SQLite/D1 and PostgreSQL.
 const databaseId = () => z.number().int().positive().max(MAX_DATABASE_ID);
 const coercedDatabaseId = () =>
   z.coerce.number().int().positive().max(MAX_DATABASE_ID);

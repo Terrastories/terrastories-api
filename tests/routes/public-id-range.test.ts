@@ -19,7 +19,9 @@ import {
   beforeEach,
   afterEach,
   afterAll,
+  vi,
 } from 'vitest';
+import { CommunityRepository } from '../../src/repositories/community.repository.js';
 import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
@@ -122,6 +124,39 @@ describe('Out-of-range path ids never reach the database - Issue #135', () => {
       expect(response.statusCode).toBe(404);
       expect(JSON.parse(response.body).error).toBe('Place not found');
     });
+
+    // The id bound must run before the community lookup: with a failing
+    // database, an oversized story/place id still answers 404 and issues no
+    // query at all (it used to reach validateCommunity first and return 500).
+    test.each([
+      ['stories', 'Story not found or not public'],
+      ['places', 'Place not found'],
+    ])(
+      'GET /api/communities/:valid/%s/3000000000 makes zero database calls',
+      async (resource, message) => {
+        const failure = new Error('database unavailable');
+        const findCommunity = vi
+          .spyOn(CommunityRepository.prototype, 'findById')
+          .mockRejectedValue(failure);
+        const select = vi.spyOn(testDb.db, 'select').mockImplementation(() => {
+          throw failure;
+        });
+        try {
+          const response = await app.inject({
+            method: 'GET',
+            url: `/api/communities/${testCommunityId}/${resource}/${OVERSIZED_ID}`,
+          });
+
+          expect(response.statusCode).toBe(404);
+          expect(JSON.parse(response.body).error).toBe(message);
+          expect(findCommunity).not.toHaveBeenCalled();
+          expect(select).not.toHaveBeenCalled();
+        } finally {
+          findCommunity.mockRestore();
+          select.mockRestore();
+        }
+      }
+    );
   });
 
   describe('Authenticated routes', () => {

@@ -43,6 +43,22 @@ export async function publicApiRoutes(
   const database = options?.database || (await getDb());
 
   /**
+   * Resource id guard. Runs before validateCommunity, so an id outside
+   * 1..2147483647 is answered "not found" without any database call (on
+   * PostgreSQL such an id would fail the query; SQLite finds no row).
+   */
+  function validateResourceId(notFoundMessage: string) {
+    return async (
+      request: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply
+    ) => {
+      if (!isDatabaseIdString(request.params.id)) {
+        return reply.status(404).send({ error: notFoundMessage });
+      }
+    };
+  }
+
+  /**
    * Community validation middleware
    * Validates that community_id exists and is accessible
    */
@@ -197,16 +213,13 @@ export async function publicApiRoutes(
   }>(
     '/communities/:community_id/stories/:id',
     {
-      preHandler: validateCommunity,
+      preHandler: [
+        validateResourceId('Story not found or not public'),
+        validateCommunity,
+      ],
     },
     async (request, reply) => {
       const { community_id, id } = request.params;
-
-      if (!isDatabaseIdString(id)) {
-        return reply
-          .status(404)
-          .send({ error: 'Story not found or not public' });
-      }
 
       try {
         const storyRepository = new StoryRepository(database as any);
@@ -303,14 +316,10 @@ export async function publicApiRoutes(
   }>(
     '/communities/:community_id/places/:id',
     {
-      preHandler: validateCommunity,
+      preHandler: [validateResourceId('Place not found'), validateCommunity],
     },
     async (request, reply) => {
       const { community_id, id } = request.params;
-
-      if (!isDatabaseIdString(id)) {
-        return reply.status(404).send({ error: 'Place not found' });
-      }
 
       try {
         const placeRepository = new PlaceRepository(database);

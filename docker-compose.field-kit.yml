@@ -168,35 +168,9 @@ services:
   # FIELD KIT SERVICES - Offline-specific functionality
   # =============================================================================
 
-  # Local file sync service for when connection is available
-  sync-service:
-    build:
-      context: .
-      target: production
-    volumes:
-      - field_kit_data:/app/data
-      - uploads_data:/app/uploads
-      - sync_queue:/app/sync-queue
-    environment:
-      - NODE_ENV=field-kit
-      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
-      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
-      - SYNC_MODE=queue
-      - OFFLINE_MODE=true
-    command: npm run sync:field-kit
-    depends_on:
-      - api
-    networks:
-      - terrastories-network
-    restart: unless-stopped
-    # Minimal resources for sync service
-    deploy:
-      resources:
-        limits:
-          cpus: '0.2'
-          memory: 128M
-    profiles:
-      - sync-enabled # Only start when sync is needed
+  # Hosted/field-kit sync has no approved protocol or runnable entrypoint.
+  # No sync-service or sync-enabled profile is provided; design: #182.
+  # SPEC-V2 Section 5 does not require synchronization for launch.
 
   # Backup service optimized for field conditions
   field-backup:
@@ -232,10 +206,6 @@ volumes:
 
   # Upload files storage (inherited from base configuration)
   uploads_data:
-    driver: local
-
-  # Sync queue for when connectivity is available
-  sync_queue:
     driver: local
 
   # Local backups with limited retention

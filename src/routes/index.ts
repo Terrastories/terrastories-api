@@ -31,6 +31,7 @@ import { SpeakerRepository } from '../repositories/speaker.repository.js';
 import { ThemesRepository } from '../repositories/themes.repository.js';
 import { FileRepository } from '../repositories/file.repository.js';
 import { isDevelopmentEnvironment } from '../shared/config/index.js';
+import { MAX_DATABASE_ID } from '../shared/types/public.js';
 
 export interface RegisterRoutesOptions {
   database?: unknown;
@@ -54,6 +55,11 @@ function createResourceCommunityResolver(
 
     const numericId = Number(rawId);
     if (!Number.isSafeInteger(numericId) || numericId <= 0) return null;
+    // An id above the PostgreSQL integer range cannot exist and must never
+    // reach the database (#135). Resolve nothing: the policy still runs
+    // against the actor's own community, and the route's id schema answers
+    // 400 before any lookup.
+    if (numericId > MAX_DATABASE_ID) return undefined;
 
     switch (family) {
       case 'stories': {

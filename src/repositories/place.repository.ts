@@ -1,37 +1,31 @@
 /**
  * Place Repository
  *
- * Database operations for place management with PostGIS spatial support,
- * multi-database compatibility, and comprehensive CRUD operations.
- *
- * Features:
- * - PostGIS spatial queries with SQLite fallback
- * - Geographic search operations (distance, bounding box)
- * - Community data isolation and multi-tenancy
- * - Story-place association management
- * - Cultural protocol support for restricted places
- * - Performance-optimized queries with spatial indexing
+ * Database operations for place management with portable application-level
+ * spatial behavior across PostgreSQL and SQLite/D1-compatible deployments.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // NOTE: Many 'any' types in this file are unavoidable due to Drizzle ORM's
-// complex typing with spatial queries and multi-database compatibility.
+// complex typing with multi-database compatibility.
 
-import { eq, and, desc, sql, count } from 'drizzle-orm';
+import { eq, and, asc, desc, sql, count, type SQL } from 'drizzle-orm';
 import {
   type Place,
   type NewPlace,
-  getPlacesTable,
-  spatialHelpers,
   validateCoordinates,
 } from '../db/schema/places.js';
-import { storyPlaces, getStoryPlacesTable } from '../db/schema/story_places.js';
 import { storyAudienceCondition } from './story.repository.js';
 import type { TransitionalStoryReadAccess } from '../shared/authorization/sovereignty-policy.js';
-import { getStoriesTable } from '../db/schema/stories.js';
-import { getCommunitiesTable } from '../db/schema/communities.js';
-import { getConfig } from '../shared/config/index.js';
+import {
+  dialectOf,
+  tablesFor,
+  textOrder,
+  type Dialect,
+  type DialectTables,
+} from '../db/dialect.js';
 import type { Database } from '../db/index.js';
+import { SpatialUtils } from '../shared/utils/spatial.js';
 import {
   DatabaseError,
   InvalidCoordinatesError,
@@ -123,22 +117,33 @@ export interface PaginatedResponse<T> {
   pages: number;
 }
 
-/**
- * Place Repository Class
- *
- * Provides complete database operations for places with PostGIS spatial support
- */
 export class PlaceRepository {
   private db: DatabaseType;
-  private isPostgres: boolean;
+  private readonly dialect: Dialect;
+  private readonly tables: DialectTables;
 
   constructor(database: DatabaseType) {
     this.db = database;
-    // Detect database type from connection string
-    const config = getConfig();
-    this.isPostgres =
-      config.database.url.startsWith('postgresql://') ||
-      config.database.url.startsWith('postgres://');
+    // Tables come from this Drizzle instance, so story/place joins use the
+    // matching dialect (previously PostgreSQL join tables on every backend).
+    this.dialect = dialectOf(database);
+    this.tables = tablesFor(database);
+  }
+
+  /** Requested sort column, then id, so pages are deterministic. */
+  private sortOrder(sortBy: string, sortOrder: 'asc' | 'desc'): SQL[] {
+    const places = this.tables.places;
+    if (sortBy === 'name') {
+      return [
+        textOrder(this.dialect, places.name, sortOrder),
+        sortOrder === 'desc' ? desc(places.id) : asc(places.id),
+      ];
+    }
+    const column =
+      sortBy === 'created_at' ? places.createdAt : places.updatedAt;
+    return sortOrder === 'desc'
+      ? [desc(column), desc(places.id)]
+      : [asc(column), asc(places.id)];
   }
 
   /**
@@ -152,8 +157,7 @@ export class PlaceRepository {
       throw new InvalidCoordinatesError(data.latitude, data.longitude);
     }
 
-    const placesTable = await getPlacesTable();
-
+    const placesTable = this.tables.places;
     const now = new Date();
     const placeData: NewPlace = {
       name: data.name,
@@ -171,8 +175,7 @@ export class PlaceRepository {
 
     try {
       // Check if community exists first (SQLite doesn't enforce foreign keys in tests)
-      const communityTable = await getCommunitiesTable();
-
+      const communityTable = this.tables.communities;
       const [existingCommunity] = await (this.db as any)
         .select({ id: communityTable.id })
         .from(communityTable)
@@ -205,8 +208,7 @@ export class PlaceRepository {
    * Get place by ID without community check (internal use)
    */
   async getById(id: number): Promise<Place | null> {
-    const placesTable = await getPlacesTable();
-
+    const placesTable = this.tables.places;
     const [place] = await (this.db as any)
       .select()
       .from(placesTable)
@@ -224,8 +226,7 @@ export class PlaceRepository {
     communityId: number
   ): Promise<Place | null> {
     try {
-      const placesTable = await getPlacesTable();
-
+      const placesTable = this.tables.places;
       const [place] = await (this.db as any)
         .select()
         .from(placesTable)
@@ -263,7 +264,6 @@ export class PlaceRepository {
         );
       }
 
-      // Handle unknown errors
       throw new DatabaseError('Unknown error occurred while retrieving place', {
         originalError: String(error),
         operation: 'get_place_by_id',
@@ -280,7 +280,7 @@ export class PlaceRepository {
     communityId: number,
     params: CommunityPlaceParams
   ): Promise<PaginatedResponse<Place>> {
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const {
       page,
       limit,
@@ -297,14 +297,7 @@ export class PlaceRepository {
     }
     const whereCondition = and(...whereConditions);
 
-    // Build order by
-    const sortColumn =
-      sortBy === 'name'
-        ? placesTable.name
-        : sortBy === 'created_at'
-          ? placesTable.createdAt
-          : placesTable.updatedAt;
-    const orderBy = sortOrder === 'desc' ? desc(sortColumn) : sortColumn;
+    const orderBy = this.sortOrder(sortBy, sortOrder);
 
     // Get total count
     const [{ count: total }] = await (this.db as any)
@@ -317,7 +310,7 @@ export class PlaceRepository {
       .select()
       .from(placesTable)
       .where(whereCondition)
-      .orderBy(orderBy)
+      .orderBy(...orderBy)
       .limit(limit)
       .offset(offset);
 
@@ -341,8 +334,7 @@ export class PlaceRepository {
       }
     }
 
-    const placesTable = await getPlacesTable();
-
+    const placesTable = this.tables.places;
     const updateData: Partial<UpdatePlaceData> = {
       ...(data.name !== undefined && { name: data.name }),
       ...(data.description !== undefined && { description: data.description }),
@@ -368,11 +360,8 @@ export class PlaceRepository {
     return updated || null;
   }
 
-  /**
-   * Soft delete place by ID
-   */
   async delete(id: number): Promise<boolean> {
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
 
     try {
       // For now, we'll do hard delete since soft delete isn't in schema
@@ -389,7 +378,8 @@ export class PlaceRepository {
   }
 
   /**
-   * Search places within radius using PostGIS or fallback calculation
+   * Search places within a radius using the same application-level Haversine
+   * calculation on every supported database backend.
    */
   async searchNear(
     params: NearbySearchParams
@@ -408,103 +398,72 @@ export class PlaceRepository {
     if (!validateCoordinates(latitude, longitude)) {
       throw new InvalidCoordinatesError(latitude, longitude);
     }
-
-    const placesTable = await getPlacesTable();
-    const offset = (page - 1) * limit;
-    const radiusMeters = radiusKm * 1000;
-
-    if (this.isPostgres) {
-      // Use PostGIS for PostgreSQL
-      const distanceCondition = sql`${spatialHelpers.findWithinRadius(latitude, longitude, radiusMeters)}`;
-
-      let whereCondition = and(
-        eq(placesTable.communityId, communityId),
-        distanceCondition
+    if (!Number.isFinite(radiusKm) || radiusKm < 0) {
+      throw new InvalidBoundsError(
+        'Search radius must be a non-negative finite number'
       );
+    }
 
-      if (!includeRestricted) {
-        whereCondition = and(
-          whereCondition,
-          eq(placesTable.isRestricted, false)
-        );
-      }
+    const placesTable = this.tables.places;
+    const offset = (page - 1) * limit;
+    const bounds = SpatialUtils.calculateBoundingBox(
+      latitude,
+      longitude,
+      radiusKm
+    );
+    const whereConditions = [
+      eq(placesTable.communityId, communityId),
+      sql`${placesTable.latitude} BETWEEN ${bounds.south} AND ${bounds.north}`,
+    ];
 
-      // Get total count
-      const [{ count: total }] = await (this.db as any)
-        .select({ count: count() })
-        .from(placesTable)
-        .where(whereCondition);
+    if (!bounds.includesAllLongitudes) {
+      whereConditions.push(
+        bounds.crossesAntimeridian
+          ? sql`(${placesTable.longitude} >= ${bounds.west} OR ${placesTable.longitude} <= ${bounds.east})`
+          : sql`${placesTable.longitude} BETWEEN ${bounds.west} AND ${bounds.east}`
+      );
+    }
 
-      // Get data with distance calculation
-      const places = await (this.db as any)
-        .select({
-          ...(Object.fromEntries(
-            Object.entries(placesTable).filter(
-              ([key]) =>
-                typeof placesTable[key as keyof typeof placesTable] !==
-                'function'
-            )
-          ) as { [K in keyof Place]: any }),
-          distance:
-            sql<number>`${spatialHelpers.calculateDistance(latitude, longitude)}`.as(
-              'distance'
-            ),
-        })
-        .from(placesTable)
-        .where(whereCondition)
-        .orderBy(sql`distance ASC`)
-        .limit(limit)
-        .offset(offset);
+    if (!includeRestricted) {
+      whereConditions.push(eq(placesTable.isRestricted, false));
+    }
 
-      return {
-        data: places.map(
-          ({ distance: _distance, ...place }: any) => place as Place
-        ),
-        total: Number(total),
-        page,
-        limit,
-        pages: Math.ceil(Number(total) / limit),
-      };
-    } else {
-      // SQLite fallback: use Haversine formula approximation
-      const whereConditions = [eq(placesTable.communityId, communityId)];
-      if (!includeRestricted) {
-        whereConditions.push(eq(placesTable.isRestricted, false));
-      }
+    const candidates = await (this.db as any)
+      .select()
+      .from(placesTable)
+      .where(and(...whereConditions));
 
-      const places = await (this.db as any)
-        .select()
-        .from(placesTable)
-        .where(and(...whereConditions));
-
-      // Compute distance once per place and cache it
-      const placesWithDistance = places.map((place: any) => ({
-        ...place,
+    const nearbyPlaces = candidates
+      .map((place: Place) => ({
+        place,
         distance: this.calculateHaversineDistance(
           latitude,
           longitude,
           place.latitude,
           place.longitude
         ),
-      }));
+      }))
+      .filter(({ distance }: { distance: number }) => distance <= radiusKm)
+      // Distance, then id, so equal distances page deterministically.
+      .sort(
+        (
+          a: { distance: number; place: Place },
+          b: { distance: number; place: Place }
+        ) => a.distance - b.distance || a.place.id - b.place.id
+      );
 
-      // Filter by distance and sort by distance
-      const nearbyPlaces = placesWithDistance
-        .filter((place: any) => place.distance <= radiusKm)
-        .sort((a: any, b: any) => a.distance - b.distance);
+    const total = nearbyPlaces.length;
+    const paginatedPlaces = nearbyPlaces
+      .slice(offset, offset + limit)
+      .map(({ place }: { place: Place }) => place);
 
-      // Apply pagination
-      const total = nearbyPlaces.length;
-      const paginatedPlaces = nearbyPlaces.slice(offset, offset + limit);
-
-      return {
-        data: paginatedPlaces,
-        total,
-        page,
-        limit,
-        pages: Math.ceil(total / limit),
-      };
-    }
+    return {
+      data: paginatedPlaces,
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit),
+    };
   }
 
   /**
@@ -538,10 +497,8 @@ export class PlaceRepository {
       throw new InvalidCoordinatesError();
     }
 
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const offset = (page - 1) * limit;
-
-    // Use coordinate range check (works for both PostGIS and SQLite)
     const boundsCondition = and(
       sql`${placesTable.latitude} BETWEEN ${south} AND ${north}`,
       sql`${placesTable.longitude} BETWEEN ${west} AND ${east}`
@@ -567,7 +524,7 @@ export class PlaceRepository {
       .select()
       .from(placesTable)
       .where(whereCondition)
-      .orderBy(placesTable.name)
+      .orderBy(...this.sortOrder('name', 'asc'))
       .limit(limit)
       .offset(offset);
 
@@ -584,8 +541,7 @@ export class PlaceRepository {
    * Get places associated with a story
    */
   async getPlacesByStory(storyId: number): Promise<Place[]> {
-    const placesTable = await getPlacesTable();
-
+    const placesTable = this.tables.places;
     const places = await (this.db as any)
       .select({
         ...(Object.fromEntries(
@@ -596,8 +552,11 @@ export class PlaceRepository {
         ) as { [K in keyof Place]: any }),
       })
       .from(placesTable)
-      .innerJoin(storyPlaces, eq(placesTable.id, storyPlaces.placeId))
-      .where(eq(storyPlaces.storyId, storyId));
+      .innerJoin(
+        this.tables.storyPlaces,
+        eq(placesTable.id, this.tables.storyPlaces.placeId)
+      )
+      .where(eq(this.tables.storyPlaces.storyId, storyId));
 
     return places as Place[];
   }
@@ -609,15 +568,17 @@ export class PlaceRepository {
     placeId: number,
     communityId: number
   ): Promise<any[]> {
-    const storiesTable = await getStoriesTable();
-
+    const storiesTable = this.tables.stories;
     const placeStories = await (this.db as any)
       .select()
       .from(storiesTable)
-      .innerJoin(storyPlaces, eq(storiesTable.id, storyPlaces.storyId))
+      .innerJoin(
+        this.tables.storyPlaces,
+        eq(storiesTable.id, this.tables.storyPlaces.storyId)
+      )
       .where(
         and(
-          eq(storyPlaces.placeId, placeId),
+          eq(this.tables.storyPlaces.placeId, placeId),
           eq(storiesTable.communityId, communityId)
         )
       );
@@ -633,7 +594,7 @@ export class PlaceRepository {
     placeId: number
   ): Promise<void> {
     await (this.db as any)
-      .insert(storyPlaces)
+      .insert(this.tables.storyPlaces)
       .values({ storyId, placeId })
       .onConflictDoNothing(); // Prevent duplicate associations
   }
@@ -646,15 +607,15 @@ export class PlaceRepository {
     placeId: number
   ): Promise<void> {
     await (this.db as any)
-      .delete(storyPlaces)
+      .delete(this.tables.storyPlaces)
       .where(
-        and(eq(storyPlaces.storyId, storyId), eq(storyPlaces.placeId, placeId))
+        and(
+          eq(this.tables.storyPlaces.storyId, storyId),
+          eq(this.tables.storyPlaces.placeId, placeId)
+        )
       );
   }
 
-  /**
-   * Calculate Haversine distance in kilometers (SQLite fallback)
-   */
   private calculateHaversineDistance(
     lat1: number,
     lon1: number,
@@ -705,12 +666,10 @@ export class PlaceRepository {
     public: number;
     withStories: number;
   }> {
-    const placesTable = await getPlacesTable();
+    const placesTable = this.tables.places;
     const includeRestricted = options.includeRestricted ?? false;
-    const storiesTable = await getStoriesTable();
-    // Dialect-aware join table: the static `storyPlaces` export is the PG
-    // table on every dialect (SPEC-V2 §8 portability).
-    const storyPlacesTable = await getStoryPlacesTable();
+    const storiesTable = this.tables.stories;
+    const storyPlacesTable = this.tables.storyPlaces;
     const placeScope = includeRestricted
       ? eq(placesTable.communityId, communityId)
       : and(

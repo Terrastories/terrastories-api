@@ -17,13 +17,16 @@
 // NOTE: Many 'any' types in this file are unavoidable due to Drizzle ORM's
 // complex typing with multi-database compatibility.
 
-import { eq, and, desc, count, like, ilike } from 'drizzle-orm';
+import { eq, and, asc, desc, count, type SQL } from 'drizzle-orm';
+import { type Speaker, type NewSpeaker } from '../db/schema/speakers.js';
 import {
-  type Speaker,
-  type NewSpeaker,
-  getSpeakersTable,
-} from '../db/schema/speakers.js';
-import { getConfig } from '../shared/config/index.js';
+  containsInsensitive,
+  dialectOf,
+  tablesFor,
+  textOrder,
+  type Dialect,
+  type DialectTables,
+} from '../db/dialect.js';
 import type { Database } from '../db/index.js';
 import {
   AppError,
@@ -129,15 +132,31 @@ export interface SpeakerStats {
  */
 export class SpeakerRepository {
   private db: DatabaseType;
-  private isPostgres: boolean;
+  private readonly dialect: Dialect;
+  private readonly tables: DialectTables;
 
   constructor(database: DatabaseType) {
     this.db = database;
-    // Detect database type from connection string
-    const config = getConfig();
-    this.isPostgres =
-      config.database.url.startsWith('postgresql://') ||
-      config.database.url.startsWith('postgres://');
+    this.dialect = dialectOf(database);
+    this.tables = tablesFor(database);
+  }
+
+  /** Requested sort column, then id, so pages are deterministic. */
+  private sortOrder(sortBy: string, sortOrder: 'asc' | 'desc'): SQL[] {
+    const speakersTable = this.tables.speakers;
+    if (sortBy === 'name') {
+      return [
+        textOrder(this.dialect, speakersTable.name, sortOrder),
+        sortOrder === 'desc' ? desc(speakersTable.id) : asc(speakersTable.id),
+      ];
+    }
+    const column =
+      sortBy === 'created_at'
+        ? speakersTable.createdAt
+        : speakersTable.updatedAt;
+    return sortOrder === 'desc'
+      ? [desc(column), desc(speakersTable.id)]
+      : [asc(column), asc(speakersTable.id)];
   }
 
   /**
@@ -189,7 +208,7 @@ export class SpeakerRepository {
       }
     }
 
-    const speakersTable = await getSpeakersTable();
+    const speakersTable = this.tables.speakers;
 
     const now = new Date();
     const speakerData: NewSpeaker = {
@@ -281,7 +300,7 @@ export class SpeakerRepository {
    * Get speaker by ID without community check (internal use)
    */
   async getById(id: number): Promise<Speaker | null> {
-    const speakersTable = await getSpeakersTable();
+    const speakersTable = this.tables.speakers;
 
     const [speaker] = await (this.db as any)
       .select()
@@ -300,7 +319,7 @@ export class SpeakerRepository {
     communityId: number
   ): Promise<Speaker | null> {
     try {
-      const speakersTable = await getSpeakersTable();
+      const speakersTable = this.tables.speakers;
 
       const [speaker] = await (this.db as any)
         .select()
@@ -363,7 +382,7 @@ export class SpeakerRepository {
     communityId: number,
     params: CommunitySpeakerParams
   ): Promise<PaginatedResponse<Speaker>> {
-    const speakersTable = await getSpeakersTable();
+    const speakersTable = this.tables.speakers;
     const {
       page,
       limit,
@@ -393,13 +412,7 @@ export class SpeakerRepository {
     const whereCondition = and(...whereConditions);
 
     // Build order by
-    const sortColumn =
-      sortBy === 'name'
-        ? speakersTable.name
-        : sortBy === 'created_at'
-          ? speakersTable.createdAt
-          : speakersTable.updatedAt;
-    const orderBy = sortOrder === 'desc' ? desc(sortColumn) : sortColumn;
+    const orderBy = this.sortOrder(sortBy, sortOrder);
 
     // Get total count
     const [{ count: total }] = await (this.db as any)
@@ -412,7 +425,7 @@ export class SpeakerRepository {
       .select()
       .from(speakersTable)
       .where(whereCondition)
-      .orderBy(orderBy)
+      .orderBy(...orderBy)
       .limit(limit)
       .offset(offset);
 
@@ -477,7 +490,7 @@ export class SpeakerRepository {
       }
     }
 
-    const speakersTable = await getSpeakersTable();
+    const speakersTable = this.tables.speakers;
 
     const updateData: Partial<UpdateSpeakerData> = {
       ...(data.name !== undefined && { name: data.name.trim() }),
@@ -505,7 +518,7 @@ export class SpeakerRepository {
    * Delete speaker by ID
    */
   async delete(id: number): Promise<boolean> {
-    const speakersTable = await getSpeakersTable();
+    const speakersTable = this.tables.speakers;
 
     try {
       const [deleted] = await (this.db as any)
@@ -529,14 +542,16 @@ export class SpeakerRepository {
     query: string,
     params: SpeakerSearchParams
   ): Promise<PaginatedResponse<Speaker>> {
-    const speakersTable = await getSpeakersTable();
+    const speakersTable = this.tables.speakers;
     const { page, limit, activeOnly = false } = params;
     const offset = (page - 1) * limit;
 
-    // Use case-insensitive search for Postgres, case-sensitive for SQLite
-    const searchCondition = this.isPostgres
-      ? ilike(speakersTable.name, `%${query}%`)
-      : like(speakersTable.name, `%${query.toLowerCase()}%`);
+    // Case-insensitive name search, identical on both backends
+    const searchCondition = containsInsensitive(
+      this.dialect,
+      speakersTable.name,
+      query
+    );
 
     const whereConditions = [
       eq(speakersTable.communityId, communityId),
@@ -560,7 +575,10 @@ export class SpeakerRepository {
       .select()
       .from(speakersTable)
       .where(whereCondition)
-      .orderBy(speakersTable.name)
+      .orderBy(
+        textOrder(this.dialect, speakersTable.name, 'asc'),
+        asc(speakersTable.id)
+      )
       .limit(limit)
       .offset(offset);
 
@@ -582,7 +600,7 @@ export class SpeakerRepository {
     communityId: number,
     options: { includeInactive?: boolean } = {}
   ): Promise<SpeakerStats> {
-    const speakersTable = await getSpeakersTable();
+    const speakersTable = this.tables.speakers;
 
     const scope = options.includeInactive
       ? eq(speakersTable.communityId, communityId)

@@ -13,23 +13,14 @@
  * - Performance-optimized queries with proper indexing
  */
 
-import { eq, and, like, desc, or, sql, count, ne } from 'drizzle-orm';
+import { eq, and, desc, or, sql, count, ne } from 'drizzle-orm';
 import {
-  communitiesSqlite,
-  communitiesPg,
-  filesPg,
-  filesSqlite,
-  placesPg,
-  placesSqlite,
-  speakersPg,
-  speakersSqlite,
-  storiesPg,
-  storiesSqlite,
-  themesPg,
-  themesSqlite,
-  usersPg,
-  usersSqlite,
-} from '../db/schema/index.js';
+  containsInsensitive,
+  dialectOf,
+  tablesFor,
+  type Dialect,
+  type DialectTables,
+} from '../db/dialect.js';
 import type { CommunityClaimState } from '../shared/authorization/administrative-policy.js';
 import type { Community } from '../db/schema/communities.js';
 import type { Database } from '../db/index.js';
@@ -83,9 +74,6 @@ export interface CommunitySearchParams {
   beta?: boolean;
 }
 
-/**
- * Cultural protocol configuration for Indigenous communities
- */
 export interface CulturalProtocols {
   languagePreferences: string[];
   elderContentRestrictions: boolean;
@@ -135,6 +123,33 @@ export class InvalidCommunityDataError extends Error {
   }
 }
 
+function isUniqueConstraintError(error: unknown): boolean {
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 4 && current; depth++) {
+    if (typeof current !== 'object') {
+      return false;
+    }
+
+    const record = current as Record<string, unknown>;
+    const code = typeof record.code === 'string' ? record.code : undefined;
+    const message =
+      typeof record.message === 'string' ? record.message.toLowerCase() : '';
+
+    if (
+      code === '23505' ||
+      message.includes('unique constraint') ||
+      message.includes('duplicate key')
+    ) {
+      return true;
+    }
+
+    current = record.cause;
+  }
+
+  return false;
+}
+
 /**
  * SPEC-V2 §7 first-administrator lock (PostgreSQL): `SELECT id FROM
  * communities WHERE id = ? FOR UPDATE`. Exported so a test can pin the
@@ -158,19 +173,22 @@ export function provisioningLockQuery(
  * Community Repository class providing database operations
  */
 export class CommunityRepository {
-  constructor(private database: Database) {}
+  private readonly dialect: Dialect;
+  private readonly tables: DialectTables;
+
+  constructor(private database: Database) {
+    this.dialect = dialectOf(database);
+    this.tables = tablesFor(database);
+  }
 
   private get communities() {
     // Determine which schema to use based on database type
     // This is a runtime check to use the correct schema
-    return 'execute' in this.database ? communitiesPg : communitiesSqlite;
+    return this.tables.communities;
   }
 
-  // Type-safe database query wrapper - cast to any to handle union type
   private get db() {
-    // Cast to any to resolve union type issues
-    // This is safe because both drizzle instances have compatible query interfaces
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- #135 will replace this cross-dialect Drizzle union cast with backend-specific integration typing.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- cross-dialect Drizzle query interfaces are behaviorally equivalent here.
     return this.database as any;
   }
 
@@ -188,17 +206,20 @@ export class CommunityRepository {
     let baseSlug = name
       .toLowerCase()
       .trim()
-      .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
-      .replace(/[\s]+/g, '-') // Replace spaces with hyphens
-      .replace(/-+/g, '-') // Remove multiple consecutive hyphens
-      .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
+      // Remove special characters
+      .replace(/[^a-z0-9\s-]/g, '')
+      // Replace spaces with hyphens
+      .replace(/[\s]+/g, '-')
+      // Remove multiple consecutive hyphens
+      .replace(/-+/g, '-')
+      // Remove leading/trailing hyphens
+      .replace(/^-|-$/g, '');
 
     // Ensure minimum length
     if (baseSlug.length < 3) {
       baseSlug = `community-${baseSlug}`;
     }
 
-    // Check for existing slugs and find unique variant
     let slug = baseSlug;
     let counter = 1;
 
@@ -263,10 +284,6 @@ export class CommunityRepository {
         }
       }
 
-      // Country validation handled by Zod schema at service layer
-
-      // Rails country/beta persistence is intentionally deferred to #135.
-      // Keep the current insert shape limited to columns present in both schemas.
       const communityData = {
         name: data.name.trim(),
         description: data.description?.trim() || null,
@@ -275,6 +292,8 @@ export class CommunityRepository {
         locale: data.locale || 'en',
         culturalSettings: data.culturalSettings || null,
         isActive: data.isActive ?? true,
+        country: data.country ?? null,
+        beta: data.beta ?? false,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -295,14 +314,8 @@ export class CommunityRepository {
         throw error;
       }
 
-      // Handle database constraint violations
-      if (error instanceof Error) {
-        if (
-          error.message.includes('UNIQUE constraint') ||
-          error.message.includes('unique constraint')
-        ) {
-          throw new DuplicateSlugError(`Community slug already exists`);
-        }
+      if (isUniqueConstraintError(error)) {
+        throw new DuplicateSlugError();
       }
 
       throw new Error(
@@ -364,8 +377,8 @@ export class CommunityRepository {
         query,
         locale,
         isActive,
-        country: _country,
-        beta: _beta,
+        country,
+        beta,
         limit = 50,
         offset = 0,
       } = params;
@@ -375,11 +388,19 @@ export class CommunityRepository {
 
       // Search query across name and description
       if (query?.trim()) {
-        const searchTerm = `%${query.trim()}%`;
+        const searchTerm = query.trim();
         conditions.push(
           or(
-            like(this.communities.name, searchTerm),
-            like(this.communities.description, searchTerm)
+            containsInsensitive(
+              this.dialect,
+              this.communities.name,
+              searchTerm
+            ),
+            containsInsensitive(
+              this.dialect,
+              this.communities.description,
+              searchTerm
+            )
           )
         );
       }
@@ -394,15 +415,13 @@ export class CommunityRepository {
         conditions.push(eq(this.communities.isActive, isActive));
       }
 
-      // Filter by country - commented out until database migration is complete
-      // if (country) {
-      //   conditions.push(eq(this.communities.country, country));
-      // }
+      if (country) {
+        conditions.push(eq(this.communities.country, country));
+      }
 
-      // Filter by beta status - commented out until database migration is complete
-      // if (beta !== undefined) {
-      //   conditions.push(eq(this.communities.beta, beta));
-      // }
+      if (beta !== undefined) {
+        conditions.push(eq(this.communities.beta, beta));
+      }
 
       // Execute query with pagination
       const whereClause =
@@ -412,7 +431,7 @@ export class CommunityRepository {
         .select()
         .from(this.communities)
         .where(whereClause)
-        .orderBy(desc(this.communities.createdAt))
+        .orderBy(desc(this.communities.createdAt), desc(this.communities.id))
         .limit(limit)
         .offset(offset);
 
@@ -483,11 +502,19 @@ export class CommunityRepository {
       ];
 
       if (query?.trim()) {
-        const searchTerm = `%${query.trim()}%`;
+        const searchTerm = query.trim();
         conditions.push(
           or(
-            like(this.communities.name, searchTerm),
-            like(this.communities.description, searchTerm)
+            containsInsensitive(
+              this.dialect,
+              this.communities.name,
+              searchTerm
+            ),
+            containsInsensitive(
+              this.dialect,
+              this.communities.description,
+              searchTerm
+            )
           )
         );
       }
@@ -569,15 +596,12 @@ export class CommunityRepository {
         }
       }
 
-      // Country validation handled by Zod schema at service layer
-
       // Prepare update data
       const updateData = {
         ...updates,
         updatedAt: new Date(),
       };
 
-      // If name is being updated, regenerate slug
       if (updates.name && updates.name.trim() !== existingCommunity.name) {
         updateData.name = updates.name.trim();
       }
@@ -623,7 +647,6 @@ export class CommunityRepository {
         return false;
       }
 
-      // Delete community (CASCADE should handle related data)
       const result = await this.db
         .delete(this.communities)
         .where(eq(this.communities.id, id))
@@ -727,7 +750,7 @@ export class CommunityRepository {
     const isClaimed = (accounts: number, contentCounts: number[]) =>
       accounts > 0 || contentCounts.some((rows) => rows > 0);
 
-    if ('execute' in this.database) {
+    if (this.dialect === 'postgresql') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
       return this.db.transaction(async (tx: any) => {
         const locked = await provisioningLockQuery(
@@ -772,20 +795,12 @@ export class CommunityRepository {
 
   /** Tables that make up the §7 claim state, for the active dialect. */
   private claimTables() {
-    const isPg = 'execute' in this.database;
+    const { users, stories, places, speakers, files, themes } = this.tables;
     return {
-      users: isPg ? usersPg : usersSqlite,
+      users,
       // Every community-owned content table. Story/place/speaker joins carry
       // no community column and only exist alongside these rows.
-      content: isPg
-        ? [storiesPg, placesPg, speakersPg, filesPg, themesPg]
-        : [
-            storiesSqlite,
-            placesSqlite,
-            speakersSqlite,
-            filesSqlite,
-            themesSqlite,
-          ],
+      content: [stories, places, speakers, files, themes],
     };
   }
 

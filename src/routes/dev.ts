@@ -6,7 +6,6 @@
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { isDevelopmentEnvironment } from '../shared/config/index.js';
 import { getDb } from '../db/index.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
@@ -36,9 +35,7 @@ export async function devRoutes(fastify: FastifyInstance) {
         );
         const speakerRepo = new SpeakerRepository(db);
         const placeRepo = new PlaceRepository(db);
-        const storyRepo = new StoryRepository(
-          db as unknown as BetterSQLite3Database<Record<string, unknown>>
-        );
+        const storyRepo = new StoryRepository(db);
 
         // Check for existing communities first (idempotent approach)
         let community = await communityRepo.findBySlug(

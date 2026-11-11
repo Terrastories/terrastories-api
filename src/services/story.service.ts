@@ -1048,12 +1048,12 @@ export class StoryService {
    */
   private projectStoryPlaces(story: StoryWithRelations): StoryWithRelations {
     const hasRestrictedPlace = Boolean(
-      story.places?.some((place) => place.isRestricted === true)
+      story.places?.some((place) => place.isRestricted)
     );
     // A withheld interview-location relation must not leave its raw foreign
-    // key behind. The relation loaders already set `interviewLocation =
-    // null` for a restricted or missing place; this defensive layer also
-    // drops a restricted relation assembled elsewhere (§6.4, every role).
+    // key behind. The relation loaders set `interviewLocation = null` for a
+    // restricted or missing place; this defensive layer also drops a
+    // restricted relation assembled elsewhere (§6.4, every role).
     const restrictedInterviewLocation =
       (story.interviewLocation as { isRestricted?: boolean } | null | undefined)
         ?.isRestricted === true;
@@ -1072,7 +1072,7 @@ export class StoryService {
       ...story,
       ...(hasRestrictedPlace
         ? {
-            places: story.places.filter((place) => place.isRestricted !== true),
+            places: story.places.filter((place) => !place.isRestricted),
           }
         : {}),
       ...(masksInterviewLocationId
@@ -1097,7 +1097,7 @@ export class StoryService {
     const keepsWithdrawn =
       userRole !== null && this.storySpeakerWithdrawalAllowed(userRole);
     const hasWithdrawnSpeaker = Boolean(
-      story.speakers?.some((speaker) => speaker.isActive === false)
+      story.speakers?.some((speaker) => !speaker.isActive)
     );
     const hasWithdrawnInterviewer = story.interviewer?.isActive === false;
     const removesWithdrawnSpeakers = !keepsWithdrawn && hasWithdrawnSpeaker;
@@ -1131,9 +1131,7 @@ export class StoryService {
       ...story,
       ...(removesWithdrawnSpeakers
         ? {
-            speakers: story.speakers.filter(
-              (speaker) => speaker.isActive !== false
-            ),
+            speakers: story.speakers.filter((speaker) => speaker.isActive),
           }
         : {}),
       // The interviewer is a story-derived speaker relation too (§6.5).

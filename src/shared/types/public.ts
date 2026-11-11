@@ -13,11 +13,22 @@ import {
 } from '../authorization/sovereignty-policy.js';
 
 // Input validation schemas for public API
+/**
+ * Path ids must be decimal integers in the range both backends store
+ * (PostgreSQL integer); larger values would fail the query on PostgreSQL but
+ * find no row on SQLite.
+ */
+export const MAX_DATABASE_ID = 2147483647;
+export function isDatabaseIdString(value: string): boolean {
+  if (!/^\d+$/.test(value)) return false;
+  const parsed = Number(value);
+  return parsed >= 1 && parsed <= MAX_DATABASE_ID;
+}
+
 export const CommunityIdParamSchema = z.object({
   community_id: z.string().refine(
     (val) => {
-      const parsed = parseInt(val, 10);
-      return !isNaN(parsed) && parsed >= 1;
+      return isDatabaseIdString(val);
     },
     { message: 'Invalid community ID' }
   ),
@@ -26,8 +37,7 @@ export const CommunityIdParamSchema = z.object({
 export const StoryIdParamSchema = CommunityIdParamSchema.extend({
   id: z.string().refine(
     (val) => {
-      const parsed = parseInt(val, 10);
-      return !isNaN(parsed) && parsed >= 1;
+      return isDatabaseIdString(val);
     },
     { message: 'Invalid story ID' }
   ),
@@ -36,8 +46,7 @@ export const StoryIdParamSchema = CommunityIdParamSchema.extend({
 export const PlaceIdParamSchema = CommunityIdParamSchema.extend({
   id: z.string().refine(
     (val) => {
-      const parsed = parseInt(val, 10);
-      return !isNaN(parsed) && parsed >= 1;
+      return isDatabaseIdString(val);
     },
     { message: 'Invalid place ID' }
   ),

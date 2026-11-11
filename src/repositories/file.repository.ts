@@ -18,12 +18,19 @@
 
 import { eq, and, like, desc, asc, count, or, sql, inArray } from 'drizzle-orm';
 import {
-  getFilesTable,
   type File,
   type NewFile,
   type UpdateFile,
   type CulturalRestrictions,
 } from '../db/schema/files.js';
+import {
+  containsInsensitive,
+  dialectOf,
+  tablesFor,
+  textOrder,
+  type Dialect,
+  type DialectTables,
+} from '../db/dialect.js';
 import type { Database } from '../db/index.js';
 
 /**
@@ -40,6 +47,7 @@ export interface FileListOptions {
     start: Date;
     end: Date;
   };
+  /** @deprecated Ignored compatibility input. Elder-only policy is DROP in SPEC-V2 §11. */
   culturalRestrictions?: {
     elderOnly?: boolean;
     public?: boolean;
@@ -83,7 +91,13 @@ export interface FileUsageStats {
  * File Repository class for database operations
  */
 export class FileRepository {
-  constructor(private readonly db: Database) {}
+  private readonly dialect: Dialect;
+  private readonly tables: DialectTables;
+
+  constructor(private readonly db: Database) {
+    this.dialect = dialectOf(db);
+    this.tables = tablesFor(db);
+  }
 
   /**
    * Create a new file record
@@ -91,7 +105,7 @@ export class FileRepository {
   async create(
     fileData: Omit<NewFile, 'id' | 'createdAt' | 'updatedAt'>
   ): Promise<File> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     const now = new Date();
     const newFile: NewFile = {
@@ -125,7 +139,7 @@ export class FileRepository {
    * Find file by ID with community scoping
    */
   async findById(id: string, communityId?: number): Promise<File | null> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       const conditions = [eq(filesTable.id, id)];
@@ -156,7 +170,7 @@ export class FileRepository {
     communityId: number,
     options: FileListOptions = {}
   ): Promise<PaginatedResult<File>> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     const {
       page = 1,
@@ -165,7 +179,6 @@ export class FileRepository {
       mimeTypeFilter,
       uploadedBy,
       dateRange,
-      culturalRestrictions,
       orderBy = 'createdAt',
       orderDirection = 'desc',
       includeInactive = false,
@@ -184,8 +197,8 @@ export class FileRepository {
       if (search) {
         conditions.push(
           or(
-            like(filesTable.filename, `%${search}%`),
-            like(filesTable.originalName, `%${search}%`)
+            containsInsensitive(this.dialect, filesTable.filename, search),
+            containsInsensitive(this.dialect, filesTable.originalName, search)
           )!
         );
       }
@@ -210,23 +223,18 @@ export class FileRepository {
         );
       }
 
-      // Cultural restrictions filter
-      if (culturalRestrictions) {
-        if (culturalRestrictions.elderOnly !== undefined) {
-          const elderOnlyCondition = culturalRestrictions.elderOnly
-            ? sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') = 1`
-            : or(
-                sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') = 0`,
-                sql`JSON_EXTRACT(${filesTable.culturalRestrictions}, '$.elderOnly') IS NULL`
-              )!;
-          conditions.push(elderOnlyCondition);
-        }
-      }
+      // SPEC-V2 §§2/11 drops elder-only list policy. Legacy metadata stays
+      // stored for migration evidence; it does not define a V2 list filter.
 
       // Build ORDER BY clause
-      const orderColumn = filesTable[orderBy];
-      const orderClause =
-        orderDirection === 'desc' ? desc(orderColumn) : asc(orderColumn);
+      const isTextColumn = orderBy === 'filename' || orderBy === 'originalName';
+      const orderClause = isTextColumn
+        ? textOrder(this.dialect, filesTable[orderBy], orderDirection)
+        : orderDirection === 'desc'
+          ? desc(filesTable[orderBy])
+          : asc(filesTable[orderBy]);
+      const idTiebreak =
+        orderDirection === 'desc' ? desc(filesTable.id) : asc(filesTable.id);
 
       // Calculate offset
       const offset = (page - 1) * limit;
@@ -237,7 +245,7 @@ export class FileRepository {
           .select()
           .from(filesTable)
           .where(and(...conditions))
-          .orderBy(orderClause)
+          .orderBy(orderClause, idTiebreak)
           .limit(limit)
           .offset(offset),
         (this.db as any)
@@ -273,7 +281,7 @@ export class FileRepository {
     updates: Partial<UpdateFile>,
     communityId?: number
   ): Promise<File> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       const conditions = [eq(filesTable.id, id)];
@@ -321,7 +329,7 @@ export class FileRepository {
    * Soft delete file (mark as inactive)
    */
   async softDelete(id: string, communityId?: number): Promise<boolean> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       const conditions = [eq(filesTable.id, id)];
@@ -352,7 +360,7 @@ export class FileRepository {
    * Hard delete file (permanent removal)
    */
   async delete(id: string, communityId?: number): Promise<boolean> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       const conditions = [eq(filesTable.id, id)];
@@ -376,7 +384,7 @@ export class FileRepository {
    * Get file usage statistics for a community
    */
   async getUsageStats(communityId: number): Promise<FileUsageStats> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       // Get total files and size
@@ -452,7 +460,7 @@ export class FileRepository {
     communityId?: number,
     limit: number = 100
   ): Promise<File[]> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       const conditions = [
@@ -468,7 +476,7 @@ export class FileRepository {
         .select()
         .from(filesTable)
         .where(and(...conditions))
-        .orderBy(desc(filesTable.createdAt))
+        .orderBy(desc(filesTable.createdAt), desc(filesTable.id))
         .limit(limit);
 
       return files as File[];
@@ -481,7 +489,7 @@ export class FileRepository {
    * Check if file path already exists
    */
   async existsByPath(path: string, communityId?: number): Promise<boolean> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       const conditions = [eq(filesTable.path, path)];
@@ -508,7 +516,7 @@ export class FileRepository {
    * Get files that need cleanup (inactive files older than specified days)
    */
   async getFilesForCleanup(daysOld: number = 30): Promise<File[]> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       const cutoffDate = new Date();
@@ -523,7 +531,7 @@ export class FileRepository {
             sql`${filesTable.updatedAt} < ${cutoffDate}`
           )
         )
-        .orderBy(asc(filesTable.updatedAt));
+        .orderBy(asc(filesTable.updatedAt), asc(filesTable.id));
 
       return files as File[];
     } catch (error) {
@@ -540,7 +548,7 @@ export class FileRepository {
     communityId: number
   ): Promise<{ valid: boolean; reason?: string }> {
     try {
-      const filesTable = await getFilesTable();
+      const filesTable = this.tables.files;
 
       for (const filePath of filePaths) {
         const [file] = await (this.db as any)
@@ -606,7 +614,7 @@ export class FileRepository {
    * Find files by IDs
    */
   async findByIds(ids: string[], communityId?: number): Promise<File[]> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       const conditions = [inArray(filesTable.id, ids)];
@@ -630,7 +638,7 @@ export class FileRepository {
    * Find file by path
    */
   async findByPath(path: string, communityId?: number): Promise<File | null> {
-    const filesTable = await getFilesTable();
+    const filesTable = this.tables.files;
 
     try {
       const conditions = [eq(filesTable.path, path)];

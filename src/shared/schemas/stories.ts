@@ -57,7 +57,13 @@ export const StoryCreateInputSchema = createStorySchema
   .strict();
 
 // Story update schema
-export const StoryUpdateInputSchema = StoryCreateInputSchema.partial()
+export const StoryUpdateInputSchema = StoryCreateInputSchema.extend({
+  mediaUrls: StoryCreateInputSchema.shape.mediaUrls.removeDefault(),
+  language: StoryCreateInputSchema.shape.language.removeDefault(),
+  tags: StoryCreateInputSchema.shape.tags.removeDefault(),
+  isRestricted: StoryCreateInputSchema.shape.isRestricted.removeDefault(),
+})
+  .partial()
   .omit({
     communityId: true, // Cannot change community
     createdBy: true, // Cannot change creator
@@ -144,14 +150,6 @@ export const CommunityIdParamSchema = z
   .object({
     communityId: z.coerce.number().int().positive(),
   })
-  .strict();
-
-// Search query schema
-export const SearchQuerySchema = z
-  .object({
-    q: z.string().min(1).max(200),
-  })
-  .merge(storyFilterFieldsSchema.omit({ search: true }))
   .strict();
 
 // Bulk operation schemas
@@ -369,10 +367,6 @@ export const validateStoryUpdate = (input: unknown) => {
   return StoryUpdateInputSchema.parse(input);
 };
 
-export const validateSearchQuery = (query: unknown) => {
-  return SearchQuerySchema.parse(query);
-};
-
 // Cultural protocol validation helpers
 export const validateCulturalProtocols = (protocols: unknown) => {
   return CulturalProtocolsSchema.parse(protocols);
@@ -412,7 +406,6 @@ export type PaginatedStoriesResponse = z.infer<
 export type StoryIdParam = z.infer<typeof StoryIdParamSchema>;
 export type StorySlugParam = z.infer<typeof StorySlugParamSchema>;
 export type CommunityIdParam = z.infer<typeof CommunityIdParamSchema>;
-export type SearchQuery = z.infer<typeof SearchQuerySchema>;
 
 // Association types
 export type StoryPlaceAssociation = z.infer<typeof StoryPlaceAssociationSchema>;

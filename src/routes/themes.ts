@@ -68,6 +68,36 @@ const ThemeIdParamSchema = z.object({
   id: z.coerce.number().int().min(1).describe('Theme ID'),
 });
 
+// Null request coordinates reach Zod unchanged and are rejected there.
+// Responses preserve stored nulls rather than serializing them as zero.
+// Fastify's global handler uses a string; service/Zod errors include an object.
+const ThemeErrorResponseSchema = {
+  type: 'object',
+  properties: {
+    statusCode: { type: 'integer' },
+    issues: {
+      type: 'array',
+      items: { type: 'object', additionalProperties: true },
+    },
+    error: {
+      anyOf: [
+        { type: 'string' },
+        {
+          type: 'object',
+          properties: {
+            message: { type: 'string' },
+            details: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+            },
+          },
+          required: ['message'],
+        },
+      ],
+    },
+  },
+};
+
 export async function themesRoutes(
   app: FastifyInstance,
   options?: { database?: Database }
@@ -129,37 +159,37 @@ export async function themesRoutes(
               description: 'Whether theme is active',
             },
             centerLat: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -90,
               maximum: 90,
               description: 'Center latitude',
             },
             centerLong: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -180,
               maximum: 180,
               description: 'Center longitude',
             },
             swBoundaryLat: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -90,
               maximum: 90,
               description: 'Southwest boundary latitude',
             },
             swBoundaryLong: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -180,
               maximum: 180,
               description: 'Southwest boundary longitude',
             },
             neBoundaryLat: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -90,
               maximum: 90,
               description: 'Northeast boundary latitude',
             },
             neBoundaryLong: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -180,
               maximum: 180,
               description: 'Northeast boundary longitude',
@@ -194,12 +224,12 @@ export async function themesRoutes(
                   name: { type: 'string' },
                   description: { type: 'string' },
                   active: { type: 'boolean' },
-                  centerLat: { type: 'number' },
-                  centerLong: { type: 'number' },
-                  swBoundaryLat: { type: 'number' },
-                  swBoundaryLong: { type: 'number' },
-                  neBoundaryLat: { type: 'number' },
-                  neBoundaryLong: { type: 'number' },
+                  centerLat: { type: ['number', 'null'] },
+                  centerLong: { type: ['number', 'null'] },
+                  swBoundaryLat: { type: ['number', 'null'] },
+                  swBoundaryLong: { type: ['number', 'null'] },
+                  neBoundaryLat: { type: ['number', 'null'] },
+                  neBoundaryLong: { type: ['number', 'null'] },
                   zoom: { type: 'number' },
                   mapboxStyleUrl: { type: 'string' },
                   communityId: { type: 'number' },
@@ -209,27 +239,9 @@ export async function themesRoutes(
               },
             },
           },
-          400: {
-            type: 'object',
-            properties: {
-              error: {
-                type: 'string',
-                example: 'Invalid geographic boundaries',
-              },
-            },
-          },
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
-          403: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Forbidden' },
-            },
-          },
+          400: ThemeErrorResponseSchema,
+          401: ThemeErrorResponseSchema,
+          403: ThemeErrorResponseSchema,
         },
       },
     },
@@ -335,12 +347,12 @@ export async function themesRoutes(
                     name: { type: 'string' },
                     description: { type: 'string' },
                     active: { type: 'boolean' },
-                    centerLat: { type: 'number' },
-                    centerLong: { type: 'number' },
-                    swBoundaryLat: { type: 'number' },
-                    swBoundaryLong: { type: 'number' },
-                    neBoundaryLat: { type: 'number' },
-                    neBoundaryLong: { type: 'number' },
+                    centerLat: { type: ['number', 'null'] },
+                    centerLong: { type: ['number', 'null'] },
+                    swBoundaryLat: { type: ['number', 'null'] },
+                    swBoundaryLong: { type: ['number', 'null'] },
+                    neBoundaryLat: { type: ['number', 'null'] },
+                    neBoundaryLong: { type: ['number', 'null'] },
                     zoom: { type: 'number' },
                     mapboxStyleUrl: { type: 'string' },
                     communityId: { type: 'number' },
@@ -360,12 +372,7 @@ export async function themesRoutes(
               },
             },
           },
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
+          401: ThemeErrorResponseSchema,
         },
       },
     },
@@ -433,12 +440,12 @@ export async function themesRoutes(
                     name: { type: 'string' },
                     description: { type: 'string' },
                     active: { type: 'boolean' },
-                    centerLat: { type: 'number' },
-                    centerLong: { type: 'number' },
-                    swBoundaryLat: { type: 'number' },
-                    swBoundaryLong: { type: 'number' },
-                    neBoundaryLat: { type: 'number' },
-                    neBoundaryLong: { type: 'number' },
+                    centerLat: { type: ['number', 'null'] },
+                    centerLong: { type: ['number', 'null'] },
+                    swBoundaryLat: { type: ['number', 'null'] },
+                    swBoundaryLong: { type: ['number', 'null'] },
+                    neBoundaryLat: { type: ['number', 'null'] },
+                    neBoundaryLong: { type: ['number', 'null'] },
                     zoom: { type: 'number' },
                     mapboxStyleUrl: { type: 'string' },
                     communityId: { type: 'number' },
@@ -449,12 +456,7 @@ export async function themesRoutes(
               },
             },
           },
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
+          401: ThemeErrorResponseSchema,
         },
       },
     },
@@ -510,12 +512,12 @@ export async function themesRoutes(
                   name: { type: 'string' },
                   description: { type: 'string' },
                   active: { type: 'boolean' },
-                  centerLat: { type: 'number' },
-                  centerLong: { type: 'number' },
-                  swBoundaryLat: { type: 'number' },
-                  swBoundaryLong: { type: 'number' },
-                  neBoundaryLat: { type: 'number' },
-                  neBoundaryLong: { type: 'number' },
+                  centerLat: { type: ['number', 'null'] },
+                  centerLong: { type: ['number', 'null'] },
+                  swBoundaryLat: { type: ['number', 'null'] },
+                  swBoundaryLong: { type: ['number', 'null'] },
+                  neBoundaryLat: { type: ['number', 'null'] },
+                  neBoundaryLong: { type: ['number', 'null'] },
                   zoom: { type: 'number' },
                   mapboxStyleUrl: { type: 'string' },
                   communityId: { type: 'number' },
@@ -525,18 +527,8 @@ export async function themesRoutes(
               },
             },
           },
-          404: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Theme not found' },
-            },
-          },
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
+          404: ThemeErrorResponseSchema,
+          401: ThemeErrorResponseSchema,
         },
       },
     },
@@ -606,37 +598,37 @@ export async function themesRoutes(
             },
             active: { type: 'boolean', description: 'Whether theme is active' },
             centerLat: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -90,
               maximum: 90,
               description: 'Center latitude',
             },
             centerLong: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -180,
               maximum: 180,
               description: 'Center longitude',
             },
             swBoundaryLat: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -90,
               maximum: 90,
               description: 'Southwest boundary latitude',
             },
             swBoundaryLong: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -180,
               maximum: 180,
               description: 'Southwest boundary longitude',
             },
             neBoundaryLat: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -90,
               maximum: 90,
               description: 'Northeast boundary latitude',
             },
             neBoundaryLong: {
-              type: 'number',
+              type: ['number', 'null'],
               minimum: -180,
               maximum: 180,
               description: 'Northeast boundary longitude',
@@ -665,12 +657,12 @@ export async function themesRoutes(
                   name: { type: 'string' },
                   description: { type: 'string' },
                   active: { type: 'boolean' },
-                  centerLat: { type: 'number' },
-                  centerLong: { type: 'number' },
-                  swBoundaryLat: { type: 'number' },
-                  swBoundaryLong: { type: 'number' },
-                  neBoundaryLat: { type: 'number' },
-                  neBoundaryLong: { type: 'number' },
+                  centerLat: { type: ['number', 'null'] },
+                  centerLong: { type: ['number', 'null'] },
+                  swBoundaryLat: { type: ['number', 'null'] },
+                  swBoundaryLong: { type: ['number', 'null'] },
+                  neBoundaryLat: { type: ['number', 'null'] },
+                  neBoundaryLong: { type: ['number', 'null'] },
                   zoom: { type: 'number' },
                   mapboxStyleUrl: { type: 'string' },
                   communityId: { type: 'number' },
@@ -680,33 +672,10 @@ export async function themesRoutes(
               },
             },
           },
-          400: {
-            type: 'object',
-            properties: {
-              error: {
-                type: 'string',
-                example: 'Invalid geographic boundaries',
-              },
-            },
-          },
-          404: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Theme not found' },
-            },
-          },
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
-          403: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Forbidden' },
-            },
-          },
+          400: ThemeErrorResponseSchema,
+          404: ThemeErrorResponseSchema,
+          401: ThemeErrorResponseSchema,
+          403: ThemeErrorResponseSchema,
         },
       },
     },
@@ -779,24 +748,9 @@ export async function themesRoutes(
             type: 'null',
             description: 'Theme deleted successfully',
           },
-          404: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Theme not found' },
-            },
-          },
-          401: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Unauthorized' },
-            },
-          },
-          403: {
-            type: 'object',
-            properties: {
-              error: { type: 'string', example: 'Forbidden' },
-            },
-          },
+          404: ThemeErrorResponseSchema,
+          401: ThemeErrorResponseSchema,
+          403: ThemeErrorResponseSchema,
         },
       },
     },

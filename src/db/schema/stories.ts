@@ -249,11 +249,19 @@ export const createStorySchema = insertStorySchema
       .optional(), // Optional for create, auto-generated from title
   });
 
-export const updateStorySchema = insertStorySchema.partial().omit({
-  id: true,
-  createdAt: true,
-  communityId: true, // Don't allow changing community
-});
+export const updateStorySchema = insertStorySchema
+  .extend({
+    mediaUrls: insertStorySchema.shape.mediaUrls.removeDefault(),
+    language: insertStorySchema.shape.language.removeDefault(),
+    tags: insertStorySchema.shape.tags.removeDefault(),
+    isRestricted: insertStorySchema.shape.isRestricted.removeDefault(),
+  })
+  .partial()
+  .omit({
+    id: true,
+    createdAt: true,
+    communityId: true, // Don't allow changing community
+  });
 
 // Export table variants for migration generation
 // The default export uses PostgreSQL table for Drizzle Kit

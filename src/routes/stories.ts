@@ -113,6 +113,9 @@ const createStorySchema = z.object({
 });
 
 const updateStorySchema = createStorySchema
+  .extend({
+    language: createStorySchema.shape.language.removeDefault(),
+  })
   .partial()
   .omit({ communityId: true });
 

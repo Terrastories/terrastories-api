@@ -20,6 +20,7 @@ import {
   type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
 import { handleRouteError } from '../shared/middleware/error.middleware.js';
+import { MAX_DATABASE_ID } from '../shared/types/public.js';
 
 /**
  * Zod validation schemas
@@ -128,7 +129,14 @@ const SearchQuerySchema = PaginationSchema.extend({
 
 // Path parameter schemas
 const SpeakerIdSchema = z.object({
-  id: z.coerce.number().min(1).describe('Speaker ID'),
+  // Capped at the PostgreSQL integer range, like PlaceIdSchema, so a
+  // malformed or out-of-range id is a 400 on both backends (#135).
+  id: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(MAX_DATABASE_ID)
+    .describe('Speaker ID'),
 });
 
 /**

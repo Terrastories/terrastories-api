@@ -162,5 +162,33 @@ describe('Out-of-range path ids never reach the database - Issue #135', () => {
 
       expect(response.statusCode).toBe(400);
     });
+
+    // The V2 content guard must not turn the route's id validation into a
+    // 404: malformed and out-of-range ids reach the route schema (400),
+    // while a well-formed unknown id is still not found (404).
+    describe.each(['places', 'speakers'])('/api/v1/%s/:id', (resource) => {
+      test.each(['abc', '1.5', '0', '-1', String(OVERSIZED_ID)])(
+        'GET with id %s returns 400',
+        async (id) => {
+          const response = await app.inject({
+            method: 'GET',
+            url: `/api/v1/${resource}/${id}`,
+            headers: { cookie: sessionId },
+          });
+
+          expect(response.statusCode, response.body).toBe(400);
+        }
+      );
+
+      test('GET with a valid unknown id returns 404', async () => {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/${resource}/999999`,
+          headers: { cookie: sessionId },
+        });
+
+        expect(response.statusCode, response.body).toBe(404);
+      });
+    });
   });
 });

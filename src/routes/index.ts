@@ -53,13 +53,18 @@ function createResourceCommunityResolver(
       return resource ? actorCommunityId : null;
     }
 
+    // A malformed id, or one above the PostgreSQL integer range, cannot name
+    // a row and must never reach the database (#135). Resolve nothing: the
+    // policy still runs against the actor's own community, and the route's
+    // id schema answers 400 before any lookup.
     const numericId = Number(rawId);
-    if (!Number.isSafeInteger(numericId) || numericId <= 0) return null;
-    // An id above the PostgreSQL integer range cannot exist and must never
-    // reach the database (#135). Resolve nothing: the policy still runs
-    // against the actor's own community, and the route's id schema answers
-    // 400 before any lookup.
-    if (numericId > MAX_DATABASE_ID) return undefined;
+    if (
+      !Number.isSafeInteger(numericId) ||
+      numericId <= 0 ||
+      numericId > MAX_DATABASE_ID
+    ) {
+      return undefined;
+    }
 
     switch (family) {
       case 'stories': {

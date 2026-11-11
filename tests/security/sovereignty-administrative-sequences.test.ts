@@ -12,6 +12,11 @@ import { onAdministrativeAudit } from '../../src/shared/utils/audit-logger.js';
 import type { AdministrativeAuditEvent } from '../../src/shared/authorization/administrative-policy.js';
 import { createTestApp } from '../helpers/api-client.js';
 import {
+  call,
+  fastifyTransport,
+  type Transport,
+} from '../helpers/transport.js';
+import {
   TestDataFactory,
   testDb,
   type TestDatabase,
@@ -39,6 +44,7 @@ import { TEST_PASSWORD } from '../constants/field-kit-test-constants.js';
  */
 describe('V2 sovereignty administrative sequences', () => {
   let app: FastifyInstance;
+  let transport: Transport;
   let db: TestDatabase;
   let audit: AdministrativeAuditEvent[];
   let stopAudit: () => void;
@@ -63,32 +69,32 @@ describe('V2 sovereignty administrative sequences', () => {
     communityId: number,
     password = TEST_PASSWORD
   ) {
-    return app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/login',
-      payload: { email, password, communityId },
+    return call(transport, 'POST', '/api/v1/auth/login', {
+      json: { email, password, communityId },
     });
   }
 
   async function cookieFor(email: string, communityId: number) {
     const response = await login(email, communityId);
-    expect(response.statusCode).toBe(200);
-    return extractSignedSessionCookie(response.headers['set-cookie']);
+    expect(response.status).toBe(200);
+    return extractSignedSessionCookie(response.headers.getSetCookie());
   }
 
   async function readProtected(cookie?: string) {
-    return app.inject({
-      method: 'GET',
-      url: `/api/v1/communities/${privateCommunityId}/stories/${protectedStoryId}`,
-      headers: cookie ? { cookie } : {},
-    });
+    return call(
+      transport,
+      'GET',
+      `/api/v1/communities/${privateCommunityId}/stories/${protectedStoryId}`,
+      cookie ? { cookie } : {}
+    );
   }
 
   async function readUnpublishedAnonymously() {
-    return app.inject({
-      method: 'GET',
-      url: `/api/communities/${privateCommunityId}/stories/${unpublishedStoryId}`,
-    });
+    return call(
+      transport,
+      'GET',
+      `/api/communities/${privateCommunityId}/stories/${unpublishedStoryId}`
+    );
   }
 
   function registerPayload(
@@ -214,6 +220,7 @@ describe('V2 sovereignty administrative sequences', () => {
     });
 
     app = await createTestApp(db);
+    transport = fastifyTransport(app);
   });
 
   afterEach(async () => {
@@ -225,15 +232,13 @@ describe('V2 sovereignty administrative sequences', () => {
   describe('registration then login then protected read', () => {
     it('rejects anonymous registration as admin into an existing private community', async () => {
       const email = `seq-anon-admin-${Date.now()}@example.test`;
-      const register = await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: registerPayload(email, 'admin'),
+      const register = await call(transport, 'POST', '/api/v1/auth/register', {
+        json: registerPayload(email, 'admin'),
       });
-      expect(register.statusCode).toBe(401);
+      expect(register.status).toBe(401);
 
       const loginAttempt = await login(email, privateCommunityId, NEW_PASSWORD);
-      expect(loginAttempt.statusCode).toBe(401);
+      expect(loginAttempt.status).toBe(401);
 
       const rows = await db
         .select()
@@ -258,16 +263,19 @@ describe('V2 sovereignty administrative sequences', () => {
         ['super_admin', privateCommunityId],
         ['admin', emptyCommunityId],
       ] as const) {
-        const response = await app.inject({
-          method: 'POST',
-          url: '/api/v1/auth/register',
-          payload: registerPayload(
-            `seq-anon-${role}-${communityId}@example.test`,
-            role,
-            communityId
-          ),
-        });
-        expect(response.statusCode).toBe(401);
+        const response = await call(
+          transport,
+          'POST',
+          '/api/v1/auth/register',
+          {
+            json: registerPayload(
+              `seq-anon-${role}-${communityId}@example.test`,
+              role,
+              communityId
+            ),
+          }
+        );
+        expect(response.status).toBe(401);
       }
       const created = await db
         .select()
@@ -285,19 +293,19 @@ describe('V2 sovereignty administrative sequences', () => {
       for (const [index, caller] of callers.entries()) {
         const cookie = await cookieFor(caller.user.email, caller.communityId);
         const email = `seq-escalate-${index}@example.test`;
-        const response = await app.inject({
-          method: 'POST',
-          url: '/api/v1/auth/register',
-          headers: { cookie },
-          payload: registerPayload(email, 'admin'),
-        });
-        expect(response.statusCode).toBe(403);
+        const response = await call(
+          transport,
+          'POST',
+          '/api/v1/auth/register',
+          { cookie, json: registerPayload(email, 'admin') }
+        );
+        expect(response.status).toBe(403);
         const loginAttempt = await login(
           email,
           privateCommunityId,
           NEW_PASSWORD
         );
-        expect(loginAttempt.statusCode).toBe(401);
+        expect(loginAttempt.status).toBe(401);
       }
       const reasons = audit
         .filter((event) => event.action === 'enrollment')
@@ -311,34 +319,29 @@ describe('V2 sovereignty administrative sequences', () => {
 
     it('rejects a community admin minting a super_admin account', async () => {
       const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
-      const response = await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        headers: { cookie },
-        payload: registerPayload('seq-mint-system@example.test', 'super_admin'),
+      const response = await call(transport, 'POST', '/api/v1/auth/register', {
+        cookie,
+        json: registerPayload('seq-mint-system@example.test', 'super_admin'),
       });
-      expect(response.statusCode).toBe(403);
+      expect(response.status).toBe(403);
     });
 
     it('lets a same-community admin enroll a member, who then reads the community audience', async () => {
       const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
       const email = 'seq-enrolled-member@example.test';
-      const response = await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        headers: { cookie },
-        payload: registerPayload(email, 'viewer'),
+      const response = await call(transport, 'POST', '/api/v1/auth/register', {
+        cookie,
+        json: registerPayload(email, 'viewer'),
       });
-      expect(response.statusCode).toBe(201);
+      expect(response.status).toBe(201);
 
+      const memberLogin = await login(email, privateCommunityId, NEW_PASSWORD);
       const memberCookie = extractSignedSessionCookie(
-        (await login(email, privateCommunityId, NEW_PASSWORD)).headers[
-          'set-cookie'
-        ]
+        memberLogin.headers.getSetCookie()
       );
       const read = await readProtected(memberCookie);
-      expect(read.statusCode).toBe(200);
-      expect(read.body).toContain(PROTECTED_TITLE);
+      expect(read.status).toBe(200);
+      expect(await read.text()).toContain(PROTECTED_TITLE);
 
       const grant = audit.find((event) => event.action === 'enrollment');
       expect(grant).toMatchObject({
@@ -355,18 +358,18 @@ describe('V2 sovereignty administrative sequences', () => {
     it('rejects a super admin creating an admin with chosen credentials in a community that has an administrator', async () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
       const email = 'seq-system-minted-admin@example.test';
-      const create = await app.inject({
-        method: 'POST',
-        url: '/api/v1/super_admin/users',
-        headers: { cookie },
-        payload: registerPayload(email, 'admin'),
-      });
-      expect(create.statusCode).toBe(403);
-      expect(create.body).not.toContain(PROTECTED_TITLE);
+      const create = await call(
+        transport,
+        'POST',
+        '/api/v1/super_admin/users',
+        { cookie, json: registerPayload(email, 'admin') }
+      );
+      expect(create.status).toBe(403);
+      expect(await create.text()).not.toContain(PROTECTED_TITLE);
 
       const loginAttempt = await login(email, privateCommunityId, NEW_PASSWORD);
-      expect(loginAttempt.statusCode).toBe(401);
-      expect((await readProtected()).statusCode).not.toBe(200);
+      expect(loginAttempt.status).toBe(401);
+      expect((await readProtected()).status).not.toBe(200);
 
       const denial = audit.find(
         (event) => event.action === 'system_account_create'
@@ -387,60 +390,67 @@ describe('V2 sovereignty administrative sequences', () => {
         ['editor', privateCommunityId],
         ['viewer', emptyCommunityId],
       ] as const) {
-        const create = await app.inject({
-          method: 'POST',
-          url: '/api/v1/super_admin/users',
-          headers: { cookie },
-          payload: registerPayload(
-            `seq-system-${role}-${communityId}@example.test`,
-            role,
-            communityId
-          ),
-        });
-        expect(create.statusCode).toBe(403);
+        const create = await call(
+          transport,
+          'POST',
+          '/api/v1/super_admin/users',
+          {
+            cookie,
+            json: registerPayload(
+              `seq-system-${role}-${communityId}@example.test`,
+              role,
+              communityId
+            ),
+          }
+        );
+        expect(create.status).toBe(403);
       }
     });
 
     it('rejects a first administrator for a community that holds content', async () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
-      const create = await app.inject({
-        method: 'POST',
-        url: '/api/v1/super_admin/users',
-        headers: { cookie },
-        payload: registerPayload(
-          'seq-content-claim@example.test',
-          'admin',
-          contentOnlyCommunityId
-        ),
-      });
-      expect(create.statusCode).toBe(403);
+      const create = await call(
+        transport,
+        'POST',
+        '/api/v1/super_admin/users',
+        {
+          cookie,
+          json: registerPayload(
+            'seq-content-claim@example.test',
+            'admin',
+            contentOnlyCommunityId
+          ),
+        }
+      );
+      expect(create.status).toBe(403);
     });
 
     it('provisions the first administrator of an empty community once, then refuses replay', async () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
-      const first = await app.inject({
-        method: 'POST',
-        url: '/api/v1/super_admin/users',
-        headers: { cookie },
-        payload: registerPayload(
+      const first = await call(transport, 'POST', '/api/v1/super_admin/users', {
+        cookie,
+        json: registerPayload(
           'seq-first-admin@example.test',
           'admin',
           emptyCommunityId
         ),
       });
-      expect(first.statusCode).toBe(201);
+      expect(first.status).toBe(201);
 
-      const replay = await app.inject({
-        method: 'POST',
-        url: '/api/v1/super_admin/users',
-        headers: { cookie },
-        payload: registerPayload(
-          'seq-second-admin@example.test',
-          'admin',
-          emptyCommunityId
-        ),
-      });
-      expect(replay.statusCode).toBe(403);
+      const replay = await call(
+        transport,
+        'POST',
+        '/api/v1/super_admin/users',
+        {
+          cookie,
+          json: registerPayload(
+            'seq-second-admin@example.test',
+            'admin',
+            emptyCommunityId
+          ),
+        }
+      );
+      expect(replay.status).toBe(403);
 
       const decisions = audit
         .filter((event) => event.action === 'system_account_create')
@@ -463,74 +473,77 @@ describe('V2 sovereignty administrative sequences', () => {
         })
       );
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
-      const first = await app.inject({
-        method: 'POST',
-        url: '/api/v1/super_admin/users',
-        headers: { cookie },
-        payload: registerPayload(
+      const first = await call(transport, 'POST', '/api/v1/super_admin/users', {
+        cookie,
+        json: registerPayload(
           'seq-first-admin-beside-system@example.test',
           'admin',
           emptyCommunityId
         ),
       });
-      expect(first.statusCode).toBe(201);
+      expect(first.status).toBe(201);
     });
 
     it('creates system accounts that still cannot read protected community content', async () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
       const email = 'seq-new-system@example.test';
-      const create = await app.inject({
-        method: 'POST',
-        url: '/api/v1/super_admin/users',
-        headers: { cookie },
-        payload: registerPayload(email, 'super_admin', privateCommunityId),
-      });
-      expect(create.statusCode).toBe(201);
+      const create = await call(
+        transport,
+        'POST',
+        '/api/v1/super_admin/users',
+        {
+          cookie,
+          json: registerPayload(email, 'super_admin', privateCommunityId),
+        }
+      );
+      expect(create.status).toBe(201);
 
       const systemLogin = await login(email, privateCommunityId, NEW_PASSWORD);
-      expect(systemLogin.statusCode).toBe(200);
+      expect(systemLogin.status).toBe(200);
       const read = await readProtected(
-        extractSignedSessionCookie(systemLogin.headers['set-cookie'])
+        extractSignedSessionCookie(systemLogin.headers.getSetCookie())
       );
-      expect(read.statusCode).not.toBe(200);
-      expect(read.body).not.toContain(PROTECTED_TITLE);
+      expect(read.status).not.toBe(200);
+      expect(await read.text()).not.toContain(PROTECTED_TITLE);
     });
   });
 
   describe('role or membership change then read', () => {
     async function superAdminUpdate(userId: number, payload: object) {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
-      return app.inject({
-        method: 'PUT',
-        url: `/api/v1/super_admin/users/${userId}`,
-        headers: { cookie },
-        payload,
+      return call(transport, 'PUT', `/api/v1/super_admin/users/${userId}`, {
+        cookie,
+        json: payload,
       });
     }
 
     it('rejects turning a system account into an admin of a protected community', async () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
       const email = 'seq-system-to-admin@example.test';
-      const create = await app.inject({
-        method: 'POST',
-        url: '/api/v1/super_admin/users',
-        headers: { cookie },
-        payload: registerPayload(email, 'super_admin', privateCommunityId),
-      });
-      expect(create.statusCode).toBe(201);
-      const systemAccountId = JSON.parse(create.body).data.id as number;
+      const create = await call(
+        transport,
+        'POST',
+        '/api/v1/super_admin/users',
+        {
+          cookie,
+          json: registerPayload(email, 'super_admin', privateCommunityId),
+        }
+      );
+      expect(create.status).toBe(201);
+      const createBody = (await create.json()) as { data: { id: number } };
+      const systemAccountId = createBody.data.id;
 
       const update = await superAdminUpdate(systemAccountId, {
         role: 'admin',
         communityId: privateCommunityId,
       });
-      expect(update.statusCode).toBe(403);
+      expect(update.status).toBe(403);
 
       const read = await readProtected(
         await cookieFor(email, privateCommunityId).catch(() => undefined)
       );
-      expect(read.statusCode).not.toBe(200);
-      expect(read.body).not.toContain(PROTECTED_TITLE);
+      expect(read.status).not.toBe(200);
+      expect(await read.text()).not.toContain(PROTECTED_TITLE);
 
       const [row] = await db
         .select()
@@ -553,14 +566,14 @@ describe('V2 sovereignty administrative sequences', () => {
       const promote = await superAdminUpdate(privateViewer.id, {
         role: 'admin',
       });
-      expect(promote.statusCode).toBe(403);
+      expect(promote.status).toBe(403);
       const move = await superAdminUpdate(otherAdmin.id, {
         communityId: privateCommunityId,
       });
-      expect(move.statusCode).toBe(403);
+      expect(move.status).toBe(403);
 
       const moved = await login(otherAdmin.email, privateCommunityId);
-      expect(moved.statusCode).toBe(401);
+      expect(moved.status).toBe(401);
 
       const [viewerRow] = await db
         .select()
@@ -573,35 +586,35 @@ describe('V2 sovereignty administrative sequences', () => {
       const rename = await superAdminUpdate(privateViewer.id, {
         firstName: 'Renamed',
       });
-      expect(rename.statusCode).toBe(200);
+      expect(rename.status).toBe(200);
       const deactivate = await superAdminUpdate(privateViewer.id, {
         isActive: false,
       });
-      expect(deactivate.statusCode).toBe(200);
+      expect(deactivate.status).toBe(200);
       const unchangedRole = await superAdminUpdate(privateViewer.id, {
         role: 'viewer',
         communityId: privateCommunityId,
       });
-      expect(unchangedRole.statusCode).toBe(200);
+      expect(unchangedRole.status).toBe(200);
     });
   });
 
   describe('private-to-public change then public read', () => {
     it('rejects a super admin publishing a private community', async () => {
-      expect((await readUnpublishedAnonymously()).statusCode).toBe(404);
+      expect((await readUnpublishedAnonymously()).status).toBe(404);
 
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
-      const publish = await app.inject({
-        method: 'PUT',
-        url: `/api/v1/super_admin/communities/${privateCommunityId}`,
-        headers: { cookie },
-        payload: { publicStories: true },
-      });
-      expect(publish.statusCode).toBe(403);
+      const publish = await call(
+        transport,
+        'PUT',
+        `/api/v1/super_admin/communities/${privateCommunityId}`,
+        { cookie, json: { publicStories: true } }
+      );
+      expect(publish.status).toBe(403);
 
       const after = await readUnpublishedAnonymously();
-      expect(after.statusCode).toBe(404);
-      expect(after.body).not.toContain(UNPUBLISHED_TITLE);
+      expect(after.status).toBe(404);
+      expect(await after.text()).not.toContain(UNPUBLISHED_TITLE);
 
       const [community] = await db
         .select()
@@ -623,13 +636,13 @@ describe('V2 sovereignty administrative sequences', () => {
 
     it('rejects publication changes bundled with lifecycle fields', async () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
-      const publish = await app.inject({
-        method: 'PUT',
-        url: `/api/v1/super_admin/communities/${privateCommunityId}`,
-        headers: { cookie },
-        payload: { name: 'SEQ-RENAMED', publicStories: true },
-      });
-      expect(publish.statusCode).toBe(403);
+      const publish = await call(
+        transport,
+        'PUT',
+        `/api/v1/super_admin/communities/${privateCommunityId}`,
+        { cookie, json: { name: 'SEQ-RENAMED', publicStories: true } }
+      );
+      expect(publish.status).toBe(403);
 
       const [community] = await db
         .select()
@@ -641,25 +654,25 @@ describe('V2 sovereignty administrative sequences', () => {
 
     it('rejects a super admin unpublishing a public community', async () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
-      const unpublish = await app.inject({
-        method: 'PUT',
-        url: `/api/v1/super_admin/communities/${otherCommunityId}`,
-        headers: { cookie },
-        payload: { publicStories: false },
-      });
-      expect(unpublish.statusCode).toBe(403);
+      const unpublish = await call(
+        transport,
+        'PUT',
+        `/api/v1/super_admin/communities/${otherCommunityId}`,
+        { cookie, json: { publicStories: false } }
+      );
+      expect(unpublish.status).toBe(403);
     });
 
     it('keeps lifecycle community updates and unchanged publication available', async () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
-      const rename = await app.inject({
-        method: 'PUT',
-        url: `/api/v1/super_admin/communities/${privateCommunityId}`,
-        headers: { cookie },
-        payload: { name: 'SEQ-RENAMED', publicStories: false },
-      });
-      expect(rename.statusCode).toBe(200);
-      expect((await readUnpublishedAnonymously()).statusCode).toBe(404);
+      const rename = await call(
+        transport,
+        'PUT',
+        `/api/v1/super_admin/communities/${privateCommunityId}`,
+        { cookie, json: { name: 'SEQ-RENAMED', publicStories: false } }
+      );
+      expect(rename.status).toBe(200);
+      expect((await readUnpublishedAnonymously()).status).toBe(404);
     });
   });
 
@@ -671,28 +684,28 @@ describe('V2 sovereignty administrative sequences', () => {
         privateAdmin.email,
         privateCommunityId
       );
-      const deactivate = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/users/${privateViewer.id}`,
-        headers: { cookie: adminCookie },
-        payload: { isActive: false },
-      });
-      expect(deactivate.statusCode).toBe(200);
+      const deactivate = await call(
+        transport,
+        'PATCH',
+        `/api/v1/users/${privateViewer.id}`,
+        { cookie: adminCookie, json: { isActive: false } }
+      );
+      expect(deactivate.status).toBe(200);
       expect(
-        (await login(privateViewer.email, privateCommunityId)).statusCode
+        (await login(privateViewer.email, privateCommunityId)).status
       ).toBe(401);
 
       const systemCookie = await cookieFor(superAdmin.email, otherCommunityId);
-      const reactivate = await app.inject({
-        method: 'PUT',
-        url: `/api/v1/super_admin/users/${privateViewer.id}`,
-        headers: { cookie: systemCookie },
-        payload: { isActive: true },
-      });
-      expect(reactivate.statusCode).toBe(403);
+      const reactivate = await call(
+        transport,
+        'PUT',
+        `/api/v1/super_admin/users/${privateViewer.id}`,
+        { cookie: systemCookie, json: { isActive: true } }
+      );
+      expect(reactivate.status).toBe(403);
 
       expect(
-        (await login(privateViewer.email, privateCommunityId)).statusCode
+        (await login(privateViewer.email, privateCommunityId)).status
       ).toBe(401);
       const [row] = await db
         .select()
@@ -724,13 +737,13 @@ describe('V2 sovereignty administrative sequences', () => {
         )
         .returning();
       const systemCookie = await cookieFor(superAdmin.email, otherCommunityId);
-      const reactivate = await app.inject({
-        method: 'PUT',
-        url: `/api/v1/super_admin/users/${system.id}`,
-        headers: { cookie: systemCookie },
-        payload: { isActive: true },
-      });
-      expect(reactivate.statusCode).toBe(200);
+      const reactivate = await call(
+        transport,
+        'PUT',
+        `/api/v1/super_admin/users/${system.id}`,
+        { cookie: systemCookie, json: { isActive: true } }
+      );
+      expect(reactivate.status).toBe(200);
     });
   });
 
@@ -739,11 +752,9 @@ describe('V2 sovereignty administrative sequences', () => {
       const cookie = await cookieFor(superAdmin.email, otherCommunityId);
       const responses = await Promise.all(
         [0, 1, 2, 3, 4].map((index) =>
-          app.inject({
-            method: 'POST',
-            url: '/api/v1/super_admin/users',
-            headers: { cookie },
-            payload: registerPayload(
+          call(transport, 'POST', '/api/v1/super_admin/users', {
+            cookie,
+            json: registerPayload(
               `seq-race-${index}@example.test`,
               'admin',
               emptyCommunityId
@@ -751,7 +762,7 @@ describe('V2 sovereignty administrative sequences', () => {
           })
         )
       );
-      const statuses = responses.map((response) => response.statusCode).sort();
+      const statuses = responses.map((response) => response.status).sort();
       expect(statuses).toEqual([201, 403, 403, 403, 403]);
 
       const admins = await db
@@ -772,11 +783,9 @@ describe('V2 sovereignty administrative sequences', () => {
     it('audits a community admin creating a member, who then reads the community audience', async () => {
       const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
       const email = 'seq-users-route-member@example.test';
-      const create = await app.inject({
-        method: 'POST',
-        url: '/api/v1/users',
-        headers: { cookie },
-        payload: {
+      const create = await call(transport, 'POST', '/api/v1/users', {
+        cookie,
+        json: {
           email,
           password: NEW_PASSWORD,
           firstName: 'Sequence',
@@ -784,7 +793,7 @@ describe('V2 sovereignty administrative sequences', () => {
           role: 'viewer',
         },
       });
-      expect(create.statusCode).toBe(201);
+      expect(create.status).toBe(201);
 
       const grant = audit.find((event) => event.action === 'enrollment');
       expect(grant).toMatchObject({
@@ -795,25 +804,22 @@ describe('V2 sovereignty administrative sequences', () => {
       });
       expectContentFreeAudit(grant!);
 
+      const memberLogin = await login(email, privateCommunityId, NEW_PASSWORD);
       const read = await readProtected(
-        extractSignedSessionCookie(
-          (await login(email, privateCommunityId, NEW_PASSWORD)).headers[
-            'set-cookie'
-          ]
-        )
+        extractSignedSessionCookie(memberLogin.headers.getSetCookie())
       );
-      expect(read.statusCode).toBe(200);
+      expect(read.status).toBe(200);
     });
 
     it('audits role changes made by a community admin', async () => {
       const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
-      const promote = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/users/${privateViewer.id}`,
-        headers: { cookie },
-        payload: { role: 'editor' },
-      });
-      expect(promote.statusCode).toBe(200);
+      const promote = await call(
+        transport,
+        'PATCH',
+        `/api/v1/users/${privateViewer.id}`,
+        { cookie, json: { role: 'editor' } }
+      );
+      expect(promote.status).toBe(200);
       const change = audit.find(
         (event) => event.action === 'membership_change'
       );
@@ -834,28 +840,26 @@ describe('V2 sovereignty administrative sequences', () => {
       publicStories: boolean,
       communityId = privateCommunityId
     ) =>
-      app.inject({
-        method: 'PUT',
-        url: `/api/v1/communities/${communityId}/publication`,
-        headers: cookie ? { cookie } : {},
-        payload: { publicStories },
+      call(transport, 'PUT', `/api/v1/communities/${communityId}/publication`, {
+        ...(cookie ? { cookie } : {}),
+        json: { publicStories },
       });
 
     it('lets the community admin publish, after which anonymous callers read public stories', async () => {
-      expect((await readUnpublishedAnonymously()).statusCode).toBe(404);
+      expect((await readUnpublishedAnonymously()).status).toBe(404);
 
       const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
       const publish = await publication(cookie, true);
-      expect(publish.statusCode).toBe(200);
-      expect(publish.json()).toMatchObject({
+      expect(publish.status).toBe(200);
+      expect(await publish.json()).toMatchObject({
         data: { id: privateCommunityId, publicStories: true },
       });
 
       const after = await readUnpublishedAnonymously();
-      expect(after.statusCode).toBe(200);
-      expect(after.body).toContain(UNPUBLISHED_TITLE);
+      expect(after.status).toBe(200);
+      expect(await after.text()).toContain(UNPUBLISHED_TITLE);
       // Publication never widens a story audience.
-      expect((await readProtected()).statusCode).not.toBe(200);
+      expect((await readProtected()).status).not.toBe(200);
 
       const grant = audit.find(
         (event) => event.action === 'publication_change'
@@ -869,12 +873,12 @@ describe('V2 sovereignty administrative sequences', () => {
       expectContentFreeAudit(grant!);
 
       const unpublish = await publication(cookie, false);
-      expect(unpublish.statusCode).toBe(200);
-      expect((await readUnpublishedAnonymously()).statusCode).toBe(404);
+      expect(unpublish.status).toBe(200);
+      expect((await readUnpublishedAnonymously()).status).toBe(404);
     });
 
     it('rejects publication by anonymous callers, members, other-community admins and super admins', async () => {
-      expect((await publication(undefined, true)).statusCode).toBe(401);
+      expect((await publication(undefined, true)).status).toBe(401);
       const callers = [
         { user: privateViewer, communityId: privateCommunityId },
         { user: otherAdmin, communityId: otherCommunityId },
@@ -882,9 +886,9 @@ describe('V2 sovereignty administrative sequences', () => {
       ];
       for (const caller of callers) {
         const cookie = await cookieFor(caller.user.email, caller.communityId);
-        expect((await publication(cookie, true)).statusCode).toBe(403);
+        expect((await publication(cookie, true)).status).toBe(403);
       }
-      expect((await readUnpublishedAnonymously()).statusCode).toBe(404);
+      expect((await readUnpublishedAnonymously()).status).toBe(404);
       const [community] = await db
         .select()
         .from(communitiesSqlite)
@@ -909,49 +913,50 @@ describe('V2 sovereignty administrative sequences', () => {
     it('rejects a super admin deactivating or deleting the only community administrator, who still logs in', async () => {
       const systemCookie = await cookieFor(superAdmin.email, otherCommunityId);
 
-      const deactivate = await app.inject({
-        method: 'PUT',
-        url: `/api/v1/super_admin/users/${privateAdmin.id}`,
-        headers: { cookie: systemCookie },
-        payload: { isActive: false },
-      });
-      expect(deactivate.statusCode).toBe(409);
-      expect(deactivate.json()).toMatchObject({
+      const deactivate = await call(
+        transport,
+        'PUT',
+        `/api/v1/super_admin/users/${privateAdmin.id}`,
+        { cookie: systemCookie, json: { isActive: false } }
+      );
+      expect(deactivate.status).toBe(409);
+      expect(await deactivate.json()).toMatchObject({
         error: { message: expect.any(String) },
         statusCode: 409,
       });
 
-      const remove = await app.inject({
-        method: 'DELETE',
-        url: `/api/v1/super_admin/users/${privateAdmin.id}`,
-        headers: { cookie: systemCookie },
-      });
-      expect(remove.statusCode).toBe(409);
+      const remove = await call(
+        transport,
+        'DELETE',
+        `/api/v1/super_admin/users/${privateAdmin.id}`,
+        { cookie: systemCookie }
+      );
+      expect(remove.status).toBe(409);
 
       // After both attempts the administrator still authenticates.
-      expect(
-        (await login(privateAdmin.email, privateCommunityId)).statusCode
-      ).toBe(200);
+      expect((await login(privateAdmin.email, privateCommunityId)).status).toBe(
+        200
+      );
     });
 
     it('rejects the sole community administrator deactivating or demoting themself', async () => {
       const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
 
-      const deactivate = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/users/${privateAdmin.id}`,
-        headers: { cookie },
-        payload: { isActive: false },
-      });
-      expect(deactivate.statusCode).toBe(409);
+      const deactivate = await call(
+        transport,
+        'PATCH',
+        `/api/v1/users/${privateAdmin.id}`,
+        { cookie, json: { isActive: false } }
+      );
+      expect(deactivate.status).toBe(409);
 
-      const demote = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/users/${privateAdmin.id}`,
-        headers: { cookie },
-        payload: { role: 'editor' },
-      });
-      expect(demote.statusCode).toBe(409);
+      const demote = await call(
+        transport,
+        'PATCH',
+        `/api/v1/users/${privateAdmin.id}`,
+        { cookie, json: { role: 'editor' } }
+      );
+      expect(demote.status).toBe(409);
     });
   });
 
@@ -992,13 +997,13 @@ describe('V2 sovereignty administrative sequences', () => {
 
       try {
         const cookie = await cookieFor(superAdmin.email, otherCommunityId);
-        const response = await app.inject({
-          method: 'PUT',
-          url: `/api/v1/super_admin/users/${privateAdmin.id}`,
-          headers: { cookie },
-          payload: { isActive: false },
-        });
-        expect(response.statusCode).toBe(409);
+        const response = await call(
+          transport,
+          'PUT',
+          `/api/v1/super_admin/users/${privateAdmin.id}`,
+          { cookie, json: { isActive: false } }
+        );
+        expect(response.status).toBe(409);
 
         const denial = audit.find(
           (event) =>
@@ -1038,12 +1043,13 @@ describe('V2 sovereignty administrative sequences', () => {
     it('r7: community DELETE of a member emits an audit event', async () => {
       const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
       audit.length = 0;
-      const r = await app.inject({
-        method: 'DELETE',
-        url: `/api/v1/users/${privateViewer.id}`,
-        headers: { cookie },
-      });
-      expect(r.statusCode).toBe(200);
+      const r = await call(
+        transport,
+        'DELETE',
+        `/api/v1/users/${privateViewer.id}`,
+        { cookie }
+      );
+      expect(r.status).toBe(200);
       expect(
         audit.some(
           (e: any) => e.resourceId === privateViewer.id && e.allowed === true
@@ -1053,12 +1059,13 @@ describe('V2 sovereignty administrative sequences', () => {
     it('r7: system DELETE of a member emits an audit event', async () => {
       const c = await cookieFor(superAdmin.email, otherCommunityId);
       audit.length = 0;
-      const r = await app.inject({
-        method: 'DELETE',
-        url: `/api/v1/super_admin/users/${privateViewer.id}`,
-        headers: { cookie: c },
-      });
-      expect(r.statusCode).toBe(200);
+      const r = await call(
+        transport,
+        'DELETE',
+        `/api/v1/super_admin/users/${privateViewer.id}`,
+        { cookie: c }
+      );
+      expect(r.status).toBe(200);
       expect(
         audit.some(
           (e: any) => e.resourceId === privateViewer.id && e.allowed === true
@@ -1071,13 +1078,14 @@ describe('V2 sovereignty administrative sequences', () => {
         .spyOn(UserRepository.prototype, 'compareAndSetMembership')
         .mockResolvedValue({ status: 'conflict' } as any);
       audit.length = 0;
-      const r = await app.inject({
-        method: 'DELETE',
-        url: `/api/v1/users/${privateViewer.id}`,
-        headers: { cookie },
-      });
+      const r = await call(
+        transport,
+        'DELETE',
+        `/api/v1/users/${privateViewer.id}`,
+        { cookie }
+      );
       spy.mockRestore();
-      expect(r.statusCode).toBe(409);
+      expect(r.status).toBe(409);
       expect(
         audit.some(
           (e: any) =>
@@ -1091,13 +1099,14 @@ describe('V2 sovereignty administrative sequences', () => {
         .spyOn(UserRepository.prototype, 'compareAndSetMembership')
         .mockResolvedValue({ status: 'conflict' } as any);
       audit.length = 0;
-      const r = await app.inject({
-        method: 'DELETE',
-        url: `/api/v1/super_admin/users/${privateViewer.id}`,
-        headers: { cookie: c },
-      });
+      const r = await call(
+        transport,
+        'DELETE',
+        `/api/v1/super_admin/users/${privateViewer.id}`,
+        { cookie: c }
+      );
       spy.mockRestore();
-      expect(r.statusCode).toBe(409);
+      expect(r.status).toBe(409);
       expect(
         audit.some(
           (e: any) =>
@@ -1108,24 +1117,24 @@ describe('V2 sovereignty administrative sequences', () => {
     it('r7: last-admin refusal is audited as denied, not only allowed', async () => {
       const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
       audit.length = 0;
-      const r = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/users/${privateAdmin.id}`,
-        headers: { cookie },
-        payload: { isActive: false },
-      });
-      expect(r.statusCode).toBe(409);
+      const r = await call(
+        transport,
+        'PATCH',
+        `/api/v1/users/${privateAdmin.id}`,
+        { cookie, json: { isActive: false } }
+      );
+      expect(r.status).toBe(409);
       expect(audit.some((e: any) => e.allowed === false)).toBe(true);
     });
     it('r7: community admin cannot demote a super_admin row stored in their community', async () => {
       const cookie = await cookieFor(otherAdmin.email, otherCommunityId);
-      const r = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/users/${superAdmin.id}`,
-        headers: { cookie },
-        payload: { role: 'viewer' },
-      });
-      expect(r.statusCode).toBeGreaterThanOrEqual(400);
+      const r = await call(
+        transport,
+        'PATCH',
+        `/api/v1/users/${superAdmin.id}`,
+        { cookie, json: { role: 'viewer' } }
+      );
+      expect(r.status).toBeGreaterThanOrEqual(400);
       const [row] = await db
         .select()
         .from(usersSqlite)
@@ -1134,13 +1143,14 @@ describe('V2 sovereignty administrative sequences', () => {
     });
     it('r7: community admin cannot deactivate a super_admin row stored in their community', async () => {
       const cookie = await cookieFor(otherAdmin.email, otherCommunityId);
-      const r = await app.inject({
-        method: 'DELETE',
-        url: `/api/v1/users/${superAdmin.id}`,
-        headers: { cookie },
-      });
-      expect(r.statusCode).toBeGreaterThanOrEqual(400);
-      expect((await login(superAdmin.email, otherCommunityId)).statusCode).toBe(
+      const r = await call(
+        transport,
+        'DELETE',
+        `/api/v1/users/${superAdmin.id}`,
+        { cookie }
+      );
+      expect(r.status).toBeGreaterThanOrEqual(400);
+      expect((await login(superAdmin.email, otherCommunityId)).status).toBe(
         200
       );
     });
@@ -1152,22 +1162,26 @@ describe('V2 sovereignty administrative sequences', () => {
         .mockResolvedValue({ status: 'conflict' } as any);
       for (const method of ['PUT', 'PATCH'] as const) {
         audit.length = 0;
-        const r = await app.inject({
+        const r = await call(
+          transport,
           method,
-          url: `/api/v1/users/${privateViewer.id}`,
-          headers: { cookie },
-          payload: {
-            firstName: 'P',
-            lastName: 'Q',
-            email: privateViewer.email,
-            role: 'editor',
-            isActive: true,
-          },
-        });
-        process.stderr.write(
-          `CONTROL ${method} ${r.statusCode} ${r.body.slice(0, 120)}\n`
+          `/api/v1/users/${privateViewer.id}`,
+          {
+            cookie,
+            json: {
+              firstName: 'P',
+              lastName: 'Q',
+              email: privateViewer.email,
+              role: 'editor',
+              isActive: true,
+            },
+          }
         );
-        expect(r.statusCode).toBe(409);
+        const rBody = await r.text();
+        process.stderr.write(
+          `CONTROL ${method} ${r.status} ${rBody.slice(0, 120)}\n`
+        );
+        expect(r.status).toBe(409);
         expect(
           audit.some(
             (e: any) =>
@@ -1204,13 +1218,11 @@ describe('V2 sovereignty administrative sequences', () => {
       ).filter((row) => row.role !== 'super_admin').length;
 
       const cookie = await cookieFor(privateAdmin.email, privateCommunityId);
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/v1/users',
-        headers: { cookie },
+      const response = await call(transport, 'GET', '/api/v1/users', {
+        cookie,
       });
-      expect(response.statusCode).toBe(200);
-      const body = response.json();
+      expect(response.status).toBe(200);
+      const body = await response.json();
       expect(
         body.data.some((row: { id: number }) => row.id === system.id)
       ).toBe(false);

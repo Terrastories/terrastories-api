@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { getDb } from '../../src/db/index.js';
 
 describe('Database Connection', () => {
@@ -25,5 +25,56 @@ describe('Database Connection', () => {
     const result = await db.all(sql`SELECT 1 as test`);
     expect(result).toBeDefined();
     expect(Array.isArray(result)).toBe(true);
+  });
+
+  it('should report PostgreSQL unavailable when the configured server cannot be queried', async () => {
+    const originalDatabaseUrl = process.env.DATABASE_URL;
+
+    try {
+      process.env.DATABASE_URL =
+        'postgresql://terrastories:terrastories-test@127.0.0.1:1/terrastories_test';
+      vi.resetModules();
+
+      const { testConnection } = await import('../../src/db/index.js');
+      const result = await testConnection();
+
+      expect(result).toEqual({
+        connected: false,
+        spatialSupport: false,
+        version: null,
+      });
+    } finally {
+      if (originalDatabaseUrl === undefined) {
+        delete process.env.DATABASE_URL;
+      } else {
+        process.env.DATABASE_URL = originalDatabaseUrl;
+      }
+      vi.resetModules();
+    }
+  });
+
+  it('should preserve the shared PostgreSQL client after a failed health probe', async () => {
+    const originalDatabaseUrl = process.env.DATABASE_URL;
+
+    try {
+      process.env.DATABASE_URL =
+        'postgresql://terrastories:terrastories-test@127.0.0.1:1/terrastories_test';
+      vi.resetModules();
+
+      const databaseModule = await import('../../src/db/index.js');
+      const capturedByRepository = await databaseModule.getDb();
+      const result = await databaseModule.testConnection();
+      const afterProbe = await databaseModule.getDb();
+
+      expect(result.connected).toBe(false);
+      expect(afterProbe).toBe(capturedByRepository);
+    } finally {
+      if (originalDatabaseUrl === undefined) {
+        delete process.env.DATABASE_URL;
+      } else {
+        process.env.DATABASE_URL = originalDatabaseUrl;
+      }
+      vi.resetModules();
+    }
   });
 });

@@ -20,6 +20,7 @@ import {
   sqliteTable,
   integer,
   text as sqliteText,
+  index as sqliteIndex,
 } from 'drizzle-orm/sqlite-core';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
@@ -44,7 +45,7 @@ export const filesPg = pgTable(
       .notNull()
       .references(() => usersPg.id),
     metadata: pgJsonb('metadata'), // { width, height, duration, etc. }
-    culturalRestrictions: pgJsonb('cultural_restrictions'), // { elderOnly: boolean, ... }
+    culturalRestrictions: pgJsonb('cultural_restrictions'),
     isActive: pgBoolean('is_active').default(true).notNull(),
     createdAt: timestamp('created_at').notNull(),
     updatedAt: timestamp('updated_at').notNull(),
@@ -64,42 +65,52 @@ export const filesPg = pgTable(
 );
 
 // SQLite table for development/testing
-export const filesSqlite = sqliteTable('files', {
-  id: sqliteText('id')
-    .primaryKey()
-    .$defaultFn(() => {
-      // Generate UUID for SQLite
-      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(
-        /[xy]/g,
-        function (c) {
-          const r = (Math.random() * 16) | 0;
-          const v = c === 'x' ? r : (r & 0x3) | 0x8;
-          return v.toString(16);
-        }
-      );
-    }),
-  filename: sqliteText('filename').notNull(),
-  originalName: sqliteText('original_name').notNull(),
-  path: sqliteText('path').notNull(),
-  url: sqliteText('url').notNull(),
-  mimeType: sqliteText('mime_type').notNull(),
-  size: integer('size').notNull(),
-  communityId: integer('community_id')
-    .notNull()
-    .references(() => communitiesSqlite.id),
-  uploadedBy: integer('uploaded_by')
-    .notNull()
-    .references(() => usersSqlite.id),
-  metadata: sqliteText('metadata'), // JSON string for SQLite
-  culturalRestrictions: sqliteText('cultural_restrictions'), // JSON string
-  isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
+export const filesSqlite = sqliteTable(
+  'files',
+  {
+    id: sqliteText('id')
+      .primaryKey()
+      .$defaultFn(() => {
+        // Generate UUID for SQLite
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(
+          /[xy]/g,
+          function (c) {
+            const r = (Math.random() * 16) | 0;
+            const v = c === 'x' ? r : (r & 0x3) | 0x8;
+            return v.toString(16);
+          }
+        );
+      }),
+    filename: sqliteText('filename').notNull(),
+    originalName: sqliteText('original_name').notNull(),
+    path: sqliteText('path').notNull(),
+    url: sqliteText('url').notNull(),
+    mimeType: sqliteText('mime_type').notNull(),
+    size: integer('size').notNull(),
+    communityId: integer('community_id')
+      .notNull()
+      .references(() => communitiesSqlite.id),
+    uploadedBy: integer('uploaded_by')
+      .notNull()
+      .references(() => usersSqlite.id),
+    metadata: sqliteText('metadata'), // JSON string for SQLite
+    culturalRestrictions: sqliteText('cultural_restrictions'),
+    isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer('updated_at', { mode: 'timestamp' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    communityIdx: sqliteIndex('files_community_idx').on(table.communityId),
+    userIdx: sqliteIndex('files_user_idx').on(table.uploadedBy),
+    mimeTypeIdx: sqliteIndex('files_mime_type_idx').on(table.mimeType),
+    activeIdx: sqliteIndex('files_active_idx').on(table.isActive),
+    createdAtIdx: sqliteIndex('files_created_at_idx').on(table.createdAt),
+  })
+);
 
 // Dynamic table selection based on database type
 export async function getFilesTable() {
@@ -126,7 +137,6 @@ export const FileMetadataSchema = z
   })
   .strict();
 
-// Cultural restrictions schema
 export const CulturalRestrictionsSchema = z
   .object({
     elderOnly: z.boolean().optional(),
@@ -223,6 +233,5 @@ export interface FileUploadOptions {
 
 // Use SQLite table as default export for Drizzle Kit compatibility
 export const files = filesSqlite;
-
 // Export the PostgreSQL table for production use
 export { filesPg as filesPostgres };

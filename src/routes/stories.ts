@@ -18,8 +18,11 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import {
   StoryService,
+  InvalidFileAccessError,
   type StoryCreateInput,
 } from '../services/story.service.js';
+import { AppError } from '../shared/errors/index.js';
+import { MAX_DATABASE_ID } from '../shared/types/public.js';
 import {
   StoryRepository,
   type StoryWithRelations,
@@ -27,13 +30,28 @@ import {
 import { FileRepository } from '../repositories/file.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
 import { getDb, type Database } from '../db/index.js';
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import {
   requireAuth,
   requireCommunityAccess,
   type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
 import { getConfig } from '../shared/config/index.js';
+
+// Request schemas cap ids at MAX_DATABASE_ID (PostgreSQL integer range) so
+// out-of-range ids get the same 400 on SQLite/D1 and PostgreSQL.
+const databaseId = () => z.number().int().positive().max(MAX_DATABASE_ID);
+const coercedDatabaseId = () =>
+  z.coerce.number().int().positive().max(MAX_DATABASE_ID);
+
+/**
+ * Only domain errors (expected business-rule failures) may surface their
+ * message to the client. Anything else, including database failures that the
+ * repository now propagates, is an internal error: answer a generic 500 and
+ * never echo the message (it can carry SQL text).
+ */
+function isStoryDomainError(error: unknown): error is Error {
+  return error instanceof AppError || error instanceof InvalidFileAccessError;
+}
 
 /**
  * Add deprecation warnings to API responses for legacy file fields
@@ -65,7 +83,7 @@ const createStorySchema = z.object({
     .max(100)
     .regex(/^[a-z0-9-]+$/)
     .optional(),
-  communityId: z.number().int().positive(),
+  communityId: databaseId(),
   mediaUrls: z.array(z.string().url()).optional(),
   // Direct file URL fields for dual-read capability (Issue #89)
   imageUrl: z.string().url().optional(),
@@ -84,14 +102,14 @@ const createStorySchema = z.object({
       accessNotes: z.string().optional(),
     })
     .optional(),
-  placeIds: z.array(z.number().int().positive()).optional(),
-  speakerIds: z.array(z.number().int().positive()).optional(),
+  placeIds: z.array(databaseId()).optional(),
+  speakerIds: z.array(databaseId()).optional(),
   placeContexts: z.array(z.string()).optional(),
   speakerRoles: z.array(z.string()).optional(),
   // Interview metadata for Indigenous storytelling context
   dateInterviewed: z.coerce.date().optional(),
-  interviewLocationId: z.number().int().positive().optional(),
-  interviewerId: z.number().int().positive().optional(),
+  interviewLocationId: databaseId().optional(),
+  interviewerId: databaseId().optional(),
 });
 
 const updateStorySchema = createStorySchema
@@ -102,12 +120,12 @@ const updateStorySchema = createStorySchema
   .omit({ communityId: true });
 
 const storyParamsSchema = z.object({
-  id: z.coerce.number().int().positive(),
+  id: coercedDatabaseId(),
 });
 
 const slugParamsSchema = z.object({
   slug: z.string().min(1).max(100),
-  communityId: z.coerce.number().int().positive(),
+  communityId: coercedDatabaseId(),
 });
 
 const listStoriesQuerySchema = z.object({
@@ -125,7 +143,7 @@ const listStoriesQuerySchema = z.object({
         .map((tag) => tag.trim())
         .filter(Boolean);
     }),
-  createdBy: z.coerce.number().int().positive().optional(),
+  createdBy: coercedDatabaseId().optional(),
   language: z.string().optional(),
   sortBy: z.enum(['createdAt', 'title', 'updatedAt']).default('createdAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
@@ -137,10 +155,7 @@ export default async function storiesRoutes(
 ) {
   const db = options?.database || (await getDb());
 
-  // StoryRepository requires BetterSQLite3Database, using type casting
-  const storyRepository = new StoryRepository(
-    db as unknown as BetterSQLite3Database<Record<string, unknown>>
-  );
+  const storyRepository = new StoryRepository(db);
   const fileRepository = new FileRepository(db);
   const userRepository = new UserRepository(db);
   const storyService = new StoryService(
@@ -188,6 +203,7 @@ export default async function storiesRoutes(
             communityId: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'Community ID',
             },
             mediaUrls: {
@@ -251,6 +267,7 @@ export default async function storiesRoutes(
               items: {
                 type: 'integer',
                 minimum: 1,
+                maximum: 2147483647,
               },
               description: 'Associated place IDs',
             },
@@ -259,6 +276,7 @@ export default async function storiesRoutes(
               items: {
                 type: 'integer',
                 minimum: 1,
+                maximum: 2147483647,
               },
               description: 'Associated speaker IDs',
             },
@@ -285,11 +303,13 @@ export default async function storiesRoutes(
             interviewLocationId: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'ID of the place where the interview was conducted',
             },
             interviewerId: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'ID of the person who conducted the interview',
             },
           },
@@ -414,7 +434,9 @@ export default async function storiesRoutes(
             return reply.status(403).send({ error: error.message });
           }
 
-          return reply.status(422).send({ error: error.message });
+          if (isStoryDomainError(error)) {
+            return reply.status(422).send({ error: error.message });
+          }
         }
 
         return reply.status(500).send({ error: 'Internal server error' });
@@ -449,6 +471,7 @@ export default async function storiesRoutes(
             id: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'Story ID',
             },
           },
@@ -571,6 +594,7 @@ export default async function storiesRoutes(
             communityId: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'Community ID',
             },
           },
@@ -687,6 +711,7 @@ export default async function storiesRoutes(
             id: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'Story ID',
             },
           },
@@ -759,6 +784,7 @@ export default async function storiesRoutes(
               items: {
                 type: 'integer',
                 minimum: 1,
+                maximum: 2147483647,
               },
               description: 'Updated place associations',
             },
@@ -767,6 +793,7 @@ export default async function storiesRoutes(
               items: {
                 type: 'integer',
                 minimum: 1,
+                maximum: 2147483647,
               },
               description: 'Updated speaker associations',
             },
@@ -779,11 +806,13 @@ export default async function storiesRoutes(
             interviewLocationId: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'ID of the place where the interview was conducted',
             },
             interviewerId: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'ID of the person who conducted the interview',
             },
           },
@@ -905,9 +934,10 @@ export default async function storiesRoutes(
           return reply.status(403).send({ error: error.message });
         }
 
-        const fallbackMessage =
-          error instanceof Error ? error.message : 'Unknown error';
-        return reply.status(422).send({ error: fallbackMessage });
+        if (isStoryDomainError(error)) {
+          return reply.status(422).send({ error: error.message });
+        }
+        return reply.status(500).send({ error: 'Internal server error' });
       }
     }
   );
@@ -939,6 +969,7 @@ export default async function storiesRoutes(
             id: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'Story ID',
             },
           },
@@ -1017,9 +1048,10 @@ export default async function storiesRoutes(
           return reply.status(403).send({ error: error.message });
         }
 
-        const fallbackMessage =
-          error instanceof Error ? error.message : 'Unknown error';
-        return reply.status(422).send({ error: fallbackMessage });
+        if (isStoryDomainError(error)) {
+          return reply.status(422).send({ error: error.message });
+        }
+        return reply.status(500).send({ error: 'Internal server error' });
       }
     }
   );
@@ -1083,6 +1115,7 @@ export default async function storiesRoutes(
             createdBy: {
               type: 'integer',
               minimum: 1,
+              maximum: 2147483647,
               description: 'Filter by author ID',
             },
             language: {

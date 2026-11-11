@@ -117,7 +117,9 @@ const BoundsSearchSchema = z
 
 // Path parameters schema
 const PlaceIdSchema = z.object({
-  id: z.coerce.number().int().positive().describe('Place ID'),
+  // Capped at the PostgreSQL integer range so SQLite and PostgreSQL answer
+  // out-of-range ids the same way (400).
+  id: z.coerce.number().int().positive().max(2147483647).describe('Place ID'),
 });
 
 /**

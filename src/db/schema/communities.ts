@@ -1,14 +1,7 @@
 /**
  * Communities table schema with multi-database support
  *
- * Supports both PostgreSQL (production) and SQLite (development/testing)
- * Follows the same pattern as users.ts and stories.ts for consistency
- *
- * Features:
- * - Root tenant entity for multi-tenant architecture
- * - Public/private story sharing configuration
- * - Cross-database compatibility (PostgreSQL/SQLite)
- * - Indigenous community configuration support
+ * Supports both PostgreSQL and SQLite/D1-compatible deployments.
  */
 
 import {
@@ -43,9 +36,8 @@ export const communitiesPg = pgTable('communities', {
   locale: pgText('locale').notNull().default('en'),
   culturalSettings: pgText('cultural_settings'),
   isActive: boolean('is_active').notNull().default(true),
-  // Rails compatibility fields - commented out temporarily for database sync issues
-  // country: pgText('country'),
-  // beta: boolean('beta').notNull().default(false),
+  country: pgText('country'),
+  beta: boolean('beta').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -62,9 +54,8 @@ export const communitiesSqlite = sqliteTable('communities', {
   locale: sqliteText('locale').notNull().default('en'),
   culturalSettings: sqliteText('cultural_settings'),
   isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
-  // Rails compatibility fields - commented out temporarily for database sync issues
-  // country: sqliteText('country'),
-  // beta: integer('beta', { mode: 'boolean' }).notNull().default(false),
+  country: sqliteText('country'),
+  beta: integer('beta', { mode: 'boolean' }).notNull().default(false),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -98,9 +89,8 @@ export const insertCommunitySchema = createInsertSchema(communitiesPg, {
     .optional(),
   publicStories: z.boolean().default(false),
   isActive: z.boolean().default(true),
-  // Rails compatibility field validation - commented out until database migration is complete
-  // country: CountryCodeSchema,
-  // beta: z.boolean().default(false),
+  country: CountryCodeSchema,
+  beta: z.boolean().default(false),
 });
 
 export const selectCommunitySchema = createSelectSchema(communitiesPg);
@@ -121,6 +111,7 @@ export const updateCommunitySchema = insertCommunitySchema
     locale: insertCommunitySchema.shape.locale.removeDefault(),
     publicStories: insertCommunitySchema.shape.publicStories.removeDefault(),
     isActive: insertCommunitySchema.shape.isActive.removeDefault(),
+    beta: insertCommunitySchema.shape.beta.removeDefault(),
   })
   .partial()
   .omit({

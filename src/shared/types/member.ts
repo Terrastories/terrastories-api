@@ -32,7 +32,7 @@ export const MemberPaginationQuerySchema = z.object({
 });
 
 export const MemberIdParamSchema = z.object({
-  id: z.number().int().positive(),
+  id: z.number().int().positive().max(2147483647),
 });
 
 // Story schemas
@@ -48,8 +48,8 @@ export const CreateStorySchema = z.object({
   mediaUrls: z.array(z.string().url()).optional(),
   language: z.string().min(2).max(10).default('en'),
   tags: z.array(z.string()).optional(),
-  placeIds: z.array(z.number().int().positive()).optional(),
-  speakerIds: z.array(z.number().int().positive()).optional(),
+  placeIds: z.array(z.number().int().positive().max(2147483647)).optional(),
+  speakerIds: z.array(z.number().int().positive().max(2147483647)).optional(),
   isRestricted: z.boolean().optional().default(false),
   points: z
     .array(
@@ -62,8 +62,8 @@ export const CreateStorySchema = z.object({
     .optional(),
   // Interview metadata for Indigenous storytelling context
   dateInterviewed: z.coerce.date().optional(),
-  interviewLocationId: z.number().int().positive().optional(),
-  interviewerId: z.number().int().positive().optional(),
+  interviewLocationId: z.number().int().positive().max(2147483647).optional(),
+  interviewerId: z.number().int().positive().max(2147483647).optional(),
 });
 
 export const UpdateStorySchema = z.object({
@@ -78,8 +78,8 @@ export const UpdateStorySchema = z.object({
   mediaUrls: z.array(z.string().url()).optional(),
   language: z.string().min(2).max(10).optional(),
   tags: z.array(z.string()).optional(),
-  placeIds: z.array(z.number().int().positive()).optional(),
-  speakerIds: z.array(z.number().int().positive()).optional(),
+  placeIds: z.array(z.number().int().positive().max(2147483647)).optional(),
+  speakerIds: z.array(z.number().int().positive().max(2147483647)).optional(),
   isRestricted: z.boolean().optional(),
   points: z
     .array(
@@ -92,8 +92,8 @@ export const UpdateStorySchema = z.object({
     .optional(),
   // Interview metadata for Indigenous storytelling context
   dateInterviewed: z.coerce.date().optional(),
-  interviewLocationId: z.number().int().positive().optional(),
-  interviewerId: z.number().int().positive().optional(),
+  interviewLocationId: z.number().int().positive().max(2147483647).optional(),
+  interviewerId: z.number().int().positive().max(2147483647).optional(),
 });
 
 // Place schemas

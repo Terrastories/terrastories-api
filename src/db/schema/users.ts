@@ -1,13 +1,5 @@
 /**
- * Users table schema with multi-database support
- *
- * Supports both PostgreSQL (production) and SQLite (development/testing)
- * Follows the same pattern as places.ts for consistency
- *
- * Features:
- * - Multi-tenant data isolation via communityId
- * - Role-based access control with enum validation
- * - Cross-database compatibility (PostgreSQL/SQLite)
+ * Users table schema with equal PostgreSQL and SQLite/D1-compatible semantics.
  */
 
 import {
@@ -18,19 +10,20 @@ import {
   boolean,
   integer as pgInteger,
   unique,
+  index,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
   unique as sqliteUnique,
+  index as sqliteIndex,
 } from 'drizzle-orm/sqlite-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
 
-// Role enum validation with cultural roles
 export const UserRoleSchema = z.enum([
   'super_admin',
   'admin',
@@ -54,25 +47,32 @@ export const usersPg = pgTable(
     })
       .notNull()
       .default('viewer'),
-    communityId: pgInteger('community_id').notNull(),
+    communityId: pgInteger('community_id')
+      .notNull()
+      .references(() => communitiesPg.id),
     isActive: boolean('is_active').notNull().default(true),
-    lastLoginAt: timestamp('last_login_at').defaultNow(),
+    lastLoginAt: timestamp('last_login_at'),
+    resetPasswordToken: pgText('reset_password_token'),
+    resetPasswordSentAt: timestamp('reset_password_sent_at'),
+    rememberCreatedAt: timestamp('remember_created_at'),
+    signInCount: pgInteger('sign_in_count').default(0).notNull(),
+    lastSignInAt: timestamp('last_sign_in_at'),
+    currentSignInIp: pgText('current_sign_in_ip'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
-
-    // Authentication fields for password reset and session management - commented out temporarily for database sync issues
-    // resetPasswordToken: pgText('reset_password_token'),
-    // resetPasswordSentAt: timestamp('reset_password_sent_at'),
-    // rememberCreatedAt: timestamp('remember_created_at'),
-    // signInCount: pgInteger('sign_in_count').default(0).notNull(),
-    // lastSignInAt: timestamp('last_sign_in_at'),
-    // currentSignInIp: pgText('current_sign_in_ip'),
   },
   (table) => ({
     // Email must be unique within each community, but can be shared across communities
     emailCommunityUnique: unique('users_email_community_unique').on(
       table.email,
       table.communityId
+    ),
+    resetPasswordTokenIdx: index('idx_users_reset_password_token')
+      .on(table.resetPasswordToken)
+      .where(sql`${table.resetPasswordToken} IS NOT NULL`),
+    communityEmailIdx: index('idx_users_community_email').on(
+      table.communityId,
+      table.email
     ),
   })
 );
@@ -96,27 +96,33 @@ export const usersSqlite = sqliteTable(
       .references(() => communitiesSqlite.id),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
     lastLoginAt: integer('last_login_at', { mode: 'timestamp' }),
+    resetPasswordToken: sqliteText('reset_password_token'),
+    resetPasswordSentAt: integer('reset_password_sent_at', {
+      mode: 'timestamp',
+    }),
+    rememberCreatedAt: integer('remember_created_at', { mode: 'timestamp' }),
+    signInCount: integer('sign_in_count').default(0).notNull(),
+    lastSignInAt: integer('last_sign_in_at', { mode: 'timestamp' }),
+    currentSignInIp: sqliteText('current_sign_in_ip'),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),
     updatedAt: integer('updated_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),
-    // Authentication fields for password reset and session management - commented out temporarily for database sync issues
-    // resetPasswordToken: sqliteText('reset_password_token'),
-    // resetPasswordSentAt: integer('reset_password_sent_at', {
-    //   mode: 'timestamp',
-    // }),
-    // rememberCreatedAt: integer('remember_created_at', { mode: 'timestamp' }),
-    // signInCount: integer('sign_in_count').default(0).notNull(),
-    // lastSignInAt: integer('last_sign_at', { mode: 'timestamp' }),
-    // currentSignInIp: sqliteText('current_sign_in_ip'),
   },
   (table) => ({
     // Email must be unique within each community, but can be shared across communities
     emailCommunityUnique: sqliteUnique('users_email_community_unique').on(
       table.email,
       table.communityId
+    ),
+    resetPasswordTokenIdx: sqliteIndex('idx_users_reset_password_token')
+      .on(table.resetPasswordToken)
+      .where(sql`${table.resetPasswordToken} IS NOT NULL`),
+    communityEmailIdx: sqliteIndex('idx_users_community_email').on(
+      table.communityId,
+      table.email
     ),
   })
 );
@@ -149,9 +155,9 @@ export const communitiesRelations = relations(communitiesPg, ({ many }) => ({
 
 // SQLite relations (same structure)
 export const usersSqliteRelations = relations(usersSqlite, ({ one }) => ({
-  community: one(communitiesPg, {
+  community: one(communitiesSqlite, {
     fields: [usersSqlite.communityId],
-    references: [communitiesPg.id],
+    references: [communitiesSqlite.id],
   }),
 }));
 
@@ -161,14 +167,12 @@ export const insertUserSchema = createInsertSchema(usersPg, {
   role: UserRoleSchema.default('viewer'),
   isActive: z.boolean().default(true),
   lastLoginAt: z.date().optional(),
-
-  // Authentication field validations - commented out until database migration is complete
-  // resetPasswordToken: z.string().optional(),
-  // resetPasswordSentAt: z.date().optional(),
-  // rememberCreatedAt: z.date().optional(),
-  // signInCount: z.number().int().min(0).default(0),
-  // lastSignInAt: z.date().optional(),
-  // currentSignInIp: z.string().optional(),
+  resetPasswordToken: z.string().optional(),
+  resetPasswordSentAt: z.date().optional(),
+  rememberCreatedAt: z.date().optional(),
+  signInCount: z.number().int().min(0).default(0),
+  lastSignInAt: z.date().optional(),
+  currentSignInIp: z.string().optional(),
 });
 
 export const selectUserSchema = createSelectSchema(usersPg);
@@ -190,6 +194,7 @@ export const updateUserSchema = insertUserSchema
   .extend({
     role: insertUserSchema.shape.role.removeDefault(),
     isActive: insertUserSchema.shape.isActive.removeDefault(),
+    signInCount: insertUserSchema.shape.signInCount.removeDefault(),
   })
   .partial()
   .omit({

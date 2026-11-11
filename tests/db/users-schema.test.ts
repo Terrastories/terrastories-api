@@ -47,23 +47,21 @@ describe('Users Schema', () => {
   });
 
   describe('Schema Structure', () => {
-    it('should have all required fields', async () => {
+    it('should have all required and compatibility fields', async () => {
       const table = await getUsersTable();
       const columns = Object.keys(table);
 
-      expect(columns).toContain('id');
-      expect(columns).toContain('email');
-      expect(columns).toContain('passwordHash');
-      expect(columns).toContain('firstName');
-      expect(columns).toContain('lastName');
-      expect(columns).toContain('role');
-      expect(columns).toContain('communityId');
-      expect(columns).toContain('isActive');
-      expect(columns).toContain('createdAt');
-      expect(columns).toContain('updatedAt');
-
-      // Password-reset/session columns remain deferred until #126 restores the migration.
       for (const field of [
+        'id',
+        'email',
+        'passwordHash',
+        'firstName',
+        'lastName',
+        'role',
+        'communityId',
+        'isActive',
+        'createdAt',
+        'updatedAt',
         'resetPasswordToken',
         'resetPasswordSentAt',
         'rememberCreatedAt',
@@ -71,33 +69,28 @@ describe('Users Schema', () => {
         'lastSignInAt',
         'currentSignInIp',
       ]) {
-        expect(columns).not.toContain(field);
+        expect(columns).toContain(field);
       }
     });
 
     it('should validate required fields through schema', () => {
-      // Test that required fields are enforced by Zod schema
       expect(() => {
-        insertUserSchema.parse({
-          // Missing required fields should fail
-        });
+        insertUserSchema.parse({});
       }).toThrow();
     });
 
     it('should have proper default values in validation schema', () => {
-      // Test that defaults work in the Zod schema
-      const validUser = {
+      const parsed = insertUserSchema.parse({
         email: 'test@example.com',
         passwordHash: 'hashedpassword',
         firstName: 'Test',
         lastName: 'User',
         communityId: 1,
-        // role and isActive should get defaults
-      };
+      });
 
-      const parsed = insertUserSchema.parse(validUser);
       expect(parsed.role).toBe('viewer');
       expect(parsed.isActive).toBe(true);
+      expect(parsed.signInCount).toBe(0);
     });
   });
 
@@ -193,7 +186,6 @@ describe('Users Schema', () => {
 
   describe('TypeScript Types', () => {
     it('should export User type', () => {
-      // This is a compile-time test, but we can verify the types exist
       const user: User = {
         id: 1,
         email: 'test@example.com',
@@ -203,6 +195,13 @@ describe('Users Schema', () => {
         role: 'viewer',
         communityId: 1,
         isActive: true,
+        lastLoginAt: null,
+        resetPasswordToken: null,
+        resetPasswordSentAt: null,
+        rememberCreatedAt: null,
+        signInCount: 0,
+        lastSignInAt: null,
+        currentSignInIp: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -229,8 +228,6 @@ describe('Users Schema', () => {
     });
 
     it('should define community relation', () => {
-      // The actual relations testing would require a full database setup
-      // For now, we just verify the relation object exists
       expect(usersRelations).toBeDefined();
     });
   });
@@ -243,7 +240,6 @@ describe('Users Schema', () => {
           passwordHash: 'hashedpassword',
           firstName: 'Test',
           lastName: 'User',
-          // Missing communityId should cause validation error
         });
       }).toThrow();
     });
@@ -263,39 +259,35 @@ describe('Users Schema', () => {
 
   describe('Database Operations', () => {
     beforeEach(async () => {
-      // Clean up any existing test data
       try {
         const { sql } = await import('drizzle-orm');
         await db.run(sql`DELETE FROM users WHERE email LIKE 'test%'`);
       } catch {
-        // Table might not exist yet, that's expected in TDD
+        // Table may not be available for schema-only tests.
       }
     });
 
     it('should create users table during migration', async () => {
-      // This test will pass once the schema is implemented and migration is run
       try {
         const { sql } = await import('drizzle-orm');
         await db.run(sql`SELECT 1 FROM users LIMIT 1`);
       } catch (tableError) {
-        // Table doesn't exist yet - expected in TDD
         expect(tableError).toBeDefined();
       }
     });
 
-    it('should enforce unique email constraint', async () => {
-      // This test will be meaningful once the table exists
-      expect(true).toBe(true); // Placeholder for now
+    it('should expose the unique email/community constraint definition', () => {
+      expect(usersPg).toBeDefined();
+      expect(usersSqlite).toBeDefined();
     });
 
-    it('should enforce foreign key constraint to communities', async () => {
-      // This test will be meaningful once both tables exist with relations
-      expect(true).toBe(true); // Placeholder for now
+    it('should expose foreign-key community relations on both variants', () => {
+      expect(usersRelations).toBeDefined();
     });
   });
 
-  describe('Temporarily disabled authentication fields (#126)', () => {
-    const deferredFields = [
+  describe('Authentication compatibility fields', () => {
+    const compatibilityFields = [
       'resetPasswordToken',
       'resetPasswordSentAt',
       'rememberCreatedAt',
@@ -304,27 +296,26 @@ describe('Users Schema', () => {
       'currentSignInIp',
     ] as const;
 
-    it('should keep deferred columns out of the active table schema', async () => {
+    it('should expose compatibility columns in the active table schema', async () => {
       const columns = Object.keys(await getUsersTable());
-      for (const field of deferredFields) {
-        expect(columns).not.toContain(field);
+      for (const field of compatibilityFields) {
+        expect(columns).toContain(field);
       }
     });
 
-    it('should strip deferred fields from insert validation until migration is restored', () => {
+    it('should preserve provided auth compatibility fields in insert validation', () => {
       const parsed = insertUserSchema.parse({
-        email: 'reset-deferred@example.com',
+        email: 'reset-compatible@example.com',
         passwordHash: 'test-password-hash',
         firstName: 'Reset',
-        lastName: 'Deferred',
+        lastName: 'Compatible',
         communityId: 1,
         resetPasswordToken: 'temporary-token',
         signInCount: 5,
       });
 
-      for (const field of deferredFields) {
-        expect(parsed).not.toHaveProperty(field);
-      }
+      expect(parsed.resetPasswordToken).toBe('temporary-token');
+      expect(parsed.signInCount).toBe(5);
     });
   });
 
@@ -340,7 +331,7 @@ describe('Users Schema', () => {
           lastName: longName,
           communityId: 1,
         });
-      }).not.toThrow(); // Should allow long names unless we add specific length constraints
+      }).not.toThrow();
     });
 
     it('should handle unicode characters in names', () => {

@@ -29,6 +29,7 @@ import {
   toPublicPlace,
   CommunityIdParamSchema,
   PaginationQuerySchema,
+  isDatabaseIdString,
 } from '../shared/types/public.js';
 
 // Note: Request validation schemas removed as they're not currently used
@@ -42,6 +43,22 @@ export async function publicApiRoutes(
   const database = options?.database || (await getDb());
 
   /**
+   * Resource id guard. Runs before validateCommunity, so an id outside
+   * 1..2147483647 is answered "not found" without any database call (on
+   * PostgreSQL such an id would fail the query; SQLite finds no row).
+   */
+  function validateResourceId(notFoundMessage: string) {
+    return async (
+      request: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply
+    ) => {
+      if (!isDatabaseIdString(request.params.id)) {
+        return reply.status(404).send({ error: notFoundMessage });
+      }
+    };
+  }
+
+  /**
    * Community validation middleware
    * Validates that community_id exists and is accessible
    */
@@ -50,6 +67,12 @@ export async function publicApiRoutes(
     reply: FastifyReply
   ) {
     const { community_id } = request.params;
+
+    // An id outside 1..2147483647 cannot exist on either backend: answer
+    // "not found" without querying (PostgreSQL would fail on overflow).
+    if (!isDatabaseIdString(community_id)) {
+      return reply.status(404).send({ error: 'Community not found' });
+    }
 
     try {
       const communityRepository = new CommunityRepository(database);
@@ -190,7 +213,10 @@ export async function publicApiRoutes(
   }>(
     '/communities/:community_id/stories/:id',
     {
-      preHandler: validateCommunity,
+      preHandler: [
+        validateResourceId('Story not found or not public'),
+        validateCommunity,
+      ],
     },
     async (request, reply) => {
       const { community_id, id } = request.params;
@@ -290,7 +316,7 @@ export async function publicApiRoutes(
   }>(
     '/communities/:community_id/places/:id',
     {
-      preHandler: validateCommunity,
+      preHandler: [validateResourceId('Place not found'), validateCommunity],
     },
     async (request, reply) => {
       const { community_id, id } = request.params;

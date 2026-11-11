@@ -13,17 +13,17 @@
  * - Pagination and filtering support
  */
 
-import { eq, and, like, desc, asc, count, or, sql } from 'drizzle-orm';
+import { eq, and, desc, asc, count, or } from 'drizzle-orm';
+import { type User, type NewUser, type UserRole } from '../db/schema/users.js';
+import { type Community } from '../db/schema/communities.js';
 import {
-  getUsersTable,
-  type User,
-  type NewUser,
-  type UserRole,
-} from '../db/schema/users.js';
-import {
-  getCommunitiesTable,
-  type Community,
-} from '../db/schema/communities.js';
+  containsInsensitive,
+  dialectOf,
+  tablesFor,
+  textOrder,
+  type Dialect,
+  type DialectTables,
+} from '../db/dialect.js';
 
 // Database type - using any temporarily to resolve union type incompatibility
 // TODO: Implement proper database abstraction layer for SQLite/PostgreSQL compatibility
@@ -65,7 +65,13 @@ export interface PaginatedResult<T> {
  * Indigenous communities maintain sovereignty over their data.
  */
 export class UserRepository {
-  constructor(private database: DatabaseType) {}
+  private readonly dialect: Dialect;
+  private readonly tables: DialectTables;
+
+  constructor(private database: DatabaseType) {
+    this.dialect = dialectOf(database);
+    this.tables = tablesFor(database);
+  }
 
   /**
    * Create a new user within a specific community
@@ -76,7 +82,7 @@ export class UserRepository {
    */
   async create(userData: NewUser): Promise<User> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       // Check if email already exists in this community
       const existingUser = await this.findByEmail(
@@ -90,7 +96,7 @@ export class UserRepository {
       }
 
       // Verify community exists
-      const communitiesTable = await getCommunitiesTable();
+      const communitiesTable = this.tables.communities;
       const communities = await this.database
         .select()
         .from(communitiesTable)
@@ -133,7 +139,7 @@ export class UserRepository {
    */
   async findById(id: number, communityId: number): Promise<User | null> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       const users = await this.database
         .select()
@@ -161,7 +167,7 @@ export class UserRepository {
    */
   async findByEmail(email: string, communityId: number): Promise<User | null> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       const users = await this.database
         .select()
@@ -192,7 +198,7 @@ export class UserRepository {
    */
   async findByEmailGlobal(email: string): Promise<User | null> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       const users = await this.database
         .select()
@@ -254,7 +260,7 @@ export class UserRepository {
     communityId: number
   ): Promise<User | null> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       // If email is being updated, check for duplicates in the community
       if (updates.email) {
@@ -299,7 +305,7 @@ export class UserRepository {
    */
   async delete(id: number, communityId: number): Promise<boolean> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       const deletedUsers = await this.database
         .delete(usersTable)
@@ -329,7 +335,7 @@ export class UserRepository {
     communityId: number
   ): Promise<PaginatedResult<User>> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
       const {
         page = 1,
         limit = 20,
@@ -347,12 +353,11 @@ export class UserRepository {
 
       if (search) {
         // Use case-insensitive search that works with both PostgreSQL and SQLite
-        const searchTerm = search.toLowerCase();
         whereConditions.push(
           or(
-            like(sql`lower(${usersTable.firstName})`, `%${searchTerm}%`),
-            like(sql`lower(${usersTable.lastName})`, `%${searchTerm}%`),
-            like(sql`lower(${usersTable.email})`, `%${searchTerm}%`)
+            containsInsensitive(this.dialect, usersTable.firstName, search),
+            containsInsensitive(this.dialect, usersTable.lastName, search),
+            containsInsensitive(this.dialect, usersTable.email, search)
           )!
         );
       }
@@ -366,8 +371,17 @@ export class UserRepository {
       }
 
       // Build order by
-      const orderColumn = usersTable[orderBy] || usersTable.createdAt;
-      const orderFn = orderDirection === 'desc' ? desc : asc;
+      const isTextColumn =
+        orderBy === 'email' ||
+        orderBy === 'firstName' ||
+        orderBy === 'lastName';
+      const orderClause = isTextColumn
+        ? textOrder(this.dialect, usersTable[orderBy], orderDirection)
+        : orderDirection === 'desc'
+          ? desc(usersTable[orderBy] || usersTable.createdAt)
+          : asc(usersTable[orderBy] || usersTable.createdAt);
+      const idTiebreak =
+        orderDirection === 'desc' ? desc(usersTable.id) : asc(usersTable.id);
 
       // Get users and count in parallel
       const [users, countResults] = await Promise.all([
@@ -375,7 +389,7 @@ export class UserRepository {
           .select()
           .from(usersTable)
           .where(and(...whereConditions))
-          .orderBy(orderFn(orderColumn))
+          .orderBy(orderClause, idTiebreak)
           .limit(limit)
           .offset(offset),
         this.database
@@ -436,7 +450,7 @@ export class UserRepository {
     filters: { role?: string; isActive?: boolean } = {}
   ): Promise<number> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       const whereConditions = [eq(usersTable.communityId, communityId)];
 
@@ -480,8 +494,8 @@ export class UserRepository {
     isActive?: boolean;
   }): Promise<(User & { communityName?: string })[]> {
     try {
-      const usersTable = await getUsersTable();
-      const communitiesTable = await getCommunitiesTable();
+      const usersTable = this.tables.users;
+      const communitiesTable = this.tables.communities;
       const {
         limit = 20,
         offset = 0,
@@ -499,12 +513,11 @@ export class UserRepository {
       }
 
       if (search) {
-        const searchTerm = search.toLowerCase();
         whereConditions.push(
           or(
-            like(sql`lower(${usersTable.firstName})`, `%${searchTerm}%`),
-            like(sql`lower(${usersTable.lastName})`, `%${searchTerm}%`),
-            like(sql`lower(${usersTable.email})`, `%${searchTerm}%`)
+            containsInsensitive(this.dialect, usersTable.firstName, search),
+            containsInsensitive(this.dialect, usersTable.lastName, search),
+            containsInsensitive(this.dialect, usersTable.email, search)
           )!
         );
       }
@@ -536,7 +549,7 @@ export class UserRepository {
           communitiesTable,
           eq(usersTable.communityId, communitiesTable.id)
         )
-        .orderBy(desc(usersTable.createdAt))
+        .orderBy(desc(usersTable.createdAt), desc(usersTable.id))
         .limit(limit)
         .offset(offset);
 
@@ -565,7 +578,7 @@ export class UserRepository {
     isActive?: boolean;
   }): Promise<number> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
       const { communityId, role, search, isActive } = options;
 
       // Build where conditions (no community restriction for super admin)
@@ -576,12 +589,11 @@ export class UserRepository {
       }
 
       if (search) {
-        const searchTerm = search.toLowerCase();
         whereConditions.push(
           or(
-            like(sql`lower(${usersTable.firstName})`, `%${searchTerm}%`),
-            like(sql`lower(${usersTable.lastName})`, `%${searchTerm}%`),
-            like(sql`lower(${usersTable.email})`, `%${searchTerm}%`)
+            containsInsensitive(this.dialect, usersTable.firstName, search),
+            containsInsensitive(this.dialect, usersTable.lastName, search),
+            containsInsensitive(this.dialect, usersTable.email, search)
           )!
         );
       }
@@ -616,7 +628,7 @@ export class UserRepository {
    */
   async countUsersByCommunity(communityId: number): Promise<number> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       // Execute count query
       const query = this.database
@@ -641,7 +653,7 @@ export class UserRepository {
    */
   async findByIdAsSuperAdmin(id: number): Promise<User | null> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
       const users = await this.database
         .select()
         .from(usersTable)
@@ -667,8 +679,8 @@ export class UserRepository {
     id: number
   ): Promise<(User & { communityName?: string }) | null> {
     try {
-      const usersTable = await getUsersTable();
-      const communitiesTable = await getCommunitiesTable();
+      const usersTable = this.tables.users;
+      const communitiesTable = this.tables.communities;
 
       const users = await this.database
         .select({
@@ -713,7 +725,7 @@ export class UserRepository {
     data: Partial<NewUser>
   ): Promise<User> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       // Update the user
       const updateData = {
@@ -768,7 +780,7 @@ export class UserRepository {
       const { page = 1, limit = 20, search, role, active } = options;
       const offset = (page - 1) * limit;
 
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       // Build where conditions
       const conditions = [eq(usersTable.communityId, communityId)];
@@ -776,9 +788,9 @@ export class UserRepository {
       if (search) {
         conditions.push(
           or(
-            like(usersTable.firstName, `%${search}%`),
-            like(usersTable.lastName, `%${search}%`),
-            like(usersTable.email, `%${search}%`)
+            containsInsensitive(this.dialect, usersTable.firstName, search),
+            containsInsensitive(this.dialect, usersTable.lastName, search),
+            containsInsensitive(this.dialect, usersTable.email, search)
           )!
         );
       }
@@ -805,7 +817,7 @@ export class UserRepository {
         .select()
         .from(usersTable)
         .where(and(...conditions))
-        .orderBy(desc(usersTable.createdAt))
+        .orderBy(desc(usersTable.createdAt), desc(usersTable.id))
         .limit(limit)
         .offset(offset);
 
@@ -834,7 +846,7 @@ export class UserRepository {
     communityId: number
   ): Promise<User | null> {
     try {
-      const usersTable = await getUsersTable();
+      const usersTable = this.tables.users;
 
       const users = await this.database
         .select()

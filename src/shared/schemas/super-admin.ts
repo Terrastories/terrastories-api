@@ -142,6 +142,12 @@ export const createCommunitySchema = z
 
 // Schema for updating communities
 export const updateCommunitySchema = createCommunitySchema
+  .extend({
+    publicStories: createCommunitySchema.shape.publicStories.removeDefault(),
+    locale: createCommunitySchema.shape.locale.removeDefault(),
+    isActive: createCommunitySchema.shape.isActive.removeDefault(),
+    beta: createCommunitySchema.shape.beta.removeDefault(),
+  })
   .partial()
   .extend({
     // Prevent slug updates for data consistency - slugs are immutable after creation

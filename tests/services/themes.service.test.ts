@@ -27,7 +27,7 @@ import {
   InvalidMapboxConfigError,
 } from '../../src/services/themes.service.js';
 import { ThemesRepository } from '../../src/repositories/themes.repository.js';
-import type { Theme } from '../../src/db/schema/themes.js';
+import { updateThemeSchema, type Theme } from '../../src/db/schema/themes.js';
 import { TestDatabaseManager } from '../helpers/database.js';
 import { createMockCommunity, createMockUser } from '../helpers/mocks.js';
 
@@ -237,6 +237,25 @@ describe('ThemesService', () => {
         swBoundaryLong: -63.0,
         neBoundaryLat: 44.5,
         neBoundaryLong: -64.0,
+      };
+
+      // Act & Assert
+      await expect(
+        themesService.createTheme(
+          createInput,
+          testUserId,
+          'admin',
+          testCommunityId
+        )
+      ).rejects.toThrow(InvalidGeographicBoundsError);
+    });
+
+    it('should throw InvalidGeographicBoundsError when only one boundary latitude is supplied', async () => {
+      // Arrange - a single supplied coordinate must still trigger bounds validation
+      const createInput: ThemeCreateInput = {
+        name: 'Single Invalid Bounds Theme',
+        communityId: testCommunityId,
+        swBoundaryLat: 200, // Out of range without any other boundary coordinate
       };
 
       // Act & Assert
@@ -710,6 +729,34 @@ describe('ThemesService', () => {
           updates: ['name', 'description', 'active'],
         })
       );
+    });
+
+    it('should preserve existing active status on a name-only update', async () => {
+      // Arrange - theme is currently active
+      const activeTheme = await themesService.createTheme(
+        {
+          name: 'Active Theme',
+          communityId: testCommunityId,
+          active: true,
+        },
+        testUserId,
+        'admin',
+        testCommunityId
+      );
+
+      // Act - update only the name
+      const result = await themesService.updateTheme(
+        activeTheme.id,
+        updateThemeSchema.parse({ name: 'Renamed Active Theme' }),
+        testUserId,
+        'admin',
+        testCommunityId
+      );
+
+      // Assert - active must not be reset by a name-only update
+      expect(result).toBeDefined();
+      expect(result!.name).toBe('Renamed Active Theme');
+      expect(result!.active).toBe(true);
     });
 
     it('should update geographic coordinates', async () => {

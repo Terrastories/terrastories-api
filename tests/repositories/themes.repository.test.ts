@@ -417,10 +417,7 @@ describe('ThemesRepository', () => {
       );
       expect(validation.isValid).toBe(false);
       expect(validation.errors).toContain(
-        'Southwest boundary latitude must be less than northeast boundary latitude'
-      );
-      expect(validation.errors).toContain(
-        'Southwest boundary longitude must be less than northeast boundary longitude'
+        'Southwest boundary latitude must be less than or equal to northeast boundary latitude'
       );
     });
 

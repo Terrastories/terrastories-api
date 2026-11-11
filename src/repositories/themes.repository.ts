@@ -134,35 +134,20 @@ function validateGeographicBounds(
   neLat?: number,
   neLng?: number
 ): boolean {
-  // If any bound is provided, all must be provided
   if (
-    swLat !== undefined ||
-    swLng !== undefined ||
-    neLat !== undefined ||
-    neLng !== undefined
-  ) {
-    if (
-      swLat === undefined ||
-      swLng === undefined ||
-      neLat === undefined ||
-      neLng === undefined
-    ) {
-      return false;
-    }
-
-    // Validate individual coordinates
-    if (
-      !validateCoordinates(swLat, swLng) ||
-      !validateCoordinates(neLat, neLng)
-    ) {
-      return false;
-    }
-
-    // Validate bounds relationship
-    return swLat < neLat && swLng < neLng;
-  }
-
-  return true; // All bounds are optional
+    [swLat, neLat].some(
+      (value) => value !== undefined && !isValidLatitude(value)
+    )
+  )
+    return false;
+  if (
+    [swLng, neLng].some(
+      (value) => value !== undefined && !isValidLongitude(value)
+    )
+  )
+    return false;
+  // Partial bounds are valid; longitude may wrap across the antimeridian.
+  return swLat === undefined || neLat === undefined || swLat <= neLat;
 }
 
 // Database type union for compatibility
@@ -786,43 +771,16 @@ export class ThemesRepository {
       isValid = false;
     }
 
-    // Check if all boundary coordinates are provided
     if (
       theme.swBoundaryLat !== null &&
-      theme.swBoundaryLong !== null &&
       theme.neBoundaryLat !== null &&
-      theme.neBoundaryLong !== null
+      isValidLatitude(Number(theme.swBoundaryLat)) &&
+      isValidLatitude(Number(theme.neBoundaryLat)) &&
+      Number(theme.swBoundaryLat) > Number(theme.neBoundaryLat)
     ) {
-      // Check SW < NE relationship (only if coordinates are in valid range)
-      if (
-        isValidLatitude(Number(theme.swBoundaryLat)) &&
-        isValidLatitude(Number(theme.neBoundaryLat)) &&
-        Number(theme.swBoundaryLat) >= Number(theme.neBoundaryLat)
-      ) {
-        errors.push(
-          'Southwest boundary latitude must be less than northeast boundary latitude'
-        );
-        isValid = false;
-      }
-
-      if (
-        isValidLongitude(Number(theme.swBoundaryLong)) &&
-        isValidLongitude(Number(theme.neBoundaryLong)) &&
-        Number(theme.swBoundaryLong) >= Number(theme.neBoundaryLong)
-      ) {
-        errors.push(
-          'Southwest boundary longitude must be less than northeast boundary longitude'
-        );
-        isValid = false;
-      }
-    } else if (
-      theme.swBoundaryLat !== null ||
-      theme.swBoundaryLong !== null ||
-      theme.neBoundaryLat !== null ||
-      theme.neBoundaryLong !== null
-    ) {
-      // Some but not all boundary coordinates are provided
-      errors.push('All boundary coordinates must be provided together');
+      errors.push(
+        'Southwest boundary latitude must be less than or equal to northeast boundary latitude'
+      );
       isValid = false;
     }
 

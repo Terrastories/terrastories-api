@@ -193,6 +193,12 @@ export const createCommunitySchema = baseCommunitySchema
  * Community update schema (all fields optional)
  */
 export const updateCommunitySchema = baseCommunitySchema
+  .extend({
+    publicStories: baseCommunitySchema.shape.publicStories.removeDefault(),
+    locale: baseCommunitySchema.shape.locale.removeDefault(),
+    isActive: baseCommunitySchema.shape.isActive.removeDefault(),
+    beta: baseCommunitySchema.shape.beta.removeDefault(),
+  })
   .partial()
   .extend({
     // Prevent slug updates for data consistency

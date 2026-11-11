@@ -903,7 +903,7 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     'updateByCommunity'
   );
   assertThemeCoordinates(
-    // Bounds are validated as a set, so update all four together.
+    // Exercise a full-bounds update as well as the partial updates below.
     await themes.updateWithCommunityCheck(zeroTheme.id, cid, {
       swBoundaryLat: zeroCoordinates.swBoundaryLat,
       swBoundaryLong: zeroCoordinates.swBoundaryLong,
@@ -1479,6 +1479,93 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   assert.ok(roundedReread, 'themes.findById must reread the rounded theme');
   assert.equal((roundedReread as any).centerLat, 1.234568);
   assert.equal((roundedReread as any).centerLong, -2);
+
+  // 8b. Partial bound writes and permissive-but-valid bound shapes (equal
+  // latitudes, antimeridian-wrapping longitudes) must behave identically on
+  // both backends. A fresh community keeps the earlier count/order assertions
+  // independent of these rows.
+  const boundsCommunity = await communities.create({
+    name: 'Partial Bounds Community',
+  });
+  const wrappedBoundsTheme = await themes.create({
+    name: 'Wrapped Bounds Theme',
+    communityId: boundsCommunity.id,
+    swBoundaryLat: 5,
+    neBoundaryLat: 5,
+    swBoundaryLong: 170,
+    neBoundaryLong: -170,
+  });
+  assertThemeCoordinates(
+    wrappedBoundsTheme,
+    {
+      swBoundaryLat: 5,
+      neBoundaryLat: 5,
+      swBoundaryLong: 170,
+      neBoundaryLong: -170,
+    },
+    'equal/wrapped bounds'
+  );
+  assert.deepEqual(
+    await themes.validateGeographicBounds(wrappedBoundsTheme.id),
+    { isValid: true, errors: [] },
+    'equal latitudes and wrapping longitudes must validate'
+  );
+
+  // Supplying one bound must not clear or invent the other bounds.
+  const partialBoundsTheme = await themes.create({
+    name: 'Partial Bounds Update Theme',
+    communityId: boundsCommunity.id,
+  });
+  const southBoundOnly = await themes.update(partialBoundsTheme.id, {
+    swBoundaryLat: 5,
+  });
+  assert.ok(southBoundOnly, 'themes.update must return the partial theme');
+  assert.equal((southBoundOnly as any).swBoundaryLat, 5);
+  for (const field of [
+    'swBoundaryLong',
+    'neBoundaryLat',
+    'neBoundaryLong',
+    'centerLat',
+    'centerLong',
+  ]) {
+    assert.equal(
+      (southBoundOnly as any)[field],
+      null,
+      `themes.update swBoundaryLat alone must leave ${field} null`
+    );
+  }
+  const northBoundOnly = await themes.update(partialBoundsTheme.id, {
+    neBoundaryLat: 10,
+  });
+  assert.ok(northBoundOnly, 'themes.update must return the updated bounds');
+  assert.equal((northBoundOnly as any).swBoundaryLat, 5);
+  assert.equal((northBoundOnly as any).neBoundaryLat, 10);
+  assert.equal((northBoundOnly as any).neBoundaryLong, null);
+  assert.deepEqual(
+    await themes.validateGeographicBounds(partialBoundsTheme.id),
+    { isValid: true, errors: [] },
+    'partial bounds must validate'
+  );
+
+  // A lone northeast latitude is valid on its own: the pair is never supplied
+  // together, so no southwest comparison applies.
+  const loneNorthBoundsTheme = await themes.create({
+    name: 'Lone North Bound Theme',
+    communityId: boundsCommunity.id,
+  });
+  const loneNorth = await themes.update(loneNorthBoundsTheme.id, {
+    neBoundaryLat: -5,
+  });
+  assert.ok(loneNorth, 'themes.update must return the lone north bound theme');
+  assert.equal((loneNorth as any).neBoundaryLat, -5);
+  assert.equal((loneNorth as any).swBoundaryLat, null);
+  assert.equal((loneNorth as any).swBoundaryLong, null);
+  assert.equal((loneNorth as any).neBoundaryLong, null);
+  assert.deepEqual(
+    await themes.validateGeographicBounds(loneNorthBoundsTheme.id),
+    { isValid: true, errors: [] },
+    'a lone northeast latitude must validate'
+  );
 
   // 9. Association rows with equal sortOrder fall back to join-row id order,
   // which is not necessarily place id order.

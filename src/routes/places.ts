@@ -55,7 +55,10 @@ const CreatePlaceSchema = CoordinateSchema.extend({
 });
 
 // Update place request schema
-const UpdatePlaceSchema = CreatePlaceSchema.partial()
+const UpdatePlaceSchema = CreatePlaceSchema.extend({
+  isRestricted: CreatePlaceSchema.shape.isRestricted.removeDefault(),
+})
+  .partial()
   .omit({ latitude: true, longitude: true })
   .extend({
     latitude: z

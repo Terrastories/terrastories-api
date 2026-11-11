@@ -287,19 +287,34 @@ describe('Themes Schema', () => {
       expect(result.error?.issues[0].path).toContain('swBoundaryLat');
     });
 
-    it('should reject SW boundary > NE boundary (longitude)', () => {
-      const invalidBounds = {
-        centerLat: 45.0,
-        centerLong: -123.0,
-        swBoundaryLat: 44.0,
-        swBoundaryLong: -121.0, // > NE
-        neBoundaryLat: 46.0,
-        neBoundaryLong: -122.0,
-      };
-
-      const result = GeographicBoundsSchema.safeParse(invalidBounds);
-      expect(result.success).toBe(false);
-      expect(result.error?.issues[0].path).toContain('swBoundaryLong');
+    // Approved rule: SW latitude <= NE latitude (equality allowed);
+    // SW longitude > NE longitude is a valid antimeridian wrap, not an error.
+    it.each([
+      {
+        title: 'SW longitude 170 > NE longitude -170 (antimeridian wrap)',
+        bounds: {
+          centerLat: 15.0,
+          centerLong: 175.0,
+          swBoundaryLat: 10.0,
+          swBoundaryLong: 170.0,
+          neBoundaryLat: 20.0,
+          neBoundaryLong: -170.0,
+        },
+      },
+      {
+        title: 'SW latitude equal to NE latitude',
+        bounds: {
+          centerLat: 15.0,
+          centerLong: -123.0,
+          swBoundaryLat: 20.0,
+          swBoundaryLong: -124.0,
+          neBoundaryLat: 20.0,
+          neBoundaryLong: -122.0,
+        },
+      },
+    ])('should accept $title for GeographicBoundsSchema', ({ bounds }) => {
+      const result = GeographicBoundsSchema.safeParse(bounds);
+      expect(result.success).toBe(true);
     });
   });
 
@@ -465,19 +480,38 @@ describe('Themes Schema', () => {
       expect(result.data).not.toHaveProperty('communityId');
     });
 
+    it('should not emit active or other defaults from a name-only update', () => {
+      const result = updateThemeSchema.parse({ name: 'Renamed Theme' });
+
+      expect(result).toEqual({ name: 'Renamed Theme' });
+      expect(result).not.toHaveProperty('active');
+      expect(result).not.toHaveProperty('communityId');
+    });
+
+    it('should preserve an explicitly supplied active value in update input', () => {
+      expect(updateThemeSchema.parse({ active: false })).toEqual({
+        active: false,
+      });
+      expect(updateThemeSchema.parse({ active: true })).toEqual({
+        active: true,
+      });
+    });
+
     it('should validate geographic bounds in createThemeSchema', () => {
       const invalidBoundsData: CreateTheme = {
         name: 'Invalid Bounds Theme',
-        swBoundaryLat: 47.0, // > NE boundary
+        swBoundaryLat: 47.0, // > NE boundary — invalid latitude order
         neBoundaryLat: 46.0,
-        swBoundaryLong: -122.0, // > NE boundary
+        swBoundaryLong: -122.0, // > NE longitude — valid antimeridian wrap, not an error
         neBoundaryLong: -123.0,
         communityId: 1,
       };
 
       const result = createThemeSchema.safeParse(invalidBoundsData);
       expect(result.success).toBe(false);
-      expect(result.error?.issues).toHaveLength(2); // both lat and long boundary errors
+      // Reversed longitude is a valid antimeridian wrap, so only the latitude issue remains
+      expect(result.error?.issues).toHaveLength(1);
+      expect(result.error?.issues[0].path).toContain('swBoundaryLat');
     });
 
     const baseCreateData = { name: 'Valid Theme', communityId: 1 };
@@ -536,10 +570,6 @@ describe('Themes Schema', () => {
         bounds: { swBoundaryLat: 47.0, neBoundaryLat: 46.0 },
         path: 'swBoundaryLat',
       },
-      {
-        bounds: { swBoundaryLong: -121.0, neBoundaryLong: -122.0 },
-        path: 'swBoundaryLong',
-      },
     ])(
       'should reject reversed nonzero bounds for $path in create',
       ({ bounds, path }) => {
@@ -556,19 +586,49 @@ describe('Themes Schema', () => {
 
     it.each([
       { swBoundaryLat: 0, neBoundaryLat: -5 },
-      { swBoundaryLong: 0, neBoundaryLong: -5 },
       { swBoundaryLat: 5, neBoundaryLat: 0 },
-      { swBoundaryLong: 5, neBoundaryLong: 0 },
     ])(
-      'should skip reversed-bounds check when a boundary is zero %j',
+      'should reject reversed bounds that include zero in create %j',
       (bounds) => {
         const result = createThemeSchema.safeParse({
           ...baseCreateData,
           ...bounds,
         });
-        expect(result.success).toBe(true);
+        expect(result.success).toBe(false);
+        expect(result.error?.issues.map((issue) => issue.path[0])).toContain(
+          Object.keys(bounds)[0]
+        );
       }
     );
+
+    // Approved rule acceptance: reversed longitude is a valid antimeridian wrap;
+    // equal SW/NE latitude is allowed.
+    it.each([
+      {
+        title: 'SW longitude 170 > NE longitude -170 (antimeridian wrap)',
+        bounds: {
+          swBoundaryLat: 10.0,
+          swBoundaryLong: 170.0,
+          neBoundaryLat: 20.0,
+          neBoundaryLong: -170.0,
+        },
+      },
+      {
+        title: 'SW latitude equal to NE latitude',
+        bounds: {
+          swBoundaryLat: 20.0,
+          swBoundaryLong: -124.0,
+          neBoundaryLat: 20.0,
+          neBoundaryLong: -122.0,
+        },
+      },
+    ])('should accept $title in create', ({ bounds }) => {
+      const result = createThemeSchema.safeParse({
+        ...baseCreateData,
+        ...bounds,
+      });
+      expect(result.success).toBe(true);
+    });
 
     it.each([
       {},
@@ -598,14 +658,44 @@ describe('Themes Schema', () => {
 
     it.each([
       { swBoundaryLat: 47.0, neBoundaryLat: 46.0 },
-      { swBoundaryLong: -121.0, neBoundaryLong: -122.0 },
+      { swBoundaryLat: 0, neBoundaryLat: -5 },
+      { swBoundaryLat: 5, neBoundaryLat: 0 },
     ])(
-      'should accept reversed bounds in update (create-only check) %j',
+      'should reject reversed bounds including zero in update %j',
       (bounds) => {
         const result = updateThemeSchema.safeParse(bounds);
-        expect(result.success).toBe(true);
+        expect(result.success).toBe(false);
+        expect(result.error?.issues.map((issue) => issue.path[0])).toContain(
+          Object.keys(bounds)[0]
+        );
       }
     );
+
+    // Approved rule acceptance: reversed longitude is a valid antimeridian wrap;
+    // equal SW/NE latitude is allowed.
+    it.each([
+      {
+        title: 'SW longitude 170 > NE longitude -170 (antimeridian wrap)',
+        bounds: {
+          swBoundaryLat: 10.0,
+          swBoundaryLong: 170.0,
+          neBoundaryLat: 20.0,
+          neBoundaryLong: -170.0,
+        },
+      },
+      {
+        title: 'SW latitude equal to NE latitude',
+        bounds: {
+          swBoundaryLat: 20.0,
+          swBoundaryLong: -124.0,
+          neBoundaryLat: 20.0,
+          neBoundaryLong: -122.0,
+        },
+      },
+    ])('should accept $title in update', ({ bounds }) => {
+      const result = updateThemeSchema.safeParse(bounds);
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('Performance & Indexing', () => {

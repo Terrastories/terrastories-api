@@ -1,8 +1,9 @@
 /**
  * Spatial Utilities for Geographic Data Processing
  *
- * Provides cross-database spatial utilities for both PostgreSQL/PostGIS
- * and SQLite environments with graceful fallbacks.
+ * Provides backend-neutral geographic helpers for PostgreSQL and
+ * SQLite/D1-compatible deployments. V2 spatial behavior is application-level
+ * and does not depend on database spatial extensions.
  */
 
 import { z } from 'zod';
@@ -17,6 +18,15 @@ export interface GeoJSONPoint {
 export interface GeoJSONPolygon {
   type: 'Polygon';
   coordinates: number[][][]; // Array of linear rings
+}
+
+export interface GeographicBoundingBox {
+  north: number;
+  south: number;
+  east: number;
+  west: number;
+  crossesAntimeridian: boolean;
+  includesAllLongitudes: boolean;
 }
 
 // Coordinate validation schemas
@@ -35,6 +45,13 @@ export const GeometryPolygonSchema = z.object({
   coordinates: z.array(z.array(z.tuple([z.number(), z.number()]))),
 });
 
+const EARTH_RADIUS_KM = 6371;
+
+function normalizeLongitudeRadians(radians: number): number {
+  const fullTurn = 2 * Math.PI;
+  return ((((radians + Math.PI) % fullTurn) + fullTurn) % fullTurn) - Math.PI;
+}
+
 /**
  * Spatial utility functions for creating and parsing geographic data
  */
@@ -45,7 +62,7 @@ export const SpatialUtils = {
   createPoint(latitude: number, longitude: number): string {
     const point: GeoJSONPoint = {
       type: 'Point',
-      coordinates: [longitude, latitude], // GeoJSON uses [lng, lat] order
+      coordinates: [longitude, latitude],
     };
     return JSON.stringify(point);
   },
@@ -143,8 +160,8 @@ export const SpatialUtils = {
   },
 
   /**
-   * Calculate distance between two points using Haversine formula
-   * Returns distance in meters
+   * Calculate distance between two points using the Haversine formula.
+   * Returns distance in meters.
    */
   calculateDistance(
     lat1: number,
@@ -152,7 +169,7 @@ export const SpatialUtils = {
     lat2: number,
     lng2: number
   ): number {
-    const R = 6371000; // Earth's radius in meters
+    const radiusMeters = EARTH_RADIUS_KM * 1000;
     const φ1 = (lat1 * Math.PI) / 180;
     const φ2 = (lat2 * Math.PI) / 180;
     const Δφ = ((lat2 - lat1) * Math.PI) / 180;
@@ -163,7 +180,97 @@ export const SpatialUtils = {
       Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
-    return R * c;
+    return radiusMeters * c;
+  },
+
+  /**
+   * Return a conservative spherical bounding box for a radius search.
+   * The box is safe as a database prefilter: exact inclusion still comes from
+   * Haversine distance. Near a pole longitude is intentionally unrestricted.
+   */
+  calculateBoundingBox(
+    latitude: number,
+    longitude: number,
+    radiusKm: number
+  ): GeographicBoundingBox {
+    if (!this.validateCoordinates(latitude, longitude)) {
+      throw new Error('Invalid coordinates for bounding box');
+    }
+    if (!Number.isFinite(radiusKm) || radiusKm < 0) {
+      throw new Error('Radius must be a non-negative finite number');
+    }
+
+    if (radiusKm === 0) {
+      return {
+        north: latitude,
+        south: latitude,
+        east: longitude,
+        west: longitude,
+        crossesAntimeridian: false,
+        includesAllLongitudes: false,
+      };
+    }
+
+    const latitudeRadians = this.toRadians(latitude);
+    const longitudeRadians = this.toRadians(longitude);
+    const angularDistance = radiusKm / EARTH_RADIUS_KM;
+    const halfPi = Math.PI / 2;
+
+    const rawSouth = latitudeRadians - angularDistance;
+    const rawNorth = latitudeRadians + angularDistance;
+    const southRadians = Math.max(-halfPi, rawSouth);
+    const northRadians = Math.min(halfPi, rawNorth);
+
+    const south = this.toDegrees(southRadians);
+    const north = this.toDegrees(northRadians);
+
+    if (
+      rawSouth <= -halfPi ||
+      rawNorth >= halfPi ||
+      angularDistance >= Math.PI
+    ) {
+      return {
+        north,
+        south,
+        east: 180,
+        west: -180,
+        crossesAntimeridian: false,
+        includesAllLongitudes: true,
+      };
+    }
+
+    const cosineLatitude = Math.cos(latitudeRadians);
+    const longitudeRatio = Math.sin(angularDistance) / cosineLatitude;
+
+    if (Math.abs(longitudeRatio) >= 1) {
+      return {
+        north,
+        south,
+        east: 180,
+        west: -180,
+        crossesAntimeridian: false,
+        includesAllLongitudes: true,
+      };
+    }
+
+    const longitudeDelta = Math.asin(longitudeRatio);
+    const westRadians = normalizeLongitudeRadians(
+      longitudeRadians - longitudeDelta
+    );
+    const eastRadians = normalizeLongitudeRadians(
+      longitudeRadians + longitudeDelta
+    );
+    const west = this.toDegrees(westRadians);
+    const east = this.toDegrees(eastRadians);
+
+    return {
+      north,
+      south,
+      east,
+      west,
+      crossesAntimeridian: west > east,
+      includesAllLongitudes: false,
+    };
   },
 
   /**

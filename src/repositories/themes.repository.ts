@@ -1,13 +1,18 @@
-import { eq, and, desc, count, sql, like } from 'drizzle-orm';
+import { eq, and, desc, count, sql, type SQL } from 'drizzle-orm';
 import {
-  themes,
   type Theme,
   type NewTheme,
   type CreateTheme,
   type UpdateTheme,
 } from '../db/schema/themes.js';
-import { communities } from '../db/schema/communities.js';
-import { getConfig } from '../shared/config/index.js';
+import {
+  containsInsensitive,
+  dialectOf,
+  tablesFor,
+  textOrder,
+  type Dialect,
+  type DialectTables,
+} from '../db/dialect.js';
 import type { Database } from '../db/index.js';
 
 export interface PaginatedResponse<T> {
@@ -111,6 +116,16 @@ function validateMapboxUrl(url: string): boolean {
 }
 
 /**
+ * PostgreSQL stores theme coordinates as numeric(10,6) and rounds to 6
+ * decimals; SQLite real keeps the full double. Round in the application on
+ * every write so both backends store and return the same value.
+ */
+function roundCoordinate<T extends number | null | undefined>(value: T): T {
+  if (value === null || value === undefined) return value;
+  return (Math.round(value * 1e6) / 1e6) as T;
+}
+
+/**
  * Validate geographic bounds
  */
 function validateGeographicBounds(
@@ -155,15 +170,46 @@ type DatabaseType = Database;
 
 export class ThemesRepository {
   private database: DatabaseType;
-  private isPostgres: boolean;
+  private readonly dialect: Dialect;
+  private readonly tables: DialectTables;
 
   constructor(database: DatabaseType) {
     this.database = database;
-    // Detect database type from connection string
-    const config = getConfig();
-    this.isPostgres =
-      config.database.url.startsWith('postgresql://') ||
-      config.database.url.startsWith('postgres://');
+    // Pick tables from the Drizzle instance itself so the same repository
+    // runs against SQLite/D1 and PostgreSQL (previously always SQLite tables).
+    this.dialect = dialectOf(database);
+    this.tables = tablesFor(database);
+  }
+
+  private get themesTable() {
+    return this.tables.themes;
+  }
+
+  /** Name order that is identical on both backends, with an id tiebreak. */
+  private nameOrder(direction: 'asc' | 'desc' = 'asc'): SQL[] {
+    return [
+      textOrder(this.dialect, this.themesTable.name, direction),
+      direction === 'desc'
+        ? desc(this.themesTable.id)
+        : sql`${this.themesTable.id} ASC`,
+    ];
+  }
+
+  /** Requested sort column, then id, so pages are deterministic. */
+  private sortOrder(sortBy: string, sortOrder: 'asc' | 'desc'): SQL[] {
+    if (sortBy === 'name') return this.nameOrder(sortOrder);
+    const column =
+      sortBy === 'created_at'
+        ? this.themesTable.createdAt
+        : this.themesTable.updatedAt;
+    return sortOrder === 'desc'
+      ? [desc(column), desc(this.themesTable.id)]
+      : [sql`${column} ASC`, sql`${this.themesTable.id} ASC`];
+  }
+
+  /** Case-insensitive name-or-description match, same on both backends. */
+  private nameOrDescription(query: string): SQL {
+    return sql`(${containsInsensitive(this.dialect, this.themesTable.name, query)} OR ${containsInsensitive(this.dialect, this.themesTable.description, query)})`;
   }
 
   // Type-safe database query wrapper - cast to any to handle union type
@@ -191,12 +237,13 @@ export class ThemesRepository {
       description: data.description || null,
       mapboxStyleUrl: data.mapboxStyleUrl || null,
       mapboxAccessToken: data.mapboxAccessToken || null,
-      centerLat: data.centerLat || null,
-      centerLong: data.centerLong || null,
-      swBoundaryLat: data.swBoundaryLat || null,
-      swBoundaryLong: data.swBoundaryLong || null,
-      neBoundaryLat: data.neBoundaryLat || null,
-      neBoundaryLong: data.neBoundaryLong || null,
+      // ?? (not ||): a 0 coordinate (equator, prime meridian) is a value.
+      centerLat: roundCoordinate(data.centerLat) ?? null,
+      centerLong: roundCoordinate(data.centerLong) ?? null,
+      swBoundaryLat: roundCoordinate(data.swBoundaryLat) ?? null,
+      swBoundaryLong: roundCoordinate(data.swBoundaryLong) ?? null,
+      neBoundaryLat: roundCoordinate(data.neBoundaryLat) ?? null,
+      neBoundaryLong: roundCoordinate(data.neBoundaryLong) ?? null,
       active: data.active || false,
       communityId: data.communityId,
       createdAt: now,
@@ -206,9 +253,9 @@ export class ThemesRepository {
     try {
       // Check if community exists first
       const [existingCommunity] = await this.db
-        .select({ id: communities.id })
-        .from(communities)
-        .where(eq(communities.id, data.communityId))
+        .select({ id: this.tables.communities.id })
+        .from(this.tables.communities)
+        .where(eq(this.tables.communities.id, data.communityId))
         .limit(1);
 
       if (!existingCommunity) {
@@ -216,7 +263,7 @@ export class ThemesRepository {
       }
 
       const [theme] = await this.db
-        .insert(themes)
+        .insert(this.themesTable)
         .values(themeData)
         .returning();
 
@@ -239,8 +286,8 @@ export class ThemesRepository {
   async findById(id: number): Promise<Theme | null> {
     const [theme] = await this.db
       .select()
-      .from(themes)
-      .where(eq(themes.id, id))
+      .from(this.themesTable)
+      .where(eq(this.themesTable.id, id))
       .limit(1);
 
     return theme || null;
@@ -255,8 +302,13 @@ export class ThemesRepository {
   ): Promise<Theme | null> {
     const [theme] = await this.db
       .select()
-      .from(themes)
-      .where(and(eq(themes.id, id), eq(themes.communityId, communityId)))
+      .from(this.themesTable)
+      .where(
+        and(
+          eq(this.themesTable.id, id),
+          eq(this.themesTable.communityId, communityId)
+        )
+      )
       .limit(1);
 
     return theme || null;
@@ -288,9 +340,9 @@ export class ThemesRepository {
       // Simple version - return all themes for community
       return await this.db
         .select()
-        .from(themes)
-        .where(eq(themes.communityId, communityId))
-        .orderBy(themes.name);
+        .from(this.themesTable)
+        .where(eq(this.themesTable.communityId, communityId))
+        .orderBy(...this.nameOrder());
     }
 
     // Paginated version
@@ -298,29 +350,23 @@ export class ThemesRepository {
     const offset = (page - 1) * limit;
 
     // Build where condition
-    const whereCondition = eq(themes.communityId, communityId);
+    const whereCondition = eq(this.themesTable.communityId, communityId);
 
-    // Build order by
-    const sortColumn =
-      sortBy === 'name'
-        ? themes.name
-        : sortBy === 'created_at'
-          ? themes.createdAt
-          : themes.updatedAt;
-    const orderBy = sortOrder === 'desc' ? desc(sortColumn) : sortColumn;
+    // Build order by (deterministic on both backends)
+    const orderBy = this.sortOrder(sortBy, sortOrder);
 
     // Get total count
     const [{ count: total }] = await this.db
       .select({ count: count() })
-      .from(themes)
+      .from(this.themesTable)
       .where(whereCondition);
 
     // Get paginated data
     const themesList = await this.db
       .select()
-      .from(themes)
+      .from(this.themesTable)
       .where(whereCondition)
-      .orderBy(orderBy)
+      .orderBy(...orderBy)
       .limit(limit)
       .offset(offset);
 
@@ -339,21 +385,32 @@ export class ThemesRepository {
   async findActiveThemes(communityId: number): Promise<Theme[]> {
     return await this.db
       .select()
-      .from(themes)
-      .where(and(eq(themes.communityId, communityId), eq(themes.active, true)))
-      .orderBy(themes.name);
+      .from(this.themesTable)
+      .where(
+        and(
+          eq(this.themesTable.communityId, communityId),
+          eq(this.themesTable.active, true)
+        )
+      )
+      .orderBy(...this.nameOrder());
   }
 
   /**
    * Search themes by name
    */
   async searchByName(communityId: number, query: string): Promise<Theme[]> {
-    const searchCondition = sql`${themes.name} LIKE ${'%' + query + '%'}`;
+    const searchCondition = containsInsensitive(
+      this.dialect,
+      this.themesTable.name,
+      query
+    );
     return await this.db
       .select()
-      .from(themes)
-      .where(and(eq(themes.communityId, communityId), searchCondition))
-      .orderBy(themes.name);
+      .from(this.themesTable)
+      .where(
+        and(eq(this.themesTable.communityId, communityId), searchCondition)
+      )
+      .orderBy(...this.nameOrder());
   }
 
   /**
@@ -363,12 +420,18 @@ export class ThemesRepository {
     communityId: number,
     query: string
   ): Promise<Theme[]> {
-    const searchCondition = sql`${themes.description} LIKE ${'%' + query + '%'}`;
+    const searchCondition = containsInsensitive(
+      this.dialect,
+      this.themesTable.description,
+      query
+    );
     return await this.db
       .select()
-      .from(themes)
-      .where(and(eq(themes.communityId, communityId), searchCondition))
-      .orderBy(themes.name);
+      .from(this.themesTable)
+      .where(
+        and(eq(this.themesTable.communityId, communityId), searchCondition)
+      )
+      .orderBy(...this.nameOrder());
   }
 
   /**
@@ -382,33 +445,27 @@ export class ThemesRepository {
     const offset = (page - 1) * limit;
 
     // Build search condition
-    const searchCondition = sql`(${themes.name} LIKE ${'%' + query + '%'} OR ${themes.description} LIKE ${'%' + query + '%'})`;
+    const searchCondition = this.nameOrDescription(query);
     const whereCondition = and(
-      eq(themes.communityId, communityId),
+      eq(this.themesTable.communityId, communityId),
       searchCondition
     );
 
-    // Build order by
-    const sortColumn =
-      sortBy === 'name'
-        ? themes.name
-        : sortBy === 'created_at'
-          ? themes.createdAt
-          : themes.updatedAt;
-    const orderBy = sortOrder === 'desc' ? desc(sortColumn) : sortColumn;
+    // Build order by (deterministic on both backends)
+    const orderBy = this.sortOrder(sortBy, sortOrder);
 
     // Get total count
     const [{ count: total }] = await this.db
       .select({ count: count() })
-      .from(themes)
+      .from(this.themesTable)
       .where(whereCondition);
 
     // Get paginated data
     const themesList = await this.db
       .select()
-      .from(themes)
+      .from(this.themesTable)
       .where(whereCondition)
-      .orderBy(orderBy)
+      .orderBy(...orderBy)
       .limit(limit)
       .offset(offset);
 
@@ -458,28 +515,32 @@ export class ThemesRepository {
       ...(data.mapboxAccessToken !== undefined && {
         mapboxAccessToken: data.mapboxAccessToken,
       }),
-      ...(data.centerLat !== undefined && { centerLat: data.centerLat }),
-      ...(data.centerLong !== undefined && { centerLong: data.centerLong }),
+      ...(data.centerLat !== undefined && {
+        centerLat: roundCoordinate(data.centerLat),
+      }),
+      ...(data.centerLong !== undefined && {
+        centerLong: roundCoordinate(data.centerLong),
+      }),
       ...(data.swBoundaryLat !== undefined && {
-        swBoundaryLat: data.swBoundaryLat,
+        swBoundaryLat: roundCoordinate(data.swBoundaryLat),
       }),
       ...(data.swBoundaryLong !== undefined && {
-        swBoundaryLong: data.swBoundaryLong,
+        swBoundaryLong: roundCoordinate(data.swBoundaryLong),
       }),
       ...(data.neBoundaryLat !== undefined && {
-        neBoundaryLat: data.neBoundaryLat,
+        neBoundaryLat: roundCoordinate(data.neBoundaryLat),
       }),
       ...(data.neBoundaryLong !== undefined && {
-        neBoundaryLong: data.neBoundaryLong,
+        neBoundaryLong: roundCoordinate(data.neBoundaryLong),
       }),
       ...(data.active !== undefined && { active: data.active }),
       updatedAt: new Date(Date.now() + 100), // Ensure it's different from creation time
     };
 
     const [updated] = await this.db
-      .update(themes)
+      .update(this.themesTable)
       .set(updateData)
-      .where(eq(themes.id, id))
+      .where(eq(this.themesTable.id, id))
       .returning();
 
     return updated || null;
@@ -508,9 +569,9 @@ export class ThemesRepository {
   async delete(id: number): Promise<boolean> {
     try {
       const [deleted] = await this.db
-        .delete(themes)
-        .where(eq(themes.id, id))
-        .returning({ id: themes.id });
+        .delete(this.themesTable)
+        .where(eq(this.themesTable.id, id))
+        .returning({ id: this.themesTable.id });
 
       return !!deleted;
     } catch {
@@ -524,9 +585,14 @@ export class ThemesRepository {
   async deleteByCommunity(id: number, communityId: number): Promise<boolean> {
     try {
       const [deleted] = await this.db
-        .delete(themes)
-        .where(and(eq(themes.id, id), eq(themes.communityId, communityId)))
-        .returning({ id: themes.id });
+        .delete(this.themesTable)
+        .where(
+          and(
+            eq(this.themesTable.id, id),
+            eq(this.themesTable.communityId, communityId)
+          )
+        )
+        .returning({ id: this.themesTable.id });
 
       return !!deleted;
     } catch {
@@ -539,9 +605,14 @@ export class ThemesRepository {
    */
   async existsInCommunity(id: number, communityId: number): Promise<boolean> {
     const [theme] = await this.db
-      .select({ id: themes.id })
-      .from(themes)
-      .where(and(eq(themes.id, id), eq(themes.communityId, communityId)))
+      .select({ id: this.themesTable.id })
+      .from(this.themesTable)
+      .where(
+        and(
+          eq(this.themesTable.id, id),
+          eq(this.themesTable.communityId, communityId)
+        )
+      )
       .limit(1);
 
     return !!theme;
@@ -559,34 +630,39 @@ export class ThemesRepository {
   }> {
     const [totalResult] = await this.db
       .select({ count: count() })
-      .from(themes)
-      .where(eq(themes.communityId, communityId));
+      .from(this.themesTable)
+      .where(eq(this.themesTable.communityId, communityId));
 
     const [activeResult] = await this.db
       .select({ count: count() })
-      .from(themes)
-      .where(and(eq(themes.communityId, communityId), eq(themes.active, true)));
+      .from(this.themesTable)
+      .where(
+        and(
+          eq(this.themesTable.communityId, communityId),
+          eq(this.themesTable.active, true)
+        )
+      );
 
     const [withMapboxResult] = await this.db
       .select({ count: count() })
-      .from(themes)
+      .from(this.themesTable)
       .where(
         and(
-          eq(themes.communityId, communityId),
-          sql`${themes.mapboxStyleUrl} IS NOT NULL`
+          eq(this.themesTable.communityId, communityId),
+          sql`${this.themesTable.mapboxStyleUrl} IS NOT NULL`
         )
       );
 
     const [withBoundsResult] = await this.db
       .select({ count: count() })
-      .from(themes)
+      .from(this.themesTable)
       .where(
         and(
-          eq(themes.communityId, communityId),
-          sql`${themes.swBoundaryLat} IS NOT NULL`,
-          sql`${themes.swBoundaryLong} IS NOT NULL`,
-          sql`${themes.neBoundaryLat} IS NOT NULL`,
-          sql`${themes.neBoundaryLong} IS NOT NULL`
+          eq(this.themesTable.communityId, communityId),
+          sql`${this.themesTable.swBoundaryLat} IS NOT NULL`,
+          sql`${this.themesTable.swBoundaryLong} IS NOT NULL`,
+          sql`${this.themesTable.neBoundaryLat} IS NOT NULL`,
+          sql`${this.themesTable.neBoundaryLong} IS NOT NULL`
         )
       );
 
@@ -628,18 +704,18 @@ export class ThemesRepository {
     communityId: number,
     query: string
   ): Promise<Theme[]> {
-    const searchCondition = sql`(${themes.name} LIKE ${'%' + query + '%'} OR ${themes.description} LIKE ${'%' + query + '%'})`;
+    const searchCondition = this.nameOrDescription(query);
     return await this.db
       .select()
-      .from(themes)
+      .from(this.themesTable)
       .where(
         and(
-          eq(themes.communityId, communityId),
-          eq(themes.active, true),
+          eq(this.themesTable.communityId, communityId),
+          eq(this.themesTable.active, true),
           searchCondition
         )
       )
-      .orderBy(themes.name);
+      .orderBy(...this.nameOrder());
   }
 
   /**
@@ -772,20 +848,25 @@ export class ThemesRepository {
     communityId: number,
     options?: { activeOnly?: boolean; searchTerm?: string }
   ): Promise<number> {
-    let query = this.db
-      .select({ count: sql`count(*)` })
-      .from(themes)
-      .where(eq(themes.communityId, communityId));
-
+    const conditions: SQL[] = [eq(this.themesTable.communityId, communityId)];
     if (options?.activeOnly) {
-      query = query.where(eq(themes.active, true));
+      conditions.push(eq(this.themesTable.active, true));
     }
-
     if (options?.searchTerm) {
-      query = query.where(like(themes.name, `%${options.searchTerm}%`));
+      conditions.push(
+        containsInsensitive(
+          this.dialect,
+          this.themesTable.name,
+          options.searchTerm
+        )
+      );
     }
 
-    const [result] = await query;
+    // Chained .where() calls replace each other in Drizzle, so combine them.
+    const [result] = await this.db
+      .select({ count: sql`count(*)` })
+      .from(this.themesTable)
+      .where(and(...conditions));
     return Number(result.count);
   }
 

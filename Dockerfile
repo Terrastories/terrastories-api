@@ -63,6 +63,8 @@ RUN npm prune --omit=dev --ignore-scripts && npm cache clean --force
 # Production runtime - minimal footprint
 FROM node:20.19.0-alpine AS production
 
+ENV NODE_ENV=production
+
 # Patch the supported Alpine runtime and install only required system packages.
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
@@ -106,7 +108,7 @@ EXPOSE 3000
 
 # Add health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/health || exit 1
 
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]

@@ -20,6 +20,8 @@ services:
       - uploads_data:/app/uploads
     environment:
       - NODE_ENV=development
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-minimum-32-characters-required-for-security}
+      - SESSION_SECRET=${SESSION_SECRET:-your-session-secret-minimum-32-characters-required-for-cookies}
       - LOG_LEVEL=debug
       - HOT_RELOAD=true
       - DATABASE_URL=./data.db # Use SQLite for faster development

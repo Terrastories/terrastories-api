@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -40,17 +40,25 @@ describe('release artifact reproducibility', () => {
     );
   });
 
-  it('keeps PostgreSQL production startup fail closed until migration parity lands', () => {
+  it('keeps PostgreSQL production startup on its own migration history, fail closed without it', () => {
     const productionCompose = readRepo('docker-compose.prod.yml');
     const migrationRunner = readRepo('src/db/migrate.ts');
 
     expect(productionCompose).toContain('node dist/db/migrate.js');
     expect(productionCompose).toContain('exec node dist/server.js');
+    // #161 (issue #135) added a separate PostgreSQL migration history. The
+    // runner must use it and must still refuse to fall back to the
+    // SQLite/D1 set when it is missing.
+    expect(migrationRunner).toContain(
+      "path.join(__dirname, 'migrations', 'postgres')"
+    );
+    expect(
+      existsSync(
+        join(repoRoot, 'src/db/migrations/postgres/meta/_journal.json')
+      )
+    ).toBe(true);
     expect(migrationRunner).toContain(
       'PostgreSQL migration history is not present. Refusing to run the SQLite/D1 migration set against PostgreSQL.'
-    );
-    expect(migrationRunner).toContain(
-      'PostgreSQL migration parity is tracked by #135.'
     );
   });
 });

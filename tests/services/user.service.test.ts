@@ -655,11 +655,11 @@ describe('User Service', () => {
       }
     });
 
-    test('should omit deferred authentication fields from current user records', async () => {
+    test('should expose restored authentication fields with safe defaults', async () => {
       const registeredUser = await userService.registerUser({
-        email: 'deferred-auth-fields@example.com',
+        email: 'restored-auth-fields@example.com',
         password: 'StrongPassword123@',
-        firstName: 'Deferred',
+        firstName: 'Restored',
         lastName: 'Auth',
         role: 'viewer',
         communityId: testCommunityId,
@@ -668,17 +668,14 @@ describe('User Service', () => {
         registeredUser.id,
         testCommunityId
       );
-
-      for (const field of [
-        'resetPasswordToken',
-        'resetPasswordSentAt',
-        'rememberCreatedAt',
-        'signInCount',
-        'lastSignInAt',
-        'currentSignInIp',
-      ]) {
-        expect(user).not.toHaveProperty(field);
-      }
+      expect(user).toMatchObject({
+        resetPasswordToken: null,
+        resetPasswordSentAt: null,
+        rememberCreatedAt: null,
+        signInCount: 0,
+        lastSignInAt: null,
+        currentSignInIp: null,
+      });
     });
   });
 });

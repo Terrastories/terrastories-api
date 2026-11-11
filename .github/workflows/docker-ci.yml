@@ -39,6 +39,17 @@ jobs:
             docker run --rm terrastories-api:${{ matrix.target }}-test \
               npm list --depth=0 typescript eslint vitest
           else
+            # Missing secrets must fail, rather than silently selecting dev config.
+            set +e
+            timeout 20s docker run --name missing-secret-container terrastories-api:production-test
+            refusal_status=$?
+            set -e
+            test "$refusal_status" -eq 1
+            docker logs missing-secret-container > missing-secret.log 2>&1
+            grep -F "Configuration validation failed" missing-secret.log
+            grep -F "JWT_SECRET is required" missing-secret.log
+            grep -F "SESSION_SECRET is required" missing-secret.log
+
             echo "Testing production image startup and health..."
             jwt_secret="$(openssl rand -hex 32)"
             session_secret="$(openssl rand -hex 32)"
@@ -95,12 +106,17 @@ jobs:
 
             check_health
             test "$(docker inspect --format='{{.State.Running}}' test-container)" = "true"
+            docker exec test-container node --input-type=module -e '
+              for (const method of ["GET", "HEAD"]) {
+                const response = await fetch("http://127.0.0.1:3000/dev/seed", {method});
+                if (response.status !== 404) process.exit(1);
+              }'
             docker stop test-container
           fi
 
       - name: Cleanup Docker image test
         if: always() && matrix.target == 'production'
-        run: docker rm -f test-container > /dev/null 2>&1 || true
+        run: docker rm -f test-container missing-secret-container > /dev/null 2>&1 || true
 
   # =============================================================================
   # DOCKER COMPOSE CONFIGURATION TESTING
@@ -120,6 +136,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Test Docker Compose configuration syntax
+        env:
+          JWT_SECRET: ci-fixture-jwt-secret-at-least-32-characters
+          SESSION_SECRET: ci-fixture-session-secret-at-least-32-characters
         run: |
           echo "Testing ${{ matrix.compose-file }} configuration..."
 
@@ -129,6 +148,15 @@ jobs:
           else
             # Test with base configuration for overrides
             docker compose -f docker-compose.yml -f ${{ matrix.compose-file }} config > /dev/null
+          fi
+
+          if [ "${{ matrix.compose-file }}" = "docker-compose.prod.yml" ]; then
+            for missing in JWT_SECRET SESSION_SECRET; do
+              if env -u "$missing" docker compose --env-file /dev/null -f docker-compose.yml -f docker-compose.prod.yml config --quiet; then
+                echo "Production Compose accepted missing $missing"
+                exit 1
+              fi
+            done
           fi
 
           echo "✅ ${{ matrix.compose-file }} syntax is valid"

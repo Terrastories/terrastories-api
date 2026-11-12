@@ -17,3 +17,21 @@ describe('persona CLI validation', () => {
     await expect(main(['--unknown', 'a'])).rejects.toThrow('Usage');
   });
 });
+
+describe('request timeout validation', () => {
+  it('rejects invalid timeout values before loading a fixture', async () => {
+    for (const value of [
+      '0',
+      '-1',
+      'NaN',
+      'Infinity',
+      '20ms',
+      ' ',
+      '2147483648',
+    ]) {
+      await expect(
+        main(['--fixture', '/missing.ts', '--request-timeout-ms', value])
+      ).rejects.toThrow('Request timeout');
+    }
+  });
+});

@@ -1,7 +1,11 @@
 import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { runJourneys, validateBaseUrl } from './runner.js';
+import {
+  runJourneys,
+  validateBaseUrl,
+  validateRequestTimeout,
+} from './runner.js';
 
 export { runJourneys as runPersonas } from './runner.js';
 
@@ -11,16 +15,25 @@ export async function main(args: string[]): Promise<number> {
     const name = args[index];
     const value = args[index + 1];
     if (
-      !['--base-url', '--fixture', '--report'].includes(name) ||
+      !['--base-url', '--fixture', '--report', '--request-timeout-ms'].includes(
+        name
+      ) ||
       !value ||
       values.has(name)
     ) {
       throw new Error(
-        'Usage: qa:personas --fixture MODULE [--base-url URL] [--report FILE]'
+        'Usage: qa:personas --fixture MODULE [--base-url URL] [--report FILE] [--request-timeout-ms MS]'
       );
     }
     values.set(name, value);
   }
+  const timeoutValue = values.get('--request-timeout-ms');
+  const requestTimeoutMs =
+    timeoutValue === undefined
+      ? 30_000
+      : validateRequestTimeout(
+          timeoutValue.trim() ? Number(timeoutValue) : NaN
+        );
   const base = values.get('--base-url');
   const url = base ? validateBaseUrl(base) : undefined;
   const fixture = values.get('--fixture');
@@ -47,10 +60,11 @@ export async function main(args: string[]): Promise<number> {
                 ? undefined
                 : await request.arrayBuffer(),
               redirect: 'manual',
+              signal: request.signal,
             }
           )
       : context.handler;
-    const report = await runJourneys({ ...context, handler });
+    const report = await runJourneys({ ...context, handler, requestTimeoutMs });
     await writeFile(
       values.get('--report') ?? 'qa-report.json',
       JSON.stringify(report, null, 2) + '\n'

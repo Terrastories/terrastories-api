@@ -48,3 +48,15 @@ Request-failure messages identify the failed operation (preparation, transport,
 or response JSON) and never copy exception text that could contain credentials.
 Use `QA_REPORT_PATH=/absolute/path/report.json` with the SQLite Vitest wrapper to
 retain its report even when assertions fail.
+
+Requests have a 30-second default deadline spanning preparation, transport and
+body reads. Set `--request-timeout-ms 10000` (or `requestTimeoutMs` in-process)
+to change it. Responses are consumed or cancelled, and stalled operations fail
+with a sanitized stage diagnostic. Logout journeys explicitly replay the saved
+pre-logout cookie. Media isolation fixtures contain real owned PNG files and a
+readable control; fixture cleanup removes only those created files.
+
+Password reset token lookup remains disabled in the current API. The journey
+checks a complete request with an invalid token **format**, at the handler,
+without claiming successful recovery or valid-format token lookup coverage.
+Restoring the full recovery flow is outside this phase-1 QA change.

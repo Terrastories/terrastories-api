@@ -1373,7 +1373,7 @@ describe('Authentication Routes', () => {
         method: 'POST',
         url: '/api/v1/auth/reset-password',
         payload: {
-          resetToken: 'invalidtoken123',
+          resetToken: 'g'.repeat(32),
           newPassword: 'NewPassword123@',
           communityId: testCommunityId,
         },
@@ -1382,8 +1382,7 @@ describe('Authentication Routes', () => {
       expect(resetPasswordResponse.statusCode).toBe(400);
 
       const resetBody = JSON.parse(resetPasswordResponse.body);
-      expect(resetBody).toHaveProperty('error');
-      expect(resetBody.error).toBeDefined();
+      expect(resetBody.error).toBe('Invalid or expired reset token');
     });
 
     test('POST /auth/reset-password should reject weak passwords', async () => {

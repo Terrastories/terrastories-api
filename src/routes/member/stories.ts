@@ -83,7 +83,12 @@ export async function memberStoriesRoutes(
           properties: {
             data: {
               type: 'array',
-              items: { type: 'object' },
+              items: {
+                type: 'object',
+                required: ['id'],
+                properties: { id: { type: 'integer' } },
+                additionalProperties: true,
+              },
             },
             meta: {
               type: 'object',

@@ -11,6 +11,10 @@ export interface Step extends Endpoint {
   prepare?: () => Promise<void>;
   headers?: Record<string, string>;
   check?: (body: unknown) => boolean;
+  /** Save the cookie sent by this step, before response Set-Cookie changes it. */
+  saveCookieAs?: string;
+  /** Replay a previously saved cookie even after logout cleared the cookie jar. */
+  useSavedCookie?: string;
 }
 export interface Journey {
   persona: string;
@@ -31,7 +35,8 @@ export interface Result extends Endpoint {
     | 'body-mismatch'
     | 'missing-created-id'
     | 'request-failed'
-    | 'unmatched-route';
+    | 'unmatched-route'
+    | 'request-timeout';
   message?: string;
 }
 export type Handler = (request: Request) => Promise<Response>;
@@ -48,6 +53,14 @@ export function validateBaseUrl(value: string): URL {
     throw new Error('Invalid base URL');
   return url;
 }
+export function validateRequestTimeout(value: number): number {
+  if (!Number.isFinite(value) || value <= 0 || value > 2_147_483_647) {
+    throw new Error(
+      'Request timeout must be positive, finite and at most 2147483647 milliseconds'
+    );
+  }
+  return value;
+}
 const key = (endpoint: Endpoint) =>
   `${endpoint.method.toUpperCase()} ${endpoint.path}`;
 function matches(pattern: string, path: string): boolean {
@@ -63,7 +76,9 @@ export async function runJourneys(options: {
   routes: Endpoint[];
   journeys: Journey[];
   exclusions?: Exclusion[];
+  requestTimeoutMs?: number;
 }) {
+  const timeoutMs = validateRequestTimeout(options.requestTimeoutMs ?? 30_000);
   const results: Result[] = [];
   const reached = new Set<string>();
   const exclusions = options.exclusions ?? [];
@@ -77,6 +92,7 @@ export async function runJourneys(options: {
   for (const journey of options.journeys) {
     if (journey.skipped) continue;
     let cookie = '';
+    const savedCookies: Record<string, string> = {};
     const ids: Record<string, number | string> = {};
     for (const step of journey.steps) {
       let path = step.path;
@@ -85,82 +101,165 @@ export async function runJourneys(options: {
       let failure: Result['failure'];
       let message: string | undefined;
       let stage = 'Preparing request';
+      const controller = new AbortController();
+      let response: Response | undefined;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cancelBody = () => {
+        // Cleanup must not itself hang after the deadline. Both cancellation
+        // paths observe rejection, including a late handler response.
+        if (reader) {
+          const activeReader = reader;
+          void activeReader
+            .cancel()
+            .catch(() => {})
+            .finally(() => {
+              try {
+                activeReader.releaseLock();
+              } catch {
+                /* A pending read owns the lock until cancellation completes. */
+              }
+            });
+        } else if (response?.body && !response.bodyUsed)
+          void response.body.cancel().catch(() => {});
+      };
       try {
-        await step.prepare?.();
-        path = step.path.replace(/\{(\w+)\}/g, (_, name: string) => {
-          if (!ids[name]) throw new Error(`Missing captured id: ${name}`);
-          return String(ids[name]);
-        });
-        const headers = new Headers(step.headers);
-        if (cookie && !headers.has('cookie')) headers.set('cookie', cookie);
-        if (step.body !== undefined)
-          headers.set('content-type', 'application/json');
-        stage = 'Sending request';
-        const response = await options.handler(
-          new Request(`http://qa.invalid${path}`, {
-            method: step.method,
-            headers,
-            body:
-              (step.rawBody instanceof Uint8Array
-                ? Uint8Array.from(step.rawBody).buffer
-                : step.rawBody) ??
-              (step.body === undefined ? undefined : JSON.stringify(step.body)),
-          })
-        );
-        actual = response.status;
-        const setCookies = response.headers.getSetCookie();
-        const sessionCookies = setCookies
-          .flatMap((value) => value.split(/,(?=\s*sessionId=)/))
-          .map((value) => value.trim().split(';')[0])
-          .filter((value) => value.startsWith('sessionId='))
-          .sort((a, b) => b.length - a.length);
-        if (sessionCookies[0]) cookie = sessionCookies[0];
-        pass = actual === step.expected;
-        if (!pass) failure = 'status-mismatch';
-        if (step.check || step.captureId) {
-          stage = 'Reading response JSON';
-          const body: unknown = await response.json();
-          if (step.check && !step.check(body)) {
-            pass = false;
-            failure ??= 'body-mismatch';
+        const work = (async () => {
+          await step.prepare?.();
+          if (controller.signal.aborted)
+            throw new Error('Request deadline elapsed');
+          path = step.path.replace(/\{(\w+)\}/g, (_, name: string) => {
+            if (!ids[name]) throw new Error(`Missing captured id: ${name}`);
+            return String(ids[name]);
+          });
+          const headers = new Headers(step.headers);
+          if (step.useSavedCookie) {
+            const saved = savedCookies[step.useSavedCookie];
+            if (!saved) throw new Error('Saved session cookie is unavailable');
+            headers.set('cookie', saved);
+          } else if (cookie && !headers.has('cookie'))
+            headers.set('cookie', cookie);
+          if (step.saveCookieAs) {
+            const outgoingCookie = headers.get('cookie');
+            if (!outgoingCookie) throw new Error('No session cookie to save');
+            savedCookies[step.saveCookieAs] = outgoingCookie;
           }
-          if (step.captureId) {
-            const data = (body as { data?: { id?: unknown } })?.data;
-            if (
-              pass &&
-              ((typeof data?.id === 'number' &&
-                Number.isSafeInteger(data.id) &&
-                data.id > 0) ||
-                (typeof data?.id === 'string' &&
-                  /^[a-zA-Z0-9-]+$/.test(data.id)))
-            )
-              ids[step.captureId] = data.id;
-            else {
+          if (step.body !== undefined)
+            headers.set('content-type', 'application/json');
+          stage = 'Sending request';
+          response = await options.handler(
+            new Request(`http://qa.invalid${path}`, {
+              method: step.method,
+              headers,
+              signal: controller.signal,
+              body:
+                (step.rawBody instanceof Uint8Array
+                  ? Uint8Array.from(step.rawBody).buffer
+                  : step.rawBody) ??
+                (step.body === undefined
+                  ? undefined
+                  : JSON.stringify(step.body)),
+            })
+          );
+          if (controller.signal.aborted) {
+            cancelBody();
+            throw new Error('Request deadline elapsed');
+          }
+          actual = response.status;
+          const setCookies = response.headers.getSetCookie();
+          const sessionCookies = setCookies
+            .flatMap((value) => value.split(/,(?=\s*sessionId=)/))
+            .map((value) => value.trim().split(';')[0])
+            .filter((value) => value.startsWith('sessionId='))
+            .sort((a, b) => b.length - a.length);
+          if (sessionCookies[0]) cookie = sessionCookies[0];
+          pass = actual === step.expected;
+          if (!pass) failure = 'status-mismatch';
+          if (step.check || step.captureId) {
+            stage = 'Reading response JSON';
+            // Retain ownership of the reader so timeout can cancel a hanging body.
+            reader = response.body?.getReader();
+            const decoder = new TextDecoder();
+            let text = '';
+            if (reader) {
+              while (true) {
+                const part = await reader.read();
+                if (controller.signal.aborted)
+                  throw new Error('Request deadline elapsed');
+                if (part.done) break;
+                text += decoder.decode(part.value, { stream: true });
+              }
+              text += decoder.decode();
+              reader.releaseLock();
+              reader = undefined;
+            }
+            const body: unknown = JSON.parse(text);
+            if (step.check && !step.check(body)) {
               pass = false;
-              failure ??= 'missing-created-id';
+              failure ??= 'body-mismatch';
+            }
+            if (step.captureId) {
+              const data = (body as { data?: { id?: unknown } })?.data;
+              if (
+                pass &&
+                ((typeof data?.id === 'number' &&
+                  Number.isSafeInteger(data.id) &&
+                  data.id > 0) ||
+                  (typeof data?.id === 'string' &&
+                    /^[a-zA-Z0-9-]+$/.test(data.id)))
+              )
+                ids[step.captureId] = data.id;
+              else {
+                pass = false;
+                failure ??= 'missing-created-id';
+              }
             }
           }
-        }
-        const candidates = options.routes.filter(
-          (route) =>
-            route.method.toUpperCase() === step.method.toUpperCase() &&
-            matches(route.path, path)
-        );
-        candidates.sort(
-          (a, b) =>
-            a.path.split('/').filter((p) => p.startsWith(':')).length -
-            b.path.split('/').filter((p) => p.startsWith(':')).length
-        );
-        if (candidates[0]) reached.add(key(candidates[0]));
-        else {
-          pass = false;
-          failure = 'unmatched-route';
-          message = 'No registered endpoint matches this request';
-        }
+          if (!step.check && !step.captureId) {
+            stage = 'Closing response body';
+            await response.body?.cancel();
+          }
+          if (controller.signal.aborted)
+            throw new Error('Request deadline elapsed');
+          const candidates = options.routes.filter(
+            (route) =>
+              route.method.toUpperCase() === step.method.toUpperCase() &&
+              matches(route.path, path)
+          );
+          candidates.sort(
+            (a, b) =>
+              a.path.split('/').filter((p) => p.startsWith(':')).length -
+              b.path.split('/').filter((p) => p.startsWith(':')).length
+          );
+          if (candidates[0]) reached.add(key(candidates[0]));
+          else {
+            pass = false;
+            failure = 'unmatched-route';
+            message = 'No registered endpoint matches this request';
+          }
+        })();
+        const deadline = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+            cancelBody();
+            reject(new Error('Request deadline elapsed'));
+          }, timeoutMs);
+        });
+        await Promise.race([work, deadline]);
       } catch {
         pass = false;
-        failure ??= 'request-failed';
-        message = `${stage} failed`;
+        if (timedOut) {
+          failure = 'request-timeout';
+          message = `${stage} exceeded request timeout`;
+        } else {
+          failure ??= 'request-failed';
+          message = `${stage} failed`;
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+        cancelBody();
       }
       results.push({
         persona: journey.persona,

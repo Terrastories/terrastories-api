@@ -1,7 +1,7 @@
 import type { Step } from '../runner.js';
 export function dashboardSteps(
   communityId: number,
-  ids: Record<string, number>
+  _ids: Record<string, number>
 ): Step[] {
   const steps: Step[] = [];
   for (const [resource, body] of [
@@ -21,6 +21,7 @@ export function dashboardSteps(
         method: 'POST',
         path: `/api/v1/member/${resource}`,
         expected: 201,
+        captureId: `dashboard${resource}`,
         body,
         check: (body) =>
           typeof body === 'object' &&
@@ -31,13 +32,13 @@ export function dashboardSteps(
       {
         name: `dashboard read ${resource}`,
         method: 'GET',
-        path: `/api/v1/member/${resource}/${ids[resource]}`,
+        path: `/api/v1/member/${resource}/{dashboard${resource}}`,
         expected: 200,
       },
       {
         name: `dashboard update ${resource}`,
         method: 'PUT',
-        path: `/api/v1/member/${resource}/${ids[resource]}`,
+        path: `/api/v1/member/${resource}/{dashboard${resource}}`,
         expected: 200,
         body:
           resource === 'stories'
@@ -47,7 +48,7 @@ export function dashboardSteps(
       {
         name: `dashboard delete ${resource}`,
         method: 'DELETE',
-        path: `/api/v1/member/${resource}/${ids[resource]}`,
+        path: `/api/v1/member/${resource}/{dashboard${resource}}`,
         expected: 204,
       }
     );

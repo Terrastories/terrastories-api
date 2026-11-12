@@ -22,7 +22,10 @@ export const restrictionApplicability = {
   users:
     'No independent privacy column; community isolation and admin-only access apply',
 };
-export function excludesIds(ids: (number | string)[]) {
+export function excludesIds(
+  ids: (number | string)[],
+  requiredId?: number | string
+) {
   return (body: unknown): boolean => {
     if (
       !body ||
@@ -31,12 +34,19 @@ export function excludesIds(ids: (number | string)[]) {
       !Array.isArray(body.data)
     )
       return false;
-    return !body.data.some(
-      (row: unknown) =>
-        row &&
-        typeof row === 'object' &&
-        'id' in row &&
-        ids.includes(row.id as number | string)
+    const rows = body.data;
+    return (
+      rows.every((row: unknown) => {
+        if (!row || typeof row !== 'object' || !('id' in row)) return false;
+        const id = row.id;
+        return (
+          ((typeof id === 'number' && Number.isSafeInteger(id) && id > 0) ||
+            (typeof id === 'string' && id.trim().length > 0)) &&
+          !ids.includes(id as number | string)
+        );
+      }) &&
+      (requiredId === undefined ||
+        rows.some((row: { id: unknown }) => row.id === requiredId))
     );
   };
 }
@@ -55,7 +65,7 @@ export function isolationSteps(f: PersonaFixture, role: Role): Step[] {
       method: 'GET',
       path: `${root}/stories`,
       expected: denied ? 403 : 200,
-      ...(!denied ? { check: excludesIds(blocked) } : {}),
+      ...(!denied ? { check: excludesIds(blocked, f.publicStoryId) } : {}),
     });
     for (const id of blocked)
       steps.push({
@@ -146,6 +156,9 @@ export function isolationSteps(f: PersonaFixture, role: Role): Step[] {
       themes: f.foreignIds.themes,
       user: f.systemUserId,
       file: f.heldFileId,
+      dashboardstories: f.publicStoryId,
+      dashboardplaces: f.placeId,
+      dashboardspeakers: f.speakerId,
     };
     const operations = [
       ...domainSteps(f.communityId),

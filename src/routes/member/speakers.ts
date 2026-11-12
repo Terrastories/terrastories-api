@@ -70,7 +70,15 @@ export async function memberSpeakersRoutes(
         200: {
           type: 'object',
           properties: {
-            data: { type: 'array', items: { type: 'object' } },
+            data: {
+              type: 'array',
+              items: {
+                type: 'object',
+                required: ['id'],
+                properties: { id: { type: 'integer' } },
+                additionalProperties: true,
+              },
+            },
             meta: {
               type: 'object',
               properties: {

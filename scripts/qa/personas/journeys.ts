@@ -1,4 +1,8 @@
-import { isolationSteps, wrongRoleSteps } from './negative-matrix.js';
+import {
+  excludesIds,
+  isolationSteps,
+  wrongRoleSteps,
+} from './negative-matrix.js';
 import { communitySteps } from './community.js';
 import { dashboardSteps } from './member-dashboard.js';
 import { userSteps, systemSteps } from './users.js';
@@ -38,17 +42,14 @@ export function buildJourneys(fixture: PersonaFixture): Journey[] {
       method: 'GET',
       path: '/api/v1/member/stories',
       expected: 200,
-      check: (body) =>
-        typeof body === 'object' &&
-        body !== null &&
-        'data' in body &&
-        Array.isArray(body.data) &&
-        !body.data.some(
-          (row: { id?: number }) =>
-            row.id === fixture.foreignStoryId ||
-            row.id === fixture.restrictedStoryId ||
-            row.id === fixture.unevidencedStoryId
-        ),
+      check: excludesIds(
+        [
+          fixture.foreignStoryId,
+          fixture.restrictedStoryId,
+          fixture.unevidencedStoryId,
+        ],
+        fixture.publicStoryId
+      ),
     },
     {
       name: 'reject foreign story',
@@ -84,12 +85,14 @@ export function buildJourneys(fixture: PersonaFixture): Journey[] {
   });
   const logout: Step = {
     name: 'logout',
+    saveCookieAs: 'pre-logout',
     method: 'POST',
     path: '/api/v1/auth/logout',
     expected: 200,
   };
   const revoked: Step = {
     name: 'reject revoked session',
+    useSavedCookie: 'pre-logout',
     method: 'GET',
     path: '/api/v1/auth/me',
     expected: 401,
@@ -125,11 +128,20 @@ export function buildJourneys(fixture: PersonaFixture): Journey[] {
           expected: 400,
         },
         {
-          name: 'reject invalid reset token',
+          name: 'reject invalid reset token format',
           method: 'POST',
           path: '/api/v1/auth/reset-password',
-          body: { token: 'invalid', password: 'QaNewPassword123!' },
+          body: {
+            resetToken: 'g'.repeat(32),
+            newPassword: 'QaNewPassword123!',
+            communityId: fixture.communityId,
+          },
           expected: 400,
+          check: (body) =>
+            typeof body === 'object' &&
+            body !== null &&
+            'error' in body &&
+            body.error === 'Invalid or expired reset token',
         },
         {
           name: 'public communities',

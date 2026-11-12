@@ -588,8 +588,12 @@ describe('Super Admin API', () => {
           payload: newUser,
         });
 
-        expect(response.statusCode).toBe(403);
-        expect(response.json().error.message).toContain('Community accounts');
+        expect(response.statusCode).toBe(201);
+        expect(response.json().data).toMatchObject({
+          id: expect.any(Number),
+          role: 'admin',
+          communityId: newUser.communityId,
+        });
       });
 
       it('should validate required fields', async () => {
@@ -608,7 +612,7 @@ describe('Super Admin API', () => {
         expect(response.statusCode).toBe(400);
       });
 
-      it('should deny community creation before checking duplicate emails', async () => {
+      it('should reject duplicate email for an authorized system account creation', async () => {
         const duplicateUser = {
           email: 'admin@example.com', // Already exists
           password: 'Password123@',
@@ -627,9 +631,9 @@ describe('Super Admin API', () => {
           payload: duplicateUser,
         });
 
-        expect(response.statusCode).toBe(403);
+        expect(response.statusCode).toBe(409);
         expect(response.json()).toMatchObject({
-          error: { message: expect.stringContaining('Community accounts') },
+          error: expect.stringContaining('email already exists'),
         });
       });
 

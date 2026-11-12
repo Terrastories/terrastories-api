@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, writeFile, unlink, rmdir } from 'node:fs/promises';
+import { join, relative, resolve } from 'node:path';
+import type { FastifyInstance } from 'fastify';
+import { getConfig } from '../../src/shared/config/index.js';
 import { sql } from 'drizzle-orm';
 import { TestDatabaseManager } from '../../tests/helpers/database.js';
 import { createTestApp } from '../../tests/helpers/api-client.js';
@@ -18,6 +22,25 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     throw new Error('SQLite fixture supports isolated in-process runs only');
   const manager = new TestDatabaseManager();
   const db = await manager.setup();
+  let app: FastifyInstance | undefined;
+  let mediaDirectory: string | undefined;
+  const mediaPaths: string[] = [];
+  const removeOwnedMedia = async () => {
+    for (const path of mediaPaths) {
+      try {
+        await unlink(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    if (mediaDirectory) {
+      try {
+        await rmdir(mediaDirectory);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+  };
   try {
     const fixtures = await manager.seedTestData();
     const password = 'QaFixturePassword123!';
@@ -117,32 +140,52 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       .insert(themesSqlite)
       .values({ name: 'QA foreign theme', communityId: foreignCommunityId })
       .returning();
-    const [foreignFile, heldFile, unknownFile] = await db
+    // Use the route's configured root and relative paths exactly as real media.
+    // Each fixture owns only this unique directory and its four byte payloads.
+    const uploadRoot = resolve(getConfig().fileUpload.uploadDir);
+    await mkdir(uploadRoot, { recursive: true });
+    mediaDirectory = await mkdtemp(join(uploadRoot, 'persona-fixture-'));
+    const mediaBytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=',
+      'base64'
+    );
+    const mediaRows = [
+      {
+        id: '11111111-1111-4111-8111-111111111111',
+        communityId: foreignCommunityId,
+      },
+      {
+        id: '22222222-2222-4222-8222-222222222222',
+        communityId: fixtures.communities[0].id,
+        culturalRestrictions: JSON.stringify({ elderOnly: true }),
+      },
+      {
+        id: '33333333-3333-4333-8333-333333333333',
+        communityId: fixtures.communities[0].id,
+        culturalRestrictions: JSON.stringify({ unknown: true }),
+      },
+      {
+        id: '44444444-4444-4444-8444-444444444444',
+        communityId: fixtures.communities[0].id,
+      },
+    ];
+    for (const row of mediaRows) {
+      const diskPath = join(mediaDirectory, `${row.id}.png`);
+      // Register before writing so error cleanup also handles partial writes.
+      mediaPaths.push(diskPath);
+      await writeFile(diskPath, mediaBytes);
+    }
+    const [foreignFile, heldFile, unknownFile, readableFile] = await db
       .insert(filesSqlite)
       .values(
-        [
-          {
-            id: '11111111-1111-4111-8111-111111111111',
-            communityId: foreignCommunityId,
-          },
-          {
-            id: '22222222-2222-4222-8222-222222222222',
-            communityId: fixtures.communities[0].id,
-            culturalRestrictions: JSON.stringify({ elderOnly: true }),
-          },
-          {
-            id: '33333333-3333-4333-8333-333333333333',
-            communityId: fixtures.communities[0].id,
-            culturalRestrictions: JSON.stringify({ unknown: true }),
-          },
-        ].map((row) => ({
+        mediaRows.map((row) => ({
           ...row,
-          filename: 'qa.png',
+          filename: `${row.id}.png`,
           originalName: 'qa.png',
-          path: '/nonexistent-qa-fixture.png',
-          url: '/qa.png',
+          path: relative(uploadRoot, join(mediaDirectory!, `${row.id}.png`)),
+          url: `/api/v1/files/${row.id}`,
           mimeType: 'image/png',
-          size: 1,
+          size: mediaBytes.length,
           uploadedBy: creatorId,
         }))
       )
@@ -204,7 +247,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       .returning();
     const routes: Endpoint[] = [];
     let expireSession: (() => Promise<void>) | undefined;
-    const app = await createTestApp(
+    app = await createTestApp(
       db,
       (route) => {
         for (const method of Array.isArray(route.method)
@@ -238,8 +281,9 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       }
     );
     await app.ready();
+    const readyApp = app;
     const handler: Handler = async (request) => {
-      const response = await app.inject({
+      const response = await readyApp.inject({
         method: request.method as 'GET',
         url: new URL(request.url).pathname + new URL(request.url).search,
         headers: Object.fromEntries(request.headers),
@@ -283,6 +327,17 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       heldFileId: heldFile.id,
       unknownFileId: unknownFile.id,
     });
+    const viewerJourney = journeys.find(
+      (journey) => journey.persona === 'viewer'
+    );
+    if (!viewerJourney)
+      throw new Error('Viewer journey is required for media proof');
+    viewerJourney.steps.splice(1, 0, {
+      name: 'read seeded media bytes',
+      method: 'GET',
+      path: `/api/v1/files/${readableFile.id}`,
+      expected: 200,
+    });
     journeys.push({
       persona: 'expired-session',
       steps: [
@@ -307,6 +362,14 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     });
     return {
       handler,
+      mediaEvidence: {
+        directory: mediaDirectory,
+        bytes: mediaBytes,
+        readable: { id: readableFile.id, path: mediaPaths[3] },
+        unavailable: [foreignFile, heldFile, unknownFile].map(
+          (file, index) => ({ id: file.id, path: mediaPaths[index] })
+        ),
+      },
       routes,
       journeys,
       exclusions: routes
@@ -329,12 +392,27 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
                   : 'Development-only seed endpoint is not exposed to production frontend personas.',
         })),
       close: async () => {
-        await app.close();
-        await manager.teardown();
+        try {
+          await readyApp.close();
+        } finally {
+          try {
+            await manager.teardown();
+          } finally {
+            await removeOwnedMedia();
+          }
+        }
       },
     };
   } catch (error) {
-    await manager.teardown();
+    try {
+      await app?.close();
+    } finally {
+      try {
+        await manager.teardown();
+      } finally {
+        await removeOwnedMedia();
+      }
+    }
     throw error;
   }
 }

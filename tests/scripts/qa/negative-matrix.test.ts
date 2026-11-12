@@ -53,6 +53,13 @@ describe('negative persona matrices', () => {
       expect(check({ data: [{ id }] })).toBe(false);
     expect(check({ data: [{ id: 10 }] })).toBe(true);
     expect(check({})).toBe(false);
+    for (const row of [{}, { id: null }, { id: 0 }, { id: '' }]) {
+      expect(check({ data: [row] })).toBe(false);
+    }
+    const withReadable = excludesIds([20, 21, 22], 10);
+    expect(withReadable({ data: [] })).toBe(false);
+    expect(withReadable({ data: [{ id: 11 }] })).toBe(false);
+    expect(withReadable({ data: [{ id: 10 }] })).toBe(true);
   });
   it('checks all story read families for editor/admin and public readers', () => {
     for (const role of ['editor', 'admin', 'super_admin'] as const) {

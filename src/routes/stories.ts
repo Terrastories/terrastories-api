@@ -1161,6 +1161,9 @@ export default async function storiesRoutes(
                 items: {
                   type: 'object',
                   description: 'Story with relations',
+                  required: ['id'],
+                  properties: { id: { type: 'integer' } },
+                  additionalProperties: true,
                 },
               },
               meta: {

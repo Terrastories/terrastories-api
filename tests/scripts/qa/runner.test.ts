@@ -254,3 +254,267 @@ describe('route inventory integrity', () => {
     expect(JSON.stringify(report)).not.toContain('never-record-me');
   });
 });
+
+describe('session replay and request lifecycle', () => {
+  const routes = [
+    { method: 'POST', path: '/login' },
+    { method: 'POST', path: '/logout' },
+    { method: 'GET', path: '/me' },
+  ];
+  it('replays the old signed cookie after logout clears the jar and detects a revoked-session leak', async () => {
+    const journeys = [
+      {
+        persona: 'viewer',
+        steps: [
+          { name: 'login', method: 'POST', path: '/login', expected: 200 },
+          {
+            name: 'logout',
+            method: 'POST',
+            path: '/logout',
+            expected: 200,
+            saveCookieAs: 'old',
+          },
+          {
+            name: 'replay revoked session',
+            method: 'GET',
+            path: '/me',
+            expected: 401,
+            useSavedCookie: 'old',
+          },
+        ],
+      },
+    ];
+    for (const revoked of [true, false]) {
+      const sent: string[] = [];
+      const report = await runJourneys({
+        routes,
+        journeys,
+        handler: async (request) => {
+          const path = new URL(request.url).pathname;
+          if (path === '/login')
+            return new Response('{}', {
+              headers: {
+                'set-cookie': 'sessionId=valid-signed-cookie; Path=/',
+              },
+            });
+          sent.push(request.headers.get('cookie') ?? '');
+          if (path === '/logout')
+            return new Response('{}', {
+              headers: { 'set-cookie': 'sessionId=; Max-Age=0; Path=/' },
+            });
+          return new Response('{}', { status: revoked ? 401 : 200 });
+        },
+      });
+      expect(sent).toEqual([
+        'sessionId=valid-signed-cookie',
+        'sessionId=valid-signed-cookie',
+      ]);
+      expect(report.pass).toBe(revoked);
+    }
+  });
+  it('rejects replay without a saved cookie before sending a request', async () => {
+    let calls = 0;
+    const report = await runJourneys({
+      routes: [{ method: 'GET', path: '/me' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            {
+              name: 'replay',
+              method: 'GET',
+              path: '/me',
+              expected: 401,
+              useSavedCookie: 'missing',
+            },
+          ],
+        },
+      ],
+      handler: async () => {
+        calls++;
+        return new Response('{}', { status: 401 });
+      },
+    });
+    expect(calls).toBe(0);
+    expect(report.pass).toBe(false);
+  });
+  it('times out a hanging handler and aborts its Request signal', async () => {
+    let signal: AbortSignal | undefined;
+    const report = await runJourneys({
+      requestTimeoutMs: 20,
+      routes: [{ method: 'GET', path: '/slow' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'slow', method: 'GET', path: '/slow', expected: 200 },
+          ],
+        },
+      ],
+      handler: async (request) => {
+        signal = request.signal;
+        return new Promise<Response>(() => {});
+      },
+    });
+    expect(signal?.aborted).toBe(true);
+    expect(report.results[0]).toMatchObject({
+      pass: false,
+      failure: 'request-timeout',
+      message: 'Sending request exceeded request timeout',
+    });
+  });
+  it('times out and cancels a hanging JSON response body', async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const report = await runJourneys({
+      requestTimeoutMs: 20,
+      routes: [{ method: 'GET', path: '/slow' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            {
+              name: 'slow JSON',
+              method: 'GET',
+              path: '/slow',
+              expected: 200,
+              check: () => true,
+            },
+          ],
+        },
+      ],
+      handler: async () => new Response(stream),
+    });
+    expect(cancelled).toBe(true);
+    expect(report.results[0]).toMatchObject({
+      pass: false,
+      failure: 'request-timeout',
+      message: 'Reading response JSON exceeded request timeout',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stream.locked).toBe(false);
+  });
+  it('cancels late handler responses after timeout', async () => {
+    let finish: (response: Response) => void = () => {};
+    let cancelled = false;
+    const report = await runJourneys({
+      requestTimeoutMs: 20,
+      routes: [{ method: 'GET', path: '/slow' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'slow', method: 'GET', path: '/slow', expected: 200 },
+          ],
+        },
+      ],
+      handler: async () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    });
+    finish(
+      new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true;
+          },
+        })
+      )
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cancelled).toBe(true);
+    expect(report.pass).toBe(false);
+  });
+  it('cancels status-only/media bodies instead of leaving them unread', async () => {
+    let cancelled = false;
+    const report = await runJourneys({
+      routes: [{ method: 'GET', path: '/media' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'media', method: 'GET', path: '/media', expected: 200 },
+          ],
+        },
+      ],
+      handler: async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array([1, 2, 3]));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          })
+        ),
+    });
+    expect(cancelled).toBe(true);
+    expect(report.pass).toBe(true);
+  });
+  it('consumes JSON before a throwing assertion and keeps thrown secrets out of the report', async () => {
+    const response = new Response('{"ok":true}');
+    const report = await runJourneys({
+      routes: [{ method: 'GET', path: '/json' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            {
+              name: 'JSON',
+              method: 'GET',
+              path: '/json',
+              expected: 200,
+              check: () => {
+                throw new Error('credential-secret');
+              },
+            },
+          ],
+        },
+      ],
+      handler: async () => response,
+    });
+    expect(response.bodyUsed).toBe(true);
+    expect(response.body?.locked).toBe(false);
+    expect(report.pass).toBe(false);
+    expect(JSON.stringify(report)).not.toContain('credential-secret');
+  });
+});
+
+describe('response cancellation deadlines', () => {
+  it('fails within the deadline when a status-only body cancellation never settles', async () => {
+    let cancelled = false;
+    const report = await runJourneys({
+      requestTimeoutMs: 20,
+      routes: [{ method: 'GET', path: '/media' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'media', method: 'GET', path: '/media', expected: 200 },
+          ],
+        },
+      ],
+      handler: async () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true;
+              return new Promise<void>(() => {});
+            },
+          })
+        ),
+    });
+    expect(cancelled).toBe(true);
+    expect(report.results[0]).toMatchObject({
+      pass: false,
+      failure: 'request-timeout',
+      message: 'Closing response body exceeded request timeout',
+    });
+  });
+});

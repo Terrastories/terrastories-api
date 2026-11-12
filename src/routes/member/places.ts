@@ -228,6 +228,21 @@ export async function memberPlacesRoutes(
           });
         }
 
+        // SPEC-V2 §6.4: a restricted place is unavailable to every role, so
+        // the service raises PlaceNotFoundError; mask it as 404 here too.
+        if (
+          error instanceof Error &&
+          (error.name === 'PlaceNotFoundError' ||
+            error.message.includes('not found'))
+        ) {
+          return reply.code(404).send({
+            error: {
+              code: 'NOT_FOUND',
+              message: 'Place not found in your community',
+            },
+          });
+        }
+
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
@@ -438,6 +453,21 @@ export async function memberPlacesRoutes(
           });
         }
 
+        // SPEC-V2 §6.4: updating an unavailable (restricted) place masks
+        // as 404 for every role.
+        if (
+          error instanceof Error &&
+          (error.name === 'PlaceNotFoundError' ||
+            error.message.includes('not found'))
+        ) {
+          return reply.code(404).send({
+            error: {
+              code: 'NOT_FOUND',
+              message: 'Place not found in your community',
+            },
+          });
+        }
+
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
         request.log.error(
@@ -510,6 +540,21 @@ export async function memberPlacesRoutes(
               code: 'VALIDATION_ERROR',
               message: 'Invalid parameters',
               details: error.issues,
+            },
+          });
+        }
+
+        // SPEC-V2 §6.4: deleting an unavailable (restricted) place masks
+        // as 404 for every role.
+        if (
+          error instanceof Error &&
+          (error.name === 'PlaceNotFoundError' ||
+            error.message.includes('not found'))
+        ) {
+          return reply.code(404).send({
+            error: {
+              code: 'NOT_FOUND',
+              message: 'Place not found in your community',
             },
           });
         }

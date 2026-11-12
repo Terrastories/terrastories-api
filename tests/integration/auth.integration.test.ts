@@ -3,6 +3,10 @@ import { buildApp } from '../../src/app.js';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import {
+  communityAdminCookie,
+  seedRegisteredUser,
+} from '../helpers/community-authority.js';
 
 describe('Authentication Integration Tests', () => {
   let app: FastifyInstance;
@@ -26,10 +30,34 @@ describe('Authentication Integration Tests', () => {
   });
 
   describe('HTTP Endpoint Integration', () => {
-    it('should register user through HTTP POST /api/v1/auth/register', async () => {
+    it('should reject anonymous registration through HTTP POST /api/v1/auth/register', async () => {
+      // SPEC-V2 §7: no anonymous signup; community admins authorize membership.
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        payload: {
+          email: 'anonymous@test.com',
+          password: 'SecurePassword123!',
+          firstName: 'Anonymous',
+          lastName: 'Test',
+          communityId: testCommunityId,
+          role: 'viewer',
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+    });
+
+    it('should register user through HTTP POST /api/v1/auth/register as a community admin', async () => {
+      const cookie = await communityAdminCookie(
+        app,
+        testDb.db,
+        testCommunityId
+      );
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/register',
+        headers: { cookie },
         payload: {
           email: 'integration@test.com',
           password: 'SecurePassword123!',
@@ -49,17 +77,13 @@ describe('Authentication Integration Tests', () => {
 
     it('should login user through HTTP POST /api/v1/auth/login and create session', async () => {
       // First register a user
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'login@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Login',
-          lastName: 'Test',
-          communityId: testCommunityId,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'login@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Login',
+        lastName: 'Test',
+        communityId: testCommunityId,
+        role: 'viewer',
       });
 
       // Then login
@@ -88,17 +112,13 @@ describe('Authentication Integration Tests', () => {
 
     it('should logout user through HTTP POST /api/v1/auth/logout', async () => {
       // First register and login a user to get session
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'logout-test@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Logout',
-          lastName: 'Test',
-          communityId: testCommunityId,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'logout-test@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Logout',
+        lastName: 'Test',
+        communityId: testCommunityId,
+        role: 'viewer',
       });
 
       const loginResponse = await app.inject({
@@ -133,17 +153,13 @@ describe('Authentication Integration Tests', () => {
   describe('Session Management', () => {
     it('should create session on successful login', async () => {
       // Register user first
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'session@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Session',
-          lastName: 'Test',
-          communityId: testCommunityId,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'session@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Session',
+        lastName: 'Test',
+        communityId: testCommunityId,
+        role: 'viewer',
       });
 
       // Login and check session
@@ -171,17 +187,13 @@ describe('Authentication Integration Tests', () => {
 
     it('should maintain session across requests', async () => {
       // Register and login
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'persistent@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Persistent',
-          lastName: 'Test',
-          communityId: testCommunityId,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'persistent@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Persistent',
+        lastName: 'Test',
+        communityId: testCommunityId,
+        role: 'viewer',
       });
 
       const loginResponse = await app.inject({
@@ -218,17 +230,13 @@ describe('Authentication Integration Tests', () => {
 
     it('should clear session on logout', async () => {
       // Register and login
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'logout@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Logout',
-          lastName: 'Test',
-          communityId: testCommunityId,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'logout@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Logout',
+        lastName: 'Test',
+        communityId: testCommunityId,
+        role: 'viewer',
       });
 
       const loginResponse = await app.inject({
@@ -302,17 +310,13 @@ describe('Authentication Integration Tests', () => {
 
     it('should enforce rate limits on login endpoint', async () => {
       // Register a user first
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'ratelimit@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'RateLimit',
-          lastName: 'Test',
-          communityId: testCommunityId,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'ratelimit@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'RateLimit',
+        lastName: 'Test',
+        communityId: testCommunityId,
+        role: 'viewer',
       });
 
       // Make multiple login attempts
@@ -414,17 +418,13 @@ describe('Authentication Integration Tests', () => {
 
     it('should allow access with valid session', async () => {
       // Register and login first
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'middleware@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Middleware',
-          lastName: 'Test',
-          communityId: testCommunityId,
-          role: 'admin',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'middleware@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Middleware',
+        lastName: 'Test',
+        communityId: testCommunityId,
+        role: 'admin',
       });
 
       const loginResponse = await app.inject({
@@ -458,17 +458,13 @@ describe('Authentication Integration Tests', () => {
 
     it('should enforce role-based access control', async () => {
       // Register viewer user
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'viewer@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Viewer',
-          lastName: 'Test',
-          communityId: testCommunityId,
-          role: 'viewer',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'viewer@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Viewer',
+        lastName: 'Test',
+        communityId: testCommunityId,
+        role: 'viewer',
       });
 
       const loginResponse = await app.inject({

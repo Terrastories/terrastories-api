@@ -5,6 +5,7 @@
  * community isolation, search capabilities, and association handling.
  */
 
+import type { TransitionalStoryReadAccess } from '../shared/authorization/sovereignty-policy.js';
 import {
   eq,
   and,
@@ -86,6 +87,7 @@ export interface Story {
   language: string;
   tags: string[] | null;
   isRestricted: boolean;
+  privacyLevel: string;
   // Interview metadata fields for Indigenous storytelling context
   dateInterviewed?: Date | null;
   interviewLocationId?: number | null;
@@ -122,6 +124,12 @@ export interface StoryWithRelations extends Story {
     culturalContext?: string;
     storyRelationship?: string;
     sortOrder?: number;
+    /**
+     * Physical Fastify restriction flag (places.is_restricted). Carried so
+     * services can apply the story-derived place projection (SPEC-V2 §6.4):
+     * a readable story never widens a restricted place's audience.
+     */
+    isRestricted: boolean;
   }>;
   speakers: Array<{
     id: number;
@@ -133,6 +141,13 @@ export interface StoryWithRelations extends Story {
     culturalRole?: string;
     storyRole?: string;
     sortOrder?: number;
+    /**
+     * Physical Fastify withdrawal flag (speakers.is_active). Carried so
+     * services can apply the story-derived speaker projection (SPEC-V2
+     * §6.5): callers without the editor/admin gate never see a withdrawn
+     * speaker inside a readable story. Not a DTO field.
+     */
+    isActive: boolean;
   }>;
   community: {
     id: number;
@@ -236,6 +251,14 @@ export interface StoryFilters {
   communityId?: number;
   isRestricted?: boolean;
   privacyLevel?: string;
+  /**
+   * Runtime read accesses the caller may hold (SPEC-V2 §6.2/§6.3):
+   * canonical audiences only; `unavailable` rows (restricted or unknown
+   * privacyLevel) are readable by no role. Transcribed to SQL exactly as
+   * documented on `fastifyStoryToAudience` in the sovereignty policy; keep
+   * both in sync. An empty array matches no row (fail closed).
+   */
+  storyAudiences?: TransitionalStoryReadAccess[];
   tags?: string[];
   createdBy?: number;
   language?: string;
@@ -401,23 +424,33 @@ export class StoryRepository {
   /**
    * Find story by ID
    */
-  async findById(id: number): Promise<Story | null> {
+  async findById(id: number, communityId?: number): Promise<Story | null> {
     const storiesTable = this.getStoriesTable();
+    const condition =
+      communityId === undefined
+        ? eq(storiesTable.id, id)
+        : and(
+            eq(storiesTable.id, id),
+            eq(storiesTable.communityId, communityId)
+          );
     const [story] = await this.db
       .select()
       .from(storiesTable)
-      .where(eq(storiesTable.id, id))
+      .where(condition)
       .limit(1);
 
     return story || null;
   }
 
   /**
-   * Find story by ID with all relations
+   * Find story by ID with all relations, optionally scoped to one community.
    */
-  async findByIdWithRelations(id: number): Promise<StoryWithRelations | null> {
-    // Get the base story
-    const story = await this.findById(id);
+  async findByIdWithRelations(
+    id: number,
+    communityId?: number
+  ): Promise<StoryWithRelations | null> {
+    // Scope the base lookup before loading any related community content.
+    const story = await this.findById(id, communityId);
     if (!story) return null;
 
     // Get community
@@ -448,12 +481,23 @@ export class StoryRepository {
         longitude: placesTable.longitude,
         region: placesTable.region,
         culturalSignificance: placesTable.culturalSignificance,
+        // SPEC-V2 §6.4: place restriction flag for the story-derived place
+        // projection in StoryService.
+        isRestricted: placesTable.isRestricted,
         culturalContext: storyPlacesTable.culturalContext,
         sortOrder: storyPlacesTable.sortOrder,
       })
       .from(storyPlacesTable)
       .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
-      .where(eq(storyPlacesTable.storyId, id))
+      // SPEC-V2 §6.4: a restricted Fastify place is unavailable to every
+      // role, so it never appears in story.places — enforced here at the
+      // data layer and again by the StoryService projection.
+      .where(
+        and(
+          eq(storyPlacesTable.storyId, id),
+          eq(placesTable.isRestricted, false)
+        )
+      )
       .orderBy(...associationOrder(storyPlacesTable));
 
     const places = placesWithAssociations.map(
@@ -465,6 +509,7 @@ export class StoryRepository {
         longitude: number;
         region: string | null;
         culturalSignificance: string | null;
+        isRestricted: boolean;
         culturalContext: string | null;
         sortOrder: number | null;
       }) => ({
@@ -475,6 +520,7 @@ export class StoryRepository {
         longitude: p.longitude,
         region: p.region || undefined,
         culturalSignificance: p.culturalSignificance || undefined,
+        isRestricted: p.isRestricted,
         culturalContext: p.culturalContext || undefined,
         storyRelationship: 'mentioned',
         sortOrder: p.sortOrder || 0,
@@ -493,6 +539,9 @@ export class StoryRepository {
         birthYear: speakersTable.birthYear,
         elderStatus: speakersTable.elderStatus,
         culturalRole: speakersTable.culturalRole,
+        // SPEC-V2 §6.5: speaker withdrawal flag for the story-derived
+        // speaker projection in StoryService.
+        isActive: speakersTable.isActive,
         storyRole: storySpeakersTable.storyRole,
         sortOrder: storySpeakersTable.sortOrder,
       })
@@ -513,6 +562,7 @@ export class StoryRepository {
         birthYear: number | null;
         elderStatus: boolean;
         culturalRole: string | null;
+        isActive: boolean;
         storyRole: string | null;
         sortOrder: number | null;
       }) => ({
@@ -525,6 +575,7 @@ export class StoryRepository {
         culturalRole: s.storyRole || s.culturalRole || undefined,
         storyRole: s.storyRole || 'narrator',
         sortOrder: s.sortOrder || 0,
+        isActive: s.isActive,
       })
     );
 
@@ -539,8 +590,8 @@ export class StoryRepository {
           and(
             eq(placesTable.id, story.interviewLocationId),
             eq(placesTable.communityId, story.communityId),
-            // A readable story must not widen a restricted place's audience
-            // (SPEC-V2 Section 6.4): never hydrate a restricted location.
+            // SPEC-V2 §6.4: a restricted place is unavailable to every role
+            // and never appears in a story-derived projection.
             eq(placesTable.isRestricted, false)
           )
         )
@@ -583,7 +634,8 @@ export class StoryRepository {
           birthYear: speaker.birthYear || undefined,
           elderStatus: speaker.elderStatus,
           culturalRole: speaker.culturalRole || undefined,
-          // Carried so callers can withhold a withdrawn interviewer.
+          // SPEC-V2 §6.5: the service drops withdrawn interviewers for
+          // callers without the editor/admin gate.
           isActive: speaker.isActive,
         };
       }
@@ -679,6 +731,7 @@ export class StoryRepository {
         longitude: number;
         region: string | null;
         culturalSignificance: string | null;
+        isRestricted: boolean;
         culturalContext: string | null;
         sortOrder: number | null;
       }> = [];
@@ -694,13 +747,21 @@ export class StoryRepository {
           longitude: placesTable.longitude,
           region: placesTable.region,
           culturalSignificance: placesTable.culturalSignificance,
-          // These columns might not exist yet
+          // SPEC-V2 §6.4: place restriction flag for the story-derived
+          // place projection in StoryService.
+          isRestricted: placesTable.isRestricted,
           culturalContext: storyPlacesTable.culturalContext,
           sortOrder: storyPlacesTable.sortOrder,
         })
         .from(storyPlacesTable)
         .innerJoin(placesTable, eq(storyPlacesTable.placeId, placesTable.id))
-        .where(inArray(storyPlacesTable.storyId, storyIds))
+        .where(
+          and(
+            inArray(storyPlacesTable.storyId, storyIds),
+            // SPEC-V2 §6.4: restricted places never appear in story.places.
+            eq(placesTable.isRestricted, false)
+          )
+        )
         .orderBy(
           storyPlacesTable.storyId,
           ...associationOrder(storyPlacesTable)
@@ -719,6 +780,7 @@ export class StoryRepository {
         birthYear: number | null;
         elderStatus: boolean;
         culturalRole: string | null;
+        isActive: boolean;
         storyRole: string | null;
         sortOrder: number | null;
       }> = [];
@@ -732,7 +794,9 @@ export class StoryRepository {
           birthYear: speakersTable.birthYear,
           elderStatus: speakersTable.elderStatus,
           culturalRole: speakersTable.culturalRole,
-          // These columns might not exist yet
+          // SPEC-V2 §6.5: speaker withdrawal flag for the story-derived
+          // speaker projection in StoryService.
+          isActive: speakersTable.isActive,
           storyRole: storySpeakersTable.storyRole,
           sortOrder: storySpeakersTable.sortOrder,
         })
@@ -759,6 +823,7 @@ export class StoryRepository {
           longitude: number;
           region: string | null;
           culturalSignificance: string | null;
+          isRestricted: boolean;
           culturalContext: string | null;
           sortOrder: number | null;
         }>
@@ -774,6 +839,7 @@ export class StoryRepository {
           birthYear: number | null;
           elderStatus: boolean;
           culturalRole: string | null;
+          isActive: boolean;
           storyRole: string | null;
           sortOrder: number | null;
         }>
@@ -808,6 +874,7 @@ export class StoryRepository {
           longitude: p.longitude,
           region: p.region || undefined,
           culturalSignificance: p.culturalSignificance || undefined,
+          isRestricted: p.isRestricted,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           culturalContext: (p as any).culturalContext || undefined,
           storyRelationship: 'mentioned',
@@ -830,6 +897,8 @@ export class StoryRepository {
           storyRole: (s as any).storyRole || 'narrator',
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           sortOrder: (s as any).sortOrder || 0,
+          // SPEC-V2 §6.5: withdrawal flag for the StoryService projection.
+          isActive: s.isActive,
         }));
 
         return {
@@ -1121,6 +1190,25 @@ export class StoryRepository {
       conditions.push(eq(storiesTable.privacyLevel, filters.privacyLevel));
     }
 
+    if (filters.storyAudiences !== undefined) {
+      const audienceCondition = storyAudienceCondition(
+        filters.storyAudiences,
+        storiesTable
+      );
+      if (!audienceCondition) {
+        // The requested accesses match no row at all (e.g. super_admin's
+        // empty grant): fail closed instead of dropping the filter.
+        return {
+          data: [],
+          total: 0,
+          page: pagination.page,
+          limit: pagination.limit,
+          totalPages: 0,
+        };
+      }
+      conditions.push(audienceCondition);
+    }
+
     if (filters.createdBy) {
       conditions.push(eq(storiesTable.createdBy, filters.createdBy));
     }
@@ -1332,4 +1420,55 @@ export class StoryRepository {
       .replace(/^-|-$/g, '') // Remove leading/trailing hyphens
       .substring(0, 50); // Truncate to reasonable length
   }
+}
+
+/**
+ * SQL transcription of `fastifyStoryToAudience` (sovereignty policy):
+ * - public      = unrestricted + privacyLevel 'public'
+ * - community   = unrestricted + privacyLevel 'members_only'
+ * - editors     = matches no Fastify row at runtime, so it contributes no
+ *                 condition here (SPEC-V2 §6.3: migration may select the
+ *                 editors audience explicitly, never implicitly)
+ * - unavailable = restricted rows and any other privacyLevel; readable by
+ *                 no role, so it contributes no condition either
+ *
+ * A row that maps to no requested access never matches. If no requested
+ * access matches any row, this returns undefined and every caller must
+ * treat that as "no rows" (fail closed), never as "no filter".
+ *
+ * Single source for `findMany` and route-level community story listings so
+ * the mapping exists exactly once outside the policy module. Works for both
+ * dialect tables because it only references shared column shape.
+ */
+export function storyAudienceCondition(
+  accesses: readonly TransitionalStoryReadAccess[],
+  storiesTable: {
+    isRestricted: AnyColumn;
+    privacyLevel: AnyColumn;
+  }
+): SQL | undefined {
+  const conditions = accesses
+    .map((access) => {
+      if (access === 'public') {
+        return and(
+          eq(storiesTable.isRestricted, false),
+          eq(storiesTable.privacyLevel, 'public')
+        );
+      }
+      if (access === 'community') {
+        return and(
+          eq(storiesTable.isRestricted, false),
+          eq(storiesTable.privacyLevel, 'members_only')
+        );
+      }
+      // 'editors' matches no Fastify row (unknown privacy levels are
+      // unavailable) and 'unavailable' is readable by no role: neither
+      // contributes a condition.
+      return undefined;
+    })
+    .filter((condition): condition is SQL => condition !== undefined);
+  if (conditions.length === 0) {
+    return undefined;
+  }
+  return conditions.length === 1 ? conditions[0] : or(...conditions);
 }

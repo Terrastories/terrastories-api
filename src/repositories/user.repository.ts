@@ -13,7 +13,7 @@
  * - Pagination and filtering support
  */
 
-import { eq, and, desc, asc, count, or } from 'drizzle-orm';
+import { eq, and, desc, asc, count, or, ne } from 'drizzle-orm';
 import { type User, type NewUser, type UserRole } from '../db/schema/users.js';
 import { type Community } from '../db/schema/communities.js';
 import {
@@ -24,6 +24,7 @@ import {
   type Dialect,
   type DialectTables,
 } from '../db/dialect.js';
+import { provisioningLockQuery } from './community.repository.js';
 
 // Database type - using any temporarily to resolve union type incompatibility
 // TODO: Implement proper database abstraction layer for SQLite/PostgreSQL compatibility
@@ -64,6 +65,16 @@ export interface PaginatedResult<T> {
  * All operations enforce community-level data isolation to ensure
  * Indigenous communities maintain sovereignty over their data.
  */
+/**
+ * Profile fields only. Role, activation and community change exclusively
+ * through compareAndSetMembership (SPEC-V2 §7), so these generic writers
+ * cannot carry them.
+ */
+export type UserProfileUpdate = Omit<
+  Partial<NewUser>,
+  'role' | 'isActive' | 'communityId'
+>;
+
 export class UserRepository {
   private readonly dialect: Dialect;
   private readonly tables: DialectTables;
@@ -256,7 +267,7 @@ export class UserRepository {
    */
   async update(
     id: number,
-    updates: Partial<NewUser>,
+    updates: UserProfileUpdate,
     communityId: number
   ): Promise<User | null> {
     try {
@@ -297,33 +308,6 @@ export class UserRepository {
   }
 
   /**
-   * Delete user within a specific community
-   *
-   * @param id - User ID
-   * @param communityId - Community ID for scoping
-   * @returns True if deleted, false if not found
-   */
-  async delete(id: number, communityId: number): Promise<boolean> {
-    try {
-      const usersTable = this.tables.users;
-
-      const deletedUsers = await this.database
-        .delete(usersTable)
-        .where(
-          and(eq(usersTable.id, id), eq(usersTable.communityId, communityId))
-        )
-        .returning();
-      const deletedUser = deletedUsers[0] as User | undefined;
-
-      return !!deletedUser;
-    } catch (error: unknown) {
-      const errorMessage =
-        error instanceof Error ? error.message : 'Unknown error';
-      throw new Error(`Failed to delete user: ${errorMessage}`);
-    }
-  }
-
-  /**
    * List users with filtering and pagination within a specific community
    *
    * @param options - Filtering and pagination options
@@ -349,7 +333,13 @@ export class UserRepository {
       const offset = (page - 1) * limit;
 
       // Build where conditions
-      const whereConditions = [eq(usersTable.communityId, communityId)];
+      // SPEC-V2 §6.2: system (super_admin) rows are not community members,
+      // even though Fastify stores a community_id on them. Excluded in SQL
+      // before pagination and counts.
+      const whereConditions = [
+        eq(usersTable.communityId, communityId),
+        ne(usersTable.role, 'super_admin'),
+      ];
 
       if (search) {
         // Use case-insensitive search that works with both PostgreSQL and SQLite
@@ -452,7 +442,13 @@ export class UserRepository {
     try {
       const usersTable = this.tables.users;
 
-      const whereConditions = [eq(usersTable.communityId, communityId)];
+      // SPEC-V2 §6.2: system (super_admin) rows are not community members,
+      // even though Fastify stores a community_id on them. Excluded in SQL
+      // before pagination and counts.
+      const whereConditions = [
+        eq(usersTable.communityId, communityId),
+        ne(usersTable.role, 'super_admin'),
+      ];
 
       if (filters.role) {
         whereConditions.push(eq(usersTable.role, filters.role as User['role']));
@@ -634,7 +630,13 @@ export class UserRepository {
       const query = this.database
         .select({ count: count() })
         .from(usersTable)
-        .where(eq(usersTable.communityId, communityId));
+        // Community member count: system (super_admin) rows excluded.
+        .where(
+          and(
+            eq(usersTable.communityId, communityId),
+            ne(usersTable.role, 'super_admin')
+          )
+        );
 
       const countResults = await query;
       const countResult = countResults[0] as { count: number };
@@ -714,6 +716,105 @@ export class UserRepository {
     }
   }
 
+  /* eslint-disable @typescript-eslint/no-explicit-any -- dialect union (#135). */
+  /**
+   * SPEC-V2 §7 compare-and-set for every role / activation / community write.
+   *
+   * The write applies only if the row still holds the values the caller's
+   * decision was based on (`expected`), so a stale decision changes nothing
+   * and returns `conflict`. With `requireOtherActiveAdmin`, the write also
+   * requires another active admin in `expected.communityId`, checked in the
+   * same transaction, so no pair of concurrent changes can leave a community
+   * without an active administrator (`last-admin`).
+   *
+   * Every writer locks the community row first: PostgreSQL `SELECT ... FOR
+   * UPDATE` (READ COMMITTED: statements after the lock see committed rows),
+   * SQLite a synchronous `BEGIN IMMEDIATE` transaction. A PostgreSQL CI lane
+   * is tracked in #161; the concurrent PG proof lives in the parity script.
+   */
+  async compareAndSetMembership(
+    id: number,
+    expected: { role: string; isActive: boolean; communityId: number },
+    patch: Partial<NewUser>,
+    options: { requireOtherActiveAdmin?: boolean } = {}
+  ): Promise<
+    | { status: 'updated'; user: User }
+    | { status: 'conflict' }
+    | { status: 'last-admin' }
+  > {
+    const usersTable = this.tables.users;
+    const communitiesTable = this.tables.communities;
+    const values = {
+      ...patch,
+      ...(patch.email !== undefined
+        ? { email: patch.email.toLowerCase().trim() }
+        : {}),
+      updatedAt: new Date(),
+    };
+    const matchesSnapshot = and(
+      eq(usersTable.id, id),
+      eq(usersTable.role, expected.role as User['role']),
+      eq(usersTable.isActive, expected.isActive),
+      eq(usersTable.communityId, expected.communityId)
+    );
+    const otherActiveAdmins = (executor: any) =>
+      executor
+        .select({ n: count() })
+        .from(usersTable)
+        .where(
+          and(
+            eq(usersTable.communityId, expected.communityId),
+            eq(usersTable.role, 'admin'),
+            eq(usersTable.isActive, true),
+            ne(usersTable.id, id)
+          )
+        );
+    const db = this.database as any;
+
+    if (this.dialect === 'postgresql') {
+      return db.transaction(async (tx: any) => {
+        await provisioningLockQuery(tx, communitiesTable, expected.communityId);
+        if (options.requireOtherActiveAdmin) {
+          const [others] = await otherActiveAdmins(tx);
+          if (Number(others?.n ?? 0) === 0) {
+            return { status: 'last-admin' as const };
+          }
+        }
+        const rows = await tx
+          .update(usersTable)
+          .set(values)
+          .where(matchesSnapshot)
+          .returning();
+        return rows.length > 0
+          ? { status: 'updated' as const, user: rows[0] as User }
+          : { status: 'conflict' as const };
+      });
+    }
+
+    return db.transaction(
+      (tx: any) => {
+        if (options.requireOtherActiveAdmin) {
+          const [others] = otherActiveAdmins(tx).all();
+          if (Number(others?.n ?? 0) === 0) {
+            return { status: 'last-admin' as const };
+          }
+        }
+        const rows = tx
+          .update(usersTable)
+          .set(values)
+          .where(matchesSnapshot)
+          .returning()
+          .all();
+        return rows.length > 0
+          ? { status: 'updated' as const, user: rows[0] as User }
+          : { status: 'conflict' as const };
+      },
+      { behavior: 'immediate' }
+    );
+  }
+
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+
   /**
    * Update user by ID across all communities (super admin only)
    * @param id - User ID
@@ -722,7 +823,7 @@ export class UserRepository {
    */
   async updateByIdAsSuperAdmin(
     id: number,
-    data: Partial<NewUser>
+    data: UserProfileUpdate
   ): Promise<User> {
     try {
       const usersTable = this.tables.users;
@@ -733,6 +834,9 @@ export class UserRepository {
         updatedAt: new Date(),
       };
 
+      // Profile fields only (UserProfileUpdate): activation, role and
+      // community go through compareAndSetMembership, which also refuses a
+      // stale reactivation (B5).
       const updatedUsers = await this.database
         .update(usersTable)
         .set(updateData)
@@ -783,7 +887,13 @@ export class UserRepository {
       const usersTable = this.tables.users;
 
       // Build where conditions
-      const conditions = [eq(usersTable.communityId, communityId)];
+      // SPEC-V2 §6.2: system (super_admin) rows are not community members,
+      // even though Fastify stores a community_id on them. Excluded in SQL
+      // before pagination and counts.
+      const conditions = [
+        eq(usersTable.communityId, communityId),
+        ne(usersTable.role, 'super_admin'),
+      ];
 
       if (search) {
         conditions.push(

@@ -302,68 +302,6 @@ describe('User Repository', () => {
     });
   });
 
-  describe('delete', () => {
-    test('should delete user successfully', async () => {
-      const userData: NewUser = {
-        email: 'delete@example.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$test_hash',
-        firstName: 'Delete',
-        lastName: 'Me',
-        role: 'viewer',
-        communityId: testCommunityId,
-        isActive: true,
-      };
-
-      const createdUser = await userRepository.create(userData);
-      const deleteResult = await userRepository.delete(
-        createdUser.id,
-        testCommunityId
-      );
-
-      expect(deleteResult).toBe(true);
-
-      // Verify user is deleted
-      const foundUser = await userRepository.findById(
-        createdUser.id,
-        testCommunityId
-      );
-      expect(foundUser).toBeNull();
-    });
-
-    test('should return false when deleting user from wrong community', async () => {
-      const userData: NewUser = {
-        email: 'wrongdelete@example.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$test_hash',
-        firstName: 'Wrong',
-        lastName: 'Delete',
-        role: 'viewer',
-        communityId: testCommunityId,
-        isActive: true,
-      };
-
-      const createdUser = await userRepository.create(userData);
-
-      // Try to delete from different community
-      const deleteResult = await userRepository.delete(
-        createdUser.id,
-        otherCommunityId
-      );
-      expect(deleteResult).toBe(false);
-
-      // Verify user still exists
-      const foundUser = await userRepository.findById(
-        createdUser.id,
-        testCommunityId
-      );
-      expect(foundUser).toBeDefined();
-    });
-
-    test('should return false for non-existent user', async () => {
-      const deleteResult = await userRepository.delete(999999, testCommunityId);
-      expect(deleteResult).toBe(false);
-    });
-  });
-
   describe('findMany', () => {
     beforeEach(async () => {
       // Create multiple test users

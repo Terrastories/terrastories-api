@@ -9,6 +9,7 @@ import { buildApp } from '../../src/app.js';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 describe('Authentication Data Sovereignty Tests', () => {
   let app: FastifyInstance;
@@ -36,17 +37,13 @@ describe('Authentication Data Sovereignty Tests', () => {
   describe('Data Sovereignty Protection', () => {
     it('should block super admin from accessing community data', async () => {
       // Register super admin in system community
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'superadmin@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Super',
-          lastName: 'Admin',
-          communityId: systemCommunityId,
-          role: 'super_admin',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'superadmin@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Super',
+        lastName: 'Admin',
+        communityId: systemCommunityId,
+        role: 'super_admin',
       });
 
       // Login super admin
@@ -85,17 +82,13 @@ describe('Authentication Data Sovereignty Tests', () => {
 
     it('should allow community admin access to community data', async () => {
       // Register community admin
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'admin@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Community',
-          lastName: 'Admin',
-          communityId: testCommunityId,
-          role: 'admin',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'admin@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Community',
+        lastName: 'Admin',
+        communityId: testCommunityId,
+        role: 'admin',
       });
 
       // Login admin
@@ -132,17 +125,13 @@ describe('Authentication Data Sovereignty Tests', () => {
 
     it('should allow elder access to community data', async () => {
       // Register elder
-      await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: {
-          email: 'elder@test.com',
-          password: 'SecurePassword123!',
-          firstName: 'Community',
-          lastName: 'Elder',
-          communityId: testCommunityId,
-          role: 'elder',
-        },
+      await seedRegisteredUser(testDb.db, {
+        email: 'elder@test.com',
+        password: 'SecurePassword123!',
+        firstName: 'Community',
+        lastName: 'Elder',
+        communityId: testCommunityId,
+        role: 'elder',
       });
 
       // Login elder

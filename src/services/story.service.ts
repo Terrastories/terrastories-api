@@ -28,6 +28,12 @@ import type { User } from '../db/schema/users.js';
 import type { Logger } from '../shared/types/index.js';
 import { getConfig } from '../shared/config/index.js';
 import { fileOperationsMetrics } from '../shared/metrics/file-operations.js';
+import {
+  fastifyRoleToV2Role,
+  fastifyStoryToAudience,
+  physicalRoleCanReadStoryAccess,
+  storyAccessForPhysicalRole,
+} from '../shared/authorization/sovereignty-policy.js';
 
 /**
  * Cultural protocols for story access and modifications
@@ -397,7 +403,9 @@ export class StoryService {
       userId,
     });
 
-    return this.applyDualRead(story);
+    return this.applyDualRead(
+      this.projectStorySpeakers(this.projectStoryPlaces(story), userRole)
+    );
   }
 
   /**
@@ -444,6 +452,17 @@ export class StoryService {
       return null;
     }
 
+    // V2 story-audience gate (§6.2/§6.3): denied reads stay
+    // indistinguishable from nonexistent stories.
+    if (this.storyAudienceDenied(story, userRole)) {
+      this.logger.warn('Story audience access denied', {
+        userId,
+        storyId: id,
+        reason: 'story_audience_denied',
+      });
+      return null;
+    }
+
     // Cultural protocol access validation
     const accessResult = await this.validateCulturalAccess(
       story,
@@ -471,7 +490,9 @@ export class StoryService {
       true
     );
 
-    return this.applyDualRead(story);
+    return this.applyDualRead(
+      this.projectStorySpeakers(this.projectStoryPlaces(story), userRole)
+    );
   }
 
   /**
@@ -512,6 +533,17 @@ export class StoryService {
       return null;
     }
 
+    // V2 story-audience gate (§6.2/§6.3): denied reads stay
+    // indistinguishable from nonexistent stories.
+    if (this.storyAudienceDenied(story, userRole)) {
+      this.logger.warn('Story audience access denied', {
+        userId,
+        slug,
+        reason: 'story_audience_denied',
+      });
+      return null;
+    }
+
     // Cultural protocol access validation
     const accessResult = await this.validateCulturalAccess(
       story,
@@ -539,7 +571,9 @@ export class StoryService {
       true
     );
 
-    return this.applyDualRead(story);
+    return this.applyDualRead(
+      this.projectStorySpeakers(this.projectStoryPlaces(story), userRole)
+    );
   }
 
   /**
@@ -549,13 +583,29 @@ export class StoryService {
     id: number,
     updates: Partial<StoryCreateInput>,
     userId: number,
-    userRole: string
+    userRole: string,
+    userCommunityId: number
   ): Promise<StoryWithRelations> {
     this.logger.info('Updating story', { storyId: id, userId, userRole });
 
-    // Get existing story
-    const existingStory = await this.storyRepository.findByIdWithRelations(id);
+    // Resolve within the authenticated tenant before loading any relations so a
+    // foreign story is indistinguishable from a nonexistent story.
+    const existingStory = await this.storyRepository.findByIdWithRelations(
+      id,
+      userCommunityId
+    );
     if (!existingStory) {
+      throw new StoryNotFoundError();
+    }
+
+    // Unavailable rows (restricted or unknown privacyLevel) are not
+    // reachable by any role (SPEC-V2 §6.3): mutation masks as 404.
+    if (this.storyAudienceDenied(existingStory, userRole)) {
+      this.logger.warn('Story audience access denied', {
+        userId,
+        storyId: id,
+        reason: 'story_audience_denied',
+      });
       throw new StoryNotFoundError();
     }
 
@@ -730,7 +780,10 @@ export class StoryService {
 
     this.logger.info('Story updated successfully', { storyId: id, userId });
 
-    return updatedStory;
+    return this.projectStorySpeakers(
+      this.projectStoryPlaces(updatedStory),
+      userRole
+    );
   }
 
   /**
@@ -739,13 +792,29 @@ export class StoryService {
   async deleteStory(
     id: number,
     userId: number,
-    userRole: string
+    userRole: string,
+    userCommunityId: number
   ): Promise<void> {
     this.logger.info('Deleting story', { storyId: id, userId, userRole });
 
-    // Get existing story
-    const existingStory = await this.storyRepository.findByIdWithRelations(id);
+    // Resolve within the authenticated tenant before loading any relations so a
+    // foreign story is indistinguishable from a nonexistent story.
+    const existingStory = await this.storyRepository.findByIdWithRelations(
+      id,
+      userCommunityId
+    );
     if (!existingStory) {
+      throw new StoryNotFoundError();
+    }
+
+    // Unavailable rows (restricted or unknown privacyLevel) are not
+    // reachable by any role (SPEC-V2 §6.3): deletion masks as 404.
+    if (this.storyAudienceDenied(existingStory, userRole)) {
+      this.logger.warn('Story audience access denied', {
+        userId,
+        storyId: id,
+        reason: 'story_audience_denied',
+      });
       throw new StoryNotFoundError();
     }
 
@@ -861,11 +930,13 @@ export class StoryService {
       communityId: userCommunityId,
     };
 
-    // Apply cultural protocol filtering at database level based on user role
-    if (userRole !== 'elder' && userRole !== 'admin') {
-      // Non-elders cannot see restricted content - filter at DB level
-      scopedFilters.isRestricted = false;
-    }
+    // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): each role sees
+    // exactly its runtime read accesses at database level. A physical
+    // Fastify `viewer` is reasoned about as V2 `member` (§6.2); legacy
+    // `elder` keeps member reach (restricted rows and unknown privacy
+    // levels stay unavailable to it, §6.3); unknown roles hold no access,
+    // so the list fails closed.
+    scopedFilters.storyAudiences = [...storyAccessForPhysicalRole(userRole)];
 
     try {
       // Get results with all filtering done at database level
@@ -875,9 +946,15 @@ export class StoryService {
       );
 
       // Return database results directly - no additional in-memory filtering
-      // All cultural protocol filtering is now handled by database queries
+      // except the story-derived place (SPEC-V2 §6.4) and speaker
+      // withdrawal (§6.5) projections, applied on top of the database-level
+      // audience filtering.
       return {
-        data: result.data.map((story) => this.applyDualRead(story)),
+        data: result.data.map((story) =>
+          this.applyDualRead(
+            this.projectStorySpeakers(this.projectStoryPlaces(story), userRole)
+          )
+        ),
         total: result.total,
         page: result.page,
         limit: result.limit,
@@ -937,6 +1014,141 @@ export class StoryService {
         'Super administrators cannot access community stories - data sovereignty protection'
       );
     }
+  }
+
+  /**
+   * SPEC-V2 §6.2/§6.3 story-audience gate for authenticated reads and
+   * mutations on the transitional Fastify schema (`privacyLevel`/
+   * `isRestricted` -> runtime read access). Unavailable rows (restricted
+   * or unknown privacyLevel) are denied to EVERY role — admin, editor,
+   * member, viewer, super_admin, and the legacy `elder` role too. Available
+   * rows keep the V1 path for non-V2 roles; super admins are already
+   * denied before callers reach this check.
+   */
+  private storyAudienceDenied(
+    story: Pick<StoryWithRelations, 'privacyLevel' | 'isRestricted'>,
+    userRole: string
+  ): boolean {
+    // Unavailable rows are readable by no role (SPEC-V2 §6.3); the legacy
+    // elder role reads as V2 member; unknown roles read nothing.
+    return !physicalRoleCanReadStoryAccess(
+      userRole,
+      fastifyStoryToAudience(story.privacyLevel, story.isRestricted)
+    );
+  }
+
+  /**
+   * Story-derived place projection (SPEC-V2 §6.4): a readable story does
+   * not widen a related place's audience. A restricted Fastify place
+   * (`places.is_restricted = true`) is unavailable to EVERY role — admin
+   * and the legacy `elder` path included — so it is always removed from
+   * `story.places`. The story relation loaders already exclude restricted
+   * places at the data layer; this projection is the second, defensive
+   * layer (it also covers relation data assembled elsewhere).
+   */
+  private projectStoryPlaces(story: StoryWithRelations): StoryWithRelations {
+    const hasRestrictedPlace = Boolean(
+      story.places?.some((place) => place.isRestricted)
+    );
+    // A withheld interview-location relation must not leave its raw foreign
+    // key behind. The relation loaders set `interviewLocation = null` for a
+    // restricted or missing place; this defensive layer also drops a
+    // restricted relation assembled elsewhere (§6.4, every role).
+    const restrictedInterviewLocation =
+      (story.interviewLocation as { isRestricted?: boolean } | null | undefined)
+        ?.isRestricted === true;
+    // The raw ID survives only alongside a loaded, readable relation. List
+    // and search rows (`findMany`) do not load the relation, so their ID is
+    // masked too: the caller cannot tell a restricted place from a readable
+    // one without it (fail closed).
+    const masksInterviewLocationId =
+      story.interviewLocationId != null &&
+      (story.interviewLocation == null || restrictedInterviewLocation);
+
+    if (!hasRestrictedPlace && !masksInterviewLocationId) {
+      return story;
+    }
+    return {
+      ...story,
+      ...(hasRestrictedPlace
+        ? {
+            places: story.places.filter((place) => !place.isRestricted),
+          }
+        : {}),
+      ...(masksInterviewLocationId
+        ? { interviewLocationId: null, interviewLocation: null }
+        : {}),
+    };
+  }
+
+  /**
+   * Story-derived speaker withdrawal projection (SPEC-V2 §6.5): a readable
+   * story does not widen a withdrawn speaker's audience. A speaker with
+   * `speakers.is_active = false` is removed from `story.speakers` for every
+   * caller without the canonical editor/admin gate — the physical Fastify
+   * viewer (V2 member), super_admin, the legacy `elder` path, and anonymous
+   * public callers (`userRole = null`). Editors and admins keep the full
+   * relation. Applied in the same place and style as `projectStoryPlaces`.
+   */
+  private projectStorySpeakers(
+    story: StoryWithRelations,
+    userRole: string | null
+  ): StoryWithRelations {
+    const keepsWithdrawn =
+      userRole !== null && this.storySpeakerWithdrawalAllowed(userRole);
+    const hasWithdrawnSpeaker = Boolean(
+      story.speakers?.some((speaker) => !speaker.isActive)
+    );
+    const hasWithdrawnInterviewer = story.interviewer?.isActive === false;
+    const removesWithdrawnSpeakers = !keepsWithdrawn && hasWithdrawnSpeaker;
+    const removesWithdrawnInterviewer =
+      !keepsWithdrawn && hasWithdrawnInterviewer;
+    // A withheld interviewer relation must not leave its raw foreign key
+    // behind: when the relations were loaded and the interviewer is absent
+    // (missing row, or withdrawn and dropped above), every role loses the
+    // ID too. Editors/admins keep the ID only while they keep the relation.
+    // The interviewer ID survives only when the caller may read that
+    // speaker. When the relation was loaded, it must be present and kept.
+    // When it was not loaded (list/search rows from `findMany`), only a
+    // canonical editor/admin keeps the ID: they may read every
+    // same-community speaker, withdrawn ones included (§6.5); every other
+    // role cannot tell a withdrawn interviewer from a readable one, so the
+    // ID is masked (fail closed).
+    const interviewerLoaded = 'interviewer' in story;
+    const masksInterviewerId =
+      story.interviewerId != null &&
+      (removesWithdrawnInterviewer ||
+        (interviewerLoaded ? story.interviewer == null : !keepsWithdrawn));
+
+    if (
+      !removesWithdrawnSpeakers &&
+      !removesWithdrawnInterviewer &&
+      !masksInterviewerId
+    ) {
+      return story;
+    }
+    return {
+      ...story,
+      ...(removesWithdrawnSpeakers
+        ? {
+            speakers: story.speakers.filter((speaker) => speaker.isActive),
+          }
+        : {}),
+      // The interviewer is a story-derived speaker relation too (§6.5).
+      ...(removesWithdrawnInterviewer ? { interviewer: null } : {}),
+      ...(masksInterviewerId ? { interviewerId: null } : {}),
+    };
+  }
+
+  /**
+   * §6.5 gate for story-derived speaker relations, mirroring the speaker
+   * service: only a physical role mapping to canonical V2 `editor`/`admin`
+   * keeps withdrawn speakers. A null v2Role (legacy `elder`, unknown roles)
+   * never grants them.
+   */
+  private storySpeakerWithdrawalAllowed(userRole: string): boolean {
+    const v2Role = fastifyRoleToV2Role(userRole);
+    return v2Role === 'editor' || v2Role === 'admin';
   }
 
   /**
@@ -1172,16 +1384,12 @@ export class StoryService {
     const logEntry = {
       timestamp: new Date().toISOString(),
       storyId: story.id,
-      storyTitle: story.title,
       userId: user.id,
       userRole: user.role,
       communityId: story.communityId,
       operation,
       allowed,
       reason,
-      culturalProtocols: (
-        story as StoryWithRelations & { culturalProtocols?: CulturalProtocols }
-      ).culturalProtocols,
     };
 
     // Log to appropriate audit system for Indigenous community oversight
@@ -1226,7 +1434,12 @@ export class StoryService {
       });
 
       return {
-        stories: publicStories.map((story) => this.applyDualRead(story)),
+        stories: publicStories.map((story) =>
+          this.applyDualRead(
+            // Anonymous callers never receive withdrawn speakers (§6.5).
+            this.projectStorySpeakers(this.projectStoryPlaces(story), null)
+          )
+        ),
         total: result.total, // Use actual total from repository
       };
     } catch (error) {
@@ -1270,28 +1483,30 @@ export class StoryService {
         return null;
       }
 
-      // Check if story is public (not restricted)
-      if (story.isRestricted) {
+      // Public visibility is an explicit contract: both the story privacy level
+      // and restriction flag must permit anonymous access.
+      if (story.privacyLevel !== 'public' || story.isRestricted) {
         this.logger.warn('[PUBLIC_API_ACCESS_DENIED]', {
           timestamp: new Date().toISOString(),
-          reason: 'Story has cultural restrictions and is not public',
+          reason: 'story_not_public',
           storyId: parseInt(storyId, 10),
-          isRestricted: story.isRestricted,
           communityId: parseInt(communityId, 10),
         });
         return null;
       }
 
-      // Log successful public access
+      // Authorization audit metadata intentionally excludes story content.
       this.logger.info('[PUBLIC_API_ACCESS]', {
         timestamp: new Date().toISOString(),
         operation: 'get_public_story',
         storyId: parseInt(storyId, 10),
-        storyTitle: story.title,
         communityId: parseInt(communityId, 10),
       });
 
-      return this.applyDualRead(story);
+      // Anonymous callers never receive withdrawn speakers (§6.5).
+      return this.applyDualRead(
+        this.projectStorySpeakers(this.projectStoryPlaces(story), null)
+      );
     } catch (error) {
       this.logger.error('Failed to get public story by ID:', {
         error: error instanceof Error ? error.message : String(error),

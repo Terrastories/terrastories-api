@@ -18,10 +18,13 @@ import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { communityAdminCookie } from '../helpers/community-authority.js';
 
 describe('Authentication Routes', () => {
   let app: FastifyInstance;
   let testCommunityId: number;
+  // SPEC-V2 §7: enrollment needs a same-community administrator session.
+  let adminCookie: string;
 
   beforeEach(async () => {
     // Setup test database
@@ -32,6 +35,7 @@ describe('Authentication Routes', () => {
 
     // Create test app with test database
     app = await createTestApp(db);
+    adminCookie = await communityAdminCookie(app, db, testCommunityId);
   });
 
   afterEach(async () => {
@@ -40,6 +44,30 @@ describe('Authentication Routes', () => {
   });
 
   describe('POST /register', () => {
+    test('should reject anonymous registration with 401 before validation', async () => {
+      // SPEC-V2 §7/§9: no anonymous signup path into a community.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/register',
+        payload: {
+          email: 'anonymous@example.com',
+          password: 'StrongPassword123@',
+          firstName: 'Anon',
+          lastName: 'Ymous',
+          role: 'admin',
+          communityId: testCommunityId,
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      const invalid = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/register',
+        payload: { email: 'not-an-email', communityId: 999999 },
+      });
+      expect(invalid.statusCode).toBe(401);
+    });
+
     test('should register a new user successfully', async () => {
       const registrationData = {
         email: 'test@example.com',
@@ -53,6 +81,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -92,6 +121,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -112,6 +142,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: incompleteData,
       });
 
@@ -133,6 +164,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -157,6 +189,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -164,6 +197,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -174,7 +208,7 @@ describe('Authentication Routes', () => {
       );
     });
 
-    test('should return 400 for invalid community ID', async () => {
+    test('should return 403 for another or non-existent community without an existence signal', async () => {
       const registrationData = {
         email: 'test@example.com',
         password: 'StrongPassword123@',
@@ -187,12 +221,19 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
-      expect(response.statusCode).toBe(400);
+      // SPEC-V2 §7: only a same-community administrator may enroll, and the
+      // decision is made before any community lookup, so a missing
+      // community answers like any other community.
+      expect(response.statusCode).toBe(403);
       const responseBody = JSON.parse(response.body);
-      expect(responseBody.error).toContain('Community not found');
+      expect(responseBody.error).toBe(
+        'Community administrator authority required'
+      );
+      expect(response.body).not.toContain('Community not found');
     });
 
     test('should return 400 for invalid role', async () => {
@@ -208,6 +249,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -229,6 +271,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -252,6 +295,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -272,6 +316,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: invalidPayload,
       });
 
@@ -293,6 +338,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -317,6 +363,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -338,6 +385,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -359,6 +407,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -375,6 +424,7 @@ describe('Authentication Routes', () => {
         url: '/api/v1/auth/register',
         headers: {
           'content-type': 'text/plain',
+          cookie: adminCookie,
         },
         payload: 'invalid payload',
       });
@@ -397,6 +447,7 @@ describe('Authentication Routes', () => {
         url: '/api/v1/auth/register',
         headers: {
           'content-type': 'application/json',
+          cookie: adminCookie,
         },
         payload: JSON.stringify(registrationData),
       });
@@ -419,6 +470,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -448,6 +500,7 @@ describe('Authentication Routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: {
           email: 'invalid-email',
           password: 'StrongPassword123@',
@@ -472,6 +525,9 @@ describe('Authentication Routes', () => {
       const fixtures = await testDb.seedTestData();
       const community1Id = fixtures.communities[0].id;
       const community2Id = fixtures.communities[1].id;
+      // Each enrollment needs that community's own administrator.
+      const cookie1 = await communityAdminCookie(app, testDb.db, community1Id);
+      const cookie2 = await communityAdminCookie(app, testDb.db, community2Id);
 
       const user1Data = {
         email: 'user1@example.com',
@@ -494,12 +550,14 @@ describe('Authentication Routes', () => {
       const response1 = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: cookie1 },
         payload: user1Data,
       });
 
       const response2 = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: cookie2 },
         payload: user2Data,
       });
 
@@ -518,6 +576,9 @@ describe('Authentication Routes', () => {
       const fixtures = await testDb.seedTestData();
       const community1Id = fixtures.communities[0].id;
       const community2Id = fixtures.communities[1].id;
+      // Each enrollment needs that community's own administrator.
+      const cookie1 = await communityAdminCookie(app, testDb.db, community1Id);
+      const cookie2 = await communityAdminCookie(app, testDb.db, community2Id);
 
       const userData = {
         email: 'same@example.com',
@@ -530,12 +591,14 @@ describe('Authentication Routes', () => {
       const response1 = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: cookie1 },
         payload: { ...userData, communityId: community1Id },
       });
 
       const response2 = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: cookie2 },
         payload: { ...userData, communityId: community2Id },
       });
 
@@ -567,6 +630,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -637,6 +701,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -708,6 +773,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -748,6 +814,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -809,6 +876,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -874,6 +942,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -921,6 +990,7 @@ describe('Authentication Routes', () => {
       const registerResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: userData,
       });
 
@@ -988,6 +1058,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: userData,
       });
 
@@ -1061,6 +1132,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: userData,
       });
 
@@ -1157,6 +1229,7 @@ describe('Authentication Routes', () => {
       const registerResponse = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -1233,6 +1306,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -1326,6 +1400,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -1391,6 +1466,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: registrationData,
       });
 
@@ -1452,6 +1528,7 @@ describe('Authentication Routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/register',
+        headers: { cookie: adminCookie },
         payload: user1Data,
       });
 

@@ -1,0 +1,114 @@
+{
+  "d1Batch": [],
+  "r2": [
+    {
+      "kb": 512,
+      "put": {
+        "path": "r2/put?kb=512",
+        "status": 200,
+        "clientMs": 580,
+        "bytes": 76,
+        "body": {
+          "ok": true,
+          "key": "spike/88f6827f-4fb3-4ae6-8375-36401e615791",
+          "size": 524288
+        }
+      },
+      "get": {
+        "status": 200,
+        "clientMs": 505,
+        "bytes": 524288
+      }
+    },
+    {
+      "kb": 10240,
+      "put": {
+        "path": "r2/put?kb=10240",
+        "status": 200,
+        "clientMs": 1051,
+        "bytes": 78,
+        "body": {
+          "ok": true,
+          "key": "spike/64820a31-5b0b-473c-b3ba-222673f3a57f",
+          "size": 10485760
+        }
+      },
+      "get": {
+        "status": 200,
+        "clientMs": 4969,
+        "bytes": 10485760
+      }
+    },
+    {
+      "kb": 51200,
+      "put": {
+        "path": "r2/put?kb=51200",
+        "status": 200,
+        "clientMs": 2989,
+        "bytes": 78,
+        "body": {
+          "ok": true,
+          "key": "spike/ddec55af-e480-4bdb-a6b0-63586d97ae3d",
+          "size": 52428800
+        }
+      },
+      "get": {
+        "status": 200,
+        "clientMs": 6490,
+        "bytes": 52428800
+      }
+    },
+    {
+      "uploadMiB": 10,
+      "put": {
+        "path": "r2/put",
+        "status": 200,
+        "clientMs": 7360,
+        "bytes": 78,
+        "body": {
+          "ok": true,
+          "key": "spike/1ca1de1d-9c5b-480d-a5ef-6fe48056485b",
+          "size": 10485760
+        }
+      }
+    },
+    {
+      "uploadMiB": 50,
+      "put": {
+        "path": "r2/put",
+        "status": 200,
+        "clientMs": 28607,
+        "bytes": 78,
+        "body": {
+          "ok": true,
+          "key": "spike/7af4dc2e-d6ea-4c1e-9d22-2798ed4abc44",
+          "size": 52428800
+        }
+      }
+    },
+    {
+      "uploadMiB": 99,
+      "put": {
+        "path": "r2/put",
+        "status": 200,
+        "clientMs": 52204,
+        "bytes": 79,
+        "body": {
+          "ok": true,
+          "key": "spike/2a68c7d7-0d73-4139-894b-2e0b352c0841",
+          "size": 103809024
+        }
+      }
+    },
+    {
+      "uploadMiB": 101,
+      "put": {
+        "path": "r2/put",
+        "status": 413,
+        "clientMs": 1998,
+        "bytes": 167,
+        "body": "<html>\r\n<head><title>413 Payload Too Large</title></head>\r\n<body>\r\n<center><h1>4"
+      }
+    }
+  ]
+}

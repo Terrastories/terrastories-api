@@ -20,6 +20,7 @@ import {
   type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
 import { handleRouteError } from '../shared/middleware/error.middleware.js';
+import { MAX_DATABASE_ID } from '../shared/types/public.js';
 
 /**
  * Zod validation schemas
@@ -88,13 +89,28 @@ const PaginationSchema = z.object({
     .describe('Items per page'),
 });
 
+// SPEC-V2 §6.5: `activeOnly` accepts only the explicit strings 'true'/'false'
+// (or real booleans). An empty query value is ignored-as-default; anything
+// else fails validation. `z.coerce.boolean` is forbidden here: it maps '' and
+// every other non-empty string to a hard boolean and let a query like
+// `?activeOnly=` widen a caller's reach.
+const ActiveOnlyQuerySchema = z.preprocess(
+  (value) => (value === '' || value === null ? undefined : value),
+  z
+    .union([z.boolean(), z.enum(['true', 'false'])])
+    .optional()
+    .transform((value) => {
+      if (value === undefined) {
+        return undefined;
+      }
+      return typeof value === 'boolean' ? value : value === 'true';
+    })
+);
+
 const SpeakerListQuerySchema = PaginationSchema.extend({
   elderOnly: z.coerce.boolean().optional().describe('Filter elders only'),
   culturalRole: z.string().optional().describe('Filter by cultural role'),
-  activeOnly: z.coerce
-    .boolean()
-    .optional()
-    .describe('Filter active speakers only'),
+  activeOnly: ActiveOnlyQuerySchema.describe('Filter active speakers only'),
   sortBy: z
     .enum(['name', 'created_at', 'updated_at'])
     .optional()
@@ -113,7 +129,14 @@ const SearchQuerySchema = PaginationSchema.extend({
 
 // Path parameter schemas
 const SpeakerIdSchema = z.object({
-  id: z.coerce.number().min(1).describe('Speaker ID'),
+  // Capped at the PostgreSQL integer range, like PlaceIdSchema, so a
+  // malformed or out-of-range id is a 400 on both backends (#135).
+  id: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(MAX_DATABASE_ID)
+    .describe('Speaker ID'),
 });
 
 /**
@@ -165,7 +188,11 @@ export async function speakerRoutes(
         const { id } = SpeakerIdSchema.parse(request.params);
         const { user } = request as AuthenticatedRequest;
 
-        const speaker = await service.getSpeakerById(id, user.communityId);
+        const speaker = await service.getSpeakerById(
+          id,
+          user.communityId,
+          user.role
+        );
 
         return reply.send({
           data: speaker,
@@ -330,7 +357,10 @@ export async function speakerRoutes(
       try {
         const { user } = request as AuthenticatedRequest;
 
-        const stats = await service.getCommunityStats(user.communityId);
+        const stats = await service.getCommunityStats(
+          user.communityId,
+          user.role
+        );
 
         return reply.send({
           data: stats,

@@ -50,9 +50,7 @@ export function createWorker(
               if (next.done) controller.close();
               else controller.enqueue(next.value);
             },
-            async cancel(reason) {
-              await reader.cancel(reason);
-            },
+            cancel: (reason) => reader.cancel(reason),
           });
         },
       },

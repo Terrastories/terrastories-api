@@ -7,7 +7,8 @@ import {
 } from './services/hono-foundation.service.js';
 
 export async function createLocalStorage(
-  directory: string
+  directory: string,
+  openFile = open
 ): Promise<FoundationStorage> {
   const root = await realpath(directory);
   return {
@@ -20,7 +21,7 @@ export async function createLocalStorage(
           key.split('/').slice(0, 2).join('/')
         );
         if (!filename.startsWith(tenantRoot + path.sep)) return null;
-        const file = await open(filename, 'r');
+        const file = await openFile(filename, 'r');
         return Readable.toWeb(file.createReadStream());
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;

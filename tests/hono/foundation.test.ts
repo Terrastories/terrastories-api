@@ -26,14 +26,16 @@ it('keeps resolved storage bytes inside their authorized tenant', async () => {
   await writeFile(`${root}/communities/1/own`, 'own');
   await writeFile(`${root}/communities/2/private`, 'private');
   await symlink('../2/private', `${root}/communities/1/escape`);
-  await writeFile(`${root}/communities/1/unreadable`, 'private', { mode: 0 });
   const storage = await createLocalStorage(root);
   const own = await storage.read('communities/1/own');
   expect(own).toBeInstanceOf(ReadableStream);
   expect(await new Response(own as ReadableStream).text()).toBe('own');
   expect(await storage.read('communities/1/escape')).toBeNull();
   expect(await storage.read('communities/1/../2/private')).toBeNull();
-  await expect(storage.read('communities/1/unreadable')).rejects.toMatchObject({
+  const denied = await createLocalStorage(root, async () => {
+    throw Object.assign(new Error(), { code: 'EACCES' });
+  });
+  await expect(denied.read('communities/1/own')).rejects.toMatchObject({
     code: 'EACCES',
   });
 });

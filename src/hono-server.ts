@@ -7,7 +7,12 @@ import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 
 const app = createHonoApp({
-  verifier: nodePasswordVerifier,
+  verifier: {
+    verify: (...args) =>
+      process.env.NODE_ENV === 'development'
+        ? nodePasswordVerifier.verify(...args)
+        : Promise.reject(new Error('Production verifier not configured')),
+  },
   repository: new HonoFoundationRepository(await getDb()),
   publicOrigin: process.env.HONO_PUBLIC_ORIGIN,
   corsOrigins: process.env.HONO_CORS_ORIGINS?.split(',')

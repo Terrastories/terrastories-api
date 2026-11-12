@@ -1,8 +1,11 @@
 # Phase 1 — Fastify → Hono Migration
 
-**Status:** Thin foundation replacing superseded PR #132
+**Status:** PR #132 closed 2026-11-11; superseded by the thin Hono slice off main (#193)
 **Authority:** Execution plan subordinate to `docs/SPEC-V2.md`  
-**Last reviewed:** 2026-11-11
+**Last reviewed:** 2026-11-12
+
+The thin foundation covers health, development login, durable sessions, revocation,
+and one protected media read; Fastify-only route work is frozen.
 
 ## Goal
 
@@ -62,7 +65,7 @@ refresh cadence quantizes the persisted idle deadline by up to 15 minutes.
 Opt-in 60-day device sessions remain a #137 follow-up. Login rotates the supplied identifier. Browser mutations require the configured public origin or explicit CORS allowlist.
 No password reset, key rotation, cleanup scheduler, rate-limit
 policy, or full identity resolver is claimed here; #137/#138 own those gates.
-Node Rails bcrypt verification is RETAIN behind `PasswordVerifier`; Workers
+Node Rails bcrypt verification is RETAIN for development behind `PasswordVerifier`; Workers
 verification awaits the auth design/#194. Current-policy upgrades remain #137.
 The Node verifier uses the existing native bcrypt dependency. Unsupported hash
 formats fail closed, including deferred Fastify Argon2id.
@@ -158,3 +161,10 @@ not wall-clock thresholds. The extra rejection work is intentional; production
 throttling remains a separate #138 gate. Numeric request IDs use the shared
 PostgreSQL-compatible positive integer bound, 2147483647; UUID media identifiers
 retain their UUID schema.
+
+The native bcrypt adapter is a development integration bridge requested for this
+slice, not a released authentication protocol. The Node listener enables it only
+in explicit development mode; other modes fail closed, as does the unconfigured
+Worker verifier. SPEC-V2 Section 7 requires client-side stretching and server-side
+SHA-256 comparison on every released profile. That protocol, pre-login handling,
+and production backoff remain follow-up authentication work (#137/#138).

@@ -6,8 +6,7 @@ export const nodePasswordVerifier: PasswordVerifier = {
     const match = /^\$2[aby]\$(0[4-9]|1[0-4])\$[./A-Za-z0-9]{53}$/.exec(hash);
     const dummy = 'N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
     try {
-      // Every rejection executes costs 04..14 in order, substituting the real
-      // hash only at its cost. Dummy matches cannot authenticate an account.
+      // Rejections execute costs 04..14; only the real hash at its cost can authenticate.
       for (let cost = 4; cost <= 14; cost++) {
         const real = match !== null && Number(match[1]) === cost;
         const candidate = real

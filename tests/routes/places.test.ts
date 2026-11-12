@@ -24,10 +24,12 @@ import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 describe('Places API Routes - Integration Tests', () => {
   let app: FastifyInstance;
   let testCommunityId: number;
+  let otherCommunityId: number;
   let adminSessionId: string;
   let editorSessionId: string;
   let viewerSessionId: string;
@@ -39,6 +41,7 @@ describe('Places API Routes - Integration Tests', () => {
     await testDb.clearData();
     const fixtures = await testDb.seedTestData();
     testCommunityId = fixtures.communities[1].id; // Skip system community
+    otherCommunityId = fixtures.communities[0].id;
 
     // Create test app with real routes
     app = await createTestApp(testDb.db);
@@ -80,30 +83,11 @@ describe('Places API Routes - Integration Tests', () => {
       communityId: testCommunityId,
     };
 
-    // Register and login users to get session cookies
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: adminUser,
-    });
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: editorUser,
-    });
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: viewerUser,
-    });
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: elderUser,
-    });
+    // Seed users (registration requires community-admin authority)
+    await seedRegisteredUser(testDb.db, adminUser);
+    await seedRegisteredUser(testDb.db, editorUser);
+    await seedRegisteredUser(testDb.db, viewerUser);
+    await seedRegisteredUser(testDb.db, elderUser);
 
     // Get session cookies
     const adminLogin = await app.inject({
@@ -355,7 +339,7 @@ describe('Places API Routes - Integration Tests', () => {
       expect(response.statusCode).toBe(401);
     });
 
-    test('should hide held places even from legacy elder accounts', async () => {
+    test('should return 404 for restricted places for every role (SPEC-V2 §6.4)', async () => {
       // Create a restricted place
       const restrictedPlaceData = {
         name: 'Sacred Restricted Place',
@@ -375,24 +359,22 @@ describe('Places API Routes - Integration Tests', () => {
       const restrictedPlace = JSON.parse(createResponse.body);
       const restrictedId = restrictedPlace.data.id;
 
-      // Held legacy rows remain unavailable to every role
-      const elderResponse = await app.inject({
-        method: 'GET',
-        url: `/api/v1/places/${restrictedId}`,
-        headers: { cookie: elderSessionId },
-      });
+      // A restricted place is unavailable in V2 runtime to EVERY role
+      // (admin, editor, viewer, elder): direct reads stay 404-masked.
+      for (const sessionCookie of [
+        adminSessionId,
+        editorSessionId,
+        viewerSessionId,
+        elderSessionId,
+      ]) {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/places/${restrictedId}`,
+          headers: { cookie: sessionCookie },
+        });
 
-      expect(elderResponse.statusCode).toBe(404);
-
-      // Viewer might not be able to access (depends on business logic)
-      const viewerResponse = await app.inject({
-        method: 'GET',
-        url: `/api/v1/places/${restrictedId}`,
-        headers: { cookie: viewerSessionId },
-      });
-
-      // This might be 200 or 403 depending on cultural protocol implementation
-      expect(viewerResponse.statusCode).toBe(404);
+        expect(response.statusCode).toBe(404);
+      }
     });
   });
 
@@ -443,6 +425,74 @@ describe('Places API Routes - Integration Tests', () => {
       const body = JSON.parse(response.body);
       expect(body.meta.page).toBe(1);
       expect(body.meta.limit).toBe(20);
+    });
+
+    test('should reject an authenticated cross-community list override', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/places?community_id=${otherCommunityId}`,
+        headers: { cookie: viewerSessionId },
+      });
+
+      expect(response.statusCode).toBe(403);
+      const body = JSON.parse(response.body);
+      expect(body.data).toBeUndefined();
+      expect(body.error).toBeDefined();
+    });
+
+    test('should exclude restricted places from the community list for an admin (SPEC-V2 §6.4)', async () => {
+      const createResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/places',
+        payload: {
+          name: 'Hidden Sacred Place',
+          latitude: 49.283,
+          longitude: -123.121,
+          isRestricted: true,
+        },
+        headers: { cookie: adminSessionId },
+      });
+      expect(createResponse.statusCode).toBe(201);
+      const restrictedId = JSON.parse(createResponse.body).data.id;
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/places?page=1&limit=50',
+        headers: { cookie: adminSessionId },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      const ids = body.data.map((place: { id: number }) => place.id);
+      expect(ids).not.toContain(restrictedId);
+      expect(body.meta.total).toBe(3);
+    });
+
+    test('should exclude restricted places from nearby search for an admin (SPEC-V2 §6.4)', async () => {
+      const createResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/places',
+        payload: {
+          name: 'Hidden Sacred Place Near',
+          latitude: 49.2828,
+          longitude: -123.1208,
+          isRestricted: true,
+        },
+        headers: { cookie: adminSessionId },
+      });
+      expect(createResponse.statusCode).toBe(201);
+      const restrictedId = JSON.parse(createResponse.body).data.id;
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/places/near?latitude=49.2827&longitude=-123.1207&radius=5&page=1&limit=50',
+        headers: { cookie: adminSessionId },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      const ids = body.data.map((place: { id: number }) => place.id);
+      expect(ids).not.toContain(restrictedId);
     });
 
     test('should require authentication', async () => {
@@ -557,6 +607,30 @@ describe('Places API Routes - Integration Tests', () => {
 
       expect(response.statusCode).toBe(400);
     });
+
+    test('should return 404 when updating a restricted place, admin included (SPEC-V2 §6.4)', async () => {
+      const createResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/places',
+        payload: {
+          name: 'Restricted Update Target',
+          latitude: 49.2827,
+          longitude: -123.1207,
+          isRestricted: true,
+        },
+        headers: { cookie: adminSessionId },
+      });
+      const restrictedId = JSON.parse(createResponse.body).data.id;
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/places/${restrictedId}`,
+        payload: { name: 'Attempted Update' },
+        headers: { cookie: adminSessionId },
+      });
+
+      expect(response.statusCode).toBe(404);
+    });
   });
 
   describe('DELETE /api/v1/places/:id', () => {
@@ -627,6 +701,31 @@ describe('Places API Routes - Integration Tests', () => {
       });
 
       expect(response.statusCode).toBe(404);
+    });
+
+    test('should return 404 when deleting a restricted place, admin and elder included (SPEC-V2 §6.4)', async () => {
+      const createResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/places',
+        payload: {
+          name: 'Restricted Delete Target',
+          latitude: 49.2827,
+          longitude: -123.1207,
+          isRestricted: true,
+        },
+        headers: { cookie: adminSessionId },
+      });
+      const restrictedId = JSON.parse(createResponse.body).data.id;
+
+      for (const sessionCookie of [adminSessionId, elderSessionId]) {
+        const response = await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/places/${restrictedId}`,
+          headers: { cookie: sessionCookie },
+        });
+
+        expect(response.statusCode).toBe(404);
+      }
     });
   });
 
@@ -809,7 +908,29 @@ describe('Places API Routes - Integration Tests', () => {
       }
     });
 
-    test('should return place statistics', async () => {
+    test('should return place statistics counting unrestricted places only for an admin (SPEC-V2 §6.4)', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/places/stats',
+        headers: { cookie: adminSessionId },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.data).toHaveProperty('total');
+      expect(body.data).toHaveProperty('public');
+      expect(body.data).toHaveProperty('withStories');
+      expect(typeof body.data.total).toBe('number');
+      expect(typeof body.data.public).toBe('number');
+      // A restricted place is unavailable to every role, admin included:
+      // only the two unrestricted places count and the `restricted` key
+      // never appears.
+      expect(body.data).not.toHaveProperty('restricted');
+      expect(body.data.total).toBe(2);
+      expect(body.data.public).toBe(2);
+    });
+
+    test('should omit restricted counts from viewer statistics (SPEC-V2 §6.4)', async () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/v1/places/stats',
@@ -818,13 +939,8 @@ describe('Places API Routes - Integration Tests', () => {
 
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body);
-      expect(body.data).toHaveProperty('total');
-      expect(body.data).toHaveProperty('restricted');
-      expect(body.data).toHaveProperty('public');
-      expect(body.data).toHaveProperty('withStories');
-      expect(typeof body.data.total).toBe('number');
-      expect(typeof body.data.restricted).toBe('number');
-      expect(typeof body.data.public).toBe('number');
+      expect(body.data).not.toHaveProperty('restricted');
+      expect(body.data.total).toBe(body.data.public);
     });
 
     test('should require authentication', async () => {

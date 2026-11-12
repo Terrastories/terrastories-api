@@ -1,0 +1,20 @@
+{
+  // Throwaway spike for issue #194. Every Cloudflare resource is prefixed ts-spike-.
+  "name": "ts-spike-kdf",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ts-spike-d1",
+      "database_id": "REPLACE_WITH_ID",
+    },
+  ],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "ts-spike-media" }],
+  "durable_objects": {
+    "bindings": [{ "name": "PROBE", "class_name": "CpuProbe" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CpuProbe"] }],
+}

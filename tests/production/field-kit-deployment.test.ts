@@ -31,7 +31,6 @@ interface OfflineCapabilities {
   core_functionality: boolean;
   tileserver_operational: boolean;
   local_storage_working: boolean;
-  sync_queue_functional: boolean;
   offline_authentication: boolean;
   cultural_protocols_enforced: boolean;
 }
@@ -866,7 +865,6 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       core_functionality: false,
       tileserver_operational: false,
       local_storage_working: false,
-      sync_queue_functional: false,
       offline_authentication: false,
       cultural_protocols_enforced: false,
     };
@@ -891,9 +889,6 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
       // Test cultural protocols
       capabilities.cultural_protocols_enforced =
         await testOfflineCulturalProtocols();
-
-      // Test sync queue
-      capabilities.sync_queue_functional = await testSyncQueueOperations();
     } catch (error) {
       console.warn('Error testing offline capabilities:', error);
     }
@@ -940,15 +935,6 @@ describe('Field Kit Offline Deployment Validation - Phase 3', () => {
   async function testOfflineCulturalProtocols(): Promise<boolean> {
     try {
       // Test that cultural restrictions are enforced offline
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async function testSyncQueueOperations(): Promise<boolean> {
-    try {
-      // Test sync queue functionality
       return true;
     } catch {
       return false;

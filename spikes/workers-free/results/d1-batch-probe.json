@@ -1,0 +1,121 @@
+{
+  "d1Batch": [
+    {
+      "path": "d1/batch?stmts=10&rows=33",
+      "status": 200,
+      "clientMs": 275,
+      "bytes": 50,
+      "body": {
+        "ok": true,
+        "stmts": 10,
+        "rows": 33,
+        "rowsWritten": 330
+      }
+    },
+    {
+      "path": "d1/batch?stmts=100&rows=33",
+      "status": 200,
+      "clientMs": 222,
+      "bytes": 52,
+      "body": {
+        "ok": true,
+        "stmts": 100,
+        "rows": 33,
+        "rowsWritten": 3300
+      }
+    },
+    {
+      "path": "d1/batch?stmts=300&rows=33",
+      "status": 200,
+      "clientMs": 322,
+      "bytes": 52,
+      "body": {
+        "ok": true,
+        "stmts": 300,
+        "rows": 33,
+        "rowsWritten": 9900
+      }
+    },
+    {
+      "path": "d1/batch?stmts=1000&rows=33",
+      "status": 200,
+      "clientMs": 657,
+      "bytes": 54,
+      "body": {
+        "ok": true,
+        "stmts": 1000,
+        "rows": 33,
+        "rowsWritten": 33000
+      }
+    },
+    {
+      "path": "d1/batch?stmts=1&rows=34",
+      "status": 500,
+      "clientMs": 57,
+      "bytes": 83,
+      "body": {
+        "ok": false,
+        "error": "D1_ERROR: too many SQL variables at offset 314: SQLITE_ERROR"
+      }
+    }
+  ],
+  "r2": [
+    {
+      "kb": 512,
+      "put": {
+        "path": "r2/put?kb=512",
+        "status": 200,
+        "clientMs": 485,
+        "bytes": 76,
+        "body": {
+          "ok": true,
+          "key": "spike/e583f1b8-2ebc-42d9-94db-3286b34d5303",
+          "size": 524288
+        }
+      },
+      "get": {
+        "status": 200,
+        "clientMs": 249,
+        "bytes": 524288
+      }
+    },
+    {
+      "kb": 10240,
+      "put": {
+        "path": "r2/put?kb=10240",
+        "status": 200,
+        "clientMs": 871,
+        "bytes": 78,
+        "body": {
+          "ok": true,
+          "key": "spike/1260fd8e-6670-4808-a70f-37cb7ee94e01",
+          "size": 10485760
+        }
+      },
+      "get": {
+        "status": 200,
+        "clientMs": 1497,
+        "bytes": 10485760
+      }
+    },
+    {
+      "kb": 51200,
+      "put": {
+        "path": "r2/put?kb=51200",
+        "status": 200,
+        "clientMs": 2330,
+        "bytes": 78,
+        "body": {
+          "ok": true,
+          "key": "spike/c1115ff0-f3c4-4b88-88a4-e731f2522add",
+          "size": 52428800
+        }
+      },
+      "get": {
+        "status": 200,
+        "clientMs": 7602,
+        "bytes": 52428800
+      }
+    }
+  ]
+}

@@ -27,6 +27,7 @@ import { createReadStream as createReadStreamSync } from 'fs';
 import { TestDataFactory, testDb } from '../helpers/database.js';
 import { getCommunitiesTable } from '../../src/db/schema/communities.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 // Mock Sharp to avoid needing real image data
 vi.mock('sharp', () => ({
@@ -115,30 +116,17 @@ describe('File Routes Integration', () => {
       .values(TestDataFactory.createCommunity({ name: 'File Test Community' }))
       .returning();
 
-    // Register user via API to ensure password is handled correctly
+    // Seed user directly (registration requires community-admin authority)
     const userEmail = 'file-user@example.com';
     const userPassword = 'SecurePassword123!';
-    const registerResponse = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: {
-        email: userEmail,
-        password: userPassword,
-        firstName: 'File',
-        lastName: 'User',
-        role: 'editor',
-        communityId: testCommunity.id,
-      },
+    testUser = await seedRegisteredUser(db, {
+      email: userEmail,
+      password: userPassword,
+      firstName: 'File',
+      lastName: 'User',
+      role: 'editor',
+      communityId: testCommunity.id,
     });
-
-    if (registerResponse.statusCode !== 201) {
-      throw new Error(
-        `Registration failed with status ${registerResponse.statusCode}: ${registerResponse.body}`
-      );
-    }
-
-    const registerResult = JSON.parse(registerResponse.body);
-    testUser = registerResult.user;
 
     // Login to get auth cookie
     const loginResponse = await app.inject({
@@ -211,6 +199,7 @@ describe('File Routes Integration', () => {
       expect(result.data.communityId).toBe(testCommunity.id);
       expect(result.data.uploadedBy).toBe(testUser.id || testUser.user?.id);
       expect(result.data.url).toMatch(/^\/api\/v1\/files\//);
+      expect(result.data).not.toHaveProperty('path');
     });
 
     it('should reject upload without authentication', async () => {

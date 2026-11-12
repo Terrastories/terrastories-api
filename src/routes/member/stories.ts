@@ -459,7 +459,8 @@ export async function memberStoriesRoutes(
           storyId,
           updates,
           user.id,
-          userRole
+          userRole,
+          userCommunityId
         );
 
         const storyDTO = toMemberStory(updatedStory, userRole);
@@ -536,7 +537,12 @@ export async function memberStoriesRoutes(
         const params = MemberIdParamSchema.parse(request.params);
         const storyId = params.id;
 
-        await storyService.deleteStory(storyId, user.id, userRole);
+        await storyService.deleteStory(
+          storyId,
+          user.id,
+          userRole,
+          userCommunityId
+        );
 
         return reply.code(204).send();
       } catch (error: unknown) {

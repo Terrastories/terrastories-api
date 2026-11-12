@@ -1,3 +1,5 @@
+import type { AdministrativeAuditEvent } from '../authorization/administrative-policy.js';
+
 /**
  * Super Admin Audit Logger
  *
@@ -126,4 +128,38 @@ export class SuperAdminAuditLogger {
  */
 export function getAuditLogger(): SuperAdminAuditLogger {
   return SuperAdminAuditLogger.getInstance();
+}
+
+/**
+ * SPEC-V2 §7 administrative audit sink. Every enrollment, system account
+ * create/update and publication decision is emitted here, allowed or
+ * denied. Entries are content-free (`AdministrativeAuditEvent`: actor ID,
+ * community ID, action, resource ID, outcome). Listeners let a deployment
+ * persist them and let tests assert on them.
+ */
+type AdministrativeAuditListener = (event: AdministrativeAuditEvent) => void;
+
+const administrativeAuditListeners = new Set<AdministrativeAuditListener>();
+
+export function onAdministrativeAudit(
+  listener: AdministrativeAuditListener
+): () => void {
+  administrativeAuditListeners.add(listener);
+  return () => {
+    administrativeAuditListeners.delete(listener);
+  };
+}
+
+export function emitAdministrativeAudit(
+  log: { warn: (obj: object, msg: string) => void },
+  event: AdministrativeAuditEvent
+): void {
+  log.warn(event, 'Administrative authorization audit');
+  administrativeAuditListeners.forEach((listener) => {
+    try {
+      listener(event);
+    } catch {
+      // A failing listener must not change the authorization outcome.
+    }
+  });
 }

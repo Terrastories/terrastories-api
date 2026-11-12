@@ -20,6 +20,7 @@ import { FastifyInstance } from 'fastify';
 import { DualApiClient } from './helpers/dual-client';
 import { createTestApp } from '../helpers/api-client';
 import { testDb, createTestData } from '../helpers/database';
+import { seedRegisteredUser } from '../helpers/community-authority';
 
 describe('V1 Compatibility: Auth', () => {
   let dualClient: DualApiClient;
@@ -43,34 +44,25 @@ describe('V1 Compatibility: Auth', () => {
     const seedData = await createTestData();
     communityId = seedData.community.id;
 
-    // Register a fresh viewer user to get working credentials
-    const viewerRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: {
-        email: 'comparison-viewer@test.com',
-        password: 'TestPass123!',
-        firstName: 'Viewer',
-        lastName: 'Test',
-        communityId: communityId,
-      },
+    // Seed fresh users directly: enrollment needs a same-community admin
+    // session (SPEC-V2 §7), so the fixtures cannot self-register.
+    await seedRegisteredUser(db, {
+      email: 'comparison-viewer@test.com',
+      password: 'TestPass123!',
+      firstName: 'Viewer',
+      lastName: 'Test',
+      communityId: communityId,
     });
-    expect(viewerRes.statusCode).toBe(201);
 
     // Register a fresh admin user
-    const adminRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: {
-        email: 'comparison-admin@test.com',
-        password: 'TestPass123!',
-        firstName: 'Admin',
-        lastName: 'Test',
-        role: 'admin',
-        communityId: communityId,
-      },
+    await seedRegisteredUser(db, {
+      email: 'comparison-admin@test.com',
+      password: 'TestPass123!',
+      firstName: 'Admin',
+      lastName: 'Test',
+      role: 'admin',
+      communityId: communityId,
     });
-    expect(adminRes.statusCode).toBe(201);
 
     // Login to get viewer token
     const viewerLogin = await app.inject({
@@ -109,6 +101,25 @@ describe('V1 Compatibility: Auth', () => {
 
   // ─── REGISTER ────────────────────────────────────────────
   describe('POST /auth/register', () => {
+    // SPEC-V2 §7: enrollment needs a same-community admin session, so the
+    // V1 contract shapes below are captured as that admin.
+    it('should return 401 for anonymous registration', async () => {
+      const response = await dualClient['makeTypescriptRequest'](
+        'POST',
+        '/api/v1/auth/register',
+        {
+          data: {
+            email: `anon-${Date.now()}@test.com`,
+            password: 'TestPass123!',
+            firstName: 'Anon',
+            lastName: 'User',
+            communityId,
+          },
+        }
+      );
+      expect(response.statusCode).toBe(401);
+    });
+
     it('should return 201 with user object on success', async () => {
       const payload = {
         email: `newuser-${Date.now()}@test.com`,
@@ -120,7 +131,7 @@ describe('V1 Compatibility: Auth', () => {
       const response = await dualClient['makeTypescriptRequest'](
         'POST',
         '/api/v1/auth/register',
-        { data: payload }
+        { auth: adminToken, data: payload }
       );
       expect(response.statusCode).toBe(201);
       const body = JSON.parse(response.body as string);
@@ -134,7 +145,7 @@ describe('V1 Compatibility: Auth', () => {
       const response = await dualClient['makeTypescriptRequest'](
         'POST',
         '/api/v1/auth/register',
-        { data: { email: 'bad@test.com' } }
+        { auth: adminToken, data: { email: 'bad@test.com' } }
       );
       expect(response.statusCode).toBe(400);
       const body = JSON.parse(response.body as string);
@@ -149,6 +160,7 @@ describe('V1 Compatibility: Auth', () => {
         'POST',
         '/api/v1/auth/register',
         {
+          auth: adminToken,
           data: {
             email,
             password: 'TestPass123!',
@@ -163,6 +175,7 @@ describe('V1 Compatibility: Auth', () => {
         'POST',
         '/api/v1/auth/register',
         {
+          auth: adminToken,
           data: {
             email,
             password: 'TestPass123!',
@@ -185,6 +198,7 @@ describe('V1 Compatibility: Auth', () => {
         'POST',
         '/api/v1/auth/register',
         {
+          auth: adminToken,
           data: {
             email,
             password: 'SecurePass1!',
@@ -216,6 +230,7 @@ describe('V1 Compatibility: Auth', () => {
         'POST',
         '/api/v1/auth/register',
         {
+          auth: adminToken,
           data: {
             email,
             password: 'RealPass1!',

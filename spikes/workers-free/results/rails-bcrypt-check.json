@@ -1,0 +1,105 @@
+{
+  "bcryptRuby": "3.1.20",
+  "bcryptjs": "3.0.3",
+  "n": 12,
+  "pass": true,
+  "truncationParity": true,
+  "rows": [
+    {
+      "cost": 10,
+      "passwordBytes": 28,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 10,
+      "passwordBytes": 30,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 10,
+      "passwordBytes": 72,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 10,
+      "passwordBytes": 94,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 10,
+      "passwordBytes": 80,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 10,
+      "passwordBytes": 29,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 12,
+      "passwordBytes": 28,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 12,
+      "passwordBytes": 30,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 12,
+      "passwordBytes": 72,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 12,
+      "passwordBytes": 94,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 12,
+      "passwordBytes": 80,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    },
+    {
+      "cost": 12,
+      "passwordBytes": 29,
+      "prefix": "$2a$",
+      "exactMatch": true,
+      "compareSync": true,
+      "wrongPasswordRejected": true
+    }
+  ]
+}

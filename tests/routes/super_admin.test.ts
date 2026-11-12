@@ -10,6 +10,7 @@ import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 describe('Super Admin API', () => {
   let app: FastifyInstance;
@@ -39,12 +40,9 @@ describe('Super Admin API', () => {
       communityId: testCommunityId,
     };
 
-    const superAdminRegResponse = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: superAdminUser,
-    });
-    superAdminUserId = superAdminRegResponse.json().user.id;
+    // Seed fixtures directly: enrollment needs a same-community admin
+    // session (SPEC-V2 §7).
+    superAdminUserId = (await seedRegisteredUser(db, superAdminUser)).id;
 
     // Login super admin
     const superAdminLogin = await app.inject({
@@ -72,11 +70,7 @@ describe('Super Admin API', () => {
       communityId: testCommunityId,
     };
 
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: adminUser,
-    });
+    await seedRegisteredUser(db, adminUser);
 
     const adminLogin = await app.inject({
       method: 'POST',
@@ -114,11 +108,7 @@ describe('Super Admin API', () => {
       communityId: testCommunityId,
     };
 
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: editorUser,
-    });
+    await seedRegisteredUser(db, editorUser);
 
     const editorLogin = await app.inject({
       method: 'POST',
@@ -555,14 +545,40 @@ describe('Super Admin API', () => {
     });
 
     describe('POST /api/v1/super_admin/users', () => {
-      it('should deny community account creation by super admin', async () => {
+      it('should refuse a community account in a community that already has accounts (SPEC-V2 §7)', async () => {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/super_admin/users',
+          headers: { cookie: superAdminSessionId },
+          payload: {
+            email: 'newuser@example.com',
+            password: 'NewUserPassword123@',
+            firstName: 'New',
+            lastName: 'User',
+            role: 'editor',
+            communityId: testCommunityId,
+          },
+        });
+
+        expect(response.statusCode).toBe(403);
+      });
+
+      it('should create the first administrator of an empty community for super admin', async () => {
+        const community = await app.inject({
+          method: 'POST',
+          url: '/api/v1/super_admin/communities',
+          headers: { cookie: superAdminSessionId },
+          payload: { name: 'Unclaimed Community', slug: 'unclaimed-community' },
+        });
+        expect(community.statusCode).toBe(201);
+
         const newUser = {
           email: 'newuser@example.com',
           password: 'NewUserPassword123@',
           firstName: 'New',
           lastName: 'User',
-          role: 'editor',
-          communityId: testCommunityId,
+          role: 'admin',
+          communityId: community.json().data.id as number,
         };
 
         const response = await app.inject({
@@ -598,7 +614,9 @@ describe('Super Admin API', () => {
           password: 'Password123@',
           firstName: 'Duplicate',
           lastName: 'User',
-          role: 'editor',
+          // A system account, so the duplicate check (not community
+          // authority) decides the outcome.
+          role: 'super_admin',
           communityId: testCommunityId,
         };
 
@@ -637,11 +655,18 @@ describe('Super Admin API', () => {
     });
 
     describe('PUT /api/v1/super_admin/users/:id', () => {
-      it('should update system user profile without changing role', async () => {
+      it('should update profile fields and refuse role changes for super admin (SPEC-V2 §7)', async () => {
+        const roleChange = await app.inject({
+          method: 'PUT',
+          url: `/api/v1/super_admin/users/${superAdminUserId}`,
+          headers: { cookie: superAdminSessionId },
+          payload: { firstName: 'Updated', lastName: 'Name', role: 'admin' },
+        });
+        expect(roleChange.statusCode).toBe(403);
+
         const updates = {
           firstName: 'Updated',
           lastName: 'Name',
-          role: 'super_admin',
         };
 
         const response = await app.inject({
@@ -657,7 +682,7 @@ describe('Super Admin API', () => {
             id: superAdminUserId,
             firstName: updates.firstName,
             lastName: updates.lastName,
-            role: updates.role,
+            role: 'super_admin',
             updatedAt: expect.any(String),
           },
         });
@@ -704,6 +729,9 @@ describe('Super Admin API', () => {
           password: 'Password123@',
           firstName: 'To',
           lastName: 'Delete',
+          // A system account: super admins may not mint community accounts
+          // in a claimed community (SPEC-V2 §7).
+
           role: 'super_admin',
           communityId: testCommunityId,
         };

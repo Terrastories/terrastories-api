@@ -14,15 +14,33 @@
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { CommunityService } from '../services/community.service.js';
+import {
+  CommunityService,
+  PublicationAuthorityRequiredError,
+} from '../services/community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { getDb, type Database } from '../db/index.js';
 import { storiesSqlite, storiesPg } from '../db/schema/index.js';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import {
+  canDiscoverCommunity,
+  fastifyCommunityToGates,
+  fastifyStoryToAudience,
+  physicalRoleCanReadStoryAccess,
+  storyAccessForPhysicalRole,
+} from '../shared/authorization/sovereignty-policy.js';
+import { storyAudienceCondition } from '../repositories/story.repository.js';
+import {
+  getCurrentUser,
+  getDiscoveryViewer,
   requireAuth,
   requireRole,
 } from '../shared/middleware/auth.middleware.js';
+import {
+  authorizePublicationChange,
+  createAdministrativeAuditEvent,
+} from '../shared/authorization/administrative-policy.js';
+import { emitAdministrativeAudit } from '../shared/utils/audit-logger.js';
 
 // Request validation schemas
 const createCommunitySchema = z
@@ -92,6 +110,106 @@ export async function communityRoutes(
   const getStoriesTable = () => {
     return 'execute' in database ? storiesPg : storiesSqlite;
   };
+
+  /**
+   * Community Publication Endpoint (SPEC-V2 §7)
+   * PUT /communities/:id/publication
+   *
+   * "Community administrators authorize membership, community roles, member
+   * recovery, and publication." Only a same-community admin may change
+   * `publicStories`; system privilege may not (super admin routes refuse it).
+   * Every attempt is audited without content. The authority decision is made
+   * before any community lookup, so a denial carries no existence signal.
+   */
+  fastify.put(
+    '/communities/:id/publication',
+    {
+      schema: {
+        description:
+          'Change community publication (public story projection). Same-community admin only.',
+        tags: ['Communities'],
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string', pattern: '^[0-9]+$' } },
+          required: ['id'],
+        },
+        body: {
+          type: 'object',
+          properties: { publicStories: { type: 'boolean' } },
+          required: ['publicStories'],
+          additionalProperties: false,
+        },
+      },
+    },
+    async (
+      request: FastifyRequest<{
+        Params: { id: string };
+        Body: { publicStories: boolean };
+      }>,
+      reply: FastifyReply
+    ) => {
+      const communityId = Number.parseInt(request.params.id, 10);
+      const sessionUser = getCurrentUser(request);
+      const actor = sessionUser
+        ? {
+            id: sessionUser.id,
+            role: sessionUser.role,
+            communityId: sessionUser.communityId,
+          }
+        : null;
+      const decision = authorizePublicationChange({
+        actor,
+        communityId,
+        currentPublic: !request.body.publicStories,
+        requestedPublic: request.body.publicStories,
+      });
+      emitAdministrativeAudit(
+        request.log,
+        createAdministrativeAuditEvent({
+          action: 'publication_change',
+          actor,
+          communityId,
+          resourceId: communityId,
+          decision,
+        })
+      );
+      if (!actor) {
+        return reply
+          .status(401)
+          .send({ error: 'Authentication required', statusCode: 401 });
+      }
+      if (!decision.allowed) {
+        return reply.status(403).send({
+          error: 'Community administrator authority required',
+          statusCode: 403,
+        });
+      }
+
+      try {
+        const community = await communityService.setPublicationAsCommunityAdmin(
+          communityId,
+          request.body.publicStories,
+          actor
+        );
+        if (!community) {
+          return reply
+            .status(404)
+            .send({ error: 'Community not found', statusCode: 404 });
+        }
+        return reply.status(200).send({
+          data: { id: community.id, publicStories: community.publicStories },
+        });
+      } catch (error) {
+        if (error instanceof PublicationAuthorityRequiredError) {
+          return reply.status(403).send({
+            error: 'Community administrator authority required',
+            statusCode: 403,
+          });
+        }
+        throw error;
+      }
+    }
+  );
 
   /**
    * Create Community Endpoint
@@ -355,6 +473,35 @@ export async function communityRoutes(
           });
         }
 
+        // SPEC-V2 §4/§6.1 discovery gate on this unauthenticated route: a
+        // community is discoverable only while active, and anonymous or
+        // other-community callers additionally need it public; a
+        // same-community session user may also read their own active but
+        // private community. super_admin sees what anonymous sees. Denials
+        // stay 404 so the response carries no existence signal.
+        const viewer = getDiscoveryViewer(request);
+        const { visibility, status } = fastifyCommunityToGates(
+          community.publicStories,
+          community.isActive
+        );
+        if (
+          !canDiscoverCommunity({ visibility, status }, communityId, viewer)
+        ) {
+          return reply.status(404).send({
+            error: 'Community not found',
+            statusCode: 404,
+          });
+        }
+
+        // culturalSettings is removed V1 cultural metadata: anonymous and
+        // other-community callers never receive it or its parsed form.
+        if (!viewer || viewer.communityId !== communityId) {
+          const data: Record<string, unknown> = { ...community };
+          delete data.culturalSettings;
+          delete data.culturalProtocols;
+          return reply.status(200).send({ data });
+        }
+
         return reply.status(200).send({ data: community });
       } catch (error) {
         fastify.log.error({ error, url: request.url }, 'Get community error');
@@ -442,7 +589,6 @@ export async function communityRoutes(
         const {
           limit = 20,
           offset = 0,
-          isActive,
           search,
         } = request.query as {
           limit?: number;
@@ -451,14 +597,18 @@ export async function communityRoutes(
           search?: string;
         };
 
-        const searchParams = {
+        // SPEC-V2 §4/§6.1 discovery gate on this unauthenticated route: the
+        // database filter admits only public+active communities, widened to
+        // the session viewer's own active-but-private community. `isActive`
+        // is deliberately not forwarded — a caller filter must never widen
+        // the gate, so `?isActive=false` returns the same discoverable set.
+        const viewer = getDiscoveryViewer(request);
+        const result = await communityService.discoverCommunities({
+          query: search,
+          viewerCommunityId: viewer?.communityId ?? null,
           limit,
           offset,
-          isActive,
-          search,
-        };
-
-        const result = await communityService.searchCommunities(searchParams);
+        });
 
         // Transform response to match pagination format expected by tests
         const page = Math.floor(offset / limit) + 1;
@@ -574,13 +724,19 @@ export async function communityRoutes(
         const storiesTable = getStoriesTable();
         const conditions = [eq(storiesTable.communityId, communityId)];
 
-        conditions.push(eq(storiesTable.isRestricted, false));
-        conditions.push(
-          inArray(
-            storiesTable.privacyLevel,
-            user.role === 'viewer' ? ['public'] : ['public', 'members_only']
-          )
+        // V2 story-audience filtering (SPEC-V2 §6.2/§6.3): a physical Fastify
+        // `viewer` reasons as V2 `member` (§6.2); the legacy `elder` keeps
+        // member reach; unknown roles hold no access (fail closed).
+        const audienceCondition = storyAudienceCondition(
+          storyAccessForPhysicalRole(user.role),
+          storiesTable
         );
+        if (!audienceCondition) {
+          // No audience grant matches any row for this role: expose
+          // nothing, fail closed.
+          return reply.status(200).send({ data: [] });
+        }
+        conditions.push(audienceCondition);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- #135 owns backend-specific Drizzle query typing.
         const stories = await (database as any)
@@ -700,12 +856,7 @@ export async function communityRoutes(
           .where(
             and(
               eq(storiesTable.communityId, communityId),
-              eq(storiesTable.id, sId),
-              eq(storiesTable.isRestricted, false),
-              inArray(
-                storiesTable.privacyLevel,
-                user.role === 'viewer' ? ['public'] : ['public', 'members_only']
-              )
+              eq(storiesTable.id, sId)
             )
           );
 
@@ -716,6 +867,22 @@ export async function communityRoutes(
         }
 
         const story = storyResult[0];
+
+        // V2 story-audience gate (SPEC-V2 §6.3): unavailable rows (restricted
+        // or unknown privacyLevel) are unreadable by every role — admin and
+        // the legacy `elder` included — and mask as 404, never 403.
+        // The caller's role audience applies too; unknown roles read nothing.
+        if (
+          !physicalRoleCanReadStoryAccess(
+            user.role,
+            fastifyStoryToAudience(story.privacyLevel, story.isRestricted)
+          )
+        ) {
+          return reply.status(404).send({
+            error: 'Story not found',
+            statusCode: 404,
+          });
+        }
 
         // @ts-ignore
         if (user && user.role === 'super_admin') {

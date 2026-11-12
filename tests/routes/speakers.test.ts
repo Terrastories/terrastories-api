@@ -16,6 +16,7 @@ import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 describe('Speakers API Routes - Integration Tests', () => {
   let app: FastifyInstance;
@@ -71,13 +72,8 @@ describe('Speakers API Routes - Integration Tests', () => {
       communityId: testCommunityId,
     };
 
-    // Register admin user
-    const adminRegisterRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: adminUser,
-    });
-    expect(adminRegisterRes.statusCode).toBe(201);
+    // Seed admin user (registration requires community-admin authority)
+    await seedRegisteredUser(testDb.db, adminUser);
 
     // Login admin user to get session cookie
     const adminLoginRes = await app.inject({
@@ -96,13 +92,8 @@ describe('Speakers API Routes - Integration Tests', () => {
     const setCookieHeader = adminLoginRes.headers['set-cookie'];
     adminSessionId = extractSignedSessionCookie(setCookieHeader);
 
-    // Register editor user
-    const editorRegisterRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: editorUser,
-    });
-    expect(editorRegisterRes.statusCode).toBe(201);
+    // Seed editor user
+    await seedRegisteredUser(testDb.db, editorUser);
 
     // Login editor user to get session cookie
     const editorLoginRes = await app.inject({
@@ -129,13 +120,8 @@ describe('Speakers API Routes - Integration Tests', () => {
         : '';
     }
 
-    // Register viewer user
-    const viewerRegisterRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: viewerUser,
-    });
-    expect(viewerRegisterRes.statusCode).toBe(201);
+    // Seed viewer user
+    await seedRegisteredUser(testDb.db, viewerUser);
 
     // Login viewer user to get session cookie
     const viewerLoginRes = await app.inject({
@@ -162,12 +148,8 @@ describe('Speakers API Routes - Integration Tests', () => {
         : '';
     }
 
-    const elderRegisterRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: elderUser,
-    });
-    expect(elderRegisterRes.statusCode).toBe(201);
+    // Seed elder user
+    await seedRegisteredUser(testDb.db, elderUser);
   });
 
   afterEach(async () => {
@@ -1074,7 +1056,7 @@ describe('Speakers API Routes - Integration Tests', () => {
         method: 'GET',
         url: '/api/v1/speakers/stats',
         headers: {
-          cookie: viewerSessionId,
+          cookie: adminSessionId,
         },
       });
 
@@ -1084,8 +1066,27 @@ describe('Speakers API Routes - Integration Tests', () => {
       expect(body.data.total).toBeGreaterThanOrEqual(3);
       expect(body.data.active).toBeGreaterThanOrEqual(2);
       expect(body.data.inactive).toBeGreaterThanOrEqual(1);
-      expect(body.data.elders).toBeGreaterThanOrEqual(1);
-      expect(body.data.nonElders).toBeGreaterThanOrEqual(2);
+      // Removed V1 scope (elderStatus) never re-enters count projections.
+      expect(body.data).not.toHaveProperty('elders');
+      expect(body.data).not.toHaveProperty('nonElders');
+    });
+
+    test('should count only active speakers for a viewer (SPEC-V2 §6.5)', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/speakers/stats',
+        headers: {
+          cookie: viewerSessionId,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.data.total).toBe(body.data.active);
+      expect(body.data.active).toBeGreaterThanOrEqual(2);
+      expect(body.data).not.toHaveProperty('inactive');
+      expect(body.data).not.toHaveProperty('elders');
+      expect(body.data).not.toHaveProperty('nonElders');
     });
 
     test('should require authentication', async () => {

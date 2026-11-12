@@ -26,6 +26,10 @@ import {
   type InvalidCommunityDataError,
 } from '../repositories/community.repository.js';
 import { toISOString } from '../shared/utils/date-transforms.js';
+import {
+  authorizePublicationChange,
+  type AdministrativeActor,
+} from '../shared/authorization/administrative-policy.js';
 import type { CommunityResponse as CommunityResponseSchema } from '../shared/schemas/communities.js';
 import type { CommunityResponse } from '../shared/schemas/super-admin.js';
 
@@ -100,6 +104,16 @@ export class CommunityOperationError extends Error {
 /**
  * Community Service class providing business logic
  */
+/**
+ * SPEC-V2 §7: publication changes need community administrator authority.
+ */
+export class PublicationAuthorityRequiredError extends Error {
+  constructor(message = 'Community administrator authority required') {
+    super(message);
+    this.name = 'PublicationAuthorityRequiredError';
+  }
+}
+
 export class CommunityService {
   constructor(private communityRepository: CommunityRepository) {}
 
@@ -469,6 +483,69 @@ export class CommunityService {
     offset = 0
   ): Promise<CommunitySearchResponse> {
     return this.searchCommunities({ isActive: true, limit, offset });
+  }
+
+  /**
+   * Discover communities on the unauthenticated public/v1 surfaces
+   * (SPEC-V2 §4/§6.1): public+active only, optionally widened to the
+   * viewer's own active-but-private community. `viewerCommunityId` must be
+   * null for anonymous callers and `super_admin` sessions. The gate is
+   * applied at the database level before pagination and totals; a caller's
+   * `isActive` filter can never widen it, which is why it is not a
+   * parameter here.
+   *
+   * @param params.query - Optional name/description search term
+   * @param params.locale - Optional locale filter
+   * @param params.viewerCommunityId - Same-community widening, or null
+   * @param params.limit - Maximum communities to return
+   * @param params.offset - Number of communities to skip
+   * @returns Promise<CommunitySearchResponse> - Gated page with full gated total
+   */
+  async discoverCommunities(
+    params: {
+      query?: string;
+      locale?: string;
+      viewerCommunityId?: number | null;
+      limit?: number;
+      offset?: number;
+    } = {}
+  ): Promise<CommunitySearchResponse> {
+    try {
+      const { limit = 20, offset = 0 } = params;
+
+      if (limit < 1 || limit > 100) {
+        throw new CommunityValidationError('Limit must be between 1 and 100');
+      }
+
+      if (offset < 0) {
+        throw new CommunityValidationError('Offset must be non-negative');
+      }
+
+      const { communities, total } =
+        await this.communityRepository.findDiscoverable({
+          query: params.query,
+          locale: params.locale,
+          viewerCommunityId: params.viewerCommunityId ?? null,
+          limit,
+          offset,
+        });
+
+      return {
+        communities,
+        total,
+        limit,
+        offset,
+        hasMore: offset + communities.length < total,
+      };
+    } catch (error) {
+      if (error instanceof CommunityValidationError) {
+        throw error;
+      }
+
+      throw new CommunityOperationError(
+        `Failed to discover communities: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
   }
 
   /**
@@ -913,6 +990,42 @@ export class CommunityService {
   }
 
   /**
+   * SPEC-V2 §7 publication change by a community administrator. Only a
+   * same-community admin may change `publicStories`; system privilege may
+   * not. Re-checks the shared policy so the service stays fail-closed for
+   * any caller. Returns null when the community does not exist or is
+   * disabled.
+   */
+  async setPublicationAsCommunityAdmin(
+    id: number,
+    publicStories: boolean,
+    actor: AdministrativeActor | null
+  ): Promise<Community | null> {
+    // Authority first, before any lookup, no-ops included: the
+    // community-admin path never treats "same value" as permission, so a
+    // null or other-community actor gets no row and no existence signal.
+    // (The system route's no-op behaviour is separate:
+    // updateCommunityAsSuperAdmin.)
+    const decision = authorizePublicationChange({
+      actor,
+      communityId: id,
+      currentPublic: !publicStories,
+      requestedPublic: publicStories,
+    });
+    if (!decision.allowed) {
+      throw new PublicationAuthorityRequiredError();
+    }
+    const existing = await this.communityRepository.findById(id);
+    if (!existing || !existing.isActive) {
+      return null;
+    }
+    if (existing.publicStories === publicStories) {
+      return existing;
+    }
+    return this.communityRepository.update(id, { publicStories });
+  }
+
+  /**
    * Update community as super admin (with enhanced permissions)
    * @param id - Community ID
    * @param updates - Update data
@@ -923,11 +1036,36 @@ export class CommunityService {
     updates: UpdateCommunityRequest
   ): Promise<Community> {
     try {
-      // Super admin can update any community
-      return await this.updateCommunity(id, updates);
+      // SPEC-V2 §7: publication is community authority. A system
+      // administrator may update lifecycle fields but never change
+      // `publicStories`; re-sending the current value is not a change.
+      if (updates.publicStories !== undefined) {
+        const existing = await this.communityRepository.findById(id);
+        if (
+          existing &&
+          !authorizePublicationChange({
+            actor: { id: 0, role: 'super_admin', communityId: null },
+            communityId: id,
+            currentPublic: existing.publicStories,
+            requestedPublic: updates.publicStories,
+          }).allowed
+        ) {
+          throw new PublicationAuthorityRequiredError();
+        }
+      }
+      // Never write `publicStories` through system authority: the only
+      // allowed value equals the one just read, and a community admin may
+      // change it before this write lands. Dropping it keeps a concurrent
+      // unpublish (or publish) from being overwritten by a stale no-op.
+      const { publicStories: _checked, ...lifecycleUpdates } = updates;
+      void _checked;
+      return await this.updateCommunity(id, lifecycleUpdates);
     } catch (error) {
       // Re-throw specific error types for proper HTTP status codes
-      if (error instanceof CommunityValidationError) {
+      if (
+        error instanceof CommunityValidationError ||
+        error instanceof PublicationAuthorityRequiredError
+      ) {
         throw error;
       }
       if (

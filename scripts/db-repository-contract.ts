@@ -273,12 +273,10 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     role: 'super_admin',
     communityId: community.id, // Legacy physical schema still requires this field.
   });
-  assert.equal(await users.findByIdAsSuperAdmin(ana.id), null);
+  assert.equal((await users.findByIdAsSuperAdmin(ana.id))?.id, ana.id);
   assert.equal(await users.findByIdWithCommunityName(ana.id), null);
-  await assert.rejects(
-    users.updateByIdAsSuperAdmin(ana.id, { isActive: false }),
-    /User not found/
-  );
+  // Internal snapshots remain available to main’s authorized CAS/lifecycle path;
+  // the read projection above still hides community accounts.
   assert.equal(
     (await users.findByIdAsSuperAdmin(systemAccount.id))?.id,
     systemAccount.id
@@ -636,7 +634,7 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   );
   assert.ok(restrictedInterviewRead, 'restricted-interview story must load');
   assert.equal(
-    restrictedInterviewRead.interviewLocation ?? null,
+    restrictedInterviewRead.interviewLocation,
     null,
     'a restricted interview location must not be hydrated into a story'
   );
@@ -665,6 +663,48 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   assert.equal(openInterviewRead?.interviewLocation?.latitude, -1.4);
   assert.equal(openInterviewRead?.interviewer?.id, storySpeaker.id);
   assert.equal(openInterviewRead?.interviewer?.isActive, true);
+
+  // SPEC-V2 §6.4: a restricted place must never appear in story.places, in
+  // the single read and the findMany bulk loader alike.
+  const restrictedPlaceStory = await stories.create({
+    title: 'Restricted Place Story',
+    slug: 'restricted-place-story',
+    communityId: storyCommunity.id,
+    createdBy: storyAuthor.id,
+    placeIds: [restrictedInterviewPlace.id, storyPlaceAlpha.id],
+  });
+  const restrictedPlaceRead = await stories.findByIdWithRelations(
+    restrictedPlaceStory.id
+  );
+  if (!restrictedPlaceRead) {
+    throw new Error('restricted-place story must load');
+  }
+  assert.deepEqual(
+    restrictedPlaceRead.places.map((place) => place.id),
+    [storyPlaceAlpha.id],
+    'findByIdWithRelations must not return a restricted place (SPEC-V2 6.4)'
+  );
+  const restrictedPlaceListed = await stories.findMany(
+    { communityId: storyCommunity.id, search: 'Restricted Place Story' },
+    { page: 1, limit: 10 }
+  );
+  const restrictedPlaceRow = restrictedPlaceListed.data.find(
+    (story) => story.id === restrictedPlaceStory.id
+  );
+  if (!restrictedPlaceRow) {
+    throw new Error(
+      'stories.findMany must return the restricted-place story row'
+    );
+  }
+  assert.deepEqual(
+    restrictedPlaceRow.places.map((place) => place.id),
+    [storyPlaceAlpha.id],
+    'findMany rows must not return a restricted place (SPEC-V2 6.4)'
+  );
+  assert.ok(
+    restrictedPlaceRow.places.every((place) => place.isRestricted === false),
+    'findMany row places must all carry isRestricted = false (SPEC-V2 6.4)'
+  );
 
   // --- ThemesRepository ------------------------------------------------
 

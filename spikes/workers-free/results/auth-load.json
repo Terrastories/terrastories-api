@@ -1,0 +1,55 @@
+[
+  {
+    "scenario": "login-success",
+    "n": 1000,
+    "counts": {
+      "200": 1000
+    },
+    "rowsWrittenHistogram": {
+      "1": 1000
+    }
+  },
+  {
+    "scenario": "session-check",
+    "n": 1000,
+    "counts": {
+      "200": 1000
+    },
+    "rowsWrittenHistogram": {
+      "0": 1000
+    }
+  },
+  {
+    "scenario": "login-failed",
+    "n": 200,
+    "counts": {
+      "401": 200
+    },
+    "rowsWrittenHistogram": {
+      "1": 200
+    }
+  },
+  {
+    "scenario": "login-unknown-identifier",
+    "n": 20,
+    "counts": {
+      "401": 20
+    },
+    "rowsWrittenHistogram": {
+      "1": 20
+    }
+  },
+  {
+    "scenario": "login-backoff",
+    "n": 8,
+    "counts": {
+      "401": 2,
+      "429": 6
+    },
+    "rowsWrittenHistogram": {
+      "0": 6,
+      "1": 2
+    },
+    "sequence": "401/1 429/0 429/0 429/0 429/0 401/1 429/0 429/0"
+  }
+]

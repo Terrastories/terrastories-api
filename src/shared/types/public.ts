@@ -6,6 +6,11 @@
  */
 
 import { z } from 'zod';
+import {
+  projectVisibleFields,
+  type CommunityVisibility,
+  type FieldVisibilityRule,
+} from '../authorization/sovereignty-policy.js';
 
 // Input validation schemas for public API
 /**
@@ -90,6 +95,28 @@ export const PublicStorySchema = z.object({
 
 export type PublicStory = z.infer<typeof PublicStorySchema>;
 
+export interface PublicStoryProjectionContext {
+  resourceCommunityId: number;
+  communityVisibility: CommunityVisibility;
+}
+
+const PUBLIC_STORY_FIELD_RULES = {
+  id: { category: 'public' },
+  title: { category: 'public' },
+  description: { category: 'public' },
+  slug: { category: 'public' },
+  mediaUrls: { category: 'public' },
+  language: { category: 'public' },
+  tags: { category: 'public' },
+  createdAt: { category: 'public' },
+  updatedAt: { category: 'public' },
+  communityId: { category: 'community-only' },
+  createdBy: { category: 'never-exposed' },
+  privacyLevel: { category: 'never-exposed' },
+  isRestricted: { category: 'never-exposed' },
+  culturalProtocols: { category: 'never-exposed' },
+} as const satisfies Record<string, FieldVisibilityRule>;
+
 /**
  * Public Place DTO - Safe fields only for public consumption
  * Excludes: createdBy, communityId, and other internal fields
@@ -109,13 +136,44 @@ export const PublicPlaceSchema = z.object({
 
 export type PublicPlace = z.infer<typeof PublicPlaceSchema>;
 
+interface PublicStorySource {
+  id: unknown;
+  title?: unknown;
+  description?: unknown;
+  slug?: unknown;
+  mediaUrls?: unknown;
+  language?: unknown;
+  tags?: unknown;
+  createdAt: unknown;
+  updatedAt: unknown;
+  communityId: unknown;
+  createdBy?: unknown;
+  privacyLevel?: unknown;
+  isRestricted?: unknown;
+  culturalProtocols?: unknown;
+}
+
+function coercePublicDate(value: unknown): Date {
+  if (value instanceof Date) return value;
+  if (typeof value === 'string' || typeof value === 'number') {
+    return new Date(value);
+  }
+  return new Date(Number.NaN);
+}
+
 /**
  * Transform internal story model to public DTO
  * Filters out sensitive fields and ensures only safe data is exposed
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function toPublicStory(story: any): PublicStory {
-  return {
+export function toPublicStory(
+  story: PublicStorySource,
+  context: PublicStoryProjectionContext
+): PublicStory | null {
+  if (Number(story.communityId) !== context.resourceCommunityId) {
+    return null;
+  }
+
+  const candidate = {
     id: Number(story.id),
     title: String(story.title || ''),
     description: story.description ? String(story.description) : undefined,
@@ -123,15 +181,23 @@ export function toPublicStory(story: any): PublicStory {
     mediaUrls: Array.isArray(story.mediaUrls) ? story.mediaUrls : [],
     language: String(story.language || 'en'),
     tags: Array.isArray(story.tags) ? story.tags : [],
-    createdAt:
-      story.createdAt instanceof Date
-        ? story.createdAt
-        : new Date(story.createdAt),
-    updatedAt:
-      story.updatedAt instanceof Date
-        ? story.updatedAt
-        : new Date(story.updatedAt),
+    createdAt: coercePublicDate(story.createdAt),
+    updatedAt: coercePublicDate(story.updatedAt),
+    communityId: Number(story.communityId),
+    createdBy: story.createdBy,
+    privacyLevel: story.privacyLevel,
+    isRestricted: story.isRestricted,
+    culturalProtocols: story.culturalProtocols,
   };
+
+  const projected = projectVisibleFields(candidate, PUBLIC_STORY_FIELD_RULES, {
+    actor: null,
+    actorCommunityId: null,
+    resourceCommunityId: context.resourceCommunityId,
+    communityVisibility: context.communityVisibility,
+  });
+  const parsed = PublicStorySchema.safeParse(projected);
+  return parsed.success ? parsed.data : null;
 }
 
 /**

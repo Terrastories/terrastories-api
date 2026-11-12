@@ -13,7 +13,7 @@
  * - Performance-optimized queries with proper indexing
  */
 
-import { eq, and, desc, or, sql, count } from 'drizzle-orm';
+import { eq, and, desc, or, sql, count, ne } from 'drizzle-orm';
 import {
   containsInsensitive,
   dialectOf,
@@ -21,6 +21,7 @@ import {
   type Dialect,
   type DialectTables,
 } from '../db/dialect.js';
+import type { CommunityClaimState } from '../shared/authorization/administrative-policy.js';
 import type { Community } from '../db/schema/communities.js';
 import type { Database } from '../db/index.js';
 
@@ -148,6 +149,25 @@ function isUniqueConstraintError(error: unknown): boolean {
 
   return false;
 }
+
+/**
+ * SPEC-V2 §7 first-administrator lock (PostgreSQL): `SELECT id FROM
+ * communities WHERE id = ? FOR UPDATE`. Exported so a test can pin the
+ * lock without a PostgreSQL CI lane (a PG lane is tracked in #161).
+ */
+/* eslint-disable @typescript-eslint/no-explicit-any -- dialect union (#135). */
+export function provisioningLockQuery(
+  executor: any,
+  communities: any,
+  communityId: number
+) {
+  return executor
+    .select({ id: communities.id })
+    .from(communities)
+    .where(eq(communities.id, communityId))
+    .for('update');
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 /**
  * Community Repository class providing database operations
@@ -434,6 +454,100 @@ export class CommunityRepository {
   }
 
   /**
+   * Discoverable communities for the unauthenticated public/v1 community
+   * surfaces (SPEC-V2 §4/§6.1): public (`publicStories = true`) AND active
+   * (`isActive = true`) only, optionally widened to one viewer's own
+   * active-but-private community. `viewerCommunityId` must be null for
+   * anonymous callers and for `super_admin` sessions (no widening on these
+   * routes). This is the SQL transcription of `canDiscoverCommunity`
+   * (sovereignty-policy); the two must stay in sync. The gate filters at the
+   * database level before pagination and totals so lists and `total` always
+   * agree. Works on both SQLite and PostgreSQL via the dialect-aware
+   * `communities` getter.
+   *
+   * @param params.query - Optional name/description search term
+   * @param params.locale - Optional locale filter
+   * @param params.viewerCommunityId - Same-community widening, or null
+   * @param params.limit - Maximum number of communities to return
+   * @param params.offset - Number of communities to skip
+   * @returns Promise<{ communities: Community[]; total: number }> - Gated page and full gated count
+   */
+  async findDiscoverable(params: {
+    query?: string;
+    locale?: string;
+    viewerCommunityId?: number | null;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ communities: Community[]; total: number }> {
+    try {
+      const {
+        query,
+        locale,
+        viewerCommunityId = null,
+        limit = 50,
+        offset = 0,
+      } = params;
+
+      const conditions = [
+        // §6.1 status gate: disabled communities close every public path.
+        eq(this.communities.isActive, true),
+        // §4/§6.1 visibility gate: private communities are discoverable
+        // only by their own members (same-community widening).
+        viewerCommunityId !== null
+          ? or(
+              eq(this.communities.publicStories, true),
+              eq(this.communities.id, viewerCommunityId)
+            )
+          : eq(this.communities.publicStories, true),
+      ];
+
+      if (query?.trim()) {
+        const searchTerm = query.trim();
+        conditions.push(
+          or(
+            containsInsensitive(
+              this.dialect,
+              this.communities.name,
+              searchTerm
+            ),
+            containsInsensitive(
+              this.dialect,
+              this.communities.description,
+              searchTerm
+            )
+          )
+        );
+      }
+
+      if (locale) {
+        conditions.push(eq(this.communities.locale, locale));
+      }
+
+      const whereClause = and(...conditions);
+
+      const [communities, totalRows] = await Promise.all([
+        this.db
+          .select()
+          .from(this.communities)
+          .where(whereClause)
+          .orderBy(desc(this.communities.createdAt))
+          .limit(limit)
+          .offset(offset),
+        this.db
+          .select({ count: count() })
+          .from(this.communities)
+          .where(whereClause),
+      ]);
+
+      return { communities, total: Number(totalRows[0]?.count || 0) };
+    } catch (error) {
+      throw new Error(
+        `Failed to find discoverable communities: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
    * Update community by ID
    * @param id - Community ID
    * @param updates - Partial community data to update
@@ -579,6 +693,133 @@ export class CommunityRepository {
         `Failed to count communities: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
+  }
+
+  /**
+   * SPEC-V2 §7 claim state: whether the community has any community account
+   * (any role except a system `super_admin` row, any status) and whether it
+   * holds community content (stories, places, speakers, files or themes). A system
+   * lifecycle action may provision a first administrator only when both are
+   * false.
+   */
+  async getClaimState(communityId: number): Promise<CommunityClaimState> {
+    const { users, content } = this.claimTables();
+    const [accounts] = await this.accountCountQuery(
+      this.db,
+      users,
+      communityId
+    );
+    let hasContent = false;
+    for (const table of content) {
+      const [rows] = await this.contentCountQuery(this.db, table, communityId);
+      if (Number(rows?.count ?? 0) > 0) {
+        hasContent = true;
+        break;
+      }
+    }
+    return {
+      hasCommunityAccounts: Number(accounts?.count ?? 0) > 0,
+      hasContent,
+    };
+  }
+
+  /**
+   * SPEC-V2 §7 first-administrator provisioning, atomic with its claim
+   * check. The claim state is re-read and the account inserted inside one
+   * write transaction, so concurrent requests cannot all pass the check:
+   *
+   * - PostgreSQL: the community row is locked `FOR UPDATE`; a concurrent
+   *   provisioning waits, then re-reads the committed account and refuses.
+   *   This relies on READ COMMITTED (the PostgreSQL default): each statement
+   *   after the lock takes a fresh snapshot, so the waiter's counts see the
+   *   winner's insert. Under REPEATABLE READ or SERIALIZABLE the waiter would
+   *   instead fail with a serialization error; if the default isolation level
+   *   ever changes, revisit this method.
+   * - SQLite: a synchronous `BEGIN IMMEDIATE` transaction takes the write
+   *   lock before reading, so no other writer (connection or interleaved
+   *   request) runs between the check and the insert.
+   *
+   * Returns the created account, or null when the community already has a
+   * community account or holds content.
+   */
+  async provisionFirstAdministrator(
+    values: Record<string, unknown> & { communityId: number }
+  ): Promise<Record<string, unknown> | null> {
+    const { users, content } = this.claimTables();
+    const communityId = values.communityId;
+    const isClaimed = (accounts: number, contentCounts: number[]) =>
+      accounts > 0 || contentCounts.some((rows) => rows > 0);
+
+    if (this.dialect === 'postgresql') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
+      return this.db.transaction(async (tx: any) => {
+        const locked = await provisioningLockQuery(
+          tx,
+          this.communities,
+          communityId
+        );
+        if (locked.length === 0) {
+          return null;
+        }
+        const [accounts] = await this.accountCountQuery(tx, users, communityId);
+        const contentCounts: number[] = [];
+        for (const table of content) {
+          const [rows] = await this.contentCountQuery(tx, table, communityId);
+          contentCounts.push(Number(rows?.count ?? 0));
+        }
+        if (isClaimed(Number(accounts?.count ?? 0), contentCounts)) {
+          return null;
+        }
+        const [created] = await tx.insert(users).values(values).returning();
+        return created ?? null;
+      });
+    }
+
+    return this.db.transaction(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
+      (tx: any) => {
+        const [accounts] = this.accountCountQuery(tx, users, communityId).all();
+        const contentCounts = content.map((table) =>
+          Number(
+            this.contentCountQuery(tx, table, communityId).all()[0]?.count ?? 0
+          )
+        );
+        if (isClaimed(Number(accounts?.count ?? 0), contentCounts)) {
+          return null;
+        }
+        return tx.insert(users).values(values).returning().get() ?? null;
+      },
+      { behavior: 'immediate' }
+    );
+  }
+
+  /** Tables that make up the §7 claim state, for the active dialect. */
+  private claimTables() {
+    const { users, stories, places, speakers, files, themes } = this.tables;
+    return {
+      users,
+      // Every community-owned content table. Story/place/speaker joins carry
+      // no community column and only exist alongside these rows.
+      content: [stories, places, speakers, files, themes],
+    };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
+  private accountCountQuery(executor: any, users: any, communityId: number) {
+    return executor
+      .select({ count: count() })
+      .from(users)
+      .where(
+        and(eq(users.communityId, communityId), ne(users.role, 'super_admin'))
+      );
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
+  private contentCountQuery(executor: any, table: any, communityId: number) {
+    return executor
+      .select({ count: count() })
+      .from(table)
+      .where(eq(table.communityId, communityId));
   }
 
   /**

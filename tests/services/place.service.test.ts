@@ -174,7 +174,7 @@ describe('PlaceService', () => {
       );
     });
 
-    it('should exclude held places even for legacy elder accounts', async () => {
+    it('should exclude restricted places for elders (SPEC-V2 §6.4)', async () => {
       const mockResponse = {
         data: [mockPlace],
         total: 1,
@@ -193,6 +193,7 @@ describe('PlaceService', () => {
         'elder'
       );
 
+      // A restricted place is unavailable to every role, elder included.
       expect(mockRepository.getByCommunity).toHaveBeenCalledWith(
         testCommunityId,
         {
@@ -228,12 +229,14 @@ describe('PlaceService', () => {
       expect(mockRepository.update).toHaveBeenCalledWith(1, updateData);
     });
 
-    it('should enforce cultural protocol restrictions', async () => {
+    it('should return 404 semantics when a viewer updates a restricted place', async () => {
       const restrictedPlace = { ...mockPlace, isRestricted: true };
       vi.spyOn(mockRepository, 'getByIdWithCommunityCheck').mockResolvedValue(
         restrictedPlace
       );
 
+      // A restricted place is unavailable to every role: the update masks
+      // as nonexistent instead of revealing the restriction (SPEC-V2 §6.4).
       await expect(
         service.updatePlace(
           1,
@@ -242,29 +245,42 @@ describe('PlaceService', () => {
           testUserId,
           'viewer'
         )
-      ).rejects.toThrow(
-        'Only elders and administrators can modify restricted places'
-      );
+      ).rejects.toThrow('Place with ID 1 not found');
     });
 
-    it('should allow elder to update restricted places', async () => {
+    it('should return 404 semantics when an elder updates a restricted place', async () => {
       const restrictedPlace = { ...mockPlace, isRestricted: true };
-      const updatedPlace = { ...restrictedPlace, name: 'Elder Updated' };
-
       vi.spyOn(mockRepository, 'getByIdWithCommunityCheck').mockResolvedValue(
         restrictedPlace
       );
-      vi.spyOn(mockRepository, 'update').mockResolvedValue(updatedPlace);
 
-      const result = await service.updatePlace(
-        1,
-        { name: 'Elder Updated' },
-        testCommunityId,
-        testUserId,
-        'elder'
+      await expect(
+        service.updatePlace(
+          1,
+          { name: 'Elder Updated' },
+          testCommunityId,
+          testUserId,
+          'elder'
+        )
+      ).rejects.toThrow('Place with ID 1 not found');
+    });
+
+    it('should return 404 semantics when an admin updates a restricted place', async () => {
+      const restrictedPlace = { ...mockPlace, isRestricted: true };
+      vi.spyOn(mockRepository, 'getByIdWithCommunityCheck').mockResolvedValue(
+        restrictedPlace
       );
 
-      expect(result.name).toBe('Elder Updated');
+      await expect(
+        service.updatePlace(
+          1,
+          { name: 'Admin Updated' },
+          testCommunityId,
+          testUserId,
+          'admin'
+        )
+      ).rejects.toThrow('Place with ID 1 not found');
+      expect(mockRepository.update).not.toHaveBeenCalled();
     });
   });
 
@@ -312,6 +328,30 @@ describe('PlaceService', () => {
 
       expect(result).toBe(true);
       // Should verify story associations are handled in repository
+    });
+
+    it('should return 404 semantics when an admin deletes a restricted place', async () => {
+      const restrictedPlace = { ...mockPlace, isRestricted: true };
+      vi.spyOn(mockRepository, 'getByIdWithCommunityCheck').mockResolvedValue(
+        restrictedPlace
+      );
+
+      await expect(
+        service.deletePlace(1, testCommunityId, testUserId, 'admin')
+      ).rejects.toThrow('Place with ID 1 not found');
+      expect(mockRepository.delete).not.toHaveBeenCalled();
+    });
+
+    it('should return 404 semantics when an elder deletes a restricted place', async () => {
+      const restrictedPlace = { ...mockPlace, isRestricted: true };
+      vi.spyOn(mockRepository, 'getByIdWithCommunityCheck').mockResolvedValue(
+        restrictedPlace
+      );
+
+      await expect(
+        service.deletePlace(1, testCommunityId, testUserId, 'elder')
+      ).rejects.toThrow('Place with ID 1 not found');
+      expect(mockRepository.delete).not.toHaveBeenCalled();
     });
   });
 
@@ -409,18 +449,20 @@ describe('PlaceService', () => {
   });
 
   describe('Cultural Protocol Enforcement', () => {
-    it('should block access to restricted places for non-elders', async () => {
+    it('should mask restricted places as not found for non-elders', async () => {
       const restrictedPlace = { ...mockPlace, isRestricted: true };
       vi.spyOn(mockRepository, 'getByIdWithCommunityCheck').mockResolvedValue(
         restrictedPlace
       );
 
+      // SPEC-V2 §6.4: restricted places are unavailable to every role; a
+      // direct read masks as 404, never 403 (no existence leak).
       await expect(
         service.getPlaceById(1, testCommunityId, 'viewer')
-      ).rejects.toThrow(/Place.*not found/);
+      ).rejects.toThrow('Place with ID 1 not found');
     });
 
-    it('should deny legacy elder access to held places', async () => {
+    it('should mask restricted places as not found for elders too', async () => {
       const restrictedPlace = { ...mockPlace, isRestricted: true };
       vi.spyOn(mockRepository, 'getByIdWithCommunityCheck').mockResolvedValue(
         restrictedPlace
@@ -428,7 +470,18 @@ describe('PlaceService', () => {
 
       await expect(
         service.getPlaceById(1, testCommunityId, 'elder')
-      ).rejects.toThrow(/Place.*not found/);
+      ).rejects.toThrow('Place with ID 1 not found');
+    });
+
+    it('should mask restricted places as not found for admins too', async () => {
+      const restrictedPlace = { ...mockPlace, isRestricted: true };
+      vi.spyOn(mockRepository, 'getByIdWithCommunityCheck').mockResolvedValue(
+        restrictedPlace
+      );
+
+      await expect(
+        service.getPlaceById(1, testCommunityId, 'admin')
+      ).rejects.toThrow('Place with ID 1 not found');
     });
 
     it('should validate cultural significance data', async () => {
@@ -448,6 +501,32 @@ describe('PlaceService', () => {
           culturalSignificance: 'Very important sacred site for our people',
         })
       );
+    });
+  });
+
+  describe('getCommunityPlaceStats() - SPEC-V2 §6.4 projection', () => {
+    it('always counts unrestricted places only and never returns a restricted count', async () => {
+      vi.spyOn(mockRepository, 'getCommunityPlaceStats').mockResolvedValue({
+        total: 3,
+        public: 3,
+        withStories: 1,
+      });
+
+      for (const role of ['admin', 'elder', 'editor', 'viewer']) {
+        const stats = await service.getCommunityPlaceStats(
+          testCommunityId,
+          role
+        );
+
+        expect(stats).not.toHaveProperty('restricted');
+        expect(mockRepository.getCommunityPlaceStats).toHaveBeenCalledWith(
+          testCommunityId,
+          {
+            includeRestricted: false,
+            storyAudiences: expect.any(Array),
+          }
+        );
+      }
     });
   });
 

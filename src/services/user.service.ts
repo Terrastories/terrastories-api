@@ -14,6 +14,14 @@
  */
 
 import { UserRepository } from '../repositories/user.repository.js';
+import {
+  authorizeCommunityEnrollment,
+  authorizeSystemAccountProvisioning,
+  type AdministrativeActor,
+  authorizeSystemAccountUpdate,
+  type AdministrativeDecision,
+  type AdministrativeDecisionReason,
+} from '../shared/authorization/administrative-policy.js';
 import * as passwordService from './password.service.js';
 import { CommunityService } from './community.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
@@ -23,6 +31,7 @@ import {
 } from '../shared/utils/date-transforms.js';
 import type {
   User,
+  NewUser,
   CreateUserData,
   UpdateUserData,
   UserRole,
@@ -123,6 +132,45 @@ export class SuperAdminRoleError extends Error {
 /**
  * Custom error for self-deletion attempts
  */
+/**
+ * SPEC-V2 §7: the requested membership, role or account change needs
+ * community authority, which system privilege does not provide.
+ */
+export class CommunityAuthorityRequiredError extends Error {
+  constructor(public readonly reason: AdministrativeDecisionReason) {
+    super('Community administrator authority required');
+    this.name = 'CommunityAuthorityRequiredError';
+  }
+}
+
+/**
+ * The membership decision was made on a snapshot the row no longer matches
+ * (a concurrent role / activation / community change landed first). Nothing
+ * was written; the caller must re-read and decide again (409).
+ */
+export class MembershipConflictError extends Error {
+  constructor(
+    message = 'The account changed since it was read; nothing was written'
+  ) {
+    super(message);
+    this.name = 'MembershipConflictError';
+  }
+}
+
+/**
+ * The change would leave a community with no active administrator, which
+ * nobody could recover: system authority may not reactivate or provision
+ * into a claimed community (SPEC-V2 §7). Recovery is tracked with #134.
+ */
+export class LastActiveAdministratorError extends Error {
+  constructor(
+    message = 'A community must keep at least one active administrator'
+  ) {
+    super(message);
+    this.name = 'LastActiveAdministratorError';
+  }
+}
+
 export class SelfDeletionError extends Error {
   constructor(message = 'Users cannot delete themselves') {
     super(message);
@@ -139,7 +187,7 @@ export class UserService {
 
   constructor(
     private userRepository: UserRepository,
-    communityRepository: CommunityRepository
+    private communityRepository: CommunityRepository
   ) {
     // Always require community repository for proper validation
     this.communityService = new CommunityService(communityRepository);
@@ -162,7 +210,34 @@ export class UserService {
    * @throws InvalidCommunityError - If community doesn't exist
    * @throws Error - For validation or system errors
    */
-  async registerUser(data: CreateUserRequest): Promise<User> {
+  async registerUser(
+    data: CreateUserRequest,
+    actor: AdministrativeActor | null
+  ): Promise<User> {
+    // SPEC-V2 §7: enrollment needs a same-community administrator. The
+    // route checks first; this re-check keeps the service fail-closed for
+    // any other caller.
+    const decision = authorizeCommunityEnrollment({
+      actor,
+      targetCommunityId: data.communityId,
+      requestedRole: data.role || 'viewer',
+    });
+    if (!decision.allowed) {
+      throw new CommunityAuthorityRequiredError(decision.reason);
+    }
+    return this.createValidatedUser(data, (userData) =>
+      this.userRepository.create(userData)
+    );
+  }
+
+  /**
+   * Shared validation, password hashing and insert for enrollment and
+   * system provisioning. Authority is decided by the callers.
+   */
+  private async createValidatedUser(
+    data: CreateUserRequest,
+    insert: (userData: CreateUserData) => Promise<User>
+  ): Promise<User> {
     try {
       // Validate email format
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -232,14 +307,15 @@ export class UserService {
       };
 
       // Create user in database
-      const user = await this.userRepository.create(userData);
+      const user = await insert(userData);
       return user;
     } catch (error) {
       // Re-throw known errors
       if (
         error instanceof DuplicateEmailError ||
         error instanceof WeakPasswordError ||
-        error instanceof InvalidCommunityError
+        error instanceof InvalidCommunityError ||
+        error instanceof CommunityAuthorityRequiredError
       ) {
         throw error;
       }
@@ -295,9 +371,19 @@ export class UserService {
         throw new AuthenticationError();
       }
 
-      // Check if user is active
+      // Disabled accounts always fail closed. Community-role principals also
+      // require an active community; super admins remain system-level operators
+      // so an archived attached community cannot lock them out of administration.
       if (!user.isActive) {
-        throw new AuthenticationError('Account is deactivated');
+        throw new AuthenticationError();
+      }
+      if (user.role !== 'super_admin') {
+        const community = await this.communityService.getCommunityById(
+          user.communityId
+        );
+        if (!community?.isActive) {
+          throw new AuthenticationError();
+        }
       }
 
       return user;
@@ -333,9 +419,19 @@ export class UserService {
         throw new AuthenticationError();
       }
 
-      // Check if user is active
+      // Disabled accounts always fail closed. Community-role principals also
+      // require an active community; super admins remain system-level operators
+      // so an archived attached community cannot lock them out of administration.
       if (!user.isActive) {
-        throw new AuthenticationError('Account is deactivated');
+        throw new AuthenticationError();
+      }
+      if (user.role !== 'super_admin') {
+        const community = await this.communityService.getCommunityById(
+          user.communityId
+        );
+        if (!community?.isActive) {
+          throw new AuthenticationError();
+        }
       }
 
       return user;
@@ -395,9 +491,27 @@ export class UserService {
       }
     }
 
+    // Role / activation / community changes use the single
+    // compare-and-set path (SPEC-V2 §7); the rest is a profile write.
+    const {
+      role: requestedRole,
+      isActive: requestedActive,
+      communityId: _ignoredCommunity,
+      ...profileUpdates
+    } = updates as UpdateUserData & { communityId?: number };
+    void _ignoredCommunity;
+    const changed = await this.applyMembershipChange(
+      existingUser,
+      { role: requestedRole, isActive: requestedActive },
+      profileUpdates
+    );
+    if (changed) {
+      return changed;
+    }
+
     // Prepare update data
     const updateData: UpdateUserData = {
-      ...updates,
+      ...profileUpdates,
       updatedAt: new Date(),
     };
 
@@ -581,22 +695,6 @@ export class UserService {
   // }
 
   /**
-   * Delete user within community scope
-   *
-   * @param id - User ID
-   * @param communityId - Community scope
-   * @throws UserNotFoundError - If user not found in community
-   */
-  async deleteUser(id: number, communityId: number): Promise<void> {
-    const existingUser = await this.userRepository.findById(id, communityId);
-    if (!existingUser) {
-      throw new UserNotFoundError();
-    }
-
-    await this.userRepository.delete(id, communityId);
-  }
-
-  /**
    * Super Admin Methods
    * These methods manage system accounts without granting community-user access
    */
@@ -728,7 +826,117 @@ export class UserService {
   }
 
   /**
-   * Create a system user as super admin
+   * The single write path for role, activation and community changes
+   * (SPEC-V2 §7). Fields equal to the caller's snapshot are stripped, so a
+   * same-value resend writes nothing. Any remaining change is a
+   * compare-and-set on the snapshot (role, isActive, communityId): a stale
+   * decision writes nothing and throws MembershipConflictError. Removing the
+   * last active admin of a community (deactivation, demotion or move) is
+   * refused atomically with the write (LastActiveAdministratorError).
+   *
+   * Returns null when no membership field changes; the caller then applies
+   * its profile-only write.
+   */
+  private async applyMembershipChange(
+    snapshot: User,
+    change: { role?: string; isActive?: boolean; communityId?: number },
+    profile: Partial<NewUser> = {}
+  ): Promise<User | null> {
+    const membership: Partial<NewUser> = {};
+    if (change.role !== undefined && change.role !== snapshot.role) {
+      membership.role = change.role as User['role'];
+    }
+    if (
+      change.isActive !== undefined &&
+      change.isActive !== snapshot.isActive
+    ) {
+      membership.isActive = change.isActive;
+    }
+    if (
+      change.communityId !== undefined &&
+      change.communityId !== snapshot.communityId
+    ) {
+      membership.communityId = change.communityId;
+    }
+    if (Object.keys(membership).length === 0) {
+      return null;
+    }
+    const removesAdmin =
+      snapshot.role === 'admin' &&
+      snapshot.isActive === true &&
+      (membership.isActive === false ||
+        (membership.role !== undefined && membership.role !== 'admin') ||
+        membership.communityId !== undefined);
+    const cleanProfile = Object.fromEntries(
+      Object.entries(profile).filter(([, value]) => value !== undefined)
+    );
+    const result = await this.userRepository.compareAndSetMembership(
+      snapshot.id,
+      {
+        role: snapshot.role,
+        isActive: snapshot.isActive,
+        communityId: snapshot.communityId,
+      },
+      { ...cleanProfile, ...membership },
+      { requireOtherActiveAdmin: removesAdmin }
+    );
+    if (result.status === 'last-admin') {
+      throw new LastActiveAdministratorError();
+    }
+    if (result.status === 'conflict') {
+      throw new MembershipConflictError();
+    }
+    return result.user;
+  }
+
+  /**
+   * SPEC-V2 §7 decision for a system account creation. A `super_admin`
+   * account needs no claim-state lookup; any community role reads the
+   * target community's claim state.
+   */
+  async authorizeSystemAccountCreate(
+    role: string,
+    communityId: number
+  ): Promise<AdministrativeDecision> {
+    const community =
+      role === 'super_admin'
+        ? { hasCommunityAccounts: false, hasContent: false }
+        : await this.communityRepository.getClaimState(communityId);
+    return authorizeSystemAccountProvisioning({
+      requestedRole: role,
+      community,
+    });
+  }
+
+  /**
+   * SPEC-V2 §7 decision for a system account update, against the stored
+   * account. Throws UserNotFoundError when the account does not exist.
+   */
+  async authorizeSystemAccountChange(
+    id: number,
+    updates: { role?: string; communityId?: number; isActive?: boolean }
+  ): Promise<AdministrativeDecision> {
+    const current = await this.userRepository.findByIdAsSuperAdmin(id);
+    if (!current) {
+      throw new UserNotFoundError();
+    }
+    return authorizeSystemAccountUpdate({
+      current: {
+        role: current.role,
+        communityId: current.communityId,
+        isActive: current.isActive,
+      },
+      requested: {
+        role: updates.role,
+        communityId: updates.communityId,
+        isActive: updates.isActive,
+      },
+    });
+  }
+
+  /**
+   * Create user in any community as super admin
+
    * @param data - User creation data
    * @returns Promise<User> - Created user
    */
@@ -742,12 +950,18 @@ export class UserService {
     isActive?: boolean;
   }): Promise<User> {
     try {
-      if (data.role !== 'super_admin') {
-        throw new SuperAdminRoleError(
-          'System administration cannot create community accounts'
-        );
+      // SPEC-V2 §7: system privilege provisions system accounts and only
+      // the first administrator of an unclaimed, empty community. Every
+      // other community account is membership and needs community
+      // authority. Checked here as well as in the route (defense in depth).
+      const decision = await this.authorizeSystemAccountCreate(
+        data.role,
+        data.communityId
+      );
+      if (!decision.allowed) {
+        throw new CommunityAuthorityRequiredError(decision.reason);
       }
-      // The legacy schema still requires a system community ID for system users.
+
       const userData: CreateUserRequest = {
         email: data.email,
         password: data.password,
@@ -758,14 +972,41 @@ export class UserService {
         isActive: data.isActive ?? true,
       };
 
-      return await this.registerUser(userData);
+      // A first administrator provisioned inactive would leave the
+      // community claimed with no active admin and no way to recover it.
+      if (data.isActive === false && data.role !== 'super_admin') {
+        throw new LastActiveAdministratorError(
+          'A first administrator must be active'
+        );
+      }
+      if (data.role === 'super_admin') {
+        return await this.createValidatedUser(userData, (validated) =>
+          this.userRepository.create(validated)
+        );
+      }
+      // First administrator: claim check and insert are one atomic write
+      // (CommunityRepository.provisionFirstAdministrator), so concurrent
+      // requests cannot each pass the check.
+      return await this.createValidatedUser(userData, async (validated) => {
+        const created =
+          await this.communityRepository.provisionFirstAdministrator({
+            ...validated,
+          });
+        if (!created) {
+          throw new CommunityAuthorityRequiredError(
+            'community-claimed-or-holds-content'
+          );
+        }
+        return created as unknown as User;
+      });
     } catch (error) {
       // Re-throw specific error types for proper HTTP status codes
       if (
         error instanceof DuplicateEmailError ||
         error instanceof WeakPasswordError ||
         error instanceof InvalidCommunityError ||
-        error instanceof SuperAdminRoleError
+        error instanceof CommunityAuthorityRequiredError ||
+        error instanceof LastActiveAdministratorError
       ) {
         throw error;
       }
@@ -794,28 +1035,52 @@ export class UserService {
     }
   ): Promise<User> {
     try {
-      const existing = await this.getUserByIdAsSuperAdmin(id);
-      if (!existing) throw new UserNotFoundError();
-      if (
-        (updates.role !== undefined && updates.role !== 'super_admin') ||
-        (updates.communityId !== undefined &&
-          updates.communityId !== existing.communityId)
-      ) {
-        throw new SuperAdminRoleError(
-          'System administration cannot assign community membership'
-        );
+      // SPEC-V2 §7: a role or community change is a membership/role change
+      // and needs community authority; profile and lifecycle fields stay
+      // available to system administration.
+      const current = await this.userRepository.findByIdAsSuperAdmin(id);
+      if (!current) {
+        throw new UserNotFoundError();
       }
+      const decision = authorizeSystemAccountUpdate({
+        current: {
+          role: current.role,
+          communityId: current.communityId,
+          isActive: current.isActive,
+        },
+        requested: {
+          role: updates.role,
+          communityId: updates.communityId,
+          isActive: updates.isActive,
+        },
+      });
+      if (!decision.allowed) {
+        throw new CommunityAuthorityRequiredError(decision.reason);
+      }
+      // B5: system authority never writes isActive:true for a community
+      // account; a stale read must not undo a community deactivation.
+      const requestedActive =
+        updates.isActive === true && current.role !== 'super_admin'
+          ? undefined
+          : updates.isActive;
+      const changed = await this.applyMembershipChange(
+        current,
+        {
+          role: updates.role,
+          communityId: updates.communityId,
+          isActive: requestedActive,
+        },
+        { firstName: updates.firstName, lastName: updates.lastName }
+      );
+      if (changed) {
+        return changed;
+      }
+
+      // Profile-only write (no membership field changed).
+
       const updateData: Partial<UpdateUserData> = {
         firstName: updates.firstName,
         lastName: updates.lastName,
-        role: updates.role as
-          | 'super_admin'
-          | 'admin'
-          | 'editor'
-          | 'viewer'
-          | undefined,
-        communityId: updates.communityId,
-        isActive: updates.isActive,
         updatedAt: new Date(),
       };
 
@@ -826,7 +1091,9 @@ export class UserService {
       }
       if (
         error instanceof UserNotFoundError ||
-        error instanceof SuperAdminRoleError
+        error instanceof CommunityAuthorityRequiredError ||
+        error instanceof LastActiveAdministratorError ||
+        error instanceof MembershipConflictError
       ) {
         throw error;
       }
@@ -880,7 +1147,7 @@ export class UserService {
       }
 
       // Deactivate the user
-      await this.userRepository.updateByIdAsSuperAdmin(id, { isActive: false });
+      await this.applyMembershipChange(user, { isActive: false });
 
       return {
         message: 'User deactivated successfully',
@@ -888,6 +1155,12 @@ export class UserService {
       };
     } catch (error) {
       // Re-throw specific error types
+      if (error instanceof MembershipConflictError) {
+        throw error;
+      }
+      if (error instanceof LastActiveAdministratorError) {
+        throw error;
+      }
       if (error instanceof UserNotFoundError) {
         throw error;
       }
@@ -984,8 +1257,15 @@ export class UserService {
         throw new Error('Invalid community ID');
       }
 
-      // Get user in the specified community
+      // Get user in the specified community. A super_admin row is a system
+      // account, not a community member (SPEC-V2 §6.2: canonical
+      // super_admin has no community), even though Fastify stores a
+      // community_id on it: community paths never see, edit or deactivate
+      // it, and answer as for a missing user.
       const user = await this.userRepository.findById(userId, communityId);
+      if (user && user.role === 'super_admin') {
+        return null;
+      }
       return user;
     } catch (error) {
       throw new Error(
@@ -1001,6 +1281,32 @@ export class UserService {
    * Enforces community boundary - user will be created in the admin's community
    */
   async createUserInCommunity(
+    data: Omit<CreateUserRequest, 'communityId'> & { communityId: number },
+    actor: AdministrativeActor | null
+  ): Promise<User> {
+    // SPEC-V2 §7: same shared enrollment policy as POST /auth/register.
+    const decision = authorizeCommunityEnrollment({
+      actor,
+      targetCommunityId: data.communityId,
+      requestedRole: data.role || 'viewer',
+    });
+    if (!decision.allowed) {
+      if (decision.reason === 'system-role-not-assignable') {
+        throw new SuperAdminRoleError(
+          'Cannot create super admin users through community endpoints'
+        );
+      }
+      throw new CommunityAuthorityRequiredError(decision.reason);
+    }
+    return this.seedUserInCommunity(data);
+  }
+
+  /**
+   * Insert a community account without an authority check. Only for the
+   * development/test seed (`/dev/seed`, environment-gated by #175); every
+   * request path uses `createUserInCommunity` or `registerUser`.
+   */
+  async seedUserInCommunity(
     data: Omit<CreateUserRequest, 'communityId'> & { communityId: number }
   ): Promise<User> {
     try {
@@ -1125,13 +1431,27 @@ export class UserService {
         }
       }
 
-      // Create update data
+      // Role and activation go through the single compare-and-set path
+      // (stale decisions conflict; the last active admin cannot be
+      // deactivated or demoted, self included).
+      const changed = await this.applyMembershipChange(
+        existingUser,
+        { role: data.role, isActive: data.isActive },
+        {
+          email: data.email,
+          firstName: data.firstName,
+          lastName: data.lastName,
+        }
+      );
+      if (changed) {
+        return changed;
+      }
+
+      // Profile-only write (no membership field changed).
       const updateData: UpdateUserData = {
         email: data.email,
         firstName: data.firstName,
         lastName: data.lastName,
-        role: data.role,
-        isActive: data.isActive,
       };
 
       // Remove undefined values
@@ -1152,6 +1472,12 @@ export class UserService {
       }
       return updatedUser;
     } catch (error) {
+      if (
+        error instanceof LastActiveAdministratorError ||
+        error instanceof MembershipConflictError
+      ) {
+        throw error;
+      }
       // Re-throw known error types
       if (
         error instanceof UserNotFoundError ||
@@ -1202,12 +1528,9 @@ export class UserService {
         throw new UserNotFoundError('User not found');
       }
 
-      // Deactivate the user (soft delete)
-      await this.userRepository.update(
-        userId,
-        { isActive: false },
-        communityId
-      );
+      // Deactivate the user (soft delete) through the compare-and-set path,
+      // so two admins removing each other cannot leave no active admin.
+      await this.applyMembershipChange(existingUser, { isActive: false });
 
       return {
         message: 'User deleted successfully',
@@ -1217,7 +1540,9 @@ export class UserService {
       // Re-throw known error types
       if (
         error instanceof UserNotFoundError ||
-        error instanceof SelfDeletionError
+        error instanceof SelfDeletionError ||
+        error instanceof LastActiveAdministratorError ||
+        error instanceof MembershipConflictError
       ) {
         throw error;
       }

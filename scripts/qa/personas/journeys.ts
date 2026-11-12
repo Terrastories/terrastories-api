@@ -111,11 +111,11 @@ export function buildJourneys(fixture: PersonaFixture): Journey[] {
           expected: 200,
         },
         {
-          name: 'reject malformed registration',
+          name: 'require authentication before registration validation',
           method: 'POST',
           path: '/api/v1/auth/register',
           body: {},
-          expected: 400,
+          expected: 401,
         },
         {
           name: 'reject malformed recovery request',
@@ -167,6 +167,13 @@ export function buildJourneys(fixture: PersonaFixture): Journey[] {
         ...isolationSteps(fixture, role),
         ...wrongRoleSteps(fixture, role),
         ...communitySteps(fixture.communityId, fixture.publicStoryId),
+        {
+          name: 'publication requires community admin',
+          method: 'PUT',
+          path: `/api/v1/communities/${fixture.communityId}/publication`,
+          body: { publicStories: true },
+          expected: role === 'admin' ? 200 : 403,
+        },
         ...(role === 'admin'
           ? [
               ...domainSteps(fixture.communityId),

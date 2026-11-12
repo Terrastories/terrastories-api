@@ -23,6 +23,7 @@ import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 import { StoryRepository } from '../../src/repositories/story.repository.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 /** Failure text a real database driver would produce; must never reach the client. */
 const DB_FAILURE_MESSAGE =
@@ -77,16 +78,8 @@ describe('Stories API error handling - Issue #135', () => {
       communityId: testCommunityId,
     };
     for (const user of [adminUser, viewerUser]) {
-      const registerResponse = await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/register',
-        payload: user,
-      });
-      if (registerResponse.statusCode !== 201) {
-        throw new Error(
-          `Registration failed for ${user.email}: ${registerResponse.statusCode} ${registerResponse.body}`
-        );
-      }
+      // SPEC-V2 §7: registration needs community authority; seed fixtures.
+      await seedRegisteredUser(testDb.db, user);
     }
 
     adminSessionId = await loginSession(adminUser.email, adminUser.password);

@@ -259,6 +259,39 @@ describe('SpeakerService', () => {
         'Speaker not found'
       );
     });
+
+    it('should mask a withdrawn speaker as not found for callers without the editor/admin gate', async () => {
+      // SPEC-V2 §6.5: a withdrawn (inactive) speaker is indistinguishable
+      // from a missing one for everyone except canonical V2 editors/admins.
+      const withdrawnSpeaker = { ...mockSpeaker, isActive: false };
+      vi.mocked(mockRepository.getByIdWithCommunityCheck).mockResolvedValue(
+        withdrawnSpeaker
+      );
+
+      await expect(
+        service.getSpeakerById(1, testCommunityId, 'viewer')
+      ).rejects.toThrow('Speaker not found');
+      await expect(
+        service.getSpeakerById(1, testCommunityId, 'elder')
+      ).rejects.toThrow('Speaker not found');
+      await expect(
+        service.getSpeakerById(1, testCommunityId, 'super_admin')
+      ).rejects.toThrow('Speaker not found');
+    });
+
+    it('should return a withdrawn speaker to editors and admins', async () => {
+      const withdrawnSpeaker = { ...mockSpeaker, isActive: false };
+      vi.mocked(mockRepository.getByIdWithCommunityCheck).mockResolvedValue(
+        withdrawnSpeaker
+      );
+
+      await expect(
+        service.getSpeakerById(1, testCommunityId, 'editor')
+      ).resolves.toEqual(withdrawnSpeaker);
+      await expect(
+        service.getSpeakerById(1, testCommunityId, 'admin')
+      ).resolves.toEqual(withdrawnSpeaker);
+    });
   });
 
   describe('getSpeakersByCommunity()', () => {
@@ -316,6 +349,41 @@ describe('SpeakerService', () => {
       expect(mockRepository.getByCommunity).toHaveBeenCalledWith(
         testCommunityId,
         expect.objectContaining({ activeOnly: false })
+      );
+    });
+
+    it('should force database-level inactive exclusion for viewers even when activeOnly is false', async () => {
+      // SPEC-V2 §6.5: `activeOnly` is a request filter, never a grant.
+      // Callers without the editor/admin gate are excluded from inactive
+      // speakers at the database level regardless of the parameter.
+      const params = { page: 1, limit: 10, activeOnly: false };
+
+      await service.getSpeakersByCommunity(
+        testCommunityId,
+        params,
+        testUserId,
+        'viewer'
+      );
+
+      expect(mockRepository.getByCommunity).toHaveBeenCalledWith(
+        testCommunityId,
+        expect.objectContaining({ activeOnly: true })
+      );
+    });
+
+    it('should force database-level inactive exclusion for the legacy elder role', async () => {
+      const params = { page: 1, limit: 10, activeOnly: false };
+
+      await service.getSpeakersByCommunity(
+        testCommunityId,
+        params,
+        testUserId,
+        'elder'
+      );
+
+      expect(mockRepository.getByCommunity).toHaveBeenCalledWith(
+        testCommunityId,
+        expect.objectContaining({ activeOnly: true })
       );
     });
 
@@ -585,7 +653,66 @@ describe('SpeakerService', () => {
       expect(mockRepository.searchByName).toHaveBeenCalledWith(
         testCommunityId,
         'Maria',
-        { page: 1, limit: 10 }
+        expect.objectContaining({ page: 1, limit: 10, activeOnly: true })
+      );
+    });
+
+    it('should exclude withdrawn speakers from search for callers without the gate', async () => {
+      // SPEC-V2 §6.5: search is a projection like any other list; viewers,
+      // super_admin, and the legacy elder role never find withdrawn speakers.
+      vi.mocked(mockRepository.searchByName).mockResolvedValue({
+        data: [],
+        total: 0,
+        page: 1,
+        limit: 10,
+        pages: 0,
+      });
+
+      for (const role of ['viewer', 'elder', 'super_admin']) {
+        await service.searchSpeakers(
+          testCommunityId,
+          'Maria',
+          { page: 1, limit: 10 },
+          testUserId,
+          role as any
+        );
+      }
+
+      expect(mockRepository.searchByName).toHaveBeenCalledWith(
+        testCommunityId,
+        'Maria',
+        expect.objectContaining({ activeOnly: true })
+      );
+    });
+
+    it('should include withdrawn speakers in search for editors and admins', async () => {
+      vi.mocked(mockRepository.searchByName).mockResolvedValue({
+        data: [mockSpeaker],
+        total: 1,
+        page: 1,
+        limit: 10,
+        pages: 1,
+      });
+
+      await service.searchSpeakers(
+        testCommunityId,
+        'Maria',
+        { page: 1, limit: 10 },
+        testUserId,
+        'editor'
+      );
+      await service.searchSpeakers(
+        testCommunityId,
+        'Maria',
+        { page: 1, limit: 10 },
+        testUserId,
+        'admin'
+      );
+
+      expect(mockRepository.searchByName).toHaveBeenCalledWith(
+        testCommunityId,
+        'Maria',
+        expect.objectContaining({ activeOnly: false })
       );
     });
 
@@ -613,22 +740,66 @@ describe('SpeakerService', () => {
   });
 
   describe('getCommunityStats()', () => {
-    it('should return community speaker statistics', async () => {
-      const mockStats = {
-        total: 10,
-        active: 8,
-        inactive: 2,
-        elders: 3,
-        nonElders: 7,
-      };
+    const mockStats = {
+      total: 4,
+      active: 3,
+      inactive: 1,
+    };
 
+    it('excludes withdrawn speakers from viewer stats (SPEC-V2 §6.5)', async () => {
       vi.mocked(mockRepository.getCommunityStats).mockResolvedValue(mockStats);
 
-      const result = await service.getCommunityStats(testCommunityId);
+      const result = await service.getCommunityStats(testCommunityId, 'viewer');
 
       expect(result).toEqual(mockStats);
       expect(mockRepository.getCommunityStats).toHaveBeenCalledWith(
-        testCommunityId
+        testCommunityId,
+        { includeInactive: false }
+      );
+    });
+
+    it('includes withdrawn speakers in editor stats', async () => {
+      vi.mocked(mockRepository.getCommunityStats).mockResolvedValue(mockStats);
+
+      await service.getCommunityStats(testCommunityId, 'editor');
+
+      expect(mockRepository.getCommunityStats).toHaveBeenCalledWith(
+        testCommunityId,
+        { includeInactive: true }
+      );
+    });
+
+    it('includes withdrawn speakers in admin stats', async () => {
+      vi.mocked(mockRepository.getCommunityStats).mockResolvedValue(mockStats);
+
+      await service.getCommunityStats(testCommunityId, 'admin');
+
+      expect(mockRepository.getCommunityStats).toHaveBeenCalledWith(
+        testCommunityId,
+        { includeInactive: true }
+      );
+    });
+
+    it('excludes withdrawn speakers for the legacy elder role', async () => {
+      // A null v2Role must never grant the inactive view (SPEC-V2 §6.5).
+      vi.mocked(mockRepository.getCommunityStats).mockResolvedValue(mockStats);
+
+      await service.getCommunityStats(testCommunityId, 'elder');
+
+      expect(mockRepository.getCommunityStats).toHaveBeenCalledWith(
+        testCommunityId,
+        { includeInactive: false }
+      );
+    });
+
+    it('excludes withdrawn speakers for unknown roles', async () => {
+      vi.mocked(mockRepository.getCommunityStats).mockResolvedValue(mockStats);
+
+      await service.getCommunityStats(testCommunityId, 'guest');
+
+      expect(mockRepository.getCommunityStats).toHaveBeenCalledWith(
+        testCommunityId,
+        { includeInactive: false }
       );
     });
   });

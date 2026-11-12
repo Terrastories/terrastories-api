@@ -14,6 +14,7 @@ import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { FastifyInstance } from 'fastify';
 import { TestDatabaseManager } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 import { performance } from 'perf_hooks';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
 
@@ -754,48 +755,25 @@ describe('Production Performance Validation - Phase 1', () => {
     const communityIds = fixtures.communities.map((c: any) => c.id);
     console.log('Using communities for performance tests:', communityIds);
 
-    // Register test users properly using the API to get correct password hashing
-    const registerResponse1 = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: {
-        email: 'perftest1@community1.test',
-        password: 'Test-Password-123!',
-        firstName: 'Test',
-        lastName: 'User1',
-        communityId: communityIds[0],
-        role: 'admin',
-      },
+    // Seed test users directly: registration requires community-admin
+    // authority (SPEC-V2 §7).
+    const user1 = await seedRegisteredUser(db.db, {
+      email: 'perftest1@community1.test',
+      password: 'Test-Password-123!',
+      firstName: 'Test',
+      lastName: 'User1',
+      communityId: communityIds[0],
+      role: 'admin',
     });
-    console.log('User 1 registration:', registerResponse1.statusCode);
-    if (registerResponse1.statusCode !== 201) {
-      console.error('User 1 registration failed:', registerResponse1.body);
-    }
-    const user1 =
-      registerResponse1.statusCode === 201
-        ? registerResponse1.json().user
-        : null;
 
-    const registerResponse2 = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: {
-        email: 'perftest2@community2.test',
-        password: 'Test-Password-123!',
-        firstName: 'Test',
-        lastName: 'User2',
-        communityId: communityIds[1],
-        role: 'admin',
-      },
+    const user2 = await seedRegisteredUser(db.db, {
+      email: 'perftest2@community2.test',
+      password: 'Test-Password-123!',
+      firstName: 'Test',
+      lastName: 'User2',
+      communityId: communityIds[1],
+      role: 'admin',
     });
-    console.log('User 2 registration:', registerResponse2.statusCode);
-    if (registerResponse2.statusCode !== 201) {
-      console.error('User 2 registration failed:', registerResponse2.body);
-    }
-    const user2 =
-      registerResponse2.statusCode === 201
-        ? registerResponse2.json().user
-        : null;
 
     // Create multiple stories for performance testing
     const storyInserts = [];
@@ -805,7 +783,7 @@ describe('Production Performance Validation - Phase 1', () => {
       const communityId = communityIds[communityIndex];
       const createdBy = communityIndex === 0 ? user1?.id || 1 : user2?.id || 1;
       storyInserts.push(`
-        (${i}, 'Performance Test Story ${i}', 'Content for story ${i}', 'performance-test-story-${i}', ${communityId}, ${createdBy}, 0, 'en', datetime('now'), datetime('now'))
+        (${i}, 'Performance Test Story ${i}', 'Content for story ${i}', 'performance-test-story-${i}', ${communityId}, ${createdBy}, 0, 'en', unixepoch(), unixepoch())
       `);
     }
 
@@ -825,7 +803,7 @@ describe('Production Performance Validation - Phase 1', () => {
       const communityIndex = Math.floor((i - 1) / 25); // 0 for first 25, 1 for second 25
       const communityId = communityIds[communityIndex];
       placeInserts.push(`
-        (${i}, 'Performance Test Place ${i}', ${communityId}, ${lng}, ${lat}, datetime('now'), datetime('now'))
+        (${i}, 'Performance Test Place ${i}', ${communityId}, ${lng}, ${lat}, unixepoch(), unixepoch())
       `);
     }
 

@@ -104,8 +104,9 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
     expect(login.status).toBe(503);
     expect((await request('/v2/auth/logout', 'POST')).status).toBe(204);
     expect((await request('/v2/auth/me')).status).toBe(401);
+    await insertSession('replacement').run();
+    expect((await request('/v2/auth/me')).status).toBe(200);
     await db.batch([
-      insertSession('replacement'),
       db.prepare('UPDATE users SET is_active=0 WHERE id=1'),
       db.prepare('UPDATE users SET is_active=1 WHERE id=1'),
     ]);

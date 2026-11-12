@@ -19,44 +19,50 @@ export function createWorker(
     },
   }
 ) {
+  const apps = new WeakMap<WorkerBindings, ReturnType<typeof createHonoApp>>();
+  const appFor = (env: WorkerBindings) => {
+    const cached = apps.get(env);
+    if (cached) return cached;
+    const client = new Proxy(env.DB, {
+      get(target, key, receiver) {
+        // App configuration is cached; every DB operation still starts primary-current.
+        const primary = env.DB.withSession('first-primary');
+        if (key === 'prepare') return primary.prepare.bind(primary);
+        if (key === 'batch') return primary.batch.bind(primary);
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const app = createHonoApp({
+      repository: new HonoFoundationRepository(drizzle(client)),
+      verifier,
+      publicOrigin: env.PUBLIC_ORIGIN,
+      corsOrigins: env.CORS_ORIGINS?.split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+      storage: {
+        async read(key) {
+          const object = await env.MEDIA.get(key);
+          if (!object) return null;
+          const reader = object.body.getReader();
+          return new ReadableStream({
+            async pull(controller) {
+              const next = await reader.read();
+              if (next.done) controller.close();
+              else controller.enqueue(next.value);
+            },
+            async cancel(reason) {
+              await reader.cancel(reason);
+            },
+          });
+        },
+      },
+    });
+    apps.set(env, app);
+    return app;
+  };
   return {
-    async fetch(request: Request, env: WorkerBindings): Promise<Response> {
-      // Each request starts from primary-current state, never a cached identity.
-      const primary = env.DB.withSession('first-primary');
-      const client = new Proxy(env.DB, {
-        get(target, key, receiver) {
-          if (key === 'prepare') return primary.prepare.bind(primary);
-          if (key === 'batch') return primary.batch.bind(primary);
-          return Reflect.get(target, key, receiver);
-        },
-      });
-      const app = createHonoApp({
-        repository: new HonoFoundationRepository(drizzle(client)),
-        verifier,
-        publicOrigin: env.PUBLIC_ORIGIN,
-        corsOrigins: env.CORS_ORIGINS?.split(',')
-          .map((origin) => origin.trim())
-          .filter(Boolean),
-        storage: {
-          async read(key) {
-            const object = await env.MEDIA.get(key);
-            if (!object) return null;
-            const reader = object.body.getReader();
-            return new ReadableStream({
-              async pull(controller) {
-                const next = await reader.read();
-                if (next.done) controller.close();
-                else controller.enqueue(next.value);
-              },
-              async cancel(reason) {
-                await reader.cancel(reason);
-              },
-            });
-          },
-        },
-      });
-      return app.fetch(request);
-    },
+    fetch: (request: Request, env: WorkerBindings) =>
+      appFor(env).fetch(request),
   };
 }
 export default createWorker();

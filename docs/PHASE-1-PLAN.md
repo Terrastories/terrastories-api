@@ -26,7 +26,7 @@ The thin foundation is opt-in and leaves `src/server.ts` and Fastify unchanged:
 - `src/hono-app.ts`: Web Request/Response app factory and transport handlers.
 - `src/services/hono-foundation.service.ts`: password/session/media policy.
 - `src/repositories/hono-foundation.repository.ts`: shared dialect-aware persistence.
-- `src/hono-server.ts`: loopback Node listener and filesystem adapter.
+- `src/hono-server.ts`: loopback Node listener and streaming filesystem adapter.
 
 Run migrations with `npm run db:migrate`, create the configured storage directory,
 then use `npm run dev:hono` (HTTP, loopback port 3001) or `npm run build` followed by
@@ -51,16 +51,21 @@ cross-community matches fail. This transitional exact-email resolver does not
 claim canonical username/normalized-email support (#137).
 
 Opaque random session tokens are stored only as SHA-256 digests. Cookies are
-HttpOnly, SameSite=Strict, Secure by default, with a fixed eight-hour lifetime.
+HttpOnly, SameSite=Strict, Secure by default, with a 12-hour idle timeout.
 Every request reads authoritative DB state. A role, community, or password change
 permanently revokes affected sessions through DB triggers; logout deletes one session, revoke
 all deletes the actor's sessions. DB errors fail closed with a content-free 503.
-Login rotates the supplied identifier. Browser mutations require the configured public origin or explicit CORS allowlist.
-No idle renewal, password reset, key rotation, cleanup scheduler, rate-limit
+Use slides the DB expiry by 12 hours, with refresh writes at most once per
+15 minutes per session; successful authenticated responses refresh the cookie.
+Conditional refreshes cannot revive revoked or expired identifiers. The bounded
+refresh cadence quantizes the persisted idle deadline by up to 15 minutes.
+Opt-in 60-day device sessions remain a #137 follow-up. Login rotates the supplied identifier. Browser mutations require the configured public origin or explicit CORS allowlist.
+No password reset, key rotation, cleanup scheduler, rate-limit
 policy, or full identity resolver is claimed here; #137/#138 own those gates.
 Node Rails bcrypt verification is RETAIN behind `PasswordVerifier`; Workers
 verification awaits the auth design/#194. Current-policy upgrades remain #137.
-Unsupported hash formats fail closed, including deferred Fastify Argon2id.
+The Node verifier uses the existing native bcrypt dependency. Unsupported hash
+formats fail closed, including deferred Fastify Argon2id.
 
 The only media case is active community branding through an explicit
 `community_media` relation. Same-community canonical roles may download it;
@@ -133,3 +138,8 @@ The focused Workers test bundles without Node imports and runs in workerd with
 real local D1/R2 bindings. It does not establish deployed Workers Free CPU limits.
 The slice installs no content/request logger; errors contain no credential,
 media, story-title, or other cultural payload.
+
+`wrangler.jsonc` is a template: replace placeholder resource names, database ID,
+and public origin before use. It contains no real deployment identifiers. The
+Worker memoizes app configuration per environment while every DB operation
+starts with primary-current state. No user/session authority is cached.

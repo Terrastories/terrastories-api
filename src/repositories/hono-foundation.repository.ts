@@ -1,5 +1,9 @@
 import { and, eq, gt, isNull, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
+import {
+  sessionLifetime,
+  sessionRenewalInterval,
+} from '../shared/session-policy.js';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
 import {
@@ -17,13 +21,11 @@ export interface FoundationUser {
   communityId: number;
 }
 
-/** Durable authority shared by the coexistence Hono slice on both DB targets. */
 export class HonoFoundationRepository {
   private readonly tables;
   private readonly sessions;
   private readonly communityMedia;
-  // Match the existing repositories' widened Drizzle boundary: both dialects
-  // expose the same query surface while their overloaded TS signatures differ.
+  // Both dialects expose the same surface with incompatible TS overloads.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly database: any;
 
@@ -51,11 +53,7 @@ export class HonoFoundationRepository {
     };
   }
 
-  /**
-   * Transitional exact stored-email lookup. Full canonical normalized identity
-   * and nullable-username support belongs to #137's domain normalization.
-   * Returning two matches forces callers to reject ambiguous tenant selection.
-   */
+  // Exact-email coexistence resolver; canonical identity normalization remains #137.
   async candidates(
     email: string,
     communityId?: number
@@ -110,9 +108,7 @@ export class HonoFoundationRepository {
     // SQLite/D1 serialize this single write statement without interactive locks.
     if (dialectOf(this.database) === 'postgresql')
       verified = verified.for('share');
-    // A stable row ID allows a single-statement rotation on every dialect.
-    // Concurrent rotations can never insert the old browser-token digest:
-    // the inserted/updated token is always the newly generated digest.
+    // Stable row IDs ensure concurrent rotations always write a fresh digest.
     const rows = await this.database
       .insert(sessions)
       .select(verified)
@@ -125,11 +121,15 @@ export class HonoFoundationRepository {
   }
 
   /** Re-read current user/community state; mutation triggers permanently revoke sessions. */
-  async session(tokenHash: string, now: Date): Promise<FoundationUser | null> {
+  async session(
+    tokenHash: string,
+    now: Date,
+    renew = true
+  ): Promise<FoundationUser | null> {
     const { users, communities } = this.tables;
     const sessions = this.sessions;
-    const rows: FoundationUser[] = await this.database
-      .select(this.projection())
+    const rows: (FoundationUser & { expiresAt: number })[] = await this.database
+      .select({ ...this.projection(), expiresAt: sessions.expiresAt })
       .from(sessions)
       .innerJoin(users, eq(sessions.userId, users.id))
       .innerJoin(communities, eq(users.communityId, communities.id))
@@ -142,7 +142,27 @@ export class HonoFoundationRepository {
         )
       )
       .limit(1);
-    return rows[0] ?? null;
+    const user = rows[0];
+    if (
+      user &&
+      renew &&
+      now.getTime() >= user.expiresAt - sessionLifetime + sessionRenewalInterval
+    ) {
+      const touched = await this.database
+        .update(sessions)
+        .set({ expiresAt: now.getTime() + sessionLifetime })
+        .where(
+          and(
+            eq(sessions.tokenHash, tokenHash),
+            eq(sessions.expiresAt, user.expiresAt),
+            gt(sessions.expiresAt, now.getTime())
+          )
+        )
+        .returning({ id: sessions.id });
+      // A lost renewal race must re-read authority, never resurrect a revoked row.
+      if (!touched.length) return this.session(tokenHash, now, false);
+    }
+    return user ?? null;
   }
 
   async revokeSession(tokenHash: string): Promise<void> {
@@ -163,7 +183,6 @@ export class HonoFoundationRepository {
   ): Promise<{
     storageKey: string;
     mimeType: string;
-    originalName: string;
   } | null> {
     const { files, communities } = this.tables;
     const media = this.communityMedia;
@@ -171,7 +190,6 @@ export class HonoFoundationRepository {
       .select({
         storageKey: files.path,
         mimeType: files.mimeType,
-        originalName: files.originalName,
       })
       .from(media)
       .innerJoin(files, eq(media.fileId, files.id))

@@ -1,7 +1,11 @@
-/** Local adapter boundary; the Hono request path depends only on read(key). */
-import { readFile, realpath } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import path from 'node:path';
-import type { FoundationStorage } from './services/hono-foundation.service.js';
+import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
+import {
+  validStorageKey,
+  type FoundationStorage,
+} from './services/hono-foundation.service.js';
 
 export async function createLocalStorage(
   directory: string
@@ -9,16 +13,7 @@ export async function createLocalStorage(
   const root = await realpath(directory);
   return {
     async read(key) {
-      if (
-        !/^communities\/[1-9][0-9]*\//.test(key) ||
-        key
-          .split('/')
-          .some(
-            (part) =>
-              !part || part === '.' || part === '..' || part.includes('\\')
-          )
-      )
-        return null;
+      if (!validStorageKey(key)) return null;
       try {
         const filename = await realpath(path.resolve(root, key));
         const tenantRoot = path.resolve(
@@ -26,7 +21,7 @@ export async function createLocalStorage(
           key.split('/').slice(0, 2).join('/')
         );
         if (!filename.startsWith(tenantRoot + path.sep)) return null;
-        return await readFile(filename);
+        return Readable.toWeb(createReadStream(filename));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
         throw error;

@@ -27,9 +27,9 @@ it('keeps resolved storage bytes inside their authorized tenant', async () => {
   await writeFile(`${root}/communities/2/private`, 'private');
   await symlink('../2/private', `${root}/communities/1/escape`);
   const storage = await createLocalStorage(root);
-  expect(
-    new TextDecoder().decode((await storage.read('communities/1/own'))!)
-  ).toBe('own');
+  const own = await storage.read('communities/1/own');
+  expect(own).toBeInstanceOf(ReadableStream);
+  expect(await new Response(own as ReadableStream).text()).toBe('own');
   expect(await storage.read('communities/1/escape')).toBeNull();
   expect(await storage.read('communities/1/../2/private')).toBeNull();
 });

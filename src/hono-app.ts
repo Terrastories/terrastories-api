@@ -1,3 +1,4 @@
+import { sessionLifetime } from './shared/session-policy.js';
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
@@ -9,7 +10,6 @@ import type {
 } from './repositories/hono-foundation.repository.js';
 import {
   HonoFoundationService,
-  sessionLifetime,
   tokenDigest,
   type FoundationStorage,
   type PasswordVerifier,
@@ -39,7 +39,6 @@ const publicUser = (user: FoundationUser) => ({
   communityId: user.communityId,
 });
 
-/** Coexistence factory; production Fastify wiring is deliberately unchanged. */
 export function createHonoApp(options: FoundationOptions) {
   const app = new Hono<{ Variables: { actor: FoundationUser } }>();
   const service = new HonoFoundationService(
@@ -78,6 +77,7 @@ export function createHonoApp(options: FoundationOptions) {
     secure: options.secureCookies ?? true,
     sameSite: 'Strict' as const,
     path: '/',
+    maxAge: sessionLifetime / 1000,
   };
   app.use('*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
@@ -137,10 +137,7 @@ export function createHonoApp(options: FoundationOptions) {
         getCookie(c, 'ts_session')
       );
       if (!result) return c.json({ error: 'Invalid credentials' }, 401);
-      setCookie(c, 'ts_session', result.token, {
-        ...cookie,
-        maxAge: sessionLifetime / 1000,
-      });
+      setCookie(c, 'ts_session', result.token, cookie);
       return c.json({ user: publicUser(result.user) });
     }
   );
@@ -149,6 +146,11 @@ export function createHonoApp(options: FoundationOptions) {
     if (!user) return c.json({ error: 'Unauthorized' }, 401);
     c.set('actor', user);
     await next();
+    if (
+      c.res.status < 400 &&
+      !['/v2/auth/logout', '/v2/auth/revoke'].includes(c.req.path)
+    )
+      setCookie(c, 'ts_session', getCookie(c, 'ts_session')!, cookie);
   });
   app.get('/v2/auth/me', (c) => c.json({ user: publicUser(c.get('actor')) }));
   app.post('/v2/auth/logout', async (c) => {

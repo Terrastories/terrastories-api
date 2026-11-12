@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from 'node:assert/strict';
 import { eq, sql } from 'drizzle-orm';
-import { hash } from 'bcryptjs';
+import { hash } from 'bcrypt';
 import { serve } from '@hono/node-server';
 import { once } from 'node:events';
 import type { Database } from '../src/db/index.js';
@@ -15,7 +15,10 @@ import {
 import { HonoFoundationRepository } from '../src/repositories/hono-foundation.repository.js';
 import { createHonoApp } from '../src/hono-app.js';
 import { nodePasswordVerifier } from '../src/node-password.js';
-import { sessionLifetime } from '../src/services/hono-foundation.service.js';
+import {
+  sessionLifetime,
+  sessionRenewalInterval,
+} from '../src/shared/session-policy.js';
 const status = async (
   response: Promise<Response>,
   expected: number,
@@ -44,7 +47,7 @@ export async function runHonoFoundationContract(
     dialectOf(database) === 'postgresql' ? sessionsPg : sessionsSqlite;
   const tag = crypto.randomUUID();
   const password = 'Foundation-password-42!';
-  // bcryptjs emits $2b$; Rails/Devise preserves the compatible $2a$ encoding.
+  // bcrypt emits $2b$; Rails/Devise preserves the compatible $2a$ encoding.
   const passwordHash = (await hash(password, 4)).replace('$2b$', '$2a$');
   const communityIds: number[] = [];
   const userIds: number[] = [];
@@ -382,8 +385,34 @@ export async function runHonoFoundationContract(
     await updateCommunity(communityA, { isActive: true });
     await status(me(disabledCookie), 401, 'reactivation cannot revive token');
     const expired = await login(viewerEmail);
-    instant = new Date(instant.getTime() + sessionLifetime);
-    await status(me(expired), 401);
+    const expiry = async (): Promise<number> =>
+      (
+        await db
+          .select({ value: sessions.expiresAt })
+          .from(sessions)
+          .where(eq(sessions.userId, viewerId))
+      )[0].value;
+    const firstExpiry = await expiry();
+    instant = new Date(instant.getTime() + sessionRenewalInterval - 1);
+    await status(me(expired), 200);
+    assert.equal(await expiry(), firstExpiry, 'no renewal before 15 minutes');
+    instant = new Date(instant.getTime() + 1);
+    await status(me(expired), 200);
+    const renewedExpiry = await expiry();
+    assert.equal(renewedExpiry, instant.getTime() + sessionLifetime);
+    instant = new Date(instant.getTime() + 1);
+    await status(me(expired), 200);
+    assert.equal(await expiry(), renewedExpiry, 'renewals are bounded');
+    instant = new Date(firstExpiry);
+    const activeAfterInitialExpiry = await me(expired);
+    assert.equal(activeAfterInitialExpiry.status, 200, 'active session slides');
+    assert.ok(
+      activeAfterInitialExpiry.headers
+        .get('set-cookie')
+        ?.includes('Max-Age=43200')
+    );
+    instant = new Date(await expiry());
+    await status(me(expired), 401, 'exact 12-hour idle boundary');
     await updateUser(viewerId, { passwordHash: 'malformed' });
     await status(
       request('/v2/auth/login', 'POST', {

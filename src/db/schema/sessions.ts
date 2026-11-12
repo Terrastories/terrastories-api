@@ -19,8 +19,7 @@ import { usersPg, usersSqlite } from './users.js';
 import { filesPg, filesSqlite } from './files.js';
 import { communitiesPg, communitiesSqlite } from './communities.js';
 
-// Expiry is Unix milliseconds on both backends. Only a digest of the opaque
-// browser token is persisted; no authorization state is cached in the cookie.
+// Token digests and Unix-millisecond expiry; user authority is never cached.
 export const sessionsPg = pgTable(
   'sessions',
   {
@@ -47,8 +46,7 @@ export const sessionsSqlite = sqliteTable(
   (table) => [index('sessions_user_idx').on(table.userId)]
 );
 
-// One typed owning-resource relation for the thin slice. A File row or a
-// legacy stored URL alone is never sufficient authority to read its bytes.
+// A File row or legacy URL alone never authorizes its bytes.
 export const communityMediaPg = pgTable(
   'community_media',
   {

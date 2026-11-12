@@ -1,8 +1,10 @@
 # Phase 1 — Fastify → Hono Migration
 
-**Status:** Active foundation in PR #132  
+**Status:** PR #132 closed 2026-11-11; superseded by the thin Hono slice off main (#193)  
 **Authority:** Execution plan subordinate to `docs/SPEC-V2.md`  
-**Last reviewed:** 2026-09-27
+**Last reviewed:** 2026-11-12
+
+PR #132 was closed on 2026-11-11 and superseded by a thin Hono slice re-landed off `main` (#193): health, login, durable session, revocation, and one protected media read land first, and Fastify-only route work is frozen. The layout and domain list below describe #132's design and are kept as reference material.
 
 ## Goal
 
@@ -92,4 +94,4 @@ Phase 1 is complete only when, on the exact merge candidate:
 8. `/api/v1` remains intact for temporary coexistence until an explicitly approved cutover.
 9. The merge candidate remains consistent with `SPEC-V2.md` and the production-readiness roadmap.
 
-PR #132 may merge as the coexistence foundation before the broader Phase 1 exit gate is complete; #134/#145/#146 follow on that base. Hono-specific production hardening proceeds through the dependency/readiness ordering in GitHub rather than growing this foundation PR into a production mega-PR.
+The thin Hono slice off `main` is the coexistence foundation and may merge before the broader Phase 1 exit gate is complete; #134/#145/#146 follow on that base (PR #132 is closed and is not a base). Hono-specific production hardening proceeds through the dependency/readiness ordering in GitHub rather than growing the slice into a production mega-PR.

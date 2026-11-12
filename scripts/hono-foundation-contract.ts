@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { eq, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { serve } from '@hono/node-server';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import type { Database } from '../src/db/index.js';
 import { dialectOf, tablesFor } from '../src/db/dialect.js';
 import {
@@ -24,11 +24,9 @@ const status = async (
   expected: number,
   message?: string
 ) => assert.equal((await response).status, expected, message);
-const send = (
-  app: ReturnType<typeof createHonoApp>,
-  path: string,
-  init?: RequestInit
-) => Promise.resolve(app.request(new Request('http://localhost' + path, init)));
+type App = ReturnType<typeof createHonoApp>;
+const send = (app: App, path: string, init?: RequestInit) =>
+  Promise.resolve(app.request(new Request('http://localhost' + path, init)));
 const failsClosed = async (response: Promise<Response>, detail: string) => {
   const result = await response;
   assert.equal(result.status, 503);
@@ -70,34 +68,21 @@ export async function runHonoFoundationContract(
   const app = createHonoApp(options);
   type Transport = (req: Request) => Promise<Response>;
   const transport: Transport = async (req) => app.request(req);
-  const request = (
-    path: string,
-    method = 'GET',
-    body?: unknown,
-    cookie?: string
-  ) =>
-    transport(
-      new Request(`http://localhost${path}`, {
-        method,
-        headers: {
-          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-          ...(cookie ? { cookie } : {}),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      })
-    );
-  const postLogin = (target: typeof app, body: unknown, headers = {}) =>
+  const get = (path: string, cookie = '') =>
+    send(app, path, { headers: { cookie } });
+  const postRaw = (target: typeof app, body: string, headers = {}) =>
     send(target, '/v2/auth/login', {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...headers },
-      body: JSON.stringify(body),
+      body,
     });
-  const me = (cookie?: string) =>
-    request('/v2/auth/me', 'GET', undefined, cookie);
+  const postLogin = (target: typeof app, body: unknown, headers = {}) =>
+    postRaw(target, JSON.stringify(body), headers);
+  const me = (cookie?: string) => get('/v2/auth/me', cookie);
   const readMedia = (cookie?: string, id = fileIds[0]) =>
-    request('/v2/media/' + id, 'GET', undefined, cookie);
+    get('/v2/media/' + id, cookie);
   const action = (name: string, cookie: string) =>
-    request('/v2/auth/' + name, 'POST', undefined, cookie);
+    send(app, '/v2/auth/' + name, { method: 'POST', headers: { cookie } });
   const updateFile = (values: Record<string, unknown>) =>
     db.update(tables.files).set(values).where(eq(tables.files.id, fileIds[0]));
   const bind = (communityId: number) =>
@@ -107,11 +92,10 @@ export async function runHonoFoundationContract(
     communityId?: number,
     previous?: string
   ) => {
-    const response = await request(
-      '/v2/auth/login',
-      'POST',
+    const response = await postLogin(
+      app,
       { email, password, communityId },
-      previous
+      previous ? { cookie: previous } : {}
     );
     const body = await response.text();
     assert.equal(response.status, 200, `login failed: ${body}`);
@@ -143,9 +127,15 @@ export async function runHonoFoundationContract(
     }
     const [communityA, communityB] = communityIds;
     const viewerEmail = `viewer-${tag}@example.test`;
+    const credentials = { email: viewerEmail, password };
     const adminEmail = `admin-${tag}@example.test`;
     const systemEmail = `system-${tag}@example.test`;
     const duplicateEmail = `duplicate-${tag}@example.test`;
+    const userDefaults = {
+      passwordHash,
+      firstName: 'Hono',
+      lastName: 'Contract',
+    };
     for (const [email, role, communityId] of [
       [viewerEmail, 'viewer', communityA],
       [adminEmail, 'admin', communityA],
@@ -156,12 +146,10 @@ export async function runHonoFoundationContract(
       const [row] = await db
         .insert(tables.users)
         .values({
+          ...userDefaults,
           email,
           role,
           communityId,
-          passwordHash,
-          firstName: 'Hono',
-          lastName: 'Contract',
         })
         .returning();
       userIds.push(row.id);
@@ -188,16 +176,19 @@ export async function runHonoFoundationContract(
       { fileId: fileIds[0], communityId: communityA, kind: 'branding' },
       { fileId: fileIds[1], communityId: communityB, kind: 'branding' },
     ]);
-    await status(request('/health'), 200);
-    await status(request('/ready'), 200);
+    await status(get('/health'), 200);
+    await status(get('/ready'), 200);
+    const apiOrigin = 'https://api.example.test';
+    const clientOrigin = 'https://client.example.test';
+    const foreignOrigin = 'https://foreign.invalid';
     const browserApp = createHonoApp({
       ...options,
-      publicOrigin: 'https://api.example.test',
-      corsOrigins: ['https://client.example.test'],
+      publicOrigin: apiOrigin,
+      corsOrigins: [clientOrigin],
     });
     for (const [origin, expected] of [
-      ['https://api.example.test', 400],
-      ['https://foreign.invalid', 403],
+      [apiOrigin, 400],
+      [foreignOrigin, 403],
     ]) {
       const browserResponse = await postLogin(
         browserApp,
@@ -206,10 +197,7 @@ export async function runHonoFoundationContract(
       );
       assert.equal(browserResponse.status, expected, 'HTTPS proxy origin');
     }
-    for (const origin of [
-      'https://client.example.test',
-      'https://foreign.invalid',
-    ]) {
+    for (const origin of [clientOrigin, foreignOrigin]) {
       const preflight = await send(browserApp, '/v2/auth/login', {
         method: 'OPTIONS',
         headers: {
@@ -219,15 +207,12 @@ export async function runHonoFoundationContract(
         },
       });
       assert.equal(preflight.status, 204);
-      assert.equal(
-        preflight.headers.get('access-control-allow-origin'),
-        origin === 'https://client.example.test' ? origin : null
+      const allowedOrigin = preflight.headers.get(
+        'access-control-allow-origin'
       );
+      assert.equal(allowedOrigin, origin === clientOrigin ? origin : null);
       assert.ok(preflight.headers.get('vary')?.includes('Origin'));
-      assert.notEqual(
-        preflight.headers.get('access-control-allow-origin'),
-        '*'
-      );
+      assert.notEqual(allowedOrigin, '*');
     }
     // Keep native Request identity: node-server's global override makes native
     // Request.clone() fail Hono's instanceof Request transport dispatch.
@@ -247,39 +232,27 @@ export async function runHonoFoundationContract(
         server.close((error) => (error ? reject(error) : resolve()))
       );
     }
-    await status(
-      postLogin(
-        app,
-        { email: viewerEmail, password },
-        { Origin: 'https://foreign.invalid' }
-      ),
-      403
-    );
+    await status(postLogin(app, credentials, { Origin: foreignOrigin }), 403);
     await status(me(), 401);
     for (const payload of [
       { email: viewerEmail, password: 'wrong' },
       { email: `missing-${tag}@example.test`, password },
       { email: duplicateEmail, password },
       { email: viewerEmail, password, communityId: communityB },
+      { email: viewerEmail, password, communityId: 2147483647 },
     ])
-      await status(request('/v2/auth/login', 'POST', payload), 401);
+      await status(postLogin(app, payload), 401);
     for (const payload of [
       {},
       { email: viewerEmail, password, communityId: '1junk' },
       { email: viewerEmail, password: 1 },
-    ]) {
-      await status(request('/v2/auth/login', 'POST', payload), 400);
-    }
-    await status(
-      transport(
-        new Request('http://localhost/v2/auth/login', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{',
-        })
+      ...[0, -1, 1.5, 2147483648, 3000000000, Number.MAX_SAFE_INTEGER].map(
+        (communityId) => ({ email: viewerEmail, password, communityId })
       ),
-      400
-    );
+    ]) {
+      await status(postLogin(app, payload), 400);
+    }
+    await status(postRaw(app, '{'), 400);
     await login(duplicateEmail, communityA);
     const attackerCookie = `ts_session=${'a'.repeat(64)}`;
     const cookie = await login(viewerEmail, undefined, attackerCookie);
@@ -375,6 +348,7 @@ export async function runHonoFoundationContract(
     ]) {
       const active = await login(viewerEmail);
       await updateUser(viewerId, change);
+      if ('isActive' in change) await status(postLogin(app, credentials), 401);
       await status(me(active), 401);
       await updateUser(viewerId, restore);
       await status(me(active), 401, 'restored account cannot revive token');
@@ -406,18 +380,14 @@ export async function runHonoFoundationContract(
     instant = new Date(firstExpiry);
     const activeAfterInitialExpiry = await me(expired);
     assert.equal(activeAfterInitialExpiry.status, 200, 'active session slides');
-    assert.ok(
-      activeAfterInitialExpiry.headers
-        .get('set-cookie')
-        ?.includes('Max-Age=43200')
-    );
+    const renewedCookie = activeAfterInitialExpiry.headers.get('set-cookie');
+    assert.ok(renewedCookie?.includes('Max-Age=43200'));
     instant = new Date(await expiry());
     await status(me(expired), 401, 'exact 12-hour idle boundary');
     await updateUser(viewerId, { passwordHash: 'malformed' });
     await status(
-      request('/v2/auth/login', 'POST', {
-        email: viewerEmail,
-        password,
+      postLogin(app, {
+        ...credentials,
       }),
       401
     );
@@ -433,27 +403,22 @@ export async function runHonoFoundationContract(
         'private detail'
       );
     }
-    let entered!: () => void, release!: () => void;
-    const reached = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    const resume = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const barrier = new EventEmitter();
+    const reached = once(barrier, 'entered');
     const racing = createHonoApp({
       ...options,
       verifier: {
         verify: async () => {
-          entered();
-          await resume;
+          barrier.emit('entered');
+          await once(barrier, 'resume');
           return true;
         },
       },
     });
-    const pending = postLogin(racing, { email: viewerEmail, password });
+    const pending = postLogin(racing, credentials);
     await reached;
     await updateUser(viewerId, { passwordHash: 'reset-during-verification' });
-    release();
+    barrier.emit('resume');
     const rejected = await pending;
     assert.equal(rejected.status, 401, 'password reset wins verifier race');
     assert.equal(rejected.headers.get('set-cookie'), null);

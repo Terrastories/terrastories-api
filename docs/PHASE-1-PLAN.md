@@ -143,3 +143,18 @@ media, story-title, or other cultural payload.
 and public origin before use. It contains no real deployment identifiers. The
 Worker memoizes app configuration per environment while every DB operation
 starts with primary-current state. No user/session authority is cached.
+
+The template disables platform logs and traces: automatic request metadata can
+include URLs or query strings carrying protected content. Enable observability
+only after a content-safe event projection and sampling policy are approved;
+this foundation does not record request bodies, URLs, credentials, or cultural
+payloads.
+
+Node password rejections perform the same ordered bcrypt cost schedule 04–14,
+using the real hash only at its encoded cost and dummy hashes for the other
+steps. Unknown/inactive/malformed accounts use only dummies. Successful credential
+verification may finish early; failure-work tests inspect the cost schedule,
+not wall-clock thresholds. The extra rejection work is intentional; production
+throttling remains a separate #138 gate. Numeric request IDs use the shared
+PostgreSQL-compatible positive integer bound, 2147483647; UUID media identifiers
+retain their UUID schema.

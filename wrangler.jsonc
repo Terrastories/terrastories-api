@@ -14,5 +14,5 @@
     { "binding": "MEDIA", "bucket_name": "replace-with-your-bucket" },
   ],
   "vars": { "PUBLIC_ORIGIN": "https://example.org", "CORS_ORIGINS": "" },
-  "observability": { "enabled": true, "traces": { "enabled": true } },
+  "observability": { "enabled": false, "traces": { "enabled": false } },
 }

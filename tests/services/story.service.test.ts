@@ -398,7 +398,7 @@ describe('StoryService', () => {
       );
     });
 
-    it('should allow elder access to elder-only content', async () => {
+    it('should withhold undispositioned elder-only content from legacy elders', async () => {
       // Arrange
       const elderOnlyStory = createElderOnlyStory();
       mockStoryRepository.findByIdWithRelations.mockResolvedValue(
@@ -414,7 +414,7 @@ describe('StoryService', () => {
       );
 
       // Assert
-      expect(result).toEqual(elderOnlyStory);
+      expect(result).toBeNull();
     });
 
     it('should deny editor access to elder-only content', async () => {
@@ -940,6 +940,7 @@ describe('StoryService', () => {
       const storyWithFiles: StoryWithRelations = {
         id: 1,
         title: 'Test Story with Files',
+        privacyLevel: 'public',
         description: 'A test story with file URLs',
         slug: 'test-story-files',
         communityId: testData.community.id,

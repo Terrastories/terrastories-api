@@ -30,7 +30,9 @@ export interface Result extends Endpoint {
     | 'status-mismatch'
     | 'body-mismatch'
     | 'missing-created-id'
-    | 'request-failed';
+    | 'request-failed'
+    | 'unmatched-route';
+  message?: string;
 }
 export type Handler = (request: Request) => Promise<Response>;
 export function validateBaseUrl(value: string): URL {
@@ -81,6 +83,8 @@ export async function runJourneys(options: {
       let actual = 0;
       let pass = false;
       let failure: Result['failure'];
+      let message: string | undefined;
+      let stage = 'Preparing request';
       try {
         await step.prepare?.();
         path = step.path.replace(/\{(\w+)\}/g, (_, name: string) => {
@@ -91,6 +95,7 @@ export async function runJourneys(options: {
         if (cookie && !headers.has('cookie')) headers.set('cookie', cookie);
         if (step.body !== undefined)
           headers.set('content-type', 'application/json');
+        stage = 'Sending request';
         const response = await options.handler(
           new Request(`http://qa.invalid${path}`, {
             method: step.method,
@@ -113,6 +118,7 @@ export async function runJourneys(options: {
         pass = actual === step.expected;
         if (!pass) failure = 'status-mismatch';
         if (step.check || step.captureId) {
+          stage = 'Reading response JSON';
           const body: unknown = await response.json();
           if (step.check && !step.check(body)) {
             pass = false;
@@ -146,9 +152,15 @@ export async function runJourneys(options: {
             b.path.split('/').filter((p) => p.startsWith(':')).length
         );
         if (candidates[0]) reached.add(key(candidates[0]));
+        else {
+          pass = false;
+          failure = 'unmatched-route';
+          message = 'No registered endpoint matches this request';
+        }
       } catch {
         pass = false;
         failure ??= 'request-failed';
+        message = `${stage} failed`;
       }
       results.push({
         persona: journey.persona,
@@ -159,6 +171,7 @@ export async function runJourneys(options: {
         actual,
         pass,
         ...(failure ? { failure } : {}),
+        ...(message ? { message } : {}),
       });
     }
   }
@@ -183,6 +196,7 @@ export async function runJourneys(options: {
       excluded: exclusions.length,
     },
     pass:
+      options.routes.length > 0 &&
       results.length > 0 &&
       results.every((result) => result.pass) &&
       uncovered.length === 0,

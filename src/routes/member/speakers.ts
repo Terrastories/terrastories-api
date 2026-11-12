@@ -1,3 +1,4 @@
+import { SpeakerNotFoundError } from '../../shared/errors/index.js';
 /**
  * Member Speakers Routes
  *
@@ -8,6 +9,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import {
   requireAuth,
+  requireRole,
   enforceDataSovereignty,
   type AuthenticatedRequest,
 } from '../../shared/middleware/auth.middleware.js';
@@ -214,6 +216,12 @@ export async function memberSpeakersRoutes(
         const speakerDTO = toMemberSpeaker(speaker, userRole);
         return reply.code(200).send({ data: speakerDTO });
       } catch (error: unknown) {
+        if (error instanceof SpeakerNotFoundError) {
+          return reply.code(404).send({
+            error: { code: 'NOT_FOUND', message: 'Resource not found' },
+          });
+        }
+
         if (error instanceof z.ZodError) {
           return reply.code(400).send({
             error: {
@@ -245,7 +253,11 @@ export async function memberSpeakersRoutes(
 
   // POST /api/v1/member/speakers - Create new speaker
   app.post('/', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Create new speaker',
       tags: ['Member Speakers'],
@@ -281,7 +293,12 @@ export async function memberSpeakersRoutes(
         201: {
           type: 'object',
           properties: {
-            data: { type: 'object' },
+            data: {
+              type: 'object',
+              additionalProperties: true,
+              required: ['id'],
+              properties: { id: { type: 'integer' } },
+            },
           },
         },
       },
@@ -353,7 +370,11 @@ export async function memberSpeakersRoutes(
 
   // PUT /api/v1/member/speakers/:id - Update speaker
   app.put('/:id', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Update speaker',
       tags: ['Member Speakers'],
@@ -471,7 +492,11 @@ export async function memberSpeakersRoutes(
 
   // DELETE /api/v1/member/speakers/:id - Delete speaker
   app.delete('/:id', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Delete speaker',
       tags: ['Member Speakers'],

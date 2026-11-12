@@ -16,6 +16,7 @@ import { PlaceRepository } from '../repositories/place.repository.js';
 import { getDb, type Database } from '../db/index.js';
 import {
   requireAuth,
+  enforceDataSovereignty,
   requireRole,
   type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
@@ -139,7 +140,11 @@ export async function placesRoutes(
    * POST /api/v1/places
    */
   fastify.post('/places', {
-    preHandler: [requireAuth, requireRole(['admin', 'editor'])],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['admin', 'editor']),
+    ],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const data = CreatePlaceSchema.parse(request.body);
@@ -167,7 +172,7 @@ export async function placesRoutes(
    * GET /api/v1/places/:id
    */
   fastify.get('/places/:id', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, enforceDataSovereignty],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { id } = PlaceIdSchema.parse(request.params);
@@ -193,7 +198,7 @@ export async function placesRoutes(
    * GET /api/v1/places
    */
   fastify.get('/places', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, enforceDataSovereignty],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       const params = PaginationSchema.parse(request.query);
       const { community_id } = request.query as { community_id?: string };
@@ -207,22 +212,16 @@ export async function placesRoutes(
         page: params.page,
       };
 
-      let result;
-      if (community_id) {
-        // If community_id is specified, filter by that community
-        result = await placeService.getPlacesByCommunity(
-          parseInt(community_id, 10),
-          repositoryParams,
-          'viewer' // Use minimal permissions for public access
-        );
-      } else {
-        // Use the authenticated user's community ID as default
-        result = await placeService.getPlacesByCommunity(
-          user.communityId,
-          repositoryParams,
-          user.role
-        );
+      if (community_id && community_id !== String(user.communityId)) {
+        return reply
+          .code(404)
+          .send({ error: { message: 'Community not found' } });
       }
+      const result = await placeService.getPlacesByCommunity(
+        user.communityId,
+        repositoryParams,
+        user.role
+      );
 
       return reply.send({
         data: result.data,
@@ -242,7 +241,11 @@ export async function placesRoutes(
    * PUT /api/v1/places/:id
    */
   fastify.put('/places/:id', {
-    preHandler: [requireAuth, requireRole(['admin', 'editor'])],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['admin', 'editor']),
+    ],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { id } = PlaceIdSchema.parse(request.params);
@@ -272,7 +275,11 @@ export async function placesRoutes(
    * DELETE /api/v1/places/:id
    */
   fastify.delete('/places/:id', {
-    preHandler: [requireAuth, requireRole(['admin', 'elder'])],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['admin', 'elder']),
+    ],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { id } = PlaceIdSchema.parse(request.params);
@@ -297,7 +304,7 @@ export async function placesRoutes(
    * GET /api/v1/places/near
    */
   fastify.get('/places/near', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, enforceDataSovereignty],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const params = NearbySearchSchema.parse(request.query);
@@ -340,7 +347,7 @@ export async function placesRoutes(
    * GET /api/v1/places/bounds
    */
   fastify.get('/places/bounds', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, enforceDataSovereignty],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const params = BoundsSearchSchema.parse(request.query);
@@ -387,7 +394,7 @@ export async function placesRoutes(
    * GET /api/v1/places/stats
    */
   fastify.get('/places/stats', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, enforceDataSovereignty],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       const { user } = request as AuthenticatedRequest;
 

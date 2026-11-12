@@ -444,6 +444,23 @@ export class StoryService {
       return null;
     }
 
+    // Undispositioned V1 restrictions have no V2 audience (SPEC-V2 §6.3).
+    // Never grant even an administrator access by inferring legacy intent.
+    const privacy = (story as StoryWithRelations & { privacyLevel?: string })
+      .privacyLevel;
+    if (
+      story.isRestricted ||
+      !['public', 'members_only'].includes(privacy ?? '') ||
+      (privacy === 'members_only' && userRole === 'viewer')
+    ) {
+      this.logger.warn('Cultural protocol access denied', {
+        userId,
+        storyId: id,
+        reason: 'Story audience is unavailable to this actor',
+      });
+      return null;
+    }
+
     // Cultural protocol access validation
     const accessResult = await this.validateCulturalAccess(
       story,
@@ -1271,7 +1288,11 @@ export class StoryService {
       }
 
       // Check if story is public (not restricted)
-      if (story.isRestricted) {
+      if (
+        story.isRestricted ||
+        (story as StoryWithRelations & { privacyLevel?: string })
+          .privacyLevel !== 'public'
+      ) {
         this.logger.warn('[PUBLIC_API_ACCESS_DENIED]', {
           timestamp: new Date().toISOString(),
           reason: 'Story has cultural restrictions and is not public',

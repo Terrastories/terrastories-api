@@ -30,3 +30,21 @@ each explicitly excluded endpoint.
 
 CI release-gate integration and disconnected field-kit acceptance remain owned
 by #147. SQLite results do not establish PostgreSQL or Workers readiness.
+
+Negative matrices cover each resource's actual schema. Stories have restricted
+and unevidenced audience fixtures; places have a restricted flag; media has held
+and unknown legacy restriction metadata. Speakers, themes and users have no
+independent restricted/unknown audience field in this schema, so their matrix
+checks community boundaries instead of inventing product fields. The
+`restrictionApplicability` map in `personas/negative-matrix.ts` records this.
+The restricted-holder logs in as a separately provisioned community admin;
+there is no V2 elder role and this identity receives no extra read privilege.
+
+The spec requires unavailable content to remain unavailable, without prescribing
+one HTTP status for every authorization stage. Journeys expect 404 for a hidden
+row when the route permits the actor to perform lookups, and 403 when a role is
+refused access to the entire route family regardless of the requested ID.
+Request-failure messages identify the failed operation (preparation, transport,
+or response JSON) and never copy exception text that could contain credentials.
+Use `QA_REPORT_PATH=/absolute/path/report.json` with the SQLite Vitest wrapper to
+retain its report even when assertions fail.

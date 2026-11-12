@@ -174,7 +174,7 @@ describe('PlaceService', () => {
       );
     });
 
-    it('should include restricted places for elders', async () => {
+    it('should exclude held places even for legacy elder accounts', async () => {
       const mockResponse = {
         data: [mockPlace],
         total: 1,
@@ -198,7 +198,7 @@ describe('PlaceService', () => {
         {
           page: 1,
           limit: 10,
-          includeRestricted: true,
+          includeRestricted: false,
         }
       );
     });
@@ -417,18 +417,18 @@ describe('PlaceService', () => {
 
       await expect(
         service.getPlaceById(1, testCommunityId, 'viewer')
-      ).rejects.toThrow('Access to this sacred place is restricted to elders');
+      ).rejects.toThrow(/Place.*not found/);
     });
 
-    it('should allow elder access to restricted places', async () => {
+    it('should deny legacy elder access to held places', async () => {
       const restrictedPlace = { ...mockPlace, isRestricted: true };
       vi.spyOn(mockRepository, 'getByIdWithCommunityCheck').mockResolvedValue(
         restrictedPlace
       );
 
-      const result = await service.getPlaceById(1, testCommunityId, 'elder');
-
-      expect(result).toEqual(restrictedPlace);
+      await expect(
+        service.getPlaceById(1, testCommunityId, 'elder')
+      ).rejects.toThrow(/Place.*not found/);
     });
 
     it('should validate cultural significance data', async () => {

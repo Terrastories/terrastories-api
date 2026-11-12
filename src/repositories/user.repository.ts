@@ -657,7 +657,7 @@ export class UserRepository {
       const users = await this.database
         .select()
         .from(usersTable)
-        .where(eq(usersTable.id, id))
+        .where(and(eq(usersTable.id, id), eq(usersTable.role, 'super_admin')))
         .limit(1);
 
       return users[0] || null;
@@ -701,7 +701,7 @@ export class UserRepository {
           communitiesTable,
           eq(usersTable.communityId, communitiesTable.id)
         )
-        .where(eq(usersTable.id, id))
+        .where(and(eq(usersTable.id, id), eq(usersTable.role, 'super_admin')))
         .limit(1);
 
       return users[0] || null;
@@ -736,7 +736,7 @@ export class UserRepository {
       const updatedUsers = await this.database
         .update(usersTable)
         .set(updateData)
-        .where(eq(usersTable.id, id))
+        .where(and(eq(usersTable.id, id), eq(usersTable.role, 'super_admin')))
         .returning();
 
       if (!updatedUsers || updatedUsers.length === 0) {

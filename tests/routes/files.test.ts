@@ -300,12 +300,11 @@ describe('File Routes Integration', () => {
         ].join('\r\n'),
       });
 
-      // Note: This test hits file type validation first, which is expected behavior
-      // Oversized invalid files should return 415 (Unsupported Media Type)
-      expect(response.statusCode).toBe(415);
+      // Reject truncated uploads before interpreting or storing their prefix.
+      expect(response.statusCode).toBe(413);
 
       const result = JSON.parse(response.body);
-      expect(result.error).toContain('Could not detect file type');
+      expect(result.error).toContain('File size exceeds');
     });
 
     it('should reject invalid file types', async () => {

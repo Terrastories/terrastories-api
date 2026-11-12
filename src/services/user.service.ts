@@ -598,11 +598,11 @@ export class UserService {
 
   /**
    * Super Admin Methods
-   * These methods provide cross-community access for super admin users only
+   * These methods manage system accounts without granting community-user access
    */
 
   /**
-   * Get all users across communities with pagination (super admin only)
+   * Get system users with pagination (super admin only)
    * @param options - Query options including pagination and filters
    * @returns Promise<{data: UserResponse[], meta: PaginationMeta}> - Paginated users
    */
@@ -638,13 +638,16 @@ export class UserService {
   }> {
     try {
       const { page = 1, limit = 20, community, role, search, active } = options;
-
       // Validate pagination
       if (page < 1) {
         throw new Error('Page must be at least 1');
       }
       if (limit < 1 || limit > 100) {
         throw new Error('Limit must be between 1 and 100');
+      }
+
+      if (role && role !== 'super_admin') {
+        return { data: [], meta: { page, limit, total: 0, totalPages: 0 } };
       }
 
       const offset = (page - 1) * limit;
@@ -673,10 +676,9 @@ export class UserService {
         searchFilters.communityId = community;
         countFilters.communityId = community;
       }
-      if (role) {
-        searchFilters.role = role;
-        countFilters.role = role;
-      }
+      // System privilege never widens this query to community accounts.
+      searchFilters.role = 'super_admin';
+      countFilters.role = 'super_admin';
       if (active !== undefined) {
         searchFilters.isActive = active;
         countFilters.isActive = active;
@@ -726,7 +728,7 @@ export class UserService {
   }
 
   /**
-   * Create user in any community as super admin
+   * Create a system user as super admin
    * @param data - User creation data
    * @returns Promise<User> - Created user
    */
@@ -740,8 +742,12 @@ export class UserService {
     isActive?: boolean;
   }): Promise<User> {
     try {
-      // Super admin can create users in any community
-      // Use the existing registerUser method but bypass community restrictions
+      if (data.role !== 'super_admin') {
+        throw new SuperAdminRoleError(
+          'System administration cannot create community accounts'
+        );
+      }
+      // The legacy schema still requires a system community ID for system users.
       const userData: CreateUserRequest = {
         email: data.email,
         password: data.password,
@@ -758,7 +764,8 @@ export class UserService {
       if (
         error instanceof DuplicateEmailError ||
         error instanceof WeakPasswordError ||
-        error instanceof InvalidCommunityError
+        error instanceof InvalidCommunityError ||
+        error instanceof SuperAdminRoleError
       ) {
         throw error;
       }
@@ -771,7 +778,7 @@ export class UserService {
   }
 
   /**
-   * Update user details as super admin (including role changes)
+   * Update system-user details as super admin
    * @param id - User ID
    * @param updates - Update data
    * @returns Promise<User> - Updated user
@@ -787,7 +794,17 @@ export class UserService {
     }
   ): Promise<User> {
     try {
-      // Super admin can update any user including cross-community changes
+      const existing = await this.getUserByIdAsSuperAdmin(id);
+      if (!existing) throw new UserNotFoundError();
+      if (
+        (updates.role !== undefined && updates.role !== 'super_admin') ||
+        (updates.communityId !== undefined &&
+          updates.communityId !== existing.communityId)
+      ) {
+        throw new SuperAdminRoleError(
+          'System administration cannot assign community membership'
+        );
+      }
       const updateData: Partial<UpdateUserData> = {
         firstName: updates.firstName,
         lastName: updates.lastName,
@@ -807,7 +824,10 @@ export class UserService {
       if (error instanceof Error && error.message.includes('User not found')) {
         throw new UserNotFoundError();
       }
-      if (error instanceof UserNotFoundError) {
+      if (
+        error instanceof UserNotFoundError ||
+        error instanceof SuperAdminRoleError
+      ) {
         throw error;
       }
       throw new Error(
@@ -819,7 +839,7 @@ export class UserService {
   }
 
   /**
-   * Get user by ID as super admin (cross-community access)
+   * Get a system user by ID as super admin
    * @param id - User ID
    * @returns Promise<User | null> - User data or null if not found
    */

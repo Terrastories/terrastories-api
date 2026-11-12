@@ -77,6 +77,76 @@ describe('User Service', () => {
     vi.clearAllMocks();
   });
 
+  describe('system administration isolation', () => {
+    test('filters community users before pagination and hides direct read/update/delete', async () => {
+      const communityUser = await userService.registerUser({
+        email: 'community-boundary@example.test',
+        password: 'StrongPassword123@',
+        firstName: 'Community',
+        lastName: 'Private',
+        role: 'viewer',
+        communityId: testCommunityId,
+      });
+      const systemUser = await userService.registerUser({
+        email: 'system-boundary@example.test',
+        password: 'StrongPassword123@',
+        firstName: 'System',
+        lastName: 'Admin',
+        role: 'super_admin',
+        communityId: otherCommunityId,
+      });
+      await expect(
+        userService.createUserAsSuperAdmin({
+          email: 'forbidden-community@example.test',
+          password: 'StrongPassword123@',
+          firstName: 'Forbidden',
+          lastName: 'Community',
+          role: 'viewer',
+          communityId: testCommunityId,
+        })
+      ).rejects.toThrow(
+        'System administration cannot create community accounts'
+      );
+      const page = await userService.getAllUsersForSuperAdmin({ limit: 1 });
+      expect(page.meta.total).toBe(1);
+      expect(page.data.map((user) => user.id)).toEqual([systemUser.id]);
+      expect(
+        (await userService.getAllUsersForSuperAdmin({ role: 'viewer' })).meta
+          .total
+      ).toBe(0);
+      expect(
+        await userService.getUserByIdAsSuperAdmin(communityUser.id)
+      ).toBeNull();
+      expect(
+        await userService.getUserByIdWithCommunityName(communityUser.id)
+      ).toBeNull();
+      await expect(
+        userService.updateUserAsSuperAdmin(communityUser.id, {
+          firstName: 'Changed',
+        })
+      ).rejects.toThrow();
+      await expect(
+        userService.deactivateUserAsSuperAdmin(communityUser.id)
+      ).rejects.toThrow();
+      expect(
+        (await userRepository.findByIdAsSuperAdmin(systemUser.id))?.isActive
+      ).toBe(true);
+      await expect(
+        userRepository.updateByIdAsSuperAdmin(communityUser.id, {
+          isActive: false,
+        })
+      ).rejects.toThrow('User not found');
+      await expect(
+        userService.updateUserAsSuperAdmin(systemUser.id, { role: 'viewer' })
+      ).rejects.toThrow('System administration');
+      await expect(
+        userService.updateUserAsSuperAdmin(systemUser.id, {
+          communityId: testCommunityId,
+        })
+      ).rejects.toThrow('System administration');
+    });
+  });
+
   describe('registerUser', () => {
     test('should register a new user successfully', async () => {
       const registrationData: CreateUserRequest = {

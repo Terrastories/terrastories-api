@@ -1,3 +1,4 @@
+import { isolationSteps, wrongRoleSteps } from './negative-matrix.js';
 import { communitySteps } from './community.js';
 import { dashboardSteps } from './member-dashboard.js';
 import { userSteps, systemSteps } from './users.js';
@@ -14,8 +15,15 @@ export interface PersonaFixture {
   foreignStoryId: number;
   restrictedStoryId: number;
   unevidencedStoryId: number;
+  foreignCommunityId: number;
+  foreignIds: Record<'places' | 'speakers' | 'themes' | 'users', number> & {
+    files: string;
+  };
+  heldPlaceId: number;
+  heldFileId: string;
+  unknownFileId: string;
   credentials: Record<
-    'viewer' | 'member' | 'editor' | 'admin' | 'super_admin',
+    'viewer' | 'member' | 'editor' | 'admin' | 'super_admin' | 'holder',
     {
       email: string;
       password: string;
@@ -38,7 +46,8 @@ export function buildJourneys(fixture: PersonaFixture): Journey[] {
         !body.data.some(
           (row: { id?: number }) =>
             row.id === fixture.foreignStoryId ||
-            row.id === fixture.restrictedStoryId
+            row.id === fixture.restrictedStoryId ||
+            row.id === fixture.unevidencedStoryId
         ),
     },
     {
@@ -128,6 +137,7 @@ export function buildJourneys(fixture: PersonaFixture): Journey[] {
           path: '/api/communities',
           expected: 200,
         },
+        ...isolationSteps(fixture, 'anonymous'),
         {
           name: 'public stories',
           method: 'GET',
@@ -154,6 +164,8 @@ export function buildJourneys(fixture: PersonaFixture): Journey[] {
       steps: [
         login(role),
         ...browse,
+        ...isolationSteps(fixture, role),
+        ...wrongRoleSteps(fixture, role),
         ...communitySteps(fixture.communityId, fixture.publicStoryId),
         ...(role === 'admin'
           ? [
@@ -220,12 +232,18 @@ export function buildJourneys(fixture: PersonaFixture): Journey[] {
     })),
     {
       persona: 'restricted-holder',
-      steps: [login('admin'), ...browse, logout],
+      steps: [
+        login('holder'),
+        ...browse,
+        ...isolationSteps(fixture, 'admin'),
+        logout,
+      ],
     },
     {
       persona: 'super_admin',
       steps: [
         login('super_admin'),
+        ...isolationSteps(fixture, 'super_admin'),
         ...systemSteps(fixture.communityId),
         {
           name: 'deny restricted story for super admin',

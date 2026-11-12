@@ -158,7 +158,7 @@ export class PlaceService {
   async getPlaceById(
     id: number,
     communityId: number,
-    userRole?: UserRole
+    _userRole?: UserRole
   ): Promise<Place> {
     const place = await this.repository.getByIdWithCommunityCheck(
       id,
@@ -169,11 +169,9 @@ export class PlaceService {
       throw new PlaceNotFoundError(id);
     }
 
-    // Check cultural protocol access
-    if (place.isRestricted && userRole !== 'elder') {
-      throw new CulturalProtocolViolationError(
-        'Access to this sacred place is restricted to elders'
-      );
+    // Restricted legacy rows await an explicit community disposition.
+    if (place.isRestricted) {
+      throw new PlaceNotFoundError(id);
     }
 
     return place;
@@ -185,10 +183,10 @@ export class PlaceService {
   async getPlacesByCommunity(
     communityId: number,
     params: Omit<CommunityPlaceParams, 'includeRestricted'>,
-    userRole?: UserRole
+    _userRole?: UserRole
   ): Promise<PaginatedResponse<Place>> {
     // Determine if user can see restricted places
-    const includeRestricted = userRole === 'elder' || userRole === 'admin';
+    const includeRestricted = false;
 
     const searchParams: CommunityPlaceParams = {
       ...params,
@@ -317,7 +315,7 @@ export class PlaceService {
    */
   async searchPlacesNear(
     params: NearbySearchRequest & { communityId: number },
-    userRole?: UserRole
+    _userRole?: UserRole
   ): Promise<PaginatedResponse<Place>> {
     // Validate search coordinates
     if (!validateCoordinates(params.latitude, params.longitude)) {
@@ -330,7 +328,7 @@ export class PlaceService {
     }
 
     // Determine if user can see restricted places
-    const includeRestricted = userRole === 'elder' || userRole === 'admin';
+    const includeRestricted = false;
 
     const searchParams: NearbySearchParams = {
       communityId: params.communityId,
@@ -350,7 +348,7 @@ export class PlaceService {
    */
   async getPlacesByBounds(
     params: BoundsSearchRequest & { communityId: number },
-    userRole?: UserRole
+    _userRole?: UserRole
   ): Promise<PaginatedResponse<Place>> {
     // Validate bounding box
     if (params.north <= params.south || params.east <= params.west) {
@@ -367,7 +365,7 @@ export class PlaceService {
     }
 
     // Determine if user can see restricted places
-    const includeRestricted = userRole === 'elder' || userRole === 'admin';
+    const includeRestricted = false;
 
     const searchParams: BoundsSearchParams = {
       communityId: params.communityId,

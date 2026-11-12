@@ -555,7 +555,7 @@ describe('Super Admin API', () => {
     });
 
     describe('POST /api/v1/super_admin/users', () => {
-      it('should create user in any community for super admin', async () => {
+      it('should deny community account creation by super admin', async () => {
         const newUser = {
           email: 'newuser@example.com',
           password: 'NewUserPassword123@',
@@ -572,18 +572,8 @@ describe('Super Admin API', () => {
           payload: newUser,
         });
 
-        expect(response.statusCode).toBe(201);
-        expect(response.json()).toMatchObject({
-          data: {
-            id: expect.any(Number),
-            email: newUser.email,
-            firstName: newUser.firstName,
-            lastName: newUser.lastName,
-            role: newUser.role,
-            communityId: newUser.communityId,
-            createdAt: expect.any(String),
-          },
-        });
+        expect(response.statusCode).toBe(403);
+        expect(response.json().error.message).toContain('Community accounts');
       });
 
       it('should validate required fields', async () => {
@@ -602,7 +592,7 @@ describe('Super Admin API', () => {
         expect(response.statusCode).toBe(400);
       });
 
-      it('should prevent duplicate emails', async () => {
+      it('should deny community creation before checking duplicate emails', async () => {
         const duplicateUser = {
           email: 'admin@example.com', // Already exists
           password: 'Password123@',
@@ -619,9 +609,9 @@ describe('Super Admin API', () => {
           payload: duplicateUser,
         });
 
-        expect(response.statusCode).toBe(409);
+        expect(response.statusCode).toBe(403);
         expect(response.json()).toMatchObject({
-          error: expect.stringContaining('email already exists'),
+          error: { message: expect.stringContaining('Community accounts') },
         });
       });
 
@@ -647,11 +637,11 @@ describe('Super Admin API', () => {
     });
 
     describe('PUT /api/v1/super_admin/users/:id', () => {
-      it('should update user details including role changes for super admin', async () => {
+      it('should update system user profile without changing role', async () => {
         const updates = {
           firstName: 'Updated',
           lastName: 'Name',
-          role: 'admin',
+          role: 'super_admin',
         };
 
         const response = await app.inject({
@@ -671,6 +661,16 @@ describe('Super Admin API', () => {
             updatedAt: expect.any(String),
           },
         });
+      });
+
+      it('should reject granting a system user community privileges', async () => {
+        const response = await app.inject({
+          method: 'PUT',
+          url: `/api/v1/super_admin/users/${superAdminUserId}`,
+          headers: { cookie: superAdminSessionId },
+          payload: { role: 'admin' },
+        });
+        expect(response.statusCode).toBe(403);
       });
 
       it('should return 404 for non-existent user', async () => {
@@ -704,7 +704,7 @@ describe('Super Admin API', () => {
           password: 'Password123@',
           firstName: 'To',
           lastName: 'Delete',
-          role: 'viewer',
+          role: 'super_admin',
           communityId: testCommunityId,
         };
 
@@ -872,7 +872,7 @@ describe('Super Admin API', () => {
         password: 'Password123@',
         firstName: 'Logged',
         lastName: 'User',
-        role: 'viewer',
+        role: 'super_admin',
         communityId: testCommunityId,
       };
 
@@ -893,7 +893,7 @@ describe('Super Admin API', () => {
         success: true,
         details: expect.objectContaining({
           email: 'loggeduser@example.com',
-          role: 'viewer',
+          role: 'super_admin',
           communityId: testCommunityId,
         }),
       });

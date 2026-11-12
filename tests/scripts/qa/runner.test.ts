@@ -159,7 +159,10 @@ describe('persona runner state and route selection', () => {
         calls++;
         return new Response('{}', { status: 201 });
       },
-      routes: [],
+      routes: [
+        { method: 'POST', path: '/items' },
+        { method: 'GET', path: '/items/:id' },
+      ],
       journeys: [
         {
           persona: 'editor',
@@ -187,5 +190,67 @@ describe('persona runner state and route selection', () => {
       'request-failed',
     ]);
     expect(report.pass).toBe(false);
+  });
+});
+
+describe('route inventory integrity', () => {
+  it('fails when route discovery returns no routes', async () => {
+    const report = await runJourneys({
+      routes: [],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'read', method: 'GET', path: '/typo', expected: 404 },
+          ],
+        },
+      ],
+      handler: async () => new Response('{}', { status: 404 }),
+    });
+    expect(report.pass).toBe(false);
+  });
+  it('fails unmatched negative steps even when all known routes are reached', async () => {
+    const report = await runJourneys({
+      routes: [{ method: 'GET', path: '/known' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'known', method: 'GET', path: '/known', expected: 200 },
+            { name: 'typo', method: 'GET', path: '/typo', expected: 404 },
+          ],
+        },
+      ],
+      handler: async (request) =>
+        new Response('{}', {
+          status: new URL(request.url).pathname === '/known' ? 200 : 404,
+        }),
+    });
+    expect(report.pass).toBe(false);
+    expect(report.results[1]).toMatchObject({
+      pass: false,
+      failure: 'unmatched-route',
+    });
+  });
+  it('records a useful safe operation message without exposing exception credentials', async () => {
+    const report = await runJourneys({
+      routes: [{ method: 'GET', path: '/known' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'known', method: 'GET', path: '/known', expected: 200 },
+          ],
+        },
+      ],
+      handler: async () => {
+        throw new Error('secret=never-record-me');
+      },
+    });
+    expect(report.results[0]).toMatchObject({
+      failure: 'request-failed',
+      message: 'Sending request failed',
+    });
+    expect(JSON.stringify(report)).not.toContain('never-record-me');
   });
 });

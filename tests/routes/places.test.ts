@@ -355,7 +355,7 @@ describe('Places API Routes - Integration Tests', () => {
       expect(response.statusCode).toBe(401);
     });
 
-    test('should handle restricted places for elder access', async () => {
+    test('should hide held places even from legacy elder accounts', async () => {
       // Create a restricted place
       const restrictedPlaceData = {
         name: 'Sacred Restricted Place',
@@ -375,14 +375,14 @@ describe('Places API Routes - Integration Tests', () => {
       const restrictedPlace = JSON.parse(createResponse.body);
       const restrictedId = restrictedPlace.data.id;
 
-      // Elder should be able to access
+      // Held legacy rows remain unavailable to every role
       const elderResponse = await app.inject({
         method: 'GET',
         url: `/api/v1/places/${restrictedId}`,
         headers: { cookie: elderSessionId },
       });
 
-      expect(elderResponse.statusCode).toBe(200);
+      expect(elderResponse.statusCode).toBe(404);
 
       // Viewer might not be able to access (depends on business logic)
       const viewerResponse = await app.inject({
@@ -392,7 +392,7 @@ describe('Places API Routes - Integration Tests', () => {
       });
 
       // This might be 200 or 403 depending on cultural protocol implementation
-      expect([200, 403]).toContain(viewerResponse.statusCode);
+      expect(viewerResponse.statusCode).toBe(404);
     });
   });
 

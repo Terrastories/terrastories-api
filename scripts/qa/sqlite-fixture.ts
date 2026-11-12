@@ -5,6 +5,9 @@ import {
   storiesSqlite,
   usersSqlite,
   speakersSqlite,
+  placesSqlite,
+  themesSqlite,
+  filesSqlite,
 } from '../../src/db/schema/index.js';
 import { hash } from 'argon2';
 import { createJourneys, type PersonaFixture } from './personas/index.js';
@@ -58,6 +61,92 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         ...(communityId === null ? {} : { communityId }),
       };
     }
+    const [holder] = await db
+      .insert(usersSqlite)
+      .values({
+        email: 'qa-holder@example.test',
+        passwordHash,
+        firstName: 'QA',
+        lastName: 'Holder',
+        role: 'admin',
+        communityId: fixtures.communities[0].id,
+        isActive: true,
+      })
+      .returning();
+    credentials.holder = {
+      email: holder.email,
+      password,
+      communityId: holder.communityId,
+    };
+    const foreignCommunityId = fixtures.communities[1].id;
+    const [foreignUser] = await db
+      .insert(usersSqlite)
+      .values({
+        email: 'qa-foreign@example.test',
+        passwordHash,
+        firstName: 'Foreign',
+        lastName: 'User',
+        role: 'viewer',
+        communityId: foreignCommunityId,
+        isActive: true,
+      })
+      .returning();
+    const [foreignPlace, heldPlace] = await db
+      .insert(placesSqlite)
+      .values([
+        {
+          name: 'QA foreign place',
+          communityId: foreignCommunityId,
+          latitude: -3,
+          longitude: -60,
+        },
+        {
+          name: 'QA held place',
+          communityId: fixtures.communities[0].id,
+          latitude: -3,
+          longitude: -60,
+          isRestricted: true,
+        },
+      ])
+      .returning();
+    const [foreignSpeaker] = await db
+      .insert(speakersSqlite)
+      .values({ name: 'QA foreign speaker', communityId: foreignCommunityId })
+      .returning();
+    const [foreignTheme] = await db
+      .insert(themesSqlite)
+      .values({ name: 'QA foreign theme', communityId: foreignCommunityId })
+      .returning();
+    const [foreignFile, heldFile, unknownFile] = await db
+      .insert(filesSqlite)
+      .values(
+        [
+          {
+            id: '11111111-1111-4111-8111-111111111111',
+            communityId: foreignCommunityId,
+          },
+          {
+            id: '22222222-2222-4222-8222-222222222222',
+            communityId: fixtures.communities[0].id,
+            culturalRestrictions: JSON.stringify({ elderOnly: true }),
+          },
+          {
+            id: '33333333-3333-4333-8333-333333333333',
+            communityId: fixtures.communities[0].id,
+            culturalRestrictions: JSON.stringify({ unknown: true }),
+          },
+        ].map((row) => ({
+          ...row,
+          filename: 'qa.png',
+          originalName: 'qa.png',
+          path: '/nonexistent-qa-fixture.png',
+          url: '/qa.png',
+          mimeType: 'image/png',
+          size: 1,
+          uploadedBy: creatorId,
+        }))
+      )
+      .returning();
     const [foreignStory, restrictedStory] = await db
       .insert(storiesSqlite)
       .values([
@@ -182,6 +271,17 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       restrictedStoryId: restrictedStory.id,
       unevidencedStoryId: unevidencedStory.id,
       credentials,
+      foreignCommunityId,
+      foreignIds: {
+        places: foreignPlace.id,
+        speakers: foreignSpeaker.id,
+        themes: foreignTheme.id,
+        users: foreignUser.id,
+        files: foreignFile.id,
+      },
+      heldPlaceId: heldPlace.id,
+      heldFileId: heldFile.id,
+      unknownFileId: unknownFile.id,
     });
     journeys.push({
       persona: 'expired-session',

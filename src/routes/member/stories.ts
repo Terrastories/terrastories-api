@@ -8,6 +8,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import {
   requireAuth,
+  requireRole,
   enforceDataSovereignty,
   type AuthenticatedRequest,
 } from '../../shared/middleware/auth.middleware.js';
@@ -265,7 +266,11 @@ export async function memberStoriesRoutes(
 
   // POST /api/v1/member/stories - Create new story
   app.post('/', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Create new story',
       tags: ['Member Stories'],
@@ -311,7 +316,12 @@ export async function memberStoriesRoutes(
         201: {
           type: 'object',
           properties: {
-            data: { type: 'object' },
+            data: {
+              type: 'object',
+              additionalProperties: true,
+              required: ['id'],
+              properties: { id: { type: 'integer' } },
+            },
           },
         },
       },
@@ -376,7 +386,11 @@ export async function memberStoriesRoutes(
 
   // PUT /api/v1/member/stories/:id - Update story
   app.put('/:id', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Update story',
       tags: ['Member Stories'],
@@ -479,7 +493,11 @@ export async function memberStoriesRoutes(
 
   // DELETE /api/v1/member/stories/:id - Delete story
   app.delete('/:id', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Delete story',
       tags: ['Member Stories'],

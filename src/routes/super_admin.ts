@@ -27,6 +27,7 @@ import {
   WeakPasswordError,
   InvalidCommunityError,
   UserNotFoundError,
+  SuperAdminRoleError,
 } from '../services/user.service.js';
 import { CommunityRepository } from '../repositories/community.repository.js';
 import { UserRepository } from '../repositories/user.repository.js';
@@ -1019,6 +1020,15 @@ export async function superAdminRoutes(
       reply: FastifyReply
     ) => {
       try {
+        if (request.body.role !== 'super_admin') {
+          return reply.code(403).send({
+            error: {
+              message:
+                'Community accounts must be managed by their community administrators',
+            },
+            statusCode: 403,
+          });
+        }
         const user = await userService.createUserAsSuperAdmin(request.body);
 
         // Audit log the user creation
@@ -1191,6 +1201,15 @@ export async function superAdminRoutes(
           { error: errorMessage, id: request.params.id },
           'Failed to update user'
         );
+
+        if (error instanceof SuperAdminRoleError) {
+          return reply.code(403).send({
+            error: {
+              code: 'FORBIDDEN',
+              message: 'System accounts cannot acquire community privileges',
+            },
+          });
+        }
 
         if (error instanceof UserNotFoundError) {
           return reply.code(404).send({

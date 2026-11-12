@@ -32,6 +32,8 @@ import { UserRepository } from '../repositories/user.repository.js';
 import { getDb, type Database } from '../db/index.js';
 import {
   requireAuth,
+  requireRole,
+  enforceDataSovereignty,
   requireCommunityAccess,
   type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
@@ -174,7 +176,11 @@ export default async function storiesRoutes(
   }>(
     '/',
     {
-      preHandler: [requireAuth, requireCommunityAccess()],
+      preHandler: [
+        requireAuth,
+        requireCommunityAccess(),
+        requireRole(['editor', 'admin']),
+      ],
       schema: {
         description:
           'Create a new story with cultural protocols and community scoping for Indigenous storytelling',
@@ -459,7 +465,7 @@ export default async function storiesRoutes(
   }>(
     '/:id',
     {
-      preHandler: [requireAuth],
+      preHandler: [requireAuth, enforceDataSovereignty],
       schema: {
         description:
           'Get story by ID with cultural protocol enforcement and community scoping',
@@ -576,7 +582,7 @@ export default async function storiesRoutes(
   }>(
     '/slug/:slug/community/:communityId',
     {
-      preHandler: [requireAuth],
+      preHandler: [requireAuth, enforceDataSovereignty],
       schema: {
         description:
           'Get story by slug within community with cultural protocol enforcement',
@@ -699,7 +705,7 @@ export default async function storiesRoutes(
   }>(
     '/:id',
     {
-      preHandler: [requireAuth],
+      preHandler: [requireAuth, enforceDataSovereignty],
       schema: {
         description:
           'Update story with cultural protocol validation and community scoping',
@@ -957,7 +963,7 @@ export default async function storiesRoutes(
   }>(
     '/:id',
     {
-      preHandler: [requireAuth],
+      preHandler: [requireAuth, enforceDataSovereignty],
       schema: {
         description:
           'Delete story with cultural protocol validation and community scoping',
@@ -1078,7 +1084,7 @@ export default async function storiesRoutes(
   }>(
     '/',
     {
-      preHandler: [requireAuth],
+      preHandler: [requireAuth, enforceDataSovereignty],
       schema: {
         description:
           'List stories with search, filtering, pagination, and cultural protocol enforcement',

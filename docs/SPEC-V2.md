@@ -610,6 +610,8 @@ Residual risks:
 
 Field kits serve HTTPS by default. The installer generates a local certificate authority and issues a certificate covering every configured host name and IP address; the certificate is reissued from that authority whenever the configured hosts or IPs change. Enrolled devices either trust that authority or pin the local CA fingerprint; the fingerprint is shown in the admin UI and on the printed recovery sheet, so it is available out of band. The client KDF stays origin-independent (Passwords, step 2): origin changes are absorbed by reissuing the certificate, never by rebinding verifiers.
 
+The device-local CA private key is stored only on the kit, in a file owned by the service user with permissions `0600`; it is never exported or included in backups or exports, and is destroyed on deprovision. A leaked CA private key requires replacing the CA and re-keying all enrolled devices.
+
 A plain-HTTP trusted-LAN exception exists. It is off by default and requires explicit admin opt-in; while enabled, the admin UI shows a persistent warning and the readiness report flags builds with it enabled. The exposure is explicit: a LAN observer can capture and replay the `derivedKey` and the session token.
 
 ### Sessions

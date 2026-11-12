@@ -44,11 +44,7 @@ import {
 } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
-import {
-  containsInsensitive,
-  dialectOf,
-  tablesFor,
-} from '../db/dialect.js';
+import { containsInsensitive, dialectOf, tablesFor } from '../db/dialect.js';
 import {
   communityMediaPg,
   communityMediaSqlite,
@@ -160,14 +156,19 @@ export class ExploreAdapterRepository {
       .from(communities)
       .where(
         search && search !== ''
-          ? and(gate, containsInsensitive(this.dialect, communities.name, search))
+          ? and(
+              gate,
+              containsInsensitive(this.dialect, communities.name, search)
+            )
           : gate
       )
       .orderBy(desc(communities.updatedAt), desc(communities.id));
   }
 
   /** The community named by a public Explore slug, or null (withheld = null). */
-  async publicCommunityBySlug(slug: string): Promise<ExploreCommunityRow | null> {
+  async publicCommunityBySlug(
+    slug: string
+  ): Promise<ExploreCommunityRow | null> {
     const { communities } = this.tables;
     const rows: ExploreCommunityRow[] = await this.database
       .select({
@@ -245,7 +246,10 @@ export class ExploreAdapterRepository {
    * stories with at least one visible place edge and one visible speaker
    * edge, plus the caller's bounded filters.
    */
-  private storyRelationConditions(communityId: number, query?: ExploreStoryQuery) {
+  private storyRelationConditions(
+    communityId: number,
+    query?: ExploreStoryQuery
+  ) {
     const { places, speakers, stories } = this.tables;
     const conditions = [
       this.publicStoryGate(communityId),
@@ -690,9 +694,7 @@ export class ExploreAdapterRepository {
    * well-formed community-scoped storage key, resolved by file id for
    * GET /explore/media/:fileId.
    */
-  async publicBrandingFile(
-    fileId: string
-  ): Promise<{
+  async publicBrandingFile(fileId: string): Promise<{
     communityId: number;
     storageKey: string;
     mimeType: string;

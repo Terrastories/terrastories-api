@@ -19,9 +19,7 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { eq } from 'drizzle-orm';
 import { tablesFor } from '../../src/db/dialect.js';
-import {
-  communityMediaSqlite,
-} from '../../src/db/schema/sessions.js';
+import { communityMediaSqlite } from '../../src/db/schema/sessions.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { ExploreAdapterRepository } from '../../src/repositories/explore-adapter.repository.js';
@@ -57,11 +55,10 @@ const storage = new Map<string, Uint8Array>([
 let storageReads = 0;
 let app: ReturnType<typeof createHonoApp>;
 let originApp: ReturnType<typeof createHonoApp>;
-let ids: Record<string, number> = {};
-let fileIds: Record<string, string> = {};
+const ids: Record<string, number> = {};
+const fileIds: Record<string, string> = {};
 
 const seed = async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const insert = async (table: unknown, values: Record<string, unknown>) => {
     const [row] = await db
       .insert(table as never)
@@ -274,22 +271,46 @@ const seed = async () => {
   const speaker = (values: Record<string, unknown>) =>
     insert(tables.speakers, { createdAt: T0, updatedAt: T0, ...values });
   ids.s1 = (
-    (await speaker({ name: 'Elder Ana', communityId: ids.a, isActive: true })) as Record<string, unknown>
+    (await speaker({
+      name: 'Elder Ana',
+      communityId: ids.a,
+      isActive: true,
+    })) as Record<string, unknown>
   ).id as number;
   ids.s2 = (
-    (await speaker({ name: 'Silent Sam', communityId: ids.a, isActive: false })) as Record<string, unknown>
+    (await speaker({
+      name: 'Silent Sam',
+      communityId: ids.a,
+      isActive: false,
+    })) as Record<string, unknown>
   ).id as number;
   ids.s3 = (
-    (await speaker({ name: 'Hidden Hana', communityId: ids.a, isActive: true })) as Record<string, unknown>
+    (await speaker({
+      name: 'Hidden Hana',
+      communityId: ids.a,
+      isActive: true,
+    })) as Record<string, unknown>
   ).id as number;
   ids.s4 = (
-    (await speaker({ name: 'Interviewer Ivo', communityId: ids.a, isActive: true })) as Record<string, unknown>
+    (await speaker({
+      name: 'Interviewer Ivo',
+      communityId: ids.a,
+      isActive: true,
+    })) as Record<string, unknown>
   ).id as number;
   ids.s5 = (
-    (await speaker({ name: 'Retired Rex', communityId: ids.a, isActive: false })) as Record<string, unknown>
+    (await speaker({
+      name: 'Retired Rex',
+      communityId: ids.a,
+      isActive: false,
+    })) as Record<string, unknown>
   ).id as number;
   ids.sB = (
-    (await speaker({ name: 'Beta Speaker', communityId: ids.b, isActive: true })) as Record<string, unknown>
+    (await speaker({
+      name: 'Beta Speaker',
+      communityId: ids.b,
+      isActive: true,
+    })) as Record<string, unknown>
   ).id as number;
 
   const story = (values: Record<string, unknown>) =>
@@ -466,7 +487,10 @@ beforeAll(async () => {
     },
   };
   app = createHonoApp(options);
-  originApp = createHonoApp({ ...options, publicOrigin: 'https://api.example.test' });
+  originApp = createHonoApp({
+    ...options,
+    publicOrigin: 'https://api.example.test',
+  });
 });
 
 afterAll(() => {
@@ -521,9 +545,9 @@ it('narrows the communities index by name search', async () => {
     'public-alpha',
   ]);
   expect((await body('/explore/communities?search=zzz')).json.data).toEqual([]);
-  expect(
-    (await body('/explore/communities?search=')).json.data
-  ).toHaveLength(2);
+  expect((await body('/explore/communities?search=')).json.data).toHaveLength(
+    2
+  );
 });
 
 it('answers community show with the Rails detail shape', async () => {
@@ -633,7 +657,9 @@ it('serves the paginated Rails stories index with filters and sort', async () =>
       updatedAt: T3.toISOString(),
     },
   ]);
-  expect(page.json.data.points.map((p: { id: number }) => p.id)).toEqual([ids.p1]);
+  expect(page.json.data.points.map((p: { id: number }) => p.id)).toEqual([
+    ids.p1,
+  ]);
   expect(page.json.meta).toEqual({
     total: 2,
     hasNextPage: false,
@@ -655,9 +681,7 @@ it('paginates, sorts, and filters the stories index', async () => {
     ids.st1,
     ids.st2,
   ]);
-  const first = await body(
-    '/explore/communities/public-alpha/stories?limit=1'
-  );
+  const first = await body('/explore/communities/public-alpha/stories?limit=1');
   expect(first.json.data.stories.map((s: { id: number }) => s.id)).toEqual([
     ids.st2,
   ]);
@@ -708,8 +732,14 @@ it('paginates, sorts, and filters the stories index', async () => {
 });
 
 it('matches nothing for filter categories with no V2 representation', async () => {
-  for (const query of ['topic[]=x', 'type_of_place[]=cave', 'speaker_community[]=y']) {
-    const page = await body(`/explore/communities/public-alpha/stories?${query}`);
+  for (const query of [
+    'topic[]=x',
+    'type_of_place[]=cave',
+    'speaker_community[]=y',
+  ]) {
+    const page = await body(
+      `/explore/communities/public-alpha/stories?${query}`
+    );
     expect(page.json.data).toEqual({ points: [], stories: [] });
     expect(page.json.meta.total).toBe(0);
     expect(page.json.meta.hasNextPage).toBe(false);
@@ -860,13 +890,11 @@ it('derives filter options from the same visibility as the story relation', asyn
     { label: 'River Bend', value: ids.p1, category: 'places' },
   ]);
   // Regions: 'West' (Quiet Cove) never appears.
-  expect(
-    filters.some((f: { value: unknown }) => f.value === 'West')
-  ).toBe(false);
+  expect(filters.some((f: { value: unknown }) => f.value === 'West')).toBe(
+    false
+  );
   // Languages: 'fr' lives only on the non-qualifying story.
-  expect(
-    filters.some((f: { value: unknown }) => f.value === 'fr')
-  ).toBe(false);
+  expect(filters.some((f: { value: unknown }) => f.value === 'fr')).toBe(false);
   // Speakers: only speakers of visibly qualifying stories.
   expect(
     filters.filter((f: { category: string }) => f.category === 'speakers')
@@ -879,7 +907,7 @@ it('caps unpaged map points for very large relations', async () => {
   const big = drizzle(sqlite);
   migrate(big, { migrationsFolder: 'src/db/migrations' });
   const t = tablesFor(big);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
   const insert = async (table: unknown, values: Record<string, unknown>[]) => {
     for (let offset = 0; offset < values.length; offset += 500)
       await big
@@ -948,9 +976,9 @@ it('caps unpaged map points for very large relations', async () => {
         updatedAt: when,
       }))
     );
-    const placeIds = (
-      await big.select({ id: t.places.id }).from(t.places)
-    ).map((row) => row.id);
+    const placeIds = (await big.select({ id: t.places.id }).from(t.places)).map(
+      (row) => row.id
+    );
     await insert(
       t.storyPlaces,
       placeIds.map((placeId) => ({
@@ -986,9 +1014,7 @@ it('caps unpaged map points for very large relations', async () => {
     );
     const listed = (await list.json()).data;
     expect(listed.points).toHaveLength(2000);
-    expect(listed.stories.map((s: { id: number }) => s.id)).toEqual([
-      story.id,
-    ]);
+    expect(listed.stories.map((s: { id: number }) => s.id)).toEqual([story.id]);
   } finally {
     sqlite.close();
   }
@@ -1006,7 +1032,9 @@ it('rejects invalid story queries with 400', async () => {
     'places[]=abc',
     'speakers[]=1;2',
   ]) {
-    const page = await body(`/explore/communities/public-alpha/stories?${query}`);
+    const page = await body(
+      `/explore/communities/public-alpha/stories?${query}`
+    );
     expect(page.status, query).toBe(400);
     expect(page.json).toEqual({ error: 'Invalid request' });
   }
@@ -1024,7 +1052,9 @@ it('answers the Rails base 404 for stories of withheld communities', async () =>
 });
 
 it('serves the Rails story show shape with place and speaker visibility', async () => {
-  const page = await body(`/explore/communities/public-alpha/stories/${ids.st1}`);
+  const page = await body(
+    `/explore/communities/public-alpha/stories/${ids.st1}`
+  );
   expect(page.status).toBe(200);
   expect(page.json.data).toEqual({
     id: ids.st1,
@@ -1036,7 +1066,12 @@ it('serves the Rails story show shape with place and speaker visibility', async 
     interviewer: { name: 'Interviewer Ivo' },
     interviewLocation: { name: 'Meeting Point' },
     speakers: [
-      { id: ids.s1, name: 'Elder Ana', speakerCommunity: null, birthdate: null },
+      {
+        id: ids.s1,
+        name: 'Elder Ana',
+        speakerCommunity: null,
+        birthdate: null,
+      },
     ],
     places: [
       {
@@ -1082,7 +1117,9 @@ it('serves the Rails story show shape with place and speaker visibility', async 
 });
 
 it('answers the identical 404 for withheld, unknown, and malformed story ids', async () => {
-  const missing = await body('/explore/communities/public-alpha/stories/999999');
+  const missing = await body(
+    '/explore/communities/public-alpha/stories/999999'
+  );
   expect(missing.status).toBe(404);
   for (const storyId of [ids.st3, ids.st4, ids.st5]) {
     const withheld = await body(
@@ -1172,12 +1209,7 @@ it('serves public branding media and withholds every other file', async () => {
   expect(media.headers.get('cache-control')).toBe('no-store');
   const missing = await get(`/explore/media/${crypto.randomUUID()}`);
   expect(missing.status).toBe(404);
-  for (const key of [
-    'aInactive',
-    'aRestricted',
-    'cross',
-    'c',
-  ] as const) {
+  for (const key of ['aInactive', 'aRestricted', 'cross', 'c'] as const) {
     const withheld = await get(`/explore/media/${fileIds[key]}`);
     expect(withheld.status, key).toBe(404);
     expect(await withheld.json()).toEqual({
@@ -1200,9 +1232,9 @@ it('serves public branding media and withholds every other file', async () => {
     .set({ path: `communities/${ids.a}/display.png` })
     .where(eq(tables.files.id, fileIds.a));
   // Withheld media and the missing id answer identically.
-  expect(
-    (await get(`/explore/media/${fileIds.aInactive}`)).status
-  ).toBe((await get(`/explore/media/${crypto.randomUUID()}`)).status);
+  expect((await get(`/explore/media/${fileIds.aInactive}`)).status).toBe(
+    (await get(`/explore/media/${crypto.randomUUID()}`)).status
+  );
 });
 
 it('generates media URLs from the configured public origin', async () => {

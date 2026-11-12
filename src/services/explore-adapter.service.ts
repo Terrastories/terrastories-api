@@ -54,9 +54,6 @@ const notFoundBody = Object.freeze({
 const communityNotFound = Object.freeze({
   error: 'Community Not Found',
 }) as { error: string };
-const invalidRequest = Object.freeze({ error: 'Invalid request' }) as {
-  error: string;
-};
 
 const notFound = (): ExploreResult => ({ status: 404, body: notFoundBody });
 const iso = (value: Date) => value.toISOString();
@@ -137,7 +134,11 @@ function pointFeature(place: ExplorePlaceRow) {
 }
 
 /** Rails story-show `center` feature: geometry + id, no properties. */
-function centerFeature(place: { id: number; latitude: number; longitude: number }) {
+function centerFeature(place: {
+  id: number;
+  latitude: number;
+  longitude: number;
+}) {
   return {
     type: 'Feature',
     id: place.id,
@@ -394,8 +395,7 @@ export class ExploreAdapterService {
   ): Promise<ExploreResult> {
     const community = await this.repository.publicCommunityBySlug(slug);
     if (!community) return notFound();
-    const hasNext = (total: number) =>
-      query.offset + query.limit < total;
+    const hasNext = (total: number) => query.offset + query.limit < total;
     if (query.unsatisfiable) {
       // topic/type_of_place/speaker_community have no V2 representation;
       // Rails semantics for a value absent from the data: nothing matches.

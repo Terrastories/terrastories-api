@@ -35,13 +35,15 @@ const notFoundBody = Object.freeze({
 });
 
 // The adapter registers onto whatever typed Hono app the host built.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function registerExploreAdapter(app: Hono<any>, options: ExploreAdapterOptions): void {
+
+export function registerExploreAdapter(
+  app: Hono<any>,
+  options: ExploreAdapterOptions
+): void {
   const service = new ExploreAdapterService(options.repository);
   const respond = (c: Context, result: ExploreResult) =>
     c.json(result.body, result.status);
-  const originOf = (url: string) =>
-    options.publicOrigin ?? new URL(url).origin;
+  const originOf = (url: string) => options.publicOrigin ?? new URL(url).origin;
 
   app.get('/explore/communities', async (c) => {
     const search = new URL(c.req.url).searchParams.get('search') ?? undefined;

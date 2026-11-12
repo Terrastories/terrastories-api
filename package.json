@@ -33,7 +33,8 @@
     "compare:api": "node scripts/api-comparison.js",
     "test:compatibility": "vitest run tests/comparison --reporter=dot --silent=true --maxWorkers=4",
     "compatibility:report": "node scripts/api-comparison.js report --output api-comparison-report.html",
-    "compatibility:full": "npm run test:compatibility && npm run compatibility:report"
+    "compatibility:full": "npm run test:compatibility && npm run compatibility:report",
+    "qa:personas": "tsx scripts/qa/run-personas.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

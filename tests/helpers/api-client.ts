@@ -359,7 +359,9 @@ export function createApiClient(app: FastifyInstance): ApiTestClient {
  * Create test Fastify app with routes for testing
  */
 export async function createTestApp(
-  testDatabase?: any
+  testDatabase?: any,
+  onRoute?: (route: { method: string | string[]; url: string }) => void,
+  configure?: (app: FastifyInstance) => void
 ): Promise<FastifyInstance> {
   if (testDatabase) {
     // Create a custom app that uses the test database
@@ -373,6 +375,8 @@ export async function createTestApp(
         caseSensitive: false,
       },
     });
+
+    if (onRoute) app.addHook('onRoute', onRoute);
 
     // Add essential plugins for JSON handling (mirror main app)
     await app.register((await import('@fastify/cors')).default);
@@ -421,6 +425,8 @@ export async function createTestApp(
         files: 5, // Maximum 5 files per request
       },
     });
+
+    configure?.(app);
 
     // Register all routes with test database
     const { registerRoutes } = await import('../../src/routes/index.js');

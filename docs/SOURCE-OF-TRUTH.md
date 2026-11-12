@@ -23,9 +23,9 @@ Historical completion reports, duplicate roadmaps, provider-specific workflow co
 These are summaries for navigation; `SPEC-V2.md` owns the full wording.
 
 - Hono is the target HTTP framework for Cloudflare Workers and Node.js.
-- One product supports three first-class modes:
-  - Cloudflare Workers + D1 + R2;
-  - Node.js + PostgreSQL + self-hosted storage;
+- One product supports three first-class launch profiles (#195):
+  - Cloudflare Workers Free + D1 + R2;
+  - Node.js + SQLite or PostgreSQL + self-hosted storage;
   - Node.js + SQLite + local filesystem for fully offline field kits.
 - D1/SQLite and PostgreSQL are equal first-class database targets for shared behavior.
 - V2 has one canonical logical relational schema/behavior contract. Dialect-specific schema definitions or migrations are allowed when tooling requires them, but may not introduce product-semantic drift.
@@ -102,7 +102,7 @@ If an issue conflicts with the spec, mark it blocked and repair the issue/spec r
 
 ## Current execution sequence
 
-- PR #132 is the Hono Phase 1 foundation. Hono-specific follow-up work must use the base/dependency relationship documented in each issue rather than independently recreating that work from `main`.
+- The Hono Phase 1 foundation is the thin Hono slice re-landed off `main` (health, login, durable session, revocation, one protected media read); PR #132 was closed on 2026-11-11 and superseded (#193). Hono follow-up work builds on that slice rather than independently recreating it from `main`.
 - `SPEC-V2.md` Section 3 pins the legacy behavior evidence; Section 4 owns the bounded launch continuity scenarios and their issue owners. The production roadmap and `pr-cycle` skill must use that same contract. Issue #147 owns named frontend/public-client revisions, disconnected browser evidence, and pilot community approval before cutover.
 - Existing parity-labelled Hono issues must be interpreted/revised against the new V2-native contract: Fastify/Rails comparison is discovery/regression evidence, not the release oracle.
 - Production-readiness issues use `priority:*`, `lane:*`, and `status:*` labels. `status:ready` means safe to start from the documented base; `status:blocked` means do not implement independently yet.

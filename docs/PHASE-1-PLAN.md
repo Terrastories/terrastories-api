@@ -1,8 +1,10 @@
 # Phase 1 — Fastify → Hono Migration
 
-**Status:** Active foundation in PR #132  
+**Status:** PR #132 closed 2026-11-11; superseded by the thin Hono slice off main (#193)  
 **Authority:** Execution plan subordinate to `docs/SPEC-V2.md`  
-**Last reviewed:** 2026-09-27
+**Last reviewed:** 2026-11-12
+
+PR #132 was closed on 2026-11-11 and superseded by a thin Hono slice re-landed off `main` (#193): health, login, durable session, revocation, and one protected media read land first, and Fastify-only route work is frozen. The layout and domain list below describe #132's design and are kept as reference material.
 
 ## Goal
 

@@ -1,9 +1,12 @@
 # Cloudflare staging
 
+**Status (2026-11-12, #193):** the Cloudflare Containers experiment below requires Workers Paid and is off the table because free hosting is required (#184). The hosted profile launches on Workers Free + D1 + R2 (#195); Node-profile staging is ephemeral docker-compose in GitHub Actions on the exact image digest (#147). The rest of this file is kept as historical analysis.
+
 ## Current feasibility
 
 The current main runtime is Fastify (`src/app.ts`, `src/server.ts`). The Hono
-foundation is tracked in PR #132; see `PHASE-1-PLAN.md`. This revision has no Worker
+foundation is the thin Hono slice re-landed off `main`; PR #132 was closed and
+superseded (#193); see `PHASE-1-PLAN.md`. This revision has no Worker
 entrypoint, Wrangler dependency/configuration, D1 binding adapter, or R2 storage
 adapter. `src/db/index.ts` opens native better-sqlite3 or a PostgreSQL connection;
 `src/services/storage/local-storage.adapter.ts` uses local filesystem storage.

@@ -1,0 +1,27 @@
+{
+  "profile": "large",
+  "logicalRows": 16652,
+  "statements": 335,
+  "sqlBytes": 4292026,
+  "clientWallSeconds": 8.74,
+  "results": [
+    {
+      "Total queries executed": 353,
+      "Rows read": 14326,
+      "Rows written": 30387,
+      "Database size (MB)": "5.36"
+    }
+  ],
+  "meta": {
+    "duration": 603.9433,
+    "changes": 16652,
+    "rows_read": 14326,
+    "rows_written": 30387,
+    "size_after": 5357568,
+    "num_tables": 12,
+    "total_attempts": 1,
+    "served_by_region": "WEUR"
+  },
+  "sqlDurationMs": 603.9433,
+  "command": "wrangler d1 execute ts-spike-d1 --remote --file large.sql"
+}

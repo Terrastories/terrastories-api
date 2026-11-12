@@ -23,6 +23,11 @@ for (let i = 0; i < raw.length; i++) {
     events.push(JSON.parse(raw.slice(start, i + 1)));
 }
 
+if (events.length === 0) {
+  console.error(`no tail events in ${process.argv[2]}; CPU evidence missing`);
+  process.exit(1);
+}
+
 const by = {};
 for (const e of events) {
   const url = e.event?.request?.url;

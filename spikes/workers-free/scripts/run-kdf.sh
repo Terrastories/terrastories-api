@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 RAW=${1:?raw dir}
 N=${2:-200}
 RPS=${3:-4}
-SUBDOMAIN=${SUBDOMAIN:-mangadl}
+SUBDOMAIN=${SUBDOMAIN:?set SUBDOMAIN to your <name>.workers.dev account subdomain}
 mkdir -p "$RAW" results
 
 # Entries are id|path[|n]. SET=extra runs the second batch requested on 2026-11-11.
@@ -41,12 +41,16 @@ for entry in "${SCENARIOS[@]}"; do
   base="https://$name.$SUBDOMAIN.workers.dev"
   npx wrangler deploy --name "$name" > "$RAW/deploy-$id.log" 2>&1
   # A new workers.dev hostname answers 404/1042 until it propagates.
+  ready=
   for _ in $(seq 1 30); do
-    [ "$(curl -s -o /dev/null -w '%{http_code}' "$base/noop")" = 200 ] && break
+    [ "$(curl -s -o /dev/null -w '%{http_code}' "$base/noop")" = 200 ] && ready=1 && break
     sleep 3
   done
+  [ -n "$ready" ] || { echo "$base never answered 200" >&2; exit 1; }
   npx wrangler tail "$name" --format json > "$RAW/tail-$id.jsonl" 2> "$RAW/tail-$id.err" &
+  tail_pid=$!
   sleep 10
+  kill -0 "$tail_pid" 2> /dev/null || { echo "wrangler tail exited for $name" >&2; exit 1; }
   node scripts/load.mjs "$base" "$path" "$n" "$RPS" | tee -a results/kdf-load.jsonl
   sleep 10
   pkill -f "[w]rangler tail $name " || true

@@ -52,6 +52,7 @@ CREATE TABLE media_links (id INTEGER PRIMARY KEY, url TEXT, story_id INTEGER, cr
 CREATE TABLE active_storage_blobs (id INTEGER PRIMARY KEY, key TEXT UNIQUE, filename TEXT, content_type TEXT, metadata TEXT, byte_size INTEGER, checksum TEXT, service_name TEXT, created_at TEXT);
 CREATE TABLE active_storage_attachments (id INTEGER PRIMARY KEY, name TEXT, record_type TEXT, record_id INTEGER, blob_id INTEGER, created_at TEXT);
 CREATE TABLE themes (id INTEGER PRIMARY KEY, active INTEGER, community_id INTEGER, center_lat REAL, center_long REAL, zoom REAL, created_at TEXT, updated_at TEXT);
+CREATE TABLE spike_import (run TEXT, n INTEGER, body TEXT); -- used by the /d1/batch probe
 CREATE INDEX idx_stories_community ON stories(community_id);
 CREATE INDEX idx_places_community ON places(community_id);
 CREATE INDEX idx_speakers_community ON speakers(community_id);

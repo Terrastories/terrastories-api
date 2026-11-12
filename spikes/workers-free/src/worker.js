@@ -157,7 +157,8 @@ export default {
           return Response.json({ ok: true, key, size });
         }
         case '/r2/get': {
-          // Protected read: the real app authorizes first; here we only stream the object.
+          // Read path only: authorization is NOT exercised here (see the results doc), so this
+          // measures object streaming, not a protected-media authorization check.
           const obj = await env.MEDIA.get(url.searchParams.get('key') ?? '');
           if (!obj) return new Response('not found', { status: 404 });
           return new Response(obj.body, {

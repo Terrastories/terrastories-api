@@ -14,7 +14,7 @@ application. Raw summaries are in `spikes/workers-free/results/`.
 | Server-side PBKDF2-SHA256 at 100,000 iterations                           | **FAIL**: 855 of 1,000 requests killed with error 1102                        |
 | Client-stretching login (Fable 5.2 design, #184) on Workers Free          | **PASS**: login p99 CPU 4 ms, session check p99 1 ms, 0 kills in 1,000 logins |
 | D1 Free import of a large community                                       | **PASS with limits**: one import uses about 30% of the daily write quota      |
-| R2 protected media read and upload                                        | **PASS** up to 100 MB per request                                             |
+| R2 media read and upload (authorization not exercised)                    | **PASS** up to 100 MB per request                                             |
 
 ## Method
 
@@ -154,6 +154,10 @@ up. The spike created its own bucket.
 | Client upload streamed through the Worker, 10 / 50 / 99 MiB | 200 (7 s, 29 s, 52 s client time) |
 | Client upload, 101 MiB                                      | **413 Payload Too Large**         |
 
+The read route streams the object without an authorization check. Authorization cost is
+the same D1 session read measured in section 2 (p99 1 ms), but the combined path was not
+measured.
+
 Limits: request bodies are capped at 100 MB on a free zone
 ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)), so larger
 media needs multipart or presigned direct-to-R2 upload. The R2 free tier is 10 GB-month of
@@ -214,7 +218,7 @@ All resources were created on 2026-11-11 and deleted on 2026-11-12. Nothing with
 `ts-spike-` prefix remains (checked with `wrangler d1 list`, `wrangler r2 bucket list`,
 and a delete probe that returned code 10090).
 
-- Workers (16 created, 16 deleted): `ts-spike-kdf`, `ts-spike-auth`, and
+- Workers (15 created, 15 deleted): `ts-spike-kdf`, `ts-spike-auth`, and
   `ts-spike-kdf-{noop,bc10,bc11,bc12,pb100k,a2m19t2,a2m12t3,a2m7t5,sha256,pb10k,pb50k,pb100kx1000,pb210k}`.
   `ts-spike-kdf-dobc10` was never deployed.
 - D1: `ts-spike-d1` (deleted).
@@ -222,6 +226,16 @@ and a delete probe that returned code 10090).
   the bucket).
 
 ## Open questions
+
+- The spike Workers were public on `workers.dev` while the runs lasted. Anyone could call
+  the write routes. All of them have been deleted. A rerun should add a shared-secret
+  header before deploying.
+- Design risk (inferred): anonymous failed logins each cost 1 D1 write, so a login flood
+  can use up the account-wide 100,000 rows-written daily quota. That also blocks imports
+  and new sessions. Successful logins insert session rows without bound until an expiry
+  sweep runs. The #184 design needs a write-free throttle in front of D1, such as the
+  Workers rate-limiting binding (Free availability unverified), and a session-expiry
+  cleanup job.
 
 - Inferred: the Free burst allowance (6–89 heavy requests per fresh Worker) is
   undocumented and may change. Only the 10 ms limit is documented.

@@ -14,6 +14,7 @@ npx wrangler d1 create ts-spike-d1                 # put the id in wrangler.json
 npx wrangler r2 bucket create ts-spike-media
 
 # 1. Server-side KDF CPU: one fresh Worker per scenario; raw tail stays in <raw-dir>.
+export SUBDOMAIN=<your workers.dev subdomain>
 scripts/run-kdf.sh <raw-dir> 200 4
 SET=extra scripts/run-kdf.sh <raw-dir> 200 4       # SHA-256, PBKDF2 10k-210k, Durable Object
 

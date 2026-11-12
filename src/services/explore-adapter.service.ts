@@ -167,14 +167,23 @@ export interface ParsedStoriesQuery {
 
 /** Upper bound on values per filter category (bounded SQL parameter lists). */
 const MAX_FILTER_VALUES = 50;
+/**
+ * Upper bound on filter values across ALL categories: the story query binds
+ * every filter value plus its gate/pagination parameters, and D1 caps a
+ * query at ~100 bound parameters, so the combined filter payload stays well
+ * under that (docs/EXPLORE-ADAPTER.md).
+ */
+const MAX_TOTAL_FILTER_VALUES = 60;
 
 /**
  * Parse the recorded Explore client query shape (Rails `story_params`).
  * Invalid values answer 400 — an intentional IMPROVE over Rails, which
- * coerced or crashed. Id filters are bounded to 1..MAX_DATABASE_ID and every
- * filter list to MAX_FILTER_VALUES, so query filters can never produce an
- * unbounded `IN (...)` list on D1/SQLite. `places[]`/`places` spellings are
- * both accepted because axios serializes arrays with brackets.
+ * coerced or crashed. Id filters are bounded to 1..MAX_DATABASE_ID, every
+ * filter list to MAX_FILTER_VALUES, and the combined filter payload to
+ * MAX_TOTAL_FILTER_VALUES across all categories, so query filters can never
+ * produce an `IN (...)` list that pushes a query past D1/SQLite's ~100
+ * bound-parameter limit. `places[]`/`places` spellings are both accepted
+ * because axios serializes arrays with brackets.
  */
 export function parseStoriesQuery(
   params: URLSearchParams
@@ -216,6 +225,20 @@ export function parseStoriesQuery(
     topic === null ||
     typeOfPlace === null ||
     speakerCommunity === null
+  )
+    return { ok: false as const };
+  // Combined cap: every filter value becomes a bound parameter of the same
+  // story query, so the total payload must stay inside the D1 envelope
+  // regardless of how the categories are combined.
+  if (
+    places.length +
+      regions.length +
+      languages.length +
+      speakers.length +
+      topic.length +
+      typeOfPlace.length +
+      speakerCommunity.length >
+    MAX_TOTAL_FILTER_VALUES
   )
     return { ok: false as const };
   const limitRaw = params.get('limit');

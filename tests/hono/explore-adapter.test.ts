@@ -259,6 +259,17 @@ const seed = async () => {
       longitude: 1.5,
     })) as Record<string, unknown>
   ).id as number;
+  // Reachable only from st6, which has no speaker edge and therefore never
+  // qualifies for the visible story relation.
+  ids.p6 = (
+    (await place({
+      name: 'Quiet Cove',
+      communityId: ids.a,
+      latitude: 10.9,
+      longitude: -20.9,
+      region: 'West',
+    })) as Record<string, unknown>
+  ).id as number;
 
   const speaker = (values: Record<string, unknown>) =>
     insert(tables.speakers, { createdAt: T0, updatedAt: T0, ...values });
@@ -355,7 +366,7 @@ const seed = async () => {
       communityId: ids.a,
       privacyLevel: 'public',
       isRestricted: false,
-      language: 'en',
+      language: 'fr',
       createdAt: T2,
       updatedAt: T2,
     })) as Record<string, unknown>
@@ -411,6 +422,7 @@ const seed = async () => {
   await edge(ids.st4, ids.p1);
   await edge(ids.st5, ids.p1);
   await edge(ids.st6, ids.p1);
+  await edge(ids.st6, ids.p6);
   await edge(ids.stB, ids.pB);
   await edge(ids.st7, ids.p2);
   // Cross-tenant edge: community A's story pointing at community B's place.
@@ -529,9 +541,14 @@ it('answers community show with the Rails detail shape', async () => {
   });
   // All four public stories count (no place/speaker join requirement).
   expect(data.storiesCount).toBe(4);
-  // Points come from public stories' place edges: restricted and
-  // invalid-coordinate places are absent.
-  expect(data.points.map((p: { id: number }) => p.id)).toEqual([ids.p1]);
+  // Points come from public stories' place edges (Rails semantics: every
+  // anonymous story, no speaker-edge requirement): restricted and
+  // invalid-coordinate places are absent, and Quiet Cove (edge from the
+  // public speaker-less story) is present.
+  expect(data.points.map((p: { id: number }) => p.id)).toEqual([
+    ids.p1,
+    ids.p6,
+  ]);
   expect(data.points[0]).toEqual({
     type: 'Feature',
     id: ids.p1,
@@ -557,7 +574,6 @@ it('answers community show with the Rails detail shape', async () => {
   ]);
   expect(data.filters).toEqual([
     { label: 'River Bend', value: ids.p1, category: 'places' },
-    { label: 'Sky Mark', value: ids.p5, category: 'places' },
     { label: 'North', value: 'North', category: 'region' },
     { label: 'en', value: 'en', category: 'language' },
     { label: 'es', value: 'es', category: 'language' },
@@ -761,6 +777,7 @@ it('never projects another community through a cross-tenant story edge', async (
   const show = await body('/explore/communities/public-alpha');
   expect(show.json.data.points.map((p: { id: number }) => p.id)).toEqual([
     ids.p1,
+    ids.p6,
   ]);
   expect(show.text).not.toContain('Beta Spot');
   const list = await body('/explore/communities/public-alpha/stories');
@@ -803,6 +820,178 @@ it('withholds branding from private communities at the query level', async () =>
   expect(await repository.brandingFileForCommunity(ids.a)).toEqual({
     fileId: fileIds.a,
   });
+});
+
+it('caps the combined filter payload across categories', async () => {
+  // 30 place ids + 31 region values = 61 filter values: over the combined
+  // cap even though each category is under its own, because every value is
+  // a bound parameter of the same query.
+  const places30 = Array.from({ length: 30 }, (_, i) => i + 1000).join(
+    '&places[]='
+  );
+  const regions31 = Array.from({ length: 31 }, (_, i) => `r${i}`).join(
+    '&region[]='
+  );
+  const over = await body(
+    `/explore/communities/public-alpha/stories?places[]=${places30}&region[]=${regions31}`
+  );
+  expect(over.status).toBe(400);
+  expect(over.json).toEqual({ error: 'Invalid request' });
+  const regions30 = Array.from({ length: 30 }, (_, i) => `r${i}`).join(
+    '&region[]='
+  );
+  const atTotal = await body(
+    `/explore/communities/public-alpha/stories?places[]=${places30}&region[]=${regions30}`
+  );
+  expect(atTotal.status).toBe(200);
+  expect(atTotal.json.meta.total).toBe(0);
+});
+
+it('derives filter options from the same visibility as the story relation', async () => {
+  const page = await body('/explore/communities/public-alpha');
+  const filters = page.json.data.filters;
+  // Places: only publishable places of visibly qualifying stories — the
+  // invalid-coordinate place (Sky Mark) and the place reachable only from a
+  // story without speaker edges (Quiet Cove) are absent.
+  const placeOptions = filters.filter(
+    (f: { category: string }) => f.category === 'places'
+  );
+  expect(placeOptions).toEqual([
+    { label: 'River Bend', value: ids.p1, category: 'places' },
+  ]);
+  // Regions: 'West' (Quiet Cove) never appears.
+  expect(
+    filters.some((f: { value: unknown }) => f.value === 'West')
+  ).toBe(false);
+  // Languages: 'fr' lives only on the non-qualifying story.
+  expect(
+    filters.some((f: { value: unknown }) => f.value === 'fr')
+  ).toBe(false);
+  // Speakers: only speakers of visibly qualifying stories.
+  expect(
+    filters.filter((f: { category: string }) => f.category === 'speakers')
+  ).toEqual([{ value: ids.s1, label: 'Elder Ana', category: 'speakers' }]);
+});
+
+it('caps unpaged map points for very large relations', async () => {
+  const sqlite = new Sqlite(':memory:');
+  sqlite.pragma('foreign_keys=ON');
+  const big = drizzle(sqlite);
+  migrate(big, { migrationsFolder: 'src/db/migrations' });
+  const t = tablesFor(big);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const insert = async (table: unknown, values: Record<string, unknown>[]) => {
+    for (let offset = 0; offset < values.length; offset += 500)
+      await big
+        .insert(table as never)
+        .values(values.slice(offset, offset + 500) as never);
+  };
+  const when = new Date('2026-01-01T00:00:00Z');
+  try {
+    const [community] = await big
+      .insert(t.communities)
+      .values({
+        name: 'Big Map',
+        slug: 'big-map',
+        publicStories: true,
+        isActive: true,
+        createdAt: when,
+        updatedAt: when,
+      })
+      .returning();
+    const [user] = await big
+      .insert(t.users)
+      .values({
+        email: 'big@example.test',
+        passwordHash: 'irrelevant',
+        firstName: 'Big',
+        lastName: 'Map',
+        role: 'viewer',
+        communityId: community.id,
+        createdAt: when,
+        updatedAt: when,
+      })
+      .returning();
+    const [speaker] = await big
+      .insert(t.speakers)
+      .values({
+        name: 'Big Speaker',
+        communityId: community.id,
+        isActive: true,
+        createdAt: when,
+        updatedAt: when,
+      })
+      .returning();
+    const [story] = await big
+      .insert(t.stories)
+      .values({
+        title: 'Big Story',
+        slug: 'big-story',
+        communityId: community.id,
+        createdBy: user.id,
+        privacyLevel: 'public',
+        isRestricted: false,
+        language: 'en',
+        createdAt: when,
+        updatedAt: when,
+      })
+      .returning();
+    const count = 2001;
+    await insert(
+      t.places,
+      Array.from({ length: count }, (_, i) => ({
+        name: `Point ${i + 1}`,
+        communityId: community.id,
+        latitude: 1 + i / 10000,
+        longitude: 1 + i / 10000,
+        createdAt: when,
+        updatedAt: when,
+      }))
+    );
+    const placeIds = (
+      await big.select({ id: t.places.id }).from(t.places)
+    ).map((row) => row.id);
+    await insert(
+      t.storyPlaces,
+      placeIds.map((placeId) => ({
+        storyId: story.id,
+        placeId,
+        sortOrder: 0,
+        createdAt: when,
+        updatedAt: when,
+      }))
+    );
+    await big.insert(t.storySpeakers).values({
+      storyId: story.id,
+      speakerId: speaker.id,
+      sortOrder: 0,
+      createdAt: when,
+      updatedAt: when,
+    });
+    const bigApp = createHonoApp({
+      repository: new HonoFoundationRepository(big),
+      verifier: { verify: async () => false },
+      secureCookies: false,
+      storage: { read: async () => null },
+    });
+    const show = await bigApp.request(
+      new Request('http://localhost/explore/communities/big-map')
+    );
+    const data = (await show.json()).data;
+    expect(data.points).toHaveLength(2000);
+    expect(data.points[0].id).toBe(placeIds[0]);
+    expect(data.points[1999].id).toBe(placeIds[1999]);
+    const list = await bigApp.request(
+      new Request('http://localhost/explore/communities/big-map/stories')
+    );
+    const listed = (await list.json()).data;
+    expect(listed.points).toHaveLength(2000);
+    expect(listed.stories.map((s: { id: number }) => s.id)).toEqual([
+      story.id,
+    ]);
+  } finally {
+    sqlite.close();
+  }
 });
 
 it('rejects invalid story queries with 400', async () => {

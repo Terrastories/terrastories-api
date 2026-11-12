@@ -47,9 +47,7 @@ import type { Database } from '../db/index.js';
 import {
   containsInsensitive,
   dialectOf,
-  orderWithTiebreak,
   tablesFor,
-  textOrder,
 } from '../db/dialect.js';
 import {
   communityMediaPg,
@@ -118,6 +116,13 @@ export interface ExploreStoryQuery {
   limit: number;
   offset: number;
 }
+
+/**
+ * Cap on any unpaged points projection (docs/EXPLORE-ADAPTER.md): map
+ * points are the whole relation by design, so the projection itself is
+ * bounded to keep responses and query work finite on every profile.
+ */
+export const MAX_POINTS = 2000;
 
 export class ExploreAdapterRepository {
   private readonly tables;
@@ -272,6 +277,13 @@ export class ExploreAdapterRepository {
    * :speakers)` with §6.4a-hardened joins), sorted with a stable id
    * tie-breaker. `total` counts the same relation, so filter probes report
    * only visibly reachable stories.
+   *
+   * PostgreSQL requires every DISTINCT ORDER BY expression to appear in the
+   * select list, so the sort key (byte-order title via COLLATE "C" on
+   * PostgreSQL, matching `textOrder` in db/dialect.ts) is selected under the
+   * `sort_key` alias and stripped before returning; the tie-break column
+   * `stories.id` is already in the select list. Results are identical on
+   * SQLite/D1 and PostgreSQL.
    */
   async publicStoryPage(
     communityId: number,
@@ -280,32 +292,44 @@ export class ExploreAdapterRepository {
     const { stories, places, speakers, storyPlaces, storySpeakers } =
       this.tables;
     const where = this.storyRelationConditions(communityId, query);
-    const primary =
+    const sortExpression =
       query.sortBy === 'title'
-        ? textOrder(this.dialect, stories.title, query.sortDir)
-        : query.sortDir === 'desc'
-          ? desc(stories.createdAt)
-          : asc(stories.createdAt);
-    const relation = () =>
-      this.database
-        .selectDistinct({
-          id: stories.id,
-          title: stories.title,
-          description: stories.description,
-          language: stories.language,
-          createdAt: stories.createdAt,
-          updatedAt: stories.updatedAt,
-        })
-        .from(stories)
-        .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
-        .innerJoin(places, eq(places.id, storyPlaces.placeId))
-        .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
-        .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
-        .where(where);
-    const rows: ExploreStoryListRow[] = await relation()
-      .orderBy(...orderWithTiebreak(primary, stories.id, query.sortDir))
+        ? this.dialect === 'postgresql'
+          ? sql`(${stories.title} COLLATE "C")`
+          : sql`(${stories.title})`
+        : sql`(${stories.createdAt})`;
+    const rows = await this.database
+      .selectDistinct({
+        id: stories.id,
+        title: stories.title,
+        description: stories.description,
+        language: stories.language,
+        createdAt: stories.createdAt,
+        updatedAt: stories.updatedAt,
+        sortKey: sql<string>`${sortExpression}`.as('sort_key'),
+      })
+      .from(stories)
+      .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
+      .innerJoin(places, eq(places.id, storyPlaces.placeId))
+      .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
+      .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
+      .where(where)
+      .orderBy(
+        query.sortDir === 'desc' ? sql`sort_key desc` : sql`sort_key asc`,
+        query.sortDir === 'desc' ? desc(stories.id) : asc(stories.id)
+      )
       .limit(query.limit)
       .offset(query.offset);
+    const page: ExploreStoryListRow[] = rows.map(
+      (row: ExploreStoryListRow & { sortKey: unknown }) => ({
+        id: row.id,
+        title: row.title,
+        description: row.description,
+        language: row.language,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      })
+    );
     const totals = await this.database
       .select({ count: sql<number>`count(distinct ${stories.id})` })
       .from(stories)
@@ -314,7 +338,7 @@ export class ExploreAdapterRepository {
       .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
       .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
       .where(where);
-    return { rows, total: Number(totals[0]?.count ?? 0) };
+    return { rows: page, total: Number(totals[0]?.count ?? 0) };
   }
 
   /**
@@ -347,7 +371,11 @@ export class ExploreAdapterRepository {
     );
   }
 
-  /** Places of every publicly readable story of the community (edges only). */
+  /**
+   * Places of every publicly readable story of the community (edges only),
+   * capped at MAX_POINTS entries (deterministic lowest place ids) so the
+   * unpaged points projection stays bounded on every profile.
+   */
   async publicPlacesOfCommunityStories(
     communityId: number
   ): Promise<ExplorePlaceRow[]> {
@@ -363,10 +391,14 @@ export class ExploreAdapterRepository {
           this.publicStoryGate(communityId)
         )
       )
-      .orderBy(asc(places.id));
+      .orderBy(asc(places.id))
+      .limit(MAX_POINTS);
   }
 
-  /** Places of the filtered story relation — the whole relation, unpaged. */
+  /**
+   * Places of the filtered story relation — the whole relation, unpaged but
+   * capped at MAX_POINTS entries (deterministic lowest place ids).
+   */
   async publicPlacesOfFilteredStories(
     communityId: number,
     query: ExploreStoryQuery
@@ -386,7 +418,8 @@ export class ExploreAdapterRepository {
           this.storyRelationConditions(communityId, query)
         )
       )
-      .orderBy(asc(places.id));
+      .orderBy(asc(places.id))
+      .limit(MAX_POINTS);
   }
 
   /** A publicly readable story of the community, or null (withheld = null). */
@@ -526,40 +559,52 @@ export class ExploreAdapterRepository {
     return this.interviewLocation(communityId, placeId);
   }
 
-  /** Place options for the filter panel: edge-associated with public stories. */
+  /**
+   * Place options for the filter panel. Same visibility as the story
+   * relation itself: places reachable from visibly qualifying stories
+   * (public, unrestricted, visible place and active same-community speaker
+   * edges) and publishable as points (valid coordinate pair).
+   */
   async filterPlaces(
     communityId: number
   ): Promise<Array<{ id: number; name: string }>> {
-    const { places, stories, storyPlaces } = this.tables;
+    const { places, speakers, stories, storyPlaces, storySpeakers } =
+      this.tables;
     return this.database
       .selectDistinct({ id: places.id, name: places.name })
       .from(places)
       .innerJoin(storyPlaces, eq(storyPlaces.placeId, places.id))
       .innerJoin(stories, eq(stories.id, storyPlaces.storyId))
+      .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
+      .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
       .where(
         and(
-          eq(places.communityId, communityId),
-          eq(places.isRestricted, false),
-          this.publicStoryGate(communityId)
+          this.visiblePlaceConditions(communityId),
+          this.storyRelationConditions(communityId)
         )
       )
       .orderBy(asc(places.id));
   }
 
-  /** Non-blank distinct regions of places edge-associated with public stories. */
+  /**
+   * Non-blank distinct regions of places reachable from visibly qualifying
+   * stories (same visibility as the story relation).
+   */
   async filterRegions(communityId: number): Promise<string[]> {
-    const { places, stories, storyPlaces } = this.tables;
+    const { places, speakers, stories, storyPlaces, storySpeakers } =
+      this.tables;
     const rows: { region: string | null }[] = await this.database
       .selectDistinct({ region: places.region })
       .from(places)
       .innerJoin(storyPlaces, eq(storyPlaces.placeId, places.id))
       .innerJoin(stories, eq(stories.id, storyPlaces.storyId))
+      .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
+      .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
       .where(
         and(
-          eq(places.communityId, communityId),
-          eq(places.isRestricted, false),
-          ne(places.region, ''),
-          this.publicStoryGate(communityId)
+          this.visiblePlaceConditions(communityId),
+          this.storyRelationConditions(communityId),
+          ne(places.region, '')
         )
       )
       .orderBy(asc(places.region));
@@ -568,31 +613,42 @@ export class ExploreAdapterRepository {
       .filter((region): region is string => region !== null);
   }
 
-  /** Active speakers edge-associated with public stories. */
+  /**
+   * Active speakers edge-associated with visibly qualifying stories (same
+   * visibility as the story relation).
+   */
   async filterSpeakers(communityId: number): Promise<ExploreSpeakerRow[]> {
-    const { speakers, stories, storySpeakers } = this.tables;
+    const { places, speakers, stories, storyPlaces, storySpeakers } =
+      this.tables;
     return this.database
       .selectDistinct({ id: speakers.id, name: speakers.name })
       .from(speakers)
       .innerJoin(storySpeakers, eq(storySpeakers.speakerId, speakers.id))
       .innerJoin(stories, eq(stories.id, storySpeakers.storyId))
-      .where(
-        and(
-          eq(speakers.communityId, communityId),
-          eq(speakers.isActive, true),
-          this.publicStoryGate(communityId)
-        )
-      )
+      .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
+      .innerJoin(places, eq(places.id, storyPlaces.placeId))
+      .where(this.storyRelationConditions(communityId))
       .orderBy(asc(speakers.id));
   }
 
-  /** Distinct non-blank languages of publicly readable stories. */
+  /**
+   * Distinct non-blank languages of visibly qualifying stories — the same
+   * relation the list serves, so a language option always implies at least
+   * one listable story.
+   */
   async filterLanguages(communityId: number): Promise<string[]> {
-    const { stories } = this.tables;
+    const { places, speakers, stories, storyPlaces, storySpeakers } =
+      this.tables;
     const rows: { language: string }[] = await this.database
       .selectDistinct({ language: stories.language })
       .from(stories)
-      .where(and(ne(stories.language, ''), this.publicStoryGate(communityId)))
+      .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
+      .innerJoin(places, eq(places.id, storyPlaces.placeId))
+      .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
+      .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
+      .where(
+        and(ne(stories.language, ''), this.storyRelationConditions(communityId))
+      )
       .orderBy(asc(stories.language));
     return rows.map((row) => row.language);
   }

@@ -72,10 +72,10 @@ Rails field → V2 source:
 | `storiesCount` | count of publicly readable stories (no join requirement, matching Rails `.size`) |
 | `points` | distinct publishable places of all publicly readable stories via `story_places` edges (Rails `public_points.uniq`): unrestricted, valid coordinate pair |
 | `categories` | Rails `Community::FILTERABLE_ATTRIBUTES` verbatim: `places, region, type_of_place, speakers, topic, language, speaker_community` |
-| `filters[].places` | unrestricted places with a `story_places` edge to a public story (`{label: name, value: id}`) |
+| `filters[].places` | publishable places (valid coordinate pair, unrestricted, same community) reachable from visibly qualifying stories — the exact relation the list serves (`{label: name, value: id}`) |
 | `filters[].region` | non-blank distinct regions of those places |
-| `filters[].language` | distinct non-blank languages of publicly readable stories |
-| `filters[].speakers` | active speakers with a `story_speakers` edge to a public story |
+| `filters[].language` | distinct non-blank languages of visibly qualifying stories — an option always implies at least one listable story |
+| `filters[].speakers` | active same-community speakers of visibly qualifying stories |
 | `filters[].type_of_place` / `topic` / `speaker_community` | never populated (no V2 columns; see below) |
 | `mapConfig.*` | index shape plus `centerLat`, `centerLong`, `swBoundaryLat/Long`, `neBoundaryLat/Long`, `maxBounds` (`[[swLong, swLat],[neLong, neLat]]` or `null`, exactly Rails `Theme#boundaries`) |
 
@@ -94,15 +94,17 @@ Query (Rails `story_params`; arrays accepted as `key[]=` and `key=`):
 | `sort_by` `created_at`\|`title` (default `created_at`), `sort_dir` `asc`\|`desc` (default `desc`) | ordering with stable id tie-break; `title` uses byte-order `textOrder` for identical SQLite/PostgreSQL results |
 | `places` (ids), `region`, `language`, `speakers` (ids) | SQL filters; a story must have ≥1 place edge and ≥1 speaker edge (Rails `joins(:places, :speakers)`, `distinct`) |
 | `topic`, `type_of_place`, `speaker_community` | accepted and echoed in `nextPageMeta`, but no story can match (no V2 representation) |
-| id bounds and list caps | id filters are bounded to `1..MAX_DATABASE_ID` and every filter list to 50 values; anything else answers 400, and no query ever builds an unbounded `IN (...)` list (D1/SQLite bound-parameter limits) — story-set place queries are joins, not id lists |
+| id bounds and list caps | id filters are bounded to `1..MAX_DATABASE_ID`, every filter list to 50 values, and the **combined** filter payload to 60 values across all categories (every value is a bound parameter of one query, and D1 caps a query at ~100); anything else answers 400, and no query ever builds an unbounded `IN (...)` list — story-set place queries are joins, not id lists |
 
 Response: `data.points` are the distinct places of the **whole filtered
 relation** (not just the page — Rails comment: "all points in the data relation
-should be returned"); `data.stories[]` carry `id`, `title`, `topic` (`null`),
+should be returned"), capped at 2000 entries (deterministic lowest place ids)
+so the unpaged projection stays bounded on every profile; `data.stories[]`
+carry `id`, `title`, `topic` (`null`),
 `desc`, `language`, `createdAt`, `updatedAt`. `meta` is Rails `Page`:
 `{ total, hasNextPage, nextPageMeta }` where `nextPageMeta` echoes received
 filters plus `sort_by`, `sort_dir`, `limit`, and `offset` (next offset or
-`null`).
+`null`). Community-show `points` carry the same 2000-entry cap.
 
 ### Story show
 
@@ -165,7 +167,11 @@ and flip on once the canonical model (#145/#146) lands them:
   (Rails had no such concepts).
 - Place show requires a §6.4a story association (Rails served every place of a
   public community).
-- Points require a valid coordinate pair (Rails only required non-null).
+- Points require a valid coordinate pair (Rails only required non-null), and
+  unpaged points projections are capped at 2000 deterministic entries.
+- Filter options derive from the same hardened relation as the story list, so
+  an option always corresponds to at least one listable story (Rails derived
+  them from looser joins).
 - Invalid query values answer 400 instead of Rails' coercion/500; `limit` is
   capped at 100.
 - Ordering has a stable id tie-breaker on every sort (§4).

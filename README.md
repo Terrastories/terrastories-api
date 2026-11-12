@@ -33,6 +33,16 @@ remain undefined ([tracking issue #182](https://github.com/Terrastories/terrasto
 The former nonfunctional service and unused queue declaration were removed; existing
 Docker volumes are not deleted by this configuration change.
 
+When upgrading a deployment that previously enabled sync, remove its orphaned
+`sync-service` container while starting the supported services:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.field-kit.yml up -d --remove-orphans
+```
+
+This also removes other orphaned containers in the same Compose project; named
+volumes remain intact.
+
 ## Current migration state
 
 `main` currently runs Fastify V1. Hono is the target framework, and the Phase 1 Hono foundation is pending in PR #132; Hono-specific follow-up work must use that documented dependency rather than assume Hono is already present on `main`. Production readiness must be proven by the active roadmap; historical “production ready” reports are intentionally not retained in this repository.

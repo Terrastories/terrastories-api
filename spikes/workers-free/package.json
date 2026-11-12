@@ -1,0 +1,18 @@
+{
+  "name": "ts-spike-workers-free",
+  "private": true,
+  "type": "module",
+  "description": "Throwaway Workers Free feasibility spike for issue #194. Not wired into the app.",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "fixtures": "node scripts/make-fixtures.mjs",
+    "dataset": "node scripts/make-dataset.mjs"
+  },
+  "dependencies": {
+    "@phi-ag/argon2": "0.6.2",
+    "bcryptjs": "3.0.3"
+  },
+  "devDependencies": {
+    "wrangler": "4.156.0"
+  }
+}

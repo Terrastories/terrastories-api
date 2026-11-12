@@ -1,0 +1,102 @@
+<!doctype html>
+<!--
+  Client-device KDF bench for the Workers Free auth design (#184, #194).
+  Serve the spike directory over plain http:// on a LAN address, not localhost, so the
+  page runs in a non-secure context like a field kit:
+    python3 -m http.server 8787 --bind 0.0.0.0     (from spikes/workers-free)
+  Then open http://<lan-ip>:8787/client/bench.html on the device and press Run.
+  Results appear on the page and in window.benchResult.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KDF device bench</title>
+    <script type="importmap">
+      { "imports": { "crypto": "./crypto-shim.js" } }
+    </script>
+  </head>
+  <body>
+    <h1>KDF device bench</h1>
+    <p>
+      Runs Argon2id (WASM, m=19456 KiB, t=2, p=1) and bcrypt cost 12 (bcryptjs)
+      five times each.
+    </p>
+    <button id="run">Run</button>
+    <pre id="out">idle</pre>
+    <script type="module">
+      import bcrypt from '../node_modules/bcryptjs/index.js';
+      import initialize from '../node_modules/@phi-ag/argon2/dist/fetch.js';
+
+      const RUNS = Number(
+        new URLSearchParams(location.search).get('runs') ?? 5
+      );
+      const out = document.getElementById('out');
+      const log = (s) => (out.textContent += `\n${s}`);
+      const p95 = (xs) =>
+        [...xs].sort((a, b) => a - b)[
+          Math.min(xs.length - 1, Math.ceil(0.95 * xs.length) - 1)
+        ];
+      // A real bcrypt-ruby 3.1.20 cost-12 hash of "correct horse battery staple".
+      const RAILS_12 =
+        '$2a$12$wRVnxDOS/XxAVRcHoU3G1OJZ8fMkUiPip0x1GQhQwgMss7fmoapkK';
+
+      async function run() {
+        out.textContent = 'running';
+        const result = {
+          userAgent: navigator.userAgent,
+          deviceMemoryGiB: navigator.deviceMemory ?? null,
+          cores: navigator.hardwareConcurrency ?? null,
+          isSecureContext,
+          cryptoSubtleAvailable: !!globalThis.crypto?.subtle,
+          argon2idMs: [],
+          bcrypt12Ms: [],
+          errors: [],
+        };
+        try {
+          const argon2 = await initialize(
+            '../node_modules/@phi-ag/argon2/dist/argon2.wasm'
+          );
+          for (let i = 0; i < RUNS; i++) {
+            const t0 = performance.now();
+            argon2.hash('correct horse battery staple', {
+              memoryCost: 19456,
+              timeCost: 2,
+              parallelism: 1,
+            });
+            result.argon2idMs.push(Math.round(performance.now() - t0));
+            log(`argon2id run ${i + 1}: ${result.argon2idMs.at(-1)} ms`);
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        } catch (e) {
+          result.errors.push(`argon2id: ${e?.message ?? e}`);
+        }
+        try {
+          for (let i = 0; i < RUNS; i++) {
+            const t0 = performance.now();
+            const ok = await bcrypt.compare(
+              'correct horse battery staple',
+              RAILS_12
+            );
+            result.bcrypt12Ms.push(Math.round(performance.now() - t0));
+            if (!ok) result.errors.push('bcrypt: Rails fixture did not verify');
+            log(`bcrypt12 run ${i + 1}: ${result.bcrypt12Ms.at(-1)} ms`);
+          }
+        } catch (e) {
+          result.errors.push(`bcrypt: ${e?.message ?? e}`);
+        }
+        result.argon2idP95Ms = result.argon2idMs.length
+          ? p95(result.argon2idMs)
+          : null;
+        result.bcrypt12P95Ms = result.bcrypt12Ms.length
+          ? p95(result.bcrypt12Ms)
+          : null;
+        window.benchResult = result;
+        out.textContent = JSON.stringify(result, null, 2);
+        document.title = 'done';
+      }
+      document.getElementById('run').onclick = run;
+      if (new URLSearchParams(location.search).has('auto')) run();
+    </script>
+  </body>
+</html>

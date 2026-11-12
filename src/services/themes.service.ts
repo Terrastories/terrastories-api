@@ -23,6 +23,11 @@ import type {
 } from '../repositories/themes.repository.js';
 import type { Theme, CreateTheme, UpdateTheme } from '../db/schema/themes.js';
 import type { Logger } from '../shared/types/index.js';
+import {
+  AuthorizationError,
+  NotFoundError,
+  ValidationError,
+} from '../shared/errors/index.js';
 
 /**
  * Cultural protocols for theme access and modifications
@@ -99,7 +104,7 @@ export class ThemeServiceError extends Error {
   }
 }
 
-export class ThemeNotFoundServiceError extends Error {
+export class ThemeNotFoundServiceError extends NotFoundError {
   constructor(message = 'Theme not found') {
     super(message);
     this.name = 'ThemeNotFoundServiceError';
@@ -113,21 +118,21 @@ export class CulturalProtocolViolationError extends Error {
   }
 }
 
-export class DataSovereigntyViolationError extends Error {
+export class DataSovereigntyViolationError extends AuthorizationError {
   constructor(message = 'Data sovereignty violation') {
     super(message);
     this.name = 'DataSovereigntyViolationError';
   }
 }
 
-export class InsufficientPermissionsError extends Error {
+export class InsufficientPermissionsError extends AuthorizationError {
   constructor(message = 'Insufficient permissions') {
     super(message);
     this.name = 'InsufficientPermissionsError';
   }
 }
 
-export class InvalidGeographicBoundsError extends Error {
+export class InvalidGeographicBoundsError extends ValidationError {
   constructor(message = 'Invalid geographic bounds') {
     super(message);
     this.name = 'InvalidGeographicBoundsError';
@@ -184,10 +189,10 @@ export class ThemesService {
     // Validate geographic bounds if provided
     if (this.hasBoundaryCoordinates(input)) {
       this.validateGeographicBounds(
-        input.swBoundaryLat!,
-        input.swBoundaryLong!,
-        input.neBoundaryLat!,
-        input.neBoundaryLong!
+        input.swBoundaryLat,
+        input.swBoundaryLong,
+        input.neBoundaryLat,
+        input.neBoundaryLong
       );
     }
 
@@ -857,36 +862,36 @@ export class ThemesService {
    * Validate geographic bounds
    */
   private validateGeographicBounds(
-    swLat: number,
-    swLng: number,
-    neLat: number,
-    neLng: number
+    swLat: number | undefined,
+    swLng: number | undefined,
+    neLat: number | undefined,
+    neLng: number | undefined
   ): void {
-    // Validate coordinate ranges
-    if (!this.isValidLatitude(swLat) || !this.isValidLatitude(neLat)) {
+    // Missing coordinates are absent, not zero; validate each known value.
+    if (
+      [swLat, neLat].some(
+        (value) => value !== undefined && !this.isValidLatitude(value)
+      )
+    ) {
       throw new InvalidGeographicBoundsError(
         'Latitude must be between -90 and 90 degrees'
       );
     }
-
-    if (!this.isValidLongitude(swLng) || !this.isValidLongitude(neLng)) {
+    if (
+      [swLng, neLng].some(
+        (value) => value !== undefined && !this.isValidLongitude(value)
+      )
+    ) {
       throw new InvalidGeographicBoundsError(
         'Longitude must be between -180 and 180 degrees'
       );
     }
-
-    // Validate bounds relationship
-    if (swLat >= neLat) {
+    if (swLat !== undefined && neLat !== undefined && swLat > neLat) {
       throw new InvalidGeographicBoundsError(
-        'Southwest latitude must be less than northeast latitude'
+        'Southwest latitude must be less than or equal to northeast latitude'
       );
     }
-
-    if (swLng >= neLng) {
-      throw new InvalidGeographicBoundsError(
-        'Southwest longitude must be less than northeast longitude'
-      );
-    }
+    // Longitude may wrap: southwest > northeast crosses the antimeridian.
   }
 
   /**
@@ -922,9 +927,9 @@ export class ThemesService {
    */
   private hasBoundaryCoordinates(input: ThemeCreateInput): boolean {
     return (
-      input.swBoundaryLat !== undefined &&
-      input.swBoundaryLong !== undefined &&
-      input.neBoundaryLat !== undefined &&
+      input.swBoundaryLat !== undefined ||
+      input.swBoundaryLong !== undefined ||
+      input.neBoundaryLat !== undefined ||
       input.neBoundaryLong !== undefined
     );
   }
@@ -948,28 +953,32 @@ export class ThemesService {
     existing: Theme,
     input: ThemeUpdateInput
   ): {
-    swLat: number;
-    swLng: number;
-    neLat: number;
-    neLng: number;
+    swLat: number | undefined;
+    swLng: number | undefined;
+    neLat: number | undefined;
+    neLng: number | undefined;
   } {
     return {
       swLat:
-        input.swBoundaryLat !== undefined
-          ? input.swBoundaryLat
-          : Number(existing.swBoundaryLat) || 0,
+        input.swBoundaryLat ??
+        (existing.swBoundaryLat == null
+          ? undefined
+          : Number(existing.swBoundaryLat)),
       swLng:
-        input.swBoundaryLong !== undefined
-          ? input.swBoundaryLong
-          : Number(existing.swBoundaryLong) || 0,
+        input.swBoundaryLong ??
+        (existing.swBoundaryLong == null
+          ? undefined
+          : Number(existing.swBoundaryLong)),
       neLat:
-        input.neBoundaryLat !== undefined
-          ? input.neBoundaryLat
-          : Number(existing.neBoundaryLat) || 0,
+        input.neBoundaryLat ??
+        (existing.neBoundaryLat == null
+          ? undefined
+          : Number(existing.neBoundaryLat)),
       neLng:
-        input.neBoundaryLong !== undefined
-          ? input.neBoundaryLong
-          : Number(existing.neBoundaryLong) || 0,
+        input.neBoundaryLong ??
+        (existing.neBoundaryLong == null
+          ? undefined
+          : Number(existing.neBoundaryLong)),
     };
   }
 

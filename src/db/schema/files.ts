@@ -188,10 +188,15 @@ export const insertFileSchema = createInsertSchema(filesSqlite, {
 export const selectFileSchema = createSelectSchema(filesSqlite);
 
 // Update schema (all fields optional except ID)
-export const updateFileSchema = insertFileSchema.partial().extend({
-  id: z.string().uuid('Invalid file ID'),
-  updatedAt: z.date().optional(),
-});
+export const updateFileSchema = insertFileSchema
+  .extend({
+    isActive: insertFileSchema.shape.isActive.removeDefault(),
+  })
+  .partial()
+  .extend({
+    id: z.string().uuid('Invalid file ID'),
+    updatedAt: z.date().optional(),
+  });
 
 // TypeScript types
 export type File = typeof filesSqlite.$inferSelect;

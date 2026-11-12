@@ -1,0 +1,13 @@
+{
+  "trackingIssue": 141,
+  "minimumSeverity": "moderate",
+  "expires": "2026-11-30",
+  "review": {
+    "status": "accepted",
+    "reviewedBy": "Repository writer/admin approval recorded externally under issue #141",
+    "reviewedOn": "2026-11-02",
+    "advisoriesSha256": "df2c879b7425566c2ce362f44419743469846b526921a15097fa2c766daccf3d",
+    "policySha256": "2d61bc9fdda98061f52993b3f6d6811451f0b842bcaac87d64364ca99b039ded",
+    "rationale": "Temporary exception for the exact moderate-or-higher advisory set and normalized npm installation paths captured in the reviewed baseline. CI verifies a matching external approval from a GitHub repository writer or administrator under issue #141 before accepting this policy. The policy digest binds the advisory identities, path-aware advisory digest, expiry date, severity threshold, and tracking issue; any advisory, path, expiry, threshold, or issue change invalidates both the in-repository digest and external approval and must fail closed until explicitly reviewed again."
+  }
+}

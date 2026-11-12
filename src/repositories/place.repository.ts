@@ -15,6 +15,8 @@ import {
   type NewPlace,
   validateCoordinates,
 } from '../db/schema/places.js';
+import { storyAudienceCondition } from './story.repository.js';
+import type { TransitionalStoryReadAccess } from '../shared/authorization/sovereignty-policy.js';
 import {
   dialectOf,
   tablesFor,
@@ -643,48 +645,91 @@ export class PlaceRepository {
   }
 
   /**
-   * Get place statistics for a community
+   * Get place statistics for a community (SPEC-V2 §6.4). Count metadata is a
+   * projection: without `includeRestricted`, counts cover unrestricted
+   * places only, the `restricted` key never appears, and `withStories`
+   * counts places joined to stories the caller may read (`storyAudiences`
+   * uses the policy's audience mapping). A defined `storyAudiences` array
+   * that matches no row (e.g. super_admin's empty grant) counts zero —
+   * fail closed, never "no filter". Restricted places are unavailable to
+   * every role in V2 runtime, so callers pass `includeRestricted: false`.
    */
-  async getCommunityPlaceStats(communityId: number): Promise<{
+  async getCommunityPlaceStats(
+    communityId: number,
+    options: {
+      includeRestricted?: boolean;
+      storyAudiences?: readonly TransitionalStoryReadAccess[];
+    } = {}
+  ): Promise<{
     total: number;
-    restricted: number;
+    restricted?: number;
     public: number;
     withStories: number;
   }> {
     const placesTable = this.tables.places;
+    const includeRestricted = options.includeRestricted ?? false;
+    const storiesTable = this.tables.stories;
+    const storyPlacesTable = this.tables.storyPlaces;
+    const placeScope = includeRestricted
+      ? eq(placesTable.communityId, communityId)
+      : and(
+          eq(placesTable.communityId, communityId),
+          eq(placesTable.isRestricted, false)
+        );
 
     const [totalResult] = await (this.db as any)
       .select({ count: count() })
       .from(placesTable)
-      .where(eq(placesTable.communityId, communityId));
+      .where(placeScope);
 
-    const [restrictedResult] = await (this.db as any)
-      .select({ count: count() })
-      .from(placesTable)
-      .where(
-        and(
-          eq(placesTable.communityId, communityId),
-          eq(placesTable.isRestricted, true)
+    const restricted = includeRestricted
+      ? Number(
+          (
+            await (this.db as any)
+              .select({ count: count() })
+              .from(placesTable)
+              .where(
+                and(
+                  eq(placesTable.communityId, communityId),
+                  eq(placesTable.isRestricted, true)
+                )
+              )
+          )[0].count
         )
-      );
+      : undefined;
 
-    const [withStoriesResult] = await (this.db as any)
-      .select({ count: count(sql`DISTINCT ${placesTable.id}`) })
-      .from(placesTable)
-      .innerJoin(
-        this.tables.storyPlaces,
-        eq(placesTable.id, this.tables.storyPlaces.placeId)
-      )
-      .where(eq(placesTable.communityId, communityId));
+    const storyScope = options.storyAudiences
+      ? storyAudienceCondition(options.storyAudiences, storiesTable)
+      : undefined;
+    // The requested story accesses match no row at all: no story-linked
+    // place may count, fail closed instead of dropping the filter.
+    const withStories =
+      options.storyAudiences && !storyScope
+        ? 0
+        : Number(
+            (
+              await (this.db as any)
+                .select({ count: count(sql`DISTINCT ${placesTable.id}`) })
+                .from(placesTable)
+                .innerJoin(
+                  storyPlacesTable,
+                  eq(placesTable.id, storyPlacesTable.placeId)
+                )
+                .innerJoin(
+                  storiesTable,
+                  eq(storyPlacesTable.storyId, storiesTable.id)
+                )
+                .where(storyScope ? and(placeScope, storyScope) : placeScope)
+            )[0].count
+          );
 
     const total = Number(totalResult.count);
-    const restricted = Number(restrictedResult.count);
 
     return {
       total,
-      restricted,
-      public: total - restricted,
-      withStories: Number(withStoriesResult.count),
+      ...(restricted !== undefined ? { restricted } : {}),
+      public: restricted !== undefined ? total - restricted : total,
+      withStories,
     };
   }
 }

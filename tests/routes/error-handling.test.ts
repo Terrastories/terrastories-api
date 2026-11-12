@@ -14,6 +14,7 @@ import { FastifyInstance } from 'fastify';
 import { testDb } from '../helpers/database.js';
 import { createTestApp } from '../helpers/api-client.js';
 import { extractSignedSessionCookie } from '../helpers/session-cookie.js';
+import { seedRegisteredUser } from '../helpers/community-authority.js';
 
 describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
   let app: FastifyInstance;
@@ -40,19 +41,8 @@ describe('Individual Resource Endpoint Error Handling - Issue #113', () => {
       communityId: testCommunityId,
     };
 
-    // Register admin
-    const registerResponse = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/register',
-      payload: adminUser,
-    });
-
-    if (registerResponse.statusCode !== 201) {
-      console.error('Registration failed:', registerResponse.body);
-      throw new Error(
-        `Registration failed with status ${registerResponse.statusCode}`
-      );
-    }
+    // Seed admin directly (registration requires community-admin authority)
+    await seedRegisteredUser(testDb.db, adminUser);
 
     // Login as admin
     const loginResponse = await app.inject({

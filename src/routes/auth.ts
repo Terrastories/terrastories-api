@@ -28,6 +28,11 @@ import {
   type UserSession,
 } from '../shared/middleware/auth.middleware.js';
 import { getConfig } from '../shared/config/index.js';
+import {
+  authorizeCommunityEnrollment,
+  createAdministrativeAuditEvent,
+} from '../shared/authorization/administrative-policy.js';
+import { emitAdministrativeAudit } from '../shared/utils/audit-logger.js';
 
 // Request validation schemas with strict validation
 const registerSchema = z
@@ -119,7 +124,7 @@ export async function authRoutes(
       },
       schema: {
         description:
-          'Register a new user with password hashing and community association',
+          "Enroll a new account in the caller's community. Requires a same-community administrator session (SPEC-V2 §7); anonymous callers get 401.",
         tags: ['Authentication'],
         response: {
           201: {
@@ -154,6 +159,22 @@ export async function authRoutes(
               details: { type: 'array', items: { type: 'string' } },
             },
           },
+          401: {
+            description:
+              'Authentication required - there is no anonymous registration',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          403: {
+            description:
+              'Forbidden - only a same-community administrator may enroll accounts',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
           409: {
             description: 'Conflict - email already exists in community',
             type: 'object',
@@ -175,11 +196,63 @@ export async function authRoutes(
     },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
+        // SPEC-V2 §7: community administrators authorize membership and
+        // community roles; §9 has no anonymous signup exception. Anonymous
+        // callers are rejected before validation or any community lookup,
+        // so the response carries no community-existence signal.
+        const sessionUser = getCurrentUser(request);
+        const actor = sessionUser
+          ? {
+              id: sessionUser.id,
+              role: sessionUser.role,
+              communityId: sessionUser.communityId,
+            }
+          : null;
+        if (!actor) {
+          const rawCommunityId = (request.body as { communityId?: unknown })
+            ?.communityId;
+          emitAdministrativeAudit(
+            request.log,
+            createAdministrativeAuditEvent({
+              action: 'enrollment',
+              actor: null,
+              communityId:
+                Number.isInteger(rawCommunityId) && Number(rawCommunityId) > 0
+                  ? Number(rawCommunityId)
+                  : null,
+              decision: { allowed: false, reason: 'anonymous' },
+            })
+          );
+          return reply.status(401).send({
+            error: 'Authentication required',
+          });
+        }
+
         // Validate request body
         const validatedData = registerSchema.parse(request.body);
 
+        const decision = authorizeCommunityEnrollment({
+          actor,
+          targetCommunityId: validatedData.communityId,
+          requestedRole: validatedData.role,
+        });
+        emitAdministrativeAudit(
+          request.log,
+          createAdministrativeAuditEvent({
+            action: 'enrollment',
+            actor,
+            communityId: validatedData.communityId,
+            decision,
+          })
+        );
+        if (!decision.allowed) {
+          return reply.status(403).send({
+            error: 'Community administrator authority required',
+          });
+        }
+
         // Register user
-        const user = await userService.registerUser(validatedData);
+        const user = await userService.registerUser(validatedData, actor);
 
         // Create clean response object (avoiding destructuring issues)
         const userResponse = {
@@ -225,6 +298,10 @@ export async function authRoutes(
             case 'InvalidCommunityError':
               return reply.status(400).send({
                 error: error.message,
+              });
+            case 'CommunityAuthorityRequiredError':
+              return reply.status(403).send({
+                error: 'Community administrator authority required',
               });
             default:
               // Generic user service errors

@@ -330,7 +330,23 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
         expect(res.statusCode).toBe(401);
       });
 
-      it('should return 201 for super admin', async () => {
+      it('should return 403 for a community account in a claimed community (SPEC-V2 §7)', async () => {
+        const res = await client.post(
+          '/api/v1/super_admin/users',
+          {
+            email: `sa-admin-${Date.now()}@test.com`,
+            password: 'TestPass123!',
+            firstName: 'SA',
+            lastName: 'Admin',
+            role: 'admin',
+            communityId: testCommunityId,
+          },
+          superAdminCookie
+        );
+        expect(res.statusCode).toBe(403);
+      });
+
+      it('should return 201 for a system account', async () => {
         const res = await client.post(
           '/api/v1/super_admin/users',
           {
@@ -338,7 +354,7 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
             password: 'TestPass123!',
             firstName: 'SA',
             lastName: 'User',
-            role: 'admin',
+            role: 'super_admin',
             communityId: testCommunityId,
           },
           superAdminCookie

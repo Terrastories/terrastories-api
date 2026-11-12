@@ -23,6 +23,7 @@ import {
   cleanupTestDb,
   createTestData,
 } from '../helpers/database.js';
+import { placesSqlite, speakersSqlite } from '../../src/db/schema/index.js';
 
 describe('StoryRepository', () => {
   let storyRepository: StoryRepository;
@@ -139,6 +140,61 @@ describe('StoryRepository', () => {
 
       // Act & Assert
       await expect(storyRepository.create(invalidStoryData)).rejects.toThrow();
+    });
+  });
+
+  describe('interview relations (SPEC-V2 §6.4/§6.5)', () => {
+    it('never embeds a restricted place as the interview location', async () => {
+      const [restrictedPlace] = await (testDb as any)
+        .insert(placesSqlite)
+        .values({
+          name: 'RESTRICTED-INTERVIEW-PLACE',
+          latitude: 1,
+          longitude: 1,
+          isRestricted: true,
+          communityId: testData.community.id,
+        })
+        .returning();
+      const story = await storyRepository.create({
+        title: 'Interviewed at a restricted place',
+        slug: 'interviewed-at-restricted-place',
+        communityId: testData.community.id,
+        createdBy: testData.users.editor.id,
+        interviewLocationId: restrictedPlace.id,
+      });
+
+      const result = await storyRepository.findByIdWithRelations(story.id);
+
+      expect(result).toBeDefined();
+      expect(result!.interviewLocation).toBeNull();
+      expect(JSON.stringify(result)).not.toContain(
+        'RESTRICTED-INTERVIEW-PLACE'
+      );
+    });
+
+    it('exposes the interviewer active flag so callers can apply the withdrawal gate', async () => {
+      const [withdrawn] = await (testDb as any)
+        .insert(speakersSqlite)
+        .values({
+          name: 'Withdrawn Interviewer',
+          communityId: testData.community.id,
+          isActive: false,
+        })
+        .returning();
+      const story = await storyRepository.create({
+        title: 'Interviewed by a withdrawn speaker',
+        slug: 'interviewed-by-withdrawn-speaker',
+        communityId: testData.community.id,
+        createdBy: testData.users.editor.id,
+        interviewerId: withdrawn.id,
+      });
+
+      const result = await storyRepository.findByIdWithRelations(story.id);
+
+      expect(result!.interviewer).toMatchObject({
+        id: withdrawn.id,
+        isActive: false,
+      });
     });
   });
 

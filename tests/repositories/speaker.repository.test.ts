@@ -432,25 +432,36 @@ describe('SpeakerRepository', () => {
     });
 
     test('should return correct community statistics', async () => {
-      const stats = await repository.getCommunityStats(testCommunityId);
+      const stats = await repository.getCommunityStats(testCommunityId, {
+        includeInactive: true,
+      });
 
       expect(stats.total).toBe(3); // Total speakers in community
       expect(stats.active).toBe(2); // Active speakers
       expect(stats.inactive).toBe(1); // Inactive speakers
-      expect(stats.elders).toBe(1); // Elder speakers
-      expect(stats.nonElders).toBe(2); // Non-elder speakers
+      // Removed V1 scope (elderStatus) never re-enters count projections.
+      expect(stats).not.toHaveProperty('elders');
+      expect(stats).not.toHaveProperty('nonElders');
+    });
+
+    it('counts only active speakers by default (fail-closed, SPEC-V2 §6.5)', async () => {
+      const stats = await repository.getCommunityStats(testCommunityId);
+
+      expect(stats.total).toBe(2);
+      expect(stats.active).toBe(2);
+      expect(stats).not.toHaveProperty('inactive');
     });
 
     test('should return zero stats for community with no speakers', async () => {
       // Create new empty community
       const emptyCommunityId = 99;
-      const stats = await repository.getCommunityStats(emptyCommunityId);
+      const stats = await repository.getCommunityStats(emptyCommunityId, {
+        includeInactive: true,
+      });
 
       expect(stats.total).toBe(0);
       expect(stats.active).toBe(0);
       expect(stats.inactive).toBe(0);
-      expect(stats.elders).toBe(0);
-      expect(stats.nonElders).toBe(0);
     });
   });
 

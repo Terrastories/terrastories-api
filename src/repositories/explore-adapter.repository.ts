@@ -1,0 +1,640 @@
+/**
+ * Read-only data access for the transitional Explore read adapter (#198).
+ *
+ * Every query here serves the anonymous public projection only, applying the
+ * same sovereignty gates as the canonical API (docs/SPEC-V2.md §4, §6.1,
+ * §6.3, §6.4a) on the transitional Fastify-era physical schema:
+ *
+ * - Community gate: `publicStories = true` AND `isActive = true` (the SQL
+ *   transcription of `fastifyCommunityToGates`; a private or disabled
+ *   community is invisible to every Explore request).
+ * - Story gate: `privacyLevel = 'public'` AND `isRestricted = false` (the SQL
+ *   transcription of `fastifyStoryToAudience` -> `public`). Restricted rows
+ *   and unknown privacy levels are `unavailable` to every role and never
+ *   reach a response; direct reads answer the same 404 as missing ids.
+ * - Place/speaker visibility follows the §6.4a decision table: a place or
+ *   speaker appears only through its association (story_places/story_speakers
+ *   edge, interview location/interviewer) with a publicly readable story.
+ *   Restricted places are never exposed (SPEC Appendix A.3), and speakers
+ *   withdrawn via `isActive = false` stay absent from public projections.
+ *
+ * No writes, no interactive transactions, Workers-portable queries only.
+ */
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lte,
+  ne,
+  sql,
+} from 'drizzle-orm';
+import type { DrizzleD1Database } from 'drizzle-orm/d1';
+import type { Database } from '../db/index.js';
+import {
+  containsInsensitive,
+  dialectOf,
+  orderWithTiebreak,
+  tablesFor,
+  textOrder,
+} from '../db/dialect.js';
+import {
+  communityMediaPg,
+  communityMediaSqlite,
+} from '../db/schema/sessions.js';
+
+export interface ExploreCommunityRow {
+  id: number;
+  name: string;
+  description: string | null;
+  slug: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ExploreThemeRow {
+  mapboxStyleUrl: string | null;
+  centerLat: number | null;
+  centerLong: number | null;
+  swBoundaryLat: number | null;
+  swBoundaryLong: number | null;
+  neBoundaryLat: number | null;
+  neBoundaryLong: number | null;
+}
+
+export interface ExplorePlaceRow {
+  id: number;
+  name: string;
+  description: string | null;
+  region: string | null;
+  latitude: number;
+  longitude: number;
+}
+
+export interface ExploreSpeakerRow {
+  id: number;
+  name: string;
+}
+
+export interface ExploreStoryListRow {
+  id: number;
+  title: string;
+  description: string | null;
+  language: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ExploreStoryDetailRow {
+  id: number;
+  title: string;
+  description: string | null;
+  language: string;
+  interviewerId: number | null;
+  interviewLocationId: number | null;
+}
+
+/** Applied filters for the Rails-shaped stories page. */
+export interface ExploreStoryQuery {
+  placeIds?: number[];
+  regions?: string[];
+  languages?: string[];
+  speakerIds?: number[];
+  sortBy: 'created_at' | 'title';
+  sortDir: 'asc' | 'desc';
+  limit: number;
+  offset: number;
+}
+
+export class ExploreAdapterRepository {
+  private readonly tables;
+  private readonly communityMedia;
+  // Both dialects expose the same surface with incompatible TS overloads.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly database: any;
+  private readonly dialect: ReturnType<typeof dialectOf>;
+
+  constructor(database: Database | DrizzleD1Database) {
+    this.database = database;
+    this.dialect = dialectOf(database);
+    this.tables = tablesFor(database);
+    this.communityMedia = (
+      this.dialect === 'postgresql' ? communityMediaPg : communityMediaSqlite
+    ) as typeof communityMediaSqlite;
+  }
+
+  /** Public active communities, newest update first (Rails index order). */
+  async publicCommunities(search?: string): Promise<ExploreCommunityRow[]> {
+    const { communities } = this.tables;
+    const gate = and(
+      eq(communities.publicStories, true),
+      eq(communities.isActive, true)
+    );
+    return this.database
+      .select({
+        id: communities.id,
+        name: communities.name,
+        description: communities.description,
+        slug: communities.slug,
+        createdAt: communities.createdAt,
+        updatedAt: communities.updatedAt,
+      })
+      .from(communities)
+      .where(
+        search && search !== ''
+          ? and(gate, containsInsensitive(this.dialect, communities.name, search))
+          : gate
+      )
+      .orderBy(desc(communities.updatedAt), desc(communities.id));
+  }
+
+  /** The community named by a public Explore slug, or null (withheld = null). */
+  async publicCommunityBySlug(slug: string): Promise<ExploreCommunityRow | null> {
+    const { communities } = this.tables;
+    const rows: ExploreCommunityRow[] = await this.database
+      .select({
+        id: communities.id,
+        name: communities.name,
+        description: communities.description,
+        slug: communities.slug,
+        createdAt: communities.createdAt,
+        updatedAt: communities.updatedAt,
+      })
+      .from(communities)
+      .where(
+        and(
+          eq(communities.slug, slug),
+          eq(communities.publicStories, true),
+          eq(communities.isActive, true)
+        )
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * The community's active theme. Multiple active rows (a V1 state the
+   * canonical model collapses) resolve deterministically to the lowest id;
+   * zero rows yield null (an all-null mapConfig).
+   */
+  async activeTheme(communityId: number): Promise<ExploreThemeRow | null> {
+    const { themes } = this.tables;
+    const rows: ExploreThemeRow[] = await this.database
+      .select({
+        mapboxStyleUrl: themes.mapboxStyleUrl,
+        centerLat: themes.centerLat,
+        centerLong: themes.centerLong,
+        swBoundaryLat: themes.swBoundaryLat,
+        swBoundaryLong: themes.swBoundaryLong,
+        neBoundaryLat: themes.neBoundaryLat,
+        neBoundaryLong: themes.neBoundaryLong,
+      })
+      .from(themes)
+      .where(and(eq(themes.communityId, communityId), eq(themes.active, true)))
+      .orderBy(asc(themes.id))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /** Publicly readable stories of the community (Rails `anonymous` audience). */
+  private publicStoryGate(communityId: number) {
+    const { stories } = this.tables;
+    return and(
+      eq(stories.communityId, communityId),
+      eq(stories.privacyLevel, 'public'),
+      eq(stories.isRestricted, false)
+    );
+  }
+
+  /** Count of publicly readable stories, without join requirements. */
+  async publicStoriesCount(communityId: number): Promise<number> {
+    const { stories } = this.tables;
+    const rows = await this.database
+      .select({ count: sql<number>`count(*)` })
+      .from(stories)
+      .where(this.publicStoryGate(communityId));
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  private storyFilterConditions(communityId: number, query: ExploreStoryQuery) {
+    const { places, speakers } = this.tables;
+    const conditions = [this.publicStoryGate(communityId)];
+    if (query.placeIds?.length)
+      conditions.push(inArray(places.id, query.placeIds));
+    if (query.regions?.length)
+      conditions.push(inArray(places.region, query.regions));
+    if (query.speakerIds?.length)
+      conditions.push(inArray(speakers.id, query.speakerIds));
+    if (query.languages?.length) {
+      const { stories } = this.tables;
+      conditions.push(inArray(stories.language, query.languages));
+    }
+    return and(...conditions);
+  }
+
+  /**
+   * One page of the Rails-shaped story relation: publicly readable stories
+   * that have at least one place and one speaker edge (Rails `joins(:places,
+   * :speakers)`), filtered, sorted with a stable id tie-breaker.
+   */
+  async publicStoryPage(
+    communityId: number,
+    query: ExploreStoryQuery
+  ): Promise<{ rows: ExploreStoryListRow[]; total: number }> {
+    const { stories, places, speakers, storyPlaces, storySpeakers } =
+      this.tables;
+    const where = this.storyFilterConditions(communityId, query);
+    const primary =
+      query.sortBy === 'title'
+        ? textOrder(this.dialect, stories.title, query.sortDir)
+        : query.sortDir === 'desc'
+          ? desc(stories.createdAt)
+          : asc(stories.createdAt);
+    const rows: ExploreStoryListRow[] = await this.database
+      .selectDistinct({
+        id: stories.id,
+        title: stories.title,
+        description: stories.description,
+        language: stories.language,
+        createdAt: stories.createdAt,
+        updatedAt: stories.updatedAt,
+      })
+      .from(stories)
+      .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
+      .innerJoin(places, eq(places.id, storyPlaces.placeId))
+      .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
+      .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
+      .where(where)
+      .orderBy(...orderWithTiebreak(primary, stories.id, query.sortDir))
+      .limit(query.limit)
+      .offset(query.offset);
+    const totals = await this.database
+      .select({ count: sql<number>`count(distinct ${stories.id})` })
+      .from(stories)
+      .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
+      .innerJoin(places, eq(places.id, storyPlaces.placeId))
+      .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
+      .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
+      .where(where);
+    return { rows, total: Number(totals[0]?.count ?? 0) };
+  }
+
+  /** All publicly readable story ids of the community, without join filters. */
+  async publicStoryIds(communityId: number): Promise<number[]> {
+    const { stories } = this.tables;
+    const rows: { id: number }[] = await this.database
+      .selectDistinct({ id: stories.id })
+      .from(stories)
+      .where(this.publicStoryGate(communityId))
+      .orderBy(asc(stories.id));
+    return rows.map((row) => row.id);
+  }
+
+  /** Story ids matching the page filters (the full relation, unpaged). */
+  async filteredStoryIds(
+    communityId: number,
+    query: ExploreStoryQuery
+  ): Promise<number[]> {
+    const { stories, places, speakers, storyPlaces, storySpeakers } =
+      this.tables;
+    const rows: { id: number }[] = await this.database
+      .selectDistinct({ id: stories.id })
+      .from(stories)
+      .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
+      .innerJoin(places, eq(places.id, storyPlaces.placeId))
+      .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
+      .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
+      .where(this.storyFilterConditions(communityId, query))
+      .orderBy(asc(stories.id));
+    return rows.map((row) => row.id);
+  }
+
+  /**
+   * Distinct publishable places of the given stories: unrestricted, valid
+   * coordinate pair, ordered by place id (the Rails `public_points.uniq`
+   * set, restricted rows removed per SPEC Appendix A.3).
+   */
+  async publicPlacesOfStories(storyIds: number[]): Promise<ExplorePlaceRow[]> {
+    const { places, storyPlaces } = this.tables;
+    if (storyIds.length === 0) return [];
+    return this.database
+      .selectDistinct({
+        id: places.id,
+        name: places.name,
+        description: places.description,
+        region: places.region,
+        latitude: places.latitude,
+        longitude: places.longitude,
+      })
+      .from(storyPlaces)
+      .innerJoin(places, eq(places.id, storyPlaces.placeId))
+      .where(
+        and(
+          inArray(storyPlaces.storyId, storyIds),
+          eq(places.isRestricted, false),
+          gte(places.latitude, -90),
+          lte(places.latitude, 90),
+          gte(places.longitude, -180),
+          lte(places.longitude, 180)
+        )
+      )
+      .orderBy(asc(places.id));
+  }
+
+  /** A publicly readable story of the community, or null (withheld = null). */
+  async publicStoryById(
+    communityId: number,
+    storyId: number
+  ): Promise<ExploreStoryDetailRow | null> {
+    const { stories } = this.tables;
+    const rows: ExploreStoryDetailRow[] = await this.database
+      .select({
+        id: stories.id,
+        title: stories.title,
+        description: stories.description,
+        language: stories.language,
+        interviewerId: stories.interviewerId,
+        interviewLocationId: stories.interviewLocationId,
+      })
+      .from(stories)
+      .where(and(eq(stories.id, storyId), this.publicStoryGate(communityId)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /** Publishable places of one story, ordered by place id. */
+  async storyPlaces(storyId: number): Promise<ExplorePlaceRow[]> {
+    return this.publicPlacesOfStories([storyId]);
+  }
+
+  /** Active same-community speakers of one story, ordered by speaker id. */
+  async storySpeakers(
+    communityId: number,
+    storyId: number
+  ): Promise<ExploreSpeakerRow[]> {
+    const { speakers, storySpeakers } = this.tables;
+    return this.database
+      .selectDistinct({ id: speakers.id, name: speakers.name })
+      .from(storySpeakers)
+      .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
+      .where(
+        and(
+          eq(storySpeakers.storyId, storyId),
+          eq(speakers.communityId, communityId),
+          eq(speakers.isActive, true)
+        )
+      )
+      .orderBy(asc(speakers.id));
+  }
+
+  /** An active same-community interviewer, or null (withdrawn = absent). */
+  async interviewer(
+    communityId: number,
+    speakerId: number
+  ): Promise<ExploreSpeakerRow | null> {
+    const { speakers } = this.tables;
+    const rows: ExploreSpeakerRow[] = await this.database
+      .select({ id: speakers.id, name: speakers.name })
+      .from(speakers)
+      .where(
+        and(
+          eq(speakers.id, speakerId),
+          eq(speakers.communityId, communityId),
+          eq(speakers.isActive, true)
+        )
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /** An unrestricted same-community interview location, or null. */
+  async interviewLocation(
+    communityId: number,
+    placeId: number
+  ): Promise<ExplorePlaceRow | null> {
+    const { places } = this.tables;
+    const rows: ExplorePlaceRow[] = await this.database
+      .select({
+        id: places.id,
+        name: places.name,
+        description: places.description,
+        region: places.region,
+        latitude: places.latitude,
+        longitude: places.longitude,
+      })
+      .from(places)
+      .where(
+        and(
+          eq(places.id, placeId),
+          eq(places.communityId, communityId),
+          eq(places.isRestricted, false),
+          gte(places.latitude, -90),
+          lte(places.latitude, 90),
+          gte(places.longitude, -180),
+          lte(places.longitude, 180)
+        )
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * A place readable by an anonymous caller per SPEC §6.4a: unrestricted,
+   * valid coordinates, in a public community, and associated with at least
+   * one publicly readable story through a story_places edge or as that
+   * story's interview location. Null otherwise (withheld = missing).
+   */
+  async publicPlaceById(
+    communityId: number,
+    placeId: number
+  ): Promise<ExplorePlaceRow | null> {
+    const { places, stories, storyPlaces } = this.tables;
+    const rows: ExplorePlaceRow[] = await this.database
+      .selectDistinct({
+        id: places.id,
+        name: places.name,
+        description: places.description,
+        region: places.region,
+        latitude: places.latitude,
+        longitude: places.longitude,
+      })
+      .from(places)
+      .innerJoin(storyPlaces, eq(storyPlaces.placeId, places.id))
+      .innerJoin(stories, eq(stories.id, storyPlaces.storyId))
+      .where(
+        and(
+          eq(places.id, placeId),
+          eq(places.communityId, communityId),
+          eq(places.isRestricted, false),
+          gte(places.latitude, -90),
+          lte(places.latitude, 90),
+          gte(places.longitude, -180),
+          lte(places.longitude, 180),
+          this.publicStoryGate(communityId)
+        )
+      )
+      .limit(1);
+    const row = rows[0];
+    if (row) return row;
+    // Interview-location-only association (no story_places edge).
+    const interview = await this.database
+      .select({ value: sql<number>`1` })
+      .from(stories)
+      .where(
+        and(
+          eq(stories.interviewLocationId, placeId),
+          this.publicStoryGate(communityId)
+        )
+      )
+      .limit(1);
+    if (!interview.length) return null;
+    return this.interviewLocation(communityId, placeId);
+  }
+
+  /** Place options for the filter panel: edge-associated with public stories. */
+  async filterPlaces(
+    communityId: number
+  ): Promise<Array<{ id: number; name: string }>> {
+    const { places, stories, storyPlaces } = this.tables;
+    return this.database
+      .selectDistinct({ id: places.id, name: places.name })
+      .from(places)
+      .innerJoin(storyPlaces, eq(storyPlaces.placeId, places.id))
+      .innerJoin(stories, eq(stories.id, storyPlaces.storyId))
+      .where(
+        and(
+          eq(places.communityId, communityId),
+          eq(places.isRestricted, false),
+          this.publicStoryGate(communityId)
+        )
+      )
+      .orderBy(asc(places.id));
+  }
+
+  /** Non-blank distinct regions of places edge-associated with public stories. */
+  async filterRegions(communityId: number): Promise<string[]> {
+    const { places, stories, storyPlaces } = this.tables;
+    const rows: { region: string | null }[] = await this.database
+      .selectDistinct({ region: places.region })
+      .from(places)
+      .innerJoin(storyPlaces, eq(storyPlaces.placeId, places.id))
+      .innerJoin(stories, eq(stories.id, storyPlaces.storyId))
+      .where(
+        and(
+          eq(places.communityId, communityId),
+          eq(places.isRestricted, false),
+          ne(places.region, ''),
+          this.publicStoryGate(communityId)
+        )
+      )
+      .orderBy(asc(places.region));
+    return rows
+      .map((row) => row.region)
+      .filter((region): region is string => region !== null);
+  }
+
+  /** Active speakers edge-associated with public stories. */
+  async filterSpeakers(communityId: number): Promise<ExploreSpeakerRow[]> {
+    const { speakers, stories, storySpeakers } = this.tables;
+    return this.database
+      .selectDistinct({ id: speakers.id, name: speakers.name })
+      .from(speakers)
+      .innerJoin(storySpeakers, eq(storySpeakers.speakerId, speakers.id))
+      .innerJoin(stories, eq(stories.id, storySpeakers.storyId))
+      .where(
+        and(
+          eq(speakers.communityId, communityId),
+          eq(speakers.isActive, true),
+          this.publicStoryGate(communityId)
+        )
+      )
+      .orderBy(asc(speakers.id));
+  }
+
+  /** Distinct non-blank languages of publicly readable stories. */
+  async filterLanguages(communityId: number): Promise<string[]> {
+    const { stories } = this.tables;
+    const rows: { language: string }[] = await this.database
+      .selectDistinct({ language: stories.language })
+      .from(stories)
+      .where(and(ne(stories.language, ''), this.publicStoryGate(communityId)))
+      .orderBy(asc(stories.language));
+    return rows.map((row) => row.language);
+  }
+
+  /**
+   * The community's canonical branding file (community_media kind
+   * 'branding'): active, unrestricted, community-scoped, in a public active
+   * community. Deterministic lowest file id.
+   */
+  async brandingFileForCommunity(
+    communityId: number
+  ): Promise<{ fileId: string } | null> {
+    const { communities, files } = this.tables;
+    const media = this.communityMedia;
+    const rows: { fileId: string }[] = await this.database
+      .select({ fileId: files.id })
+      .from(media)
+      .innerJoin(files, eq(files.id, media.fileId))
+      .innerJoin(communities, eq(communities.id, media.communityId))
+      .where(
+        and(
+          eq(media.communityId, communityId),
+          eq(media.kind, 'branding'),
+          eq(files.communityId, communityId),
+          eq(files.isActive, true),
+          isNull(files.culturalRestrictions),
+          eq(communities.isActive, true)
+        )
+      )
+      .orderBy(asc(files.id))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * A branding file readable anonymously: same tenant checks as
+   * brandingFileForCommunity plus the community publication gate and a
+   * well-formed community-scoped storage key, resolved by file id for
+   * GET /explore/media/:fileId.
+   */
+  async publicBrandingFile(
+    fileId: string
+  ): Promise<{
+    communityId: number;
+    storageKey: string;
+    mimeType: string;
+  } | null> {
+    const { communities, files } = this.tables;
+    const media = this.communityMedia;
+    const rows: {
+      communityId: number;
+      storageKey: string;
+      mimeType: string;
+    }[] = await this.database
+      .select({
+        communityId: media.communityId,
+        storageKey: files.path,
+        mimeType: files.mimeType,
+      })
+      .from(media)
+      .innerJoin(files, eq(files.id, media.fileId))
+      .innerJoin(communities, eq(communities.id, media.communityId))
+      .where(
+        and(
+          eq(files.id, fileId),
+          eq(media.kind, 'branding'),
+          eq(files.communityId, media.communityId),
+          eq(files.isActive, true),
+          isNull(files.culturalRestrictions),
+          eq(communities.isActive, true),
+          eq(communities.publicStories, true)
+        )
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
+}

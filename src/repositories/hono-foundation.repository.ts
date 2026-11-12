@@ -42,6 +42,11 @@ export class HonoFoundationRepository {
     ) as typeof communityMediaSqlite;
   }
 
+  /** Shared connection for the transitional Explore read adapter (#198). */
+  get connection(): Database | DrizzleD1Database {
+    return this.database;
+  }
+
   private projection() {
     const { users } = this.tables;
     return {

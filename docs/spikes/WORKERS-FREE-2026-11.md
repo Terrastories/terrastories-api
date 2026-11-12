@@ -6,15 +6,15 @@ application. Raw summaries are in `spikes/workers-free/results/`.
 
 ## Verdict
 
-| Question                                                                  | Result                                                                        |
-| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Server-side Rails bcrypt verification (cost 10, 11 or 12) on Workers Free | **FAIL**: killed with error 1102 after a short burst                          |
-| Server-side Argon2id (WASM) at OWASP parameters on Workers Free           | **FAIL**: killed with error 1102 after a short burst                          |
-| Server-side PBKDF2-SHA256 at OWASP 600,000 iterations                     | **FAIL**: Workers rejects more than 100,000 iterations                        |
-| Server-side PBKDF2-SHA256 at 100,000 iterations                           | **FAIL**: 855 of 1,000 requests killed with error 1102                        |
-| Client-stretching login (Fable 5.2 design, #184) on Workers Free          | **PASS**: login p99 CPU 4 ms, session check p99 1 ms, 0 kills in 1,000 logins |
-| D1 Free import of a large community                                       | **PASS with limits**: one import uses about 30% of the daily write quota      |
-| R2 media read and upload (authorization not exercised)                    | **PASS** up to 100 MB per request                                             |
+| Question                                                                  | Result                                                                                 |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Server-side Rails bcrypt verification (cost 10, 11 or 12) on Workers Free | **FAIL**: killed with error 1102 after a short burst                                   |
+| Server-side Argon2id (WASM) at OWASP parameters on Workers Free           | **FAIL**: killed with error 1102 after a short burst                                   |
+| Server-side PBKDF2-SHA256 at OWASP 600,000 iterations                     | **FAIL**: Workers rejects more than 100,000 iterations (observed; raw output not kept) |
+| Server-side PBKDF2-SHA256 at 100,000 iterations                           | **FAIL**: 855 of 1,000 requests killed with error 1102                                 |
+| Client-stretching login (Fable 5.2 design, #184) on Workers Free          | **PASS**: login p99 CPU 4 ms, session check p99 1 ms, 0 kills in 1,000 logins          |
+| D1 Free import of a large community                                       | **PASS with limits**: one import uses about 30% of the daily write quota               |
+| R2 media read and upload (authorization not exercised)                    | **PASS** up to 100 MB per request                                                      |
 
 ## Method
 
@@ -50,7 +50,7 @@ Each scenario sent 200 requests at 4 requests per second to its own fresh Worker
 | PBKDF2-SHA256 100k                 | 0/200            | 200×200                     | 16 / 22                                              | 58     |
 | PBKDF2-SHA256 100k (1,000 req)     | **855/1,000**    | 200×145 503×855             | 10 / 25                                              | 253    |
 | PBKDF2-SHA256 210k                 | not run          | —                           | —                                                    | —      |
-| PBKDF2-SHA256 600k                 | n/a: HTTP 500    | rejected by runtime         | —                                                    | —      |
+| PBKDF2-SHA256 600k                 | n/a: HTTP 500 ¹  | rejected by runtime ¹       | —                                                    | —      |
 | bcrypt cost 10                     | **183/200**      | 200×17 503×183              | 10 / 149                                             | 57     |
 | bcrypt cost 11                     | **176/200**      | 200×12 503×1 200×12 503×175 | 10 / 262                                             | 57     |
 | bcrypt cost 12                     | **194/200**      | 200×6 503×194               | 10 / 345                                             | 51     |
@@ -66,7 +66,10 @@ Notes:
   one at 10 ms. Killed requests show `cpuTime` 10 in tail. A trivial route on the same
   Worker still answered 10/10 after each kill streak, so the kills do not spread to other
   routes. The burst allowance is undocumented, and the design must not rely on it.
-- **PBKDF2 above 100,000 iterations** fails at once with
+- **PBKDF2 above 100,000 iterations** (¹ observed, not recorded: this comes from the first
+  exploratory run, whose scenarios interfered with each other. That run's output file was
+  discarded and no committed results file covers 600k or 210k. Treat this as an observation
+  to re-capture.) The call fails at once with
   `Pbkdf2 failed: iteration counts above 100000 are not supported (requested 600000)`, so
   OWASP's 600,000 (SHA-256) and 210,000 (SHA-512 level) cannot run on Workers at all.
 - **Argon2id instance reuse.** Reusing one WASM instance across parameter sets failed with
@@ -116,7 +119,9 @@ Terrastories deployment typically holds. The profile has 1 community, 50 users,
 300 speakers, 800 places, 2,000 stories (each with a description of about 1.5 KB),
 3,000 place–story links, 2,500 speaker–story links, 2,500 media rows with
 2,500 ActiveStorage blobs and attachments, 500 media links, and 1 theme. That is
-16,652 rows in 12 tables shaped like `rails/db/schema.rb`, with 6 secondary indexes.
+16,652 rows in 12 tables shaped like `rails/db/schema.rb`, with 6 explicit secondary indexes plus 4 implicit UNIQUE indexes (`users.email`,
+`users.username`, `communities.slug`, `active_storage_blobs.key`). Those indexes add about
+13,700 index entries, which accounts for the measured 30,387 rows written (within 0.2%).
 `scripts/make-dataset.mjs` generates it.
 
 | Measurement                                                     | Value                                             |
@@ -147,12 +152,12 @@ Limits hit or close:
 R2 was already enabled on this account (other buckets exist), so no card question came
 up. The spike created its own bucket.
 
-| Measurement                                                 | Result                            |
-| ----------------------------------------------------------- | --------------------------------- |
-| Worker-generated object put + protected get, 512 KiB        | 200 / 200                         |
-| Same, 10 MiB and 50 MiB                                     | 200 / 200, get streamed in 5–8 s  |
-| Client upload streamed through the Worker, 10 / 50 / 99 MiB | 200 (7 s, 29 s, 52 s client time) |
-| Client upload, 101 MiB                                      | **413 Payload Too Large**         |
+| Measurement                                                           | Result                                      |
+| --------------------------------------------------------------------- | ------------------------------------------- |
+| Worker-generated object put + get (no auth), 512 KiB, n=1             | put 200, get 200                            |
+| Same, 10 MiB and 50 MiB, n=1 each                                     | put 200, get 200; get streamed in 5–8 s     |
+| Client upload streamed through the Worker, 10 / 50 / 99 MiB, n=1 each | HTTP 200 each (7 s, 29 s, 52 s client time) |
+| Client upload, 101 MiB, n=1                                           | **HTTP 413 Payload Too Large**              |
 
 The read route streams the object without an authorization check. Authorization cost is
 the same D1 session read measured in section 2 (p99 1 ms), but the combined path was not

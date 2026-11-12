@@ -23,7 +23,7 @@ API**; it is not a second canonical namespace.
 | Community gate (§4/§6.1) | `communities.public_stories = true` AND `communities.is_active = true` in SQL before any projection |
 | Story gate (§6.3, option A) | Only `privacy_level = 'public'` AND `is_restricted = false` rows (the SQL transcription of `fastifyStoryToAudience` → `public`). `is_restricted` rows, unknown privacy levels, and every other audience are **never** exposed |
 | Same-404 (§6.4a) | Unknown, withheld, malformed, and out-of-range ids answer the identical 404 body as missing ids |
-| Place/speaker visibility (§6.4a) | Places/speakers appear only through association (story edge or interview location/interviewer) with a publicly readable story; restricted places never; speakers with `is_active = false` (withdrawal) never |
+| Place/speaker visibility (§6.4a) | Places/speakers appear only through association (story edge or interview location/interviewer) with a publicly readable story; restricted places never; speakers with `is_active = false` (withdrawal) never. These conditions hold in **every** joined relation, so filter probes (`places[]`, `region[]`, `speakers[]`) and `meta.total` can never confirm a restricted place, an inactive speaker, or another community's row; joined place/speaker rows are also community-scoped, so a cross-tenant `story_places` edge projects nothing |
 | Map credentials (§6.6) | `mapboxAccessToken` is always `null`; `NEVER_EXPOSED_FIELDS_BY_FAMILY.themes` |
 | Transport | `(req: Request) => Promise<Response>` via Hono `app.fetch`; GET only; no Node-only APIs in the request path (Workers-compatible, covered by `tests/hono/worker.test.ts` bundling); no interactive transactions |
 | Logging | The adapter logs nothing and puts no cultural content in any response (`cultural_settings`, `cultural_significance`, `cultural_context`, `cultural_restrictions` are never projected) |
@@ -94,6 +94,7 @@ Query (Rails `story_params`; arrays accepted as `key[]=` and `key=`):
 | `sort_by` `created_at`\|`title` (default `created_at`), `sort_dir` `asc`\|`desc` (default `desc`) | ordering with stable id tie-break; `title` uses byte-order `textOrder` for identical SQLite/PostgreSQL results |
 | `places` (ids), `region`, `language`, `speakers` (ids) | SQL filters; a story must have ≥1 place edge and ≥1 speaker edge (Rails `joins(:places, :speakers)`, `distinct`) |
 | `topic`, `type_of_place`, `speaker_community` | accepted and echoed in `nextPageMeta`, but no story can match (no V2 representation) |
+| id bounds and list caps | id filters are bounded to `1..MAX_DATABASE_ID` and every filter list to 50 values; anything else answers 400, and no query ever builds an unbounded `IN (...)` list (D1/SQLite bound-parameter limits) — story-set place queries are joins, not id lists |
 
 Response: `data.points` are the distinct places of the **whole filtered
 relation** (not just the page — Rails comment: "all points in the data relation

@@ -23,6 +23,7 @@ import {
   type ExplorePlaceRow,
   type ExploreThemeRow,
 } from '../repositories/explore-adapter.repository.js';
+import { MAX_DATABASE_ID } from '../shared/types/public.js';
 
 /** Rails `Community::FILTERABLE_ATTRIBUTES`, served verbatim. */
 export const EXPLORE_FILTERABLE_ATTRIBUTES = [
@@ -164,31 +165,58 @@ export interface ParsedStoriesQuery {
   offset: number;
 }
 
+/** Upper bound on values per filter category (bounded SQL parameter lists). */
+const MAX_FILTER_VALUES = 50;
+
 /**
  * Parse the recorded Explore client query shape (Rails `story_params`).
  * Invalid values answer 400 — an intentional IMPROVE over Rails, which
- * coerced or crashed. `places[]`/`places` spellings are both accepted
- * because axios serializes arrays with brackets.
+ * coerced or crashed. Id filters are bounded to 1..MAX_DATABASE_ID and every
+ * filter list to MAX_FILTER_VALUES, so query filters can never produce an
+ * unbounded `IN (...)` list on D1/SQLite. `places[]`/`places` spellings are
+ * both accepted because axios serializes arrays with brackets.
  */
 export function parseStoriesQuery(
   params: URLSearchParams
 ): ParsedStoriesQuery | { ok: false } {
-  const values = (key: string) => [
-    ...params.getAll(key),
-    ...params.getAll(`${key}[]`),
-  ];
-  const intFilter = (key: string): number[] | { invalid: true } => {
-    const raw = values(key);
-    if (!raw.length) return [];
+  // null marks invalid input (bad id, or a list over the size cap).
+  const stringFilter = (key: string): string[] | null => {
+    const raw = [...params.getAll(key), ...params.getAll(`${key}[]`)];
+    return raw.length > MAX_FILTER_VALUES ? null : raw;
+  };
+  const intFilter = (key: string): number[] | null => {
+    const raw = stringFilter(key);
+    if (raw === null) return null;
     const parsed: number[] = [];
-    for (const value of raw)
-      if (!/^\d+$/.test(value)) return { invalid: true };
-      else parsed.push(Number(value));
+    for (const value of raw) {
+      // Same bounds as isDatabaseIdString: an out-of-range id cannot exist
+      // on either backend, so it is invalid input, not a filter value.
+      if (
+        !/^\d+$/.test(value) ||
+        Number(value) < 1 ||
+        Number(value) > MAX_DATABASE_ID
+      )
+        return null;
+      parsed.push(Number(value));
+    }
     return parsed;
   };
   const places = intFilter('places');
   const speakers = intFilter('speakers');
-  if ('invalid' in places || 'invalid' in speakers)
+  const regions = stringFilter('region');
+  const languages = stringFilter('language');
+  const topic = stringFilter('topic');
+  const typeOfPlace = stringFilter('type_of_place');
+  const speakerCommunity = stringFilter('speaker_community');
+  if (
+    places === null ||
+    speakers === null ||
+    regions === null ||
+    languages === null ||
+    topic === null ||
+    typeOfPlace === null ||
+    speakerCommunity === null
+  )
     return { ok: false as const };
   const limitRaw = params.get('limit');
   const offsetRaw = params.get('offset');
@@ -209,21 +237,14 @@ export function parseStoriesQuery(
   const sortDir = sortDirRaw === null ? 'desc' : (sortDirRaw as 'asc' | 'desc');
   if (sortBy !== 'created_at' && sortBy !== 'title') return { ok: false };
   if (sortDir !== 'asc' && sortDir !== 'desc') return { ok: false };
-  const regions = values('region');
-  const languages = values('language');
   const echo: Record<string, string[] | number[]> = {};
   if (places.length) echo.places = places;
   if (regions.length) echo.region = regions;
   if (languages.length) echo.language = languages;
   if (speakers.length) echo.speakers = speakers;
   const unsatisfiable =
-    values('topic').length > 0 ||
-    values('type_of_place').length > 0 ||
-    values('speaker_community').length > 0;
+    topic.length > 0 || typeOfPlace.length > 0 || speakerCommunity.length > 0;
   if (unsatisfiable) {
-    const topic = values('topic');
-    const typeOfPlace = values('type_of_place');
-    const speakerCommunity = values('speaker_community');
     if (topic.length) echo.topic = topic;
     if (typeOfPlace.length) echo.type_of_place = typeOfPlace;
     if (speakerCommunity.length) echo.speaker_community = speakerCommunity;
@@ -281,7 +302,7 @@ export class ExploreAdapterService {
       branding,
       theme,
       storiesCount,
-      storyIds,
+      places,
       filterPlaces,
       regions,
       languages,
@@ -290,13 +311,12 @@ export class ExploreAdapterService {
       this.repository.brandingFileForCommunity(community.id),
       this.repository.activeTheme(community.id),
       this.repository.publicStoriesCount(community.id),
-      this.repository.publicStoryIds(community.id),
+      this.repository.publicPlacesOfCommunityStories(community.id),
       this.repository.filterPlaces(community.id),
       this.repository.filterRegions(community.id),
       this.repository.filterLanguages(community.id),
       this.repository.filterSpeakers(community.id),
     ]);
-    const places = await this.repository.publicPlacesOfStories(storyIds);
     const filters: ExploreFilterOption[] = [
       ...filterPlaces.map((place) => ({
         label: place.name,
@@ -374,11 +394,10 @@ export class ExploreAdapterService {
         },
       };
     }
-    const [{ rows, total }, storyIds] = await Promise.all([
+    const [{ rows, total }, places] = await Promise.all([
       this.repository.publicStoryPage(community.id, query),
-      this.repository.filteredStoryIds(community.id, query),
+      this.repository.publicPlacesOfFilteredStories(community.id, query),
     ]);
-    const places = await this.repository.publicPlacesOfStories(storyIds);
     return {
       status: 200,
       body: {
@@ -417,7 +436,7 @@ export class ExploreAdapterService {
     const story = await this.repository.publicStoryById(community.id, storyId);
     if (!story) return notFound();
     const [places, speakers] = await Promise.all([
-      this.repository.storyPlaces(story.id),
+      this.repository.storyPlaces(community.id, story.id),
       this.repository.storySpeakers(community.id, story.id),
     ]);
     const interviewer = story.interviewerId

@@ -17,6 +17,16 @@
  *   edge, interview location/interviewer) with a publicly readable story.
  *   Restricted places are never exposed (SPEC Appendix A.3), and speakers
  *   withdrawn via `isActive = false` stay absent from public projections.
+ *   These conditions are applied in EVERY joined relation — including filter
+ *   probes — so a filter value can never confirm the existence of a
+ *   restricted place, an inactive speaker, or another community's row, and
+ *   `meta.total` counts only stories reachable through visible associations.
+ * - Places are additionally scoped to the owning community on every join;
+ *   a cross-tenant story_places edge cannot project another community's
+ *   place.
+ * - No query builds an unbounded `IN (...)` list: D1/SQLite bound-parameter
+ *   limits (~100) rule that out. Story-set queries are expressed as joins;
+ *   user-supplied filter lists are bounded by the query parser.
  *
  * No writes, no interactive transactions, Workers-portable queries only.
  */
@@ -209,6 +219,44 @@ export class ExploreAdapterRepository {
     );
   }
 
+  /**
+   * Joined place/speaker rows must themselves be visible to an anonymous
+   * caller (§6.4a) and belong to the same community: unrestricted same-
+   * community places and active same-community speakers. Applied to every
+   * joined relation so filter probes cannot confirm hidden rows.
+   */
+  private visibleJoinConditions(communityId: number) {
+    const { places, speakers } = this.tables;
+    return and(
+      eq(places.communityId, communityId),
+      eq(places.isRestricted, false),
+      eq(speakers.communityId, communityId),
+      eq(speakers.isActive, true)
+    );
+  }
+
+  /**
+   * Where-clause of the Rails-shaped story relation: publicly readable
+   * stories with at least one visible place edge and one visible speaker
+   * edge, plus the caller's bounded filters.
+   */
+  private storyRelationConditions(communityId: number, query?: ExploreStoryQuery) {
+    const { places, speakers, stories } = this.tables;
+    const conditions = [
+      this.publicStoryGate(communityId),
+      this.visibleJoinConditions(communityId),
+    ];
+    if (query?.placeIds?.length)
+      conditions.push(inArray(places.id, query.placeIds));
+    if (query?.regions?.length)
+      conditions.push(inArray(places.region, query.regions));
+    if (query?.speakerIds?.length)
+      conditions.push(inArray(speakers.id, query.speakerIds));
+    if (query?.languages?.length)
+      conditions.push(inArray(stories.language, query.languages));
+    return and(...conditions);
+  }
+
   /** Count of publicly readable stories, without join requirements. */
   async publicStoriesCount(communityId: number): Promise<number> {
     const { stories } = this.tables;
@@ -219,26 +267,11 @@ export class ExploreAdapterRepository {
     return Number(rows[0]?.count ?? 0);
   }
 
-  private storyFilterConditions(communityId: number, query: ExploreStoryQuery) {
-    const { places, speakers } = this.tables;
-    const conditions = [this.publicStoryGate(communityId)];
-    if (query.placeIds?.length)
-      conditions.push(inArray(places.id, query.placeIds));
-    if (query.regions?.length)
-      conditions.push(inArray(places.region, query.regions));
-    if (query.speakerIds?.length)
-      conditions.push(inArray(speakers.id, query.speakerIds));
-    if (query.languages?.length) {
-      const { stories } = this.tables;
-      conditions.push(inArray(stories.language, query.languages));
-    }
-    return and(...conditions);
-  }
-
   /**
-   * One page of the Rails-shaped story relation: publicly readable stories
-   * that have at least one place and one speaker edge (Rails `joins(:places,
-   * :speakers)`), filtered, sorted with a stable id tie-breaker.
+   * One page of the Rails-shaped story relation (Rails `joins(:places,
+   * :speakers)` with §6.4a-hardened joins), sorted with a stable id
+   * tie-breaker. `total` counts the same relation, so filter probes report
+   * only visibly reachable stories.
    */
   async publicStoryPage(
     communityId: number,
@@ -246,28 +279,30 @@ export class ExploreAdapterRepository {
   ): Promise<{ rows: ExploreStoryListRow[]; total: number }> {
     const { stories, places, speakers, storyPlaces, storySpeakers } =
       this.tables;
-    const where = this.storyFilterConditions(communityId, query);
+    const where = this.storyRelationConditions(communityId, query);
     const primary =
       query.sortBy === 'title'
         ? textOrder(this.dialect, stories.title, query.sortDir)
         : query.sortDir === 'desc'
           ? desc(stories.createdAt)
           : asc(stories.createdAt);
-    const rows: ExploreStoryListRow[] = await this.database
-      .selectDistinct({
-        id: stories.id,
-        title: stories.title,
-        description: stories.description,
-        language: stories.language,
-        createdAt: stories.createdAt,
-        updatedAt: stories.updatedAt,
-      })
-      .from(stories)
-      .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
-      .innerJoin(places, eq(places.id, storyPlaces.placeId))
-      .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
-      .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
-      .where(where)
+    const relation = () =>
+      this.database
+        .selectDistinct({
+          id: stories.id,
+          title: stories.title,
+          description: stories.description,
+          language: stories.language,
+          createdAt: stories.createdAt,
+          updatedAt: stories.updatedAt,
+        })
+        .from(stories)
+        .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
+        .innerJoin(places, eq(places.id, storyPlaces.placeId))
+        .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
+        .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
+        .where(where);
+    const rows: ExploreStoryListRow[] = await relation()
       .orderBy(...orderWithTiebreak(primary, stories.id, query.sortDir))
       .limit(query.limit)
       .offset(query.offset);
@@ -282,63 +317,73 @@ export class ExploreAdapterRepository {
     return { rows, total: Number(totals[0]?.count ?? 0) };
   }
 
-  /** All publicly readable story ids of the community, without join filters. */
-  async publicStoryIds(communityId: number): Promise<number[]> {
-    const { stories } = this.tables;
-    const rows: { id: number }[] = await this.database
-      .selectDistinct({ id: stories.id })
-      .from(stories)
-      .where(this.publicStoryGate(communityId))
-      .orderBy(asc(stories.id));
-    return rows.map((row) => row.id);
+  /**
+   * Publishable places of the community's public stories, expressed as a
+   * join (never an id list, which would hit D1 bound-parameter limits).
+   * Places are community-scoped and unrestricted with a valid coordinate
+   * pair; the community gate is the caller's `publicCommunityBySlug` result.
+   */
+  private visiblePlaceColumns() {
+    const { places } = this.tables;
+    return {
+      id: places.id,
+      name: places.name,
+      description: places.description,
+      region: places.region,
+      latitude: places.latitude,
+      longitude: places.longitude,
+    };
   }
 
-  /** Story ids matching the page filters (the full relation, unpaged). */
-  async filteredStoryIds(
+  private visiblePlaceConditions(communityId: number) {
+    const { places } = this.tables;
+    return and(
+      eq(places.communityId, communityId),
+      eq(places.isRestricted, false),
+      gte(places.latitude, -90),
+      lte(places.latitude, 90),
+      gte(places.longitude, -180),
+      lte(places.longitude, 180)
+    );
+  }
+
+  /** Places of every publicly readable story of the community (edges only). */
+  async publicPlacesOfCommunityStories(
+    communityId: number
+  ): Promise<ExplorePlaceRow[]> {
+    const { places, stories, storyPlaces } = this.tables;
+    return this.database
+      .selectDistinct(this.visiblePlaceColumns())
+      .from(storyPlaces)
+      .innerJoin(stories, eq(stories.id, storyPlaces.storyId))
+      .innerJoin(places, eq(places.id, storyPlaces.placeId))
+      .where(
+        and(
+          this.visiblePlaceConditions(communityId),
+          this.publicStoryGate(communityId)
+        )
+      )
+      .orderBy(asc(places.id));
+  }
+
+  /** Places of the filtered story relation — the whole relation, unpaged. */
+  async publicPlacesOfFilteredStories(
     communityId: number,
     query: ExploreStoryQuery
-  ): Promise<number[]> {
-    const { stories, places, speakers, storyPlaces, storySpeakers } =
+  ): Promise<ExplorePlaceRow[]> {
+    const { places, speakers, stories, storyPlaces, storySpeakers } =
       this.tables;
-    const rows: { id: number }[] = await this.database
-      .selectDistinct({ id: stories.id })
+    return this.database
+      .selectDistinct(this.visiblePlaceColumns())
       .from(stories)
       .innerJoin(storyPlaces, eq(storyPlaces.storyId, stories.id))
       .innerJoin(places, eq(places.id, storyPlaces.placeId))
       .innerJoin(storySpeakers, eq(storySpeakers.storyId, stories.id))
       .innerJoin(speakers, eq(speakers.id, storySpeakers.speakerId))
-      .where(this.storyFilterConditions(communityId, query))
-      .orderBy(asc(stories.id));
-    return rows.map((row) => row.id);
-  }
-
-  /**
-   * Distinct publishable places of the given stories: unrestricted, valid
-   * coordinate pair, ordered by place id (the Rails `public_points.uniq`
-   * set, restricted rows removed per SPEC Appendix A.3).
-   */
-  async publicPlacesOfStories(storyIds: number[]): Promise<ExplorePlaceRow[]> {
-    const { places, storyPlaces } = this.tables;
-    if (storyIds.length === 0) return [];
-    return this.database
-      .selectDistinct({
-        id: places.id,
-        name: places.name,
-        description: places.description,
-        region: places.region,
-        latitude: places.latitude,
-        longitude: places.longitude,
-      })
-      .from(storyPlaces)
-      .innerJoin(places, eq(places.id, storyPlaces.placeId))
       .where(
         and(
-          inArray(storyPlaces.storyId, storyIds),
-          eq(places.isRestricted, false),
-          gte(places.latitude, -90),
-          lte(places.latitude, 90),
-          gte(places.longitude, -180),
-          lte(places.longitude, 180)
+          this.visiblePlaceConditions(communityId),
+          this.storyRelationConditions(communityId, query)
         )
       )
       .orderBy(asc(places.id));
@@ -365,9 +410,23 @@ export class ExploreAdapterRepository {
     return rows[0] ?? null;
   }
 
-  /** Publishable places of one story, ordered by place id. */
-  async storyPlaces(storyId: number): Promise<ExplorePlaceRow[]> {
-    return this.publicPlacesOfStories([storyId]);
+  /** Publishable same-community places of one story, ordered by place id. */
+  async storyPlaces(
+    communityId: number,
+    storyId: number
+  ): Promise<ExplorePlaceRow[]> {
+    const { places, storyPlaces } = this.tables;
+    return this.database
+      .selectDistinct(this.visiblePlaceColumns())
+      .from(storyPlaces)
+      .innerJoin(places, eq(places.id, storyPlaces.placeId))
+      .where(
+        and(
+          eq(storyPlaces.storyId, storyId),
+          this.visiblePlaceConditions(communityId)
+        )
+      )
+      .orderBy(asc(places.id));
   }
 
   /** Active same-community speakers of one story, ordered by speaker id. */
@@ -417,25 +476,10 @@ export class ExploreAdapterRepository {
   ): Promise<ExplorePlaceRow | null> {
     const { places } = this.tables;
     const rows: ExplorePlaceRow[] = await this.database
-      .select({
-        id: places.id,
-        name: places.name,
-        description: places.description,
-        region: places.region,
-        latitude: places.latitude,
-        longitude: places.longitude,
-      })
+      .select(this.visiblePlaceColumns())
       .from(places)
       .where(
-        and(
-          eq(places.id, placeId),
-          eq(places.communityId, communityId),
-          eq(places.isRestricted, false),
-          gte(places.latitude, -90),
-          lte(places.latitude, 90),
-          gte(places.longitude, -180),
-          lte(places.longitude, 180)
-        )
+        and(eq(places.id, placeId), this.visiblePlaceConditions(communityId))
       )
       .limit(1);
     return rows[0] ?? null;
@@ -453,26 +497,14 @@ export class ExploreAdapterRepository {
   ): Promise<ExplorePlaceRow | null> {
     const { places, stories, storyPlaces } = this.tables;
     const rows: ExplorePlaceRow[] = await this.database
-      .selectDistinct({
-        id: places.id,
-        name: places.name,
-        description: places.description,
-        region: places.region,
-        latitude: places.latitude,
-        longitude: places.longitude,
-      })
+      .selectDistinct(this.visiblePlaceColumns())
       .from(places)
       .innerJoin(storyPlaces, eq(storyPlaces.placeId, places.id))
       .innerJoin(stories, eq(stories.id, storyPlaces.storyId))
       .where(
         and(
           eq(places.id, placeId),
-          eq(places.communityId, communityId),
-          eq(places.isRestricted, false),
-          gte(places.latitude, -90),
-          lte(places.latitude, 90),
-          gte(places.longitude, -180),
-          lte(places.longitude, 180),
+          this.visiblePlaceConditions(communityId),
           this.publicStoryGate(communityId)
         )
       )
@@ -567,8 +599,8 @@ export class ExploreAdapterRepository {
 
   /**
    * The community's canonical branding file (community_media kind
-   * 'branding'): active, unrestricted, community-scoped, in a public active
-   * community. Deterministic lowest file id.
+   * 'branding'): active, unrestricted, community-scoped, in a public AND
+   * active community. Deterministic lowest file id.
    */
   async brandingFileForCommunity(
     communityId: number
@@ -587,7 +619,8 @@ export class ExploreAdapterRepository {
           eq(files.communityId, communityId),
           eq(files.isActive, true),
           isNull(files.culturalRestrictions),
-          eq(communities.isActive, true)
+          eq(communities.isActive, true),
+          eq(communities.publicStories, true)
         )
       )
       .orderBy(asc(files.id))

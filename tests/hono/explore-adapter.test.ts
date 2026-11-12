@@ -24,6 +24,7 @@ import {
 } from '../../src/db/schema/sessions.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
+import { ExploreAdapterRepository } from '../../src/repositories/explore-adapter.repository.js';
 
 const t = (seconds: string) => new Date(seconds);
 const T0 = t('2026-01-01T00:00:00Z');
@@ -37,11 +38,13 @@ const neverExposed = [
   'pk-secret-token-a',
   'secret-ceremony-settings',
   'Sacred Cave',
+  'Secrets',
   'Hidden Hana',
   'Silent Sam',
   'Members Only Tale',
   'Restricted River',
   'Unknown Privacy',
+  'Edge To Restricted',
 ];
 
 const sqlite = new Sqlite(':memory:');
@@ -218,7 +221,7 @@ const seed = async () => {
       communityId: ids.a,
       latitude: 10.3,
       longitude: -20.4,
-      region: 'North',
+      region: 'Secrets',
       isRestricted: true,
     })) as Record<string, unknown>
   ).id as number;
@@ -368,6 +371,19 @@ const seed = async () => {
       updatedAt: T2,
     })) as Record<string, unknown>
   ).id as number;
+  // Public story whose ONLY place edge points at the restricted place: it
+  // must never surface through the joined public relation.
+  ids.st7 = (
+    (await story({
+      title: 'Edge To Restricted',
+      communityId: ids.a,
+      privacyLevel: 'public',
+      isRestricted: false,
+      language: 'en',
+      createdAt: T2,
+      updatedAt: T2,
+    })) as Record<string, unknown>
+  ).id as number;
 
   const edge = async (storyId: number, placeId: number) => {
     await insert(tables.storyPlaces, {
@@ -396,12 +412,16 @@ const seed = async () => {
   await edge(ids.st5, ids.p1);
   await edge(ids.st6, ids.p1);
   await edge(ids.stB, ids.pB);
+  await edge(ids.st7, ids.p2);
+  // Cross-tenant edge: community A's story pointing at community B's place.
+  await edge(ids.st2, ids.pB);
   for (const speakerId of [ids.s1, ids.s2]) await voice(ids.st1, speakerId);
   await voice(ids.st2, ids.s1);
   await voice(ids.st3, ids.s3);
   await voice(ids.st4, ids.s1);
   await voice(ids.st5, ids.s1);
   await voice(ids.stB, ids.sB);
+  await voice(ids.st7, ids.s1);
 };
 
 const get = async (path: string) =>
@@ -507,8 +527,8 @@ it('answers community show with the Rails detail shape', async () => {
     sponsorLogos: [],
     displayImage: `http://localhost/explore/media/${fileIds.a}`,
   });
-  // All three public stories count (no place/speaker join requirement).
-  expect(data.storiesCount).toBe(3);
+  // All four public stories count (no place/speaker join requirement).
+  expect(data.storiesCount).toBe(4);
   // Points come from public stories' place edges: restricted and
   // invalid-coordinate places are absent.
   expect(data.points.map((p: { id: number }) => p.id)).toEqual([ids.p1]);
@@ -682,6 +702,107 @@ it('matches nothing for filter categories with no V2 representation', async () =
     '/explore/communities/public-alpha/stories?topic[]=x&language[]=en'
   );
   expect(echoed.json.meta.nextPageMeta).toMatchObject({ topic: ['x'] });
+});
+
+it('reveals nothing about hidden rows through filter probing', async () => {
+  // Each probe names an id/region that only a restricted place, an inactive
+  // speaker, or another community's row could satisfy. None may match, and
+  // no response text may confirm the hidden row exists.
+  const probes = [
+    `places[]=${ids.p2}`,
+    'region[]=Secrets',
+    `speakers[]=${ids.s2}`,
+    `places[]=${ids.pB}`,
+    `speakers[]=${ids.sB}`,
+  ];
+  for (const probe of probes) {
+    const page = await body(
+      `/explore/communities/public-alpha/stories?${probe}`
+    );
+    expect(page.status, probe).toBe(200);
+    expect(page.json.data, probe).toEqual({ points: [], stories: [] });
+    expect(page.json.meta.total, probe).toBe(0);
+    expect(page.text, probe).not.toContain('Sacred Cave');
+    expect(page.text, probe).not.toContain('Silent Sam');
+    expect(page.text, probe).not.toContain('Beta Spot');
+  }
+  // A visible id probed alongside a withheld id matches exactly what the
+  // visible id matches alone: the combined probe adds no information.
+  const combined = await body(
+    `/explore/communities/public-alpha/stories?places[]=${ids.p1}&places[]=${ids.p2}`
+  );
+  expect(combined.json.meta.total).toBe(2);
+  expect(
+    combined.json.data.stories.map((s: { id: number }) => s.id).sort()
+  ).toEqual([ids.st1, ids.st2].sort());
+});
+
+it('drops stories whose only associations are hidden rows', async () => {
+  // st7 is a public story, but its only place edge is the restricted place:
+  // it never reaches the list, its points, or meta.total (which therefore
+  // counts visible rows only).
+  const page = await body('/explore/communities/public-alpha/stories');
+  expect(page.json.meta.total).toBe(2);
+  expect(page.json.data.stories).toHaveLength(2);
+  expect(page.text).not.toContain('Edge To Restricted');
+  // Its detail stays readable (the story itself is public) while the
+  // restricted place never leaks into places or points.
+  const detail = await body(
+    `/explore/communities/public-alpha/stories/${ids.st7}`
+  );
+  expect(detail.status).toBe(200);
+  expect(detail.json.data.places).toEqual([]);
+  expect(detail.json.data.points).toEqual([]);
+  expect(detail.text).not.toContain('Sacred Cave');
+});
+
+it('never projects another community through a cross-tenant story edge', async () => {
+  // st2 (community A) carries a story_places edge to community B's place.
+  const show = await body('/explore/communities/public-alpha');
+  expect(show.json.data.points.map((p: { id: number }) => p.id)).toEqual([
+    ids.p1,
+  ]);
+  expect(show.text).not.toContain('Beta Spot');
+  const list = await body('/explore/communities/public-alpha/stories');
+  expect(list.json.data.points.map((p: { id: number }) => p.id)).toEqual([
+    ids.p1,
+  ]);
+  expect(list.text).not.toContain('Beta Spot');
+});
+
+it('rejects out-of-range filter ids and oversized filter lists', async () => {
+  for (const query of [
+    'places[]=0',
+    'places[]=2147483648',
+    'speakers[]=4294967296',
+    `places[]=${Array.from({ length: 51 }, (_, i) => i + 1).join('&places[]=')}`,
+    `region[]=${Array.from({ length: 51 }, (_, i) => `r${i}`).join('&region[]=')}`,
+  ]) {
+    const page = await body(
+      `/explore/communities/public-alpha/stories?${query}`
+    );
+    expect(page.status, query).toBe(400);
+    expect(page.json).toEqual({ error: 'Invalid request' });
+  }
+  // Exactly at the cap parses normally.
+  const atCap = await body(
+    `/explore/communities/public-alpha/stories?places[]=${Array.from(
+      { length: 50 },
+      (_, i) => i + 1000
+    ).join('&places[]=')}`
+  );
+  expect(atCap.status).toBe(200);
+  expect(atCap.json.meta.total).toBe(0);
+});
+
+it('withholds branding from private communities at the query level', async () => {
+  // The repository gate itself (not just the 404 in front of it) refuses a
+  // private community's branding file.
+  const repository = new ExploreAdapterRepository(db);
+  expect(await repository.brandingFileForCommunity(ids.c)).toBeNull();
+  expect(await repository.brandingFileForCommunity(ids.a)).toEqual({
+    fileId: fileIds.a,
+  });
 });
 
 it('rejects invalid story queries with 400', async () => {

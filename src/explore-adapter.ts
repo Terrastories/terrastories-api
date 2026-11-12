@@ -37,6 +37,7 @@ const notFoundBody = Object.freeze({
 // The adapter registers onto whatever typed Hono app the host built.
 
 export function registerExploreAdapter(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app: Hono<any>,
   options: ExploreAdapterOptions
 ): void {

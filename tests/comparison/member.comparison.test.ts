@@ -103,14 +103,11 @@ describe('V1 Compatibility: Member Endpoints', () => {
           { title: `Member Story ${Date.now()}`, description: 'Desc' },
           adminCookie
         );
-        // May be 201 or 422/500 depending on service implementation
-        if (res.statusCode === 201) {
-          const body = JSON.parse(res.body);
-          expect(body).toHaveProperty('data');
-          // V1 member story create serializes the created story as an empty
-          // object in this compatibility environment.
-          expect(body.data).toEqual({});
-        }
+        expect(res.statusCode).toBe(201);
+        const body = JSON.parse(res.body);
+        // V2 improves the legacy empty response: clients need the created ID.
+        expect(body.data).toMatchObject({ id: expect.any(Number) });
+        expect(body.data.id).toBeGreaterThan(0);
       });
     });
 
@@ -158,18 +155,14 @@ describe('V1 Compatibility: Member Endpoints', () => {
           { title: `Member Delete ${Date.now()}` },
           adminCookie
         );
-        if (createRes.statusCode === 201) {
-          const storyId = JSON.parse(createRes.body).data.id;
-          if (storyId) {
-            const res = await client.delete(
-              `/api/v1/member/stories/${storyId}`,
-              adminCookie
-            );
-            expect(res.statusCode).toBe(204);
-          } else {
-            expect(JSON.parse(createRes.body).data).toEqual({});
-          }
-        }
+        expect(createRes.statusCode).toBe(201);
+        const storyId = JSON.parse(createRes.body).data.id;
+        expect(storyId).toBeGreaterThan(0);
+        const res = await client.delete(
+          `/api/v1/member/stories/${storyId}`,
+          adminCookie
+        );
+        expect(res.statusCode).toBe(204);
       });
     });
   });

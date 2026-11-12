@@ -292,18 +292,15 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
         expect(res.statusCode).toBe(401);
       });
 
-      it('should return 200 with data object for super admin', async () => {
+      it('should hide community account details from super admin', async () => {
         const res = await client.get(
           '/api/v1/super_admin/users/1',
           undefined,
           superAdminCookie
         );
-        expect(res.statusCode).toBe(200);
+        expect(res.statusCode).toBe(404);
         const body = JSON.parse(res.body);
-        expect(body).toHaveProperty('data');
-        expect(body.data).toHaveProperty('id');
-        expect(body.data).toHaveProperty('email');
-        expect(body.data).toHaveProperty('role');
+        expect(body).not.toHaveProperty('data');
       });
 
       it('should return 404 for nonexistent user', async () => {
@@ -330,7 +327,7 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
         expect(res.statusCode).toBe(401);
       });
 
-      it('should return 201 for super admin', async () => {
+      it('should refuse community account creation by super admin', async () => {
         const res = await client.post(
           '/api/v1/super_admin/users',
           {
@@ -343,11 +340,44 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
           },
           superAdminCookie
         );
+        expect(res.statusCode).toBe(403);
+        const body = JSON.parse(res.body);
+        expect(body).not.toHaveProperty('data');
+      });
+
+      it('should create a system account for super admin', async () => {
+        const res = await client.post(
+          '/api/v1/super_admin/users',
+          {
+            email: `sa-system-${Date.now()}@test.com`,
+            password: 'TestPass123!',
+            firstName: 'SA',
+            lastName: 'User',
+            role: 'super_admin',
+            communityId: systemCommunityId,
+          },
+          superAdminCookie
+        );
         expect(res.statusCode).toBe(201);
         const body = JSON.parse(res.body);
         expect(body).toHaveProperty('data');
         expect(body.data).toHaveProperty('id');
         expect(body.data).toHaveProperty('email');
+        expect(body.data.role).toBe('super_admin');
+        const detail = await client.get(
+          `/api/v1/super_admin/users/${body.data.id}`,
+          undefined,
+          superAdminCookie
+        );
+        expect(detail.statusCode).toBe(200);
+        expect(JSON.parse(detail.body).data.id).toBe(body.data.id);
+        const update = await client.put(
+          `/api/v1/super_admin/users/${body.data.id}`,
+          { firstName: 'SystemUpdated' },
+          superAdminCookie
+        );
+        expect(update.statusCode).toBe(200);
+        expect(JSON.parse(update.body).data.firstName).toBe('SystemUpdated');
       });
     });
 
@@ -360,7 +390,7 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
         expect(res.statusCode).toBe(401);
       });
 
-      it('should return 200 for super admin updating user', async () => {
+      it('should hide community accounts from system-user updates', async () => {
         const res = await client.put(
           '/api/v1/super_admin/users/1',
           {
@@ -371,7 +401,7 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
           },
           superAdminCookie
         );
-        expect([200, 404]).toContain(res.statusCode);
+        expect(res.statusCode).toBe(404);
       });
     });
 
@@ -398,23 +428,22 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
             password: 'TestPass123!',
             firstName: 'Delete',
             lastName: 'Me',
-            role: 'viewer',
-            communityId: testCommunityId,
+            role: 'super_admin',
+            communityId: systemCommunityId,
           },
           superAdminCookie
         );
-        if (createRes.statusCode === 201) {
-          const userId = JSON.parse(createRes.body).data?.id;
-          if (!userId) return;
+        expect(createRes.statusCode).toBe(201);
+        const userId = JSON.parse(createRes.body).data?.id;
+        expect(userId).toBeGreaterThan(0);
 
-          const res = await client.delete(
-            `/api/v1/super_admin/users/${userId}`,
-            superAdminCookie
-          );
-          expect(res.statusCode).toBe(200);
-          const body = JSON.parse(res.body);
-          expect(body).toHaveProperty('data');
-        }
+        const res = await client.delete(
+          `/api/v1/super_admin/users/${userId}`,
+          superAdminCookie
+        );
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body).toHaveProperty('data');
       });
     });
   });

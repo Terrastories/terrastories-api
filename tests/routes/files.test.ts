@@ -387,7 +387,7 @@ describe('File Routes Integration', () => {
       expect(response.statusCode).toBe(401);
     });
 
-    it('should respect elder-only cultural restrictions', async () => {
+    it('should hide held cultural media without revealing its restriction', async () => {
       // Upload file with elder-only restriction using FormData
       const testImagePath = join(testUploadDir, 'test-image.jpg');
 
@@ -422,10 +422,10 @@ describe('File Routes Integration', () => {
         },
       });
 
-      expect(response.statusCode).toBe(403);
+      expect(response.statusCode).toBe(404);
 
       const result = JSON.parse(response.body);
-      expect(result.error).toContain('elder-only cultural content');
+      expect(result.error).toBe('File not found');
     });
   });
 

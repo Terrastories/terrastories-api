@@ -435,7 +435,7 @@ describe('File Upload Security', () => {
   });
 
   describe('Cultural Protocol Security', () => {
-    it('should enforce elder-only restrictions', async () => {
+    it('should hold legacy elder-only files for every role', async () => {
       const fileId = 'sacred-file-id';
 
       mockFileRepository.findById = vi.fn().mockResolvedValue({
@@ -447,14 +447,11 @@ describe('File Upload Security', () => {
         createdAt: new Date(),
       });
 
-      // Non-elder should be blocked
-      await expect(
-        fileService.getFile(fileId, 123, 1, 'editor')
-      ).rejects.toThrow('Access denied - elder-only cultural content');
-
-      // Elder should have access
-      const result = await fileService.getFile(fileId, 123, 1, 'elder');
-      expect(result).toBeDefined();
+      for (const role of ['editor', 'admin', 'elder']) {
+        await expect(fileService.getFile(fileId, 123, 1, role)).rejects.toThrow(
+          'File not found'
+        );
+      }
     });
 
     it('should validate cultural restrictions input', async () => {

@@ -430,7 +430,7 @@ describe('API Integration Tests', () => {
       });
     });
 
-    it('should handle empty results gracefully', async () => {
+    it('should reject foreign community selectors without revealing their existence', async () => {
       const tokens = await apiClient.getTokens();
       const response = await apiClient.get(
         '/api/v1/places',
@@ -440,11 +440,7 @@ describe('API Integration Tests', () => {
         tokens.admin
       );
 
-      apiClient.assertSuccess(response);
-
-      const result = apiClient.assertPaginatedResponse(response);
-      expect(result.data).toHaveLength(0);
-      expect(result.meta.total).toBe(0);
+      expect(response.statusCode).toBe(404);
     });
   });
 

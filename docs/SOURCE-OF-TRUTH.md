@@ -102,7 +102,7 @@ If an issue conflicts with the spec, mark it blocked and repair the issue/spec r
 
 ## Current execution sequence
 
-- PR #132 is the Hono Phase 1 foundation. Hono-specific follow-up work must use the base/dependency relationship documented in each issue rather than independently recreating that work from `main`.
+- PR #132 is superseded by the thin Hono foundation off `main` (2026-11-11 senior ruling). Follow-up work must use the replacement foundation and the base/dependency relationship documented in each issue. See `PHASE-1-PLAN.md` for its bounded scope.
 - `SPEC-V2.md` Section 3 pins the legacy behavior evidence; Section 4 owns the bounded launch continuity scenarios and their issue owners. The production roadmap and `pr-cycle` skill must use that same contract. Issue #147 owns named frontend/public-client revisions, disconnected browser evidence, and pilot community approval before cutover.
 - Existing parity-labelled Hono issues must be interpreted/revised against the new V2-native contract: Fastify/Rails comparison is discovery/regression evidence, not the release oracle.
 - Production-readiness issues use `priority:*`, `lane:*`, and `status:*` labels. `status:ready` means safe to start from the documented base; `status:blocked` means do not implement independently yet.

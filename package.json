@@ -11,7 +11,7 @@
     "test": "vitest",
     "test:coverage": "SKIP_TIMING_ASSERTIONS=true vitest run --coverage --exclude tests/production/performance.test.ts --reporter=dot --silent=true --maxWorkers=4",
     "test:ci:contracts": "bash tests/scripts/user_workflow.test.sh && vitest run tests/scripts --reporter=dot --silent=true --maxWorkers=4",
-    "test:ci:core": "vitest run tests/config/ tests/db tests/helpers tests/integration --reporter=dot --silent=true --maxWorkers=4",
+    "test:ci:core": "vitest run tests/config/ tests/db tests/helpers tests/integration tests/hono --reporter=dot --silent=true --maxWorkers=4",
     "test:ci:routes": "vitest run tests/routes --reporter=dot --silent=true --maxWorkers=4",
     "test:ci:services": "vitest run tests/repositories tests/services tests/shared tests/security tests/unit tests/app.test.ts tests/config.test.ts --reporter=dot --silent=true --maxWorkers=4",
     "test:ci:production": "vitest run tests/production tests/docker --reporter=dot --silent=true --maxWorkers=1",
@@ -33,7 +33,9 @@
     "compare:api": "node scripts/api-comparison.js",
     "test:compatibility": "vitest run tests/comparison --reporter=dot --silent=true --maxWorkers=4",
     "compatibility:report": "node scripts/api-comparison.js report --output api-comparison-report.html",
-    "compatibility:full": "npm run test:compatibility && npm run compatibility:report"
+    "compatibility:full": "npm run test:compatibility && npm run compatibility:report",
+    "dev:hono": "NODE_ENV=development tsx watch src/hono-server.ts",
+    "start:hono": "node dist/hono-server.js"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
@@ -45,24 +47,28 @@
     "@fastify/static": "^8.2.0",
     "@fastify/swagger": "^9.5.1",
     "@fastify/swagger-ui": "^5.2.3",
+    "@hono/node-server": "^2.1.7",
     "@types/bcrypt": "^6.0.0",
     "@types/pg": "^8.15.5",
     "argon2": "^0.44.0",
     "bcrypt": "^6.0.0",
+    "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.2.0",
     "dotenv": "^17.2.1",
     "drizzle-orm": "^0.44.4",
     "drizzle-zod": "^0.8.3",
     "fastify": "^5.5.0",
     "file-type": "^21.0.0",
+    "hono": "^4.13.18",
     "mime-types": "^3.0.1",
     "pg": "^8.16.3",
     "postgres": "^3.4.7",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "uuid": "^11.1.0",
     "zod": "^4.0.17"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261110.1",
     "@eslint/js": "^9.34.0",
     "@types/argon2": "^0.15.4",
     "@types/better-sqlite3": "^7.6.13",
@@ -79,6 +85,7 @@
     "form-data": "^4.0.4",
     "husky": "^9.1.7",
     "lint-staged": "^16.1.5",
+    "miniflare": "4.20260426.0",
     "prettier": "^3.6.2",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
@@ -133,6 +140,11 @@
     },
     "@eslint/eslintrc": {
       "minimatch": "11.0.3"
+    },
+    "miniflare": {
+      "undici": "^7.30.1",
+      "sharp": "^0.35.5",
+      "ws": "^8.21.0"
     }
   },
   "allowScripts": {
@@ -140,6 +152,6 @@
     "bcrypt@6.0.0": true,
     "better-sqlite3@12.2.0": true,
     "esbuild@0.25.9": true,
-    "sharp@0.35.4": true
+    "sharp@0.35.5": true
   }
 }

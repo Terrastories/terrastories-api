@@ -114,6 +114,35 @@ jobs:
             done
           fi
 
+          if [ "${{ matrix.compose-file }}" = "docker-compose.field-kit.yml" ]; then
+            # Include inactive profiles so a broken optional sync service cannot hide.
+            # Keep unresolved placeholders out of logs/artifacts; pass JSON via stdin.
+            set -o pipefail
+            docker compose -f docker-compose.yml -f docker-compose.field-kit.yml \
+              --profile '*' config --no-interpolate --format json |
+            node --input-type=module -e '
+              import assert from "node:assert/strict";
+              import { readFileSync } from "node:fs";
+              const config = JSON.parse(readFileSync(0, "utf8"));
+              assert.ok(config.services.api, "field-kit API must remain available");
+              // --no-interpolate retains Compose list-form environment entries.
+              const rawEnv = config.services.api.environment;
+              const env = Array.isArray(rawEnv)
+                ? Object.fromEntries(rawEnv.map(entry => {
+                    const split = entry.indexOf("=");
+                    return [entry.slice(0, split), entry.slice(split + 1)];
+                  }))
+                : rawEnv;
+              assert.equal(env.OFFLINE_MODE, "true");
+              assert.equal(env.DATABASE_URL, "./data/field-kit.db");
+              assert.equal(config.services["sync-service"], undefined, "sync design is deferred (#182)");
+              assert.equal(config.volumes?.sync_queue, undefined, "no unused sync queue");
+              for (const service of Object.values(config.services)) {
+                assert.ok(!service.profiles?.includes("sync-enabled"), "no unsupported sync profile");
+              }
+            '
+          fi
+
           echo "✅ ${{ matrix.compose-file }} syntax is valid"
 
   # =============================================================================

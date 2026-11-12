@@ -30,6 +30,23 @@ const fixture: PersonaFixture = {
   credentials: {} as PersonaFixture['credentials'],
 };
 describe('negative persona matrices', () => {
+  it('denies every member-dashboard write for viewer and member', () => {
+    for (const role of ['viewer', 'member'] as const) {
+      const steps = wrongRoleSteps(fixture, role);
+      for (const [resource, id] of [
+        ['stories', fixture.publicStoryId],
+        ['places', fixture.placeId],
+        ['speakers', fixture.speakerId],
+      ] as const) {
+        for (const method of ['POST', 'PUT', 'DELETE']) {
+          const path = `/api/v1/member/${resource}${method === 'POST' ? '' : `/${id}`}`;
+          expect(steps).toContainEqual(
+            expect.objectContaining({ method, path, expected: 403 })
+          );
+        }
+      }
+    }
+  });
   it('rejects restricted, foreign and unevidenced IDs in list projections', () => {
     const check = excludesIds([20, 21, 22]);
     for (const id of [20, 21, 22])

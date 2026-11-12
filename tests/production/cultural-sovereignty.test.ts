@@ -286,7 +286,7 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
   });
 
   describe('Elder-Only Content Access Controls', () => {
-    test('Non-elder users receive 403 for elder-restricted content', async () => {
+    test('Community users receive generic 404 for held legacy content', async () => {
       const community = testCommunities[0];
 
       // Create elder-only story
@@ -312,14 +312,11 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
         headers: { cookie: regularUserSessionCookie },
       });
 
-      expect(response.statusCode).toBe(403);
-      expect(response.json().error).toContain('elder access required');
-      expect(response.json().culturalProtocol).toBe(
-        'elder_restriction_enforced'
-      );
+      expect(response.statusCode).toBe(404);
+      expect(response.json().error).toBe('Story not found');
     });
 
-    test('Elder users can access elder-restricted content', async () => {
+    test('Legacy elder identity cannot bypass held content', async () => {
       const community = testCommunities[0];
 
       // Create elder-only content
@@ -342,10 +339,8 @@ describe('Indigenous Cultural Protocol & Data Sovereignty - Phase 2', () => {
         },
       });
 
-      expect(response.statusCode).toBe(200);
-      const responseData = response.json();
-      expect(responseData.data.title).toBe('Elder Traditional Knowledge');
-      expect(responseData.data.traditional_knowledge).toBe(true);
+      expect(response.statusCode).toBe(404);
+      expect(response.json().error).toBe('Story not found');
     });
 
     test('Cultural protocol enforcement logs all elder content access', async () => {

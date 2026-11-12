@@ -26,7 +26,6 @@ import {
 } from '../repositories/place.repository.js';
 import { validateCoordinates } from '../db/schema/places.js';
 import {
-  CulturalProtocolViolationError,
   InsufficientPermissionsError,
   PlaceNotFoundError,
   InvalidCoordinatesError,
@@ -36,6 +35,7 @@ import {
   InvalidFieldLengthError,
   RequiredFieldError,
 } from '../shared/errors/index.js';
+import { storyAccessForPhysicalRole } from '../shared/authorization/sovereignty-policy.js';
 
 /**
  * Request data for place creation
@@ -153,12 +153,16 @@ export class PlaceService {
   }
 
   /**
-   * Get place by ID with community isolation and cultural protocol checks
+   * Get place by ID with community isolation and cultural protocol checks.
+   * A restricted place (`is_restricted = true`) is unavailable in V2 runtime
+   * to EVERY role (SPEC-V2 §6.4) — admin, editor, viewer, and the legacy
+   * `elder` role included — so a direct read masks as 404, never 403 (no
+   * existence leak).
    */
   async getPlaceById(
     id: number,
     communityId: number,
-    userRole?: UserRole
+    _userRole?: UserRole
   ): Promise<Place> {
     const place = await this.repository.getByIdWithCommunityCheck(
       id,
@@ -169,30 +173,27 @@ export class PlaceService {
       throw new PlaceNotFoundError(id);
     }
 
-    // Check cultural protocol access
-    if (place.isRestricted && userRole !== 'elder') {
-      throw new CulturalProtocolViolationError(
-        'Access to this sacred place is restricted to elders'
-      );
+    // Unavailable rows are indistinguishable from nonexistent ones.
+    if (place.isRestricted) {
+      throw new PlaceNotFoundError(id);
     }
 
     return place;
   }
 
   /**
-   * Get paginated places for a community with cultural protocol filtering
+   * Get paginated places for a community. Restricted places are unavailable
+   * to every role (SPEC-V2 §6.4), so they are always excluded from the
+   * listing regardless of the caller's role.
    */
   async getPlacesByCommunity(
     communityId: number,
     params: Omit<CommunityPlaceParams, 'includeRestricted'>,
-    userRole?: UserRole
+    _userRole?: UserRole
   ): Promise<PaginatedResponse<Place>> {
-    // Determine if user can see restricted places
-    const includeRestricted = userRole === 'elder' || userRole === 'admin';
-
     const searchParams: CommunityPlaceParams = {
       ...params,
-      includeRestricted,
+      includeRestricted: false,
     };
 
     return await this.repository.getByCommunity(communityId, searchParams);
@@ -218,15 +219,10 @@ export class PlaceService {
       throw new PlaceNotFoundError('Place not found');
     }
 
-    // Check cultural protocol permissions
-    if (
-      existingPlace.isRestricted &&
-      userRole !== 'elder' &&
-      userRole !== 'admin'
-    ) {
-      throw new CulturalProtocolViolationError(
-        'Only elders and administrators can modify restricted places'
-      );
+    // A restricted place is unavailable to every role (SPEC-V2 §6.4): the
+    // update masks as 404 rather than revealing the restriction.
+    if (existingPlace.isRestricted) {
+      throw new PlaceNotFoundError(id);
     }
 
     // Validate update data
@@ -306,6 +302,12 @@ export class PlaceService {
       throw new PlaceNotFoundError('Place not found');
     }
 
+    // A restricted place is unavailable to every role (SPEC-V2 §6.4): the
+    // deletion masks as 404 rather than revealing the restriction.
+    if (existingPlace.isRestricted) {
+      throw new PlaceNotFoundError(id);
+    }
+
     // TODO: In the future, we should also check for story associations and handle them appropriately
     // For now, the repository will handle cascade operations
 
@@ -313,11 +315,12 @@ export class PlaceService {
   }
 
   /**
-   * Search places near a geographic point
+   * Search places near a geographic point. Restricted places are unavailable
+   * to every role (SPEC-V2 §6.4) and stay excluded from nearby search.
    */
   async searchPlacesNear(
     params: NearbySearchRequest & { communityId: number },
-    userRole?: UserRole
+    _userRole?: UserRole
   ): Promise<PaginatedResponse<Place>> {
     // Validate search coordinates
     if (!validateCoordinates(params.latitude, params.longitude)) {
@@ -329,9 +332,6 @@ export class PlaceService {
       throw new InvalidRadiusError(params.radiusKm, 0, 1000);
     }
 
-    // Determine if user can see restricted places
-    const includeRestricted = userRole === 'elder' || userRole === 'admin';
-
     const searchParams: NearbySearchParams = {
       communityId: params.communityId,
       latitude: params.latitude,
@@ -339,18 +339,19 @@ export class PlaceService {
       radiusKm: params.radiusKm,
       page: params.page || 1,
       limit: Math.min(params.limit || 20, 100), // Cap at 100 results
-      includeRestricted,
+      includeRestricted: false,
     };
 
     return await this.repository.searchNear(searchParams);
   }
 
   /**
-   * Search places within a bounding box
+   * Search places within a bounding box. Restricted places are unavailable
+   * to every role (SPEC-V2 §6.4) and stay excluded from bounds search.
    */
   async getPlacesByBounds(
     params: BoundsSearchRequest & { communityId: number },
-    userRole?: UserRole
+    _userRole?: UserRole
   ): Promise<PaginatedResponse<Place>> {
     // Validate bounding box
     if (params.north <= params.south || params.east <= params.west) {
@@ -366,9 +367,6 @@ export class PlaceService {
       throw new InvalidCoordinatesError();
     }
 
-    // Determine if user can see restricted places
-    const includeRestricted = userRole === 'elder' || userRole === 'admin';
-
     const searchParams: BoundsSearchParams = {
       communityId: params.communityId,
       north: params.north,
@@ -377,7 +375,7 @@ export class PlaceService {
       west: params.west,
       page: params.page || 1,
       limit: Math.min(params.limit || 20, 100), // Cap at 100 results
-      includeRestricted,
+      includeRestricted: false,
     };
 
     return await this.repository.searchInBounds(searchParams);
@@ -391,15 +389,30 @@ export class PlaceService {
   }
 
   /**
-   * Get community place statistics
+   * Get community place statistics (SPEC-V2 §6.4). Count metadata is a
+   * projection: restricted Fastify places are unavailable in V2 runtime to
+   * EVERY role, so they are never counted and the `restricted` key never
+   * appears — `total`/`public` cover unrestricted places only. `withStories`
+   * counts only places linked to stories the caller may read (the
+   * intersection of place and story access); the legacy `elder` and unknown
+   * roles get the same story reach as V2 member.
    */
-  async getCommunityPlaceStats(communityId: number): Promise<{
+  async getCommunityPlaceStats(
+    communityId: number,
+    role: string
+  ): Promise<{
     total: number;
-    restricted: number;
+    restricted?: number;
     public: number;
     withStories: number;
   }> {
-    return await this.repository.getCommunityPlaceStats(communityId);
+    // Physical role -> runtime story accesses (SPEC-V2 §6.2: Fastify
+    // `viewer` reasons as V2 `member`; legacy `elder` keeps member reach;
+    // unknown roles hold none, so withStories fails closed to 0).
+    return await this.repository.getCommunityPlaceStats(communityId, {
+      includeRestricted: false,
+      storyAudiences: storyAccessForPhysicalRole(role),
+    });
   }
 
   /**

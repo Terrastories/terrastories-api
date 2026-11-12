@@ -28,7 +28,11 @@ describe('partial updates through real route handlers', () => {
     await testDb.teardown();
   });
 
-  it('preserves a restricted place when PUT changes only its name', async () => {
+  // SPEC-V2 §6.4 (option A ruling): a restricted place is unavailable to
+  // every role, so a partial PUT cannot reach it. It must not rename it or
+  // reset its restriction either. Schema-level partial-update defaults are
+  // pinned in tests/shared/schemas/partial-updates.test.ts.
+  it('a partial PUT neither reaches nor resets a restricted place', async () => {
     const created = await app.inject({
       method: 'POST',
       url: '/api/v1/places',
@@ -50,18 +54,14 @@ describe('partial updates through real route handlers', () => {
       headers: { cookie },
       payload: { name: 'Restricted place after rename' },
     });
-    expect(updated.statusCode, updated.body).toBe(200);
-    expect(updated.json().data).toMatchObject({
-      name: 'Restricted place after rename',
-      isRestricted: true,
-    });
+    expect(updated.statusCode, updated.body).toBe(404);
 
     const [saved] = await testDb.db
       .select()
       .from(placesSqlite)
       .where(eq(placesSqlite.id, place.id));
     expect(saved).toMatchObject({
-      name: 'Restricted place after rename',
+      name: 'Restricted place before rename',
       isRestricted: true,
     });
   });

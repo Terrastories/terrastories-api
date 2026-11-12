@@ -287,8 +287,12 @@ describe('API Integration Tests', () => {
       apiClient.assertSuccess(response);
 
       const result = apiClient.assertPaginatedResponse(response);
-      expect(result.data).toHaveLength(4); // System + 3 test fixture communities
-      expect(result.meta.total).toBe(4);
+      // SPEC-V2 §4/§6.1: this unauthenticated list discovers only public+active
+      // communities. Of the seeded fixtures (System private, Test public, Demo
+      // private, Isolated public) exactly two are discoverable; the private
+      // System and Demo communities are excluded from data and total.
+      expect(result.data).toHaveLength(2);
+      expect(result.meta.total).toBe(2);
 
       // Verify community structure
       result.data.forEach((community) => {
@@ -430,21 +434,20 @@ describe('API Integration Tests', () => {
       });
     });
 
-    it('should handle empty results gracefully', async () => {
+    it('should reject caller-selected community IDs outside the authenticated scope', async () => {
       const tokens = await apiClient.getTokens();
       const response = await apiClient.get(
         '/api/v1/places',
         {
-          community_id: 99999, // Non-existent community
+          community_id: 99999,
         },
         tokens.admin
       );
 
-      apiClient.assertSuccess(response);
-
-      const result = apiClient.assertPaginatedResponse(response);
-      expect(result.data).toHaveLength(0);
-      expect(result.meta.total).toBe(0);
+      expect(response.statusCode).toBe(403);
+      expect(JSON.parse(response.body)).toEqual({
+        error: { message: 'Access denied - community data isolation' },
+      });
     });
   });
 
@@ -535,13 +538,16 @@ describe('API Integration Tests', () => {
     it('should handle concurrent requests', async () => {
       const tokens = await apiClient.getTokens();
 
-      // Make multiple concurrent requests
+      // Make multiple concurrent requests. The created communities must be
+      // public: SPEC-V2 §4/§6.1 hides private communities from the
+      // unauthenticated discovery list, so private fixtures would not verify.
       const requests = Array.from({ length: 10 }, (_, i) =>
         apiClient.post(
           '/api/v1/communities',
           {
             name: `Concurrent Community ${i}`,
             slug: `concurrent-${i}-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+            publicStories: true,
           },
           tokens.admin
         )
@@ -554,10 +560,10 @@ describe('API Integration Tests', () => {
         apiClient.assertSuccess(response, 201);
       });
 
-      // Verify all communities were created
+      // Verify all communities were created and are discoverable
       const listResponse = await apiClient.get('/api/v1/communities');
       const result = apiClient.assertPaginatedResponse(listResponse);
-      expect(result.data.length).toBeGreaterThanOrEqual(13); // 3 fixtures + 10 new
+      expect(result.data.length).toBeGreaterThanOrEqual(12); // 2 public fixtures + 10 new public
     });
   });
 

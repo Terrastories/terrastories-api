@@ -1,0 +1,66 @@
+{
+  "bcryptRuby": "3.1.20",
+  "ruby": "3.3.13",
+  "fixtures": [
+    {
+      "cost": 10,
+      "password": "correct horse battery staple",
+      "hash": "$2a$10$OPEEPMv9zau1FDUNbw2rweJK/5RSRgR0fNjtURoUk2OdRQinaa/y."
+    },
+    {
+      "cost": 10,
+      "password": "pässwörd-ünïcode-日本語",
+      "hash": "$2a$10$K6ODrj4IGwcPoAU0G7RJBeNidlxHM9/z2mfd8jXIrOggHBCVtGJ8q"
+    },
+    {
+      "cost": 10,
+      "password": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "hash": "$2a$10$WXK/bbZ/kNpGfnwFnBzMoehXXknCQp8vUQ0sAIFYDQ64WUzQuUQ5W"
+    },
+    {
+      "cost": 10,
+      "password": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaIGNORED-after-72-bytes",
+      "hash": "$2a$10$c98cGooBAC0NN3RS.xavrOUYP34UaWrtXSUG.qKrkNoJZAPkYKu.q"
+    },
+    {
+      "cost": 10,
+      "password": "éééééééééééééééééééééééééééééééééééééééé",
+      "hash": "$2a$10$TwflpDi2gVXqrQXULItiJ.f.ADsV9vZvk3H4qwv4wM6NjEscSBHhi"
+    },
+    {
+      "cost": 10,
+      "password": " leading and trailing spaces ",
+      "hash": "$2a$10$sYZJcm71Cozq7YVntqDDwu/45giCpK8pi.cJdTpP.14WSceQpwt1K"
+    },
+    {
+      "cost": 12,
+      "password": "correct horse battery staple",
+      "hash": "$2a$12$wRVnxDOS/XxAVRcHoU3G1OJZ8fMkUiPip0x1GQhQwgMss7fmoapkK"
+    },
+    {
+      "cost": 12,
+      "password": "pässwörd-ünïcode-日本語",
+      "hash": "$2a$12$4ZZG3UNsxwqiCmJmqYPEFO31D2RsFDZbmGifBgD9MKGoQr8KY7abK"
+    },
+    {
+      "cost": 12,
+      "password": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "hash": "$2a$12$MKxVVHBpNNGpKZ2uUGqr1ec4ZY42FjnbFUnqjyPCG55ji8.RNC61u"
+    },
+    {
+      "cost": 12,
+      "password": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaIGNORED-after-72-bytes",
+      "hash": "$2a$12$ykz7/9vkDQNAEoZ9zj0n6.DOJIvn4hedFxDRrDiAedGk3.OspxSWK"
+    },
+    {
+      "cost": 12,
+      "password": "éééééééééééééééééééééééééééééééééééééééé",
+      "hash": "$2a$12$ZjBT8vnx3OSSRwogukO06e11zjeXv.mrHSfHwdkWeXNU4Pn9nlFNe"
+    },
+    {
+      "cost": 12,
+      "password": " leading and trailing spaces ",
+      "hash": "$2a$12$lAd6Ihe4s2PTRAXrb5zgkOCM3UYsVgbvo9q/Z8N7gP/dhdQjIysu6"
+    }
+  ]
+}

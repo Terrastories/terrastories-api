@@ -50,3 +50,5 @@ console.log(
     2
   )
 );
+
+if (!pass) process.exitCode = 1;

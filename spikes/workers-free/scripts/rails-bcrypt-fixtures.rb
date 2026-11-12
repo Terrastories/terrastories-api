@@ -10,7 +10,7 @@ passwords = [
   'pässwörd-ünïcode-日本語',
   'a' * 72,
   'a' * 72 + 'IGNORED-after-72-bytes',
-  'é' * 40, # 80 bytes in UTF-8: truncation splits a code point
+  'é' * 40, # 80 bytes in UTF-8: 72-byte cutoff falls between code points
   ' leading and trailing spaces ',
 ]
 out = []

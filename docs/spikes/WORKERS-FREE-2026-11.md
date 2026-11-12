@@ -6,15 +6,15 @@ application. Raw summaries are in `spikes/workers-free/results/`.
 
 ## Verdict
 
-| Question                                                                  | Result                                                                                 |
-| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Server-side Rails bcrypt verification (cost 10, 11 or 12) on Workers Free | **FAIL**: killed with error 1102 after a short burst                                   |
-| Server-side Argon2id (WASM) at OWASP parameters on Workers Free           | **FAIL**: killed with error 1102 after a short burst                                   |
-| Server-side PBKDF2-SHA256 at OWASP 600,000 iterations                     | **FAIL**: Workers rejects more than 100,000 iterations (observed; raw output not kept) |
-| Server-side PBKDF2-SHA256 at 100,000 iterations                           | **FAIL**: 855 of 1,000 requests killed with error 1102                                 |
-| Client-stretching login (Fable 5.2 design, #184) on Workers Free          | **PASS**: login p99 CPU 4 ms, session check p99 1 ms, 0 kills in 1,000 logins          |
-| D1 Free import of a large community                                       | **PASS with limits**: one import uses about 30% of the daily write quota               |
-| R2 media read and upload (authorization not exercised)                    | **PASS** up to 100 MB per request                                                      |
+| Question                                                                  | Result                                                                        |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Server-side Rails bcrypt verification (cost 10, 11 or 12) on Workers Free | **FAIL**: killed with error 1102 after a short burst                          |
+| Server-side Argon2id (WASM) at OWASP parameters on Workers Free           | **FAIL**: killed with error 1102 after a short burst                          |
+| Server-side PBKDF2-SHA256 at OWASP 600,000 iterations                     | **UNVERIFIED**: rejection observed once, not retained                         |
+| Server-side PBKDF2-SHA256 at 100,000 iterations                           | **FAIL**: 855 of 1,000 requests killed with error 1102                        |
+| Client-stretching login (Fable 5.2 design, #184) on Workers Free          | **PASS**: login p99 CPU 4 ms, session check p99 1 ms, 0 kills in 1,000 logins |
+| D1 Free import of a large community                                       | **PASS with limits**: one import uses about 30% of the daily write quota      |
+| R2 media read and upload (authorization not exercised)                    | **PASS** up to 100 MB per request                                             |
 
 ## Method
 
@@ -41,23 +41,23 @@ application. Raw summaries are in `spikes/workers-free/results/`.
 
 Each scenario sent 200 requests at 4 requests per second to its own fresh Worker.
 
-| Scenario                           | Kill rate (1102) | Status timeline             | CPU p50 / p99 (ms, sampled; killed requests show 10) | Tail n |
-| ---------------------------------- | ---------------- | --------------------------- | ---------------------------------------------------- | ------ |
-| noop                               | 0/200            | 200×200                     | 0 / 0                                                | 61     |
-| SHA-256 token verify (1,000 req)   | 0/1,000          | 200×1000                    | 0 / 0 (max 1)                                        | 258    |
-| PBKDF2-SHA256 10k                  | 0/200            | 200×200                     | 3 / 4                                                | 52     |
-| PBKDF2-SHA256 50k                  | 0/200            | 200×200                     | 12 / 18                                              | 54     |
-| PBKDF2-SHA256 100k                 | 0/200            | 200×200                     | 16 / 22                                              | 58     |
-| PBKDF2-SHA256 100k (1,000 req)     | **855/1,000**    | 200×145 503×855             | 10 / 25                                              | 253    |
-| PBKDF2-SHA256 210k                 | not run          | —                           | —                                                    | —      |
-| PBKDF2-SHA256 600k                 | n/a: HTTP 500 ¹  | rejected by runtime ¹       | —                                                    | —      |
-| bcrypt cost 10                     | **183/200**      | 200×17 503×183              | 10 / 149                                             | 57     |
-| bcrypt cost 11                     | **176/200**      | 200×12 503×1 200×12 503×175 | 10 / 262                                             | 57     |
-| bcrypt cost 12                     | **194/200**      | 200×6 503×194               | 10 / 345                                             | 51     |
-| Argon2id m=19456 t=2 p=1           | **170/200**      | 200×30 503×170              | 10 / 98                                              | 57     |
-| Argon2id m=12288 t=3 p=1           | **133/200**      | 200×67 503×133              | 10 / 67                                              | 50     |
-| Argon2id m=7168 t=5 p=1            | **111/200**      | 200×89 503×111              | 25 / 54                                              | 58     |
-| bcrypt cost 10 in a Durable Object | not run          | —                           | —                                                    | —      |
+| Scenario                           | Kill rate (1102) | Status timeline               | CPU p50 / p99 (ms, sampled; killed requests show 10) | Tail n |
+| ---------------------------------- | ---------------- | ----------------------------- | ---------------------------------------------------- | ------ |
+| noop                               | 0/200            | 200×200                       | 0 / 0                                                | 61     |
+| SHA-256 token verify (1,000 req)   | 0/1,000          | 200×1000                      | 0 / 0 (max 1)                                        | 258    |
+| PBKDF2-SHA256 10k                  | 0/200            | 200×200                       | 3 / 4                                                | 52     |
+| PBKDF2-SHA256 50k                  | 0/200            | 200×200                       | 12 / 18                                              | 54     |
+| PBKDF2-SHA256 100k                 | 0/200            | 200×200                       | 16 / 22                                              | 58     |
+| PBKDF2-SHA256 100k (1,000 req)     | **855/1,000**    | 200×145 503×855               | 10 / 25                                              | 253    |
+| PBKDF2-SHA256 210k                 | not run          | —                             | —                                                    | —      |
+| PBKDF2-SHA256 600k                 | unverified ¹     | observed once, not retained ¹ | —                                                    | —      |
+| bcrypt cost 10                     | **183/200**      | 200×17 503×183                | 10 / 149                                             | 57     |
+| bcrypt cost 11                     | **176/200**      | 200×12 503×1 200×12 503×175   | 10 / 262                                             | 57     |
+| bcrypt cost 12                     | **194/200**      | 200×6 503×194                 | 10 / 345                                             | 51     |
+| Argon2id m=19456 t=2 p=1           | **170/200**      | 200×30 503×170                | 10 / 98                                              | 57     |
+| Argon2id m=12288 t=3 p=1           | **133/200**      | 200×67 503×133                | 10 / 67                                              | 50     |
+| Argon2id m=7168 t=5 p=1            | **111/200**      | 200×89 503×111                | 25 / 54                                              | 58     |
+| bcrypt cost 10 in a Durable Object | not run          | —                             | —                                                    | —      |
 
 Notes:
 
@@ -66,12 +66,8 @@ Notes:
   one at 10 ms. Killed requests show `cpuTime` 10 in tail. A trivial route on the same
   Worker still answered 10/10 after each kill streak, so the kills do not spread to other
   routes. The burst allowance is undocumented, and the design must not rely on it.
-- **PBKDF2 above 100,000 iterations** (¹ observed, not recorded: this comes from the first
-  exploratory run, whose scenarios interfered with each other. That run's output file was
-  discarded and no committed results file covers 600k or 210k. Treat this as an observation
-  to re-capture.) The call fails at once with
-  `Pbkdf2 failed: iteration counts above 100000 are not supported (requested 600000)`, so
-  OWASP's 600,000 (SHA-256) and 210,000 (SHA-512 level) cannot run on Workers at all.
+- **PBKDF2 above 100,000 iterations** (¹): rejection at 600k was observed once,
+  not retained. The runtime ceiling remains unverified; see Open questions.
 - **Argon2id instance reuse.** Reusing one WASM instance across parameter sets failed with
   `Memory allocation error`. The spike creates one instance per request.
 
@@ -81,8 +77,8 @@ requests all passed, but a 1,000-request run passed 145 and then lost 855 to err
 The 200-request runs at 10k and 50k had no kills. 50k (p99 18 ms) is over the 10 ms limit,
 so its clean run probably sat inside the burst allowance (inferred). Only about 10k
 (p99 4 ms) has headroom, and that is far below any OWASP PBKDF2 recommendation. The 210k
-scenario did not run. Because the runtime rejects more than 100,000 iterations, 210k would
-fail the same way as 600k (inferred from the error text).
+scenario did not run; neither a 210k rejection nor a SHA-512 ceiling was measured.
+The unretained 600k observation does not establish either result.
 
 ## 2. Client-stretching login (Fable 5.2 auth design, #184)
 
@@ -176,12 +172,12 @@ not CPU, so media serving fits the CPU limit.
 No real low-end phone was available, so the reference-device rows of #184 remain a
 **manual procedure**. What was measured:
 
-| Check                                                                                                                                                                         | Result                                                                                             |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Byte-exact Rails match: bcryptjs recomputes 12 real bcrypt-ruby 3.1.20 hashes (`$2a$`, cost 10 and 12; ASCII, Unicode, 72 bytes, 72+ bytes, 80-byte split code point, spaces) | **12/12 exact**, 72-byte truncation parity holds (`results/rails-bcrypt-check.json`)               |
-| Page served over `http://192.168.68.106:8787` (LAN, not localhost), headless Chrome                                                                                           | `isSecureContext` false, `crypto.subtle` **unavailable**; both WASM Argon2id and bcryptjs **work** |
-| Desktop (8 cores), no throttle, 5 runs                                                                                                                                        | Argon2id m=19456 t=2 p95 72 ms; bcrypt cost 12 p95 504 ms                                          |
-| Same desktop, CDP CPU throttle 6× (rough low-end proxy)                                                                                                                       | Argon2id p95 403 ms; bcrypt cost 12 p95 2,891 ms                                                   |
+| Check                                                                                                                                                                                                      | Result                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Byte-exact Rails match: bcryptjs recomputes 12 real bcrypt-ruby 3.1.20 hashes (`$2a$`, cost 10 and 12; ASCII, Unicode, 72 bytes, 72+ bytes, 80-byte Unicode password (cutoff between code points), spaces) | **12/12 exact**, 72-byte truncation parity holds (`results/rails-bcrypt-check.json`)               |
+| Page served over `http://192.168.68.106:8787` (LAN, not localhost), headless Chrome                                                                                                                        | `isSecureContext` false, `crypto.subtle` **unavailable**; both WASM Argon2id and bcryptjs **work** |
+| Desktop (8 cores), no throttle, 5 runs                                                                                                                                                                     | Argon2id m=19456 t=2 p95 72 ms; bcrypt cost 12 p95 504 ms                                          |
+| Same desktop, CDP CPU throttle 6× (rough low-end proxy)                                                                                                                                                    | Argon2id p95 403 ms; bcrypt cost 12 p95 2,891 ms                                                   |
 
 The 6× throttle does not model a 2 GB phone's memory limits or thermal throttling. It is
 a proxy only.
@@ -231,6 +227,12 @@ and a delete probe that returned code 10090).
   the bucket).
 
 ## Open questions
+
+- **Unverified PBKDF2 ceiling.** A 600k rejection was observed once, not retained:
+  the exploratory run output was discarded because scenarios interfered. No committed
+  results capture that rejection. The 210k scenario was not run, and any SHA-512
+  rejection is an inference, not a measurement. A retained capture is needed to establish
+  a ceiling; the measured 100k sustained-load failure stands independently.
 
 - The spike Workers were public on `workers.dev` while the runs lasted. Anyone could call
   the write routes. All of them have been deleted. A rerun should add a shared-secret

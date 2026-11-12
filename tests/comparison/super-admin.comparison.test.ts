@@ -409,7 +409,7 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
         expect(res.statusCode).toBe(401);
       });
 
-      it('should hide community accounts from system-user updates', async () => {
+      it('should allow profile updates without granting membership authority', async () => {
         const res = await client.put(
           '/api/v1/super_admin/users/1',
           {
@@ -420,7 +420,18 @@ describe('V1 Compatibility: Super Admin Endpoints', () => {
           },
           superAdminCookie
         );
-        expect(res.statusCode).toBe(404);
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(res.body).data).toMatchObject({
+          firstName: 'SAUpdated',
+          role: 'admin',
+          communityId: testCommunityId,
+        });
+        const roleChange = await client.put(
+          '/api/v1/super_admin/users/1',
+          { role: 'viewer' },
+          superAdminCookie
+        );
+        expect(roleChange.statusCode).toBe(403);
       });
     });
 

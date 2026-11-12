@@ -35,7 +35,8 @@
     "test:compatibility": "vitest run tests/comparison --reporter=dot --silent=true --maxWorkers=4",
     "compatibility:report": "node scripts/api-comparison.js report --output api-comparison-report.html",
     "compatibility:full": "npm run test:compatibility && npm run compatibility:report",
-    "qa:personas": "tsx scripts/qa/run-personas.ts"
+    "qa:personas": "tsx scripts/qa/run-personas.ts",
+    "qa:personas:sqlite": "vitest run tests/scripts/qa --maxWorkers=2"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

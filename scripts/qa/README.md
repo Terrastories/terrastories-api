@@ -3,8 +3,10 @@
 Run the isolated SQLite acceptance wrapper with:
 
 ```sh
-npx vitest run tests/scripts/qa --maxWorkers=2
+npm run qa:personas:sqlite
 ```
+
+which is `vitest run tests/scripts/qa --maxWorkers=2`.
 
 The CLI accepts an explicit fixture module so it never silently seeds a deployed
 community:
@@ -28,8 +30,23 @@ Skipped personas do not count toward route coverage. Any failed assertion or
 unreached route makes the command exit nonzero. A nonempty reason is required for
 each explicitly excluded endpoint.
 
-CI release-gate integration and disconnected field-kit acceptance remain owned
-by #147. SQLite results do not establish PostgreSQL or Workers readiness.
+Disconnected field-kit acceptance remains owned by #147. SQLite results do
+not establish PostgreSQL or Workers readiness.
+
+## CI release gate
+
+The `persona-qa-sqlite` job in `.github/workflows/ci.yml`, with check name
+**Persona QA gate (SQLite)**, runs `npm run qa:personas:sqlite` on Node
+20.19.0 with `QA_REPORT_PATH` set on every pull request and push to `main`.
+The job uses no secrets and fails closed: any failed assertion or unreached
+endpoint exits nonzero. The `qa-report.json` it produces is uploaded as the
+`persona-qa-report` artifact on every run, including failed ones, and a
+missing report fails the upload step.
+
+A maintainer must add **Persona QA gate (SQLite)** to the repository's
+required status checks for `main` (Settings → Branches → branch protection).
+That branch-protection change cannot be made from a pull request, so the
+gate is advisory in CI until it is applied.
 
 Negative matrices cover each resource's actual schema. Stories have restricted
 and unevidenced audience fixtures; places have a restricted flag; media has held

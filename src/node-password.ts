@@ -1,7 +1,6 @@
 import { compare } from 'bcrypt';
 import type { PasswordVerifier } from './services/hono-foundation.service.js';
 
-/** Native Node verifier; Workers auth is selected after #194 measurements. */
 export const nodePasswordVerifier: PasswordVerifier = {
   async verify(password, hash) {
     const pattern = /^\$2[aby]\$(0[4-9]|1[0-4])\$[./A-Za-z0-9]{53}$/;

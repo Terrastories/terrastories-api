@@ -19,7 +19,6 @@ import { usersPg, usersSqlite } from './users.js';
 import { filesPg, filesSqlite } from './files.js';
 import { communitiesPg, communitiesSqlite } from './communities.js';
 
-// Token digests and Unix-millisecond expiry; user authority is never cached.
 export const sessionsPg = pgTable(
   'sessions',
   {
@@ -46,7 +45,6 @@ export const sessionsSqlite = sqliteTable(
   (table) => [index('sessions_user_idx').on(table.userId)]
 );
 
-// A File row or legacy URL alone never authorizes its bytes.
 export const communityMediaPg = pgTable(
   'community_media',
   {

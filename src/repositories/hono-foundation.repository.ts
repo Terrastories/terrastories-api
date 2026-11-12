@@ -53,7 +53,6 @@ export class HonoFoundationRepository {
     };
   }
 
-  // Exact-email coexistence resolver; canonical identity normalization remains #137.
   async candidates(
     email: string,
     communityId?: number

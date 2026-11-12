@@ -1,6 +1,5 @@
-import { realpath } from 'node:fs/promises';
+import { open, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import {
   validStorageKey,
@@ -21,7 +20,8 @@ export async function createLocalStorage(
           key.split('/').slice(0, 2).join('/')
         );
         if (!filename.startsWith(tenantRoot + path.sep)) return null;
-        return Readable.toWeb(createReadStream(filename));
+        const file = await open(filename, 'r');
+        return Readable.toWeb(file.createReadStream());
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
         throw error;

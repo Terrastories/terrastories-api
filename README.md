@@ -55,7 +55,7 @@ The production-readiness backlog is organized in GitHub with:
 
 ## Development
 
-Requirements are Node.js 20.9+ and npm 9+.
+Requirements are Node.js 20.19+ and npm 9+.
 
 ```bash
 npm install

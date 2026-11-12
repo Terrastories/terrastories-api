@@ -1,43 +1,17 @@
 {
   "trackingIssue": 141,
   "expires": "2026-11-30",
-  "capturedOn": "2026-10-31",
+  "capturedOn": "2026-11-02",
   "advisories": [
     {
       "source": "1102341",
       "package": "esbuild",
       "severity": "moderate",
-      "url": "https://github.com/advisories/GHSA-67mh-4wv8-2f99"
-    },
-    {
-      "source": "1116251",
-      "package": "drizzle-orm",
-      "severity": "high",
-      "url": "https://github.com/advisories/GHSA-gpj5-g38j-94v9"
-    },
-    {
-      "source": "1116758",
-      "package": "@fastify/static",
-      "severity": "moderate",
-      "url": "https://github.com/advisories/GHSA-pr96-94w5-mx2h"
-    },
-    {
-      "source": "1116759",
-      "package": "@fastify/static",
-      "severity": "moderate",
-      "url": "https://github.com/advisories/GHSA-x428-ghpx-8j92"
-    },
-    {
-      "source": "1124285",
-      "package": "@fastify/static",
-      "severity": "moderate",
-      "url": "https://github.com/advisories/GHSA-8pvw-jcv7-9cmj"
-    },
-    {
-      "source": "1124286",
-      "package": "@fastify/static",
-      "severity": "high",
-      "url": "https://github.com/advisories/GHSA-83w8-p2f5-377r"
+      "url": "https://github.com/advisories/GHSA-67mh-4wv8-2f99",
+      "nodes": ["node_modules/@esbuild-kit/core-utils/node_modules/esbuild"],
+      "nodeScopes": {
+        "node_modules/@esbuild-kit/core-utils/node_modules/esbuild": "dev"
+      }
     }
   ]
 }

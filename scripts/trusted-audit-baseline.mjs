@@ -630,7 +630,16 @@ export function canonicalRegistryTarball(name, version) {
 // `npm audit --package-lock-only` trusts each lock entry's `version`, while
 // `npm ci` installs whatever `resolved` + `integrity` point at. Every package
 // entry must therefore resolve to the public registry tarball of its own
-// name@version, so the audited version is the installed version.
+// name@version. The integrity value is format-checked, not fetched. That only
+// binds the installed bytes when two more assumptions hold:
+// - npm ci fetches from the public registry. npm's default
+//   `replace-registry-host=npmjs` rewrites registry.npmjs.org `resolved` URLs
+//   to the configured registry, so a project .npmrc with `registry=` could
+//   serve other bytes that match a PR-supplied integrity. The supply-chain
+//   "Dependency review" job rejects any .npmrc in the PR tree.
+// - The npm cache is cold or keyed on the exact lockfile hash (setup-node's
+//   npm cache). A warm cache restored by a looser key could serve other
+//   content by digest; tests/scripts/ci-supply-chain.test.js pins this.
 export function validateLockfileSources(lock) {
   if (
     !lock ||

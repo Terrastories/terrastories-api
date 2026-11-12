@@ -1,10 +1,24 @@
-import { access, readFile, readdir } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import {
+  access,
+  readFile,
+  mkdtemp,
+  rmdir,
+  writeFile,
+  unlink,
+} from 'node:fs/promises';
+import { resolve, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { getConfig } from '../../../src/shared/config/index.js';
 import { createFixture } from '../../../scripts/qa/sqlite-fixture.js';
 import * as personas from '../../../scripts/qa/personas/index.js';
 import { extractSignedSessionCookie } from '../../helpers/session-cookie.js';
+
+// The ESM namespace of a node: builtin is not configurable, so mkdtemp is
+// observed through a partial module mock instead of vi.spyOn.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, mkdtemp: vi.fn(actual.mkdtemp) };
+});
 
 describe('persona media fixture evidence', () => {
   it('serves seeded readable bytes and denies real foreign/held/unknown bytes', async () => {
@@ -55,9 +69,14 @@ describe('persona media fixture evidence', () => {
 
   it('removes only owned media when setup fails after creating the application', async () => {
     const uploadRoot = resolve(getConfig().fileUpload.uploadDir);
-    const before = (await readdir(uploadRoot))
-      .filter((name) => name.startsWith('persona-fixture-'))
-      .sort();
+    const mkdtempMock = vi.mocked(mkdtemp);
+    const untouched = await mkdtemp(
+      join(uploadRoot, 'persona-fixture-control-')
+    );
+    const sentinel = join(untouched, 'sentinel');
+    await writeFile(sentinel, 'preserve');
+    // Drop the control directory's call so only the fixture's call is recorded.
+    mkdtempMock.mockClear();
     const failingJourneys = vi
       .spyOn(personas, 'createJourneys')
       .mockImplementationOnce(() => {
@@ -65,12 +84,16 @@ describe('persona media fixture evidence', () => {
       });
     try {
       await expect(createFixture()).rejects.toThrow('fixture setup regression');
+      expect(mkdtempMock).toHaveBeenCalledTimes(1);
+      const owned = await mkdtempMock.mock.results[0]!.value;
+      expect(owned).toBeDefined();
+      await expect(access(owned)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(sentinel, 'utf8')).toBe('preserve');
     } finally {
       failingJourneys.mockRestore();
+      mkdtempMock.mockClear();
+      await unlink(sentinel);
+      await rmdir(untouched);
     }
-    const after = (await readdir(uploadRoot))
-      .filter((name) => name.startsWith('persona-fixture-'))
-      .sort();
-    expect(after).toEqual(before);
   });
 });

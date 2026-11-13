@@ -892,27 +892,6 @@ export async function communityRoutes(
           });
         }
 
-        // Elder access control: Check if story is restricted and requires elder access
-        // For now, using isRestricted flag + title/description patterns to identify elder content
-        // TODO: Add proper privacy_level and cultural_restrictions fields to schema in future
-        const isElderContent =
-          story.isRestricted &&
-          (story.title.toLowerCase().includes('elder') ||
-            story.title.toLowerCase().includes('sacred') ||
-            story.description?.toLowerCase().includes('elder') ||
-            story.description?.toLowerCase().includes('traditional knowledge'));
-
-        if (isElderContent) {
-          // @ts-ignore
-          if (!user || user.role !== 'elder') {
-            return reply.status(403).send({
-              error: 'elder access required',
-              statusCode: 403,
-              culturalProtocol: 'elder_restriction_enforced',
-            });
-          }
-        }
-
         // Enhance story response with cultural metadata for testing
         // TODO: These fields should be stored in database schema in future
         const traditional_knowledge = Boolean(

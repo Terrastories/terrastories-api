@@ -114,6 +114,12 @@ export class FileService {
         }
       }
 
+      // Multipart parsers may end the stream at their limit without throwing.
+      // Never persist that prefix as if it were the complete uploaded object.
+      if (file.file.truncated) {
+        throw new Error('File size exceeds maximum allowed');
+      }
+
       const fileBuffer = Buffer.concat(chunks);
 
       // 2. Validate file type from buffer
@@ -312,15 +318,27 @@ export class FileService {
       throw new Error(error);
     }
 
-    // Cultural restrictions check
-    if (file.culturalRestrictions) {
-      const restrictions: CulturalRestrictions =
-        typeof file.culturalRestrictions === 'string'
-          ? JSON.parse(file.culturalRestrictions)
-          : file.culturalRestrictions;
-
-      if (restrictions.elderOnly && userRole !== 'elder') {
-        throw new Error('Access denied - elder-only cultural content');
+    // Legacy cultural restrictions have no implicit V2 audience. Unknown
+    // metadata remains held until community disposition, including for admins.
+    if (
+      file.culturalRestrictions !== null &&
+      file.culturalRestrictions !== undefined
+    ) {
+      try {
+        const restrictions: unknown =
+          typeof file.culturalRestrictions === 'string'
+            ? JSON.parse(file.culturalRestrictions)
+            : file.culturalRestrictions;
+        if (
+          !restrictions ||
+          typeof restrictions !== 'object' ||
+          Array.isArray(restrictions) ||
+          Object.keys(restrictions).length > 0
+        ) {
+          throw new Error('File not found');
+        }
+      } catch {
+        throw new Error('File not found');
       }
     }
 

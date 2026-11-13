@@ -8,6 +8,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import {
   requireAuth,
+  requireRole,
   enforceDataSovereignty,
   type AuthenticatedRequest,
 } from '../../shared/middleware/auth.middleware.js';
@@ -15,7 +16,7 @@ import { z } from 'zod';
 import { SpeakerService } from '../../services/speaker.service.js';
 import { SpeakerRepository } from '../../repositories/speaker.repository.js';
 import { getDb, type Database } from '../../db/index.js';
-import { AppError } from '../../shared/errors/index.js';
+import { AppError, SpeakerNotFoundError } from '../../shared/errors/index.js';
 import {
   toMemberSpeaker,
   createPaginationMeta,
@@ -69,7 +70,15 @@ export async function memberSpeakersRoutes(
         200: {
           type: 'object',
           properties: {
-            data: { type: 'array', items: { type: 'object' } },
+            data: {
+              type: 'array',
+              items: {
+                type: 'object',
+                required: ['id'],
+                properties: { id: { type: 'integer' } },
+                additionalProperties: true,
+              },
+            },
             meta: {
               type: 'object',
               properties: {
@@ -216,6 +225,12 @@ export async function memberSpeakersRoutes(
         const speakerDTO = toMemberSpeaker(speaker, userRole);
         return reply.code(200).send({ data: speakerDTO });
       } catch (error: unknown) {
+        if (error instanceof SpeakerNotFoundError) {
+          return reply.code(404).send({
+            error: { code: 'NOT_FOUND', message: 'Resource not found' },
+          });
+        }
+
         if (error instanceof z.ZodError) {
           return reply.code(400).send({
             error: {
@@ -259,7 +274,11 @@ export async function memberSpeakersRoutes(
 
   // POST /api/v1/member/speakers - Create new speaker
   app.post('/', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Create new speaker',
       tags: ['Member Speakers'],
@@ -295,7 +314,12 @@ export async function memberSpeakersRoutes(
         201: {
           type: 'object',
           properties: {
-            data: { type: 'object' },
+            data: {
+              type: 'object',
+              additionalProperties: true,
+              required: ['id'],
+              properties: { id: { type: 'integer' } },
+            },
           },
         },
       },
@@ -367,7 +391,11 @@ export async function memberSpeakersRoutes(
 
   // PUT /api/v1/member/speakers/:id - Update speaker
   app.put('/:id', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Update speaker',
       tags: ['Member Speakers'],
@@ -485,7 +513,11 @@ export async function memberSpeakersRoutes(
 
   // DELETE /api/v1/member/speakers/:id - Delete speaker
   app.delete('/:id', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Delete speaker',
       tags: ['Member Speakers'],

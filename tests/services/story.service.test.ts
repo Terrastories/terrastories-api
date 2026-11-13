@@ -2066,6 +2066,7 @@ describe('StoryService', () => {
       const storyWithFiles: StoryWithRelations = {
         id: 1,
         title: 'Test Story with Files',
+        privacyLevel: 'public',
         description: 'A test story with file URLs',
         slug: 'test-story-files',
         communityId: testData.community.id,

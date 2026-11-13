@@ -1,3 +1,4 @@
+import { PlaceNotFoundError } from '../../shared/errors/index.js';
 /**
  * Member Places Routes
  *
@@ -8,6 +9,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import {
   requireAuth,
+  requireRole,
   enforceDataSovereignty,
   type AuthenticatedRequest,
 } from '../../shared/middleware/auth.middleware.js';
@@ -60,7 +62,15 @@ export async function memberPlacesRoutes(
         200: {
           type: 'object',
           properties: {
-            data: { type: 'array', items: { type: 'object' } },
+            data: {
+              type: 'array',
+              items: {
+                type: 'object',
+                required: ['id'],
+                properties: { id: { type: 'integer' } },
+                additionalProperties: true,
+              },
+            },
             meta: {
               type: 'object',
               properties: {
@@ -218,6 +228,12 @@ export async function memberPlacesRoutes(
         const placeDTO = toMemberPlace(place, userRole);
         return reply.code(200).send({ data: placeDTO });
       } catch (error: unknown) {
+        if (error instanceof PlaceNotFoundError) {
+          return reply.code(404).send({
+            error: { code: 'NOT_FOUND', message: 'Resource not found' },
+          });
+        }
+
         if (error instanceof z.ZodError) {
           return reply.code(400).send({
             error: {
@@ -264,7 +280,11 @@ export async function memberPlacesRoutes(
 
   // POST /api/v1/member/places - Create new place
   app.post('/', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Create new place',
       tags: ['Member Places'],
@@ -292,7 +312,12 @@ export async function memberPlacesRoutes(
         201: {
           type: 'object',
           properties: {
-            data: { type: 'object' },
+            data: {
+              type: 'object',
+              additionalProperties: true,
+              required: ['id'],
+              properties: { id: { type: 'integer' } },
+            },
           },
         },
       },
@@ -362,7 +387,11 @@ export async function memberPlacesRoutes(
 
   // PUT /api/v1/member/places/:id - Update place
   app.put('/:id', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Update place',
       tags: ['Member Places'],
@@ -486,7 +515,11 @@ export async function memberPlacesRoutes(
 
   // DELETE /api/v1/member/places/:id - Delete place
   app.delete('/:id', {
-    preHandler: [requireAuth, enforceDataSovereignty],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['editor', 'admin']),
+    ],
     schema: {
       description: 'Delete place',
       tags: ['Member Places'],

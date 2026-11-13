@@ -16,7 +16,18 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { eq, and, like, desc, asc, count, or, sql, inArray } from 'drizzle-orm';
+import {
+  eq,
+  and,
+  like,
+  desc,
+  asc,
+  count,
+  or,
+  sql,
+  inArray,
+  isNull,
+} from 'drizzle-orm';
 import {
   type File,
   type NewFile,
@@ -223,8 +234,21 @@ export class FileRepository {
         );
       }
 
-      // SPEC-V2 §§2/11 drops elder-only list policy. Legacy metadata stays
-      // stored for migration evidence; it does not define a V2 list filter.
+      // Hold legacy/unknown restrictions before both counting and pagination.
+      // Only absent or explicitly empty metadata establishes unrestricted access.
+      const unrestrictedMetadata = [
+        isNull(filesTable.culturalRestrictions),
+        sql`${filesTable.culturalRestrictions} = ${'{}'}`,
+      ];
+      // The existing PostgreSQL adapter stores string inputs as JSONB strings.
+      // Its decoded "{}" value is the same empty metadata parsed by getFile;
+      // accept that historical representation without rewriting stored evidence.
+      if (this.dialect === 'postgresql') {
+        unrestrictedMetadata.push(
+          sql`${filesTable.culturalRestrictions} = ${JSON.stringify('{}')}`
+        );
+      }
+      conditions.push(or(...unrestrictedMetadata)!);
 
       // Build ORDER BY clause
       const isTextColumn = orderBy === 'filename' || orderBy === 'originalName';

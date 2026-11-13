@@ -16,6 +16,7 @@ import { SpeakerRepository } from '../repositories/speaker.repository.js';
 import { getDb, type Database } from '../db/index.js';
 import {
   requireAuth,
+  enforceDataSovereignty,
   requireRole,
   type AuthenticatedRequest,
 } from '../shared/middleware/auth.middleware.js';
@@ -155,7 +156,11 @@ export async function speakerRoutes(
    * POST /api/v1/speakers - Create new speaker
    */
   fastify.post('/speakers', {
-    preHandler: [requireAuth, requireRole(['admin', 'editor'])],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['admin', 'editor']),
+    ],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const data = CreateSpeakerSchema.parse(request.body);
@@ -182,7 +187,7 @@ export async function speakerRoutes(
    * GET /api/v1/speakers/:id - Get speaker by ID
    */
   fastify.get('/speakers/:id', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, enforceDataSovereignty],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { id } = SpeakerIdSchema.parse(request.params);
@@ -207,7 +212,7 @@ export async function speakerRoutes(
    * GET /api/v1/speakers - List community speakers
    */
   fastify.get('/speakers', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, enforceDataSovereignty],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const params = SpeakerListQuerySchema.parse(request.query);
@@ -239,7 +244,11 @@ export async function speakerRoutes(
    * PUT /api/v1/speakers/:id - Update speaker
    */
   fastify.put('/speakers/:id', {
-    preHandler: [requireAuth, requireRole(['admin', 'editor'])],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['admin', 'editor']),
+    ],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { id } = SpeakerIdSchema.parse(request.params);
@@ -268,7 +277,11 @@ export async function speakerRoutes(
    * PATCH /api/v1/speakers/:id - Partially update speaker
    */
   fastify.patch('/speakers/:id', {
-    preHandler: [requireAuth, requireRole(['admin', 'editor'])],
+    preHandler: [
+      requireAuth,
+      enforceDataSovereignty,
+      requireRole(['admin', 'editor']),
+    ],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { id } = SpeakerIdSchema.parse(request.params);
@@ -297,7 +310,7 @@ export async function speakerRoutes(
    * DELETE /api/v1/speakers/:id - Delete speaker
    */
   fastify.delete('/speakers/:id', {
-    preHandler: [requireAuth, requireRole(['admin'])],
+    preHandler: [requireAuth, enforceDataSovereignty, requireRole(['admin'])],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { id } = SpeakerIdSchema.parse(request.params);
@@ -316,7 +329,7 @@ export async function speakerRoutes(
    * GET /api/v1/speakers/search - Search speakers
    */
   fastify.get('/speakers/search', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, enforceDataSovereignty],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const params = SearchQuerySchema.parse(request.query);
@@ -352,7 +365,7 @@ export async function speakerRoutes(
    * GET /api/v1/speakers/stats - Get community speaker statistics
    */
   fastify.get('/speakers/stats', {
-    preHandler: [requireAuth],
+    preHandler: [requireAuth, enforceDataSovereignty],
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { user } = request as AuthenticatedRequest;

@@ -703,7 +703,7 @@ export class UserRepository {
           communitiesTable,
           eq(usersTable.communityId, communitiesTable.id)
         )
-        .where(eq(usersTable.id, id))
+        .where(and(eq(usersTable.id, id), eq(usersTable.role, 'super_admin')))
         .limit(1);
 
       return users[0] || null;

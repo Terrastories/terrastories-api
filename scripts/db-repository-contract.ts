@@ -264,6 +264,41 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     communityId: riverCommunity.id,
   });
   assertValidDate(ana.createdAt, 'users.create createdAt');
+  // System administration must never expose or mutate community accounts.
+  const systemAccount = await users.create({
+    email: 'system-isolation@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'System',
+    lastName: 'Boundary',
+    role: 'super_admin',
+    communityId: community.id, // Legacy physical schema still requires this field.
+  });
+  assert.equal((await users.findByIdAsSuperAdmin(ana.id))?.id, ana.id);
+  assert.equal(await users.findByIdWithCommunityName(ana.id), null);
+  // Internal snapshots remain available to main’s authorized CAS/lifecycle path;
+  // the read projection above still hides community accounts.
+  assert.equal(
+    (await users.findByIdAsSuperAdmin(systemAccount.id))?.id,
+    systemAccount.id
+  );
+  assert.equal(
+    (await users.findByIdWithCommunityName(systemAccount.id))?.id,
+    systemAccount.id
+  );
+  const systemPage = await users.searchUsers({
+    role: 'super_admin',
+    limit: 1,
+    offset: 0,
+  });
+  const systemCount = await users.countUsers({ role: 'super_admin' });
+  assert.ok(systemPage.every((user) => user.role === 'super_admin'));
+  assert.ok(systemCount >= 1);
+  const unchangedCommunityUser = await users.findById(
+    ana.id,
+    riverCommunity.id
+  );
+  assert.equal(unchangedCommunityUser?.isActive, true);
+
   for (const search of ['ana', 'ANA']) {
     const anaResults = await users.findByCommunity(riverCommunity.id, {
       search,
@@ -1830,7 +1865,7 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
       size: 123,
       communityId: tenant,
       uploadedBy: uploader,
-      culturalRestrictions: JSON.stringify({ elderOnly }),
+      culturalRestrictions: JSON.stringify(elderOnly ? { elderOnly } : {}),
     });
     policyFileIds.push(file.id);
   }
@@ -1843,19 +1878,21 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     });
     assert.deepEqual(
       policyResult.data.map((row) => row.id),
-      policyFileIds.slice(0, 2),
-      `culturalRestrictions { elderOnly: ${elderOnly} } must not filter the file list`
+      policyFileIds.slice(0, 1),
+      `held cultural restrictions must be absent before file pagination`
     );
-    assert.equal(policyResult.meta.total, 2);
-    // SQLite stores legacy metadata as text; PostgreSQL jsonb decodes it.
-    // Compare the preserved values independently of the storage representation.
-    for (const [index, expected] of [false, true].entries()) {
-      const metadata = policyResult.data[index].culturalRestrictions;
-      assert.deepEqual(
-        typeof metadata === 'string' ? JSON.parse(metadata) : metadata,
-        { elderOnly: expected }
-      );
-    }
+    assert.equal(policyResult.meta.total, 1);
+    const restricted = await files.findById(
+      policyFileIds[1],
+      policyCommunity.id
+    );
+    assert.deepEqual(
+      typeof restricted?.culturalRestrictions === 'string'
+        ? JSON.parse(restricted.culturalRestrictions)
+        : restricted?.culturalRestrictions,
+      { elderOnly: true },
+      'held metadata remains preserved for explicit disposition'
+    );
   }
 
   // 13. Keyset cursor across a full tie: 300 stories share one identical

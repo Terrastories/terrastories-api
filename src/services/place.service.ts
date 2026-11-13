@@ -174,6 +174,7 @@ export class PlaceService {
     }
 
     // Unavailable rows are indistinguishable from nonexistent ones.
+
     if (place.isRestricted) {
       throw new PlaceNotFoundError(id);
     }

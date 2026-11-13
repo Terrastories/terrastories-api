@@ -86,6 +86,76 @@ describe('User Service', () => {
     vi.clearAllMocks();
   });
 
+  describe('system administration isolation', () => {
+    test('filters community read projections while preserving authorized lifecycle commands', async () => {
+      const communityUser = await userRepository.create({
+        email: 'community-boundary@example.test',
+        passwordHash: 'test-hash',
+        firstName: 'Community',
+        lastName: 'Private',
+        role: 'viewer',
+        communityId: testCommunityId,
+      });
+      const systemUser = await userRepository.create({
+        email: 'system-boundary@example.test',
+        passwordHash: 'test-hash',
+        firstName: 'System',
+        lastName: 'Admin',
+        role: 'super_admin',
+        communityId: otherCommunityId,
+      });
+      await expect(
+        userService.createUserAsSuperAdmin({
+          email: 'forbidden-community@example.test',
+          password: 'StrongPassword123@',
+          firstName: 'Forbidden',
+          lastName: 'Community',
+          role: 'viewer',
+          communityId: testCommunityId,
+        })
+      ).rejects.toThrow(CommunityAuthorityRequiredError);
+      const page = await userService.getAllUsersForSuperAdmin({ limit: 1 });
+      expect(page.meta.total).toBe(1);
+      expect(page.data.map((user) => user.id)).toEqual([systemUser.id]);
+      expect(
+        (await userService.getAllUsersForSuperAdmin({ role: 'viewer' })).meta
+          .total
+      ).toBe(0);
+      expect(
+        (await userService.getUserByIdAsSuperAdmin(communityUser.id))?.id
+      ).toBe(communityUser.id);
+      expect(
+        await userService.getUserByIdWithCommunityName(communityUser.id)
+      ).toBeNull();
+      const updated = await userService.updateUserAsSuperAdmin(
+        communityUser.id,
+        { firstName: 'Changed' }
+      );
+      expect(updated.role).toBe(communityUser.role);
+      expect(updated.communityId).toBe(communityUser.communityId);
+      await expect(
+        userService.updateUserAsSuperAdmin(communityUser.id, { role: 'admin' })
+      ).rejects.toThrow(CommunityAuthorityRequiredError);
+      await userService.deactivateUserAsSuperAdmin(communityUser.id);
+      expect(
+        (await userRepository.findById(communityUser.id, testCommunityId))
+          ?.isActive
+      ).toBe(false);
+      expect(
+        (await userRepository.findByIdAsSuperAdmin(systemUser.id))?.isActive
+      ).toBe(true);
+      await expect(
+        userService.updateUserAsSuperAdmin(systemUser.id, { role: 'viewer' })
+      ).rejects.toThrow(CommunityAuthorityRequiredError);
+      const unchangedSystemAccount = await userService.updateUserAsSuperAdmin(
+        systemUser.id,
+        { communityId: testCommunityId }
+      );
+      expect(unchangedSystemAccount.role).toBe('super_admin');
+      expect(unchangedSystemAccount.communityId).toBe(testCommunityId);
+    });
+  });
+
   describe('registerUser', () => {
     test('should register a new user successfully for a same-community admin actor', async () => {
       const registrationData: CreateUserRequest = {

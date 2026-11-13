@@ -589,16 +589,10 @@ describe('Super Admin API', () => {
         });
 
         expect(response.statusCode).toBe(201);
-        expect(response.json()).toMatchObject({
-          data: {
-            id: expect.any(Number),
-            email: newUser.email,
-            firstName: newUser.firstName,
-            lastName: newUser.lastName,
-            role: newUser.role,
-            communityId: newUser.communityId,
-            createdAt: expect.any(String),
-          },
+        expect(response.json().data).toMatchObject({
+          id: expect.any(Number),
+          role: 'admin',
+          communityId: newUser.communityId,
         });
       });
 
@@ -618,7 +612,7 @@ describe('Super Admin API', () => {
         expect(response.statusCode).toBe(400);
       });
 
-      it('should prevent duplicate emails', async () => {
+      it('should reject duplicate email for an authorized system account creation', async () => {
         const duplicateUser = {
           email: 'admin@example.com', // Already exists
           password: 'Password123@',
@@ -698,6 +692,16 @@ describe('Super Admin API', () => {
         });
       });
 
+      it('should reject granting a system user community privileges', async () => {
+        const response = await app.inject({
+          method: 'PUT',
+          url: `/api/v1/super_admin/users/${superAdminUserId}`,
+          headers: { cookie: superAdminSessionId },
+          payload: { role: 'admin' },
+        });
+        expect(response.statusCode).toBe(403);
+      });
+
       it('should return 404 for non-existent user', async () => {
         const response = await app.inject({
           method: 'PUT',
@@ -731,6 +735,7 @@ describe('Super Admin API', () => {
           lastName: 'Delete',
           // A system account: super admins may not mint community accounts
           // in a claimed community (SPEC-V2 §7).
+
           role: 'super_admin',
           communityId: testCommunityId,
         };

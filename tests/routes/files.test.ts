@@ -289,12 +289,11 @@ describe('File Routes Integration', () => {
         ].join('\r\n'),
       });
 
-      // Note: This test hits file type validation first, which is expected behavior
-      // Oversized invalid files should return 415 (Unsupported Media Type)
-      expect(response.statusCode).toBe(415);
+      // Reject truncated uploads before interpreting or storing their prefix.
+      expect(response.statusCode).toBe(413);
 
       const result = JSON.parse(response.body);
-      expect(result.error).toContain('Could not detect file type');
+      expect(result.error).toContain('File size exceeds');
     });
 
     it('should reject invalid file types', async () => {
@@ -377,7 +376,7 @@ describe('File Routes Integration', () => {
       expect(response.statusCode).toBe(401);
     });
 
-    it('should respect elder-only cultural restrictions', async () => {
+    it('should hide held cultural media without revealing its restriction', async () => {
       // Upload file with elder-only restriction using FormData
       const testImagePath = join(testUploadDir, 'test-image.jpg');
 
@@ -412,10 +411,10 @@ describe('File Routes Integration', () => {
         },
       });
 
-      expect(response.statusCode).toBe(403);
+      expect(response.statusCode).toBe(404);
 
       const result = JSON.parse(response.body);
-      expect(result.error).toContain('elder-only cultural content');
+      expect(result.error).toBe('File not found');
     });
   });
 

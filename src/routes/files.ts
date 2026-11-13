@@ -70,6 +70,18 @@ export async function fileRoutes(
     fileRepository
   );
 
+  // System privilege never grants access to authenticated community media.
+  fastify.addHook('preHandler', async (request, reply) => {
+    const actor =
+      (request as AuthenticatedRequest).user ||
+      (request as AuthenticatedRequest).session?.user;
+    if (actor?.role === 'super_admin') {
+      return reply
+        .code(403)
+        .send({ error: 'Community file access denied', statusCode: 403 });
+    }
+  });
+
   // Set up audit logging
   if (config.fileUpload.enableAuditLogging) {
     fileService.setLogger((entry) => {
@@ -83,7 +95,21 @@ export async function fileRoutes(
   fastify.post(
     '/upload',
     {
-      preHandler: [requireAuth, requireCommunityAccess()],
+      preHandler: [
+        requireAuth,
+        requireCommunityAccess(),
+        async (request, reply) => {
+          const actor =
+            (request as AuthenticatedRequest).user ||
+            (request as AuthenticatedRequest).session?.user;
+          if (!actor || !['admin', 'editor'].includes(actor.role)) {
+            return reply.code(403).send({
+              error: 'File upload requires an editor',
+              statusCode: 403,
+            });
+          }
+        },
+      ],
       schema: {
         description:
           'Upload a file with community scoping and cultural restrictions for Indigenous storytelling',
@@ -123,6 +149,14 @@ export async function fileRoutes(
           },
           400: {
             description: 'Bad request - validation error',
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              statusCode: { type: 'number' },
+            },
+          },
+          403: {
+            description: 'Community file operation forbidden',
             type: 'object',
             properties: {
               error: { type: 'string' },
@@ -202,7 +236,12 @@ export async function fileRoutes(
           error instanceof Error ? error.message : 'Unknown error';
 
         // Handle specific error types
-        if (errorMessage.includes('File size exceeds')) {
+        if (
+          errorMessage.includes('File size exceeds') ||
+          (error instanceof Error &&
+            'code' in error &&
+            error.code === 'FST_REQ_FILE_TOO_LARGE')
+        ) {
           return reply.status(413).send({
             error: errorMessage,
             statusCode: 413,

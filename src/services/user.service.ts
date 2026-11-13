@@ -696,11 +696,11 @@ export class UserService {
 
   /**
    * Super Admin Methods
-   * These methods provide cross-community access for super admin users only
+   * These methods manage system accounts without granting community-user access
    */
 
   /**
-   * Get all users across communities with pagination (super admin only)
+   * Get system users with pagination (super admin only)
    * @param options - Query options including pagination and filters
    * @returns Promise<{data: UserResponse[], meta: PaginationMeta}> - Paginated users
    */
@@ -736,13 +736,16 @@ export class UserService {
   }> {
     try {
       const { page = 1, limit = 20, community, role, search, active } = options;
-
       // Validate pagination
       if (page < 1) {
         throw new Error('Page must be at least 1');
       }
       if (limit < 1 || limit > 100) {
         throw new Error('Limit must be between 1 and 100');
+      }
+
+      if (role && role !== 'super_admin') {
+        return { data: [], meta: { page, limit, total: 0, totalPages: 0 } };
       }
 
       const offset = (page - 1) * limit;
@@ -771,10 +774,9 @@ export class UserService {
         searchFilters.communityId = community;
         countFilters.communityId = community;
       }
-      if (role) {
-        searchFilters.role = role;
-        countFilters.role = role;
-      }
+      // System privilege never widens this query to community accounts.
+      searchFilters.role = 'super_admin';
+      countFilters.role = 'super_admin';
       if (active !== undefined) {
         searchFilters.isActive = active;
         countFilters.isActive = active;
@@ -934,6 +936,7 @@ export class UserService {
 
   /**
    * Create user in any community as super admin
+
    * @param data - User creation data
    * @returns Promise<User> - Created user
    */
@@ -1016,7 +1019,7 @@ export class UserService {
   }
 
   /**
-   * Update user details as super admin (including role changes)
+   * Update system-user details as super admin
    * @param id - User ID
    * @param updates - Update data
    * @returns Promise<User> - Updated user
@@ -1074,6 +1077,7 @@ export class UserService {
       }
 
       // Profile-only write (no membership field changed).
+
       const updateData: Partial<UpdateUserData> = {
         firstName: updates.firstName,
         lastName: updates.lastName,
@@ -1102,7 +1106,7 @@ export class UserService {
   }
 
   /**
-   * Get user by ID as super admin (cross-community access)
+   * Get a system user by ID as super admin
    * @param id - User ID
    * @returns Promise<User | null> - User data or null if not found
    */

@@ -35,6 +35,7 @@
     "test:compatibility": "vitest run tests/comparison --reporter=dot --silent=true --maxWorkers=4",
     "compatibility:report": "node scripts/api-comparison.js report --output api-comparison-report.html",
     "compatibility:full": "npm run test:compatibility && npm run compatibility:report",
+    "qa:personas": "tsx scripts/qa/run-personas.ts",
     "dev:hono": "NODE_ENV=development tsx watch src/hono-server.ts",
     "start:hono": "node dist/hono-server.js"
   },

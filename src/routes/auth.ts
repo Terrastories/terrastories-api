@@ -765,7 +765,7 @@ export async function authRoutes(
     async (request, reply) => {
       try {
         const {
-          resetToken: _resetToken,
+          resetToken,
           newPassword: _newPassword,
           communityId: _communityId,
         } = request.body as {
@@ -773,6 +773,14 @@ export async function authRoutes(
           newPassword: string;
           communityId: number;
         };
+
+        // Reject malformed tokens before any reset processing. The issued
+        // token format is 16 random bytes encoded as 32 hexadecimal digits.
+        if (!/^[a-f0-9]{32}$/i.test(resetToken)) {
+          return reply.code(400).send({
+            error: 'Invalid or expired reset token',
+          });
+        }
 
         // Reset the password within the specified community - TEMPORARILY DISABLED
         // await userService.resetPassword(resetToken, newPassword, communityId);

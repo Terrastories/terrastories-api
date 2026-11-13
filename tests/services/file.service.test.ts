@@ -160,6 +160,30 @@ describe('FileService', () => {
   });
 
   describe('uploadFile', () => {
+    it('rejects a parser-truncated valid file before persistence', async () => {
+      const stream = Object.assign(
+        (async function* () {
+          yield Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+        })(),
+        { truncated: true }
+      );
+      const file: MockMultipartFile = {
+        filename: 'truncated.jpg',
+        mimetype: 'image/jpeg',
+        encoding: '7bit',
+        fieldname: 'file',
+        file: stream,
+      };
+      await expect(
+        fileService.uploadFile(file, {
+          communityId: 1,
+          uploadedBy: 123,
+          maxSize: 10 * 1024 * 1024,
+        })
+      ).rejects.toThrow('File size exceeds maximum allowed');
+      expect(mockFileRepository.create).not.toHaveBeenCalled();
+    });
+
     it('should upload valid image file with community scoping', async () => {
       // Create mock JPEG file data
       const jpegHeader = Buffer.from([0xff, 0xd8, 0xff, 0xe0]); // JPEG magic number
@@ -424,11 +448,12 @@ describe('FileService', () => {
       // Non-elder user should be blocked
       await expect(
         fileService.getFile(fileId, userId, 1, 'editor')
-      ).rejects.toThrow('Access denied - elder-only cultural content');
+      ).rejects.toThrow('File not found');
 
-      // Elder user should have access
-      const result = await fileService.getFile(fileId, userId, 1, 'elder');
-      expect(result).toBeDefined();
+      // Legacy elder privilege cannot resolve the held audience.
+      await expect(
+        fileService.getFile(fileId, userId, 1, 'elder')
+      ).rejects.toThrow('File not found');
     });
   });
 

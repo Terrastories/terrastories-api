@@ -8,7 +8,7 @@ describe('FileRepository legacy list policy', () => {
     await testDb.teardown();
   });
 
-  test('ignores removed elder-only filtering while preserving metadata and tenant scoping', async () => {
+  test('holds legacy restrictions before pagination while preserving metadata and tenant scoping', async () => {
     const db = await testDb.setup();
     const fixtures = await testDb.seedTestData();
     const communityId = fixtures.communities[0].id;
@@ -38,32 +38,26 @@ describe('FileRepository legacy list policy', () => {
         size: 123,
         communityId: tenant,
         uploadedBy: tenant === communityId ? user.id : otherUser.id,
-        culturalRestrictions: JSON.stringify({ elderOnly }),
+        culturalRestrictions: JSON.stringify(elderOnly ? { elderOnly } : {}),
       });
 
     const elder = await createFile('elder.mp3', communityId, true);
     const ordinary = await createFile('ordinary.mp3', communityId, false);
     await createFile('other-tenant.mp3', otherCommunityId, true);
 
-    // SPEC-V2 §§2/11: elder-only policy is DROP. This compatibility input
-    // cannot alter the list; legacy stored values remain available as evidence.
+    // Removed roles never imply an audience; held metadata remains stored.
     for (const elderOnly of [true, false]) {
       const result = await repository.findByCommunity(communityId, {
         culturalRestrictions: { elderOnly },
         orderBy: 'filename',
         orderDirection: 'asc',
       });
-      expect(result.data.map((file) => file.id)).toEqual([
-        elder.id,
-        ordinary.id,
-      ]);
-      expect(result.meta.total).toBe(2);
-      expect(result.data[0].culturalRestrictions).toBe(
-        JSON.stringify({ elderOnly: true })
-      );
-      expect(result.data[1].culturalRestrictions).toBe(
-        JSON.stringify({ elderOnly: false })
-      );
+      expect(result.data.map((file) => file.id)).toEqual([ordinary.id]);
+      expect(result.meta.total).toBe(1);
+      expect(result.data[0].culturalRestrictions).toBe('{}');
+      expect(
+        (await repository.findById(elder.id, communityId))?.culturalRestrictions
+      ).toBe(JSON.stringify({ elderOnly: true }));
     }
   });
 });

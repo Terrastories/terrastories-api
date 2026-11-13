@@ -6,15 +6,20 @@
 
 Historical 2025 documents describe the Fastify TypeScript API as production-ready, but V2 introduces a Fastify-to-Hono migration and therefore needs a new production-readiness proof. Production readiness is a property of a specific revision and deployment configuration, not a permanent repository label.
 
-Current baseline as of 2026-08-22:
+Current baseline as of 2026-11-12 (#193):
 
-- `main` still runs Fastify V1; the Phase 1 Hono foundation is pending in PR #132. Hono-specific audit evidence must therefore be bound to that PR's exact head rather than described as current `main` state.
+- `main` runs Fastify V1. PR #132 was closed on 2026-11-11 and superseded by a thin Hono slice re-landed off `main`: health, login, durable session, revocation, and one protected media read (about 1,500 lines cap).
+- Fastify freeze: after #162, #177 and #160 merge, no new Fastify-only route work. #177 is merged; #162 and #160 are open.
+- Launch profiles (#195): Cloudflare Workers Free + D1 + R2 (hosted); Node.js with SQLite or PostgreSQL (self-hosted); offline Node.js + SQLite field kit. Free hosting is required; no paid plan (#184). Both SQLite and PostgreSQL stay (#196 closed).
+- #194, measured on Workers Free: server-side bcrypt/Argon2id killed the Worker (error 1102) and PBKDF2 100k fails under sustained load; the client-stretching auth gate passed.
+
+Historical 2026-08-22 baseline:
+
 - Issue #133 landed in PR #152 on 2026-08-21, restoring `validate:ci` as a terminating fail-closed aggregate gate, bounded deterministic test shards, zero-warning lint, separate source coverage, repaired compatibility scripts, and an expiring fail-closed dependency-audit baseline.
 - PR #152's final candidate passed five consecutive complete CI workflows on one SHA without retries; the latest three satisfied #133's deterministic-baseline exit criterion. Its local evidence included 1,682/1,682 Vitest tests plus 18/18 workflow shell contracts.
 - On that same candidate, API comparison passed 203/203 plus report generation, and Docker development/production builds, Compose base/dev/prod/field-kit validation, Docker integration, and user-workflow/data-sovereignty scenarios were green.
 - PostgreSQL fresh/upgrade migration parity remains separately owned by #135. V2 does not depend on PostGIS, and SQLite migrations must not be run against PostgreSQL.
 - Existing dependency debt remains tracked by #141; the audit baseline is explicitly expiring rather than silently accepting new advisories.
-- Hono canonical-contract coverage, production session storage, CORS, and other Hono-specific readiness claims must be re-audited against the exact PR #132 revision before Phase 1 can exit.
 
 ## Production definition of done
 
@@ -64,7 +69,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Map temporary/coexistence routes to approved V2 namespaces without making old route names or response shapes authoritative.
 - Make unexpected V2 status, response-body, error-envelope, pagination, header/cookie, and content-type differences fail tests.
 - Deliberately introduce a V2 mismatch to prove the harness fails closed.
-- Add contract coverage for all Hono domains implemented by PR #132: health, auth, public API, themes, places, speakers, communities, stories, users, files, member, admin, and dev/test-only routes.
+- Add contract coverage for the thin Hono slice domains first — health, login, durable sessions, revocation, and the protected media read — then for each domain as it moves to Hono; Fastify-only route work is frozen (#193).
 - Test route ordering for static routes vs `/:id` across every affected resource.
 - Add real HTTP smoke tests against `@hono/node-server`, not only in-process `app.request()` calls.
 
@@ -83,7 +88,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Add required PostgreSQL CI and a D1/SQLite-compatible CI path; shared database behavior must pass on both first-class targets.
 - Run schema/repository/portable-spatial integration tests against both backends. Remove the legacy PostGIS bootstrap/verification/query branch and its dedicated test (`src/db/migrate.ts`, `src/db/index.ts`, `src/repositories/place.repository.ts`, `tests/db/postgis.test.ts`); V2 spatial behavior must remain portable application-level latitude/longitude logic.
 - Establish the single logical relational schema/behavior contract in `SPEC-V2.md` Sections 6/8 on both targets. Dialect-specific Drizzle definitions/migrations are allowed; equivalent product semantics are mandatory.
-- Replace Worker-incompatible dependencies on shared paths. Implement `PasswordHasher` with an approved KDF benchmarked on Workers and Node; preserved Rails bcrypt verification (and Fastify Argon2id once that deferred profile is re-activated, per `SPEC-V2.md` Section 10) with policy-aware lazy upgrade is migration behavior, not a mandate for the new-password algorithm.
+- Replace Worker-incompatible dependencies on shared paths. Auth uses client-side password stretching (#184, measured by #194): no server-side password KDF on any profile. The browser stretches the password — Argon2id in WebAssembly for new passwords; recomputed bcrypt for legacy Rails `has_secure_password` hashes, wrapped and upgraded on login — and the server only computes SHA-256 and compares. Stretching thresholds live in `SPEC-V2.md` Section 7.
 - Add migration tests for:
   - empty database -> latest;
   - previous release -> latest;
@@ -92,7 +97,8 @@ A Terrastories API revision is production-ready only when all of the following a
   - constraints, indexes, foreign keys, defaults, timestamps, and portable latitude/longitude spatial behavior.
 - Add data invariants for community IDs, ownership, file ownership, join tables, and canonical fields and retained legacy relationships.
 - Implement the lossless Stage-1 Rails PostgreSQL/ActiveStorage source adapter emitting the portable bundle contract and accounting for every source row and stored byte payload. The Fastify V1 PostgreSQL-or-SQLite adapter is DEFER per `SPEC-V2.md` Section 10 until a named deployed installation holding community data is identified; its mapping contracts remain specified there.
-- Drill the final cutover boundary under an enforced read-only source or a complete ordered change journal plus reconciled high-water mark; writes after an earlier snapshot must prevent success.
+- Drill the final cutover boundary as a maintenance-window read-only cutover only (#197); there is no low-downtime change-journal path.
+- Imports must fit D1 batch and daily write limits on Workers Free (#194).
 - Require expand-contract migrations for risky changes: add/backfill/read-switch/remove rather than destructive one-step changes.
 - Build automated backup + restore verification with checksums/counts and selected semantic invariants.
 - Define RPO/RTO targets and prove them in a restoration drill.
@@ -115,7 +121,8 @@ A Terrastories API revision is production-ready only when all of the following a
 - Define session-secret rotation with overlap and emergency revocation procedures.
 - Review cookie flags for production (`Secure`, `HttpOnly`, `SameSite`, domain/path, lifetime).
 - Replace wildcard CORS with an environment-validated allowlist. Never combine permissive wildcard behavior with credentialed production requests.
-- Add rate limits to login, registration, password reset/recovery, uploads, and expensive spatial/search endpoints.
+- Enforce the V2 session model (#184): sessions re-read the user on every request; 12-hour idle expiry by default with opt-in 60-day device sessions; admin-issued one-time codes and first-admin recovery codes (#188).
+- Add mandatory durable rate limits (D1 on Workers) to login, registration, password reset/recovery, uploads, and expensive spatial/search endpoints.
 - Add CSRF protection or prove why the chosen cookie/API architecture does not require it for each state-changing browser flow.
 - Ensure auth errors are consistent and do not leak user existence or sensitive internals.
 
@@ -131,12 +138,13 @@ A Terrastories API revision is production-ready only when all of the following a
 
 ### Work
 
-- Build a reusable authorization matrix covering the V2 roles defined by the canonical spec (anonymous/public behavior plus viewer, member, editor, admin, and super-admin) across communities.
+- Build a reusable authorization matrix covering the V2 roles defined by the canonical spec (anonymous/public behavior plus viewer, member, editor, admin, and super-admin) across communities, driven by the `SPEC-V2.md` Section 6.4a place/speaker decision table (#190) and running behind a transport-neutral Request→Response adapter (#162).
 - For every protected community-data endpoint, add cross-community negative tests and super-admin data-sovereignty restriction tests. Include private-community viewer access, story audiences, disabled communities, and indirect administrative privilege escalation under `SPEC-V2.md` Sections 6.2/7.
 - Test list/search/stats/export/file endpoints for indirect leaks, not only direct `GET /:id` routes.
 - Add property/invariant tests asserting a principal from community A cannot observe community B data unless the contract explicitly permits public data.
 - Validate V2 public/private and community-ownership behavior consistently in nested relations, search, public API, files, and metadata; do not reintroduce elder-only/cultural-metadata scope removed by the V2 spec.
 - Ensure audit logs capture security-relevant administrative actions under the content-free audit contract in `SPEC-V2.md` Section 7 (actor/community/action/resource IDs and outcome; network metadata only on authentication and security events with bounded retention).
+- Keep export always available to community admins, including while the community is disabled, and complete erasure within 30 days including backups (#187).
 - Add a release-blocking sovereignty suite independent from general unit coverage.
 
 ### Exit gate
@@ -154,7 +162,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Add malformed multipart, oversized request, decompression/image-bomb, corrupted image, and unsupported media tests.
 - Ensure community ownership is checked on metadata, download, transformed variants, and deletion.
 - Test interrupted writes and cleanup of partial/orphan files.
-- Define production storage durability, backup, retention, and migration semantics.
+- Define production storage durability, backup, retention, and migration semantics. Storage topology (#195): R2 free tier for the hosted profile — 100 MB per request, multipart/presigned uploads above that — and local filesystem for Node profiles.
 - Keep local filesystem storage mandatory for the offline field-kit profile and supported for the canonical self-hosted Node.js profile; document its single-host constraints, durability expectations, and restore procedures. Any separately approved multi-instance self-hosted topology must use shared/durable storage without weakening field-kit local-filesystem support.
 
 ### Exit gate
@@ -192,6 +200,7 @@ A Terrastories API revision is production-ready only when all of the following a
 - Separate liveness and readiness endpoints. Readiness must fail when required DB/storage dependencies are unavailable.
 - Capture the Hono server handle and close it during graceful shutdown; test SIGTERM behavior and in-flight request draining.
 - Add structured JSON logging with request IDs and redaction.
+- Name the observability sink (#193): Node profiles (self-hosted VM image and field kit) write structured JSON logs to local rotated files plus a local metrics endpoint — no external service; the hosted profile uses Cloudflare's built-in Workers logs on the Free plan (quota to be verified at release). No sensitive community data leaves the deployment.
 - Define metrics for request rate/error/latency, auth failures, DB pool, migration status, file operations, session store, and resource saturation.
 - Add alert thresholds and runbooks for DB unavailable, storage unavailable, elevated 5xx, backup failure, disk pressure, and migration failure.
 - Ensure monitoring can operate locally/offline for field-kit deployments and does not require exporting sensitive community data.
@@ -226,7 +235,7 @@ A Terrastories API revision is production-ready only when all of the following a
 
 ### Work
 
-- Provision separate representative validation/staging for all three deployment modes: Cloudflare Workers + D1 + R2, Node.js + PostgreSQL/self-hosted storage, and offline Node.js + SQLite field kit. SQLite-compatible query tests do not replace actual Workers/D1/R2 adapter evidence.
+- Staging per #147 (#193): ephemeral docker-compose in GitHub Actions on the exact image digest (Node + PostgreSQL and network-blocked Node + SQLite), plus a Workers Free staging deployment for the hosted profile; one VM image serves self-hosted and field kit. Cloudflare Containers staging is off the table because it needs Workers Paid (#184). SQLite-compatible query tests do not replace actual Workers/D1/R2 adapter evidence.
 - Seed anonymized/representative data, including multilingual, public/private, and cross-community isolation cases within V2 scope.
 - Run migration, contract, sovereignty, file-security, load-smoke, and backup/restore suites against each applicable profile.
 - Deploy immutable, traceable artifacts: image digest for containerized Node deployments and an immutable Worker deployment/version identity for Cloudflare.
@@ -237,6 +246,7 @@ A Terrastories API revision is production-ready only when all of the following a
 ### Exit gate
 
 - Staging passes the complete production gate on the exact release artifact.
+- The #199 persona-based QA script passes on every launch profile as a release gate (#199, #147).
 - Rollback/restore rehearsal succeeds.
 - Every launch continuity scenario in `SPEC-V2.md` Section 4 passes against named API/frontend/public-client revisions and migrated representative data. #147 owns the evidence, frontend-owner assignments, and community approval.
 - Cold-start browser/server tests with internet blocked prove local maps/assets/media, login, editing/import, recovery, and restart; external links have the documented offline state.
@@ -245,15 +255,15 @@ A Terrastories API revision is production-ready only when all of the following a
 ## Recommended execution order
 
 1. **Baseline trust:** Phase 0.
-2. **Hono correctness:** Phase 1. Land PR #132 as the coexistence foundation, then complete #134/#145/#146; foundation merge is not the full Phase 1 exit gate.
-3. **Early deployment proof (the SPEC-V2 Section 13 three-profile feasibility gate):** before broad domain normalization, prove login, protected media serving, revocation, legacy password verification (Rails bcrypt), and import transaction limits on real Workers+D1+R2, Node+PostgreSQL, and disconnected Node+SQLite. Failure requires an explicit scope or platform decision. #147 coordinates #135/#137/#140/#142; #144 records measured KDF, request, upload, and resource budgets, including representative field-kit hardware.
-4. **Data safety:** Phase 2.
+2. **Hono thin slice and three-profile gate (#193):** land the thin Hono slice off `main` — health, login, durable session, revocation, and one protected media read; PR #132 is closed and superseded — and pass the SPEC-V2 Section 13 three-profile feasibility gate on real Workers Free + D1 + R2, Node, and disconnected Node+SQLite. Fastify freeze: after #162, #177 and #160 merge, no new Fastify-only route work.
+3. **Contract harness:** #134, then #145/#146 domain cases with Rails-parity schema normalization (Phase 1).
+4. **Data safety:** Phase 2 — #137/#140, Rails Stage-1 capture (#164) and Stage-2 transform, then #136. Stage-1 capture is schema-independent and may land whenever ready, but it is not ahead of the transport on the critical path.
 5. **Auth/session + sovereignty:** Phases 3 and 4 in parallel where independent.
 6. **Files + CI supply chain:** Phases 5 and 6.
 7. **Operations + performance:** Phases 7 and 8.
-8. **Release:** Phase 9.
+8. **API-readiness gate and release:** #199 persona QA, then #147 with frontend continuity and community approval (Phase 9).
 
-Do not cut over production traffic from Fastify to Hono before Phases 0-4 and the relevant Phase 5/6 P0 items are complete.
+Do not release V2 or cut over a Rails community before Phases 0-4 and the relevant Phase 5/6 P0 items are complete.
 
 ## Suggested issue/PR slicing
 
@@ -273,6 +283,8 @@ Keep changes reviewable and independently verifiable. A practical sequence is:
 12. Supply-chain/SBOM/image scanning.
 13. Observability/runbooks/failure injection.
 14. Load/capacity suite.
-15. Staging/canary/release-evidence automation.
+15. Explore read adapter (#198) so the existing Explore client can read V2 before frontend work starts (#185).
+16. Persona QA script (#199): the API-readiness gate for frontend work (#185).
+17. Staging/canary/release-evidence automation.
 
 Every PR should run the Terrastories `pr-cycle` skill and must leave the repository's production-readiness evidence stronger than it found it.

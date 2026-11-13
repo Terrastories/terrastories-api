@@ -117,7 +117,10 @@ describe('Static file routing (wildcard: false)', () => {
           method: 'GET',
           url: '/assets/%2e%2e%2ftraversal-sentinel.txt',
         });
-        expect(response.statusCode).toBe(wildcard ? 403 : 404);
+        // @fastify/static 8 answered 403 here with wildcard true; 10 resolves
+        // the encoded path inside root and answers 404. Either way the
+        // sibling file outside root must not be served.
+        expect(response.statusCode).toBe(404);
         expect(response.payload).not.toContain(SENTINEL_CONTENTS);
       } finally {
         await traversalApp.close();

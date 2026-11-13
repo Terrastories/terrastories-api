@@ -133,34 +133,49 @@ export async function buildApp(options?: BuildAppOptions) {
 
     app.log.error({ error, method, url }, 'Request error');
 
+    const errorDetails =
+      typeof error === 'object' && error !== null
+        ? (error as unknown as Record<string, unknown>)
+        : {};
+    const statusCode =
+      typeof errorDetails.statusCode === 'number'
+        ? errorDetails.statusCode
+        : undefined;
+    const message =
+      error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+          ? error
+          : 'Unknown error';
+    const validation =
+      errorDetails.validation ?? errorDetails.validationContext ?? undefined;
+
     // Don't leak internal errors in production
     const isDevelopment = config.environment === 'development';
 
-    if (error.statusCode && error.statusCode < 500) {
+    if (statusCode && statusCode < 500) {
       // Handle schema validation errors - all 400 errors are validation errors in this context
-      if (error.statusCode === 400) {
+      if (statusCode === 400) {
         const malformedJson =
-          error.code === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
-          error.code === 'FST_ERR_CTP_EMPTY_JSON_BODY';
-        return reply.status(error.statusCode).send({
+          errorDetails.code === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
+          errorDetails.code === 'FST_ERR_CTP_EMPTY_JSON_BODY';
+        return reply.status(statusCode).send({
           error: malformedJson
             ? 'Malformed JSON body'
             : 'Request validation failed',
-          statusCode: error.statusCode,
-          issues: malformedJson
-            ? undefined
-            : error.validation || error.validationContext || undefined,
+          statusCode,
+          issues: malformedJson ? undefined : validation,
         });
       }
 
-      return reply.status(error.statusCode).send({
-        error: error.message,
-        statusCode: error.statusCode,
+      return reply.status(statusCode).send({
+        error: message,
+        statusCode,
       });
     }
 
     return reply.status(500).send({
-      error: isDevelopment ? error.message : 'Internal Server Error',
+      error: isDevelopment ? message : 'Internal Server Error',
       statusCode: 500,
     });
   });

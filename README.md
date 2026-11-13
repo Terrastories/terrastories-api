@@ -45,7 +45,7 @@ volumes remain intact.
 
 ## Current migration state
 
-`main` currently runs Fastify V1. Hono is the target framework, and the Phase 1 Hono foundation is pending in PR #132; Hono-specific follow-up work must use that documented dependency rather than assume Hono is already present on `main`. Production readiness must be proven by the active roadmap; historical “production ready” reports are intentionally not retained in this repository.
+`main` currently runs Fastify V1. Hono is the target framework, re-landed as a thin slice off `main` (health, login, durable session, revocation, one protected media read); PR #132 was closed on 2026-11-11 and superseded (#193). Production readiness must be proven by the active roadmap; historical “production ready” reports are intentionally not retained in this repository.
 
 The production-readiness backlog is organized in GitHub with:
 
@@ -55,7 +55,7 @@ The production-readiness backlog is organized in GitHub with:
 
 ## Development
 
-Requirements are Node.js 20.9+ and npm 9+.
+Requirements are Node.js 20.19+ and npm 9+.
 
 ```bash
 npm install
@@ -92,7 +92,7 @@ src/
 └── server.ts        current Fastify runtime entrypoint on main
 ```
 
-PR #132 introduces the Phase 1 Hono application builder and Hono transport routes; those paths become current repository structure only after that PR lands.
+The thin Hono slice off `main` introduces the Phase 1 Hono application builder and the first Hono transport routes; PR #132 was closed and superseded (#193).
 
 The intended dependency direction is Route → Service → Repository → Database.
 

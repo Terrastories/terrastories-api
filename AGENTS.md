@@ -55,8 +55,8 @@ Do not implement source changes under `SPEC DECISION REQUIRED`.
 
 ## 3. Repository structure
 
-- `src/routes/`: current Fastify V1 routes on `main`; Phase 1 Hono V2 transport work is pending in PR #132.
-- `src/server.ts`: current Fastify runtime entrypoint on `main`; Hono coexistence begins only when PR #132 lands.
+- `src/routes/`: current Fastify V1 routes on `main`; Fastify-only route work is frozen after #162, #177 and #160 merge; Hono is re-landed as a thin slice off `main` (PR #132 closed, superseded) (#193).
+- `src/server.ts`: current Fastify runtime entrypoint on `main`; Hono coexistence begins with the thin Hono slice (#193).
 - `src/services/`: business logic.
 - `src/repositories/`: data access.
 - `src/db/`: Drizzle database setup, schemas, migrations, seeds.
@@ -76,7 +76,7 @@ Keep Route → Service → Repository → Database separation. Avoid business lo
   - `status:ready`: safe to start from its documented base;
   - `status:blocked`: prerequisite/base dependency must be satisfied first;
   - `status:needs-decision`: no implementation until the decision is resolved.
-- Hono-specific follow-up work must not independently recreate PR #132 from `main`; follow the issue's documented base/stacking dependency.
+- Hono work builds on the thin Hono slice off `main`; do not revive closed PR #132.
 - Stage intentional files explicitly. Do not use broad staging that captures unrelated work.
 
 ## 5. Development loop

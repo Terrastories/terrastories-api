@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -108,31 +108,49 @@ describe('bounded test shard runner', () => {
       setInterval(() => {}, 10_000);
     `;
 
-    try {
-      await expect(
-        runCommand(process.execPath, ['-e', parentCode], {
-          label: 'process-tree',
-          timeoutMs: 500,
-          stdio: 'ignore',
-        })
-      ).rejects.toThrow('process-tree exceeded 500ms and was terminated');
-
-      const grandchildPid = Number(readFileSync(pidPath, 'utf8'));
-      let grandchildAlive = true;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        try {
-          process.kill(grandchildPid, 0);
-        } catch (error) {
-          if (error?.code === 'ESRCH') {
-            grandchildAlive = false;
-            break;
-          }
-          throw error;
-        }
+    // Under host load two Node startups can take longer than a short shard
+    // deadline, so the parent could be killed before it writes the pid file.
+    // Use a deadline long enough for both startups, and poll with deadlines
+    // instead of fixed sleeps.
+    const shardDeadlineMs = 3_000;
+    const pollUntil = async (condition, deadlineMs) => {
+      const stopAt = performance.now() + deadlineMs;
+      while (!condition()) {
+        if (performance.now() >= stopAt) return false;
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      return true;
+    };
 
-      expect(grandchildAlive).toBe(false);
+    try {
+      const run = runCommand(process.execPath, ['-e', parentCode], {
+        label: 'process-tree',
+        timeoutMs: shardDeadlineMs,
+        stdio: 'ignore',
+      });
+      const outcome = expect(run).rejects.toThrow(
+        `process-tree exceeded ${shardDeadlineMs}ms and was terminated`
+      );
+
+      // The grandchild must exist before the deadline fires, or the test
+      // would not prove that descendants are killed.
+      expect(await pollUntil(() => existsSync(pidPath), shardDeadlineMs)).toBe(
+        true
+      );
+      await outcome;
+
+      const grandchildPid = Number(readFileSync(pidPath, 'utf8'));
+      const isGone = () => {
+        try {
+          process.kill(grandchildPid, 0);
+          return false;
+        } catch (error) {
+          if (error?.code === 'ESRCH') return true;
+          throw error;
+        }
+      };
+
+      expect(await pollUntil(isGone, 5_000)).toBe(true);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

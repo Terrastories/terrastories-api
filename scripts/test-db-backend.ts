@@ -25,6 +25,9 @@ import {
 import { portableMigrationFixture as fixture } from '../tests/fixtures/db/portable-migration-fixture.js';
 
 const rootDir = process.cwd();
+const { runHonoFoundationContract } = await import(
+  './hono-foundation-contract.js'
+);
 const sqliteMigrations = path.join(rootDir, 'src/db/migrations');
 const postgresMigrations = path.join(sqliteMigrations, 'postgres');
 const backend = process.argv[2];
@@ -1217,6 +1220,7 @@ async function runSqliteGate(): Promise<void> {
   await migrateSqlite(freshDb, { migrationsFolder: sqliteMigrations });
   verifySqliteSchema(freshSqlite);
   await runRepositoryContract(freshDb);
+  await runHonoFoundationContract(freshDb);
   verifySqliteTransactionAndForeignKey(freshSqlite);
   await migrateSqlite(freshDb, { migrationsFolder: sqliteMigrations });
   freshSqlite.close();
@@ -1288,6 +1292,7 @@ async function runPostgresGate(): Promise<void> {
     // probe proves the session pin rather than a lucky UTC server default.
     await verifyPostgresTimezoneSafeDefaults(databaseUrl);
     await runRepositoryContract(freshDb);
+    await runHonoFoundationContract(freshDb);
     await verifyPostgresTransactionAndForeignKey(client);
     await migratePostgres(freshDb, { migrationsFolder: postgresMigrations });
 

@@ -3,25 +3,25 @@ import { join, relative, resolve } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { getConfig } from '../../src/shared/config/index.js';
 import { sql } from 'drizzle-orm';
-import { TestDatabaseManager } from '../../tests/helpers/database.js';
+import { tablesFor } from '../../src/db/dialect.js';
+import { openPersonaQaDatabase } from './qa-database.js';
 import { createTestApp } from '../../tests/helpers/api-client.js';
-import {
-  storiesSqlite,
-  usersSqlite,
-  speakersSqlite,
-  placesSqlite,
-  themesSqlite,
-  filesSqlite,
-} from '../../src/db/schema/index.js';
 import { hash } from 'argon2';
 import { createJourneys, type PersonaFixture } from './personas/index.js';
 import type { Endpoint, Handler } from './runner.js';
 
 export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
   if (baseUrl)
-    throw new Error('SQLite fixture supports isolated in-process runs only');
-  const manager = new TestDatabaseManager();
-  const db = await manager.setup();
+    throw new Error(
+      'In-process persona fixtures support isolated in-process runs only'
+    );
+  // Isolated in-memory SQLite by default; the same journeys run against a
+  // freshly migrated PostgreSQL when DATABASE_URL and the reset guard select
+  // it (scripts/qa/qa-database.ts). Tables come from the repo's dialect
+  // helpers so seeding stays identical across backends.
+  const qa = await openPersonaQaDatabase();
+  const db = qa.db;
+  const { users, places, speakers, themes, files, stories } = tablesFor(db);
   let app: FastifyInstance | undefined;
   let mediaDirectory: string | undefined;
   const mediaPaths: string[] = [];
@@ -42,7 +42,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     }
   };
   try {
-    const fixtures = await manager.seedTestData();
+    const fixtures = await qa.seed();
     const password = 'QaFixturePassword123!';
     const passwordHash = await hash(password, {
       memoryCost: 8192,
@@ -65,7 +65,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
           ? fixtures.systemCommunity.id
           : fixtures.communities[0].id;
       const [user] = await db
-        .insert(usersSqlite)
+        .insert(users)
         .values({
           email,
           passwordHash,
@@ -85,7 +85,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       };
     }
     const [holder] = await db
-      .insert(usersSqlite)
+      .insert(users)
       .values({
         email: 'qa-holder@example.test',
         passwordHash,
@@ -103,7 +103,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     };
     const foreignCommunityId = fixtures.communities[1].id;
     const [foreignUser] = await db
-      .insert(usersSqlite)
+      .insert(users)
       .values({
         email: 'qa-foreign@example.test',
         passwordHash,
@@ -115,7 +115,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       })
       .returning();
     const [foreignPlace, heldPlace] = await db
-      .insert(placesSqlite)
+      .insert(places)
       .values([
         {
           name: 'QA foreign place',
@@ -133,11 +133,11 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       ])
       .returning();
     const [foreignSpeaker] = await db
-      .insert(speakersSqlite)
+      .insert(speakers)
       .values({ name: 'QA foreign speaker', communityId: foreignCommunityId })
       .returning();
     const [foreignTheme] = await db
-      .insert(themesSqlite)
+      .insert(themes)
       .values({ name: 'QA foreign theme', communityId: foreignCommunityId })
       .returning();
     // Use the route's configured root and relative paths exactly as real media.
@@ -176,7 +176,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       await writeFile(diskPath, mediaBytes);
     }
     const [foreignFile, heldFile, unknownFile, readableFile] = await db
-      .insert(filesSqlite)
+      .insert(files)
       .values(
         mediaRows.map((row) => ({
           ...row,
@@ -187,11 +187,15 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
           mimeType: 'image/png',
           size: mediaBytes.length,
           uploadedBy: creatorId,
+          // PostgreSQL deliberately has no database default for these
+          // columns; supply the same instant SQLite's JS default would.
+          createdAt: new Date(),
+          updatedAt: new Date(),
         }))
       )
       .returning();
     const [foreignStory, restrictedStory] = await db
-      .insert(storiesSqlite)
+      .insert(stories)
       .values([
         {
           title: 'Foreign QA story',
@@ -209,7 +213,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       ])
       .returning();
     const [unevidencedStory] = await db
-      .insert(storiesSqlite)
+      .insert(stories)
       .values({
         title: 'Unevidenced QA story',
         slug: 'qa-unknown',
@@ -219,7 +223,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       })
       .returning();
     const [publicStory] = await db
-      .insert(storiesSqlite)
+      .insert(stories)
       .values({
         title: 'Public QA story',
         slug: 'qa-public',
@@ -228,14 +232,14 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       })
       .returning();
     const [speaker] = await db
-      .insert(speakersSqlite)
+      .insert(speakers)
       .values({
         name: 'QA dashboard speaker seed',
         communityId: fixtures.communities[0].id,
       })
       .returning();
     const editable = await db
-      .insert(storiesSqlite)
+      .insert(stories)
       .values(
         ['editor', 'admin'].map((role) => ({
           title: `QA ${role} editable`,
@@ -396,7 +400,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
           await readyApp.close();
         } finally {
           try {
-            await manager.teardown();
+            await qa.close();
           } finally {
             await removeOwnedMedia();
           }
@@ -408,7 +412,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       await app?.close();
     } finally {
       try {
-        await manager.teardown();
+        await qa.close();
       } finally {
         await removeOwnedMedia();
       }

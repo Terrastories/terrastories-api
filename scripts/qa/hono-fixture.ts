@@ -6,10 +6,13 @@
  * persona journeys. Runs on isolated in-memory SQLite by default and on a
  * freshly migrated PostgreSQL when DATABASE_URL and the reset guard select
  * it (scripts/qa/qa-database.ts), with identical journeys and expectations.
- * The route table is derived from `app.routes`, so a newly registered route
- * fails coverage until a journey reaches it. Mirrors sqlite-fixture.ts:
- * refuses HTTP mode because its isolated database cannot seed a deployed
- * server.
+ * A caller may instead supply a backend (same journeys, same expectations)
+ * whose database handle, media store and request handler come from elsewhere
+ * — the Workers build (#199) seeds D1, stores media in R2 and dispatches to
+ * bundled workerd. The route table is derived from `createHonoApp`, so a
+ * newly registered route fails coverage until a journey reaches it. Mirrors
+ * sqlite-fixture.ts: refuses HTTP mode because its isolated database cannot
+ * seed a deployed server.
  */
 import { sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
@@ -22,6 +25,8 @@ import {
   communityMediaSqlite,
 } from '../../src/db/schema/sessions.js';
 import { openPersonaQaDatabase } from './qa-database.js';
+import type { WidenedQaDatabase } from './qa-database.js';
+import type { TestFixtures } from '../../tests/helpers/database.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
@@ -66,18 +71,99 @@ const ownUser =
     );
   };
 
-export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
-  if (baseUrl)
+/**
+ * The shared persona password: every backend seeds the same credentials, so
+ * the journeys and their expectations stay byte-identical across SQLite,
+ * PostgreSQL and Workers.
+ */
+export const HONO_PERSONA_PASSWORD = 'QaHonoPassword123!';
+
+/**
+ * An alternative backend for the same persona journeys. `db` is a Drizzle
+ * handle on an already-migrated database; `seedBaseline` provisions the
+ * system + three communities + places baseline; `putMedia` stores media
+ * bytes under the key the served app reads them back by; `handler` receives
+ * the fixture's Set-Cookie tracker and returns the request handler the
+ * runner drives; `close` releases the backend even after a seeding failure.
+ */
+export interface HonoQaBackend {
+  db: WidenedQaDatabase;
+  seedBaseline: () => Promise<TestFixtures>;
+  passwordHash: string;
+  putMedia: (key: string, bytes: Uint8Array) => Promise<void>;
+  handler: (observeResponseCookies: (response: Response) => void) => Handler;
+  close: () => Promise<void>;
+}
+
+/**
+ * The endpoint table every Hono backend must cover, derived from the same
+ * `createHonoApp` registration the served apps are built from — the
+ * in-process fixture below and the Workers build in src/worker.ts wrap the
+ * same factory, so their route tables equal this table by construction.
+ * Registration is unconditional, so the stub collaborators below are never
+ * invoked and cannot change the table; a worker-only route registered
+ * outside `createHonoApp` would need its own derivation here. Only
+ * method-ALL middleware registrations are dropped (they are not callable
+ * endpoints) — a concrete-method route stays in coverage even when its path
+ * is a wildcard — and bodyLimit re-registers the login route, so keep the
+ * first concrete entry.
+ */
+export function honoPersonaRouteTable(): Endpoint[] {
+  const app = createHonoApp({
+    repository: { connection: null } as unknown as HonoFoundationRepository,
+    verifier: {
+      async verify() {
+        return false;
+      },
+    },
+    storage: {
+      async read() {
+        return null;
+      },
+    },
+  });
+  const routes: Endpoint[] = [];
+  const registered = new Set<string>();
+  for (const route of app.routes) {
+    if (route.method === 'ALL') continue;
+    const key = `${route.method} ${route.path}`;
+    if (registered.has(key)) continue;
+    registered.add(key);
+    routes.push({ method: route.method, path: route.path });
+  }
+  if (routes.length === 0)
+    throw new Error('Hono app registered no persona endpoints');
+  return routes;
+}
+
+export async function createFixture(
+  options: {
+    baseUrl?: string;
+    backend?: HonoQaBackend;
+  } = {}
+) {
+  if (options.baseUrl)
     throw new Error(
       'In-process persona fixtures support isolated in-process runs only'
     );
   // Isolated in-memory SQLite by default; the same journeys run against a
   // freshly migrated PostgreSQL when DATABASE_URL and the reset guard select
-  // it (scripts/qa/qa-database.ts). Tables come from the repo's dialect
-  // helpers so seeding stays identical across backends; communityMedia is
-  // picked the same way HonoFoundationRepository picks it.
-  const qa = await openPersonaQaDatabase();
-  const db = qa.db;
+  // it (scripts/qa/qa-database.ts), or against a caller-supplied backend —
+  // the Workers build seeds D1, stores media in R2 and dispatches to
+  // workerd. Tables come from the repo's dialect helpers so seeding stays
+  // identical across backends; communityMedia is picked the same way
+  // HonoFoundationRepository picks it.
+  const backend = options.backend;
+  const qa = backend ? null : await openPersonaQaDatabase();
+  const db = backend ? backend.db : qa!.db;
+  // Media bytes through the injected store: in-memory for the in-process
+  // fixture, the R2 bucket for the Workers build.
+  const storage = new Map<string, Uint8Array>();
+  const putMedia: (key: string, bytes: Uint8Array) => Promise<void> = backend
+    ? backend.putMedia
+    : async (key, bytes) => {
+        storage.set(key, bytes);
+      };
   const {
     users,
     places,
@@ -90,7 +176,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
   const communityMedia =
     dialectOf(db) === 'postgresql' ? communityMediaPg : communityMediaSqlite;
   try {
-    const fixtures = await qa.seed();
+    const fixtures = await (backend ? backend.seedBaseline() : qa!.seed());
     // Public active community for Explore; Demo community stays private.
     const communityId = fixtures.communities[0].id;
     const communitySlug = fixtures.communities[0].slug;
@@ -101,9 +187,12 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     // own Explore surface serves as the positive control.
     const foreignCommunityId = fixtures.communities[2].id;
     const foreignCommunitySlug = fixtures.communities[2].slug;
-    const password = 'QaHonoPassword123!';
+    const password = HONO_PERSONA_PASSWORD;
     // bcrypt emits $2b$; the verifier accepts the Rails/Devise $2a$ encoding.
-    const passwordHash = (await hash(password, 4)).replace('$2b$', '$2a$');
+    // The Workers backend supplies its own Workers-verifiable encoding.
+    const passwordHash = backend
+      ? backend.passwordHash
+      : (await hash(password, 4)).replace('$2b$', '$2a$');
     const credentials: Record<Role, { email: string; password: string }> = {
       viewer: { email: 'qa-hono-viewer@example.test', password },
       member: { email: 'qa-hono-member@example.test', password },
@@ -151,10 +240,11 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         isActive: true,
       })
       .returning();
-    // Branding media through the injected storage adapter: readable for the
-    // public community, withheld by cultural restrictions, foreign+restricted
-    // or foreign+unrestricted; each withheld file fails exactly one gate.
-    const storage = new Map<string, Uint8Array>();
+    // Branding media through the injected media store (in-memory adapter for
+    // the in-process fixture, the R2 bucket for the Workers build): readable
+    // for the public community, withheld by cultural restrictions,
+    // foreign+restricted or foreign+unrestricted; each withheld file fails
+    // exactly one gate.
     const mediaBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
     const brandingFile = async (
       ownerCommunityId: number,
@@ -183,7 +273,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         communityId: ownerCommunityId,
         kind: 'branding',
       });
-      storage.set(path, mediaBytes);
+      await putMedia(path, mediaBytes);
       return id;
     };
     const readableFileId = await brandingFile(communityId, null);
@@ -324,42 +414,36 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       { storyId: unknownStory.id, speakerId: speaker.id },
       { storyId: foreignStory.id, speakerId: foreignSpeaker.id },
     ]);
-    const app = createHonoApp({
-      repository: new HonoFoundationRepository(db),
-      verifier: nodePasswordVerifier,
-      secureCookies: false,
-      storage: { read: async (key) => storage.get(key) ?? null },
-    });
-    // Derive the endpoint table from the app itself: only method-ALL
-    // middleware registrations are dropped (they are not callable
-    // endpoints) — a concrete-method route stays in coverage even when its
-    // path is a wildcard — and bodyLimit re-registers the login route, so
-    // keep the first concrete entry.
-    const routes: Endpoint[] = [];
-    const registered = new Set<string>();
-    for (const route of app.routes) {
-      if (route.method === 'ALL') continue;
-      const key = `${route.method} ${route.path}`;
-      if (registered.has(key)) continue;
-      registered.add(key);
-      routes.push({ method: route.method, path: route.path });
-    }
-    if (routes.length === 0)
-      throw new Error('Hono app registered no persona endpoints');
-    // The runner hands checks the response body only; wrap the app to track
-    // the live ts_session cookie value (most recent non-empty Set-Cookie) so
+    // The runner hands checks the response body only; the handler tracks the
+    // live ts_session cookie value (most recent non-empty Set-Cookie) so
     // auth body checks can prove the token itself never leaks into a body.
     let sessionCookieValue = '';
     const liveSessionCookie = () => sessionCookieValue;
-    const handler: Handler = async (request) => {
-      const response = await app.fetch(request);
+    const observeResponseCookies = (response: Response) => {
       for (const setCookie of response.headers.getSetCookie()) {
         const setting = setCookie.split(';')[0].trim();
         if (setting.startsWith('ts_session=') && setting !== 'ts_session=')
           sessionCookieValue = setting.slice('ts_session='.length);
       }
-      return response;
     };
+    let handler: Handler;
+    if (backend) {
+      handler = backend.handler(observeResponseCookies);
+    } else {
+      const app = createHonoApp({
+        repository: new HonoFoundationRepository(db),
+        verifier: nodePasswordVerifier,
+        secureCookies: false,
+        storage: { read: async (key) => storage.get(key) ?? null },
+      });
+      handler = async (request) => {
+        const response = await app.fetch(request);
+        observeResponseCookies(response);
+        return response;
+      };
+    }
+    // Route table shared by every backend (see honoPersonaRouteTable).
+    const routes = honoPersonaRouteTable();
     /**
      * Exact id-set equality: same rows in any order, nothing extra, missing
      * or duplicated. Order-insensitive because multi-row responses can share
@@ -1065,11 +1149,13 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       exclusions: [],
       sessionCookieName: 'ts_session',
       close: async () => {
-        await qa.close();
+        if (backend) await backend.close();
+        else await qa!.close();
       },
     };
   } catch (error) {
-    await qa.close();
+    if (backend) await backend.close();
+    else await qa!.close();
     throw error;
   }
 }

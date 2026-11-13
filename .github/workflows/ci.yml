@@ -203,3 +203,70 @@ jobs:
           name: persona-qa-report
           path: qa-report.json
           if-no-files-found: error
+
+  persona-qa-postgres:
+    name: Persona QA gate (PostgreSQL 13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      postgres:
+        # Debian (glibc) image on purpose: musl-based Alpine sorts text by
+        # bytes even under en_US.utf8, which hides collation drift from SQLite.
+        image: postgres:13
+        env:
+          POSTGRES_DB: terrastories_test
+          POSTGRES_USER: terrastories
+          POSTGRES_PASSWORD: terrastories-test
+          # Non-UTC server time zone: application sessions must pin UTC
+          # themselves (job-level TZ below reaches only the Node process).
+          TZ: America/Sao_Paulo
+          PGTZ: America/Sao_Paulo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U terrastories -d terrastories_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test
+      ALLOW_POSTGRES_TEST_RESET: 'true'
+      # Non-UTC host time zone: timestamp decoding must not depend on the
+      # runner being UTC (the gate once passed only on UTC hosts).
+      TZ: America/Sao_Paulo
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.19.0
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Run persona QA gate (PostgreSQL 13)
+        # The same persona journeys as the SQLite gate, against a freshly
+        # migrated PostgreSQL 13 database (the fixtures reset the dedicated
+        # test database), so SQLite-only collation, timestamp, boolean and
+        # JSON behaviour cannot hide a sovereignty leak. The script fails
+        # closed unless DATABASE_URL and ALLOW_POSTGRES_TEST_RESET select
+        # the PostgreSQL target.
+        run: npm run qa:personas:postgres
+        env:
+          # Absolute path so the wrappers retain their reports even when
+          # their assertions fail (see scripts/qa/README.md).
+          QA_REPORT_PATH: ${{ github.workspace }}/qa-report.json
+      - name: Upload persona QA report (PostgreSQL)
+        # Publish both dialect reports for diagnosis even when the gate
+        # fails; a missing report fails this upload instead of passing
+        # silently.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: persona-qa-report-postgres
+          path: |
+            qa-report-postgres.json
+            qa-report-postgres-hono.json
+          if-no-files-found: error

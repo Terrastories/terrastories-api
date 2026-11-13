@@ -262,3 +262,132 @@ describe('persona QA CI release gate', () => {
     expect(readme).toMatch(/required status check/i);
   });
 });
+
+const PG_JOB_KEY = 'persona-qa-postgres';
+const PG_JOB_NAME = 'Persona QA gate (PostgreSQL 13)';
+
+describe('PostgreSQL persona QA CI release gate', () => {
+  const ci = readRepo('.github/workflows/ci.yml');
+  const job = parseWorkflowJob(ci, PG_JOB_KEY);
+  const jobKeys = job.entries.filter((entry) => entry.indent === 4);
+
+  it('defines the PostgreSQL persona QA gate job', () => {
+    expect(job.text, `ci.yml must define a "${PG_JOB_KEY}" job`).not.toBe('');
+    expect(valueOf(jobKeys, 'name')).toBe(PG_JOB_NAME);
+    expect(valueOf(jobKeys, 'runs-on')).toBe('ubuntu-latest');
+    expect(valueOf(jobKeys, 'timeout-minutes')).toBe('15');
+    // The gate must run on its own, like the SQLite gate.
+    expect(entryByKey(jobKeys, 'needs')).toBeUndefined();
+
+    const permissions = childrenOf(
+      job.entries,
+      entryByKey(jobKeys, 'permissions')
+    );
+    expect(valueOf(permissions, 'contents')).toBe('read');
+  });
+
+  it('mirrors the PostgreSQL database gate service, env and non-UTC TZ', () => {
+    const postgresService = entryByKey(job.entries, 'postgres');
+    expect(
+      postgresService,
+      'job must run the postgres:13 service'
+    ).toBeDefined();
+    const serviceEntries = childrenOf(job.entries, postgresService);
+    expect(valueOf(serviceEntries, 'image')).toBe('postgres:13');
+    expect(valueOf(serviceEntries, 'POSTGRES_DB')).toBe('terrastories_test');
+    expect(valueOf(serviceEntries, 'POSTGRES_USER')).toBe('terrastories');
+    expect(valueOf(serviceEntries, 'POSTGRES_PASSWORD')).toBe(
+      'terrastories-test'
+    );
+    // Non-UTC on purpose: collation and timestamp drift must surface, and
+    // sessions must pin UTC themselves instead of riding a UTC default.
+    expect(valueOf(serviceEntries, 'TZ')).toBe('America/Sao_Paulo');
+    expect(valueOf(serviceEntries, 'PGTZ')).toBe('America/Sao_Paulo');
+    expect(job.text).toContain('- 5432:5432');
+    expect(job.text).toContain(
+      '--health-cmd "pg_isready -U terrastories -d terrastories_test"'
+    );
+
+    const jobEnv = childrenOf(job.entries, entryByKey(jobKeys, 'env'));
+    expect(valueOf(jobEnv, 'DATABASE_URL')).toBe(
+      'postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test'
+    );
+    expect(valueOf(jobEnv, 'ALLOW_POSTGRES_TEST_RESET')).toBe("'true'");
+    expect(valueOf(jobEnv, 'TZ')).toBe('America/Sao_Paulo');
+  });
+
+  it('installs dependencies and runs the qa:personas:postgres wrapper', () => {
+    // The gate must invoke the dedicated wrapper script, which runs the two
+    // PostgreSQL persona wrappers serially (they reset one shared database)
+    // and fails closed when the PostgreSQL target is not selected.
+    const packageJson = JSON.parse(readRepo('package.json'));
+    expect(packageJson.scripts['qa:personas:postgres']).toBe(
+      'QA_PERSONAS_POSTGRES=1 vitest run tests/scripts/qa/postgres-fastify.test.ts tests/scripts/qa/postgres-hono.test.ts --maxWorkers=1'
+    );
+
+    expect(job.steps).toHaveLength(5);
+
+    const install = stepNamed(job.steps, 'Install dependencies');
+    expect(stepValue(install, 'run')).toBe('npm ci --legacy-peer-deps');
+
+    const gate = stepNamed(job.steps, 'Run persona QA gate (PostgreSQL 13)');
+    expect(gate).toBeDefined();
+    expect(stepValue(gate, 'run')).toBe('npm run qa:personas:postgres');
+    // The wrappers only retain their reports, including on failure, when
+    // QA_REPORT_PATH is absolute.
+    const gateEnv = stepParent(gate, 'env');
+    expect(valueOf(gateEnv, 'QA_REPORT_PATH')).toBe(
+      '${{ github.workspace }}/qa-report.json'
+    );
+
+    const setupNode = stepUsing(job.steps, 'actions/setup-node');
+    const setupNodeWith = stepParent(setupNode, 'with');
+    expect(valueOf(setupNodeWith, 'node-version')).toBe('20.19.0');
+    expect(valueOf(setupNodeWith, 'cache')).toBe("'npm'");
+  });
+
+  it('uses only SHA-pinned actions and never persists credentials', () => {
+    const uses = job.steps
+      .map((step) => stepValue(step, 'uses'))
+      .filter((value) => value !== undefined);
+    expect(uses.length).toBeGreaterThanOrEqual(3);
+
+    for (const ref of uses) {
+      expect(isShaPinned(ref), `${ref} must be 40-hex SHA pinned`).toBe(true);
+    }
+
+    const checkout = stepUsing(job.steps, 'actions/checkout');
+    const checkoutWith = stepParent(checkout, 'with');
+    expect(valueOf(checkoutWith, 'persist-credentials')).toBe('false');
+  });
+
+  it('fails closed on every step and uses no secrets', () => {
+    const continueOnError = (entries) =>
+      entries.find((entry) => entry.key === 'continue-on-error');
+    expect(continueOnError(jobKeys)).toBeUndefined();
+    for (const step of job.steps) {
+      const label = stepValue(step, 'name') ?? stepValue(step, 'uses');
+      expect(continueOnError(step), `step "${label}"`).toBeUndefined();
+    }
+    expect(job.text).not.toContain('secrets.');
+
+    // Both dialect reports are published for diagnosis even when the gate
+    // fails, and a missing report fails the upload instead of passing
+    // silently. The parser flattens `path: |`, so the two report names are
+    // pinned in the raw job text.
+    const upload = stepUsing(job.steps, 'actions/upload-artifact');
+    expect(stepValue(upload, 'if')).toBe('always()');
+    const uploadWith = stepParent(upload, 'with');
+    expect(valueOf(uploadWith, 'name')).toBe('persona-qa-report-postgres');
+    expect(valueOf(uploadWith, 'path')).toBe('|');
+    expect(job.text).toContain('qa-report-postgres.json');
+    expect(job.text).toContain('qa-report-postgres-hono.json');
+    expect(valueOf(uploadWith, 'if-no-files-found')).toBe('error');
+  });
+
+  it('documents the check name alongside the SQLite gate', () => {
+    const readme = readRepo('scripts/qa/README.md');
+
+    expect(readme).toContain(PG_JOB_NAME);
+  });
+});

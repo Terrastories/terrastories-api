@@ -87,6 +87,46 @@ required status checks for `main` (Settings → Branches → branch protection).
 That branch-protection change cannot be made from a pull request, so the
 gate is advisory in CI until it is applied.
 
+## PostgreSQL 13
+
+The same persona journeys — Fastify fixture and Hono fixture — also run
+against PostgreSQL 13:
+
+```sh
+DATABASE_URL=postgresql://terrastories:...@localhost:5432/terrastories_test \
+ALLOW_POSTGRES_TEST_RESET=true \
+npm run qa:personas:postgres
+```
+
+The command runs only the two PostgreSQL wrappers
+(`tests/scripts/qa/postgres-fastify.test.ts` and
+`tests/scripts/qa/postgres-hono.test.ts`) serially (`--maxWorkers=1`),
+because each wrapper resets and re-migrates the one shared test database
+through `scripts/qa/qa-database.ts`. Journeys and expectations are identical
+to SQLite; only the backend changes, so SQLite-only behaviour (collation,
+timestamps, booleans, JSON) cannot hide a sovereignty leak.
+
+The wrappers activate only when `DATABASE_URL` points at PostgreSQL and
+`ALLOW_POSTGRES_TEST_RESET=true` — the same opt-in, and the same dedicated
+`test`-named-database restriction, as the PostgreSQL database gate — and
+otherwise skip with the resolver's reason (a PostgreSQL URL without the
+guard is an explicit operator intent and throws instead of silently
+downgrading). `qa:personas:postgres` sets `QA_PERSONAS_POSTGRES=1`, so the
+dedicated gate fails closed when its target is misconfigured instead of
+skipping green. Reports are written as `-postgres` and `-postgres-hono`
+siblings of `QA_REPORT_PATH`, so parallel wrappers never race on one file.
+
+The `persona-qa-postgres` job in `.github/workflows/ci.yml`, with check name
+**Persona QA gate (PostgreSQL 13)**, runs this command on Node 20.19.0
+against a `postgres:13` service whose database, server and job time zones
+are deliberately non-UTC (`America/Sao_Paulo`), mirroring the PostgreSQL
+database gate. The job uses no secrets and fails closed: any failed
+assertion or unreached endpoint exits nonzero. Both dialect reports are
+uploaded as the `persona-qa-report-postgres` artifact on every run,
+including failed ones, and a missing report fails the upload step. A
+maintainer must add **Persona QA gate (PostgreSQL 13)** to the repository's
+required status checks for `main` together with the SQLite gate.
+
 Negative matrices cover each resource's actual schema. Stories have restricted
 and unevidenced audience fixtures; places have a restricted flag; media has held
 and unknown legacy restriction metadata. Speakers, themes and users have no

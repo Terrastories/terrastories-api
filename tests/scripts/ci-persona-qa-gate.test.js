@@ -309,9 +309,16 @@ describe('PostgreSQL persona QA CI release gate', () => {
     );
 
     const jobEnv = childrenOf(job.entries, entryByKey(jobKeys, 'env'));
-    expect(valueOf(jobEnv, 'DATABASE_URL')).toBe(
+    // The persona target travels through QA_POSTGRES_URL, never DATABASE_URL:
+    // the Vitest test environment pins DATABASE_URL to in-memory SQLite for
+    // every worker, overriding any job-level value.
+    expect(valueOf(jobEnv, 'QA_POSTGRES_URL')).toBe(
       'postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test'
     );
+    expect(
+      entryByKey(jobEnv, 'DATABASE_URL'),
+      'the persona gate must not set DATABASE_URL'
+    ).toBeUndefined();
     expect(valueOf(jobEnv, 'ALLOW_POSTGRES_TEST_RESET')).toBe("'true'");
     expect(valueOf(jobEnv, 'TZ')).toBe('America/Sao_Paulo');
   });

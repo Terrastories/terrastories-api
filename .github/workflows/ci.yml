@@ -231,7 +231,11 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test
+      # Dedicated selector: the Vitest test environment pins DATABASE_URL to
+      # in-memory SQLite inside every worker (overriding this job-level
+      # value), so the PostgreSQL persona target travels through its own
+      # variable. The npm script sets QA_PERSONAS_POSTGRES=1 itself.
+      QA_POSTGRES_URL: postgresql://terrastories:terrastories-test@localhost:5432/terrastories_test
       ALLOW_POSTGRES_TEST_RESET: 'true'
       # Non-UTC host time zone: timestamp decoding must not depend on the
       # runner being UTC (the gate once passed only on UTC hosts).
@@ -251,8 +255,9 @@ jobs:
         # migrated PostgreSQL 13 database (the fixtures reset the dedicated
         # test database), so SQLite-only collation, timestamp, boolean and
         # JSON behaviour cannot hide a sovereignty leak. The script fails
-        # closed unless DATABASE_URL and ALLOW_POSTGRES_TEST_RESET select
-        # the PostgreSQL target.
+        # closed unless QA_POSTGRES_URL and ALLOW_POSTGRES_TEST_RESET select
+        # the PostgreSQL target (the npm script marks the gate with
+        # QA_PERSONAS_POSTGRES=1, which alone lets the wrappers run).
         run: npm run qa:personas:postgres
         env:
           # Absolute path so the wrappers retain their reports even when

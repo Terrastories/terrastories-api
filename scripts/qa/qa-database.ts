@@ -2,11 +2,19 @@
  * Dialect-aware database bootstrap for the in-process persona QA fixtures.
  *
  * SQLite is the default: the fixtures keep using the repository's in-memory
- * `TestDatabaseManager` unchanged. When `DATABASE_URL` points at PostgreSQL
- * and the destructive-reset guard (`ALLOW_POSTGRES_TEST_RESET`) is set — the
- * same opt-in the PostgreSQL database gate uses — the same journeys instead
- * provision a freshly migrated PostgreSQL schema, so SQLite-only behaviour
- * (collation, timestamps, booleans, JSON) cannot hide a sovereignty leak.
+ * `TestDatabaseManager` unchanged. The PostgreSQL target is selected only by
+ * the dedicated gate `qa:personas:postgres` through `QA_POSTGRES_URL` — a
+ * dedicated variable on purpose: the repository Vitest config pins
+ * `DATABASE_URL` to `sqlite::memory:` for every test worker, overriding any
+ * job-level value, so the persona target must not travel through
+ * `DATABASE_URL`. `QA_PERSONAS_POSTGRES=1` (set by the npm script) marks the
+ * dedicated gate; without it nothing in the QA fixtures ever opens a
+ * PostgreSQL connection, so `qa:personas:sqlite` cannot touch PostgreSQL.
+ * The destructive-reset guard (`ALLOW_POSTGRES_TEST_RESET`) and the
+ * dedicated test-database name check are the same opt-in the PostgreSQL
+ * database gate uses, so the same journeys provision a freshly migrated
+ * PostgreSQL schema where SQLite-only behaviour (collation, timestamps,
+ * booleans, JSON) cannot hide a sovereignty leak.
  */
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,7 +75,7 @@ export function resolvePostgresQaTarget(
     return {
       status: 'unconfigured',
       reason:
-        'DATABASE_URL does not point at PostgreSQL; the in-process SQLite fixtures own this run',
+        'QA_POSTGRES_URL does not point at PostgreSQL; the in-process SQLite fixtures own this run',
     };
   if (allowReset !== 'true')
     return {
@@ -84,6 +92,42 @@ export function resolvePostgresQaTarget(
       reason: `refusing destructive PostgreSQL persona QA against non-test database ${databaseName}`,
     };
   return { status: 'ready', url: databaseUrl };
+}
+
+export interface PostgresPersonaQaDecision {
+  /**
+   * Run the PostgreSQL journeys. The gate marker alone decides this — a ready
+   * target never forces a run outside the dedicated gate — and a run whose
+   * target is not ready fails closed inside the wrapper instead of skipping.
+   */
+  run: boolean;
+  /** Why the journeys skip when `run` is false. */
+  reason: string;
+  /** The resolved target, carrying its own not-ready reasons. */
+  target: PostgresQaTarget;
+}
+
+/**
+ * Decide whether the PostgreSQL persona wrappers may run: only the dedicated
+ * gate (`QA_PERSONAS_POSTGRES=1`, set by `npm run qa:personas:postgres`) runs
+ * them, whatever the environment, so `qa:personas:sqlite` never touches
+ * PostgreSQL even with `QA_POSTGRES_URL` exported. Pure so the Vitest
+ * wrappers and their tests share the exact skip/fail decision.
+ */
+export function decidePostgresPersonaQa(
+  marker: string | undefined,
+  databaseUrl: string | undefined,
+  allowReset: string | undefined
+): PostgresPersonaQaDecision {
+  const target = resolvePostgresQaTarget(databaseUrl, allowReset);
+  if (marker !== '1')
+    return {
+      run: false,
+      reason:
+        'QA_PERSONAS_POSTGRES is not "1"; only npm run qa:personas:postgres runs these journeys',
+      target,
+    };
+  return { run: true, reason: '', target };
 }
 
 /** Drop and recreate both schemas, exactly like the PostgreSQL gate's reset. */
@@ -203,19 +247,21 @@ async function seedPostgresFixtures(
 }
 
 /**
- * Open the persona QA database for this process. Unconfigured environments
- * keep today's isolated in-memory SQLite manager. A PostgreSQL URL without
- * the reset guard (or against a non-test database name) is an explicit
+ * Open the persona QA database for this process. Outside the dedicated gate
+ * (`QA_PERSONAS_POSTGRES` unset — `qa:personas:sqlite`, the plain test suite,
+ * the tsx CLI) every run keeps today's isolated in-memory SQLite manager, so
+ * nothing but the gate can open PostgreSQL. Inside the gate the target must
+ * be ready: a `QA_POSTGRES_URL` without the reset guard (or against a
+ * non-test database name, or not pointing at PostgreSQL) is an explicit
  * operator intent, so it throws instead of silently downgrading to SQLite.
  */
 export async function openPersonaQaDatabase(): Promise<PersonaQaDatabase> {
-  const target = resolvePostgresQaTarget(
-    process.env.DATABASE_URL,
+  const decision = decidePostgresPersonaQa(
+    process.env.QA_PERSONAS_POSTGRES,
+    process.env.QA_POSTGRES_URL,
     process.env.ALLOW_POSTGRES_TEST_RESET
   );
-  if (target.status === 'refused')
-    throw new Error(`PostgreSQL persona QA refused: ${target.reason}`);
-  if (target.status === 'unconfigured') {
+  if (!decision.run) {
     const manager = new TestDatabaseManager();
     const db = await manager.setup();
     return {
@@ -225,7 +271,11 @@ export async function openPersonaQaDatabase(): Promise<PersonaQaDatabase> {
       close: () => manager.teardown(),
     };
   }
-  const client = createPostgresClient(target.url, {
+  if (decision.target.status !== 'ready')
+    throw new Error(
+      `PostgreSQL persona QA requires a ready target: ${decision.target.reason}`
+    );
+  const client = createPostgresClient(decision.target.url, {
     max: 2,
     onnotice: () => undefined,
   });

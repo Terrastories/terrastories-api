@@ -1,33 +1,34 @@
 import { writeFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { resolvePostgresQaTarget } from '../../../scripts/qa/qa-database.js';
+import { decidePostgresPersonaQa } from '../../../scripts/qa/qa-database.js';
 import { createFixture } from '../../../scripts/qa/sqlite-fixture.js';
 import { runJourneys } from '../../../scripts/qa/runner.js';
 
 // Module scope: resolve before any hook could rewrite the environment, so
-// the wrapper always reports what the operator actually configured.
-const target = resolvePostgresQaTarget(
-  process.env.DATABASE_URL,
+// the wrapper always reports what the operator actually configured. The
+// dedicated gate marker decides whether these journeys run at all; the
+// target itself is selected through QA_POSTGRES_URL because the Vitest test
+// environment pins DATABASE_URL to in-memory SQLite for every worker.
+const decision = decidePostgresPersonaQa(
+  process.env.QA_PERSONAS_POSTGRES,
+  process.env.QA_POSTGRES_URL,
   process.env.ALLOW_POSTGRES_TEST_RESET
 );
-// qa:personas:postgres sets this marker: the dedicated gate must fail closed
-// when its PostgreSQL target is misconfigured, not skip green.
-const required = process.env.QA_PERSONAS_POSTGRES === '1';
 
 describe(
-  target.status === 'ready'
+  decision.run
     ? 'Fastify frontend persona acceptance (PostgreSQL)'
-    : `Fastify frontend persona acceptance (PostgreSQL) — skipped: ${target.reason}`,
+    : `Fastify frontend persona acceptance (PostgreSQL) — skipped: ${decision.reason}`,
   () => {
     // Same journeys and expectations as the SQLite wrapper: only the backend
     // differs, so collation, timestamp, boolean and JSON behaviour cannot
     // hide a sovereignty leak behind SQLite semantics.
-    it.skipIf(target.status !== 'ready' && !required)(
+    it.skipIf(!decision.run)(
       'satisfies persona assertions and reaches every registered endpoint',
       async () => {
-        if (target.status !== 'ready')
+        if (decision.target.status !== 'ready')
           throw new Error(
-            `qa:personas:postgres requires a PostgreSQL target: ${target.reason}`
+            `qa:personas:postgres requires a PostgreSQL target: ${decision.target.reason}`
           );
         const fixture = await createFixture();
         try {

@@ -93,7 +93,7 @@ The same persona journeys — Fastify fixture and Hono fixture — also run
 against PostgreSQL 13:
 
 ```sh
-DATABASE_URL=postgresql://terrastories:...@localhost:5432/terrastories_test \
+QA_POSTGRES_URL=postgresql://terrastories:...@localhost:5432/terrastories_test \
 ALLOW_POSTGRES_TEST_RESET=true \
 npm run qa:personas:postgres
 ```
@@ -106,15 +106,22 @@ through `scripts/qa/qa-database.ts`. Journeys and expectations are identical
 to SQLite; only the backend changes, so SQLite-only behaviour (collation,
 timestamps, booleans, JSON) cannot hide a sovereignty leak.
 
-The wrappers activate only when `DATABASE_URL` points at PostgreSQL and
-`ALLOW_POSTGRES_TEST_RESET=true` — the same opt-in, and the same dedicated
-`test`-named-database restriction, as the PostgreSQL database gate — and
-otherwise skip with the resolver's reason (a PostgreSQL URL without the
-guard is an explicit operator intent and throws instead of silently
-downgrading). `qa:personas:postgres` sets `QA_PERSONAS_POSTGRES=1`, so the
-dedicated gate fails closed when its target is misconfigured instead of
-skipping green. Reports are written as `-postgres` and `-postgres-hono`
-siblings of `QA_REPORT_PATH`, so parallel wrappers never race on one file.
+The wrappers run only under the dedicated gate: `qa:personas:postgres` sets
+`QA_PERSONAS_POSTGRES=1`, and without that marker they skip with a reason —
+so `qa:personas:sqlite`, which shares their directory, never touches
+PostgreSQL even when `QA_POSTGRES_URL` is exported. The gate's target is
+selected by `QA_POSTGRES_URL` (a dedicated variable on purpose: the
+repository Vitest test environment pins `DATABASE_URL` to `sqlite::memory:`
+inside every worker, overriding any outer value) with the same
+`ALLOW_POSTGRES_TEST_RESET=true` reset guard and the same
+dedicated-test-database restriction as the PostgreSQL database gate — only
+bare `test` and `*_test`-suffixed names such as `terrastories_test` may be
+reset; a `test_*` prefix is not allowed. When the gate is active but its
+target is not ready — including a PostgreSQL URL without the guard, an
+explicit operator intent — the wrapper fails closed instead of skipping
+green or silently downgrading to SQLite. Reports are written as `-postgres`
+and `-postgres-hono` siblings of `QA_REPORT_PATH`, so parallel wrappers
+never race on one file.
 
 The `persona-qa-postgres` job in `.github/workflows/ci.yml`, with check name
 **Persona QA gate (PostgreSQL 13)**, runs this command on Node 20.19.0

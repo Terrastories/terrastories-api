@@ -11,12 +11,7 @@ beforeAll(async () => {
 
   // Ensure test environment
   process.env.NODE_ENV = 'test';
-  // The PostgreSQL persona QA run selects its backend through DATABASE_URL
-  // plus the ALLOW_POSTGRES_TEST_RESET guard (scripts/qa/qa-database.ts);
-  // keep such a URL instead of forcing the in-process SQLite default.
-  if (!/^(?:postgres|postgresql):\/\//.test(process.env.DATABASE_URL ?? '')) {
-    process.env.DATABASE_URL = 'sqlite::memory:';
-  }
+  process.env.DATABASE_URL = 'sqlite::memory:';
   process.env.LOG_LEVEL = 'warn';
 
   // Initialize global test database

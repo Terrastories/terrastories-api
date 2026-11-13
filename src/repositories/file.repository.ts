@@ -394,11 +394,14 @@ export class FileRepository {
         conditions.push(eq(filesTable.communityId, communityId));
       }
 
-      const result = await (this.db as any)
+      // `.changes` exists only on SQLite driver results; returning() reports
+      // deleted rows on both SQLite and PostgreSQL.
+      const deleted = await (this.db as any)
         .delete(filesTable)
-        .where(and(...conditions));
+        .where(and(...conditions))
+        .returning({ id: filesTable.id });
 
-      return result.changes > 0;
+      return deleted.length > 0;
     } catch (error) {
       throw new Error(`Failed to delete file: ${error}`);
     }

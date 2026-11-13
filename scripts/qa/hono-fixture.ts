@@ -3,27 +3,25 @@
  *
  * Drives the Hono app (foundation routes plus the #198 Explore read adapter)
  * through `app.fetch` so every registered Hono endpoint is exercised by
- * persona journeys on SQLite. The route table is derived from `app.routes`,
- * so a newly registered route fails coverage until a journey reaches it.
- * Mirrors sqlite-fixture.ts: refuses HTTP mode because its isolated database
- * cannot seed a deployed server.
+ * persona journeys. Runs on isolated in-memory SQLite by default and on a
+ * freshly migrated PostgreSQL when DATABASE_URL and the reset guard select
+ * it (scripts/qa/qa-database.ts), with identical journeys and expectations.
+ * The route table is derived from `app.routes`, so a newly registered route
+ * fails coverage until a journey reaches it. Mirrors sqlite-fixture.ts:
+ * refuses HTTP mode because its isolated database cannot seed a deployed
+ * server.
  */
 import { sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { nodePasswordVerifier } from '../../src/node-password.js';
-import { communityMediaSqlite } from '../../src/db/schema/sessions.js';
+import { dialectOf, tablesFor } from '../../src/db/dialect.js';
 import {
-  filesSqlite,
-  placesSqlite,
-  speakersSqlite,
-  storiesSqlite,
-  storyPlacesSqlite,
-  storySpeakersSqlite,
-  usersSqlite,
-} from '../../src/db/schema/index.js';
-import { TestDatabaseManager } from '../../tests/helpers/database.js';
+  communityMediaPg,
+  communityMediaSqlite,
+} from '../../src/db/schema/sessions.js';
+import { openPersonaQaDatabase } from './qa-database.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
@@ -70,11 +68,29 @@ const ownUser =
 
 export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
   if (baseUrl)
-    throw new Error('SQLite fixture supports isolated in-process runs only');
-  const manager = new TestDatabaseManager();
-  const db = await manager.setup();
+    throw new Error(
+      'In-process persona fixtures support isolated in-process runs only'
+    );
+  // Isolated in-memory SQLite by default; the same journeys run against a
+  // freshly migrated PostgreSQL when DATABASE_URL and the reset guard select
+  // it (scripts/qa/qa-database.ts). Tables come from the repo's dialect
+  // helpers so seeding stays identical across backends; communityMedia is
+  // picked the same way HonoFoundationRepository picks it.
+  const qa = await openPersonaQaDatabase();
+  const db = qa.db;
+  const {
+    users,
+    places,
+    speakers,
+    stories,
+    storyPlaces,
+    storySpeakers,
+    files,
+  } = tablesFor(db);
+  const communityMedia =
+    dialectOf(db) === 'postgresql' ? communityMediaPg : communityMediaSqlite;
   try {
-    const fixtures = await manager.seedTestData();
+    const fixtures = await qa.seed();
     // Public active community for Explore; Demo community stays private.
     const communityId = fixtures.communities[0].id;
     const communitySlug = fixtures.communities[0].slug;
@@ -99,7 +115,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     let creatorId = 0;
     for (const role of Object.keys(credentials) as Role[]) {
       const [user] = await db
-        .insert(usersSqlite)
+        .insert(users)
         .values({
           email: credentials[role].email,
           passwordHash,
@@ -124,7 +140,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     // V2 member role); the interpolated value binds as a string parameter.
     const foreignViewerRole: Role = 'viewer';
     await db
-      .insert(usersSqlite)
+      .insert(users)
       .values({
         email: foreignViewerCredentials.email,
         passwordHash,
@@ -146,7 +162,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     ) => {
       const id = crypto.randomUUID();
       const path = `communities/${ownerCommunityId}/${id}.png`;
-      await db.insert(filesSqlite).values({
+      await db.insert(files).values({
         id,
         filename: `${id}.png`,
         originalName: 'qa-branding.png',
@@ -157,8 +173,12 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         uploadedBy: creatorId,
         communityId: ownerCommunityId,
         culturalRestrictions,
+        // PostgreSQL deliberately has no database default for these
+        // columns; supply the same instant SQLite's JS default would.
+        createdAt: new Date(),
+        updatedAt: new Date(),
       });
-      await db.insert(communityMediaSqlite).values({
+      await db.insert(communityMedia).values({
         fileId: id,
         communityId: ownerCommunityId,
         kind: 'branding',
@@ -196,7 +216,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     // its own public community), the unevidenced story alone has no edges,
     // and foreign ids answer the same 404 on another community's slug.
     const [publicPlace, restrictedPlace, unassociatedPlace] = await db
-      .insert(placesSqlite)
+      .insert(places)
       .values([
         {
           name: 'QA public place',
@@ -220,7 +240,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       ])
       .returning();
     const [foreignPlace] = await db
-      .insert(placesSqlite)
+      .insert(places)
       .values({
         name: 'QA foreign place',
         communityId: foreignCommunityId,
@@ -229,11 +249,11 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       })
       .returning();
     const [speaker] = await db
-      .insert(speakersSqlite)
+      .insert(speakers)
       .values({ name: 'QA hono speaker', communityId, isActive: true })
       .returning();
     const [foreignSpeaker] = await db
-      .insert(speakersSqlite)
+      .insert(speakers)
       .values({
         name: 'QA foreign speaker',
         communityId: foreignCommunityId,
@@ -247,7 +267,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       unknownStory,
       foreignStory,
     ] = await db
-      .insert(storiesSqlite)
+      .insert(stories)
       .values([
         {
           title: 'QA public story',
@@ -291,14 +311,14 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     // visible. The restricted place is evidenced by a public story too, so
     // its 404 is the restricted flag alone; the unassociated place has no
     // edge and is hidden by the §6.4a association rule alone.
-    await db.insert(storyPlacesSqlite).values([
+    await db.insert(storyPlaces).values([
       { storyId: publicStory.id, placeId: publicPlace.id },
       { storyId: restrictedStory.id, placeId: publicPlace.id },
       { storyId: unknownStory.id, placeId: publicPlace.id },
       { storyId: foreignStory.id, placeId: foreignPlace.id },
       { storyId: publicStory.id, placeId: restrictedPlace.id },
     ]);
-    await db.insert(storySpeakersSqlite).values([
+    await db.insert(storySpeakers).values([
       { storyId: publicStory.id, speakerId: speaker.id },
       { storyId: restrictedStory.id, speakerId: speaker.id },
       { storyId: unknownStory.id, speakerId: speaker.id },
@@ -1045,11 +1065,11 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       exclusions: [],
       sessionCookieName: 'ts_session',
       close: async () => {
-        await manager.teardown();
+        await qa.close();
       },
     };
   } catch (error) {
-    await manager.teardown();
+    await qa.close();
     throw error;
   }
 }

@@ -36,7 +36,8 @@
     "compatibility:report": "node scripts/api-comparison.js report --output api-comparison-report.html",
     "compatibility:full": "npm run test:compatibility && npm run compatibility:report",
     "qa:personas": "tsx scripts/qa/run-personas.ts",
-    "qa:personas:sqlite": "vitest run tests/scripts/qa --maxWorkers=2",
+    "qa:personas:sqlite": "vitest run tests/scripts/qa/ --maxWorkers=2",
+    "qa:personas:postgres": "QA_PERSONAS_POSTGRES=1 vitest run tests/scripts/qa-postgres/postgres-fastify.test.ts tests/scripts/qa-postgres/postgres-hono.test.ts --maxWorkers=1 --no-file-parallelism",
     "dev:hono": "NODE_ENV=development tsx watch src/hono-server.ts",
     "start:hono": "node dist/hono-server.js"
   },

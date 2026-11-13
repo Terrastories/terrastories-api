@@ -167,7 +167,13 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       return id;
     };
     const readableFileId = await brandingFile(communityId, null);
-    const restrictedFileId = await brandingFile(communityId, '{}');
+    // CulturalRestrictionsSchema-shaped, clearly non-empty metadata: the
+    // gates below prove the cultural-restriction condition itself, not the
+    // empty-'{}' edge.
+    const restrictedFileId = await brandingFile(
+      communityId,
+      JSON.stringify({ accessLevel: 'family' })
+    );
     // Foreign AND unrestricted, in the public foreign community: publicly
     // servable there (its Explore surface and its own users get 200), so a
     // 404 for community personas is community scoping, not restrictions.
@@ -182,7 +188,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     // keeping this file off every Explore surface).
     const superAdminRestrictedFileId = await brandingFile(
       fixtures.systemCommunity.id,
-      '{}'
+      JSON.stringify({ accessLevel: 'family' })
     );
     // Explore gates (#162 option A), each fixture withholding exactly one
     // property: every gated story carries the same evidence edges as the
@@ -334,21 +340,36 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       }
       return response;
     };
-    /** Exact id-list equality: same rows, same order, nothing extra or missing. */
-    const idsExactly = (
+    /**
+     * Exact id-set equality: same rows in any order, nothing extra, missing
+     * or duplicated. Order-insensitive because multi-row responses can share
+     * same-tick timestamps, so their order is not a stable contract.
+     */
+    const idsExactlyAsSet = (
       rows: { id?: number }[] | undefined,
       expected: number[]
-    ): boolean =>
-      JSON.stringify(rows?.map((row) => row.id)) === JSON.stringify(expected);
-    const storyRows = (body: unknown): { id?: number }[] | undefined =>
-      (body as { data?: { stories?: { id?: number }[] } }).data?.stories;
+    ): boolean => {
+      const actual = (Array.isArray(rows) ? rows : [])
+        .map((row) => row.id)
+        .sort((a, b) => Number(a ?? 0) - Number(b ?? 0));
+      const wanted = [...expected].sort((a, b) => a - b);
+      return JSON.stringify(actual) === JSON.stringify(wanted);
+    };
+    // A missing or non-array data.stories resolves to undefined so the id
+    // check fails on a malformed response instead of throwing.
+    const storyRows = (body: unknown): { id?: number }[] | undefined => {
+      const stories = (body as { data?: { stories?: unknown } }).data?.stories;
+      return Array.isArray(stories)
+        ? (stories as { id?: number }[])
+        : undefined;
+    };
     // The list gate is shared by the anonymous and session'd journeys: the
     // response carries exactly the public story — same row, same order,
     // nothing extra — so any unexpected row fails, and each withheld fixture
     // fails exactly one condition (restriction, missing edges, unknown
     // privacy, community).
     const storiesListCheck = (body: unknown): boolean =>
-      idsExactly(storyRows(body), [publicStory.id]);
+      idsExactlyAsSet(storyRows(body), [publicStory.id]);
     /**
      * Story detail must embed exactly the visible relations: places carries
      * only unrestricted same-community places (the restricted place the
@@ -370,9 +391,9 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         ).data;
         return (
           data?.id === storyId &&
-          idsExactly(data?.places, placeIds) &&
-          idsExactly(data?.speakers, speakerIds) &&
-          idsExactly(data?.points, placeIds)
+          idsExactlyAsSet(data?.places, placeIds) &&
+          idsExactlyAsSet(data?.speakers, speakerIds) &&
+          idsExactlyAsSet(data?.points, placeIds)
         );
       };
     // Shared by the anonymous and session'd journeys so both assert the same
@@ -415,7 +436,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         return (
           data?.slug === slug &&
           data?.storiesCount === expected.storiesCount &&
-          idsExactly(data?.points, expected.placeIds) &&
+          idsExactlyAsSet(data?.points, expected.placeIds) &&
           JSON.stringify(optionValues('places')) ===
             JSON.stringify(expected.placeIds) &&
           JSON.stringify(optionValues('speakers')) ===
@@ -439,9 +460,10 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     };
     /**
      * Shared by the anonymous and session'd journeys: the exact community
-     * projection, plus a displayImage that is either absent or the
-     * community's readable branding file — never the restricted one (a
-     * different file id, so the endsWith match can never admit it).
+     * projection plus a positive displayImage — the community's readable
+     * branding file must surface as /explore/media/<readableFileId> — and
+     * the restricted file id must never appear anywhere in the serialized
+     * body (a different UUID, so the endsWith match can never admit it).
      */
     const ownCommunityDetailCheck = (body: unknown): boolean => {
       const projection = communityDetailCheck(communitySlug, {
@@ -449,13 +471,16 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         placeIds: [publicPlace.id],
         speakerIds: [speaker.id],
       })(body);
+      // Null-safe read: a missing or non-string displayImage fails the check
+      // below instead of throwing.
       const displayImage = (
-        body as { data?: { details?: { displayImage?: string } } }
+        body as { data?: { details?: { displayImage?: unknown } } }
       ).data?.details?.displayImage;
       return (
         projection &&
-        (displayImage === undefined ||
-          displayImage.endsWith(`/explore/media/${readableFileId}`))
+        typeof displayImage === 'string' &&
+        displayImage.endsWith(`/explore/media/${readableFileId}`) &&
+        !(JSON.stringify(body) ?? '').includes(String(restrictedFileId))
       );
     };
     const explore: Step[] = [
@@ -504,13 +529,15 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
             placeIds: [foreignPlace.id],
             speakerIds: [foreignSpeaker.id],
           })(body);
+          // Null-safe like the own-community check: a non-string
+          // displayImage fails instead of throwing.
+          const displayImage = (
+            body as { data?: { details?: { displayImage?: unknown } } }
+          ).data?.details?.displayImage;
           return (
             projection &&
-            !!(
-              body as { data?: { details?: { displayImage?: string } } }
-            ).data?.details?.displayImage?.endsWith(
-              `/explore/media/${foreignFileId}`
-            )
+            typeof displayImage === 'string' &&
+            displayImage.endsWith(`/explore/media/${foreignFileId}`)
           );
         },
       },
@@ -538,7 +565,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         method: 'GET',
         path: `/explore/communities/${foreignCommunitySlug}/stories`,
         expected: 200,
-        check: (body) => idsExactly(storyRows(body), [foreignStory.id]),
+        check: (body) => idsExactlyAsSet(storyRows(body), [foreignStory.id]),
       },
       {
         name: 'explore story detail',
@@ -626,7 +653,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
           ).data;
           return (
             data?.id === publicPlace.id &&
-            idsExactly(data?.points, [publicPlace.id])
+            idsExactlyAsSet(data?.points, [publicPlace.id])
           );
         },
       },
@@ -665,7 +692,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
           ).data;
           return (
             data?.id === foreignPlace.id &&
-            idsExactly(data?.points, [foreignPlace.id])
+            idsExactlyAsSet(data?.points, [foreignPlace.id])
           );
         },
       },

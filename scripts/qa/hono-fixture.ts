@@ -463,7 +463,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
      * projection plus a positive displayImage — the community's readable
      * branding file must surface as /explore/media/<readableFileId> — and
      * the restricted file id must never appear anywhere in the serialized
-     * body (a different UUID, so the endsWith match can never admit it).
+     * body.
      */
     const ownCommunityDetailCheck = (body: unknown): boolean => {
       const projection = communityDetailCheck(communitySlug, {

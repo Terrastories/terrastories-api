@@ -313,6 +313,77 @@ describe('session replay and request lifecycle', () => {
       expect(report.pass).toBe(revoked);
     }
   });
+  it('clears the tracked session cookie when Set-Cookie empties it', async () => {
+    const sent: (string | null)[] = [];
+    const report = await runJourneys({
+      sessionCookieName: 'ts_session',
+      routes: [
+        { method: 'POST', path: '/login' },
+        { method: 'POST', path: '/logout' },
+        { method: 'GET', path: '/me' },
+      ],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'login', method: 'POST', path: '/login', expected: 200 },
+            { name: 'logout', method: 'POST', path: '/logout', expected: 204 },
+            {
+              name: 'me after logout',
+              method: 'GET',
+              path: '/me',
+              expected: 401,
+            },
+          ],
+        },
+      ],
+      handler: async (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === '/login')
+          return new Response('{}', {
+            headers: { 'set-cookie': 'ts_session=opaque-token; Path=/' },
+          });
+        sent.push(request.headers.get('cookie'));
+        if (path === '/logout')
+          return new Response(null, {
+            status: 204,
+            headers: { 'set-cookie': 'ts_session=; Max-Age=0; Path=/' },
+          });
+        return new Response('{}', { status: 401 });
+      },
+    });
+    expect(sent).toEqual(['ts_session=opaque-token', null]);
+    expect(report.pass).toBe(true);
+  });
+  it('tracks a non-default session cookie name across journey steps', async () => {
+    const sent: string[] = [];
+    const report = await runJourneys({
+      sessionCookieName: 'ts_session',
+      routes: [
+        { method: 'POST', path: '/login' },
+        { method: 'GET', path: '/me' },
+      ],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'login', method: 'POST', path: '/login', expected: 200 },
+            { name: 'me', method: 'GET', path: '/me', expected: 200 },
+          ],
+        },
+      ],
+      handler: async (request) => {
+        if (new URL(request.url).pathname === '/login')
+          return new Response('{}', {
+            headers: { 'set-cookie': 'ts_session=opaque-token; Path=/' },
+          });
+        sent.push(request.headers.get('cookie') ?? '');
+        return new Response('{}');
+      },
+    });
+    expect(sent).toEqual(['ts_session=opaque-token']);
+    expect(report.pass).toBe(true);
+  });
   it('rejects replay without a saved cookie before sending a request', async () => {
     let calls = 0;
     const report = await runJourneys({

@@ -1,4 +1,6 @@
 import { sessionLifetime } from './shared/session-policy.js';
+import { registerExploreAdapter } from './explore-adapter.js';
+import { ExploreAdapterRepository } from './repositories/explore-adapter.repository.js';
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
@@ -186,6 +188,13 @@ export function createHonoApp(options: FoundationOptions) {
         },
       }
     );
+  });
+  // Transitional Explore read adapter (#198): Rails-shaped public reads for
+  // the existing Explore client; removed once the V2 frontend is canonical.
+  registerExploreAdapter(app, {
+    repository: new ExploreAdapterRepository(options.repository.connection),
+    storage: options.storage,
+    publicOrigin: configuredOrigin,
   });
   return app;
 }

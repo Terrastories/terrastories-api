@@ -180,7 +180,14 @@ export async function runJourneys(options: {
             .map((value) => value.trim().split(';')[0])
             .filter((value) => value.startsWith(sessionCookiePrefix))
             .sort((a, b) => b.length - a.length);
-          if (sessionCookies[0]) cookie = sessionCookies[0];
+          // A Set-Cookie that empties the session cookie (logout/revoke
+          // clearing, e.g. `ts_session=`) clears the tracked cookie — an
+          // empty value must never be adopted as the current session.
+          if (sessionCookies[0])
+            cookie =
+              sessionCookies[0] === sessionCookiePrefix
+                ? ''
+                : sessionCookies[0];
           pass = actual === step.expected;
           if (!pass) failure = 'status-mismatch';
           if (step.check || step.captureId) {

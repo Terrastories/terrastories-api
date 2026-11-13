@@ -27,16 +27,28 @@ isolated SQLite database with an in-memory storage adapter, and returns the
 same shape (`routes`, `journeys`, `exclusions`, `handler`, `close`) plus
 `sessionCookieName: 'ts_session'` — the runner tracks that cookie name for
 the Hono stack instead of Fastify's `sessionId`. Its endpoint table is
-derived from `app.routes` itself (middleware `ALL`/wildcard registrations
-and `bodyLimit`'s duplicate login entry are not endpoints), so registering a
+derived from `app.routes` itself (only method-`ALL` middleware registrations
+and `bodyLimit`'s duplicate login entry are dropped — a concrete-method
+route stays in coverage even on a wildcard path), so registering a
 new Hono route fails coverage until a journey reaches it or a reviewed
 exclusion names it; today every Hono endpoint is reached and the fixture
 excludes nothing. Journeys cover anonymous Explore browsing (ruling #162
-option A: restricted and unevidenced rows are hidden from every role),
-session lifecycle for viewer, member, editor and community admin (own-user
-profile without secrets, community-scoped media, logout/revoke replay),
-super-admin boundaries, identical 401 bodies for wrong-password and
-unknown-user logins, and the #147-skipped field-kit persona. The Vitest
+option A), session lifecycle for viewer, member, editor and community admin
+(own-user profile without secrets, community-scoped media, logout/revoke
+replay), super-admin boundaries, identical 401 bodies for wrong-password and
+unknown-user logins, and the #147-skipped field-kit persona. Each withheld
+Explore fixture fails exactly one gate: the restricted story/place and media
+carry no other withholding property, the unevidenced story is public but
+edgeless (hidden from the stories list by the evidence rule alone; story
+show has no join requirement and serves it with empty relations), the
+unknown-privacy story carries full evidence, and the foreign story/place/
+media live in a second public community — visible on their own community's
+Explore surface and, for media, to a foreign-community viewer persona on
+`/v2/media` — so their 404s on this community's surfaces are community
+scoping alone. An unrestricted file in the private community isolates the
+Explore community-publication gate. Editor, community admin and super_admin
+also drive the Explore steps with a session cookie: the anonymous projection
+never widens for an authenticated caller. The Vitest
 wrapper `tests/scripts/qa/hono.test.ts` runs inside
 `npm run qa:personas:sqlite` and, when `QA_REPORT_PATH` is set, writes a
 sibling report ending in `-hono.json` so parallel wrappers never race on one
@@ -97,7 +109,9 @@ Requests have a 30-second default deadline spanning preparation, transport and
 body reads. Set `--request-timeout-ms 10000` (or `requestTimeoutMs` in-process)
 to change it. Responses are consumed or cancelled, and stalled operations fail
 with a sanitized stage diagnostic. Logout journeys explicitly replay the saved
-pre-logout cookie. Media isolation fixtures contain real owned PNG files and a
+pre-logout cookie, and a Set-Cookie that empties the session cookie (for
+example `ts_session=`) clears the runner's tracked cookie instead of adopting
+the empty value. Media isolation fixtures contain real owned PNG files and a
 readable control; fixture cleanup removes only those created files.
 
 Password reset token lookup remains disabled in the current API. The journey

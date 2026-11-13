@@ -100,7 +100,7 @@ npm run qa:personas:postgres
 
 The command runs only the two PostgreSQL wrappers
 (`tests/scripts/qa/postgres-fastify.test.ts` and
-`tests/scripts/qa/postgres-hono.test.ts`) serially (`--maxWorkers=1`),
+`tests/scripts/qa/postgres-hono.test.ts`) serially (`--maxWorkers=1 --no-file-parallelism`; both reset the one shared database),
 because each wrapper resets and re-migrates the one shared test database
 through `scripts/qa/qa-database.ts`. Journeys and expectations are identical
 to SQLite; only the backend changes, so SQLite-only behaviour (collation,

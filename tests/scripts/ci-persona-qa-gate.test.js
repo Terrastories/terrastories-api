@@ -329,7 +329,7 @@ describe('PostgreSQL persona QA CI release gate', () => {
     // and fails closed when the PostgreSQL target is not selected.
     const packageJson = JSON.parse(readRepo('package.json'));
     expect(packageJson.scripts['qa:personas:postgres']).toBe(
-      'QA_PERSONAS_POSTGRES=1 vitest run tests/scripts/qa/postgres-fastify.test.ts tests/scripts/qa/postgres-hono.test.ts --maxWorkers=1'
+      'QA_PERSONAS_POSTGRES=1 vitest run tests/scripts/qa/postgres-fastify.test.ts tests/scripts/qa/postgres-hono.test.ts --maxWorkers=1 --no-file-parallelism'
     );
 
     expect(job.steps).toHaveLength(5);

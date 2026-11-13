@@ -312,6 +312,85 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         !ids.includes(foreignStory.id)
       );
     };
+    /** Exact id-list equality: same rows, same order, nothing extra or missing. */
+    const idsExactly = (
+      rows: { id?: number }[] | undefined,
+      expected: number[]
+    ): boolean =>
+      JSON.stringify(rows?.map((row) => row.id)) === JSON.stringify(expected);
+    /**
+     * Story detail must embed exactly the visible relations: places carries
+     * only unrestricted same-community places (the restricted place the
+     * public story evidences stays out), speakers only active same-community
+     * speakers, and points mirrors the same rows as places.
+     */
+    const storyDetailCheck =
+      (storyId: number, placeIds: number[], speakerIds: number[]) =>
+      (body: unknown): boolean => {
+        const data = (
+          body as {
+            data?: {
+              id?: number;
+              places?: { id?: number }[];
+              speakers?: { id?: number }[];
+              points?: { id?: number }[];
+            };
+          }
+        ).data;
+        return (
+          data?.id === storyId &&
+          idsExactly(data?.places, placeIds) &&
+          idsExactly(data?.speakers, speakerIds) &&
+          idsExactly(data?.points, placeIds)
+        );
+      };
+    // Shared by the anonymous and session'd journeys so both assert the same
+    // exact projection: one visible place, one visible speaker.
+    const publicStoryDetailCheck = storyDetailCheck(
+      publicStory.id,
+      [publicPlace.id],
+      [speaker.id]
+    );
+    /**
+     * Community detail embeds a story count and projection collections; each
+     * must carry exactly the visible rows: storiesCount counts only publicly
+     * readable stories, map points only publishable associated places, and
+     * the place/speaker filter options never confirm a hidden row.
+     */
+    const communityDetailCheck =
+      (
+        slug: string,
+        expected: {
+          storiesCount: number;
+          placeIds: number[];
+          speakerIds: number[];
+        }
+      ) =>
+      (body: unknown): boolean => {
+        const data = (
+          body as {
+            data?: {
+              slug?: string;
+              storiesCount?: number;
+              points?: { id?: number }[];
+              filters?: { category?: string; value?: number | string }[];
+            };
+          }
+        ).data;
+        const optionValues = (category: string): (number | string)[] =>
+          (data?.filters ?? [])
+            .filter((option) => option.category === category)
+            .map((option) => option.value);
+        return (
+          data?.slug === slug &&
+          data?.storiesCount === expected.storiesCount &&
+          idsExactly(data?.points, expected.placeIds) &&
+          JSON.stringify(optionValues('places')) ===
+            JSON.stringify(expected.placeIds) &&
+          JSON.stringify(optionValues('speakers')) ===
+            JSON.stringify(expected.speakerIds)
+        );
+      };
     const explore: Step[] = [
       {
         name: 'explore communities list',
@@ -335,8 +414,15 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         method: 'GET',
         path: `/explore/communities/${communitySlug}`,
         expected: 200,
-        check: (body) =>
-          (body as { data?: { slug?: string } }).data?.slug === communitySlug,
+        // storiesCount 2 = the public story plus the edge-less unevidenced
+        // story (both publicly readable; Rails counts without joins); the
+        // restricted, unknown-privacy and foreign stories stay out of the
+        // count, the points and the place/speaker filter options.
+        check: communityDetailCheck(communitySlug, {
+          storiesCount: 2,
+          placeIds: [publicPlace.id],
+          speakerIds: [speaker.id],
+        }),
       },
       {
         name: 'hide private community',
@@ -352,20 +438,24 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       },
       {
         // Positive control: the foreign community publishes its own Explore
-        // surface, and that surface points at its own unrestricted file.
+        // surface with the same exact projection over its own rows (one
+        // public story, its own place and speaker), and that surface points
+        // at its own unrestricted file.
         name: 'explore foreign community detail',
         method: 'GET',
         path: `/explore/communities/${foreignCommunitySlug}`,
         expected: 200,
         check: (body) => {
-          const data = (
-            body as {
-              data?: { slug?: string; details?: { displayImage?: string } };
-            }
-          ).data;
+          const projection = communityDetailCheck(foreignCommunitySlug, {
+            storiesCount: 1,
+            placeIds: [foreignPlace.id],
+            speakerIds: [foreignSpeaker.id],
+          })(body);
           return (
-            data?.slug === foreignCommunitySlug &&
-            !!data?.details?.displayImage?.endsWith(
+            projection &&
+            !!(
+              body as { data?: { details?: { displayImage?: string } } }
+            ).data?.details?.displayImage?.endsWith(
               `/explore/media/${foreignFileId}`
             )
           );
@@ -401,8 +491,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         method: 'GET',
         path: `/explore/communities/${communitySlug}/stories/${publicStory.id}`,
         expected: 200,
-        check: (body) =>
-          (body as { data?: { id?: number } }).data?.id === publicStory.id,
+        check: publicStoryDetailCheck,
       },
       {
         // Hidden by isRestricted alone: it carries the same edges as the
@@ -461,30 +550,31 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         method: 'GET',
         path: `/explore/communities/${foreignCommunitySlug}/stories/${foreignStory.id}`,
         expected: 200,
-        check: (body) => {
-          const data = (
-            body as {
-              data?: {
-                id?: number;
-                places?: { id?: number }[];
-                speakers?: { id?: number }[];
-              };
-            }
-          ).data;
-          return (
-            data?.id === foreignStory.id &&
-            data?.places?.[0]?.id === foreignPlace.id &&
-            data?.speakers?.[0]?.id === foreignSpeaker.id
-          );
-        },
+        // Same exact-projection contract on the foreign community: its story
+        // embeds only its own place and its own speaker.
+        check: storyDetailCheck(
+          foreignStory.id,
+          [foreignPlace.id],
+          [foreignSpeaker.id]
+        ),
       },
       {
+        // Place show embeds no story collection (checked against the service:
+        // the Rails-shaped place card carries only its own point), so the
+        // exact assertion pins the single embedded point to the place itself.
         name: 'explore place detail',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${publicPlace.id}`,
         expected: 200,
-        check: (body) =>
-          (body as { data?: { id?: number } }).data?.id === publicPlace.id,
+        check: (body) => {
+          const data = (
+            body as { data?: { id?: number; points?: { id?: number }[] } }
+          ).data;
+          return (
+            data?.id === publicPlace.id &&
+            idsExactly(data?.points, [publicPlace.id])
+          );
+        },
       },
       {
         // Hidden by the restricted flag alone: a public story evidences it.
@@ -509,13 +599,21 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       },
       {
         // Positive control: the foreign place is served on its own community
-        // slug through its edge to the foreign story.
+        // slug through its edge to the foreign story, with the same exact
+        // single-point projection.
         name: 'explore foreign place detail',
         method: 'GET',
         path: `/explore/communities/${foreignCommunitySlug}/places/${foreignPlace.id}`,
         expected: 200,
-        check: (body) =>
-          (body as { data?: { id?: number } }).data?.id === foreignPlace.id,
+        check: (body) => {
+          const data = (
+            body as { data?: { id?: number; points?: { id?: number }[] } }
+          ).data;
+          return (
+            data?.id === foreignPlace.id &&
+            idsExactly(data?.points, [foreignPlace.id])
+          );
+        },
       },
       {
         name: 'reject malformed place id',
@@ -567,8 +665,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         method: 'GET',
         path: `/explore/communities/${communitySlug}/stories/${publicStory.id}`,
         expected: 200,
-        check: (body) =>
-          (body as { data?: { id?: number } }).data?.id === publicStory.id,
+        check: publicStoryDetailCheck,
       },
       {
         name: 'hide restricted story while authenticated',
@@ -604,6 +701,12 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         name: 'reject cross-community place id while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${foreignPlace.id}`,
+        expected: 404,
+      },
+      {
+        name: 'hide restricted branding media while authenticated',
+        method: 'GET',
+        path: `/explore/media/${restrictedFileId}`,
         expected: 404,
       },
       {

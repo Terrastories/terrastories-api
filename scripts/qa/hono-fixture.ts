@@ -36,8 +36,26 @@ const invalidCredentials = (body: unknown): boolean =>
   (body as { error?: string }).error === 'Invalid credentials' &&
   Object.keys(body as object).length === 1;
 
+/**
+ * Serialized secrets an auth body must never carry: the live session cookie
+ * value (supplied by the fixture's response wrapper) and password-hash
+ * fragments (bcrypt `$2`, argon2, pbkdf2). The cookie value is compared in
+ * its JSON-escaped form so an echoed token fails even with escapes.
+ */
+const leaksSecret = (body: unknown, cookieValue: () => string): boolean => {
+  const text = JSON.stringify(body);
+  const cookie = JSON.stringify(cookieValue()).slice(1, -1);
+  return (
+    text.includes('passwordHash') ||
+    text.includes('$2') ||
+    text.includes('$argon') ||
+    text.includes('pbkdf2') ||
+    (cookie !== '' && text.includes(cookie))
+  );
+};
+
 const ownUser =
-  (email: string, role: Role) =>
+  (email: string, role: Role, cookieValue: () => string) =>
   (body: unknown): boolean => {
     const user = (body as { user?: Record<string, unknown> }).user;
     return (
@@ -46,8 +64,7 @@ const ownUser =
       user.email === email &&
       user.role === role &&
       typeof user.id === 'number' &&
-      !JSON.stringify(body).includes('passwordHash') &&
-      !JSON.stringify(body).includes('ts_session')
+      !leaksSecret(body, cookieValue)
     );
   };
 
@@ -158,6 +175,15 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     // Foreign AND unrestricted in the private community: /explore/media
     // withholds it through the community publication gate alone.
     const foreignPrivateFileId = await brandingFile(privateCommunityId, null);
+    // Restricted branding in the SUPER ADMIN's own system community: the
+    // highest role still gets 404 on /v2/media, so that gate below is the
+    // cultural-restriction condition alone (scoping matches because the file
+    // is in the super admin's own community; the community is also private,
+    // keeping this file off every Explore surface).
+    const superAdminRestrictedFileId = await brandingFile(
+      fixtures.systemCommunity.id,
+      '{}'
+    );
     // Explore gates (#162 option A), each fixture withholding exactly one
     // property: every gated story carries the same evidence edges as the
     // public story (restricted/unknown-privacy in this community, foreign in
@@ -294,23 +320,19 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     }
     if (routes.length === 0)
       throw new Error('Hono app registered no persona endpoints');
-    const handler: Handler = (request) => app.fetch(request);
-    const storyIds = (body: unknown): number[] =>
-      (body as { data?: { stories?: { id?: number }[] } }).data?.stories?.map(
-        (story) => story.id
-      ) ?? [];
-    // The list gate is shared by the anonymous and session'd journeys: only
-    // the public story is listable; each withheld fixture fails exactly one
-    // condition (restriction, missing edges, unknown privacy, community).
-    const storiesListCheck = (body: unknown): boolean => {
-      const ids = storyIds(body);
-      return (
-        ids.includes(publicStory.id) &&
-        !ids.includes(restrictedStory.id) &&
-        !ids.includes(unevidencedStory.id) &&
-        !ids.includes(unknownStory.id) &&
-        !ids.includes(foreignStory.id)
-      );
+    // The runner hands checks the response body only; wrap the app to track
+    // the live ts_session cookie value (most recent non-empty Set-Cookie) so
+    // auth body checks can prove the token itself never leaks into a body.
+    let sessionCookieValue = '';
+    const liveSessionCookie = () => sessionCookieValue;
+    const handler: Handler = async (request) => {
+      const response = await app.fetch(request);
+      for (const setCookie of response.headers.getSetCookie()) {
+        const setting = setCookie.split(';')[0].trim();
+        if (setting.startsWith('ts_session=') && setting !== 'ts_session=')
+          sessionCookieValue = setting.slice('ts_session='.length);
+      }
+      return response;
     };
     /** Exact id-list equality: same rows, same order, nothing extra or missing. */
     const idsExactly = (
@@ -318,6 +340,15 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       expected: number[]
     ): boolean =>
       JSON.stringify(rows?.map((row) => row.id)) === JSON.stringify(expected);
+    const storyRows = (body: unknown): { id?: number }[] | undefined =>
+      (body as { data?: { stories?: { id?: number }[] } }).data?.stories;
+    // The list gate is shared by the anonymous and session'd journeys: the
+    // response carries exactly the public story — same row, same order,
+    // nothing extra — so any unexpected row fails, and each withheld fixture
+    // fails exactly one condition (restriction, missing edges, unknown
+    // privacy, community).
+    const storiesListCheck = (body: unknown): boolean =>
+      idsExactly(storyRows(body), [publicStory.id]);
     /**
      * Story detail must embed exactly the visible relations: places carries
      * only unrestricted same-community places (the restricted place the
@@ -391,23 +422,49 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
             JSON.stringify(expected.speakerIds)
         );
       };
+    // Shared by the anonymous and session'd journeys: the list carries
+    // exactly the two seeded public communities as a slug set — the private
+    // demo and system communities stay absent, and any unexpected row fails.
+    // Set comparison (not order): the index sorts newest-update-first, and
+    // the seeded rows share same-tick timestamps.
+    const communitiesListCheck = (body: unknown): boolean => {
+      const slugs =
+        (body as { data?: { slug?: string }[] }).data?.map(
+          (community) => community.slug
+        ) ?? [];
+      return (
+        JSON.stringify([...slugs].sort()) ===
+        JSON.stringify([communitySlug, foreignCommunitySlug].sort())
+      );
+    };
+    /**
+     * Shared by the anonymous and session'd journeys: the exact community
+     * projection, plus a displayImage that is either absent or the
+     * community's readable branding file — never the restricted one (a
+     * different file id, so the endsWith match can never admit it).
+     */
+    const ownCommunityDetailCheck = (body: unknown): boolean => {
+      const projection = communityDetailCheck(communitySlug, {
+        storiesCount: 2,
+        placeIds: [publicPlace.id],
+        speakerIds: [speaker.id],
+      })(body);
+      const displayImage = (
+        body as { data?: { details?: { displayImage?: string } } }
+      ).data?.details?.displayImage;
+      return (
+        projection &&
+        (displayImage === undefined ||
+          displayImage.endsWith(`/explore/media/${readableFileId}`))
+      );
+    };
     const explore: Step[] = [
       {
         name: 'explore communities list',
         method: 'GET',
         path: '/explore/communities',
         expected: 200,
-        check: (body) => {
-          const slugs =
-            (body as { data?: { slug?: string }[] }).data?.map(
-              (community) => community.slug
-            ) ?? [];
-          return (
-            slugs.includes(communitySlug) &&
-            slugs.includes(foreignCommunitySlug) &&
-            !slugs.includes(privateCommunitySlug)
-          );
-        },
+        check: communitiesListCheck,
       },
       {
         name: 'explore community detail',
@@ -418,11 +475,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         // story (both publicly readable; Rails counts without joins); the
         // restricted, unknown-privacy and foreign stories stay out of the
         // count, the points and the place/speaker filter options.
-        check: communityDetailCheck(communitySlug, {
-          storiesCount: 2,
-          placeIds: [publicPlace.id],
-          speakerIds: [speaker.id],
-        }),
+        check: ownCommunityDetailCheck,
       },
       {
         name: 'hide private community',
@@ -479,12 +532,13 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       },
       {
         // Positive control: the foreign story (evidenced, public,
-        // unrestricted) is listable on its own community slug.
+        // unrestricted) is listable on its own community slug — exactly it,
+        // so an unexpected row here fails like anywhere else.
         name: 'explore foreign stories list',
         method: 'GET',
         path: `/explore/communities/${foreignCommunitySlug}/stories`,
         expected: 200,
-        check: (body) => storyIds(body).includes(foreignStory.id),
+        check: (body) => idsExactly(storyRows(body), [foreignStory.id]),
       },
       {
         name: 'explore story detail',
@@ -650,9 +704,25 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       },
     ];
     // Explore is anonymous-public: with a session cookie, editor, community
-    // admin and super_admin must see exactly the same projection — withheld
+    // admin and super_admin must see exactly the same projection — the
+    // community list (exact slug set, private community absent) and detail
+    // (exact counts, points, filters and displayImage) included; withheld
     // rows stay 404 and nothing already public narrows.
     const exploreWithSession: Step[] = [
+      {
+        name: 'explore communities list while authenticated',
+        method: 'GET',
+        path: '/explore/communities',
+        expected: 200,
+        check: communitiesListCheck,
+      },
+      {
+        name: 'explore community detail while authenticated',
+        method: 'GET',
+        path: `/explore/communities/${communitySlug}`,
+        expected: 200,
+        check: ownCommunityDetailCheck,
+      },
       {
         name: 'explore stories list while authenticated',
         method: 'GET',
@@ -774,14 +844,14 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
             path: '/v2/auth/login',
             expected: 200,
             body: credentials[role],
-            check: ownUser(credentials[role].email, role),
+            check: ownUser(credentials[role].email, role, liveSessionCookie),
           },
           {
             name: 'read own profile without secrets',
             method: 'GET',
             path: '/v2/auth/me',
             expected: 200,
-            check: ownUser(credentials[role].email, role),
+            check: ownUser(credentials[role].email, role, liveSessionCookie),
           },
           // Explore with a session: editor and community admin must see the
           // same anonymous projection (no widening, no narrowing).
@@ -859,18 +929,34 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
             path: '/v2/auth/login',
             expected: 200,
             body: credentials.super_admin,
-            check: ownUser(credentials.super_admin.email, 'super_admin'),
+            check: ownUser(
+              credentials.super_admin.email,
+              'super_admin',
+              liveSessionCookie
+            ),
           },
           {
             name: 'read own profile without secrets',
             method: 'GET',
             path: '/v2/auth/me',
             expected: 200,
-            check: ownUser(credentials.super_admin.email, 'super_admin'),
+            check: ownUser(
+              credentials.super_admin.email,
+              'super_admin',
+              liveSessionCookie
+            ),
           },
           // Explore with a session: super_admin sees the same anonymous
           // projection; privilege never widens the public surface.
           ...exploreWithSession,
+          {
+            // Cultural restrictions withhold this file even from the highest
+            // role, inside the super admin's OWN system community.
+            name: 'reject restricted media of own community',
+            method: 'GET',
+            path: `/v2/media/${superAdminRestrictedFileId}`,
+            expected: 404,
+          },
           {
             name: 'deny media of another community',
             method: 'GET',
@@ -898,7 +984,11 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
             path: '/v2/auth/login',
             expected: 200,
             body: foreignViewerCredentials,
-            check: ownUser(foreignViewerCredentials.email, 'viewer'),
+            check: ownUser(
+              foreignViewerCredentials.email,
+              'viewer',
+              liveSessionCookie
+            ),
           },
           {
             name: 'read own community media',

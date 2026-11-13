@@ -7,9 +7,11 @@ npm run qa:personas:sqlite
 ```
 
 which is `vitest run tests/scripts/qa/ --maxWorkers=2`.
-The PostgreSQL wrappers live in `tests/scripts/qa-postgres/`, outside that
-glob, so this job never touches PostgreSQL. The `qa:personas` CLI runs on
-SQLite only; PostgreSQL runs go through `npm run qa:personas:postgres`.
+The PostgreSQL wrappers live in `tests/scripts/qa-postgres/` and the
+Workers wrapper in `tests/scripts/qa-workers/`, outside that glob, so this
+job never touches PostgreSQL or workerd. The `qa:personas` CLI runs on
+SQLite only; PostgreSQL runs go through `npm run qa:personas:postgres` and
+Workers runs through `npm run qa:personas:workers`.
 
 The CLI accepts an explicit fixture module so it never silently seeds a deployed
 community:
@@ -136,6 +138,59 @@ uploaded as the `persona-qa-report-postgres` artifact on every run,
 including failed ones, and a missing report fails the upload step. A
 maintainer must add **Persona QA gate (PostgreSQL 13)** to the repository's
 required status checks for `main` together with the SQLite gate.
+
+## Workers (workerd, D1, R2)
+
+The same Hono persona journeys also run against the real Workers build:
+
+```sh
+npm run qa:personas:workers
+```
+
+`scripts/qa/workers-fixture.ts` bundles `src/worker.ts` (behind a gateway
+that injects the password verifier and adds no routes) with the same esbuild
+and Miniflare steps as `tests/hono/worker.test.ts` (`tests/helpers/
+worker-runtime.ts`), executes it in workerd with the D1 `DB` and R2 `MEDIA`
+bindings of the Workers Free profile, applies the repository's SQLite
+migrations to D1 through the binding, seeds through
+`drizzle-orm/d1` over `mf.getD1Database('DB')` and stores media bytes with
+`bucket.put` over `mf.getR2Bucket('MEDIA')` under the keys the worker reads
+back. The runner's handler rebuilds each request as a
+`dispatchFetch(url, init)` call — a Node-global `Request` object is a
+foreign realm to Miniflare's bundled undici — and tracks the same
+`ts_session` cookie. Journeys, steps and expectations are identical to the
+SQLite fixture (`createFixture({ backend })` in `scripts/qa/hono-fixture.ts`),
+so no Node-only behaviour can hide a sovereignty leak from the hosted
+Workers Free profile.
+
+Passwords: bcrypt — the in-process fixture's verifier — is a Node native
+module and cannot run in workerd, and the hosted Workers auth method stays
+open (#194), so the Workers fixture pins a Workers-native verifier: real
+PBKDF2-SHA-256 through WebCrypto inside workerd (100 000 iterations), with
+`pbkdf2$…` encodings seeded from Node through the same algorithm — a full
+cryptographic check, not an equality stub. Route coverage uses the shared
+`honoPersonaRouteTable()`, derived from the same `createHonoApp`
+registration the bundled worker serves, so the Workers table equals the
+SQLite fixture's table and every endpoint must be reached with zero
+exclusions — today all 13 endpoints are, by 119 steps across the same
+personas.
+
+The wrapper `tests/scripts/qa-workers/workers-hono.test.ts` lives outside
+`tests/scripts/qa/`, so `qa:personas:sqlite` never collects it, and runs
+only under the dedicated gate: `qa:personas:workers` sets
+`QA_PERSONAS_WORKERS=1`, and without that marker the wrapper skips with a
+reason. It needs no services, no secrets and no network; when
+`QA_REPORT_PATH` is set it writes a sibling report ending in
+`-workers-hono.json`.
+
+The `persona-qa-workers` job in `.github/workflows/ci.yml`, with check name
+**Persona QA gate (Workers D1)**, runs this command on Node 20.19.0 with
+the same SHA-pinned actions as the SQLite gate. The job uses no secrets and
+fails closed: any failed assertion or unreached endpoint exits nonzero.
+The report is uploaded as the `persona-qa-report-workers` artifact on every
+run, including failed ones, and a missing report fails the upload step. A
+maintainer must add **Persona QA gate (Workers D1)** to the repository's
+required status checks for `main` together with the other persona gates.
 
 Negative matrices cover each resource's actual schema. Stories have restricted
 and unevidenced audience fixtures; places have a restricted flag; media has held

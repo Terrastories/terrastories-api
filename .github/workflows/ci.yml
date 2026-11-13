@@ -168,3 +168,38 @@ jobs:
         run: npm ci --legacy-peer-deps
       - name: Run PostgreSQL migration and integration gate
         run: npm run test:db:postgres
+
+  persona-qa-sqlite:
+    name: Persona QA gate (SQLite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.19.0
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Run persona QA gate (SQLite)
+        # The SQLite fixture requires the repository Vitest test setup, so the
+        # gate runs the wrapper suite instead of the deployed-target CLI.
+        # Any failed assertion or unreached endpoint exits nonzero.
+        run: npm run qa:personas:sqlite
+        env:
+          # Absolute path so the wrapper retains the report even when its
+          # assertions fail (see scripts/qa/README.md).
+          QA_REPORT_PATH: ${{ github.workspace }}/qa-report.json
+      - name: Upload persona QA report
+        # Publish the report for diagnosis even when the gate fails; a
+        # missing report fails this upload instead of passing silently.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: persona-qa-report
+          path: qa-report.json
+          if-no-files-found: error

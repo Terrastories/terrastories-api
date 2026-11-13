@@ -25,5 +25,9 @@ describe('SQLite frontend persona acceptance', () => {
     } finally {
       await fixture.close();
     }
-  }, 30000);
+    // Generous timeout: the runner enforces its own 30s per-request deadline
+    // and writes qa-report.json before the assertions run, but only if Vitest
+    // has not killed the test first — keep the test timeout well above the
+    // request deadline so slow-but-failing runs still surface the report.
+  }, 120000);
 });

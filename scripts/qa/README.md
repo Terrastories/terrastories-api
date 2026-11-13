@@ -6,7 +6,10 @@ Run the isolated SQLite acceptance wrapper with:
 npm run qa:personas:sqlite
 ```
 
-which is `vitest run tests/scripts/qa --maxWorkers=2`.
+which is `vitest run tests/scripts/qa/ --maxWorkers=2`.
+The PostgreSQL wrappers live in `tests/scripts/qa-postgres/`, outside that
+glob, so this job never touches PostgreSQL. The `qa:personas` CLI runs on
+SQLite only; PostgreSQL runs go through `npm run qa:personas:postgres`.
 
 The CLI accepts an explicit fixture module so it never silently seeds a deployed
 community:
@@ -99,8 +102,8 @@ npm run qa:personas:postgres
 ```
 
 The command runs only the two PostgreSQL wrappers
-(`tests/scripts/qa/postgres-fastify.test.ts` and
-`tests/scripts/qa/postgres-hono.test.ts`) serially (`--maxWorkers=1 --no-file-parallelism`; both reset the one shared database),
+(`tests/scripts/qa-postgres/postgres-fastify.test.ts` and
+`tests/scripts/qa-postgres/postgres-hono.test.ts`) serially (`--maxWorkers=1 --no-file-parallelism`; both reset the one shared database),
 because each wrapper resets and re-migrates the one shared test database
 through `scripts/qa/qa-database.ts`. Journeys and expectations are identical
 to SQLite; only the backend changes, so SQLite-only behaviour (collation,

@@ -183,7 +183,7 @@ describe('persona QA CI release gate', () => {
     // documented SQLite acceptance suite, not an invented command.
     const packageJson = JSON.parse(readRepo('package.json'));
     expect(packageJson.scripts['qa:personas:sqlite']).toBe(
-      'vitest run tests/scripts/qa --maxWorkers=2'
+      'vitest run tests/scripts/qa/ --maxWorkers=2'
     );
 
     expect(job.steps).toHaveLength(5);
@@ -329,7 +329,7 @@ describe('PostgreSQL persona QA CI release gate', () => {
     // and fails closed when the PostgreSQL target is not selected.
     const packageJson = JSON.parse(readRepo('package.json'));
     expect(packageJson.scripts['qa:personas:postgres']).toBe(
-      'QA_PERSONAS_POSTGRES=1 vitest run tests/scripts/qa/postgres-fastify.test.ts tests/scripts/qa/postgres-hono.test.ts --maxWorkers=1 --no-file-parallelism'
+      'QA_PERSONAS_POSTGRES=1 vitest run tests/scripts/qa-postgres/postgres-fastify.test.ts tests/scripts/qa-postgres/postgres-hono.test.ts --maxWorkers=1 --no-file-parallelism'
     );
 
     expect(job.steps).toHaveLength(5);

@@ -8,3 +8,4 @@ export * from './story_speakers.js';
 export * from './themes.js';
 export * from './users.js';
 export * from './attachments.js';
+export * from './sessions.js';

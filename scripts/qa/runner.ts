@@ -77,8 +77,15 @@ export async function runJourneys(options: {
   journeys: Journey[];
   exclusions?: Exclusion[];
   requestTimeoutMs?: number;
+  /** Tracked session cookie name; stacks differ (Fastify sessionId, Hono ts_session). */
+  sessionCookieName?: string;
 }) {
   const timeoutMs = validateRequestTimeout(options.requestTimeoutMs ?? 30_000);
+  const sessionCookieName = options.sessionCookieName ?? 'sessionId';
+  const sessionCookiePrefix = `${sessionCookieName}=`;
+  const sessionCookieSplit = new RegExp(
+    `,(?=\\s*${sessionCookieName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=)`
+  );
   const results: Result[] = [];
   const reached = new Set<string>();
   const exclusions = options.exclusions ?? [];
@@ -169,9 +176,9 @@ export async function runJourneys(options: {
           actual = response.status;
           const setCookies = response.headers.getSetCookie();
           const sessionCookies = setCookies
-            .flatMap((value) => value.split(/,(?=\s*sessionId=)/))
+            .flatMap((value) => value.split(sessionCookieSplit))
             .map((value) => value.trim().split(';')[0])
-            .filter((value) => value.startsWith('sessionId='))
+            .filter((value) => value.startsWith(sessionCookiePrefix))
             .sort((a, b) => b.length - a.length);
           if (sessionCookies[0]) cookie = sessionCookies[0];
           pass = actual === step.expected;

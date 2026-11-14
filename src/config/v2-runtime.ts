@@ -230,6 +230,8 @@ function parseCorsOrigins(raw: string | undefined): string[] {
 
 /** Node V2 entrypoint environment (`src/hono-server.ts`). */
 export interface NodeV2Env {
+  /** Accepts `process.env` and partial test environments. */
+  [key: string]: string | undefined;
   NODE_ENV?: string | undefined;
   HONO_PUBLIC_ORIGIN?: string | undefined;
   HONO_CORS_ORIGINS?: string | undefined;

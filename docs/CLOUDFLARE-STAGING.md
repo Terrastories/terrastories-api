@@ -64,6 +64,8 @@ and roadmap Phase 9; this document does not declare a release ready.
    npx wrangler deploy --env staging --dry-run
    npx wrangler secret put JWT_SECRET --env staging
    npx wrangler secret put SESSION_SECRET --env staging
+   npx wrangler d1 info terrastories-staging --env staging
+   npx wrangler d1 export terrastories-staging --remote --env staging --output "d1-backup-$(date -u +%Y%m%dT%H%M%SZ).sql"
    npx wrangler d1 time-travel info terrastories-staging --env staging
    npx wrangler d1 migrations apply terrastories-staging --remote --env staging
    npx wrangler deploy --env staging
@@ -71,10 +73,13 @@ and roadmap Phase 9; this document does not declare a release ready.
 
    Review the dry-run output and account before remote mutations. Provision the
    isolated D1 database and R2 bucket and configure their bindings before applying
-   migrations. Record the bookmark that `d1 time-travel info` prints
+   migrations. Check that `d1 info` reports `version: production` (Time Travel
+   needs it; Wrangler 3.4.0 or later). Keep the timestamped export as a
+   retained copy, and record the bookmark that `d1 time-travel info` prints
    immediately before the apply. `wrangler d1 migrations apply` is not known to
    run a migration file atomically. If a run fails after a migration's guard,
-   restore in place with
+   restore in place (destructive: it overwrites the database, cancels in-flight
+   queries and asks for confirmation) with
    `npx wrangler d1 time-travel restore terrastories-staging --env staging --bookmark=<bookmark>`,
    repair the data, and re-apply. Time Travel is always on: 7 days of history
    on Workers Free, 30 on Paid

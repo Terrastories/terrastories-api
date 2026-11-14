@@ -619,6 +619,33 @@ describe('response cancellation deadlines', () => {
 });
 
 describe('contract classification and HTTP baseUrl transport', () => {
+  it('rejects an unknown contract label on a journey or a step before sending a request', async () => {
+    let requests = 0;
+    const handler = async () => {
+      requests += 1;
+      return new Response('{}');
+    };
+    const routes = [{ method: 'GET', path: '/items' }];
+    const step = { name: 'list', method: 'GET', path: '/items', expected: 200 };
+    await expect(
+      runJourneys({
+        contract: 'canonical-v2',
+        routes,
+        handler,
+        journeys: [{ persona: 'viewer', contract: 'legacy', steps: [step] }],
+      } as unknown as Parameters<typeof runJourneys>[0])
+    ).rejects.toThrow("Invalid contract class on journey 'viewer'");
+    await expect(
+      runJourneys({
+        contract: 'canonical-v2',
+        routes,
+        handler,
+        journeys: [{ persona: 'viewer', steps: [{ ...step, contract: 'v2' }] }],
+      } as unknown as Parameters<typeof runJourneys>[0])
+    ).rejects.toThrow("Invalid contract class on step 'viewer/list'");
+    expect(requests).toBe(0);
+  });
+
   it('requires an explicit contract class and records canonical-v2 on report, results and summary', async () => {
     await expect(
       runJourneys({

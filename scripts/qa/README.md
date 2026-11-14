@@ -80,8 +80,8 @@ supplies it through the repository test setup. For a deployed target, supply
 `createFixture({baseUrl})`. That module must provision isolated QA data and return
 `contract`, `routes`, `journeys`, optional reasoned `exclusions`, and an asynchronous `close`
 cleanup function. The in-process form also returns a `handler(Request)`.
-The SQLite fixture refuses HTTP mode because its database does not seed a remote
-server. Never point a provisioning fixture at community production data.
+The SQLite fixture refuses an external `--base-url` because its database does not seed
+a remote server. Never point a provisioning fixture at community production data.
 
 Reports default to `qa-report.json`; use `--report PATH` to select another path.
 Reports contain request paths and outcomes, without credentials or cookies.

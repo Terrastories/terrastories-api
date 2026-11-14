@@ -36,6 +36,7 @@ import {
 } from '../../src/db/schema/sessions.js';
 import { openPersonaQaDatabase } from './qa-database.js';
 import type { WidenedQaDatabase } from './qa-database.js';
+import { readRuleOutcome } from '../../src/policy/read-rules.js';
 import type { TestFixtures } from '../../tests/helpers/database.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
@@ -950,6 +951,30 @@ export async function createFixture(
         !text.includes('QA members-only speaker')
       );
     };
+    /**
+     * §6.4a derivation (#190): expected status for an Explore read of a
+     * seeded place by its story association. Explore is a public surface
+     * (#162), so every caller — anonymous or any session — gets the
+     * anonymous column; the restricted flag applies the #162 override over
+     * whatever the cell says. Derived from src/policy/read-rules.ts (the
+     * machine-readable §6.4a table) so spec and expectations cannot drift.
+     */
+    const explorePlaceStatus = (
+      association:
+        | 'via-readable-story'
+        | 'story-less'
+        | 'via-unreadable-stories-only',
+      restricted = false
+    ): number =>
+      readRuleOutcome({
+        resource: 'place',
+        association,
+        viewer: 'anonymous-public',
+        restrictedOrUnevidenced: restricted,
+      }) === 'hidden'
+        ? 404
+        : 200;
+
     const explore: Step[] = [
       {
         name: 'explore communities list',
@@ -1186,7 +1211,8 @@ export async function createFixture(
         name: 'explore place detail',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${publicPlace.id}`,
-        expected: 200,
+        // §6.4a cell: anonymous × place via a readable story.
+        expected: explorePlaceStatus('via-readable-story'),
         check: (body) => {
           const data = (
             body as { data?: { id?: number; points?: { id?: number }[] } }
@@ -1199,10 +1225,11 @@ export async function createFixture(
       },
       {
         // Hidden by the restricted flag alone: a public story evidences it.
+        // §6.4a: the #162 override hides the readable-story cell.
         name: 'hide restricted place',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${restrictedPlace.id}`,
-        expected: 404,
+        expected: explorePlaceStatus('via-readable-story', true),
       },
       {
         // Hidden by the §6.4a association rule alone: unrestricted, valid
@@ -1210,7 +1237,7 @@ export async function createFixture(
         name: 'hide unassociated place',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${unassociatedPlace.id}`,
-        expected: 404,
+        expected: explorePlaceStatus('story-less'),
       },
       {
         // #191/§6.4a: the members-only place is unrestricted with valid
@@ -1220,7 +1247,7 @@ export async function createFixture(
         name: 'hide members-only story place',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${membersPlace.id}`,
-        expected: 404,
+        expected: explorePlaceStatus('via-unreadable-stories-only'),
       },
       {
         name: 'reject cross-community place id',
@@ -1235,7 +1262,8 @@ export async function createFixture(
         name: 'explore foreign place detail',
         method: 'GET',
         path: `/explore/communities/${foreignCommunitySlug}/places/${foreignPlace.id}`,
-        expected: 200,
+        // §6.4a cell: anonymous × place via a readable story.
+        expected: explorePlaceStatus('via-readable-story'),
         check: (body) => {
           const data = (
             body as { data?: { id?: number; points?: { id?: number }[] } }
@@ -1355,13 +1383,14 @@ export async function createFixture(
         name: 'hide restricted place while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${restrictedPlace.id}`,
-        expected: 404,
+        // §6.4a/#162: same anonymous cell — Explore is a public surface.
+        expected: explorePlaceStatus('via-readable-story', true),
       },
       {
         name: 'hide unassociated place while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${unassociatedPlace.id}`,
-        expected: 404,
+        expected: explorePlaceStatus('story-less'),
       },
       {
         // #191: the members-only story's own place stays unreachable for
@@ -1369,7 +1398,7 @@ export async function createFixture(
         name: 'hide members-only story place while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${membersPlace.id}`,
-        expected: 404,
+        expected: explorePlaceStatus('via-unreadable-stories-only'),
       },
       {
         name: 'reject cross-community story id while authenticated',

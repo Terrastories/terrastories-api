@@ -1,41 +1,17 @@
 import { writeFile } from 'node:fs/promises';
-import { format } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { decidePostgresPersonaQa } from '../../../scripts/qa/qa-database.js';
 import {
   createFixture,
   HONO_PERSONA_CULTURAL_STRINGS,
 } from '../../../scripts/qa/hono-fixture.js';
-import { runJourneys } from '../../../scripts/qa/runner.js';
+import { runJourneysCapturingOutput } from '../../../scripts/qa/output-capture.js';
 
-/**
- * #191: capture every console write while the journeys run, so the assertion
- * below can prove cultural content (seeded story titles, descriptions, place
- * names) never reaches log output. The Hono app has no logging seam —
- * `src/hono-app.ts` answers errors without logging anything and the Explore
- * adapter logs nothing — so the in-process wrappers (this PostgreSQL wrapper
- * and the SQLite one) assert over console output. The Workers wrapper runs
- * the app inside workerd, where console output is out of process and is not
- * captured.
- */
-const runJourneysCapturingConsole = async (
-  fixture: Awaited<ReturnType<typeof createFixture>>
-) => {
-  const methods = ['log', 'info', 'warn', 'error', 'debug', 'trace'] as const;
-  const originals = methods.map((method) => console[method]);
-  const lines: string[] = [];
-  for (const method of methods)
-    console[method] = (...args: unknown[]) => {
-      lines.push(format(...args));
-    };
-  try {
-    return { report: await runJourneys(fixture), lines };
-  } finally {
-    methods.forEach((method, index) => {
-      console[method] = originals[index];
-    });
-  }
-};
+// #191: the shared capture (scripts/qa/output-capture.ts) records every
+// console and process stdout/stderr write while the journeys run, so the
+// assertion below fails if any cultural string reaches log output on either
+// channel (loggers such as pino bypass console and write to the streams
+// directly).
 
 // Module scope: resolve before any hook could rewrite the environment, so
 // the wrapper always reports what the operator actually configured. The
@@ -65,7 +41,7 @@ describe(
           );
         const fixture = await createFixture();
         try {
-          const { report, lines } = await runJourneysCapturingConsole(fixture);
+          const { report, lines } = await runJourneysCapturingOutput(fixture);
           // Sibling of every other report so parallel wrappers never race on
           // one QA_REPORT_PATH and each stack and dialect keeps its own
           // diagnosis file.
@@ -84,9 +60,9 @@ describe(
             'unreached Hono endpoints need journeys or reviewed exclusions'
           ).toEqual([]);
           expect(report.pass).toBe(true);
-          // #191: no cultural content may appear in any console line the app
-          // emitted while serving the journeys (empty today: the app logs
-          // nothing, which this assertion keeps true).
+          // #191: no cultural content may appear in any console or stream
+          // line the app emitted while serving the journeys (empty today:
+          // the app logs nothing, which this assertion keeps true).
           expect(
             lines.filter((line) =>
               HONO_PERSONA_CULTURAL_STRINGS.some((text) => line.includes(text))

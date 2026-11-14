@@ -10,7 +10,7 @@
  * journeys: a members-only story, a deactivated-but-public community, the
  * explicit publicStories=false surface, the #180 story serialization shapes,
  * and the exported cultural strings the in-process wrappers keep out of
- * console output.
+ * captured console and stream output.
  * A caller may instead supply a backend (same journeys, same expectations)
  * whose database handle, media store and request handler come from elsewhere
  * — the Workers build (#199) seeds D1, stores media in R2 and dispatches to
@@ -89,13 +89,17 @@ const ownUser =
 export const HONO_PERSONA_PASSWORD = 'QaHonoPassword123!';
 
 /**
- * Seeded story titles, story descriptions and place names (#191): cultural
- * content that must never appear in app log output. The Hono app has no
- * logging seam (`src/hono-app.ts` answers errors silently and the Explore
- * adapter logs nothing), so the in-process wrappers (SQLite and PostgreSQL)
- * capture console writes during the journeys and assert none of these
- * strings appear in any line; the Workers wrapper runs the app inside
- * workerd, where console output is out of process and is not captured.
+ * Seeded story titles, story descriptions, place names and speaker names
+ * (#191): cultural content that must never appear in app log output — in
+ * Indigenous storytelling data sovereignty, speaker identities (elders,
+ * knowledge keepers) are protected cultural data like story text. The Hono
+ * app has no logging seam (`src/hono-app.ts` answers errors silently and
+ * the Explore adapter logs nothing), so the in-process wrappers (SQLite and
+ * PostgreSQL) capture console methods and process stdout/stderr writes
+ * during the journeys (scripts/qa/output-capture.ts) and assert none of
+ * these strings appear in any captured line; the Workers wrapper runs the
+ * app inside workerd, where console output is out of process and is not
+ * captured.
  */
 export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
   'QA public story',
@@ -109,11 +113,20 @@ export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
   'QA members-only story description',
   'QA inactive community story',
   'QA inactive community story description',
+  'QA private community story',
+  'QA private community story description',
   'QA public place',
   'QA restricted place',
   'QA unassociated place',
+  'QA members-only place',
   'QA foreign place',
   'QA inactive community place',
+  'QA private community place',
+  'QA hono speaker',
+  'QA members-only speaker',
+  'QA foreign speaker',
+  'QA inactive community speaker',
+  'QA private community speaker',
 ];
 
 /**
@@ -360,10 +373,13 @@ export async function createFixture(
       JSON.stringify({ accessLevel: 'family' })
     );
     // Explore gates (#162 option A), each fixture withholding exactly one
-    // property: every gated story carries the same evidence edges as the
-    // public story (restricted/unknown-privacy/members-only in this
-    // community, foreign in its own public community), the unevidenced story
-    // alone has no edges, and foreign ids answer the same 404 on another
+    // property: every gated story is fully evidenced — the restricted and
+    // unknown-privacy stories share the public story's edges, the
+    // members-only story carries its own distinct edges (so a projection
+    // leak of them changes the exact id sets instead of hiding inside rows
+    // the public story already evidences), and the foreign story is
+    // evidenced in its own public community — the unevidenced story alone
+    // has no edges, and foreign ids answer the same 404 on another
     // community's slug.
     const [publicPlace, restrictedPlace, unassociatedPlace] = await db
       .insert(places)
@@ -410,6 +426,27 @@ export async function createFixture(
         isActive: true,
       })
       .returning();
+    // #191: distinct edges for the members-only story, used by no visible
+    // story — otherwise its place/speaker are the public story's rows
+    // already present in every expected set, and a leak of members-only
+    // edges into map points or filter options passes vacuously.
+    const [membersPlace] = await db
+      .insert(places)
+      .values({
+        name: 'QA members-only place',
+        communityId,
+        latitude: -3,
+        longitude: -60,
+      })
+      .returning();
+    const [membersSpeaker] = await db
+      .insert(speakers)
+      .values({
+        name: 'QA members-only speaker',
+        communityId,
+        isActive: true,
+      })
+      .returning();
     // #191 fail-closed community gate: a community that is public but
     // DEACTIVATED (publicStories true, isActive false — the schema's names
     // for the SPEC §4/§6.1 publication and lifecycle flags). It owns a fully
@@ -450,6 +487,29 @@ export async function createFixture(
         isActive: true,
       })
       .returning();
+    // #191 publicStories=false fixtures: the private (Demo) community's OWN
+    // fully publishable rows — a public, unrestricted, evidenced story with
+    // its own place and speaker. A story id of another community 404s under
+    // the private slug through community id scoping alone even without the
+    // publication flag, so only these own rows make the 404s below prove the
+    // publicStories=false gate itself.
+    const [privatePlace] = await db
+      .insert(places)
+      .values({
+        name: 'QA private community place',
+        communityId: privateCommunityId,
+        latitude: -3,
+        longitude: -60,
+      })
+      .returning();
+    const [privateSpeaker] = await db
+      .insert(speakers)
+      .values({
+        name: 'QA private community speaker',
+        communityId: privateCommunityId,
+        isActive: true,
+      })
+      .returning();
     const [
       publicStory,
       restrictedStory,
@@ -458,6 +518,7 @@ export async function createFixture(
       foreignStory,
       membersStory,
       inactiveStory,
+      privateStory,
     ] = await db
       .insert(stories)
       .values([
@@ -503,8 +564,11 @@ export async function createFixture(
           // #191: V1's story service checked isRestricted but not
           // privacyLevel, so a members-only story was returned by id. Option
           // A (#162): Explore is a public surface; members-only content never
-          // appears there for any persona. Same evidence edges as the public
-          // story, so its absence is the privacy gate alone.
+          // appears there for any persona. Fully evidenced through its OWN
+          // distinct place and speaker (membersPlace/membersSpeaker above),
+          // so its absence from list, count, points and filters is the
+          // privacy gate alone — and a projection leak of its edges changes
+          // the exact id sets instead of passing vacuously.
           title: 'QA members-only story',
           slug: 'qa-hono-members',
           communityId,
@@ -522,6 +586,20 @@ export async function createFixture(
           privacyLevel: 'public',
           description: 'QA inactive community story description',
         },
+        {
+          // The private community's own genuinely public row: unrestricted,
+          // fully evidenced by its own place and speaker inside an active
+          // community. Every withholding property is absent except
+          // publicStories=false, so the 404s under the private slug below
+          // isolate that flag (a foreign community's story id would 404
+          // there through id scoping regardless of the flag).
+          title: 'QA private community story',
+          slug: 'qa-hono-private',
+          communityId: privateCommunityId,
+          createdBy: creatorId,
+          privacyLevel: 'public',
+          description: 'QA private community story description',
+        },
       ])
       .returning();
     // Rails-shaped lists join places and speakers, so the public story stays
@@ -534,16 +612,20 @@ export async function createFixture(
       { storyId: unknownStory.id, placeId: publicPlace.id },
       { storyId: foreignStory.id, placeId: foreignPlace.id },
       { storyId: publicStory.id, placeId: restrictedPlace.id },
-      { storyId: membersStory.id, placeId: publicPlace.id },
+      // Distinct edge (#191): no visible story evidences membersPlace.
+      { storyId: membersStory.id, placeId: membersPlace.id },
       { storyId: inactiveStory.id, placeId: inactivePlace.id },
+      { storyId: privateStory.id, placeId: privatePlace.id },
     ]);
     await db.insert(storySpeakers).values([
       { storyId: publicStory.id, speakerId: speaker.id },
       { storyId: restrictedStory.id, speakerId: speaker.id },
       { storyId: unknownStory.id, speakerId: speaker.id },
       { storyId: foreignStory.id, speakerId: foreignSpeaker.id },
-      { storyId: membersStory.id, speakerId: speaker.id },
+      // Distinct edge (#191): no visible story evidences membersSpeaker.
+      { storyId: membersStory.id, speakerId: membersSpeaker.id },
       { storyId: inactiveStory.id, speakerId: inactiveSpeaker.id },
+      { storyId: privateStory.id, speakerId: privateSpeaker.id },
     ]);
     // The runner hands checks the response body only; the handler tracks the
     // live ts_session cookie value (most recent non-empty Set-Cookie) so
@@ -805,7 +887,11 @@ export async function createFixture(
         ) ?? [];
       return (
         JSON.stringify([...slugs].sort()) ===
-        JSON.stringify([communitySlug, foreignCommunitySlug].sort())
+          JSON.stringify([communitySlug, foreignCommunitySlug].sort()) &&
+        // #191: the exact set above already fails on any leak; this names the
+        // deactivated-but-public community so the lifecycle-gate claim maps
+        // to an assertion that mentions its fixture.
+        !slugs.includes(inactiveCommunity.slug)
       );
     };
     /**
@@ -821,6 +907,7 @@ export async function createFixture(
         placeIds: [publicPlace.id],
         speakerIds: [speaker.id],
       })(body);
+      const text = JSON.stringify(body) ?? '';
       // Null-safe read: a missing or non-string displayImage fails the check
       // below instead of throwing.
       const displayImage = (
@@ -830,7 +917,12 @@ export async function createFixture(
         projection &&
         typeof displayImage === 'string' &&
         displayImage.endsWith(`/explore/media/${readableFileId}`) &&
-        !(JSON.stringify(body) ?? '').includes(String(restrictedFileId))
+        !text.includes(String(restrictedFileId)) &&
+        // #191: the members-only story's own edges stay out even as filter
+        // labels — the id-level leak is already pinned by the exact sets in
+        // the projection above; this catches a serializer naming the rows.
+        !text.includes('QA members-only place') &&
+        !text.includes('QA members-only speaker')
       );
     };
     const explore: Step[] = [
@@ -862,9 +954,9 @@ export async function createFixture(
       {
         // #191 explicit publicStories=false surface: the private community
         // (publicStories false, isActive true) 404s on every Explore path
-        // under its slug — including ids that are genuinely public rows of
-        // another community, so the publication gate withholds even public
-        // content.
+        // under its slug — including its OWN fully publishable rows (the
+        // story and place below), so the 404s prove the publication flag,
+        // not cross-community id scoping.
         name: 'hide private community stories',
         method: 'GET',
         path: `/explore/communities/${privateCommunitySlug}/stories`,
@@ -873,13 +965,13 @@ export async function createFixture(
       {
         name: 'hide private community story',
         method: 'GET',
-        path: `/explore/communities/${privateCommunitySlug}/stories/${publicStory.id}`,
+        path: `/explore/communities/${privateCommunitySlug}/stories/${privateStory.id}`,
         expected: 404,
       },
       {
         name: 'hide private community place',
         method: 'GET',
-        path: `/explore/communities/${privateCommunitySlug}/places/${publicPlace.id}`,
+        path: `/explore/communities/${privateCommunitySlug}/places/${privatePlace.id}`,
         expected: 404,
       },
       {
@@ -1024,7 +1116,7 @@ export async function createFixture(
       },
       {
         // #191: hidden by the privacy gate alone — privacyLevel 'members'
-        // with the same evidence edges as the public story. V1's story
+        // while fully evidenced through its own distinct edges. V1's story
         // service checked isRestricted but not privacyLevel and returned
         // members-only stories by id; option A (#162) keeps members-only
         // content off the public Explore surface for every persona.
@@ -1096,6 +1188,16 @@ export async function createFixture(
         expected: 404,
       },
       {
+        // #191/§6.4a: the members-only place is unrestricted with valid
+        // coordinates in the public community, but its only association is
+        // the members-only story — with that story hidden, the place is
+        // unreachable and 404s exactly like the unassociated place.
+        name: 'hide members-only story place',
+        method: 'GET',
+        path: `/explore/communities/${communitySlug}/places/${membersPlace.id}`,
+        expected: 404,
+      },
+      {
         name: 'reject cross-community place id',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${foreignPlace.id}`,
@@ -1162,11 +1264,11 @@ export async function createFixture(
         expected: 404,
       },
     ];
-    // Explore is anonymous-public: with a session cookie, editor, community
-    // admin and super_admin must see exactly the same projection — the
-    // community list (exact slug set, private community absent) and detail
-    // (exact counts, points, filters and displayImage) included; withheld
-    // rows stay 404 and nothing already public narrows.
+    // Explore is anonymous-public: with a session cookie, member, editor,
+    // community admin and super_admin must see exactly the same projection —
+    // the community list (exact slug set, private community absent) and
+    // detail (exact counts, points, filters and displayImage) included;
+    // withheld rows stay 404 and nothing already public narrows.
     const exploreWithSession: Step[] = [
       {
         name: 'explore communities list while authenticated',
@@ -1234,6 +1336,14 @@ export async function createFixture(
         name: 'hide unassociated place while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${unassociatedPlace.id}`,
+        expected: 404,
+      },
+      {
+        // #191: the members-only story's own place stays unreachable for
+        // authenticated personas too — privilege never widens §6.4a.
+        name: 'hide members-only story place while authenticated',
+        method: 'GET',
+        path: `/explore/communities/${communitySlug}/places/${membersPlace.id}`,
         expected: 404,
       },
       {
@@ -1328,29 +1438,15 @@ export async function createFixture(
             expected: 200,
             check: ownUser(credentials[role].email, role, liveSessionCookie),
           },
-          // #191 option A from the persona whose canonical role would grant
-          // the community audience: Explore stays a public surface for a
-          // member too — exact anonymous list, members-only story 404.
-          ...(role === 'member'
-            ? [
-                {
-                  name: 'explore stories list as member',
-                  method: 'GET',
-                  path: `/explore/communities/${communitySlug}/stories`,
-                  expected: 200,
-                  check: storiesListCheck,
-                },
-                {
-                  name: 'hide members-only story from member persona',
-                  method: 'GET',
-                  path: `/explore/communities/${communitySlug}/stories/${membersStory.id}`,
-                  expected: 404,
-                },
-              ]
+          // #191 option A across the full claimed matrix: member — the
+          // persona whose canonical role would grant the community audience —
+          // joins editor and community admin in driving the authenticated
+          // Explore steps, so the stories list (exact ids), community detail
+          // (counts/points/filters) and the members-only 404 hold for every
+          // role the README names, each while authenticated.
+          ...(role === 'member' || role === 'editor' || role === 'admin'
+            ? exploreWithSession
             : []),
-          // Explore with a session: editor and community admin must see the
-          // same anonymous projection (no widening, no narrowing).
-          ...(role === 'editor' || role === 'admin' ? exploreWithSession : []),
           {
             name: 'read own community media',
             method: 'GET',

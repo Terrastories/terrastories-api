@@ -56,9 +56,10 @@ scoping alone. An unrestricted file in the private community isolates the
 Explore community-publication gate. The [#191 fail-closed cases](#191-fail-closed-cases)
 extend the same one-fixture-one-gate set (members-only story,
 deactivated-but-public community, explicit `publicStories=false` surface).
-Editor, community admin and super_admin
+Member, editor, community admin and super_admin
 also drive the Explore steps with a session cookie: the anonymous projection
-never widens for an authenticated caller. The Vitest
+never widens for an authenticated caller — member included, the persona whose
+canonical role would grant the community audience. The Vitest
 wrapper `tests/scripts/qa/hono.test.ts` runs inside
 `npm run qa:personas:sqlite` and, when `QA_REPORT_PATH` is set, writes a
 sibling report ending in `-hono.json` so parallel wrappers never race on one
@@ -103,22 +104,29 @@ The Hono fixture seeds the V1 public-projection leaks as fail-closed cases on
 every backend (SQLite, PostgreSQL 13, Workers D1 — one fixture, three
 backends):
 
-- A `privacyLevel 'members'` story with the same place/speaker edges as the
-  public story: absent from the stories list (exact id set, `meta.total`),
+- A `privacyLevel 'members'` story with its own place and speaker edges,
+  used by no visible story (so a projection leak of those edges changes the
+  exact id sets instead of hiding inside rows the public story already
+  evidences): absent from the stories list (exact id set, `meta.total`),
   absent from community-detail counts/points/filters (`storiesCount` pins the
   count a V1-style leak would inflate), and 404 by id for anonymous,
   member, editor, admin and super_admin personas (ruling #162 option A:
-  Explore is a public surface; members-only content never appears there).
-  V1's story service checked `isRestricted` but not `privacyLevel`.
+  Explore is a public surface; members-only content never appears there) —
+  each of list, community detail and 404 asserted while authenticated for
+  every one of those roles. Its place and speaker stay out of points,
+  filters and place detail (404: its only association is the hidden story,
+  §6.4a). V1's story service checked `isRestricted` but not `privacyLevel`.
 - A community with `isActive` false but `publicStories` true (the schema's
   names for the SPEC §4/§6.1 lifecycle and publication flags), owning a fully
   evidenced public story, its own place/speaker and an unrestricted branding
   file: the communities list excludes it (exact slug set), and detail,
   stories, story, place and `/explore/media` under it are 404 — the lifecycle
   gate alone.
-- The `publicStories=false` surface made explicit: stories, story (a genuinely
-  public row's id) and place under the private community's slug are 404,
-  alongside the existing detail and media 404s.
+- The `publicStories=false` surface made explicit: stories, story and place —
+  the private community's own fully evidenced, unrestricted public rows, so
+  the 404s are the publication flag rather than cross-community id scoping —
+  under the private community's slug are 404, alongside the existing detail
+  and media 404s.
 - #180 on Hono: story list rows and story detail assert the exact key sets
   fixed by `docs/EXPLORE-ADAPTER.md` with populated `title`/`desc` — never
   `{}`.
@@ -126,11 +134,15 @@ backends):
   `src/hono-app.ts` answers errors without logging anything and the Explore
   adapter logs nothing — so the **in-process wrappers only** (SQLite
   `tests/scripts/qa/hono.test.ts` and PostgreSQL
-  `tests/scripts/qa-postgres/postgres-hono.test.ts`) capture console output
-  during the journeys and assert no seeded story title, description or place
-  name (`HONO_PERSONA_CULTURAL_STRINGS`) appears in any line. The Workers
-  wrapper runs the app inside workerd, where console output is out of process
-  and is not captured.
+  `tests/scripts/qa-postgres/postgres-hono.test.ts`, through the shared
+  `scripts/qa/output-capture.ts`) capture console methods and
+  `process.stdout`/`process.stderr` writes during the journeys and assert no
+  seeded story title, description, place or speaker name
+  (`HONO_PERSONA_CULTURAL_STRINGS`) appears in any captured line. Speaker
+  names are protected cultural data like story text; stream writes are
+  captured because loggers such as pino bypass `console` entirely. The
+  Workers wrapper runs the app inside workerd, where console output is out of
+  process and is not captured.
 
 ## PostgreSQL 13
 
@@ -218,7 +230,7 @@ independently checked, and a worker-only route registered outside
 `createHonoApp` would escape coverage. The in-process SQLite and PostgreSQL
 runs, by contrast, derive coverage from the app they actually serve. Every
 endpoint must be reached with zero exclusions — today all 13 endpoints are,
-by 135 steps across the same personas.
+by 152 steps across the same personas.
 
 The wrapper `tests/scripts/qa-workers/workers-hono.test.ts` lives outside
 `tests/scripts/qa/`, so `qa:personas:sqlite` never collects it, and runs

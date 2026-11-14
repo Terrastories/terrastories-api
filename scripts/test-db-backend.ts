@@ -2009,6 +2009,14 @@ async function verifyPostgresTransactionAndForeignKey(
         INSERT INTO audit_entries (community_id, actor_id, action, resource_type, resource_ids, outcome, ip_address)
         VALUES (${comm}, ${saId}, 'claim_token.issue', 'claim_token', '[1]'::jsonb, 'success', '203.0.113.1')
       `;
+      await assert.rejects(
+        tx.savepoint(async (sp) => sp`DELETE FROM users WHERE id = ${saId}`)
+      );
+      await assert.rejects(
+        tx.savepoint(
+          async (sp) => sp`DELETE FROM communities WHERE id = ${comm}`
+        )
+      );
       throw new Error('slice3a_pg_probe_rollback');
     }),
     /slice3a_pg_probe_rollback/

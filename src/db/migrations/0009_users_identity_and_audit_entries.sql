@@ -213,6 +213,11 @@ CREATE UNIQUE INDEX `files_community_id_id_unique` ON `files` (`community_id`,`i
 --> statement-breakpoint
 DROP INDEX `_137_files_community_id_id_unique`;
 --> statement-breakpoint
+DELETE FROM `sqlite_sequence` WHERE `name` = 'users';
+--> statement-breakpoint
+INSERT INTO `sqlite_sequence` (`name`, `seq`)
+SELECT 'users', `seq` FROM `sqlite_sequence` WHERE `name` = 'users_old';
+--> statement-breakpoint
 DROP TABLE `users_old`;
 --> statement-breakpoint
 CREATE UNIQUE INDEX `users_email_community_unique` ON `users` (`email`,`community_id`);
@@ -257,8 +262,8 @@ CREATE TABLE `audit_entries` (
 	`ip_address` text,
 	`user_agent` text,
 	`created_at` integer NOT NULL,
-	CONSTRAINT `audit_entries_community_id_communities_id_fk` FOREIGN KEY (`community_id`) REFERENCES `communities`(`id`) ON UPDATE no action ON DELETE set null,
-	CONSTRAINT `audit_entries_actor_id_users_id_fk` FOREIGN KEY (`actor_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE set null
+	CONSTRAINT `audit_entries_community_id_communities_id_fk` FOREIGN KEY (`community_id`) REFERENCES `communities`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT `audit_entries_actor_id_users_id_fk` FOREIGN KEY (`actor_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE INDEX `idx_audit_entries_community_created_at` ON `audit_entries` (`community_id`,`created_at`);

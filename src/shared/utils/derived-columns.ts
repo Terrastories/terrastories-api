@@ -80,3 +80,30 @@ export function deriveDescriptionForWrite(
     descriptionPlain: plainText.length === 0 ? null : plainText,
   };
 }
+
+/**
+ * Derive normalized email/username columns for V2/coexistence `users` writes
+ * (SPEC-V2 §6.2) so `email_normalized` and `username_normalized` never drift
+ * from the stored raw values.
+ */
+export function deriveUserIdentityColumns(fields: {
+  email?: string;
+  username?: string | null;
+}): {
+  emailNormalized?: string;
+  usernameNormalized?: string | null;
+} {
+  return {
+    ...(fields.email !== undefined
+      ? { emailNormalized: normalizeSearchText(fields.email) }
+      : {}),
+    ...(fields.username !== undefined
+      ? {
+          usernameNormalized:
+            fields.username === null
+              ? null
+              : normalizeSearchText(fields.username),
+        }
+      : {}),
+  };
+}

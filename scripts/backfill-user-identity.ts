@@ -14,8 +14,13 @@ async function main(): Promise<void> {
   const db = await initializeDatabase();
   const result = await backfillUserIdentity(db);
   console.log(
-    `Backfilled user identities: scanned=${result.scanned}, updated=${result.updated}`
+    `Backfilled user identities: scanned=${result.scanned}, updated=${result.updated}, drifted=${result.drifted}`
   );
+  if (result.drifted > 0) {
+    console.warn(
+      `Identity normalization drift repaired for user IDs: ${result.driftedUserIds.join(', ')}`
+    );
+  }
 }
 
 main().catch((error) => {

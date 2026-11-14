@@ -1626,7 +1626,7 @@
           "tableTo": "communities",
           "columnsFrom": ["community_id"],
           "columnsTo": ["id"],
-          "onDelete": "set null",
+          "onDelete": "no action",
           "onUpdate": "no action"
         },
         "audit_entries_actor_id_users_id_fk": {
@@ -1635,7 +1635,7 @@
           "tableTo": "users",
           "columnsFrom": ["actor_id"],
           "columnsTo": ["id"],
-          "onDelete": "set null",
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },

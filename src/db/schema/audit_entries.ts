@@ -4,7 +4,10 @@
  * Per SPEC-V2 §6.8 and §7:
  * - Append-only content-free security and lifecycle audit log.
  * - No update is permitted except the 90-day scrub nullifying ip_address and user_agent.
- * - Deletion happens only through community erasure.
+ * - Deletion happens only through community erasure; FKs use ON DELETE NO ACTION
+ *   so deleting a community or user fails while audit entries exist, and the
+ *   erasure slice must delete a community's audit entries explicitly before
+ *   removing parent rows.
  */
 
 import {
@@ -34,10 +37,10 @@ export const auditEntriesPg = pgTable(
   {
     id: serial('id').primaryKey(),
     communityId: pgInteger('community_id').references(() => communitiesPg.id, {
-      onDelete: 'set null',
+      onDelete: 'no action',
     }),
     actorId: pgInteger('actor_id').references(() => usersPg.id, {
-      onDelete: 'set null',
+      onDelete: 'no action',
     }),
     action: pgText('action').notNull(),
     resourceType: pgText('resource_type'),
@@ -72,11 +75,11 @@ export const auditEntriesSqlite = sqliteTable(
     communityId: integer('community_id').references(
       () => communitiesSqlite.id,
       {
-        onDelete: 'set null',
+        onDelete: 'no action',
       }
     ),
     actorId: integer('actor_id').references(() => usersSqlite.id, {
-      onDelete: 'set null',
+      onDelete: 'no action',
     }),
     action: sqliteText('action').notNull(),
     resourceType: sqliteText('resource_type'),

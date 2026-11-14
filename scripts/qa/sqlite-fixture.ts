@@ -9,6 +9,7 @@ import { createTestApp } from '../../tests/helpers/api-client.js';
 import { hash } from 'argon2';
 import { createJourneys, type PersonaFixture } from './personas/index.js';
 import type { Endpoint, Handler } from './runner.js';
+import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
 
 export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
   if (baseUrl)
@@ -68,6 +69,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         .insert(users)
         .values({
           email,
+          ...deriveUserIdentityColumns({ email }),
           passwordHash,
           firstName: 'QA',
           lastName: role,
@@ -88,6 +90,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       .insert(users)
       .values({
         email: 'qa-holder@example.test',
+        ...deriveUserIdentityColumns({ email: 'qa-holder@example.test' }),
         passwordHash,
         firstName: 'QA',
         lastName: 'Holder',
@@ -106,6 +109,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       .insert(users)
       .values({
         email: 'qa-foreign@example.test',
+        ...deriveUserIdentityColumns({ email: 'qa-foreign@example.test' }),
         passwordHash,
         firstName: 'Foreign',
         lastName: 'User',

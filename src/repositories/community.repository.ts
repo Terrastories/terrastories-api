@@ -25,6 +25,7 @@ import type { CommunityClaimState } from '../shared/authorization/administrative
 import { communityToPhysical } from '../policy/canonical-state.js';
 import type { Community } from '../db/schema/communities.js';
 import type { Database } from '../db/index.js';
+import { deriveUserIdentityColumns } from '../shared/utils/derived-columns.js';
 
 // Re-export Community type for other modules
 export type { Community } from '../db/schema/communities.js';
@@ -754,6 +755,21 @@ export class CommunityRepository {
     const communityId = values.communityId;
     const isClaimed = (accounts: number, contentCounts: number[]) =>
       accounts > 0 || contentCounts.some((rows) => rows > 0);
+    const {
+      emailNormalized: _ignoredEmailNormalized,
+      usernameNormalized: _ignoredUsernameNormalized,
+      ...safeValues
+    } = values;
+    const insertValues = {
+      ...safeValues,
+      ...deriveUserIdentityColumns({
+        email: typeof values.email === 'string' ? values.email : undefined,
+        username:
+          typeof values.username === 'string' || values.username === null
+            ? values.username
+            : undefined,
+      }),
+    };
 
     if (this.dialect === 'postgresql') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dialect union, see `db` above (#135).
@@ -775,7 +791,10 @@ export class CommunityRepository {
         if (isClaimed(Number(accounts?.count ?? 0), contentCounts)) {
           return null;
         }
-        const [created] = await tx.insert(users).values(values).returning();
+        const [created] = await tx
+          .insert(users)
+          .values(insertValues)
+          .returning();
         return created ?? null;
       });
     }
@@ -792,7 +811,7 @@ export class CommunityRepository {
         if (isClaimed(Number(accounts?.count ?? 0), contentCounts)) {
           return null;
         }
-        return tx.insert(users).values(values).returning().get() ?? null;
+        return tx.insert(users).values(insertValues).returning().get() ?? null;
       },
       { behavior: 'immediate' }
     );

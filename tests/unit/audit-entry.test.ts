@@ -93,6 +93,70 @@ describe('AuditEntry content-free validator and 90-day scrub helper', () => {
     expect(() =>
       validateContentFreeAuditEntry({ ...base, ipAddress: '198.51.100.2' })
     ).toThrow(AuditEntryValidationError);
+    expect(() =>
+      validateContentFreeAuditEntry({
+        ...base,
+        createdAt: new Date('2020-01-01T00:00:00.000Z'),
+      })
+    ).toThrow(AuditEntryValidationError);
+  });
+
+  it('requires a non-null communityId for non-auth/system resources and allows null only for auth/system events', () => {
+    expect(
+      validateContentFreeAuditEntry({
+        communityId: null,
+        actorId: 1,
+        action: 'auth.login',
+        resourceType: null,
+        outcome: 'failure',
+        ipAddress: '203.0.113.10',
+      }).communityId
+    ).toBeNull();
+
+    expect(
+      validateContentFreeAuditEntry({
+        communityId: null,
+        actorId: 1,
+        action: 'system.bootstrap',
+        resourceType: 'bootstrap',
+        outcome: 'success',
+      }).communityId
+    ).toBeNull();
+
+    for (const invalid of [
+      {
+        communityId: null,
+        action: 'story.publish',
+        resourceType: 'story',
+        resourceIds: [1],
+        outcome: 'success',
+      },
+      {
+        communityId: null,
+        action: 'claim_token.issue',
+        resourceType: 'claim_token',
+        resourceIds: [5],
+        outcome: 'success',
+      },
+      {
+        communityId: null,
+        action: 'user.update',
+        resourceType: 'user',
+        resourceIds: [9],
+        outcome: 'success',
+      },
+      {
+        communityId: null,
+        action: 'story.delete',
+        resourceType: null,
+        resourceIds: [1],
+        outcome: 'success',
+      },
+    ]) {
+      expect(() => validateContentFreeAuditEntry(invalid)).toThrow(
+        AuditEntryValidationError
+      );
+    }
   });
 
   it('scrubs ipAddress and userAgent at or before the 90-day cutoff idempotently', () => {

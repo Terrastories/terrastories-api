@@ -19,7 +19,15 @@ import {
   scrubExpiredAuditNetworkMetadata,
   writeAuditEntry,
 } from '../../src/repositories/audit-entry.repository.js';
+import { UserRepository } from '../../src/repositories/user.repository.js';
+import { CommunityRepository } from '../../src/repositories/community.repository.js';
+import { AuditEntryValidationError } from '../../src/shared/utils/audit-entry.js';
 import { normalizeSearchText } from '../../src/shared/utils/search-normalize.js';
+import {
+  applyD1Migrations,
+  bundleWorkerModule,
+  startWorkerRuntime,
+} from '../helpers/worker-runtime.js';
 
 const migrationsFolder = path.resolve(process.cwd(), 'src/db/migrations');
 
@@ -376,18 +384,21 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
       .where(eq(communitiesSqlite.id, commB.id));
     expect(await countFor(user.id)).toBe(0);
 
-    const now = new Date('2026-11-14T12:00:00.000Z');
-    const oldEntry = await writeAuditEntry(db, {
-      communityId: commA.id,
-      actorId: sa.id,
-      action: 'claim_token.issue',
-      resourceType: 'claim_token',
-      resourceIds: [15],
-      outcome: 'success',
-      ipAddress: '203.0.113.9',
-      userAgent: 'OldUA/1.0',
-      createdAt: new Date(now.getTime() - 95 * 86_400_000),
-    });
+    const now = new Date();
+    const [oldEntry] = await db
+      .insert(auditEntriesSqlite)
+      .values({
+        communityId: commA.id,
+        actorId: sa.id,
+        action: 'claim_token.issue',
+        resourceType: 'claim_token',
+        resourceIds: [15],
+        outcome: 'success',
+        ipAddress: '203.0.113.9',
+        userAgent: 'OldUA/1.0',
+        createdAt: new Date(now.getTime() - 95 * 86_400_000),
+      })
+      .returning();
     const freshEntry = await writeAuditEntry(db, {
       communityId: null,
       actorId: sa.id,
@@ -397,8 +408,28 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
       outcome: 'success',
       ipAddress: '203.0.113.10',
       userAgent: 'NewUA/2.0',
-      createdAt: new Date(now.getTime() - 10 * 86_400_000),
     });
+
+    await expect(
+      writeAuditEntry(db, {
+        communityId: null,
+        actorId: sa.id,
+        action: 'auth.login',
+        resourceType: 'session',
+        outcome: 'success',
+        createdAt: new Date(now.getTime() - 200 * 86_400_000),
+      } as unknown as Parameters<typeof writeAuditEntry>[1])
+    ).rejects.toThrow(AuditEntryValidationError);
+    await expect(
+      writeAuditEntry(db, {
+        communityId: null,
+        actorId: sa.id,
+        action: 'story.publish',
+        resourceType: 'story',
+        resourceIds: [1],
+        outcome: 'success',
+      })
+    ).rejects.toThrow(AuditEntryValidationError);
 
     expect(
       (await scrubExpiredAuditNetworkMetadata(db, { now })).scrubbedCount
@@ -416,11 +447,293 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
     expect(oldAfter.resourceIds).toEqual([15]);
     expect(freshAfter.ipAddress).toBe('203.0.113.10');
 
+    // ON DELETE NO ACTION: referenced user and community cannot be deleted while audit entries exist.
+    expect(() =>
+      db.delete(usersSqlite).where(eq(usersSqlite.id, sa.id)).run()
+    ).toThrow();
+    expect(() =>
+      db
+        .delete(communitiesSqlite)
+        .where(eq(communitiesSqlite.id, commA.id))
+        .run()
+    ).toThrow();
+
+    // Explicit erasure deletes audit entries first, then parent deletion succeeds.
+    await db
+      .delete(auditEntriesSqlite)
+      .where(eq(auditEntriesSqlite.communityId, commA.id));
+    await db
+      .delete(auditEntriesSqlite)
+      .where(eq(auditEntriesSqlite.actorId, sa.id));
     await db.delete(usersSqlite).where(eq(usersSqlite.id, sa.id));
-    const [afterDelete] = await db
+  });
+
+  it('keeps emailNormalized in sync on every repository write and repairs V1 drift in backfillUserIdentity without false collisions', async () => {
+    const { sqlite, db } = setupDb();
+    const userRepo = new UserRepository(db);
+    const communityRepo = new CommunityRepository(db);
+
+    const [commA] = await db
+      .insert(communitiesSqlite)
+      .values({ name: 'SyncA', slug: 'sync-a' })
+      .returning();
+    const [commB] = await db
+      .insert(communitiesSqlite)
+      .values({ name: 'SyncB', slug: 'sync-b' })
+      .returning();
+
+    const firstAdmin = await communityRepo.provisionFirstAdministrator({
+      email: 'First.Admin@EXAMPLE.ORG',
+      passwordHash: 'h',
+      firstName: 'First',
+      lastName: 'Admin',
+      role: 'admin',
+      communityId: commB.id,
+      isActive: true,
+    });
+    expect(firstAdmin?.emailNormalized).toBe('first.admin@example.org');
+
+    const created = await userRepo.create({
+      email: 'ΜΆΡΊΑ@EXAMPLE.ORG',
+      passwordHash: 'h',
+      firstName: 'Maria',
+      lastName: 'K',
+      role: 'viewer',
+      communityId: commA.id,
+    });
+    expect(created.emailNormalized).toBe(
+      normalizeSearchText('ΜΆΡΊΑ@EXAMPLE.ORG')
+    );
+
+    const updated = await userRepo.update(
+      created.id,
+      { email: '  Updated.Maria@EXAMPLE.ORG ' },
+      commA.id
+    );
+    expect(updated?.email).toBe('updated.maria@example.org');
+    expect(updated?.emailNormalized).toBe('updated.maria@example.org');
+
+    const casResult = await userRepo.compareAndSetMembership(
+      created.id,
+      { role: 'viewer', isActive: true, communityId: commA.id },
+      { email: 'CAS.Maria@EXAMPLE.ORG', role: 'member' }
+    );
+    expect(casResult.status).toBe('updated');
+    if (casResult.status === 'updated') {
+      expect(casResult.user.email).toBe('cas.maria@example.org');
+      expect(casResult.user.emailNormalized).toBe('cas.maria@example.org');
+    }
+
+    const saUpdated = await userRepo.updateByIdAsSuperAdmin(created.id, {
+      email: 'Super.Maria@EXAMPLE.ORG',
+    });
+    expect(saUpdated.emailNormalized).toBe('super.maria@example.org');
+
+    // Simulate a V1 email change that left email_normalized stale while another
+    // account legitimately claims the old email (and also test swapped drift).
+    const otherUser = await userRepo.create({
+      email: 'old.slot@example.org',
+      passwordHash: 'h',
+      firstName: 'Other',
+      lastName: 'User',
+      role: 'viewer',
+      communityId: commA.id,
+    });
+    sqlite
+      .prepare('UPDATE users SET email = ? WHERE id = ?')
+      .run('brand.new@example.org', otherUser.id);
+    // Insert a second user taking old.slot@example.org with NULL email_normalized
+    // (as if pre-backfill); backfill must recompute otherUser's new email instead
+    // of keeping stale 'old.slot@example.org' and throwing a false collision.
+    await db.insert(usersSqlite).values({
+      email: 'old.slot@example.org',
+      emailNormalized: null,
+      passwordHash: 'h',
+      firstName: 'New',
+      lastName: 'Holder',
+      role: 'viewer',
+      communityId: commA.id,
+    });
+
+    const result = await backfillUserIdentity(db);
+    expect(result.drifted).toBe(1);
+    expect(result.driftedUserIds).toEqual([otherUser.id]);
+    expect(result.updated).toBe(4); // otherUser + New Holder emailNormalized + displayName backfill
+
+    const [repaired] = await db
       .select()
-      .from(auditEntriesSqlite)
-      .where(eq(auditEntriesSqlite.id, freshEntry.id));
-    expect(afterDelete.actorId).toBeNull();
+      .from(usersSqlite)
+      .where(eq(usersSqlite.id, otherUser.id));
+    expect(repaired.emailNormalized).toBe('brand.new@example.org');
+
+    const [newHolder] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'old.slot@example.org'));
+    expect(newHolder.emailNormalized).toBe('old.slot@example.org');
+
+    const secondPass = await backfillUserIdentity(db);
+    expect(secondPass.updated).toBe(0);
+    expect(secondPass.drifted).toBe(0);
+  });
+
+  it('detects SPEC-V2 §6.2 cross-boundary collisions in backfillUserIdentity (null-community share and username-vs-email)', async () => {
+    const { db } = setupDb();
+    const [comm] = await db
+      .insert(communitiesSqlite)
+      .values({ name: 'Col', slug: 'col' })
+      .returning();
+
+    // 1. Null-community account sharing email with a community account
+    await db.insert(usersSqlite).values([
+      {
+        email: 'Shared@Example.ORG',
+        emailNormalized: null,
+        passwordHash: 'h',
+        firstName: 'Community',
+        lastName: 'User',
+        role: 'admin',
+        communityId: comm.id,
+      },
+      {
+        email: 'shared@example.org',
+        emailNormalized: null,
+        passwordHash: 'h',
+        firstName: 'Super',
+        lastName: 'Admin',
+        role: 'super_admin',
+        communityId: null,
+      },
+    ]);
+
+    await expect(backfillUserIdentity(db)).rejects.toThrow(
+      IdentityNormalizationCollisionError
+    );
+
+    // Clear and test username matching another account's email (normalized)
+    await db.delete(usersSqlite);
+    await db.insert(usersSqlite).values([
+      {
+        email: 'Person.One@Example.ORG',
+        emailNormalized: null,
+        username: 'person.one@example.org', // own email as own username is allowed
+        usernameNormalized: null,
+        passwordHash: 'h',
+        firstName: 'P1',
+        lastName: 'U',
+        role: 'viewer',
+        communityId: comm.id,
+      },
+    ]);
+    expect((await backfillUserIdentity(db)).updated).toBe(1);
+
+    await db.insert(usersSqlite).values({
+      email: 'second@example.org',
+      emailNormalized: null,
+      username: 'PERSON.ONE@EXAMPLE.ORG', // matches Person.One's email -> must fail!
+      usernameNormalized: null,
+      passwordHash: 'h',
+      firstName: 'P2',
+      lastName: 'U',
+      role: 'viewer',
+      communityId: comm.id,
+    });
+    await expect(backfillUserIdentity(db)).rejects.toThrow(
+      IdentityNormalizationCollisionError
+    );
+  });
+
+  it('preserves sqlite_sequence high-water mark for rebuilt users table in SQLite 0009 and D1 (Miniflare)', async () => {
+    const preFolder = createPre0009Folder();
+    tempDirs.push(preFolder);
+
+    // 1. better-sqlite3: delete max-id row before 0009 -> next insert gets id 4
+    const { sqlite, db } = setupDb(preFolder);
+    const now = Date.now();
+    const commId = Number(
+      sqlite
+        .prepare(
+          `INSERT INTO communities (name, slug, created_at, updated_at) VALUES ('SeqC', 'seq-c', ?, ?)`
+        )
+        .run(now, now).lastInsertRowid
+    );
+    for (const email of ['u1@e.org', 'u2@e.org', 'u3@e.org']) {
+      sqlite
+        .prepare(
+          `INSERT INTO users (email, password_hash, first_name, last_name, role, community_id, created_at, updated_at) VALUES (?, 'h', 'F', 'L', 'viewer', ?, ?, ?)`
+        )
+        .run(email, commId, now, now);
+    }
+    sqlite.prepare('DELETE FROM users WHERE id = 3').run();
+    migrate(db, { migrationsFolder });
+
+    const [insertedAfter] = await db
+      .insert(usersSqlite)
+      .values({
+        email: 'u4@e.org',
+        emailNormalized: 'u4@e.org',
+        passwordHash: 'h',
+        firstName: 'F',
+        lastName: 'L',
+        role: 'viewer',
+        communityId: commId,
+      })
+      .returning();
+    expect(insertedAfter.id).toBe(4);
+
+    // 2. Miniflare / workerd D1: verify D1 permits writing sqlite_sequence in 0009
+    const mf = startWorkerRuntime(
+      await bundleWorkerModule(
+        `import worker from './src/worker.js'; export default worker;`
+      )
+    );
+    try {
+      const d1 = await mf.getD1Database('DB');
+      await applyD1Migrations(d1, preFolder);
+      await d1.batch([
+        d1
+          .prepare(
+            `INSERT INTO communities (name, slug, created_at, updated_at) VALUES ('D1C', 'd1-c', ?, ?)`
+          )
+          .bind(now, now),
+        d1
+          .prepare(
+            `INSERT INTO users (email, password_hash, first_name, last_name, role, community_id, created_at, updated_at) VALUES ('d1-1@e.org', 'h', 'A', '1', 'viewer', 1, ?, ?)`
+          )
+          .bind(now, now),
+        d1
+          .prepare(
+            `INSERT INTO users (email, password_hash, first_name, last_name, role, community_id, created_at, updated_at) VALUES ('d1-2@e.org', 'h', 'A', '2', 'viewer', 1, ?, ?)`
+          )
+          .bind(now, now),
+        d1.prepare('DELETE FROM users WHERE id = 2'),
+      ]);
+
+      const sql0009 = fs.readFileSync(
+        path.join(
+          migrationsFolder,
+          '0009_users_identity_and_audit_entries.sql'
+        ),
+        'utf8'
+      );
+      const statements0009 = sql0009
+        .split('--> statement-breakpoint')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      await d1.batch(statements0009.map((s) => d1.prepare(s)));
+
+      await d1
+        .prepare(
+          `INSERT INTO users (email, email_normalized, password_hash, first_name, last_name, role, community_id, created_at, updated_at) VALUES ('d1-3@e.org', 'd1-3@e.org', 'h', 'A', '3', 'viewer', 1, ?, ?)`
+        )
+        .bind(now, now)
+        .run();
+      const row = (await d1
+        .prepare(`SELECT id FROM users WHERE email = 'd1-3@e.org'`)
+        .first()) as { id: number } | null;
+      expect(row?.id).toBe(3);
+    } finally {
+      await mf.dispose();
+    }
   });
 });

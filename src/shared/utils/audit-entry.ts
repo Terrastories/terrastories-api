@@ -20,8 +20,28 @@ const ALLOWED_AUDIT_INPUT_KEYS = new Set([
   'outcome',
   'ipAddress',
   'userAgent',
-  'createdAt',
 ]);
+
+// Auth and system resource types are the only entries permitted to omit
+// communityId (§6.8); every community-content entry must bind a community.
+const NULL_COMMUNITY_RESOURCE_TYPES = new Set([
+  'auth',
+  'authentication',
+  'session',
+  'sessions',
+  'login_code',
+  'login_codes',
+  'recovery_code',
+  'recovery_codes',
+  'auth_throttle',
+  'security',
+  'system',
+  'bootstrap',
+  'super_admin',
+  'community_erasure',
+]);
+
+const NULL_COMMUNITY_ACTION_PREFIX = /^(?:auth|security|system|bootstrap)\./;
 
 // Content-bearing resource types must never attach IP/User-Agent metadata (§6.8).
 const CONTENT_RESOURCE_TYPES = new Set([
@@ -65,7 +85,6 @@ export interface ContentFreeAuditEntryInput {
   outcome: string;
   ipAddress?: string | null;
   userAgent?: string | null;
-  createdAt?: Date;
 }
 
 export interface ValidatedAuditEntryRecord {
@@ -77,7 +96,6 @@ export interface ValidatedAuditEntryRecord {
   outcome: string;
   ipAddress: string | null;
   userAgent: string | null;
-  createdAt?: Date;
 }
 
 function assertOptionalPositiveInt(
@@ -227,21 +245,26 @@ export function validateContentFreeAuditEntry(
     );
   }
 
-  let createdAt: Date | undefined;
-  if (record.createdAt !== undefined) {
-    if (
-      !(record.createdAt instanceof Date) ||
-      Number.isNaN(record.createdAt.getTime())
-    ) {
+  const communityId = assertOptionalPositiveInt(
+    record.communityId,
+    'communityId'
+  );
+  if (communityId === null) {
+    if (resourceType !== null) {
+      if (!NULL_COMMUNITY_RESOURCE_TYPES.has(resourceType)) {
+        throw new AuditEntryValidationError(
+          `Audit entry resourceType "${resourceType}" requires a non-null communityId`
+        );
+      }
+    } else if (!NULL_COMMUNITY_ACTION_PREFIX.test(record.action)) {
       throw new AuditEntryValidationError(
-        'Audit entry createdAt must be a valid Date'
+        'Audit entry without communityId must target an auth or system resource/action'
       );
     }
-    createdAt = record.createdAt;
   }
 
   return {
-    communityId: assertOptionalPositiveInt(record.communityId, 'communityId'),
+    communityId,
     actorId: assertOptionalPositiveInt(record.actorId, 'actorId'),
     action: record.action,
     resourceType,
@@ -249,7 +272,6 @@ export function validateContentFreeAuditEntry(
     outcome: record.outcome,
     ipAddress,
     userAgent,
-    ...(createdAt !== undefined ? { createdAt } : {}),
   };
 }
 

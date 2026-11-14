@@ -25,6 +25,7 @@ import {
   type DialectTables,
 } from '../db/dialect.js';
 import { provisioningLockQuery } from './community.repository.js';
+import { deriveUserIdentityColumns } from '../shared/utils/derived-columns.js';
 
 // Database type - using any temporarily to resolve union type incompatibility
 // TODO: Implement proper database abstraction layer for SQLite/PostgreSQL compatibility
@@ -127,6 +128,10 @@ export class UserRepository {
         .insert(usersTable)
         .values({
           ...userData,
+          ...deriveUserIdentityColumns({
+            email: userData.email,
+            username: userData.username,
+          }),
           createdAt: new Date(),
           updatedAt: new Date(),
         })
@@ -286,11 +291,25 @@ export class UserRepository {
         }
       }
 
+      const nextEmail =
+        updates.email !== undefined
+          ? updates.email.toLowerCase().trim()
+          : undefined;
+      const {
+        emailNormalized: _ignoredEmailNormalized,
+        usernameNormalized: _ignoredUsernameNormalized,
+        ...safeUpdates
+      } = updates;
+
       const updatedUsers = await this.database
         .update(usersTable)
         .set({
-          ...updates,
-          email: updates.email?.toLowerCase().trim(),
+          ...safeUpdates,
+          ...(nextEmail !== undefined ? { email: nextEmail } : {}),
+          ...deriveUserIdentityColumns({
+            email: nextEmail,
+            username: updates.username,
+          }),
           updatedAt: new Date(),
         })
         .where(
@@ -747,11 +766,20 @@ export class UserRepository {
   > {
     const usersTable = this.tables.users;
     const communitiesTable = this.tables.communities;
+    const nextEmail =
+      patch.email !== undefined ? patch.email.toLowerCase().trim() : undefined;
+    const {
+      emailNormalized: _ignoredEmailNormalized,
+      usernameNormalized: _ignoredUsernameNormalized,
+      ...safePatch
+    } = patch;
     const values = {
-      ...patch,
-      ...(patch.email !== undefined
-        ? { email: patch.email.toLowerCase().trim() }
-        : {}),
+      ...safePatch,
+      ...(nextEmail !== undefined ? { email: nextEmail } : {}),
+      ...deriveUserIdentityColumns({
+        email: nextEmail,
+        username: patch.username,
+      }),
       updatedAt: new Date(),
     };
     const matchesSnapshot = and(
@@ -842,8 +870,17 @@ export class UserRepository {
       const usersTable = this.tables.users;
 
       // Update the user
+      const {
+        emailNormalized: _ignoredEmailNormalized,
+        usernameNormalized: _ignoredUsernameNormalized,
+        ...safeData
+      } = data;
       const updateData = {
-        ...data,
+        ...safeData,
+        ...deriveUserIdentityColumns({
+          email: data.email,
+          username: data.username,
+        }),
         updatedAt: new Date(),
       };
 

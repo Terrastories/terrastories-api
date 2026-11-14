@@ -73,8 +73,8 @@ EXECUTE FUNCTION revoke_changed_authority_sessions();
 --> statement-breakpoint
 CREATE TABLE "audit_entries" (
 	"id" serial PRIMARY KEY NOT NULL,
-	"community_id" integer CONSTRAINT "audit_entries_community_id_communities_id_fk" REFERENCES "communities"("id") ON DELETE SET NULL,
-	"actor_id" integer CONSTRAINT "audit_entries_actor_id_users_id_fk" REFERENCES "users"("id") ON DELETE SET NULL,
+	"community_id" integer CONSTRAINT "audit_entries_community_id_communities_id_fk" REFERENCES "communities"("id") ON DELETE NO ACTION,
+	"actor_id" integer CONSTRAINT "audit_entries_actor_id_users_id_fk" REFERENCES "users"("id") ON DELETE NO ACTION,
 	"action" text NOT NULL,
 	"resource_type" text,
 	"resource_ids" jsonb DEFAULT '[]'::jsonb NOT NULL,

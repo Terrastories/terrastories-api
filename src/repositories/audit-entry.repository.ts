@@ -34,7 +34,7 @@ export async function writeAuditEntry(
       outcome: validated.outcome,
       ipAddress: validated.ipAddress,
       userAgent: validated.userAgent,
-      createdAt: validated.createdAt ?? new Date(),
+      createdAt: new Date(),
     })
     .returning();
 

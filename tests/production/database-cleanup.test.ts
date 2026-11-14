@@ -132,54 +132,117 @@ describe('Production Database Cleanup', () => {
       // This test should fail initially - many-to-many relationships not handled
       const db = await productionTestDb.getDb();
 
-      // Create test data with many-to-many relationships
-      const fixtures = await productionTestDb.seedTestData();
+      // Seed one explicit same-community chain (community -> user -> speaker,
+      // place, story) so the join rows below reference real rows. community_id
+      // is read back from the seeded story/place/speaker rows, never
+      // hardcoded, so the inserts cannot silently fail on a tenant mismatch
+      // (#186: the join tables carry NOT NULL community_id and composite
+      // foreign keys).
+      const community = await db
+        .insert(communitiesSqlite)
+        .values({
+          name: 'Cascade Test Community',
+          slug: 'cascade-test',
+          description: 'Community for cascading join-table deletes',
+          publicStories: true,
+        })
+        .returning();
 
-      // Add story-place and story-speaker relationships
-      // Note: This will fail initially because the join tables don't exist yet
-      try {
-        // Get raw SQLite connection for direct execution
-        const testDbManager = productionTestDb as any;
-        const sqlite = testDbManager.sqlite;
+      const user = await db
+        .insert(usersSqlite)
+        .values({
+          email: 'cascadetest@example.com',
+          passwordHash: 'hash',
+          firstName: 'Cascade',
+          lastName: 'Test',
+          role: 'admin',
+          communityId: community[0].id,
+          isActive: true,
+        })
+        .returning();
 
-        if (sqlite) {
-          sqlite.exec(`
-            INSERT INTO story_places (community_id, story_id, place_id, cultural_context, sort_order)
-            VALUES (1, 1, 1, 'Cultural context', 1)
-          `);
+      const speaker = await db
+        .insert(speakersSqlite)
+        .values({
+          name: 'Cascade Test Speaker',
+          bio: 'Speaker for cascade testing',
+          communityId: community[0].id,
+          elderStatus: false,
+          isActive: true,
+        })
+        .returning();
 
-          sqlite.exec(`
-            INSERT INTO story_speakers (community_id, story_id, speaker_id, story_role, sort_order)
-            VALUES (1, 1, 1, 'Narrator', 1)
-          `);
-        }
-      } catch (error) {
-        // Expected to fail - join tables don't exist yet
-      }
+      const place = await db
+        .insert(placesSqlite)
+        .values({
+          name: 'Cascade Test Place',
+          description: 'Place for cascade testing',
+          latitude: 40.7128,
+          longitude: -74.006,
+          communityId: community[0].id,
+        })
+        .returning();
+
+      const story = await db
+        .insert(storiesSqlite)
+        .values({
+          title: 'Cascade Test Story',
+          description: 'Story for cascade testing',
+          slug: 'cascade-test-story',
+          communityId: community[0].id,
+          createdBy: user[0].id,
+          mediaUrls: [],
+          tags: [],
+        })
+        .returning();
+
+      // Direct SQL join-row inserts keep the raw-connection character of the
+      // test, with ids and the tenant column read back from the actual rows.
+      // Failures propagate: a swallowed insert here would make the cleanup
+      // assertions below vacuous.
+      const sqlite = (productionTestDb as any).sqlite;
+      expect(sqlite).toBeDefined();
+
+      const tenantOf = (table: string, id: number): number =>
+        (
+          sqlite
+            .prepare(`SELECT community_id FROM ${table} WHERE id = ?`)
+            .get(id) as { community_id: number }
+        ).community_id;
+      const storyTenant = tenantOf('stories', story[0].id);
+      expect(tenantOf('places', place[0].id)).toBe(storyTenant);
+      expect(tenantOf('speakers', speaker[0].id)).toBe(storyTenant);
+
+      const now = Math.floor(Date.now() / 1000);
+      sqlite
+        .prepare(
+          `INSERT INTO story_places
+           (community_id, story_id, place_id, cultural_context, sort_order, created_at, updated_at)
+           VALUES (?, ?, ?, 'Cultural context', 1, ?, ?)`
+        )
+        .run(storyTenant, story[0].id, place[0].id, now, now);
+      sqlite
+        .prepare(
+          `INSERT INTO story_speakers
+           (community_id, story_id, speaker_id, story_role, sort_order, created_at, updated_at)
+           VALUES (?, ?, ?, 'Narrator', 1, ?, ?)`
+        )
+        .run(storyTenant, story[0].id, speaker[0].id, now, now);
 
       // This should fail initially - cascading deletes for join tables not implemented
       await expect(productionTestDb.clearData()).resolves.not.toThrow();
 
-      // Verify join table data was cleared
-      try {
-        const testDbManager = productionTestDb as any;
-        const sqlite = testDbManager.sqlite;
+      // Verify join table data was cleared. No try/catch: the rows above
+      // demonstrably exist, so these counts are meaningful.
+      const remainingStoryPlaces = sqlite
+        .prepare('SELECT * FROM story_places')
+        .all();
+      const remainingStorySpeakers = sqlite
+        .prepare('SELECT * FROM story_speakers')
+        .all();
 
-        if (sqlite) {
-          const remainingStoryPlaces = sqlite
-            .prepare('SELECT * FROM story_places')
-            .all();
-          const remainingStorySpeakers = sqlite
-            .prepare('SELECT * FROM story_speakers')
-            .all();
-
-          expect(remainingStoryPlaces).toHaveLength(0);
-          expect(remainingStorySpeakers).toHaveLength(0);
-        }
-      } catch (error) {
-        // Expected to fail - tables don't exist yet
-        expect(error.message).toContain('no such table');
-      }
+      expect(remainingStoryPlaces).toHaveLength(0);
+      expect(remainingStorySpeakers).toHaveLength(0);
     });
 
     it('should fail: prevent foreign key constraint violations during cleanup', async () => {

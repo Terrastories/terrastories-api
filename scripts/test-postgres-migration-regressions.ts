@@ -11,13 +11,18 @@ const previousReleaseFixture = path.join(
   rootDir,
   'tests/fixtures/db/postgres-previous-release.sql'
 );
-const snapshotPath = path.join(migrationsFolder, 'meta/0003_snapshot.json');
+const snapshotPath = path.join(migrationsFolder, 'meta/0004_snapshot.json');
 
 const canonicalUniqueConstraints = [
   'communities_slug_unique',
   'story_place_unique',
   'story_speaker_unique',
   'users_email_community_unique',
+  // #186: composite parent keys for the tenant foreign keys.
+  'places_community_id_id_unique',
+  'speakers_community_id_id_unique',
+  'stories_community_id_id_unique',
+  'files_community_id_id_unique',
 ] as const;
 
 const stagedCommunityOwnershipConstraints = [
@@ -144,7 +149,11 @@ async function assertCanonicalUniqueConstraints(
           'communities_slug_unique',
           'story_place_unique',
           'story_speaker_unique',
-          'users_email_community_unique'
+          'users_email_community_unique',
+          'places_community_id_id_unique',
+          'speakers_community_id_id_unique',
+          'stories_community_id_id_unique',
+          'files_community_id_id_unique'
         ]::text[]
       )
     ORDER BY constraint_entry.conname

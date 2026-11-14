@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { getDb } from '../../src/db/index.js';
 import {
+  migrateInMemorySqlite,
+  sqliteColumn,
+  sqliteForeignKeyGroups,
+} from '../helpers/tenant-fk-probe.js';
+import {
   getStorySpeakersTable,
   storySpeakersPg,
   storySpeakersSqlite,
@@ -57,6 +62,7 @@ describe('Story Speakers Schema', () => {
     it('should have required columns', () => {
       // Just check that the tables have the expected structure
       expect(storySpeakersPg).toHaveProperty('id');
+      expect(storySpeakersPg).toHaveProperty('communityId');
       expect(storySpeakersPg).toHaveProperty('storyId');
       expect(storySpeakersPg).toHaveProperty('speakerId');
       expect(storySpeakersPg).toHaveProperty('createdAt');
@@ -84,6 +90,7 @@ describe('Story Speakers Schema', () => {
   describe('Zod Validation Schemas', () => {
     const validStorySpeaker = {
       id: 1,
+      communityId: 2,
       storyId: 5,
       speakerId: 2,
       storyRole: 'Primary storyteller',
@@ -93,6 +100,7 @@ describe('Story Speakers Schema', () => {
     };
 
     const validCreateStorySpeaker = {
+      communityId: 2,
       storyId: 5,
       speakerId: 2,
       storyRole: 'Primary storyteller',
@@ -145,6 +153,7 @@ describe('Story Speakers Schema', () => {
     it('should infer correct StorySpeaker type', () => {
       const storySpeaker: StorySpeaker = {
         id: 1,
+        communityId: 2,
         storyId: 5,
         speakerId: 2,
         storyRole: 'Primary storyteller',
@@ -157,6 +166,7 @@ describe('Story Speakers Schema', () => {
 
     it('should infer correct NewStorySpeaker type', () => {
       const newStorySpeaker: NewStorySpeaker = {
+        communityId: 2,
         storyId: 5,
         speakerId: 2,
         storyRole: 'Primary storyteller',
@@ -167,6 +177,7 @@ describe('Story Speakers Schema', () => {
 
     it('should infer correct CreateStorySpeaker type', () => {
       const createStorySpeaker: CreateStorySpeaker = {
+        communityId: 2,
         storyId: 5,
         speakerId: 2,
         storyRole: 'Primary storyteller',
@@ -181,6 +192,46 @@ describe('Story Speakers Schema', () => {
       expect(storySpeakersPg).toBeDefined();
       expect(storySpeakersSqlite).toBeDefined();
       // Unique constraints are defined in table creation
+    });
+  });
+
+  // #186: assertions run against a database that applied the repository's
+  // SQLite migrations, so they prove the applied schema, not the Drizzle
+  // objects (the dual-backend gate in scripts/test-db-backend.ts covers the
+  // same contract on PostgreSQL and on upgraded databases).
+  describe('Composite Tenant Foreign Keys (migrated database)', () => {
+    let sqlite: Awaited<ReturnType<typeof migrateInMemorySqlite>>;
+
+    beforeAll(async () => {
+      sqlite = await migrateInMemorySqlite();
+    });
+
+    afterAll(() => {
+      sqlite.close();
+    });
+
+    it('should carry the NOT NULL community_id tenant column', () => {
+      const column = sqliteColumn(sqlite, 'story_speakers', 'community_id');
+      expect(column).toBeDefined();
+      expect(column?.notnull).toBe(1);
+    });
+
+    it('should reference stories(community_id, id) and speakers(community_id, id) on delete cascade', () => {
+      const foreignKeys = sqliteForeignKeyGroups(sqlite, 'story_speakers');
+      expect(foreignKeys).toContainEqual({
+        table: 'stories',
+        from: ['community_id', 'story_id'],
+        to: ['community_id', 'id'],
+        onUpdate: 'NO ACTION',
+        onDelete: 'CASCADE',
+      });
+      expect(foreignKeys).toContainEqual({
+        table: 'speakers',
+        from: ['community_id', 'speaker_id'],
+        to: ['community_id', 'id'],
+        onUpdate: 'NO ACTION',
+        onDelete: 'CASCADE',
+      });
     });
   });
 });

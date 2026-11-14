@@ -15,12 +15,14 @@ import {
   jsonb as pgJsonb,
   boolean as pgBoolean,
   index as pgIndex,
+  unique,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
   index as sqliteIndex,
+  uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
@@ -61,6 +63,11 @@ export const filesPg = pgTable(
     activeIdx: pgIndex('files_active_idx').on(table.isActive),
     // Created date index for ordering
     createdAtIdx: pgIndex('files_created_at_idx').on(table.createdAt),
+    // Parent key for the composite tenant FK from community_media (#186)
+    communityIdIdUnique: unique('files_community_id_id_unique').on(
+      table.communityId,
+      table.id
+    ),
   })
 );
 
@@ -109,6 +116,11 @@ export const filesSqlite = sqliteTable(
     mimeTypeIdx: sqliteIndex('files_mime_type_idx').on(table.mimeType),
     activeIdx: sqliteIndex('files_active_idx').on(table.isActive),
     createdAtIdx: sqliteIndex('files_created_at_idx').on(table.createdAt),
+    // Parent key for the composite tenant FK from community_media (#186)
+    communityIdIdUnique: uniqueIndex('files_community_id_id_unique').on(
+      table.communityId,
+      table.id
+    ),
   })
 );
 

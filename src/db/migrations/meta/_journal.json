@@ -36,6 +36,13 @@
       "when": 1794355200000,
       "tag": "0004_durable_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1794614400000,
+      "tag": "0005_composite_tenant_fks",
+      "breakpoints": true
     }
   ]
 }

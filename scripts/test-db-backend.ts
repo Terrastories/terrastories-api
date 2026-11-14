@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   copyFile,
   mkdir,
@@ -574,6 +575,105 @@ function verifySqliteSchema(sqlite: Database.Database): void {
   assert.ok(placeFks.some((row) => row.table === 'communities'));
   assert.ok(userFks.some((row) => row.table === 'communities'));
   assert.ok(themeFks.some((row) => row.table === 'communities'));
+
+  // #186: composite tenant FKs on the rebuilt tables, the backfilled
+  // community_id columns, and the composite parent keys.
+  for (const table of ['story_places', 'story_speakers']) {
+    const columns = columnNames(
+      sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]
+    );
+    assert.ok(
+      columns.has('community_id'),
+      `missing ${table}.community_id after the #186 rebuild`
+    );
+  }
+  for (const [table, indexName] of [
+    ['places', 'places_community_id_id_unique'],
+    ['speakers', 'speakers_community_id_id_unique'],
+    ['stories', 'stories_community_id_id_unique'],
+    ['files', 'files_community_id_id_unique'],
+  ] as const) {
+    const indexes = sqlite
+      .prepare(`PRAGMA index_list(${table})`)
+      .all() as any[];
+    const unique = indexes.find((row) => String(row.name) === indexName);
+    assert.ok(unique, `missing SQLite composite parent key ${indexName}`);
+    assert.equal(Number(unique.unique), 1, `${indexName} must be unique`);
+  }
+
+  const compositeTenantFk = (
+    table: string,
+    parentTable: string,
+    fromColumns: string[],
+    onDelete: string
+  ): void => {
+    const rows = sqlite
+      .prepare(`PRAGMA foreign_key_list(${table})`)
+      .all() as any[];
+    const groups = new Map<number, any[]>();
+    for (const row of rows) {
+      if (row.table !== parentTable) continue;
+      const group = groups.get(row.id) ?? [];
+      group.push(row);
+      groups.set(row.id, group);
+    }
+    const matched = [...groups.values()].some((group) => {
+      const ordered = [...group].sort((left, right) => left.seq - right.seq);
+      return (
+        ordered.length === fromColumns.length &&
+        fromColumns.every((column, index) => ordered[index].from === column) &&
+        ordered[0].to === 'community_id' &&
+        ordered[1].to === 'id' &&
+        ordered.every((row) => row.on_delete === onDelete)
+      );
+    });
+    assert.ok(
+      matched,
+      `${table} must reference ${parentTable}(community_id, id) via ${fromColumns.join(', ')} ON DELETE ${onDelete}`
+    );
+  };
+  compositeTenantFk(
+    'story_places',
+    'stories',
+    ['community_id', 'story_id'],
+    'CASCADE'
+  );
+  compositeTenantFk(
+    'story_places',
+    'places',
+    ['community_id', 'place_id'],
+    'CASCADE'
+  );
+  compositeTenantFk(
+    'story_speakers',
+    'stories',
+    ['community_id', 'story_id'],
+    'CASCADE'
+  );
+  compositeTenantFk(
+    'story_speakers',
+    'speakers',
+    ['community_id', 'speaker_id'],
+    'CASCADE'
+  );
+  compositeTenantFk(
+    'stories',
+    'places',
+    ['community_id', 'interview_location_id'],
+    'NO ACTION'
+  );
+  compositeTenantFk(
+    'stories',
+    'speakers',
+    ['community_id', 'interviewer_id'],
+    'NO ACTION'
+  );
+  compositeTenantFk(
+    'community_media',
+    'files',
+    ['community_id', 'file_id'],
+    'CASCADE'
+  );
 }
 
 /**
@@ -782,29 +882,63 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   }
 
   const constraintRows = await client.unsafe(
-    `SELECT conname FROM pg_constraint WHERE connamespace = 'public'::regnamespace`
+    `SELECT conname, pg_get_constraintdef(oid) AS definition
+     FROM pg_constraint WHERE connamespace = 'public'::regnamespace`
   );
-  const constraints = new Set(
-    constraintRows.map((row: any) => String(row.conname))
+  const constraints = new Map(
+    constraintRows.map((row: any) => [
+      String(row.conname),
+      String(row.definition),
+    ])
   );
   for (const constraint of [
     'users_community_id_communities_id_fk',
     'places_community_id_communities_id_fk',
     'speakers_community_id_communities_id_fk',
     'stories_community_id_communities_id_fk',
-    'stories_interview_location_id_places_id_fk',
-    'stories_interviewer_id_speakers_id_fk',
     'files_community_id_communities_id_fk',
     'files_uploaded_by_users_id_fk',
-    'story_places_story_id_stories_id_fk',
-    'story_places_place_id_places_id_fk',
-    'story_speakers_story_id_stories_id_fk',
-    'story_speakers_speaker_id_speakers_id_fk',
     'themes_community_id_communities_id_fk',
+    'community_media_community_id_communities_id_fk',
   ]) {
     assert.ok(
       constraints.has(constraint),
       `missing PostgreSQL FK ${constraint}`
+    );
+  }
+  // #186: composite (community_id, id) tenant foreign keys must exist on both
+  // the fresh schema and the upgraded one, and their definitions must pair
+  // community_id with the referenced id column.
+  for (const [constraint, expectPair] of [
+    ['stories_interview_location_community_fk', 'interview_location_id'],
+    ['stories_interviewer_community_fk', 'interviewer_id'],
+    ['story_places_story_community_fk', 'story_id'],
+    ['story_places_place_community_fk', 'place_id'],
+    ['story_speakers_story_community_fk', 'story_id'],
+    ['story_speakers_speaker_community_fk', 'speaker_id'],
+    ['community_media_file_community_fk', 'file_id'],
+  ] as const) {
+    const definition = constraints.get(constraint);
+    assert.ok(
+      definition,
+      `missing PostgreSQL composite tenant FK ${constraint}`
+    );
+    assert.match(
+      definition,
+      new RegExp(`FOREIGN KEY \\(community_id, ${expectPair}\\)`),
+      `${constraint} must be a composite tenant foreign key`
+    );
+  }
+  // #186: parent keys for the composite FKs.
+  for (const constraint of [
+    'places_community_id_id_unique',
+    'speakers_community_id_id_unique',
+    'stories_community_id_id_unique',
+    'files_community_id_id_unique',
+  ]) {
+    assert.ok(
+      constraints.has(constraint),
+      `missing PostgreSQL composite parent key ${constraint}`
     );
   }
 }
@@ -1167,6 +1301,613 @@ async function verifySqliteFailedMigrationNotRecorded(): Promise<void> {
   sqlite.close();
 }
 
+/* ------------------------------------------------------------------ */
+/* #186 drift gate: applied SQLite schema vs the Drizzle snapshot.    */
+/* ------------------------------------------------------------------ */
+
+interface SnapshotColumn {
+  name: string;
+  type: string;
+  notNull: boolean;
+  primaryKey: boolean;
+  default?: boolean | number | string;
+}
+
+interface SnapshotIndex {
+  name: string;
+  columns: string[];
+  isUnique: boolean;
+}
+
+interface SnapshotForeignKey {
+  name: string;
+  tableFrom: string;
+  tableTo: string;
+  columnsFrom: string[];
+  columnsTo: string[];
+  onDelete: string;
+  onUpdate: string;
+}
+
+interface SnapshotTable {
+  name: string;
+  columns: Record<string, SnapshotColumn>;
+  indexes: Record<string, SnapshotIndex>;
+  foreignKeys: Record<string, SnapshotForeignKey>;
+  uniqueConstraints?: Record<string, { name: string; columns: string[] }>;
+  checkConstraints?: Record<string, { name: string; value: string }>;
+}
+
+interface Snapshot {
+  tables: Record<string, SnapshotTable>;
+}
+
+/** Tables 0005 rebuilds by hand: they must match the Drizzle snapshot exactly. */
+const rebuiltTables = [
+  'stories',
+  'story_places',
+  'story_speakers',
+  'community_media',
+] as const;
+
+/**
+ * Normalize a constraint expression for text comparison: collapse whitespace
+ * runs, strip identifier quoting ("x", `x`, and [x] all denote the identifier
+ * x), and drop `<table>.` qualification (the Drizzle snapshot qualifies column
+ * references with the table name while the applied SQLite SQL does not).
+ *
+ * Every rule applies ONLY outside single-quoted string literals, where '' is
+ * an escaped quote and never a terminator: a literal is data, so its bytes —
+ * quotes, dots, spacing — must compare exactly, not normalized. Whole-string
+ * normalization would equate `'br anding'` with `'br  anding'`, strip quote
+ * characters a literal contains, and delete `<table>.` text inside one.
+ */
+function normalizeConstraintExpression(
+  expression: string,
+  table: string
+): string {
+  const tableQualifier = new RegExp(
+    `\\b${table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\.`,
+    'g'
+  );
+  const normalizeOutsideLiteral = (text: string): string =>
+    text
+      .replace(/["`[\]]/g, '')
+      .replace(tableQualifier, '')
+      .replace(/\s+/g, ' ');
+
+  let result = '';
+  let outside = '';
+  let inLiteral = false;
+  let index = 0;
+  while (index < expression.length) {
+    const char = expression[index];
+    if (!inLiteral) {
+      if (char === "'") {
+        result += normalizeOutsideLiteral(outside) + "'";
+        outside = '';
+        inLiteral = true;
+      } else {
+        outside += char;
+      }
+      index += 1;
+    } else if (char === "'" && expression[index + 1] !== "'") {
+      // An unpaired quote closes the literal (including a trailing ' at the
+      // end of the expression); '' stays inside it as an escaped quote.
+      result += char;
+      inLiteral = false;
+      index += 1;
+    } else if (char === "'") {
+      result += "''";
+      index += 2;
+    } else {
+      result += char;
+      index += 1;
+    }
+  }
+  // An unterminated literal run stays verbatim; it still has to match.
+  return (result + normalizeOutsideLiteral(outside)).trim();
+}
+
+/**
+ * Extract the parenthesized expression of `CONSTRAINT `name` CHECK (...)`
+ * from CREATE TABLE SQL, honoring nested parentheses and ignoring
+ * parentheses inside single-quoted string literals.
+ */
+function sqliteCheckExpression(
+  createSql: string,
+  constraintName: string
+): string {
+  const header = `CONSTRAINT \`${constraintName}\` CHECK`;
+  const headerIndex = createSql.indexOf(header);
+  assert.ok(
+    headerIndex >= 0,
+    `CREATE SQL must declare CHECK constraint ${constraintName}`
+  );
+  const open = createSql.indexOf('(', headerIndex + header.length);
+  assert.ok(open >= 0, `CHECK constraint ${constraintName} has no expression`);
+  let depth = 0;
+  let quoted = false;
+  for (let index = open; index < createSql.length; index += 1) {
+    const char = createSql[index];
+    if (quoted) {
+      quoted = char !== "'";
+    } else if (char === "'") {
+      quoted = true;
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        return createSql.slice(open + 1, index);
+      }
+    }
+  }
+  return assert.fail(
+    `CHECK constraint ${constraintName} has unbalanced parentheses`
+  );
+}
+
+/**
+ * All `CONSTRAINT `name` CHECK` names a CREATE TABLE declares, so the drift
+ * gate can compare them as a set: an extra CHECK in the applied SQL that the
+ * snapshot does not declare must fail the gate, not only a missing one.
+ */
+function sqliteCheckConstraintNames(createSql: string): string[] {
+  const names: string[] = [];
+  for (const match of createSql.matchAll(/CONSTRAINT `([^`]+)` CHECK/g)) {
+    names.push(match[1] as string);
+  }
+  return names;
+}
+
+/**
+ * Compare a migrated SQLite database against meta/0005_snapshot.json — the
+ * structure `drizzle-kit generate` derived from the Drizzle schema — so the
+ * hand-written table rebuilds in 0005 cannot drift from the schema (a dropped
+ * column, default, CHECK expression, index, inline UNIQUE, or FK in the SQL
+ * would fail this gate).
+ *
+ * PRAGMA foreign_key_list is name-blind (SQLite keeps CONSTRAINT names only in
+ * the sqlite_master SQL text), so foreign keys are compared structurally and
+ * constraint names are checked against sqlite_master.
+ */
+function verifySqliteSnapshotDrift(
+  sqlite: Database.Database,
+  label: string
+): void {
+  const snapshot = JSON.parse(
+    readFileSync(
+      path.join(sqliteMigrations, 'meta', '0005_snapshot.json'),
+      'utf8'
+    )
+  ) as Snapshot;
+
+  for (const table of rebuiltTables) {
+    const expected = snapshot.tables[table];
+    assert.ok(expected, `snapshot must describe ${table}`);
+
+    const pragmaColumns = sqlite
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as any[];
+    const expectedColumns = Object.values(expected.columns);
+    assert.deepEqual(
+      pragmaColumns.map((column) => column.name),
+      expectedColumns.map((column) => column.name),
+      `${label}: ${table} column names/order must match the snapshot`
+    );
+    for (const pragmaColumn of pragmaColumns) {
+      const snapshotColumn = expectedColumns.find(
+        (column) => column.name === pragmaColumn.name
+      )!;
+      assert.equal(
+        String(pragmaColumn.type).toLowerCase(),
+        snapshotColumn.type.toLowerCase(),
+        `${label}: ${table}.${pragmaColumn.name} type must match the snapshot`
+      );
+      assert.equal(
+        Number(pragmaColumn.notnull),
+        snapshotColumn.notNull ? 1 : 0,
+        `${label}: ${table}.${pragmaColumn.name} NOT NULL must match the snapshot`
+      );
+      assert.equal(
+        Number(pragmaColumn.pk),
+        snapshotColumn.primaryKey ? 1 : 0,
+        `${label}: ${table}.${pragmaColumn.name} PRIMARY KEY must match the snapshot`
+      );
+      const expectedDefault =
+        snapshotColumn.default === undefined
+          ? null
+          : String(snapshotColumn.default);
+      assert.equal(
+        pragmaColumn.dflt_value === null
+          ? null
+          : String(pragmaColumn.dflt_value),
+        expectedDefault,
+        `${label}: ${table}.${pragmaColumn.name} DEFAULT must match the snapshot`
+      );
+    }
+
+    // Named indexes AND inline UNIQUE constraints. PRAGMA table_info carries
+    // no uniqueness information, so a table-level UNIQUE(...) clause — which
+    // SQLite surfaces as an origin-'u' auto-index named
+    // sqlite_autoindex_<table>_<n>, not as a named CREATE INDEX — would
+    // otherwise be invisible to this gate. Comparing both origins (origin
+    // 'pk' stays excluded: PRIMARY KEY coverage is checked per column above)
+    // makes a dropped or smuggled-in UNIQUE (community_id, id) on a rebuilt
+    // table fail here.
+    const namedIndexes = new Map<
+      string,
+      { unique: boolean; columns: string[] }
+    >();
+    const inlineUniqueIndexes: Array<{ unique: boolean; columns: string[] }> =
+      [];
+    for (const row of sqlite
+      .prepare(`PRAGMA index_list(${table})`)
+      .all() as any[]) {
+      if (row.origin !== 'c' && row.origin !== 'u') continue;
+      const columns = (
+        sqlite.prepare(`PRAGMA index_info(${row.name})`).all() as any[]
+      )
+        .slice()
+        .sort((left, right) => left.seqno - right.seqno)
+        .map((indexColumn) => indexColumn.name);
+      const applied = { unique: Number(row.unique) === 1, columns };
+      if (String(row.name).startsWith('sqlite_autoindex_')) {
+        inlineUniqueIndexes.push(applied);
+      } else {
+        namedIndexes.set(String(row.name), applied);
+      }
+    }
+    const expectedIndexes = Object.values(expected.indexes ?? {});
+    assert.deepEqual(
+      [...namedIndexes.keys()].sort(),
+      expectedIndexes.map((index) => index.name).sort(),
+      `${label}: ${table} index names must match the snapshot`
+    );
+    for (const index of expectedIndexes) {
+      const applied = namedIndexes.get(index.name);
+      assert.ok(applied, `${label}: ${table} must have index ${index.name}`);
+      assert.equal(
+        applied.unique,
+        index.isUnique,
+        `${label}: ${table} index ${index.name} uniqueness must match the snapshot`
+      );
+      assert.deepEqual(
+        applied.columns,
+        index.columns,
+        `${label}: ${table} index ${index.name} columns must match the snapshot`
+      );
+    }
+    // Snapshot UNIQUE constraints apply as unnamed origin-'u' auto-indexes
+    // (their CONSTRAINT name lives only in the sqlite_master SQL text), so
+    // they are matched structurally; the set comparison also fails when the
+    // applied table declares an inline UNIQUE the snapshot does not have.
+    const inlineUniqueKey = (entry: { unique: boolean; columns: string[] }) =>
+      JSON.stringify([entry.unique, entry.columns]);
+    assert.deepEqual(
+      inlineUniqueIndexes.map(inlineUniqueKey).sort(),
+      Object.values(expected.uniqueConstraints ?? {})
+        .map((constraint) =>
+          inlineUniqueKey({ unique: true, columns: constraint.columns })
+        )
+        .sort(),
+      `${label}: ${table} inline UNIQUE constraints (unique, columns) must match the snapshot`
+    );
+
+    const appliedForeignKeys = (
+      sqlite.prepare(`PRAGMA foreign_key_list(${table})`).all() as any[]
+    ).reduce<Map<number, any[]>>((groups, row) => {
+      const group = groups.get(row.id) ?? [];
+      group.push(row);
+      groups.set(row.id, group);
+      return groups;
+    }, new Map());
+    const appliedForeignKeyTuples = [...appliedForeignKeys.values()]
+      .map((group) =>
+        group
+          .slice()
+          .sort((left, right) => left.seq - right.seq)
+          .map((row) => ({
+            table: String(row.table),
+            from: String(row.from),
+            to: String(row.to),
+            onDelete: String(row.on_delete).toLowerCase(),
+            onUpdate: String(row.on_update).toLowerCase(),
+          }))
+      )
+      .map((columns) => ({
+        table: columns[0].table,
+        columnsFrom: columns.map((column) => column.from),
+        columnsTo: columns.map((column) => column.to),
+        onDelete: columns[0].onDelete,
+        onUpdate: columns[0].onUpdate,
+      }));
+    const expectedForeignKeyTuples = Object.values(
+      expected.foreignKeys ?? {}
+    ).map((foreignKey) => ({
+      table: foreignKey.tableTo,
+      columnsFrom: foreignKey.columnsFrom,
+      columnsTo: foreignKey.columnsTo,
+      onDelete: (foreignKey.onDelete ?? 'no action').toLowerCase(),
+      onUpdate: (foreignKey.onUpdate ?? 'no action').toLowerCase(),
+    }));
+    const tupleKey = (tuple: {
+      table: string;
+      columnsFrom: string[];
+      columnsTo: string[];
+      onDelete: string;
+      onUpdate: string;
+    }) =>
+      JSON.stringify([
+        tuple.table,
+        tuple.columnsFrom,
+        tuple.columnsTo,
+        tuple.onDelete,
+        tuple.onUpdate,
+      ]);
+    assert.deepEqual(
+      appliedForeignKeyTuples.map(tupleKey).sort(),
+      expectedForeignKeyTuples.map(tupleKey).sort(),
+      `${label}: ${table} foreign keys (table, from, to, on delete, on update) must match the snapshot`
+    );
+
+    // Constraint names live in the sqlite_master SQL text, not in PRAGMAs.
+    const createSql = String(
+      (
+        sqlite
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?"
+          )
+          .get(table) as any
+      ).sql
+    );
+    for (const foreignKey of Object.values(expected.foreignKeys ?? {})) {
+      assert.match(
+        createSql,
+        new RegExp(`CONSTRAINT \`${foreignKey.name}\` FOREIGN KEY`),
+        `${label}: ${table} must declare FK constraint name ${foreignKey.name}`
+      );
+    }
+    // Bidirectional name check: a CHECK the applied SQL declares but the
+    // snapshot does not must fail here too — comparing only snapshot names
+    // would let a smuggled-in predicate pass the gate.
+    const expectedChecks = Object.values(expected.checkConstraints ?? {});
+    assert.deepEqual(
+      sqliteCheckConstraintNames(createSql).sort(),
+      expectedChecks.map((check) => check.name).sort(),
+      `${label}: ${table} CHECK constraint names must match the snapshot`
+    );
+    for (const check of expectedChecks) {
+      // The name alone proves nothing about the predicate: compare the
+      // snapshot's expression against the applied sqlite_master SQL text
+      // (whitespace/quoting normalized outside literals, literals compared
+      // byte-exact) so an altered CHECK fails the gate.
+      assert.equal(
+        normalizeConstraintExpression(
+          sqliteCheckExpression(createSql, check.name),
+          table
+        ),
+        normalizeConstraintExpression(check.value, table),
+        `${label}: ${table} CHECK constraint ${check.name} expression must match the snapshot`
+      );
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* #186 crash safety: cross-community guard abort and re-run.         */
+/* ------------------------------------------------------------------ */
+
+/** Row counts a 0000-only database seeded by this gate always holds. */
+const seededRowCounts: Array<[table: string, count: number]> = [
+  ['stories', 1],
+  ['story_places', 1],
+  ['story_speakers', 1],
+  ['community_media', 0],
+];
+
+/**
+ * A migration folder whose journal stops before 0005: the state an upgraded
+ * database is in when a runner picks up migration 0005.
+ */
+async function createSqlitePre186Folder(): Promise<string> {
+  const folder = await mkdtemp(
+    path.join(os.tmpdir(), 'terrastories-sqlite-pre186-')
+  );
+  await mkdir(path.join(folder, 'meta'));
+  const journal = JSON.parse(
+    await readFile(path.join(sqliteMigrations, 'meta', '_journal.json'), 'utf8')
+  ) as { entries: Array<{ tag: string }> };
+  const entries = journal.entries.filter(
+    (entry) => entry.tag !== '0005_composite_tenant_fks'
+  );
+  await writeFile(
+    path.join(folder, 'meta', '_journal.json'),
+    JSON.stringify({ ...journal, entries }, null, 2)
+  );
+  for (const entry of entries) {
+    await copyFile(
+      path.join(sqliteMigrations, `${entry.tag}.sql`),
+      path.join(folder, `${entry.tag}.sql`)
+    );
+  }
+  return folder;
+}
+
+async function createSeededPre186Sqlite(): Promise<{
+  sqlite: Database.Database;
+  otherPlaceId: number;
+}> {
+  const sqlite = new Database(':memory:');
+  sqlite.pragma('foreign_keys = ON');
+  const database = drizzleSqlite(sqlite);
+  const pre186Folder = await createSqlitePre186Folder();
+  try {
+    await migrateSqlite(database, { migrationsFolder: pre186Folder });
+  } finally {
+    await rm(pre186Folder, { recursive: true, force: true });
+  }
+  seedPreviousReleaseSqlite(sqlite);
+
+  // A cross-community edge the legacy single-column FKs allow: a second
+  // community, a place in it, and a story_places row binding story 1
+  // (community 1) to that place. Migration 0005 must refuse this data.
+  const now = sqliteTimestamp('2026-01-01T00:00:00.000Z');
+  sqlite
+    .prepare(
+      `INSERT INTO communities
+       (id, name, slug, public_stories, created_at, updated_at)
+       VALUES (2, 'Other Community', 'other-community', 1, ?, ?)`
+    )
+    .run(now, now);
+  const otherPlaceId = 9001;
+  sqlite
+    .prepare(
+      `INSERT INTO places
+       (id, name, community_id, latitude, longitude, created_at, updated_at)
+       VALUES (?, 'Other Community Place', 2, 1.5, 2.5, ?, ?)`
+    )
+    .run(otherPlaceId, now, now);
+  sqlite
+    .prepare(
+      `INSERT INTO story_places (id, story_id, place_id, created_at, updated_at)
+       VALUES (2, 1, ?, ?, ?)`
+    )
+    .run(otherPlaceId, now, now);
+  return { sqlite, otherPlaceId };
+}
+
+function assertJoinSurfaceIntact(
+  sqlite: Database.Database,
+  label: string
+): void {
+  for (const [table, baseline] of seededRowCounts) {
+    // The seeded cross-community edge adds one story_places row.
+    const expected = table === 'story_places' ? baseline + 1 : baseline;
+    const count = (
+      sqlite.prepare(`SELECT count(*) AS count FROM ${table}`).get() as any
+    ).count;
+    assert.equal(
+      count,
+      expected,
+      `${label}: ${table} must still exist with its rows after the failed migration`
+    );
+  }
+  const residue = (
+    sqlite
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('stories_old', 'story_places_new', 'story_speakers_new', 'community_media_new')"
+      )
+      .all() as any[]
+  ).map((row) => String(row.name));
+  assert.deepEqual(
+    residue,
+    [],
+    `${label}: a failed migration must not leave rebuild residue tables`
+  );
+}
+
+/**
+ * Migration 0005's statements, mirroring a runner that executes the file one
+ * statement at a time with no wrapping transaction (the production D1 path
+ * through `wrangler d1 migrations apply`, whose atomicity this repository
+ * cannot guarantee from source).
+ */
+async function compositeTenantFkStatements(): Promise<string[]> {
+  const source = await readFile(
+    path.join(sqliteMigrations, '0005_composite_tenant_fks.sql'),
+    'utf8'
+  );
+  return splitStatements(source);
+}
+
+async function verifySqliteCrossCommunityGuard(): Promise<void> {
+  const statements = await compositeTenantFkStatements();
+
+  // 1. Statement-by-statement (non-atomic runner): the guard aborts before
+  //    any destructive step, the tables survive, and a re-run after repair
+  //    succeeds — proving the guard table's re-entrancy.
+  {
+    const { sqlite, otherPlaceId } = await createSeededPre186Sqlite();
+    let aborted = false;
+    try {
+      for (const statement of statements) sqlite.exec(statement);
+    } catch (error) {
+      if (!/cross_community_rows/.test(String(error))) throw error;
+      aborted = true;
+    }
+    assert.equal(
+      aborted,
+      true,
+      'stepwise: the cross-community edge must abort migration 0005'
+    );
+    assertJoinSurfaceIntact(sqlite, 'stepwise');
+    const guardAfterAbort = sqlite
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='_186_cross_community_guard'"
+      )
+      .get();
+    assert.ok(
+      guardAfterAbort,
+      'stepwise: the aborted guard leaves its table behind (no transaction to roll it back)'
+    );
+    sqlite
+      .prepare('DELETE FROM story_places WHERE place_id = ?')
+      .run(otherPlaceId);
+    for (const statement of statements) sqlite.exec(statement);
+    assert.equal(
+      sqlite
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='_186_cross_community_guard'"
+        )
+        .get(),
+      undefined,
+      'stepwise: the re-run must drop the guard table'
+    );
+    verifySqliteSchema(sqlite);
+    verifySqliteSnapshotDrift(sqlite, 'stepwise re-run');
+    sqlite.close();
+  }
+
+  // 2. Drizzle migrator (atomic runner): same abort, fully rolled back. The
+  //    better-sqlite3 migrator throws synchronously, hence try/catch instead
+  //    of assert.rejects.
+  {
+    const { sqlite, otherPlaceId } = await createSeededPre186Sqlite();
+    const database = drizzleSqlite(sqlite);
+    let aborted = false;
+    try {
+      await migrateSqlite(database, { migrationsFolder: sqliteMigrations });
+    } catch (error) {
+      if (!/cross_community_rows/.test(String(error))) throw error;
+      aborted = true;
+    }
+    assert.equal(
+      aborted,
+      true,
+      'drizzle: the cross-community edge must abort migration 0005'
+    );
+    assertJoinSurfaceIntact(sqlite, 'drizzle');
+    assert.equal(
+      sqlite
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='_186_cross_community_guard'"
+        )
+        .get(),
+      undefined,
+      'drizzle: the transactional rollback must remove the guard table'
+    );
+    sqlite
+      .prepare('DELETE FROM story_places WHERE place_id = ?')
+      .run(otherPlaceId);
+    await migrateSqlite(database, { migrationsFolder: sqliteMigrations });
+    verifySqliteSchema(sqlite);
+    verifySqliteSnapshotDrift(sqlite, 'drizzle re-run');
+    sqlite.close();
+  }
+}
+
 async function resetPostgres(client: PostgresClient): Promise<void> {
   await client.unsafe('DROP SCHEMA IF EXISTS drizzle CASCADE');
   await client.unsafe('DROP SCHEMA IF EXISTS public CASCADE');
@@ -1213,19 +1954,20 @@ async function runSqliteGate(): Promise<void> {
   console.log('🪶 SQLite/D1-compatible integration gate');
   await verifyStaticPortabilityContract();
 
-  console.log('  1/4 fresh migration + shared repository contract');
+  console.log('  1/5 fresh migration + shared repository contract');
   const freshSqlite = new Database(':memory:');
   freshSqlite.pragma('foreign_keys = ON');
   const freshDb = drizzleSqlite(freshSqlite);
   await migrateSqlite(freshDb, { migrationsFolder: sqliteMigrations });
   verifySqliteSchema(freshSqlite);
+  verifySqliteSnapshotDrift(freshSqlite, 'fresh');
   await runRepositoryContract(freshDb);
   await runHonoFoundationContract(freshDb);
   verifySqliteTransactionAndForeignKey(freshSqlite);
   await migrateSqlite(freshDb, { migrationsFolder: sqliteMigrations });
   freshSqlite.close();
 
-  console.log('  2/4 previous-release upgrade + data preservation');
+  console.log('  2/5 previous-release upgrade + data preservation');
   const upgradeSqlite = new Database(':memory:');
   upgradeSqlite.pragma('foreign_keys = ON');
   const upgradeDb = drizzleSqlite(upgradeSqlite);
@@ -1238,11 +1980,12 @@ async function runSqliteGate(): Promise<void> {
   seedPreviousReleaseSqlite(upgradeSqlite);
   await migrateSqlite(upgradeDb, { migrationsFolder: sqliteMigrations });
   verifySqliteSchema(upgradeSqlite);
+  verifySqliteSnapshotDrift(upgradeSqlite, 'previous-release upgrade');
   verifySqlitePreservation(upgradeSqlite);
   await verifySqliteApplicationDates(upgradeDb);
   upgradeSqlite.close();
 
-  console.log('  3/4 deliberate dialect incompatibility rejection');
+  console.log('  3/5 deliberate dialect incompatibility rejection');
   validateMigrationText(
     'sqlite',
     await readFile(
@@ -1252,8 +1995,11 @@ async function runSqliteGate(): Promise<void> {
     'SQLite baseline'
   );
 
-  console.log('  4/4 failed migration recording guard');
+  console.log('  4/5 failed migration recording guard');
   await verifySqliteFailedMigrationNotRecorded();
+
+  console.log('  5/5 cross-community guard abort and re-run');
+  await verifySqliteCrossCommunityGuard();
   console.log('✅ SQLite/D1-compatible integration gate passed');
 }
 

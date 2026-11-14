@@ -7,6 +7,7 @@ import {
   index as pgIndex,
   uuid,
   check as pgCheck,
+  foreignKey,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
@@ -14,6 +15,7 @@ import {
   integer,
   index,
   check,
+  foreignKey as sqliteForeignKey,
 } from 'drizzle-orm/sqlite-core';
 import { usersPg, usersSqlite } from './users.js';
 import { filesPg, filesSqlite } from './files.js';
@@ -48,9 +50,7 @@ export const sessionsSqlite = sqliteTable(
 export const communityMediaPg = pgTable(
   'community_media',
   {
-    fileId: uuid('file_id')
-      .primaryKey()
-      .references(() => filesPg.id, { onDelete: 'cascade' }),
+    fileId: uuid('file_id').primaryKey(),
     communityId: pgInteger('community_id')
       .notNull()
       .references(() => communitiesPg.id, { onDelete: 'cascade' }),
@@ -58,16 +58,20 @@ export const communityMediaPg = pgTable(
   },
   (table) => [
     pgCheck('community_media_kind_check', sql`${table.kind} = 'branding'`),
+    // Composite tenant FK (#186): branding media must reference a file of the
+    // same community, never another community's file.
+    foreignKey({
+      name: 'community_media_file_community_fk',
+      columns: [table.communityId, table.fileId],
+      foreignColumns: [filesPg.communityId, filesPg.id],
+    }).onDelete('cascade'),
   ]
 );
 
 export const communityMediaSqlite = sqliteTable(
   'community_media',
   {
-    fileId: text('file_id')
-      .primaryKey()
-      .notNull()
-      .references(() => filesSqlite.id, { onDelete: 'cascade' }),
+    fileId: text('file_id').primaryKey().notNull(),
     communityId: integer('community_id')
       .notNull()
       .references(() => communitiesSqlite.id, { onDelete: 'cascade' }),
@@ -75,5 +79,12 @@ export const communityMediaSqlite = sqliteTable(
   },
   (table) => [
     check('community_media_kind_check', sql`${table.kind} = 'branding'`),
+    // Composite tenant FK (#186): branding media must reference a file of the
+    // same community, never another community's file.
+    sqliteForeignKey({
+      name: 'community_media_file_community_fk',
+      columns: [table.communityId, table.fileId],
+      foreignColumns: [filesSqlite.communityId, filesSqlite.id],
+    }).onDelete('cascade'),
   ]
 );

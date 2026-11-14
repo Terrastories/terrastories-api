@@ -606,26 +606,51 @@ export async function createFixture(
     // visible. The restricted place is evidenced by a public story too, so
     // its 404 is the restricted flag alone; the unassociated place has no
     // edge and is hidden by the §6.4a association rule alone.
+    // #186: every join row carries the story's (and target's) community.
     await db.insert(storyPlaces).values([
-      { storyId: publicStory.id, placeId: publicPlace.id },
-      { storyId: restrictedStory.id, placeId: publicPlace.id },
-      { storyId: unknownStory.id, placeId: publicPlace.id },
-      { storyId: foreignStory.id, placeId: foreignPlace.id },
-      { storyId: publicStory.id, placeId: restrictedPlace.id },
+      { communityId, storyId: publicStory.id, placeId: publicPlace.id },
+      { communityId, storyId: restrictedStory.id, placeId: publicPlace.id },
+      { communityId, storyId: unknownStory.id, placeId: publicPlace.id },
+      {
+        communityId: foreignCommunityId,
+        storyId: foreignStory.id,
+        placeId: foreignPlace.id,
+      },
+      { communityId, storyId: publicStory.id, placeId: restrictedPlace.id },
       // Distinct edge (#191): no visible story evidences membersPlace.
-      { storyId: membersStory.id, placeId: membersPlace.id },
-      { storyId: inactiveStory.id, placeId: inactivePlace.id },
-      { storyId: privateStory.id, placeId: privatePlace.id },
+      { communityId, storyId: membersStory.id, placeId: membersPlace.id },
+      {
+        communityId: inactiveCommunity.id,
+        storyId: inactiveStory.id,
+        placeId: inactivePlace.id,
+      },
+      {
+        communityId: privateCommunityId,
+        storyId: privateStory.id,
+        placeId: privatePlace.id,
+      },
     ]);
     await db.insert(storySpeakers).values([
-      { storyId: publicStory.id, speakerId: speaker.id },
-      { storyId: restrictedStory.id, speakerId: speaker.id },
-      { storyId: unknownStory.id, speakerId: speaker.id },
-      { storyId: foreignStory.id, speakerId: foreignSpeaker.id },
+      { communityId, storyId: publicStory.id, speakerId: speaker.id },
+      { communityId, storyId: restrictedStory.id, speakerId: speaker.id },
+      { communityId, storyId: unknownStory.id, speakerId: speaker.id },
+      {
+        communityId: foreignCommunityId,
+        storyId: foreignStory.id,
+        speakerId: foreignSpeaker.id,
+      },
       // Distinct edge (#191): no visible story evidences membersSpeaker.
-      { storyId: membersStory.id, speakerId: membersSpeaker.id },
-      { storyId: inactiveStory.id, speakerId: inactiveSpeaker.id },
-      { storyId: privateStory.id, speakerId: privateSpeaker.id },
+      { communityId, storyId: membersStory.id, speakerId: membersSpeaker.id },
+      {
+        communityId: inactiveCommunity.id,
+        storyId: inactiveStory.id,
+        speakerId: inactiveSpeaker.id,
+      },
+      {
+        communityId: privateCommunityId,
+        storyId: privateStory.id,
+        speakerId: privateSpeaker.id,
+      },
     ]);
     // The runner hands checks the response body only; the handler tracks the
     // live ts_session cookie value (most recent non-empty Set-Cookie) so

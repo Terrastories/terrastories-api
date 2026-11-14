@@ -9,7 +9,8 @@
  * - Unique constraints to prevent duplicate relationships
  * - Cascade delete for referential integrity
  * - Cross-database compatibility (PostgreSQL/SQLite)
- * - Multi-tenant data isolation via foreign key relationships
+ * - Multi-tenant data isolation via composite (community_id, id) foreign keys
+ *   so an edge can only link a story and a speaker of the same community (#186)
  */
 
 import {
@@ -19,12 +20,14 @@ import {
   text,
   timestamp,
   unique,
+  foreignKey,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
   uniqueIndex,
+  foreignKey as sqliteForeignKey,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
@@ -36,12 +39,12 @@ export const storySpeakersPg = pgTable(
   'story_speakers',
   {
     id: serial('id').primaryKey(),
-    storyId: pgInteger('story_id')
-      .notNull()
-      .references(() => storiesPg.id, { onDelete: 'cascade' }),
-    speakerId: pgInteger('speaker_id')
-      .notNull()
-      .references(() => speakersPg.id, { onDelete: 'cascade' }),
+    // Tenant of the story (and, enforced by the composite FKs, of the
+    // speaker): backfilled from the story by migration 0004 and written by
+    // repositories.
+    communityId: pgInteger('community_id').notNull(),
+    storyId: pgInteger('story_id').notNull(),
+    speakerId: pgInteger('speaker_id').notNull(),
     storyRole: text('story_role'),
     sortOrder: pgInteger('sort_order').default(0),
     createdAt: timestamp('created_at').notNull().defaultNow(),
@@ -53,6 +56,20 @@ export const storySpeakersPg = pgTable(
       table.storyId,
       table.speakerId
     ),
+    // Composite tenant foreign keys (#186): each edge must stay inside one
+    // community on both the story side and the speaker side. The explicit
+    // names stay short: PostgreSQL truncates identifiers at 63 bytes, which
+    // would break the applied-vs-snapshot constraint-name gate.
+    storyCommunityFk: foreignKey({
+      name: 'story_speakers_story_community_fk',
+      columns: [table.communityId, table.storyId],
+      foreignColumns: [storiesPg.communityId, storiesPg.id],
+    }).onDelete('cascade'),
+    speakerCommunityFk: foreignKey({
+      name: 'story_speakers_speaker_community_fk',
+      columns: [table.communityId, table.speakerId],
+      foreignColumns: [speakersPg.communityId, speakersPg.id],
+    }).onDelete('cascade'),
   })
 );
 
@@ -61,12 +78,12 @@ export const storySpeakersSqlite = sqliteTable(
   'story_speakers',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
-    storyId: integer('story_id')
-      .notNull()
-      .references(() => storiesSqlite.id, { onDelete: 'cascade' }),
-    speakerId: integer('speaker_id')
-      .notNull()
-      .references(() => speakersSqlite.id, { onDelete: 'cascade' }),
+    // Tenant of the story (and, enforced by the composite FKs, of the
+    // speaker): backfilled from the story by migration 0005 and written by
+    // repositories.
+    communityId: integer('community_id').notNull(),
+    storyId: integer('story_id').notNull(),
+    speakerId: integer('speaker_id').notNull(),
     storyRole: sqliteText('story_role'),
     sortOrder: integer('sort_order').default(0),
     createdAt: integer('created_at', { mode: 'timestamp' })
@@ -82,6 +99,20 @@ export const storySpeakersSqlite = sqliteTable(
       table.storyId,
       table.speakerId
     ),
+    // Composite tenant foreign keys (#186): each edge must stay inside one
+    // community on both the story side and the speaker side. The explicit
+    // names stay short: PostgreSQL truncates identifiers at 63 bytes, which
+    // would break the applied-vs-snapshot constraint-name gate.
+    storyCommunityFk: sqliteForeignKey({
+      name: 'story_speakers_story_community_fk',
+      columns: [table.communityId, table.storyId],
+      foreignColumns: [storiesSqlite.communityId, storiesSqlite.id],
+    }).onDelete('cascade'),
+    speakerCommunityFk: sqliteForeignKey({
+      name: 'story_speakers_speaker_community_fk',
+      columns: [table.communityId, table.speakerId],
+      foreignColumns: [speakersSqlite.communityId, speakersSqlite.id],
+    }).onDelete('cascade'),
   })
 );
 

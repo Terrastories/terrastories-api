@@ -11,6 +11,7 @@ import { TestDatabaseManager } from '../helpers/database.js';
 describe('Relationships Integration Tests', () => {
   let manager: TestDatabaseManager;
   let db: Awaited<ReturnType<TestDatabaseManager['getDb']>>;
+  let communityId: number;
   let storyId: number;
   let speakerId: number;
   let placeIds: number[];
@@ -19,7 +20,7 @@ describe('Relationships Integration Tests', () => {
     manager = new TestDatabaseManager();
     db = await manager.setup();
     const fixtures = await manager.seedTestData();
-    const communityId = fixtures.communities[0].id;
+    communityId = fixtures.communities[0].id;
     placeIds = fixtures.places
       .filter((place) => place.communityId === communityId)
       .map((place) => place.id);
@@ -54,12 +55,14 @@ describe('Relationships Integration Tests', () => {
 
     await db.insert(storyPlacesSqlite).values(
       placeIds.slice(0, 2).map((placeId, sortOrder) => ({
+        communityId,
         storyId,
         placeId,
         sortOrder,
       }))
     );
     await db.insert(storySpeakersSqlite).values({
+      communityId,
       storyId,
       speakerId,
       storyRole: 'storyteller',
@@ -80,8 +83,8 @@ describe('Relationships Integration Tests', () => {
   });
 
   it('prevents duplicate many-to-many relationships', async () => {
-    const placeRelationship = { storyId, placeId: placeIds[0] };
-    const speakerRelationship = { storyId, speakerId };
+    const placeRelationship = { communityId, storyId, placeId: placeIds[0] };
+    const speakerRelationship = { communityId, storyId, speakerId };
 
     await db.insert(storyPlacesSqlite).values(placeRelationship);
     await db.insert(storySpeakersSqlite).values(speakerRelationship);
@@ -96,10 +99,15 @@ describe('Relationships Integration Tests', () => {
 
   it('cascades relationship rows when a story is deleted', async () => {
     await db.insert(storyPlacesSqlite).values({
+      communityId,
       storyId,
       placeId: placeIds[0],
     });
-    await db.insert(storySpeakersSqlite).values({ storyId, speakerId });
+    await db.insert(storySpeakersSqlite).values({
+      communityId,
+      storyId,
+      speakerId,
+    });
 
     await db.delete(storiesSqlite).where(eq(storiesSqlite.id, storyId));
 

@@ -182,12 +182,22 @@ describe('V2 sovereignty stats audiences', () => {
       .returning();
     await db.insert(storyPlacesSqlite).values([
       {
+        communityId,
         storyId: restrictedCommunityStory.id,
         placeId: publicPlaceWithRestrictedStory.id,
       },
-      { storyId: publicStory.id, placeId: publicPlaceWithPublicStory.id },
-      { storyId: communityStory.id, placeId: publicPlaceWithCommunityStory.id },
       {
+        communityId,
+        storyId: publicStory.id,
+        placeId: publicPlaceWithPublicStory.id,
+      },
+      {
+        communityId,
+        storyId: communityStory.id,
+        placeId: publicPlaceWithCommunityStory.id,
+      },
+      {
+        communityId,
         storyId: restrictedStory.id,
         placeId: publicPlaceWithRestrictedStory.id,
       },

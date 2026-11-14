@@ -20,12 +20,14 @@ import {
   boolean,
   integer as pgInteger,
   index,
+  unique,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
   index as sqliteIndex,
+  uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
@@ -64,6 +66,11 @@ export const speakersPg = pgTable(
     elderStatusIdx: index('speakers_elder_status_idx').on(table.elderStatus),
     culturalRoleIdx: index('speakers_cultural_role_idx').on(table.culturalRole),
     activeIdx: index('speakers_is_active_idx').on(table.isActive),
+    // Parent key for composite tenant FKs from stories/story_speakers (#186)
+    communityIdIdUnique: unique('speakers_community_id_id_unique').on(
+      table.communityId,
+      table.id
+    ),
   })
 );
 
@@ -110,6 +117,11 @@ export const speakersSqlite = sqliteTable(
       table.culturalRole
     ),
     activeIdx: sqliteIndex('speakers_is_active_idx').on(table.isActive),
+    // Parent key for composite tenant FKs from stories/story_speakers (#186)
+    communityIdIdUnique: uniqueIndex('speakers_community_id_id_unique').on(
+      table.communityId,
+      table.id
+    ),
   })
 );
 

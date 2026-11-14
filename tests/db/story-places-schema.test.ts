@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { getDb } from '../../src/db/index.js';
 import {
+  migrateInMemorySqlite,
+  sqliteColumn,
+  sqliteForeignKeyGroups,
+} from '../helpers/tenant-fk-probe.js';
+import {
   getStoryPlacesTable,
   storyPlacesPg,
   storyPlacesSqlite,
@@ -57,6 +62,7 @@ describe('Story Places Schema', () => {
     it('should have required columns', () => {
       // Just check that the tables have the expected structure
       expect(storyPlacesPg).toHaveProperty('id');
+      expect(storyPlacesPg).toHaveProperty('communityId');
       expect(storyPlacesPg).toHaveProperty('storyId');
       expect(storyPlacesPg).toHaveProperty('placeId');
       expect(storyPlacesPg).toHaveProperty('createdAt');
@@ -84,6 +90,7 @@ describe('Story Places Schema', () => {
   describe('Zod Validation Schemas', () => {
     const validStoryPlace = {
       id: 1,
+      communityId: 2,
       storyId: 5,
       placeId: 3,
       culturalContext: 'A sacred site for ceremony',
@@ -93,6 +100,7 @@ describe('Story Places Schema', () => {
     };
 
     const validCreateStoryPlace = {
+      communityId: 2,
       storyId: 5,
       placeId: 3,
       culturalContext: 'A sacred site for ceremony',
@@ -143,6 +151,7 @@ describe('Story Places Schema', () => {
     it('should infer correct StoryPlace type', () => {
       const storyPlace: StoryPlace = {
         id: 1,
+        communityId: 2,
         storyId: 5,
         placeId: 3,
         culturalContext: 'A sacred site for ceremony',
@@ -155,6 +164,7 @@ describe('Story Places Schema', () => {
 
     it('should infer correct NewStoryPlace type', () => {
       const newStoryPlace: NewStoryPlace = {
+        communityId: 2,
         storyId: 5,
         placeId: 3,
         culturalContext: 'A sacred site for ceremony',
@@ -165,6 +175,7 @@ describe('Story Places Schema', () => {
 
     it('should infer correct CreateStoryPlace type', () => {
       const createStoryPlace: CreateStoryPlace = {
+        communityId: 2,
         storyId: 5,
         placeId: 3,
         culturalContext: 'A sacred site for ceremony',
@@ -179,6 +190,46 @@ describe('Story Places Schema', () => {
       expect(storyPlacesPg).toBeDefined();
       expect(storyPlacesSqlite).toBeDefined();
       // Unique constraints are defined in table creation
+    });
+  });
+
+  // #186: assertions run against a database that applied the repository's
+  // SQLite migrations, so they prove the applied schema, not the Drizzle
+  // objects (the dual-backend gate in scripts/test-db-backend.ts covers the
+  // same contract on PostgreSQL and on upgraded databases).
+  describe('Composite Tenant Foreign Keys (migrated database)', () => {
+    let sqlite: Awaited<ReturnType<typeof migrateInMemorySqlite>>;
+
+    beforeAll(async () => {
+      sqlite = await migrateInMemorySqlite();
+    });
+
+    afterAll(() => {
+      sqlite.close();
+    });
+
+    it('should carry the NOT NULL community_id tenant column', () => {
+      const column = sqliteColumn(sqlite, 'story_places', 'community_id');
+      expect(column).toBeDefined();
+      expect(column?.notnull).toBe(1);
+    });
+
+    it('should reference stories(community_id, id) and places(community_id, id) on delete cascade', () => {
+      const foreignKeys = sqliteForeignKeyGroups(sqlite, 'story_places');
+      expect(foreignKeys).toContainEqual({
+        table: 'stories',
+        from: ['community_id', 'story_id'],
+        to: ['community_id', 'id'],
+        onUpdate: 'NO ACTION',
+        onDelete: 'CASCADE',
+      });
+      expect(foreignKeys).toContainEqual({
+        table: 'places',
+        from: ['community_id', 'place_id'],
+        to: ['community_id', 'id'],
+        onUpdate: 'NO ACTION',
+        onDelete: 'CASCADE',
+      });
     });
   });
 });

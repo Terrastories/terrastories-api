@@ -2247,4 +2247,203 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     ['S original update', 'T original update'],
     'findByIdWithRelations after stories.update'
   );
+
+  // 16. #186: composite (community_id, id) tenant foreign keys make a
+  // cross-community reference a DATABASE error on both backends, while the
+  // same-community versions are accepted. Raw inserts bypass the
+  // repositories' application-level validation on purpose: these assertions
+  // prove the constraint itself, not the service guard.
+  const tenantFkCommunity = await communities.create({
+    name: 'Composite Tenant FK Community',
+  });
+  const tenantFkOtherCommunity = await communities.create({
+    name: 'Composite Tenant FK Other Community',
+  });
+  const tenantFkAuthor = await users.create({
+    email: 'composite-tenant-fk@example.test',
+    passwordHash: 'repository-contract-hash',
+    firstName: 'Composite',
+    lastName: 'TenantFk',
+    communityId: tenantFkCommunity.id,
+  });
+  const tenantFkPlaceAlpha = await places.create({
+    name: 'Tenant FK Place Alpha',
+    communityId: tenantFkCommunity.id,
+    latitude: -3.1,
+    longitude: -60.1,
+  });
+  const tenantFkPlaceBeta = await places.create({
+    name: 'Tenant FK Place Beta',
+    communityId: tenantFkCommunity.id,
+    latitude: -3.2,
+    longitude: -60.2,
+  });
+  const tenantFkForeignPlace = await places.create({
+    name: 'Tenant FK Foreign Place',
+    communityId: tenantFkOtherCommunity.id,
+    latitude: -3.3,
+    longitude: -60.3,
+  });
+  const tenantFkSpeaker = await speakers.create({
+    name: 'Tenant FK Speaker',
+    communityId: tenantFkCommunity.id,
+  });
+  const tenantFkForeignSpeaker = await speakers.create({
+    name: 'Tenant FK Foreign Speaker',
+    communityId: tenantFkOtherCommunity.id,
+  });
+  const tenantFkStory = await stories.create({
+    title: 'Tenant FK Story',
+    slug: 'tenant-fk-story',
+    communityId: tenantFkCommunity.id,
+    createdBy: tenantFkAuthor.id,
+    placeIds: [tenantFkPlaceAlpha.id],
+    speakerIds: [tenantFkSpeaker.id],
+  });
+
+  // Repository-written join rows carry the story's community (the #186
+  // migration's backfill semantics hold for new writes too).
+  const tenantFkEdges = await (database as any)
+    .select()
+    .from(dialectTables.storyPlaces)
+    .where(eq(dialectTables.storyPlaces.storyId, tenantFkStory.id));
+  assert.equal(tenantFkEdges.length, 1);
+  assert.equal(
+    tenantFkEdges[0].communityId,
+    tenantFkCommunity.id,
+    'story_places join rows must carry the story community'
+  );
+  const tenantFkVoices = await (database as any)
+    .select()
+    .from(dialectTables.storySpeakers)
+    .where(eq(dialectTables.storySpeakers.storyId, tenantFkStory.id));
+  assert.equal(tenantFkVoices.length, 1);
+  assert.equal(
+    tenantFkVoices[0].communityId,
+    tenantFkCommunity.id,
+    'story_speakers join rows must carry the story community'
+  );
+
+  // story_places: a story of one community cannot link a place of another
+  // community, whether the join row claims the story's community or the
+  // place's.
+  await assert.rejects(
+    (database as any).insert(dialectTables.storyPlaces).values({
+      communityId: tenantFkCommunity.id,
+      storyId: tenantFkStory.id,
+      placeId: tenantFkForeignPlace.id,
+    }),
+    undefined,
+    'the composite tenant FK must reject a story_places edge to another community place'
+  );
+  await assert.rejects(
+    (database as any).insert(dialectTables.storyPlaces).values({
+      communityId: tenantFkOtherCommunity.id,
+      storyId: tenantFkStory.id,
+      placeId: tenantFkForeignPlace.id,
+    }),
+    undefined,
+    'the composite tenant FK must reject a story_places row claiming another community'
+  );
+  await (database as any).insert(dialectTables.storyPlaces).values({
+    communityId: tenantFkCommunity.id,
+    storyId: tenantFkStory.id,
+    placeId: tenantFkPlaceBeta.id,
+  });
+
+  // story_speakers: same contract on the speaker side.
+  await assert.rejects(
+    (database as any).insert(dialectTables.storySpeakers).values({
+      communityId: tenantFkCommunity.id,
+      storyId: tenantFkStory.id,
+      speakerId: tenantFkForeignSpeaker.id,
+    }),
+    undefined,
+    'the composite tenant FK must reject a story_speakers edge to another community speaker'
+  );
+  const tenantFkSecondSpeaker = await speakers.create({
+    name: 'Tenant FK Second Speaker',
+    communityId: tenantFkCommunity.id,
+  });
+  await (database as any).insert(dialectTables.storySpeakers).values({
+    communityId: tenantFkCommunity.id,
+    storyId: tenantFkStory.id,
+    speakerId: tenantFkSecondSpeaker.id,
+  });
+
+  // stories: interview metadata cannot reference another community's place
+  // or speaker; same-community references are accepted.
+  await assert.rejects(
+    (database as any).insert(dialectTables.stories).values({
+      title: 'Cross-community interview story',
+      slug: 'cross-community-interview-story',
+      communityId: tenantFkCommunity.id,
+      createdBy: tenantFkAuthor.id,
+      interviewLocationId: tenantFkForeignPlace.id,
+    }),
+    undefined,
+    'the composite tenant FK must reject an interview location of another community'
+  );
+  await assert.rejects(
+    (database as any).insert(dialectTables.stories).values({
+      title: 'Cross-community interviewer story',
+      slug: 'cross-community-interviewer-story',
+      communityId: tenantFkCommunity.id,
+      createdBy: tenantFkAuthor.id,
+      interviewerId: tenantFkForeignSpeaker.id,
+    }),
+    undefined,
+    'the composite tenant FK must reject an interviewer of another community'
+  );
+  const tenantFkInterviewStory = await (database as any)
+    .insert(dialectTables.stories)
+    .values({
+      title: 'Same-community interview story',
+      slug: 'same-community-interview-story',
+      communityId: tenantFkCommunity.id,
+      createdBy: tenantFkAuthor.id,
+      interviewLocationId: tenantFkPlaceBeta.id,
+      interviewerId: tenantFkSpeaker.id,
+    })
+    .returning();
+  assert.equal(tenantFkInterviewStory.length, 1);
+
+  // community_media: branding cannot bind another community's file.
+  const tenantFkFileId = crypto.randomUUID();
+  await (database as any).insert(dialectTables.files).values({
+    id: tenantFkFileId,
+    filename: 'tenant-fk-branding.png',
+    originalName: 'tenant-fk-branding.png',
+    path: `contract/communities/${tenantFkCommunity.id}/${tenantFkFileId}.png`,
+    url: `https://example.test/${tenantFkFileId}`,
+    mimeType: 'image/png',
+    size: 3,
+    communityId: tenantFkCommunity.id,
+    uploadedBy: tenantFkAuthor.id,
+    // PostgreSQL deliberately has no database default for these columns;
+    // supply the same instant SQLite's JS default would.
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  const { communityMediaPg, communityMediaSqlite } = await import(
+    '../src/db/schema/sessions.js'
+  );
+  const tenantFkMedia =
+    dialectOf(database) === 'postgresql'
+      ? communityMediaPg
+      : communityMediaSqlite;
+  await assert.rejects(
+    (database as any).insert(tenantFkMedia).values({
+      fileId: tenantFkFileId,
+      communityId: tenantFkOtherCommunity.id,
+      kind: 'branding',
+    }),
+    undefined,
+    'the composite tenant FK must reject a community_media binding to another community file'
+  );
+  await (database as any).insert(tenantFkMedia).values({
+    fileId: tenantFkFileId,
+    communityId: tenantFkCommunity.id,
+    kind: 'branding',
+  });
 }

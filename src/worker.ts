@@ -6,6 +6,7 @@ import type { PasswordVerifier } from './services/hono-foundation.service.js';
 import {
   validateWorkerV2Runtime,
   V2RuntimeConfigError,
+  v2RuntimeModeNotice,
 } from './config/v2-runtime.js';
 
 export interface WorkerBindings {
@@ -29,13 +30,23 @@ export function createWorker(
   }
 ) {
   const apps = new WeakMap<WorkerBindings, ReturnType<typeof createHonoApp>>();
-  const reportedConfigRefusals = new WeakSet<WorkerBindings>();
+  // Throttle the one-line refusal log per isolate: module state persists for
+  // the isolate's lifetime, which is at least as stable a key as the `env`
+  // object's identity across requests (PR #229 review).
+  let reportedConfigRefusal = false;
   const appFor = (env: WorkerBindings) => {
     const cached = apps.get(env);
     if (cached) return cached;
     // #150: fail closed at initialisation — insecure/default production
     // configuration refuses to serve. Throws before any adapter is built.
     const runtimeConfig = validateWorkerV2Runtime(env);
+    // PR #229 review: a relaxed mode that reaches a deployment must be
+    // visible — one content-free line naming the mode, once per binding set.
+    const modeNotice = v2RuntimeModeNotice(runtimeConfig);
+    if (modeNotice) {
+      // eslint-disable-next-line no-console -- workerd's only operator channel
+      console.warn(modeNotice);
+    }
     const client = new Proxy(env.DB, {
       get(target, key, receiver) {
         // App configuration is cached; every DB operation still starts primary-current.
@@ -76,14 +87,16 @@ export function createWorker(
       } catch (error) {
         if (!(error instanceof V2RuntimeConfigError)) throw error;
         // The refusal is operational state, not community content: log the
-        // setting names once per binding set, then fail closed uniformly.
-        if (!reportedConfigRefusals.has(env)) {
-          reportedConfigRefusals.add(env);
+        // setting names once per isolate, then fail closed uniformly with a
+        // stable content-free code so the refusal is identifiable from the
+        // response alone, where no retained log store exists (PR #229 review).
+        if (!reportedConfigRefusal) {
+          reportedConfigRefusal = true;
           // eslint-disable-next-line no-console -- workerd's only operator channel
           console.error(error.message);
         }
         return Response.json(
-          { error: 'Service unavailable' },
+          { error: 'Service unavailable', code: 'config-refused' },
           { status: 503, headers: { 'Cache-Control': 'no-store' } }
         );
       }

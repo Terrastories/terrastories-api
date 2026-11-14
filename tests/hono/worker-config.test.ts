@@ -24,7 +24,12 @@ it('refuses to serve on placeholder production configuration and stays refused',
       const refused = await mf.dispatchFetch('https://worker.test/health');
       expect(refused.status).toBe(503);
       expect(refused.headers.get('cache-control')).toBe('no-store');
-      expect(await refused.json()).toEqual({ error: 'Service unavailable' });
+      // The stable content-free code makes a refused deploy identifiable
+      // from the response alone (PR #229 review).
+      expect(await refused.json()).toEqual({
+        error: 'Service unavailable',
+        code: 'config-refused',
+      });
     }
   } finally {
     await mf.dispose();
@@ -41,7 +46,33 @@ it('refuses to serve when production PUBLIC_ORIGIN is missing entirely', async (
   try {
     const refused = await mf.dispatchFetch('https://worker.test/health');
     expect(refused.status).toBe(503);
-    expect(await refused.json()).toEqual({ error: 'Service unavailable' });
+    expect(await refused.json()).toEqual({
+      error: 'Service unavailable',
+      code: 'config-refused',
+    });
+  } finally {
+    await mf.dispose();
+  }
+});
+
+it('refuses to serve in development mode behind a production https origin', async () => {
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(
+      `import worker from './src/worker.js'; export default {fetch:(r,e)=>worker.fetch(r,e)};`
+    ),
+    // A relaxed mode may not hide behind a deployed origin (PR #229 review).
+    {
+      ENVIRONMENT: 'development',
+      PUBLIC_ORIGIN: 'https://api.terrastories.org',
+    }
+  );
+  try {
+    const refused = await mf.dispatchFetch('https://worker.test/health');
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toEqual({
+      error: 'Service unavailable',
+      code: 'config-refused',
+    });
   } finally {
     await mf.dispose();
   }

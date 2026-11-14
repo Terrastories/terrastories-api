@@ -607,6 +607,8 @@ The 2026-11-11 maintainer decision settled the recovery path, the login locator 
 
 ## 7. Authentication, sessions, and sovereignty
 
+Operational governance for this section — secrets inventory, rotation runbooks, data classification, retention and incident response — is in `docs/OPERATIONS-GOVERNANCE.md` (#150).
+
 ### Passwords (#184)
 
 Workers Free allows about 10 ms CPU per invocation (Section 5). #194 measured that server-side bcrypt and Argon2id are killed (error 1102) and that PBKDF2 at 100,000 iterations fails under sustained load. Rejection above 100,000 iterations was observed once, not retained, and remains unverified — so no profile runs a password KDF on the server. The browser stretches the password; the server only hashes and compares. One wire protocol runs on all three profiles (portability invariant).

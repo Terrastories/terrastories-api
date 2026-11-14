@@ -49,14 +49,23 @@ export async function bundleWorkerModule(contents: string): Promise<string> {
   return bundle.outputFiles![0].text;
 }
 
-/** Run a bundled worker in workerd with the Workers Free bindings. */
-export function startWorkerRuntime(script: string): Miniflare {
+/**
+ * Run a bundled worker in workerd with the Workers Free bindings. Plain
+ * bindings default the runtime to the validator's test mode (#150) so the
+ * fixtures keep exercising application behavior; production-mode refusals
+ * have their own dedicated coverage in tests/hono/worker-config.test.ts.
+ */
+export function startWorkerRuntime(
+  script: string,
+  bindings: Record<string, string> = { ENVIRONMENT: 'test' }
+): Miniflare {
   return new Miniflare({
     modules: true,
     script,
     compatibilityDate,
     d1Databases: ['DB'],
     r2Buckets: ['MEDIA'],
+    bindings,
   });
 }
 

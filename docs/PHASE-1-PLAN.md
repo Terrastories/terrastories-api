@@ -36,7 +36,9 @@ then use `npm run dev:hono` (HTTP, loopback port 3001) or `npm run build` follow
 `npm run start:hono` (Secure cookies; place behind same-origin HTTPS). Set
 `HONO_PORT` and `HONO_STORAGE_ROOT` as needed. Behind a TLS proxy, set
 `HONO_PUBLIC_ORIGIN` to the exact browser origin (for example
-`https://api.example.org`); forwarded headers are not trusted for CSRF policy.
+`https://api.example.org`) — the configuration gate (#150,
+`docs/OPERATIONS-GOVERNANCE.md`) refuses to start `start:hono` in production
+mode without it; forwarded headers are not trusted for CSRF policy.
 `HONO_CORS_ORIGINS` is a comma-separated exact-origin allowlist, empty by default;
 the Worker uses `PUBLIC_ORIGIN` and `CORS_ORIGINS` bindings with the same policy.
 No wildcard origin is accepted. Fastify runs separately.

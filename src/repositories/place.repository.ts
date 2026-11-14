@@ -593,10 +593,36 @@ export class PlaceRepository {
     storyId: number,
     placeId: number
   ): Promise<void> {
-    await (this.db as any)
-      .insert(this.tables.storyPlaces)
-      .values({ storyId, placeId })
-      .onConflictDoNothing(); // Prevent duplicate associations
+    const existing = await (this.db as any)
+      .select({ id: this.tables.storyPlaces.id })
+      .from(this.tables.storyPlaces)
+      .where(
+        and(
+          eq(this.tables.storyPlaces.storyId, storyId),
+          eq(this.tables.storyPlaces.placeId, placeId)
+        )
+      )
+      .limit(1);
+
+    if (existing.length > 0) {
+      return;
+    }
+
+    const [story] = await (this.db as any)
+      .select({ communityId: this.tables.stories.communityId })
+      .from(this.tables.stories)
+      .where(eq(this.tables.stories.id, storyId))
+      .limit(1);
+
+    if (!story) {
+      throw new DatabaseError(`Story ${storyId} not found`);
+    }
+
+    await (this.db as any).insert(this.tables.storyPlaces).values({
+      communityId: story.communityId,
+      storyId,
+      placeId,
+    });
   }
 
   /**

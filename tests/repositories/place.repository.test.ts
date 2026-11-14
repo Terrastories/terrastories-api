@@ -10,11 +10,13 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { eq, and } from 'drizzle-orm';
 import {
   PlaceRepository,
   type CreatePlaceData,
 } from '../../src/repositories/place.repository.js';
-import { testDb } from '../helpers/database.js';
+import { tablesFor } from '../../src/db/dialect.js';
+import { testDb, TestDataFactory } from '../helpers/database.js';
 
 describe('PlaceRepository', () => {
   let repository: PlaceRepository;
@@ -428,6 +430,85 @@ describe('PlaceRepository', () => {
       ).rejects.toThrow(
         'Invalid bounding box: north must be > south, east must be > west'
       );
+    });
+  });
+
+  describe('addStoryPlaceAssociation', () => {
+    test('should be idempotent when called multiple times for the same edge (#189)', async () => {
+      const tables = tablesFor(db);
+      const [author] = await db
+        .insert(tables.users)
+        .values(TestDataFactory.createUser(testCommunityId))
+        .returning();
+      const place = await repository.create({
+        name: 'Idempotent Place',
+        latitude: 37.77,
+        longitude: -122.41,
+        communityId: testCommunityId,
+      });
+      const [story] = await db
+        .insert(tables.stories)
+        .values({
+          title: 'Story for Place Association',
+          slug: 'story-for-place-assoc',
+          communityId: testCommunityId,
+          createdBy: author.id,
+        })
+        .returning();
+
+      await repository.addStoryPlaceAssociation(story.id, place.id);
+      await repository.addStoryPlaceAssociation(story.id, place.id);
+
+      const edges = await db
+        .select()
+        .from(tables.storyPlaces)
+        .where(
+          and(
+            eq(tables.storyPlaces.storyId, story.id),
+            eq(tables.storyPlaces.placeId, place.id)
+          )
+        );
+      expect(edges).toHaveLength(1);
+    });
+
+    test('should reject cross-community place associations via composite FK', async () => {
+      const tables = tablesFor(db);
+      const [author] = await db
+        .insert(tables.users)
+        .values(TestDataFactory.createUser(testCommunityId))
+        .returning();
+      const otherPlace = await repository.create({
+        name: 'Other Community Place',
+        latitude: 37.78,
+        longitude: -122.42,
+        communityId: otherCommunityId,
+      });
+      const [story] = await db
+        .insert(tables.stories)
+        .values({
+          title: 'Story in Community 1',
+          slug: 'story-in-c1',
+          communityId: testCommunityId,
+          createdBy: author.id,
+        })
+        .returning();
+
+      await expect(
+        repository.addStoryPlaceAssociation(story.id, otherPlace.id)
+      ).rejects.toThrow();
+    });
+
+    test('should reject non-existent stories cleanly', async () => {
+      const place = await repository.create({
+        name: 'Orphan Check Place',
+        latitude: 37.79,
+        longitude: -122.43,
+        communityId: testCommunityId,
+      });
+
+      await expect(
+        repository.addStoryPlaceAssociation(999999, place.id)
+      ).rejects.toThrow('Story 999999 not found');
     });
   });
 });

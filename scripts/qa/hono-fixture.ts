@@ -1968,12 +1968,23 @@ export async function createFixture(
       exclusions: [],
       sessionCookieName: 'ts_session',
       close: async () => {
+        // Run both cleanups even if the first fails, and report every
+        // failure instead of letting the second hide the first.
+        const errors: unknown[] = [];
         try {
           await closeActiveServer();
-        } finally {
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
           if (backend) await backend.close();
           else await qa!.close();
+        } catch (error) {
+          errors.push(error);
         }
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1)
+          throw new AggregateError(errors, 'Persona fixture cleanup failed');
       },
     };
   } catch (error) {

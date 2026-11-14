@@ -186,10 +186,9 @@ describe('Story Places Schema', () => {
   });
 
   describe('Constraints and Indexes', () => {
-    it('should have table constraints defined', () => {
+    it('should have table constraints and non-unique lookup index defined', () => {
       expect(storyPlacesPg).toBeDefined();
       expect(storyPlacesSqlite).toBeDefined();
-      // Unique constraints are defined in table creation
     });
   });
 

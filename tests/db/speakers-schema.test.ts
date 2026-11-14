@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { getDb } from '../../src/db/index.js';
 import {
+  migrateInMemorySqlite,
+  sqliteColumn,
+  sqliteForeignKeyGroups,
+} from '../helpers/tenant-fk-probe.js';
+import {
   getSpeakersTable,
   speakersPg,
   speakersSqlite,
@@ -446,6 +451,94 @@ describe('Speakers Schema', () => {
       if (result.success) {
         expect(result.data.isActive).toBe(false);
       }
+    });
+
+    it('should accept additive V2 §6.5 fields (birthDate, birthplaceId, affiliation)', () => {
+      const parsed = createSpeakerSchema.safeParse({
+        name: 'Elder A',
+        communityId: 1,
+        birthDate: '1948-05-12',
+        birthplaceId: 42,
+        affiliation: 'Upper River Nation',
+      });
+      expect(parsed.success).toBe(true);
+    });
+  });
+
+  describe('Additive §6.5 Columns and Composite Birthplace FK (migrated database)', () => {
+    let sqlite: Awaited<ReturnType<typeof migrateInMemorySqlite>>;
+
+    beforeAll(async () => {
+      sqlite = await migrateInMemorySqlite();
+    });
+
+    afterAll(() => {
+      sqlite.close();
+    });
+
+    it('should carry nullable birth_date, birthplace_id, and affiliation columns', () => {
+      for (const name of ['birth_date', 'birthplace_id', 'affiliation']) {
+        const col = sqliteColumn(sqlite, 'speakers', name);
+        expect(col).toBeDefined();
+        expect(col?.notnull).toBe(0);
+      }
+    });
+
+    it('should enforce composite (community_id, birthplace_id) FK against places(community_id, id)', () => {
+      const foreignKeys = sqliteForeignKeyGroups(sqlite, 'speakers');
+      expect(foreignKeys).toContainEqual({
+        table: 'places',
+        from: ['community_id', 'birthplace_id'],
+        to: ['community_id', 'id'],
+        onUpdate: 'NO ACTION',
+        onDelete: 'NO ACTION',
+      });
+
+      const now = Date.now();
+      const c1 = Number(
+        sqlite
+          .prepare(
+            "INSERT INTO communities (name, slug, created_at, updated_at) VALUES ('C1', 'c1-sp', ?, ?)"
+          )
+          .run(now, now).lastInsertRowid
+      );
+      const c2 = Number(
+        sqlite
+          .prepare(
+            "INSERT INTO communities (name, slug, created_at, updated_at) VALUES ('C2', 'c2-sp', ?, ?)"
+          )
+          .run(now, now).lastInsertRowid
+      );
+      const p1 = Number(
+        sqlite
+          .prepare(
+            "INSERT INTO places (name, community_id, latitude, longitude, created_at, updated_at) VALUES ('P1', ?, 0, 0, ?, ?)"
+          )
+          .run(c1, now, now).lastInsertRowid
+      );
+      const p2 = Number(
+        sqlite
+          .prepare(
+            "INSERT INTO places (name, community_id, latitude, longitude, created_at, updated_at) VALUES ('P2', ?, 0, 0, ?, ?)"
+          )
+          .run(c2, now, now).lastInsertRowid
+      );
+
+      expect(() =>
+        sqlite
+          .prepare(
+            "INSERT INTO speakers (name, community_id, birthplace_id, created_at, updated_at) VALUES ('Cross', ?, ?, ?, ?)"
+          )
+          .run(c1, p2, now, now)
+      ).toThrow();
+
+      expect(() =>
+        sqlite
+          .prepare(
+            "INSERT INTO speakers (name, community_id, birth_date, birthplace_id, affiliation, created_at, updated_at) VALUES ('Same', ?, '1950-01-02', ?, 'Clan', ?, ?)"
+          )
+          .run(c1, p1, now, now)
+      ).not.toThrow();
     });
   });
 });

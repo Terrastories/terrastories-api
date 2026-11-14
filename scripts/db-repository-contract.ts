@@ -2627,4 +2627,116 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     communityId: tenantFkCommunity.id,
     kind: 'branding',
   });
+
+  // #189: duplicate story edges are allowed at the table level to retain
+  // source multiplicity, while frozen V1 repositories remain idempotent.
+  await (database as any).insert(dialectTables.storyPlaces).values({
+    communityId: tenantFkCommunity.id,
+    storyId: tenantFkStory.id,
+    placeId: tenantFkPlaceAlpha.id,
+    culturalContext: 'second visit',
+    sortOrder: 1,
+  });
+  const duplicatePlaceEdges = await (database as any)
+    .select()
+    .from(dialectTables.storyPlaces)
+    .where(
+      and(
+        eq(dialectTables.storyPlaces.storyId, tenantFkStory.id),
+        eq(dialectTables.storyPlaces.placeId, tenantFkPlaceAlpha.id)
+      )
+    );
+  assert.equal(
+    duplicatePlaceEdges.length,
+    2,
+    'story_places must store duplicate (story_id, place_id) edges at the table level'
+  );
+
+  await (database as any).insert(dialectTables.storySpeakers).values({
+    communityId: tenantFkCommunity.id,
+    storyId: tenantFkStory.id,
+    speakerId: tenantFkSpeaker.id,
+    storyRole: 'translator',
+    sortOrder: 1,
+  });
+  const duplicateSpeakerEdges = await (database as any)
+    .select()
+    .from(dialectTables.storySpeakers)
+    .where(
+      and(
+        eq(dialectTables.storySpeakers.storyId, tenantFkStory.id),
+        eq(dialectTables.storySpeakers.speakerId, tenantFkSpeaker.id)
+      )
+    );
+  assert.equal(
+    duplicateSpeakerEdges.length,
+    2,
+    'story_speakers must store duplicate (story_id, speaker_id) edges at the table level'
+  );
+
+  const idempotentPlace = await places.create({
+    name: 'Idempotent Edge Place',
+    communityId: tenantFkCommunity.id,
+    latitude: -3.4,
+    longitude: -60.4,
+  });
+  await places.addStoryPlaceAssociation(tenantFkStory.id, idempotentPlace.id);
+  await places.addStoryPlaceAssociation(tenantFkStory.id, idempotentPlace.id);
+  const v1PlaceEdges = await (database as any)
+    .select()
+    .from(dialectTables.storyPlaces)
+    .where(
+      and(
+        eq(dialectTables.storyPlaces.storyId, tenantFkStory.id),
+        eq(dialectTables.storyPlaces.placeId, idempotentPlace.id)
+      )
+    );
+  assert.equal(
+    v1PlaceEdges.length,
+    1,
+    'V1 PlaceRepository.addStoryPlaceAssociation must remain idempotent'
+  );
+
+  const v1DedupStory = await stories.create({
+    title: 'V1 Dedup Edge Story',
+    slug: 'v1-dedup-edge-story',
+    communityId: tenantFkCommunity.id,
+    createdBy: tenantFkAuthor.id,
+    placeIds: [tenantFkPlaceAlpha.id, tenantFkPlaceAlpha.id],
+    speakerIds: [tenantFkSpeaker.id, tenantFkSpeaker.id],
+  });
+  const v1DedupPlaces = await (database as any)
+    .select()
+    .from(dialectTables.storyPlaces)
+    .where(eq(dialectTables.storyPlaces.storyId, v1DedupStory.id));
+  const v1DedupSpeakers = await (database as any)
+    .select()
+    .from(dialectTables.storySpeakers)
+    .where(eq(dialectTables.storySpeakers.storyId, v1DedupStory.id));
+  assert.equal(v1DedupPlaces.length, 1);
+  assert.equal(v1DedupSpeakers.length, 1);
+
+  // #189: additive §6.5 speaker fields + composite birthplace_id tenant FK.
+  await assert.rejects(
+    (database as any).insert(dialectTables.speakers).values({
+      name: 'Cross-community birthplace speaker',
+      communityId: tenantFkCommunity.id,
+      birthplaceId: tenantFkForeignPlace.id,
+    }),
+    undefined,
+    'the composite tenant FK must reject a speaker birthplace_id of another community'
+  );
+  const [speakerWithV2Fields] = await (database as any)
+    .insert(dialectTables.speakers)
+    .values({
+      name: 'Same-community birthplace speaker',
+      communityId: tenantFkCommunity.id,
+      birthDate: '1952-07-19',
+      birthplaceId: tenantFkPlaceAlpha.id,
+      affiliation: 'River Council',
+    })
+    .returning();
+  assert.equal(speakerWithV2Fields.birthDate, '1952-07-19');
+  assert.equal(speakerWithV2Fields.birthplaceId, tenantFkPlaceAlpha.id);
+  assert.equal(speakerWithV2Fields.affiliation, 'River Council');
 }

@@ -82,19 +82,34 @@ describe('Relationships Integration Tests', () => {
     expect(linkedSpeakers[0].speakerId).toBe(speakerId);
   });
 
-  it('prevents duplicate many-to-many relationships', async () => {
+  it('retains duplicate many-to-many story edges at the table level (#189)', async () => {
     const placeRelationship = { communityId, storyId, placeId: placeIds[0] };
     const speakerRelationship = { communityId, storyId, speakerId };
 
     await db.insert(storyPlacesSqlite).values(placeRelationship);
+    await db.insert(storyPlacesSqlite).values({
+      ...placeRelationship,
+      culturalContext: 'second visit',
+      sortOrder: 1,
+    });
     await db.insert(storySpeakersSqlite).values(speakerRelationship);
+    await db.insert(storySpeakersSqlite).values({
+      ...speakerRelationship,
+      storyRole: 'translator',
+      sortOrder: 1,
+    });
 
-    await expect(
-      db.insert(storyPlacesSqlite).values(placeRelationship)
-    ).rejects.toThrow();
-    await expect(
-      db.insert(storySpeakersSqlite).values(speakerRelationship)
-    ).rejects.toThrow();
+    const placeEdges = await db
+      .select()
+      .from(storyPlacesSqlite)
+      .where(eq(storyPlacesSqlite.storyId, storyId));
+    const speakerEdges = await db
+      .select()
+      .from(storySpeakersSqlite)
+      .where(eq(storySpeakersSqlite.storyId, storyId));
+
+    expect(placeEdges).toHaveLength(2);
+    expect(speakerEdges).toHaveLength(2);
   });
 
   it('cascades relationship rows when a story is deleted', async () => {

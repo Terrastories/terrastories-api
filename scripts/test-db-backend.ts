@@ -705,6 +705,41 @@ function verifySqliteSchema(sqlite: Database.Database): void {
     ['community_id', 'file_id'],
     'CASCADE'
   );
+
+  // #189: additive speaker fields, composite birthplace FK, and non-unique
+  // story-edge lookup indexes.
+  const speakerColumns = columnNames(
+    sqlite.prepare('PRAGMA table_info(speakers)').all() as any[]
+  );
+  for (const column of ['birth_date', 'birthplace_id', 'affiliation']) {
+    assert.ok(speakerColumns.has(column), `missing speakers.${column}`);
+  }
+  compositeTenantFk(
+    'speakers',
+    'places',
+    ['community_id', 'birthplace_id'],
+    'NO ACTION'
+  );
+  for (const [table, expectedIdx, droppedIdx] of [
+    ['story_places', 'story_places_story_place_idx', 'story_place_unique'],
+    [
+      'story_speakers',
+      'story_speakers_story_speaker_idx',
+      'story_speaker_unique',
+    ],
+  ] as const) {
+    const indexes = sqlite
+      .prepare(`PRAGMA index_list(${table})`)
+      .all() as any[];
+    assert.equal(
+      indexes.some((row) => String(row.name) === droppedIdx),
+      false,
+      `${droppedIdx} must be dropped on ${table}`
+    );
+    const lookup = indexes.find((row) => String(row.name) === expectedIdx);
+    assert.ok(lookup, `missing SQLite non-unique index ${expectedIdx}`);
+    assert.equal(Number(lookup.unique), 0, `${expectedIdx} must be non-unique`);
+  }
 }
 
 /**
@@ -1219,6 +1254,52 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
       `missing PostgreSQL composite parent key ${constraint}`
     );
   }
+
+  // #189: additive speaker fields, composite birthplace FK, and non-unique
+  // story-edge lookup indexes.
+  for (const required of [
+    'speakers.birth_date',
+    'speakers.birthplace_id',
+    'speakers.affiliation',
+  ]) {
+    assert.ok(names.has(required), `missing ${required}`);
+  }
+  const birthplaceFkDef = constraints.get('speakers_birthplace_community_fk');
+  assert.ok(
+    birthplaceFkDef,
+    'missing PostgreSQL composite tenant FK speakers_birthplace_community_fk'
+  );
+  assert.match(
+    birthplaceFkDef,
+    /FOREIGN KEY \(community_id, birthplace_id\)/,
+    'speakers_birthplace_community_fk must be a composite tenant foreign key'
+  );
+  assert.equal(
+    constraints.has('story_place_unique'),
+    false,
+    'story_place_unique constraint must be dropped'
+  );
+  assert.equal(
+    constraints.has('story_speaker_unique'),
+    false,
+    'story_speaker_unique constraint must be dropped'
+  );
+  assert.equal(
+    indexes.has('story_place_unique'),
+    false,
+    'story_place_unique index must be dropped'
+  );
+  assert.equal(
+    indexes.has('story_speaker_unique'),
+    false,
+    'story_speaker_unique index must be dropped'
+  );
+  for (const indexName of [
+    'story_places_story_place_idx',
+    'story_speakers_story_speaker_idx',
+  ]) {
+    assert.ok(indexes.has(indexName), `missing PostgreSQL index ${indexName}`);
+  }
 }
 
 async function verifyPostgresPreservation(
@@ -1670,8 +1751,9 @@ interface Snapshot {
   tables: Record<string, SnapshotTable>;
 }
 
-/** Tables 0005 rebuilds by hand: they must match the Drizzle snapshot exactly. */
+/** Tables 0005/0007 rebuild by hand: they must match the Drizzle snapshot exactly. */
 const rebuiltTables = [
+  'speakers',
   'stories',
   'story_places',
   'story_speakers',
@@ -1808,7 +1890,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0006_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0007_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2195,6 +2277,15 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       undefined,
       'stepwise: the re-run must drop the guard table'
     );
+    for (const file of [
+      '0006_ms_timestamps.sql',
+      '0007_story_edge_multiplicity_and_speaker_fields.sql',
+    ]) {
+      const nextStatements = splitStatements(
+        await readFile(path.join(sqliteMigrations, file), 'utf8')
+      );
+      for (const statement of nextStatements) sqlite.exec(statement);
+    }
     verifySqliteSchema(sqlite);
     verifySqliteSnapshotDrift(sqlite, 'stepwise re-run');
     sqlite.close();

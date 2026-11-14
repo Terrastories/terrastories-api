@@ -7,7 +7,7 @@ This note explains how the persona contract harness separates approved V2 requir
 
 ## Contract classes: `canonical-v2` vs `legacy-v1`
 
-- **`canonical-v2`** — assertions derived from [`docs/SPEC-V2.md`](SPEC-V2.md) (the V2 product and architecture oracle). These run against the Hono V2 app on: in-process SQLite, real Node HTTP over the in-process SQLite database (`@hono/node-server`), in-process PostgreSQL 13, and Workers D1/R2 (in-process only).
+- **`canonical-v2`** — assertions derived from [`docs/SPEC-V2.md`](SPEC-V2.md) (the V2 product and architecture oracle). These run against the Hono V2 app on: in-process SQLite, real Node HTTP (`@hono/node-server`) over the selected in-process QA database (SQLite by default), in-process PostgreSQL 13, and Workers D1/R2 (in-process only).
 - **`legacy-v1`** — assertions running against the frozen Fastify V1 coexistence fixtures (SQLite and PostgreSQL). Fastify V1 and legacy Rails are **evidence**, not the V2 oracle: `legacy-v1` pins frozen V1 behaviour during coexistence without making V1 routes or response shapes a V2 requirement.
 
 Both classes fail closed on status mismatches, body-check failures, or uncovered endpoints (`report.pass === false`). The `contract` label on the report and each `Result`, along with the per-class pass/fail counts in `report.summary`, keeps the two classes distinguishable in CI reports.

@@ -1637,6 +1637,44 @@ export async function createFixture(
             expected: 404,
           },
           {
+            // #188: re-login with the live cookie rotates the session row
+            // (same user, unexpired) on every backend — including the atomic
+            // D1 batch path on Workers.
+            name: 'rotate own session by re-login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: credentials[role],
+            check: ownUser(credentials[role].email, role, liveSessionCookie),
+          },
+          ...(role === 'admin'
+            ? [
+                {
+                  // #188 shared-browser login: signing in as another user
+                  // over the live admin cookie binds the new user's own
+                  // fresh session and revokes the presented one.
+                  name: 'take over live session by cross-user login',
+                  method: 'POST',
+                  path: '/v2/auth/login',
+                  expected: 200,
+                  body: credentials.viewer,
+                  saveCookieAs: 'pre-takeover',
+                  check: ownUser(
+                    credentials.viewer.email,
+                    'viewer',
+                    liveSessionCookie
+                  ),
+                },
+                {
+                  name: 'reject pre-takeover admin cookie',
+                  method: 'GET',
+                  path: '/v2/auth/me',
+                  expected: 401,
+                  useSavedCookie: 'pre-takeover',
+                },
+              ]
+            : []),
+          {
             name: 'logout',
             method: 'POST',
             path: '/v2/auth/logout',

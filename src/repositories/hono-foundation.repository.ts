@@ -1,4 +1,4 @@
-import { and, eq, gt, isNull, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import {
   sessionLifetime,
@@ -83,45 +83,97 @@ export class HonoFoundationRepository {
   async createSession(
     tokenHash: string,
     user: FoundationUser,
+    now: Date,
     expiresAt: Date,
     previousHash?: string
   ): Promise<boolean> {
     const sessions = this.sessions;
     const { users, communities } = this.tables;
-    let verified = this.database
-      .select({
-        id: sql`coalesce((select ${sessions.id} from ${sessions} where ${sessions.tokenHash} = ${previousHash ?? ''}), ${tokenHash})`,
-        tokenHash: sql`${tokenHash}`,
-        userId: users.id,
-        expiresAt: sql`${expiresAt.getTime()}`,
-      })
-      .from(users)
-      .innerJoin(communities, eq(users.communityId, communities.id))
-      .where(
-        and(
-          eq(users.id, user.id),
-          eq(users.passwordHash, user.passwordHash),
-          eq(users.role, sql`${user.role}`),
-          eq(users.communityId, user.communityId),
-          eq(users.isActive, true),
-          eq(communities.isActive, true)
-        )
-      );
-    // PostgreSQL locks current authority through the write; a concurrent reset
-    // either changes this selection or waits and then revokes the new session.
-    // SQLite/D1 serialize this single write statement without interactive locks.
-    if (dialectOf(this.database) === 'postgresql')
-      verified = verified.for('share');
-    // Stable row IDs ensure concurrent rotations always write a fresh digest.
-    const rows = await this.database
-      .insert(sessions)
-      .select(verified)
-      .onConflictDoUpdate({
-        target: sessions.id,
-        set: { tokenHash, userId: user.id, expiresAt: expiresAt.getTime() },
-      })
-      .returning({ id: sessions.id });
-    return rows.length > 0;
+    const db = this.database;
+    // A presented session belonging to a different user is never rotated
+    // onto the new login: it is revoked, and the authenticating user always
+    // gets a row of their own (#188 — shared-browser login). The revocation
+    // is coupled to the verified session write below and runs only when that
+    // write establishes the login, so a login that loses the authority race
+    // never destroys the other user's session.
+    const verifiedInsert = (database: typeof db) => {
+      let verified = database
+        .select({
+          // Only an unexpired same-user row is rotated in place; an expired
+          // presented row is never resurrected — the login allocates a fresh
+          // row instead.
+          id: sql`coalesce((select ${sessions.id} from ${sessions} where ${sessions.tokenHash} = ${previousHash ?? ''} and ${sessions.userId} = ${user.id} and ${sessions.expiresAt} > ${now.getTime()}), ${tokenHash})`,
+          tokenHash: sql`${tokenHash}`,
+          userId: users.id,
+          expiresAt: sql`${expiresAt.getTime()}`,
+        })
+        .from(users)
+        .innerJoin(communities, eq(users.communityId, communities.id))
+        .where(
+          and(
+            eq(users.id, user.id),
+            eq(users.passwordHash, user.passwordHash),
+            eq(users.role, sql`${user.role}`),
+            eq(users.communityId, user.communityId),
+            eq(users.isActive, true),
+            eq(communities.isActive, true)
+          )
+        );
+      // PostgreSQL locks current authority through the write; a concurrent
+      // reset either changes this selection or waits and then revokes the new
+      // session. SQLite/D1 serialize this single write statement without
+      // interactive locks.
+      if (dialectOf(this.database) === 'postgresql')
+        verified = verified.for('share');
+      // Stable row IDs ensure concurrent rotations always write a fresh digest.
+      return database
+        .insert(sessions)
+        .select(verified)
+        .onConflictDoUpdate({
+          target: sessions.id,
+          set: { tokenHash, userId: user.id, expiresAt: expiresAt.getTime() },
+        })
+        .returning({ id: sessions.id });
+    };
+    const revokePresented = (hash: string) =>
+      and(eq(sessions.tokenHash, hash), ne(sessions.userId, user.id));
+    if (previousHash === undefined) {
+      const rows = await verifiedInsert(db);
+      return rows.length > 0;
+    }
+    // Workers/D1 has no interactive transactions: one atomic batch couples
+    // the revocation to the insert, whose committed row the delete's exists
+    // guard requires — a failed gate inserts nothing, so nothing is revoked.
+    if (typeof db.batch === 'function') {
+      const [rows] = await db.batch([
+        verifiedInsert(db),
+        db
+          .delete(sessions)
+          .where(
+            and(
+              revokePresented(previousHash),
+              sql`exists (select 1 from ${sessions} where ${sessions.tokenHash} = ${tokenHash} and ${sessions.userId} = ${user.id})`
+            )
+          ),
+      ]);
+      return rows.length > 0;
+    }
+    if (dialectOf(db) === 'postgresql') {
+      return db.transaction(async (tx: typeof db) => {
+        const rows = await verifiedInsert(tx);
+        if (rows.length > 0)
+          await tx.delete(sessions).where(revokePresented(previousHash));
+        return rows.length > 0;
+      });
+    }
+    // better-sqlite3 (drizzle "sync" mode) exposes only synchronous
+    // transactions; the insert and the coupled revocation run in one.
+    return db.transaction((tx: typeof db) => {
+      const rows = verifiedInsert(tx).all();
+      if (rows.length > 0)
+        tx.delete(sessions).where(revokePresented(previousHash)).run();
+      return rows.length > 0;
+    });
   }
 
   /** Re-read current user/community state; mutation triggers permanently revoke sessions. */

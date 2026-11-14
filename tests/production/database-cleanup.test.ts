@@ -213,7 +213,7 @@ describe('Production Database Cleanup', () => {
       expect(tenantOf('places', place[0].id)).toBe(storyTenant);
       expect(tenantOf('speakers', speaker[0].id)).toBe(storyTenant);
 
-      const now = Math.floor(Date.now() / 1000);
+      const now = Date.now();
       sqlite
         .prepare(
           `INSERT INTO story_places

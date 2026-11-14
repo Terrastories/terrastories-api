@@ -732,6 +732,7 @@ Test administrative sequences, not only direct content requests: credential reco
 - Use Drizzle/parameterized query APIs for application data access by default.
 - Raw SQL is allowed only when necessary behind repository/migration boundaries; it must be parameterized and either portable or explicitly dialect-scoped with equivalent behavior tests.
 - JSON fields are storage containers unless a capability is explicitly proven portable; shared product behavior must not depend on PostgreSQL JSONB-only operators.
+- Timestamps are stored at millisecond precision on every backend — SQLite/D1 timestamp columns hold Unix milliseconds and PostgreSQL columns are `timestamp(3)` (#192) — so ordering and pagination semantics are identical across backends.
 - Risky schema changes use expand/contract or a tested backup/restore/forward-fix strategy.
 - Media storage keys are server-generated and community-scoped, except the isolated account-scoped system-profile case in Section 6.7; user filenames are metadata only.
 - Writes that must be atomic (an import commit, a write that checks tenant invariants across rows) run as one D1 batch on Workers; interactive transactions are not assumed portable.

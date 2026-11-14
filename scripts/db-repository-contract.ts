@@ -1998,134 +1998,132 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     'tie page 4 must be exactly the 30 lowest matching ids'
   );
 
-  // 14. PostgreSQL keeps microseconds in created_at; the keyset cursor must
-  // carry them exactly as the database stores them (raw text, not a truncated
-  // millisecond JS Date) so 200 rows inside ONE millisecond are neither
-  // skipped nor duplicated. SQLite timestamps are whole seconds (integer
-  // storage), so microsecond fidelity cannot be expressed there; case 13
-  // covers shared-instant ties on SQLite instead.
-  if (dialectOf(database) === 'postgresql') {
-    const microCommunity = await communities.create({
-      name: 'Microsecond Community',
+  // 14. #192: timestamps are millisecond precision on EVERY backend —
+  // SQLite/D1 stores Unix milliseconds and PostgreSQL columns are
+  // timestamp(3). Rows whose createdAt instants differ by 1-2 ms must order
+  // deterministically newest-first identically on both backends (a
+  // seconds-precision backend would tie them and fall back to id order), and
+  // a Date with millisecond components must round-trip exactly.
+  {
+    const msCommunity = await communities.create({
+      name: 'Millisecond Order Community',
     });
-    const microAuthor = await users.create({
-      email: 'microsecond-cursor@example.test',
+    const msAuthor = await users.create({
+      email: 'millisecond-order@example.test',
       passwordHash: 'repository-contract-hash',
-      firstName: 'Micro',
-      lastName: 'Cursor',
-      communityId: microCommunity.id,
+      firstName: 'Millisecond',
+      lastName: 'Order',
+      communityId: msCommunity.id,
     });
-    const microStoryIds: number[] = [];
-    for (let index = 0; index < 200; index += 1) {
-      const created = await stories.create({
-        title: `Micro Precision ${index}`,
-        slug: `micro-precision-${index}`,
-        communityId: microCommunity.id,
-        createdBy: microAuthor.id,
-        tags: ['Micro'],
-      });
-      microStoryIds.push(created.id);
-    }
-    // All 200 land inside one millisecond: one distinct microsecond per id...
-    await (database as any).execute(sql`
-      UPDATE stories
-      SET created_at =
-        timestamp '2026-02-01 00:00:00' + ((id % 1000) * interval '1 microsecond')
-      WHERE community_id = ${microCommunity.id}
-    `);
-    // ...and the 50 lowest ids collapse onto one identical microsecond value,
-    // mixing exact ties with sub-millisecond differences.
-    await (database as any).execute(sql`
-      UPDATE stories
-      SET created_at = timestamp '2026-02-01 00:00:00'
-      WHERE community_id = ${microCommunity.id}
-        AND id IN (
-          SELECT id FROM stories
-          WHERE community_id = ${microCommunity.id}
-          ORDER BY id ASC
-          LIMIT 50
-        )
-    `);
-    // Expected order read straight from the database as stored text.
-    const microRowsResult = await (database as any).execute(sql`
-      SELECT id, created_at::text AS created_at_text
-      FROM stories
-      WHERE community_id = ${microCommunity.id}
-      ORDER BY created_at DESC, id DESC
-    `);
-    const microExpected: Array<{ id: number; text: string }> = (
-      Array.isArray(microRowsResult) ? microRowsResult : microRowsResult.rows
-    ).map((row: any) => ({
-      id: Number(row.id),
-      text: String(row.created_at_text),
-    }));
-    assert.equal(microExpected.length, 200);
-    // Sanity: every timestamp stays inside the same millisecond, the
-    // sub-millisecond offsets really differ, and 50 rows share one value.
-    const microValueCounts = new Map<string, number>();
-    for (const { text } of microExpected) {
-      assert.match(
-        text,
-        /^2026-02-01 00:00:00(\.\d{1,6})?$/,
-        `created_at must stay inside the 2026-02-01 00:00:00 millisecond, got ${text}`
-      );
-      const dot = text.indexOf('.');
-      if (dot >= 0) {
-        const digits = text.length - dot - 1;
-        const micros = Number(text.slice(dot + 1)) * 10 ** (6 - digits);
-        assert.ok(
-          micros > 0 && micros <= 999,
-          `sub-millisecond microsecond offset expected, got ${text}`
-        );
-      }
-      microValueCounts.set(text, (microValueCounts.get(text) ?? 0) + 1);
-    }
-    assert.ok(
-      microValueCounts.size > 100,
-      'the 200 rows must carry mostly distinct microsecond offsets'
-    );
-    assert.ok(
-      Math.max(...microValueCounts.values()) >= 50,
-      '50 rows must share one identical microsecond value'
-    );
+    // Creation order is newest-instant FIRST, so every row expected to lead
+    // the page also has the LOWEST id: only timestamp order can produce the
+    // asserted page (an id-desc tiebreak alone would reverse it).
+    const msNewest = await stories.create({
+      title: 'Millisecond Newest',
+      slug: 'millisecond-newest',
+      communityId: msCommunity.id,
+      createdBy: msAuthor.id,
+      tags: ['MsPrecision'],
+    });
+    const msMiddle = await stories.create({
+      title: 'Millisecond Middle',
+      slug: 'millisecond-middle',
+      communityId: msCommunity.id,
+      createdBy: msAuthor.id,
+      tags: ['MsPrecision'],
+    });
+    const msOldest = await stories.create({
+      title: 'Millisecond Oldest',
+      slug: 'millisecond-oldest',
+      communityId: msCommunity.id,
+      createdBy: msAuthor.id,
+      tags: ['MsPrecision'],
+    });
+    // Adjacent rows differ by 1-2 ms — every pairwise gap is below one
+    // second, so a seconds-precision backend ties all three rows.
+    const msRoundTripInstant = new Date('2026-08-01T00:00:00.900Z');
+    const msBase = msRoundTripInstant.getTime();
+    await (database as any)
+      .update(dialectTables.stories)
+      .set({ createdAt: new Date(msBase + 2) })
+      .where(eq(dialectTables.stories.id, msNewest.id));
+    await (database as any)
+      .update(dialectTables.stories)
+      .set({ createdAt: new Date(msBase + 1) })
+      .where(eq(dialectTables.stories.id, msMiddle.id));
+    // The oldest row doubles as the round-trip probe: a Date with a non-zero
+    // millisecond component must come back as the same instant, not truncated
+    // to whole seconds (SQLite's pre-#192 storage) or microseconds.
+    await (database as any)
+      .update(dialectTables.stories)
+      .set({ createdAt: msRoundTripInstant })
+      .where(eq(dialectTables.stories.id, msOldest.id));
 
-    const microFirstPage = await stories.findMany(
-      { communityId: microCommunity.id, tags: ['micro'] },
-      { page: 1, limit: 50 }
+    const expectedMsOrder = [msNewest.id, msMiddle.id, msOldest.id];
+    const msPage = await stories.findMany(
+      { communityId: msCommunity.id },
+      { page: 1, limit: 10 }
     );
-    assert.equal(microFirstPage.total, 200);
-    assert.equal(microFirstPage.totalPages, 4);
-    const microPagedIds: number[] = [];
-    for (let page = 1; page <= 4; page += 1) {
-      const pageResult = await stories.findMany(
-        { communityId: microCommunity.id, tags: ['micro'] },
-        { page, limit: 50 }
-      );
-      assert.equal(
-        pageResult.total,
-        200,
-        `microsecond page ${page} must keep the total`
-      );
-      microPagedIds.push(...pageResult.data.map((story) => story.id));
-    }
+    assert.equal(msPage.total, 3);
+    assert.deepEqual(
+      msPage.data.map((story) => story.id),
+      expectedMsOrder,
+      'rows 1-2 ms apart must order newest-first by createdAt, not by id'
+    );
     assert.equal(
-      new Set(microPagedIds).size,
-      200,
-      'microsecond pages must not repeat an id'
+      msPage.data[2].createdAt.getTime(),
+      msRoundTripInstant.getTime(),
+      'a Date with millisecond components must round-trip exactly'
     );
+    // The tag-filtered keyset scan must separate the same rows identically:
+    // its cursor carries createdAt exactly as stored on both backends.
+    const msTagged = await stories.findMany(
+      { communityId: msCommunity.id, tags: ['msprecision'] },
+      { page: 1, limit: 10 }
+    );
+    assert.equal(msTagged.total, 3);
     assert.deepEqual(
-      new Set(microPagedIds),
-      new Set(microStoryIds),
-      'the union of all microsecond pages must be exactly the 200 story ids'
+      msTagged.data.map((story) => story.id),
+      expectedMsOrder,
+      'the keyset scan must order 1-2 ms rows newest-first on both backends'
     );
-    assert.deepEqual(
-      microPagedIds,
-      microExpected.map((row) => row.id),
-      'microsecond pages must follow createdAt desc then id desc, matching the raw-SQL order'
-    );
-  } else {
-    // Skipped on SQLite: its timestamps are whole seconds, so rows can never
-    // differ only below one second (see the storage note above).
+    const expectedMsInstants = [msBase + 2, msBase + 1, msBase];
+    for (const [index, story] of msTagged.data.entries()) {
+      assert.equal(
+        story.createdAt.getTime(),
+        expectedMsInstants[index],
+        `keyset row ${index} must keep its millisecond instant`
+      );
+    }
+
+    // PostgreSQL narrows storage to timestamp(3): sub-millisecond offsets
+    // round to the nearest millisecond (down from 0.4 ms, up from 0.6 ms), so
+    // the backend no longer holds a precision SQLite cannot express. SQLite
+    // integer storage has no sub-millisecond values to round.
+    if (dialectOf(database) === 'postgresql') {
+      await (database as any).execute(sql`
+        UPDATE stories
+        SET created_at = timestamp '2026-02-01 00:00:00.0004'
+        WHERE id = ${msOldest.id}
+      `);
+      const roundedDown = await stories.findById(msOldest.id);
+      assert.equal(
+        roundedDown?.createdAt.getTime(),
+        Date.UTC(2026, 1, 1, 0, 0, 0, 0),
+        'timestamp(3) must round a 0.4 ms offset down to the same millisecond'
+      );
+      await (database as any).execute(sql`
+        UPDATE stories
+        SET created_at = timestamp '2026-02-01 00:00:00.0006'
+        WHERE id = ${msOldest.id}
+      `);
+      const roundedUp = await stories.findById(msOldest.id);
+      assert.equal(
+        roundedUp?.createdAt.getTime(),
+        Date.UTC(2026, 1, 1, 0, 0, 0, 1),
+        'timestamp(3) must round a 0.6 ms offset up to the next millisecond'
+      );
+    }
   }
 
   // 15. Association metadata stays aligned with the deduped id: a repeated id

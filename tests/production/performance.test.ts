@@ -717,8 +717,8 @@ describe('Production Performance Validation - Phase 1', () => {
             await db.executeRaw(`
             SELECT COUNT(*) as story_count,
                    COUNT(DISTINCT community_id) as community_count
-            FROM stories 
-            WHERE created_at >= datetime('now', '-1 year')
+            FROM stories
+            WHERE created_at >= unixepoch('now', '-1 year') * 1000
           `);
 
             const duration = performance.now() - start;
@@ -783,7 +783,7 @@ describe('Production Performance Validation - Phase 1', () => {
       const communityId = communityIds[communityIndex];
       const createdBy = communityIndex === 0 ? user1?.id || 1 : user2?.id || 1;
       storyInserts.push(`
-        (${i}, 'Performance Test Story ${i}', 'Content for story ${i}', 'performance-test-story-${i}', ${communityId}, ${createdBy}, 0, 'en', unixepoch(), unixepoch())
+        (${i}, 'Performance Test Story ${i}', 'Content for story ${i}', 'performance-test-story-${i}', ${communityId}, ${createdBy}, 0, 'en', cast(unixepoch('subsec') * 1000 as integer), cast(unixepoch('subsec') * 1000 as integer))
       `);
     }
 
@@ -803,7 +803,7 @@ describe('Production Performance Validation - Phase 1', () => {
       const communityIndex = Math.floor((i - 1) / 25); // 0 for first 25, 1 for second 25
       const communityId = communityIds[communityIndex];
       placeInserts.push(`
-        (${i}, 'Performance Test Place ${i}', ${communityId}, ${lng}, ${lat}, unixepoch(), unixepoch())
+        (${i}, 'Performance Test Place ${i}', ${communityId}, ${lng}, ${lat}, cast(unixepoch('subsec') * 1000 as integer), cast(unixepoch('subsec') * 1000 as integer))
       `);
     }
 

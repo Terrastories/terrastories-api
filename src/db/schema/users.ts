@@ -51,15 +51,17 @@ export const usersPg = pgTable(
       .notNull()
       .references(() => communitiesPg.id),
     isActive: boolean('is_active').notNull().default(true),
-    lastLoginAt: timestamp('last_login_at'),
+    lastLoginAt: timestamp('last_login_at', { precision: 3 }),
     resetPasswordToken: pgText('reset_password_token'),
-    resetPasswordSentAt: timestamp('reset_password_sent_at'),
-    rememberCreatedAt: timestamp('remember_created_at'),
+    resetPasswordSentAt: timestamp('reset_password_sent_at', {
+      precision: 3,
+    }),
+    rememberCreatedAt: timestamp('remember_created_at', { precision: 3 }),
     signInCount: pgInteger('sign_in_count').default(0).notNull(),
-    lastSignInAt: timestamp('last_sign_in_at'),
+    lastSignInAt: timestamp('last_sign_in_at', { precision: 3 }),
     currentSignInIp: pgText('current_sign_in_ip'),
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+    createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { precision: 3 }).defaultNow().notNull(),
   },
   (table) => ({
     // Email must be unique within each community, but can be shared across communities
@@ -95,19 +97,21 @@ export const usersSqlite = sqliteTable(
       .notNull()
       .references(() => communitiesSqlite.id),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
-    lastLoginAt: integer('last_login_at', { mode: 'timestamp' }),
+    lastLoginAt: integer('last_login_at', { mode: 'timestamp_ms' }),
     resetPasswordToken: sqliteText('reset_password_token'),
     resetPasswordSentAt: integer('reset_password_sent_at', {
-      mode: 'timestamp',
+      mode: 'timestamp_ms',
     }),
-    rememberCreatedAt: integer('remember_created_at', { mode: 'timestamp' }),
+    rememberCreatedAt: integer('remember_created_at', {
+      mode: 'timestamp_ms',
+    }),
     signInCount: integer('sign_in_count').default(0).notNull(),
-    lastSignInAt: integer('last_sign_in_at', { mode: 'timestamp' }),
+    lastSignInAt: integer('last_sign_in_at', { mode: 'timestamp_ms' }),
     currentSignInIp: sqliteText('current_sign_in_ip'),
-    createdAt: integer('created_at', { mode: 'timestamp' })
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
   },

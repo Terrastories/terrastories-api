@@ -47,8 +47,8 @@ export const storySpeakersPg = pgTable(
     speakerId: pgInteger('speaker_id').notNull(),
     storyRole: text('story_role'),
     sortOrder: pgInteger('sort_order').default(0),
-    createdAt: timestamp('created_at').notNull().defaultNow(),
-    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    createdAt: timestamp('created_at', { precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { precision: 3 }).notNull().defaultNow(),
   },
   (table) => ({
     // Composite unique constraint to prevent duplicate relationships
@@ -86,10 +86,10 @@ export const storySpeakersSqlite = sqliteTable(
     speakerId: integer('speaker_id').notNull(),
     storyRole: sqliteText('story_role'),
     sortOrder: integer('sort_order').default(0),
-    createdAt: integer('created_at', { mode: 'timestamp' })
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
   },

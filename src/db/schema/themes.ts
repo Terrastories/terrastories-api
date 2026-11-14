@@ -107,8 +107,8 @@ export const themesPg = pgTable(
     communityId: bigint('community_id', { mode: 'number' })
       .notNull()
       .references(() => communitiesPg.id),
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+    createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { precision: 3 }).defaultNow().notNull(),
   },
   (table) => ({
     communityIdIdx: index('idx_themes_community_id').on(table.communityId),
@@ -138,10 +138,10 @@ export const themesSqlite = sqliteTable('themes', {
   communityId: integer('community_id')
     .notNull()
     .references(() => communitiesSqlite.id),
-  createdAt: integer('created_at', { mode: 'timestamp' })
+  createdAt: integer('created_at', { mode: 'timestamp_ms' })
     .notNull()
     .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
     .notNull()
     .$defaultFn(() => new Date()),
 });

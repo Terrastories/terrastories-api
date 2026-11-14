@@ -64,11 +64,11 @@ export const storiesPg = pgTable(
     language: pgText('language').notNull().default('en'),
     tags: jsonb('tags').$type<string[]>().default([]),
     // Interview metadata fields for Indigenous storytelling context
-    dateInterviewed: timestamp('date_interviewed'),
+    dateInterviewed: timestamp('date_interviewed', { precision: 3 }),
     interviewLocationId: pgInteger('interview_location_id'),
     interviewerId: pgInteger('interviewer_id'),
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+    createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { precision: 3 }).defaultNow().notNull(),
   },
   (table) => ({
     // Standard indexes for filtering and searching
@@ -126,13 +126,13 @@ export const storiesSqlite = sqliteTable(
     language: sqliteText('language').notNull().default('en'),
     tags: sqliteText('tags', { mode: 'json' }).$type<string[]>().default([]),
     // Interview metadata fields for Indigenous storytelling context
-    dateInterviewed: integer('date_interviewed', { mode: 'timestamp' }),
+    dateInterviewed: integer('date_interviewed', { mode: 'timestamp_ms' }),
     interviewLocationId: integer('interview_location_id'),
     interviewerId: integer('interviewer_id'),
-    createdAt: integer('created_at', { mode: 'timestamp' })
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
   },

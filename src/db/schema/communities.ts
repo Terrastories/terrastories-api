@@ -38,8 +38,8 @@ export const communitiesPg = pgTable('communities', {
   isActive: boolean('is_active').notNull().default(true),
   country: pgText('country'),
   beta: boolean('beta').notNull().default(false),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { precision: 3 }).defaultNow().notNull(),
 });
 
 // SQLite table for development/testing
@@ -56,10 +56,10 @@ export const communitiesSqlite = sqliteTable('communities', {
   isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
   country: sqliteText('country'),
   beta: integer('beta', { mode: 'boolean' }).notNull().default(false),
-  createdAt: integer('created_at', { mode: 'timestamp' })
+  createdAt: integer('created_at', { mode: 'timestamp_ms' })
     .notNull()
     .$defaultFn(() => new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' })
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
     .notNull()
     .$defaultFn(() => new Date()),
 });

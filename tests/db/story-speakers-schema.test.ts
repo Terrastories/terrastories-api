@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { getDb } from '../../src/db/index.js';
 import {
+  migrateInMemorySqlite,
+  sqliteColumn,
+  sqliteForeignKeyGroups,
+} from '../helpers/tenant-fk-probe.js';
+import {
   getStorySpeakersTable,
   storySpeakersPg,
   storySpeakersSqlite,
@@ -62,8 +67,6 @@ describe('Story Speakers Schema', () => {
       expect(storySpeakersPg).toHaveProperty('speakerId');
       expect(storySpeakersPg).toHaveProperty('createdAt');
       expect(storySpeakersPg).toHaveProperty('updatedAt');
-      // #186: the composite tenant FK column exists on both dialects.
-      expect(storySpeakersSqlite).toHaveProperty('communityId');
     });
 
     it('should support both PostgreSQL and SQLite', () => {
@@ -189,6 +192,46 @@ describe('Story Speakers Schema', () => {
       expect(storySpeakersPg).toBeDefined();
       expect(storySpeakersSqlite).toBeDefined();
       // Unique constraints are defined in table creation
+    });
+  });
+
+  // #186: assertions run against a database that applied the repository's
+  // SQLite migrations, so they prove the applied schema, not the Drizzle
+  // objects (the dual-backend gate in scripts/test-db-backend.ts covers the
+  // same contract on PostgreSQL and on upgraded databases).
+  describe('Composite Tenant Foreign Keys (migrated database)', () => {
+    let sqlite: Awaited<ReturnType<typeof migrateInMemorySqlite>>;
+
+    beforeAll(async () => {
+      sqlite = await migrateInMemorySqlite();
+    });
+
+    afterAll(() => {
+      sqlite.close();
+    });
+
+    it('should carry the NOT NULL community_id tenant column', () => {
+      const column = sqliteColumn(sqlite, 'story_speakers', 'community_id');
+      expect(column).toBeDefined();
+      expect(column?.notnull).toBe(1);
+    });
+
+    it('should reference stories(community_id, id) and speakers(community_id, id) on delete cascade', () => {
+      const foreignKeys = sqliteForeignKeyGroups(sqlite, 'story_speakers');
+      expect(foreignKeys).toContainEqual({
+        table: 'stories',
+        from: ['community_id', 'story_id'],
+        to: ['community_id', 'id'],
+        onUpdate: 'NO ACTION',
+        onDelete: 'CASCADE',
+      });
+      expect(foreignKeys).toContainEqual({
+        table: 'speakers',
+        from: ['community_id', 'speaker_id'],
+        to: ['community_id', 'id'],
+        onUpdate: 'NO ACTION',
+        onDelete: 'CASCADE',
+      });
     });
   });
 });

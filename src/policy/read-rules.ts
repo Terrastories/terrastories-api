@@ -26,6 +26,13 @@
  *   is visible to an admin only WITH user-management authority — and
  *   `readRuleOutcome` resolves such a cell to `hidden` for a viewer
  *   that does not hold the authority.
+ * - §6.7 owner grants are expressed the same way, as data over the
+ *   cells: `READ_RULE_OWNER_GRANTS` names the rows whose read audience
+ *   includes the record's owner (the account owner of a user-profile
+ *   media row), and the REQUIRED `viewerIsOwner` input of
+ *   `readRuleOutcome` carries that per-record relationship. The owner
+ *   is not a viewer column; the flag resolves exactly those rows to
+ *   `visible` and is ignored on every other row, so it never widens.
  */
 
 export const READ_RULE_VIEWERS = [
@@ -262,10 +269,13 @@ export const READ_RULES: ReadRuleTable = {
       'own-editor': 'visible',
       'own-admin': 'visible',
     },
-    // Account owner and authorized uploader are separately authorized
-    // (§6.7); they are not viewer columns of the table. The own-admin
-    // cell needs user-management authority on top (§6.7):
-    // READ_RULE_REQUIRED_AUTHORITIES gates it in readRuleOutcome.
+    // §6.7: the account owner reads this row through the REQUIRED
+    // viewerIsOwner input (READ_RULE_OWNER_GRANTS) — a per-record
+    // relationship, not a viewer column — and an own-admin needs
+    // user-management authority on top of the role:
+    // READ_RULE_REQUIRED_AUTHORITIES gates that cell in readRuleOutcome.
+    // The authorized uploader of an unattached-staging row stays a
+    // route-level §6.7 check outside this table.
     'user-profile': {
       'anonymous-public': 'hidden',
       'other-community': 'hidden',
@@ -311,7 +321,9 @@ export type ReadRuleAuthority = (typeof READ_RULE_AUTHORITIES)[number];
  * authority (§6.7). `readRuleOutcome` resolves them to `hidden` for a
  * viewer without the authority — including a caller that passes no
  * authorities — so the user-profile cell can never widen to every
- * same-community admin.
+ * same-community admin. The account-owner half of that row's §6.7
+ * audience is the separate `viewerIsOwner` input below and needs no
+ * authority.
  */
 export const READ_RULE_REQUIRED_AUTHORITIES = {
   media: {
@@ -321,6 +333,22 @@ export const READ_RULE_REQUIRED_AUTHORITIES = {
   [resource in ReadRuleResource]: Partial<{
     [association: string]: Partial<Record<ReadRuleViewer, ReadRuleAuthority>>;
   }>;
+}>;
+
+/**
+ * §6.7 rows whose read audience includes the record's owner: the
+ * account owner of a user-profile media row reads it. The grant is a
+ * per-record relationship the caller resolves from the session — an
+ * anonymous caller is never the owner — carried by the REQUIRED
+ * `viewerIsOwner` input of `readRuleOutcome`, never a viewer column.
+ * `readRuleOutcome` resolves exactly these rows to `visible` for the
+ * owner and ignores the flag on every other row, so it cannot widen a
+ * cell.
+ */
+export const READ_RULE_OWNER_GRANTS = {
+  media: ['user-profile'],
+} as const satisfies Partial<{
+  [resource in ReadRuleResource]: readonly string[];
 }>;
 
 /**
@@ -379,13 +407,23 @@ export interface ReadRuleInput {
    * means none. Fail closed.
    */
   viewerAuthorities?: readonly string[];
+  /**
+   * REQUIRED per-record §6.7 ownership: the viewer is the owner of this
+   * specific row (today: the account owner a user-profile media row
+   * attaches to). The caller resolves the relationship from the
+   * session — an anonymous caller is never the owner. It resolves
+   * exactly the `READ_RULE_OWNER_GRANTS` rows to `visible` and is
+   * ignored on every other row; a missing or non-boolean value from an
+   * untyped caller is falsy and fails closed to the ordinary cell.
+   */
+  viewerIsOwner: boolean;
 }
 
 /**
- * Resolve one §6.4a cell (plus the #162 override and §6.7 authority
- * qualifiers). Unknown resources, associations or viewers fail closed to
- * `hidden`; community gates (§4/§6.1) remain the caller's separate
- * precondition.
+ * Resolve one §6.4a cell (plus the #162 override, the §6.7 owner grant
+ * and the §6.7 authority qualifiers). Unknown resources, associations
+ * or viewers fail closed to `hidden`; community gates (§4/§6.1) remain
+ * the caller's separate precondition.
  */
 export function readRuleOutcome(input: ReadRuleInput): ReadRuleOutcome {
   // #162 first, over every cell: the guard is `!== 'clear'`, not
@@ -394,6 +432,17 @@ export function readRuleOutcome(input: ReadRuleInput): ReadRuleOutcome {
   // closed to hidden for every viewer.
   if (input.privacyEvidence !== 'clear') {
     return READ_RULE_OVERRIDES.restrictedOrUnevidencedPrivacy.outcome;
+  }
+  // §6.7 owner grant second: a restricted or unevidenced row stays
+  // hidden even for its owner (#162 wins, fail closed), and the owner
+  // of a granted row needs no authority — exactly the
+  // READ_RULE_OWNER_GRANTS rows resolve to `visible`, never any other
+  // row, so the flag cannot widen a cell.
+  if (
+    input.viewerIsOwner &&
+    isOwnerGranted(input.resource, input.association)
+  ) {
+    return 'visible';
   }
   const authority = lookupRequiredAuthority(
     input.resource,
@@ -408,6 +457,14 @@ export function readRuleOutcome(input: ReadRuleInput): ReadRuleOutcome {
   if (!row) return 'hidden';
   const outcome = lookupOutcome(row, input.viewer);
   return outcome ?? 'hidden';
+}
+
+function isOwnerGranted(resource: string, association: string): boolean {
+  const byResource = READ_RULE_OWNER_GRANTS as Record<
+    string,
+    readonly string[] | undefined
+  >;
+  return (byResource[resource] ?? []).includes(association);
 }
 
 function lookupRequiredAuthority(

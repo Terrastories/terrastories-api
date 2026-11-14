@@ -38,6 +38,7 @@ import { openPersonaQaDatabase } from './qa-database.js';
 import type { WidenedQaDatabase } from './qa-database.js';
 import {
   readRuleOutcome,
+  type ReadRuleOutcome,
   type ReadRulePrivacyEvidence,
 } from '../../src/policy/read-rules.js';
 import type { TestFixtures } from '../../tests/helpers/database.js';
@@ -955,67 +956,76 @@ export async function createFixture(
       );
     };
     /**
-     * §6.4a derivation (#190): expected status for an Explore read of a
-     * seeded place by its story association. Explore is a public surface
-     * (#162), so every caller — anonymous or any session — gets the
-     * anonymous column; the privacyEvidence argument carries the row's
-     * #162 evidence (restricted / unevidenced / clear) and applies the
-     * override over whatever the cell says. Derived from
-     * src/policy/read-rules.ts (the machine-readable §6.4a table) so spec
-     * and expectations cannot drift.
+     * §6.4a derivation (#190): expected outcome for the ANONYMOUS column
+     * of one row — Explore is a public surface (#162), so every caller,
+     * anonymous or any session, reads that column and none is ever the
+     * record owner. Derived from src/policy/read-rules.ts (the
+     * machine-readable §6.4a table) so spec and expectations cannot
+     * drift. The privacyEvidence argument is REQUIRED: it carries the
+     * row's #162 evidence (restricted / unevidenced / clear), so no call
+     * site can inherit the permissive 'clear' as a silent default.
      */
+    const exploreAnonymousOutcome = (
+      resource: 'place' | 'story',
+      association: string,
+      privacyEvidence: ReadRulePrivacyEvidence
+    ): ReadRuleOutcome =>
+      readRuleOutcome({
+        resource,
+        association,
+        viewer: 'anonymous-public',
+        privacyEvidence,
+        viewerIsOwner: false,
+      });
+
+    const exploreStatusOf = (outcome: ReadRuleOutcome): number =>
+      outcome === 'hidden' ? 404 : 200;
+
+    /** Place-row status derivation; the evidence argument is required. */
     const explorePlaceStatus = (
       association:
         | 'via-readable-story'
         | 'story-less'
         | 'via-unreadable-stories-only',
-      privacyEvidence: ReadRulePrivacyEvidence = 'clear'
+      privacyEvidence: ReadRulePrivacyEvidence
     ): number =>
-      readRuleOutcome({
-        resource: 'place',
-        association,
-        viewer: 'anonymous-public',
-        privacyEvidence,
-      }) === 'hidden'
-        ? 404
-        : 200;
-
-    /** Same §6.4a derivation for a seeded story, keyed by audience row. */
-    const exploreStoryStatus = (
-      association:
-        | 'audience-public'
-        | 'audience-community'
-        | 'audience-editors',
-      privacyEvidence: ReadRulePrivacyEvidence = 'clear'
-    ): number =>
-      readRuleOutcome({
-        resource: 'story',
-        association,
-        viewer: 'anonymous-public',
-        privacyEvidence,
-      }) === 'hidden'
-        ? 404
-        : 200;
+      exploreStatusOf(
+        exploreAnonymousOutcome('place', association, privacyEvidence)
+      );
 
     /**
-     * #162 regression guard: the §6.4a-derived expectation must equal the
-     * literal status the ruling pinned when it landed. If the table (or
-     * the override) ever widens, building the fixture fails here instead
-     * of the journey silently expecting the wider status. Derived value
-     * AND literal stay in the step, so a wrong table cannot quietly
-     * weaken the #162 cases.
+     * #162 regression guard, two-sided. The gated leg alone is a
+     * constant: readRuleOutcome returns the #162 override outcome before
+     * the table is consulted, so with restricted or unevidenced evidence
+     * EVERY association of every table derives 404 and a one-sided pin
+     * could not see a widened cell. Each pinned case therefore asserts
+     * both legs against the literal maintainer ruling: the anonymous
+     * CELL with clear evidence ('visible' for the public-audience story
+     * row, 'with-readable-stories' for the readable-story place row) AND
+     * the literal hidden outcome — 404 on the wire — under the row's
+     * non-clear evidence. A widened or detached cell, a wrong evidence
+     * label and a weakened override all fail here instead of the journey
+     * silently expecting the wider status.
      */
     const pinnedExploreStatus = (
-      derived: number,
-      ruling: number,
+      resource: 'place' | 'story',
+      association: string,
+      cellOutcome: ReadRuleOutcome,
+      gatedEvidence: ReadRulePrivacyEvidence,
       name: string
     ): number => {
-      if (derived !== ruling) {
+      const cell = exploreAnonymousOutcome(resource, association, 'clear');
+      const gated = exploreAnonymousOutcome(
+        resource,
+        association,
+        gatedEvidence
+      );
+      if (cell !== cellOutcome || gated !== 'hidden') {
         throw new Error(
-          `§6.4a/#162 guard on '${name}': table derives ${derived}, the #162 ruling pins ${ruling}`
+          `§6.4a/#162 guard on '${name}': the ${resource}/${association} anonymous cell is '${cell}' with clear evidence (the ruling pins '${cellOutcome}') and '${gated}' with '${gatedEvidence}' evidence (the ruling pins 'hidden')`
         );
       }
-      return ruling;
+      return 404;
     };
 
     const explore: Step[] = [
@@ -1171,14 +1181,17 @@ export async function createFixture(
       },
       {
         // Hidden by isRestricted alone: it carries the same edges as the
-        // public story. #162 case: derived from the §6.4a table AND pinned
-        // to the literal 404 so a wrong table cannot weaken it.
+        // public story. #162 case, pinned two-sided: the anonymous cell
+        // of the audience-public row with clear evidence ('visible') AND
+        // the literal 404 under the restricted evidence.
         name: 'hide restricted story',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/stories/${restrictedStory.id}`,
         expected: pinnedExploreStatus(
-          exploreStoryStatus('audience-public', 'restricted'),
-          404,
+          'story',
+          'audience-public',
+          'visible',
+          'restricted',
           'hide restricted story'
         ),
       },
@@ -1206,14 +1219,17 @@ export async function createFixture(
       },
       {
         // Hidden by the privacy gate alone: it carries the same edges as the
-        // public story. #162 case: derived from the §6.4a table AND pinned
-        // to the literal 404 so a wrong table cannot weaken it.
+        // public story. #162 case, pinned two-sided: the anonymous cell
+        // of the audience-public row with clear evidence ('visible') AND
+        // the literal 404 under the unevidenced evidence.
         name: 'hide unknown-privacy story',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/stories/${unknownStory.id}`,
         expected: pinnedExploreStatus(
-          exploreStoryStatus('audience-public', 'unevidenced'),
-          404,
+          'story',
+          'audience-public',
+          'visible',
+          'unevidenced',
           'hide unknown-privacy story'
         ),
       },
@@ -1265,7 +1281,7 @@ export async function createFixture(
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${publicPlace.id}`,
         // §6.4a cell: anonymous × place via a readable story.
-        expected: explorePlaceStatus('via-readable-story'),
+        expected: explorePlaceStatus('via-readable-story', 'clear'),
         check: (body) => {
           const data = (
             body as { data?: { id?: number; points?: { id?: number }[] } }
@@ -1279,14 +1295,17 @@ export async function createFixture(
       {
         // Hidden by the restricted flag alone: a public story evidences it.
         // §6.4a: the #162 override hides the readable-story cell. #162
-        // case: derived from the table AND pinned to the literal 404 so a
-        // wrong table cannot weaken it.
+        // case, pinned two-sided: the anonymous cell with clear evidence
+        // ('with-readable-stories') AND the literal 404 under the
+        // restricted evidence.
         name: 'hide restricted place',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${restrictedPlace.id}`,
         expected: pinnedExploreStatus(
-          explorePlaceStatus('via-readable-story', 'restricted'),
-          404,
+          'place',
+          'via-readable-story',
+          'with-readable-stories',
+          'restricted',
           'hide restricted place'
         ),
       },
@@ -1296,7 +1315,7 @@ export async function createFixture(
         name: 'hide unassociated place',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${unassociatedPlace.id}`,
-        expected: explorePlaceStatus('story-less'),
+        expected: explorePlaceStatus('story-less', 'clear'),
       },
       {
         // #191/§6.4a: the members-only place is unrestricted with valid
@@ -1306,7 +1325,7 @@ export async function createFixture(
         name: 'hide members-only story place',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${membersPlace.id}`,
-        expected: explorePlaceStatus('via-unreadable-stories-only'),
+        expected: explorePlaceStatus('via-unreadable-stories-only', 'clear'),
       },
       {
         name: 'reject cross-community place id',
@@ -1322,7 +1341,7 @@ export async function createFixture(
         method: 'GET',
         path: `/explore/communities/${foreignCommunitySlug}/places/${foreignPlace.id}`,
         // §6.4a cell: anonymous × place via a readable story.
-        expected: explorePlaceStatus('via-readable-story'),
+        expected: explorePlaceStatus('via-readable-story', 'clear'),
         check: (body) => {
           const data = (
             body as { data?: { id?: number; points?: { id?: number }[] } }
@@ -1412,24 +1431,32 @@ export async function createFixture(
         check: publicStoryDetailCheck,
       },
       {
-        // #162 case, derived AND pinned to the literal 404 (see above).
+        // #162 case, pinned two-sided (see the guard above): the
+        // audience-public anonymous cell AND the literal 404 under the
+        // restricted evidence.
         name: 'hide restricted story while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/stories/${restrictedStory.id}`,
         expected: pinnedExploreStatus(
-          exploreStoryStatus('audience-public', 'restricted'),
-          404,
+          'story',
+          'audience-public',
+          'visible',
+          'restricted',
           'hide restricted story while authenticated'
         ),
       },
       {
-        // #162 case, derived AND pinned to the literal 404 (see above).
+        // #162 case, pinned two-sided (see the guard above): the
+        // audience-public anonymous cell AND the literal 404 under the
+        // unevidenced evidence.
         name: 'hide unknown-privacy story while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/stories/${unknownStory.id}`,
         expected: pinnedExploreStatus(
-          exploreStoryStatus('audience-public', 'unevidenced'),
-          404,
+          'story',
+          'audience-public',
+          'visible',
+          'unevidenced',
           'hide unknown-privacy story while authenticated'
         ),
       },
@@ -1450,14 +1477,17 @@ export async function createFixture(
         expected: 404,
       },
       {
-        // #162 case, derived AND pinned to the literal 404: same anonymous
-        // cell — Explore is a public surface no session widens.
+        // #162 case, pinned two-sided (see the guard above): the same
+        // anonymous cell — Explore is a public surface no session widens
+        // — AND the literal 404 under the restricted evidence.
         name: 'hide restricted place while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${restrictedPlace.id}`,
         expected: pinnedExploreStatus(
-          explorePlaceStatus('via-readable-story', 'restricted'),
-          404,
+          'place',
+          'via-readable-story',
+          'with-readable-stories',
+          'restricted',
           'hide restricted place while authenticated'
         ),
       },
@@ -1467,7 +1497,7 @@ export async function createFixture(
         name: 'hide unassociated place while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${unassociatedPlace.id}`,
-        expected: explorePlaceStatus('story-less'),
+        expected: explorePlaceStatus('story-less', 'clear'),
       },
       {
         // #191/#162: the members-only story's own place stays unreachable
@@ -1476,7 +1506,7 @@ export async function createFixture(
         name: 'hide members-only story place while authenticated',
         method: 'GET',
         path: `/explore/communities/${communitySlug}/places/${membersPlace.id}`,
-        expected: explorePlaceStatus('via-unreadable-stories-only'),
+        expected: explorePlaceStatus('via-unreadable-stories-only', 'clear'),
       },
       {
         name: 'reject cross-community story id while authenticated',

@@ -5,6 +5,7 @@ import {
   READ_RULE_AUTHORITIES,
   READ_RULE_OVERRIDES,
   READ_RULE_OUTCOMES,
+  READ_RULE_OWNER_GRANTS,
   READ_RULE_REQUIRED_AUTHORITIES,
   READ_RULE_RESOURCES,
   READ_RULES,
@@ -84,6 +85,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         association: 'via-readable-story',
         viewer: 'anonymous-public',
         privacyEvidence: 'clear',
+        viewerIsOwner: false,
       })
     ).toBe('with-readable-stories');
     expect(
@@ -92,6 +94,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         association: 'via-readable-story',
         viewer: 'anonymous-public',
         privacyEvidence: 'clear',
+        viewerIsOwner: false,
       })
     ).toBe('hidden');
     expect(
@@ -100,6 +103,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         association: 'via-any-story',
         viewer: 'anonymous-public',
         privacyEvidence: 'clear',
+        viewerIsOwner: false,
       })
     ).toBe('hidden');
     expect(
@@ -108,6 +112,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         association: 'via-readable-story',
         viewer: 'elder',
         privacyEvidence: 'clear',
+        viewerIsOwner: false,
       })
     ).toBe('hidden');
     expect(
@@ -116,6 +121,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         association: 'via-readable-story',
         viewer: '',
         privacyEvidence: 'clear',
+        viewerIsOwner: false,
       })
     ).toBe('hidden');
   });
@@ -141,6 +147,7 @@ describe('§6.4a read-rules table (#190): #162 override', () => {
               association: label.split('/')[1],
               viewer,
               privacyEvidence: evidence,
+              viewerIsOwner: false,
             }),
             `${evidence} ${label}/${viewer}`
           ).toBe('hidden');
@@ -154,6 +161,7 @@ describe('§6.4a read-rules table (#190): #162 override', () => {
         association: 'audience-public',
         viewer: 'own-admin',
         privacyEvidence: 'restricted',
+        viewerIsOwner: false,
       })
     ).toBe('hidden');
     expect(
@@ -162,6 +170,7 @@ describe('§6.4a read-rules table (#190): #162 override', () => {
         association: 'story-less',
         viewer: 'super-admin',
         privacyEvidence: 'unevidenced',
+        viewerIsOwner: false,
       })
     ).toBe('hidden');
   });
@@ -208,6 +217,7 @@ describe('§6.4a read-rules table (#190): #162 override', () => {
           association,
           viewer,
           privacyEvidence: 'clear',
+          viewerIsOwner: false,
         })
       ).toBe(ordinary);
     }
@@ -232,6 +242,7 @@ describe('§6.4a read-rules table (#190): §6.7 authority qualifiers', () => {
       viewer: 'own-admin',
       privacyEvidence: 'clear',
       viewerAuthorities,
+      viewerIsOwner: false,
     });
 
   it('marks exactly the user-profile media cell for own-admin', () => {
@@ -276,8 +287,8 @@ describe('§6.4a read-rules table (#190): §6.7 authority qualifiers', () => {
     expect(profileMedia()).toBe('hidden');
     expect(profileMedia([])).toBe('hidden');
     expect(profileMedia(['community-settings'])).toBe('hidden');
-    expect(profileMedia(['user-management', 'community-settings'])).not.toBe(
-      'hidden'
+    expect(profileMedia(['user-management', 'community-settings'])).toBe(
+      'visible'
     );
   });
 
@@ -293,7 +304,121 @@ describe('§6.4a read-rules table (#190): §6.7 authority qualifiers', () => {
         viewer: 'own-admin',
         privacyEvidence: 'restricted',
         viewerAuthorities: ['user-management'],
+        viewerIsOwner: false,
       })
+    ).toBe('hidden');
+  });
+
+  it('pins the whole user-profile media row literally (every viewer column)', () => {
+    // §6.4a/§6.7: only the authority-gated own-admin cell is visible.
+    // Every other column — the own-community viewer/member/editor cells
+    // that decide whether a NON-owner community member reads someone's
+    // profile photo — is hidden, and flipping any of them to visible
+    // must fail this literal row pin, not just the gated-cell tests
+    // above. The account owner is the separate REQUIRED viewerIsOwner
+    // input (see the owner-grant block below), not a column.
+    expect(READ_RULES.media['user-profile']).toEqual({
+      'anonymous-public': 'hidden',
+      'other-community': 'hidden',
+      'super-admin': 'hidden',
+      'own-viewer': 'hidden',
+      'own-member': 'hidden',
+      'own-editor': 'hidden',
+      'own-admin': 'visible',
+    });
+  });
+});
+
+describe('§6.4a read-rules table (#190): §6.7 owner grant', () => {
+  const userProfileMedia = (
+    viewer: (typeof READ_RULE_VIEWERS)[number],
+    viewerIsOwner: boolean
+  ) =>
+    readRuleOutcome({
+      resource: 'media',
+      association: 'user-profile',
+      viewer,
+      privacyEvidence: 'clear',
+      viewerIsOwner,
+    });
+
+  it('grants exactly the user-profile media row to the record owner', () => {
+    expect(READ_RULE_OWNER_GRANTS).toEqual({ media: ['user-profile'] });
+  });
+
+  it('reads user-profile media as the account owner on every viewer column', () => {
+    // §6.7: the owner holds no authority and may sit in any role column
+    // (own-viewer through own-admin, or the super-admin column for the
+    // null-community profile-photo exception); the per-record owner
+    // flag — never the column — carries the grant.
+    for (const viewer of READ_RULE_VIEWERS) {
+      expect(userProfileMedia(viewer, true)).toBe('visible');
+    }
+  });
+
+  it('keeps user-profile media hidden for a non-owner on every viewer column', () => {
+    // The other side of §6.7: without the owner relationship the row is
+    // hidden on every column — this helper passes no authorities, so
+    // even own-admin reads hidden; its authority-gated visible cell is
+    // pinned in the §6.7 authority-qualifier block above.
+    for (const viewer of READ_RULE_VIEWERS) {
+      expect(userProfileMedia(viewer, false)).toBe('hidden');
+    }
+  });
+
+  it('never lets the owner flag widen any other row', () => {
+    for (const [label, row] of allRows) {
+      if (label === 'media/user-profile') continue;
+      const [resource, association] = label.split('/');
+      for (const viewer of Object.keys(row)) {
+        const ordinary = readRuleOutcome({
+          resource,
+          association,
+          viewer,
+          privacyEvidence: 'clear',
+          viewerIsOwner: false,
+        });
+        expect(
+          readRuleOutcome({
+            resource,
+            association,
+            viewer,
+            privacyEvidence: 'clear',
+            viewerIsOwner: true,
+          }),
+          `${label}/${viewer}`
+        ).toBe(ordinary);
+      }
+    }
+  });
+
+  it('lets the #162 override win over the owner grant', () => {
+    // Same fail-closed ordering as the authority qualifier: a
+    // restricted or unevidenced row stays hidden even for its owner.
+    for (const evidence of ['restricted', 'unevidenced'] as const) {
+      expect(
+        readRuleOutcome({
+          resource: 'media',
+          association: 'user-profile',
+          viewer: 'own-viewer',
+          privacyEvidence: evidence,
+          viewerIsOwner: true,
+        })
+      ).toBe('hidden');
+    }
+  });
+
+  it('fails closed when an untyped caller omits the owner flag', () => {
+    // The input is REQUIRED at the type level; a caller that drops it
+    // (this needs a cast) must not inherit the grant — a missing flag
+    // is falsy, so the ordinary cell decides.
+    expect(
+      readRuleOutcome({
+        resource: 'media',
+        association: 'user-profile',
+        viewer: 'own-viewer',
+        privacyEvidence: 'clear',
+      } as ReadRuleInput)
     ).toBe('hidden');
   });
 });

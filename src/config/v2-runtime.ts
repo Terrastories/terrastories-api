@@ -86,7 +86,13 @@ function isPlaceholderValue(value: string): boolean {
   );
 }
 
-function isDocumentationHostname(hostname: string): boolean {
+/** Lowercase and drop a trailing root dot, so `example.com.` matches. */
+function normalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.$/, '');
+}
+
+function isDocumentationHostname(raw: string): boolean {
+  const hostname = normalizeHostname(raw);
   return (
     PLACEHOLDER_HOSTNAMES.includes(hostname) ||
     PLACEHOLDER_HOST_SUFFIXES.some((suffix) => hostname.endsWith(suffix)) ||
@@ -94,8 +100,15 @@ function isDocumentationHostname(hostname: string): boolean {
   );
 }
 
-function isLoopbackHostname(hostname: string): boolean {
-  return LOOPBACK_HOSTNAMES.includes(hostname);
+function isLoopbackHostname(raw: string): boolean {
+  const hostname = normalizeHostname(raw);
+  return (
+    LOOPBACK_HOSTNAMES.includes(hostname) ||
+    hostname.endsWith('.localhost') ||
+    /^127(\.\d{1,3}){3}$/.test(hostname) ||
+    hostname === '[0:0:0:0:0:0:0:1]' ||
+    hostname.startsWith('[::ffff:127.')
+  );
 }
 
 /** The validated configuration the entrypoints build their app options from. */
@@ -260,7 +273,14 @@ export function validateNodeV2Runtime(env: NodeV2Env): NodeV2RuntimeConfig {
     environment: env.NODE_ENV,
     publicOrigin: env.HONO_PUBLIC_ORIGIN,
     corsOrigins: parseCorsOrigins(env.HONO_CORS_ORIGINS),
-    secureCookies: env.NODE_ENV !== 'development',
+    // Secure cookies follow the origin: browsers drop Secure cookies over
+    // plain HTTP, so the §7 field-kit trusted-LAN exception must not set it.
+    secureCookies:
+      env.NODE_ENV !== 'development' &&
+      !(
+        env.HONO_ALLOW_PLAIN_HTTP === 'true' &&
+        (env.HONO_PUBLIC_ORIGIN ?? '').toLowerCase().startsWith('http:')
+      ),
     allowPlainHttp: env.HONO_ALLOW_PLAIN_HTTP === 'true',
     names: {
       environment: 'NODE_ENV',

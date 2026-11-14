@@ -135,6 +135,65 @@ describe('V2 runtime configuration gate (#150)', () => {
     });
   });
 
+  describe('Node: Secure cookies follow the origin (PR #229 review)', () => {
+    it('emits non-Secure cookies under the field-kit plain-HTTP opt-in', () => {
+      const config = validateNodeV2Runtime({
+        NODE_ENV: 'field-kit',
+        HONO_PUBLIC_ORIGIN: 'http://field-kit.local:3000',
+        HONO_ALLOW_PLAIN_HTTP: 'true',
+      });
+      expect(config.secureCookies).toBe(false);
+    });
+
+    it('keeps Secure cookies for an https field-kit origin', () => {
+      const config = validateNodeV2Runtime({
+        NODE_ENV: 'field-kit',
+        HONO_PUBLIC_ORIGIN: 'https://field-kit.local',
+        HONO_ALLOW_PLAIN_HTTP: 'true',
+      });
+      expect(config.secureCookies).toBe(true);
+    });
+
+    it('still refuses plain HTTP in production even with the opt-in flag', () => {
+      refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'production',
+          HONO_PUBLIC_ORIGIN: 'http://api.terrastories.org',
+          HONO_ALLOW_PLAIN_HTTP: 'true',
+        })
+      );
+    });
+  });
+
+  describe('hostname normalization (PR #229 review)', () => {
+    it.each([
+      'https://example.com.',
+      'https://api.example.org.',
+      'https://EXAMPLE.COM',
+    ])('refuses documentation host %s', (origin) => {
+      refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'production',
+          HONO_PUBLIC_ORIGIN: origin,
+        })
+      );
+    });
+
+    it.each([
+      'https://127.0.0.2',
+      'https://localhost.',
+      'https://app.localhost',
+      'https://[0:0:0:0:0:0:0:1]',
+    ])('refuses loopback host %s in production', (origin) => {
+      refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'production',
+          HONO_PUBLIC_ORIGIN: origin,
+        })
+      );
+    });
+  });
+
   describe('plain-HTTP rule (SPEC-V2 §7 field-kit exception)', () => {
     const httpOrigin = 'http://field-kit.local:3000';
 

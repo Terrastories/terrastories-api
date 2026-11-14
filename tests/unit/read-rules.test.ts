@@ -349,8 +349,8 @@ describe('§6.4a read-rules table (#190): §6.7 owner grant', () => {
   it('reads user-profile media as the account owner on every viewer column', () => {
     // §6.7: the owner holds no authority and may sit in any role column
     // (own-viewer through own-admin, or the super-admin column for the
-    // null-community profile-photo exception); the per-record owner
-    // flag — never the column — carries the grant.
+    // null-community profile-photo exception); the grant needs both the
+    // per-record owner flag and an owner-capable column.
     for (const viewer of READ_RULE_VIEWERS) {
       const ownerCapable =
         viewer !== 'anonymous-public' && viewer !== 'other-community';

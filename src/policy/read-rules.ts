@@ -32,7 +32,8 @@
  *   media row), and the REQUIRED `viewerIsOwner` input of
  *   `readRuleOutcome` carries that per-record relationship. The owner
  *   is not a viewer column; the flag resolves exactly those rows to
- *   `visible` (for its owner only) and is ignored on every other row.
+ *   `visible` for its owner (in an own-* or super-admin column only) and
+ *   is ignored on every other row.
  */
 
 export const READ_RULE_VIEWERS = [
@@ -342,8 +343,8 @@ export const READ_RULE_REQUIRED_AUTHORITIES = {
  * anonymous caller is never the owner — carried by the REQUIRED
  * `viewerIsOwner` input of `readRuleOutcome`, never a viewer column.
  * `readRuleOutcome` resolves exactly these rows to `visible` for the
- * owner and ignores the flag on every other row; it widens only the
- * granted rows, and only for their owner.
+ * owner (own-* or super-admin column only) and ignores the flag on every
+ * other row; it widens only the granted rows, and only for their owner.
  */
 export const READ_RULE_OWNER_GRANTS = {
   media: ['user-profile'],

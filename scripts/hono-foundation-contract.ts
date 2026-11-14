@@ -330,9 +330,17 @@ export async function runHonoFoundationContract(
     });
     await status(readMedia(replacement), 404);
     await updateFile({ culturalRestrictions: sql`NULL` });
-    // A valid FK on each side still must not authorize a cross-tenant binding.
-    await bind(communityB);
-    await status(readMedia(replacement), 404);
+    // #186: the composite (community_id, file_id) tenant FK makes a cross-tenant
+    // media binding structurally impossible — the database itself must reject
+    // the corrupt binding, and the still-valid same-community binding keeps
+    // serving. (The repository-level `files.community_id = media.community_id`
+    // guard remains as defense in depth for any pre-migration legacy rows.)
+    await assert.rejects(
+      bind(communityB),
+      undefined,
+      'the composite tenant FK must reject a cross-community community_media binding'
+    );
+    await status(readMedia(replacement), 200);
     await bind(communityA);
     await status(action('logout', replacement), 204);
     await status(me(replacement), 401);

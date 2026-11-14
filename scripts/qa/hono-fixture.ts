@@ -9,7 +9,10 @@
  * A caller may instead supply a backend (same journeys, same expectations)
  * whose database handle, media store and request handler come from elsewhere
  * — the Workers build (#199) seeds D1, stores media in R2 and dispatches to
- * bundled workerd. The route table is derived from `createHonoApp`, so a
+ * bundled workerd. In-process backends derive the route table from the
+ * served app's own `app.routes` and pin the shared honoPersonaRouteTable()
+ * stub to it; the Workers backend serves its app inside workerd, where
+ * `app.routes` cannot be read, so it uses that pinned stub. Either way a
  * newly registered route fails coverage until a journey reaches it. Mirrors
  * sqlite-fixture.ts: refuses HTTP mode because its isolated database cannot
  * seed a deployed server.
@@ -96,17 +99,39 @@ export interface HonoQaBackend {
 }
 
 /**
- * The endpoint table every Hono backend must cover, derived from the same
- * `createHonoApp` registration the served apps are built from — the
- * in-process fixture below and the Workers build in src/worker.ts wrap the
- * same factory, so their route tables equal this table by construction.
- * Registration is unconditional, so the stub collaborators below are never
- * invoked and cannot change the table; a worker-only route registered
- * outside `createHonoApp` would need its own derivation here. Only
- * method-ALL middleware registrations are dropped (they are not callable
- * endpoints) — a concrete-method route stays in coverage even when its path
- * is a wildcard — and bodyLimit re-registers the login route, so keep the
- * first concrete entry.
+ * The endpoint table of a Hono app's own `app.routes`: only method-ALL
+ * middleware registrations are dropped (they are not callable endpoints) —
+ * a concrete-method route stays in coverage even when its path is a
+ * wildcard — and bodyLimit re-registers the login route, so keep the first
+ * concrete entry.
+ */
+function routeTableOf(app: ReturnType<typeof createHonoApp>): Endpoint[] {
+  const routes: Endpoint[] = [];
+  const registered = new Set<string>();
+  for (const route of app.routes) {
+    if (route.method === 'ALL') continue;
+    const key = `${route.method} ${route.path}`;
+    if (registered.has(key)) continue;
+    registered.add(key);
+    routes.push({ method: route.method, path: route.path });
+  }
+  if (routes.length === 0)
+    throw new Error('Hono app registered no persona endpoints');
+  return routes;
+}
+
+/**
+ * The endpoint table for backends whose served app is out of reach: the
+ * Workers build runs `createHonoApp` inside workerd, where `app.routes`
+ * cannot be read from Node. Faithful because the bundled gateway's default
+ * export is `createWorker(verifier)` from src/worker.ts, and `createWorker`
+ * composes `createHonoApp` with options that do not change route
+ * registration — registration is unconditional, so the stub collaborators
+ * below are never invoked and cannot change the table. The in-process
+ * fixture run derives its table from the app it actually serves and asserts
+ * the two are equal, so this stub cannot drift from the real app; a
+ * worker-only route registered outside `createHonoApp` would need its own
+ * derivation here.
  */
 export function honoPersonaRouteTable(): Endpoint[] {
   const app = createHonoApp({
@@ -122,18 +147,7 @@ export function honoPersonaRouteTable(): Endpoint[] {
       },
     },
   });
-  const routes: Endpoint[] = [];
-  const registered = new Set<string>();
-  for (const route of app.routes) {
-    if (route.method === 'ALL') continue;
-    const key = `${route.method} ${route.path}`;
-    if (registered.has(key)) continue;
-    registered.add(key);
-    routes.push({ method: route.method, path: route.path });
-  }
-  if (routes.length === 0)
-    throw new Error('Hono app registered no persona endpoints');
-  return routes;
+  return routeTableOf(app);
 }
 
 export async function createFixture(
@@ -427,7 +441,16 @@ export async function createFixture(
       }
     };
     let handler: Handler;
+    let routes: Endpoint[];
     if (backend) {
+      // The Workers app lives inside workerd, so its `app.routes` cannot
+      // be read from Node; coverage uses the honoPersonaRouteTable() stub.
+      // It is faithful: the bundled gateway's default export is
+      // createWorker(verifier) from src/worker.ts, and createWorker
+      // composes createHonoApp with options that do not change route
+      // registration; the in-process branch below pins the stub to the
+      // real app.
+      routes = honoPersonaRouteTable();
       handler = backend.handler(observeResponseCookies);
     } else {
       const app = createHonoApp({
@@ -436,14 +459,27 @@ export async function createFixture(
         secureCookies: false,
         storage: { read: async (key) => storage.get(key) ?? null },
       });
+      // Coverage comes from the app this fixture actually serves, not from
+      // the honoPersonaRouteTable() stub (see routeTableOf for the
+      // filtering).
+      routes = routeTableOf(app);
+      // Pin the stub the Workers backend relies on: prove it equals the
+      // served app's table, so it cannot drift from the real app.
+      const served = routes.map((route) => `${route.method} ${route.path}`);
+      const stub = honoPersonaRouteTable().map(
+        (route) => `${route.method} ${route.path}`
+      );
+      if (JSON.stringify(served) !== JSON.stringify(stub))
+        throw new Error(
+          `honoPersonaRouteTable() drifted from the served Hono app: ` +
+            `served [${served.join(', ')}] vs stub [${stub.join(', ')}]`
+        );
       handler = async (request) => {
         const response = await app.fetch(request);
         observeResponseCookies(response);
         return response;
       };
     }
-    // Route table shared by every backend (see honoPersonaRouteTable).
-    const routes = honoPersonaRouteTable();
     /**
      * Exact id-set equality: same rows in any order, nothing extra, missing
      * or duplicated. Order-insensitive because multi-row responses can share

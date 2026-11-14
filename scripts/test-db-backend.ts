@@ -178,6 +178,33 @@ async function createTemporaryMigrationFolder(
   return folder;
 }
 
+/** #192: a migrations folder holding the journal entries up to `lastTag`. */
+async function createSqliteMigrationsFolderThrough(
+  lastTag: string
+): Promise<string> {
+  const folder = await mkdtemp(
+    path.join(os.tmpdir(), 'terrastories-sqlite-through-')
+  );
+  await mkdir(path.join(folder, 'meta'));
+  const journal = JSON.parse(
+    await readFile(path.join(sqliteMigrations, 'meta', '_journal.json'), 'utf8')
+  ) as { entries: Array<{ tag: string }> };
+  const end = journal.entries.findIndex((entry) => entry.tag === lastTag);
+  assert.ok(end >= 0, `migration ${lastTag} exists`);
+  const entries = journal.entries.slice(0, end + 1);
+  for (const entry of entries) {
+    await copyFile(
+      path.join(sqliteMigrations, `${entry.tag}.sql`),
+      path.join(folder, `${entry.tag}.sql`)
+    );
+  }
+  await writeFile(
+    path.join(folder, 'meta', '_journal.json'),
+    JSON.stringify({ ...journal, entries }, null, 2)
+  );
+  return folder;
+}
+
 async function createSqlitePreviousReleaseFolder(): Promise<string> {
   const folder = await mkdtemp(
     path.join(os.tmpdir(), 'terrastories-sqlite-v1-')
@@ -770,8 +797,16 @@ async function verifySqliteMigrationColumnSet(
     'utf8'
   );
   const statementShape =
-    /^UPDATE `([a-z_]+)` SET `([a-z_]+)` = `\2` \* 1000 WHERE `\2` IS NOT NULL AND abs\(`\2`\) < 100000000000;?$/;
+    /^UPDATE `([a-z_]+)` SET `([a-z_]+)` = `\2` \* 1000 WHERE `\2` IS NOT NULL AND abs\(`\2`\) < 100000000000 AND NOT EXISTS \(SELECT 1 FROM `_192_ms_done` WHERE `col` = '\1\.\2'\);?$/;
+  const markerShape =
+    /^INSERT OR IGNORE INTO `_192_ms_done` \(`col`\) VALUES \('([a-z_]+)\.([a-z_]+)'\);?$/;
+  const bookkeeping = new Set([
+    'CREATE TABLE IF NOT EXISTS `_192_ms_done` (`col` text PRIMARY KEY NOT NULL);',
+    'DROP TABLE `_192_ms_done`;',
+  ]);
   const migrated: string[] = [];
+  const marked: string[] = [];
+  let pendingUpdate: string | undefined;
   for (const statement of splitStatements(source)) {
     // The file's first entry carries the header comment block; statements
     // themselves are single UPDATE lines.
@@ -780,13 +815,39 @@ async function verifySqliteMigrationColumnSet(
       .filter((line) => !line.trimStart().startsWith('--'))
       .join(' ')
       .trim();
+    const normalized = stripped.endsWith(';') ? stripped : `${stripped};`;
+    if (bookkeeping.has(normalized)) continue;
+    const marker = stripped.match(markerShape);
+    if (marker) {
+      const key = `${marker[1]}.${marker[2]}`;
+      assert.equal(
+        pendingUpdate,
+        key,
+        `0006 marker ${key} must directly follow its own UPDATE`
+      );
+      marked.push(key);
+      pendingUpdate = undefined;
+      continue;
+    }
     const match = stripped.match(statementShape);
     assert.ok(
       match,
-      `0006 statements must be guarded seconds-only conversions: ${statement}`
+      `0006 statements must be marker-guarded seconds-only conversions: ${statement}`
     );
-    migrated.push(`${match[1]}.${match[2]}`);
+    assert.equal(
+      pendingUpdate,
+      undefined,
+      `0006 UPDATE for ${pendingUpdate} has no done marker`
+    );
+    pendingUpdate = `${match[1]}.${match[2]}`;
+    migrated.push(pendingUpdate);
   }
+  assert.equal(pendingUpdate, undefined, '0006 last UPDATE has no done marker');
+  assert.deepEqual(
+    marked.slice().sort(),
+    migrated.slice().sort(),
+    '0006 marks every converted column exactly once'
+  );
   assert.deepEqual(
     migrated.sort(),
     schemaColumns.map((column) => `${column.table}.${column.column}`).sort(),
@@ -808,13 +869,13 @@ function verifySqliteStoredMilliseconds(
   for (const { table, column } of columns) {
     const row = sqlite
       .prepare(
-        `SELECT count(*) AS seconds FROM ${table} WHERE ${column} IS NOT NULL AND abs(${column}) < 100000000000`
+        `SELECT count(*) AS seconds FROM ${table} WHERE ${column} IS NOT NULL AND (abs(${column}) < 100000000000 OR abs(${column}) >= 10000000000000)`
       )
       .get() as any;
     assert.equal(
       row.seconds,
       0,
-      `${table}.${column} must hold Unix milliseconds after migration 0006 (#192)`
+      `${table}.${column} must hold Unix milliseconds after migration 0006 (#192): no seconds value and no doubled (>= 1e13) value`
     );
   }
 }
@@ -2271,6 +2332,70 @@ async function runSqliteGate(): Promise<void> {
   verifySqliteStoredMilliseconds(upgradeSqlite, timestampColumns);
   await verifySqliteApplicationDates(upgradeDb);
   upgradeSqlite.close();
+
+  // #192 partial-run repair: a stepwise runner dies half-way through 0006,
+  // then the file is applied again in full. Every column, including a content
+  // date inside the ambiguous 1966-1973 millisecond window, must end up
+  // converted exactly once (the per-column done markers, not the range guard,
+  // make this exact).
+  const partialSqlite = new Database(':memory:');
+  partialSqlite.pragma('foreign_keys = ON');
+  const partialDb = drizzleSqlite(partialSqlite);
+  const partialReleaseFolder = await createSqlitePreviousReleaseFolder();
+  try {
+    await migrateSqlite(partialDb, { migrationsFolder: partialReleaseFolder });
+  } finally {
+    await rm(partialReleaseFolder, { recursive: true, force: true });
+  }
+  seedPreviousReleaseSqlite(partialSqlite);
+  const through0005 = await createSqliteMigrationsFolderThrough(
+    '0005_composite_tenant_fks'
+  );
+  try {
+    await migrateSqlite(partialDb, { migrationsFolder: through0005 });
+  } finally {
+    await rm(through0005, { recursive: true, force: true });
+  }
+  // 1970-06-24T00:00:00Z in Unix seconds; its millisecond value (1.5e10) is
+  // inside the range guard's ambiguous window.
+  const interviewSeconds = 15_033_600;
+  partialSqlite
+    .prepare('UPDATE stories SET date_interviewed = ?')
+    .run(interviewSeconds);
+  const partialStatements = splitStatements(msTimestampsSource);
+  const half = Math.floor(partialStatements.length / 2);
+  for (const statement of partialStatements.slice(0, half)) {
+    partialSqlite.exec(statement);
+  }
+  for (const statement of partialStatements) {
+    partialSqlite.exec(statement);
+  }
+  const interviewRows = partialSqlite
+    .prepare(
+      'SELECT date_interviewed AS value FROM stories WHERE date_interviewed IS NOT NULL'
+    )
+    .all() as Array<{ value: number }>;
+  assert.ok(interviewRows.length > 0, 'partial-run fixture seeds a story');
+  for (const row of interviewRows) {
+    assert.equal(
+      row.value,
+      interviewSeconds * 1000,
+      'stories.date_interviewed must be converted exactly once after a partial 0006 run and a full re-run (#192)'
+    );
+  }
+  assert.equal(
+    (
+      partialSqlite
+        .prepare(
+          "SELECT count(*) AS n FROM sqlite_master WHERE name = '_192_ms_done'"
+        )
+        .get() as { n: number }
+    ).n,
+    0,
+    'the 0006 done-marker table is dropped at the end'
+  );
+  verifySqlitePreservation(partialSqlite);
+  partialSqlite.close();
 
   console.log('  3/5 deliberate dialect incompatibility rejection');
   validateMigrationText(

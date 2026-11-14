@@ -55,11 +55,13 @@ export const placesPg = pgTable(
     id: serial('id').primaryKey(),
     name: pgText('name').notNull(),
     description: pgText('description'),
+    descriptionPlain: pgText('description_plain'),
     communityId: pgInteger('community_id')
       .notNull()
       .references(() => communitiesPg.id),
-    latitude: doublePrecision('latitude').notNull(),
-    longitude: doublePrecision('longitude').notNull(),
+    latitude: doublePrecision('latitude'),
+    longitude: doublePrecision('longitude'),
+    typeOfPlace: pgText('type_of_place'),
     region: pgText('region'),
     mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
     // Direct file URL column for dual-read capability (Issue #89)
@@ -88,11 +90,13 @@ export const placesSqlite = sqliteTable(
     id: integer('id').primaryKey({ autoIncrement: true }),
     name: sqliteText('name').notNull(),
     description: sqliteText('description'),
+    descriptionPlain: sqliteText('description_plain'),
     communityId: integer('community_id')
       .notNull()
       .references(() => communitiesSqlite.id),
-    latitude: real('latitude').notNull(),
-    longitude: real('longitude').notNull(),
+    latitude: real('latitude'),
+    longitude: real('longitude'),
+    typeOfPlace: sqliteText('type_of_place'),
     region: sqliteText('region'),
     mediaUrls: sqliteText('media_urls', { mode: 'json' })
       .$type<string[]>()

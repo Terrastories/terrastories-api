@@ -57,6 +57,13 @@
       "when": 1794744000000,
       "tag": "0007_story_edge_multiplicity_and_speaker_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794830400000,
+      "tag": "0008_slice1_content_columns",
+      "breakpoints": true
     }
   ]
 }

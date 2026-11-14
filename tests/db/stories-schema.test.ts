@@ -265,6 +265,24 @@ describe('Stories Schema', () => {
       const result = createStorySchema.safeParse(storyWithoutAuthor);
       expect(result.success).toBe(false);
     });
+
+    it('should keep V1 Zod validation non-null for createdBy while Drizzle columns allow null', () => {
+      expect(
+        createStorySchema.safeParse({
+          title: 'Story with null author',
+          communityId: 1,
+          createdBy: null,
+        }).success
+      ).toBe(false);
+      expect(storiesPg.createdBy.notNull).toBe(false);
+      expect(storiesSqlite.createdBy.notNull).toBe(false);
+      expect(storiesPg.topic).toBeDefined();
+      expect(storiesPg.topicNormalized).toBeDefined();
+      expect(storiesPg.descriptionPlain).toBeDefined();
+      expect(storiesSqlite.topic).toBeDefined();
+      expect(storiesSqlite.topicNormalized).toBeDefined();
+      expect(storiesSqlite.descriptionPlain).toBeDefined();
+    });
   });
 
   describe('Cultural Sensitivity Features', () => {

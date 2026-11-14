@@ -305,6 +305,22 @@ describe('Places Schema', () => {
       expect(placesPg.longitude).toBeDefined();
       expect(placesSqlite.latitude).toBeDefined();
       expect(placesSqlite.longitude).toBeDefined();
+      expect(placesPg.latitude.notNull).toBe(false);
+      expect(placesPg.longitude.notNull).toBe(false);
+      expect(placesSqlite.latitude.notNull).toBe(false);
+      expect(placesSqlite.longitude.notNull).toBe(false);
+      expect(placesPg.typeOfPlace).toBeDefined();
+      expect(placesPg.descriptionPlain).toBeDefined();
+      expect(placesSqlite.typeOfPlace).toBeDefined();
+      expect(placesSqlite.descriptionPlain).toBeDefined();
+      expect(
+        insertPlaceSchema.safeParse({
+          name: 'Null Coords',
+          communityId: 1,
+          latitude: null,
+          longitude: null,
+        }).success
+      ).toBe(false);
     });
   });
 

@@ -31,6 +31,7 @@ export const communitiesPg = pgTable('communities', {
   id: serial('id').primaryKey(),
   name: pgText('name').notNull(),
   description: pgText('description'),
+  descriptionPlain: pgText('description_plain'),
   slug: pgText('slug').notNull().unique(),
   publicStories: boolean('public_stories').notNull().default(false),
   locale: pgText('locale').notNull().default('en'),
@@ -47,6 +48,7 @@ export const communitiesSqlite = sqliteTable('communities', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: sqliteText('name').notNull(),
   description: sqliteText('description'),
+  descriptionPlain: sqliteText('description_plain'),
   slug: sqliteText('slug').notNull().unique(),
   publicStories: integer('public_stories', { mode: 'boolean' })
     .notNull()

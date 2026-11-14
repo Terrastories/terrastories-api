@@ -81,7 +81,7 @@ export interface Story {
   description?: string | null;
   slug: string;
   communityId: number;
-  createdBy: number;
+  createdBy: number | null;
   mediaUrls: string[] | null;
   // Direct file URL columns for dual-read capability (Issue #89)
   imageUrl?: string | null;
@@ -467,13 +467,16 @@ export class StoryRepository {
       .where(eq(communitiesTable.id, story.communityId))
       .limit(1);
 
-    // Get author
+    // Get author (nullable in V2 storage per §6.3)
     const usersTable = this.getUsersTable();
-    const [author] = await this.db
-      .select()
-      .from(usersTable)
-      .where(eq(usersTable.id, story.createdBy))
-      .limit(1);
+    const [author] =
+      story.createdBy !== null
+        ? await this.db
+            .select()
+            .from(usersTable)
+            .where(eq(usersTable.id, story.createdBy))
+            .limit(1)
+        : [undefined];
 
     // Get places through proper database joins
     const storyPlacesTable = this.getStoryPlacesTable();
@@ -706,16 +709,23 @@ export class StoryRepository {
         .where(inArray(communitiesTable.id, communityIds))
         .execute();
 
-      // Bulk load authors for all stories
+      // Bulk load authors for all stories (createdBy is nullable per §6.3)
       const authorIds = [
-        ...new Set<number>(stories.map((s: Story) => s.createdBy)),
+        ...new Set<number>(
+          stories
+            .map((s: Story) => s.createdBy)
+            .filter((id: number | null): id is number => id !== null)
+        ),
       ];
       const usersTable = this.getUsersTable();
-      const authors = await this.db
-        .select()
-        .from(usersTable)
-        .where(inArray(usersTable.id, authorIds))
-        .execute();
+      const authors =
+        authorIds.length > 0
+          ? await this.db
+              .select()
+              .from(usersTable)
+              .where(inArray(usersTable.id, authorIds))
+              .execute()
+          : [];
 
       // Create lookup maps for efficient joins
       const communityMap = new Map(
@@ -868,7 +878,8 @@ export class StoryRepository {
       // Build stories with relations
       return stories.map((story: Story) => {
         const community = communityMap.get(story.communityId);
-        const author = authorMap.get(story.createdBy);
+        const author =
+          story.createdBy !== null ? authorMap.get(story.createdBy) : undefined;
 
         // Get places for this story
         const storyPlaces = placesByStory.get(story.id) || [];

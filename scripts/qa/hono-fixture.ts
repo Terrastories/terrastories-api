@@ -217,6 +217,37 @@ export function honoPersonaRouteTable(): Endpoint[] {
   return routeTableOf(app);
 }
 
+export interface ClosableHttpServer {
+  listening?: boolean;
+  closeIdleConnections?: () => void;
+  close: (callback?: (error?: Error) => void) => unknown;
+}
+
+/**
+ * Close an HTTP persona server without masking setup errors when the server
+ * never started listening or is already stopped.
+ */
+export async function closeServer(
+  activeServer: ClosableHttpServer | undefined
+): Promise<void> {
+  if (!activeServer || !activeServer.listening) return;
+  // Close idle keep-alive sockets so Node fetch keep-alive does not
+  // delay server.close().
+  activeServer.closeIdleConnections?.();
+  await new Promise<void>((resolve, reject) =>
+    activeServer.close((error) => {
+      if (
+        !error ||
+        (error as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING'
+      ) {
+        resolve();
+      } else {
+        reject(error);
+      }
+    })
+  );
+}
+
 export async function createFixture(
   options: {
     baseUrl?: string;
@@ -262,20 +293,10 @@ export async function createFixture(
   const communityMedia =
     dialectOf(db) === 'postgresql' ? communityMediaPg : communityMediaSqlite;
   let server: ReturnType<typeof serve> | undefined;
-  const closeServer = async () => {
-    if (!server) return;
+  const closeActiveServer = async () => {
     const activeServer = server;
     server = undefined;
-    // Close idle keep-alive sockets so Node fetch keep-alive does not
-    // delay server.close().
-    if ('closeIdleConnections' in activeServer) {
-      (
-        activeServer as { closeIdleConnections?: () => void }
-      ).closeIdleConnections?.();
-    }
-    await new Promise<void>((resolve, reject) =>
-      activeServer.close((error) => (error ? reject(error) : resolve()))
-    );
+    await closeServer(activeServer);
   };
   try {
     const fixtures = await (backend ? backend.seedBaseline() : qa!.seed());
@@ -1948,7 +1969,7 @@ export async function createFixture(
       sessionCookieName: 'ts_session',
       close: async () => {
         try {
-          await closeServer();
+          await closeActiveServer();
         } finally {
           if (backend) await backend.close();
           else await qa!.close();
@@ -1957,10 +1978,15 @@ export async function createFixture(
     };
   } catch (error) {
     try {
-      await closeServer();
-    } finally {
+      await closeActiveServer();
+    } catch {
+      // Cleanup errors must never mask the setup error.
+    }
+    try {
       if (backend) await backend.close();
       else await qa!.close();
+    } catch {
+      // Cleanup errors must never mask the setup error.
     }
     throw error;
   }

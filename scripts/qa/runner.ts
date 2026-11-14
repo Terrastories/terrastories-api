@@ -96,7 +96,7 @@ function matches(pattern: string, path: string): boolean {
 export async function runJourneys(options: {
   handler?: Handler;
   baseUrl?: string;
-  contract?: ContractClass;
+  contract: ContractClass;
   routes: Endpoint[];
   journeys: Journey[];
   exclusions?: Exclusion[];
@@ -104,7 +104,10 @@ export async function runJourneys(options: {
   /** Tracked session cookie name; stacks differ (Fastify sessionId, Hono ts_session). */
   sessionCookieName?: string;
 }) {
-  const contract: ContractClass = options.contract ?? 'canonical-v2';
+  if (options.contract !== 'canonical-v2' && options.contract !== 'legacy-v1') {
+    throw new Error('Persona runner requires an explicit contract class');
+  }
+  const contract: ContractClass = options.contract;
   const baseUrl =
     options.baseUrl === undefined
       ? undefined

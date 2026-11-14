@@ -1,6 +1,8 @@
+import { createServer } from 'node:http';
 import { writeFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import {
+  closeServer,
   createFixture,
   HONO_PERSONA_CULTURAL_STRINGS,
 } from '../../../scripts/qa/hono-fixture.js';
@@ -44,4 +46,23 @@ describe('Hono V2 persona acceptance (real HTTP)', () => {
       await fixture.close();
     }
   }, 120000);
+
+  it('closeServer returns cleanly on a never-listening server and ERR_SERVER_NOT_RUNNING', async () => {
+    const server = createServer();
+    expect(server.listening).toBe(false);
+    await expect(closeServer(server)).resolves.toBeUndefined();
+
+    await expect(
+      closeServer({
+        listening: true,
+        close(callback) {
+          callback?.(
+            Object.assign(new Error('Server is not running.'), {
+              code: 'ERR_SERVER_NOT_RUNNING',
+            })
+          );
+        },
+      })
+    ).resolves.toBeUndefined();
+  });
 });

@@ -46,8 +46,17 @@ export async function main(args: string[]): Promise<number> {
     throw new Error('Fixture must export createFixture');
   const context = await module.createFixture({ baseUrl: url?.href });
   try {
+    if (
+      context.contract !== 'canonical-v2' &&
+      context.contract !== 'legacy-v1'
+    ) {
+      throw new Error(
+        'Fixture must declare a contract class (canonical-v2 or legacy-v1)'
+      );
+    }
     const report = await runJourneys({
       ...context,
+      contract: context.contract,
       ...(url ? { baseUrl: url.href, handler: undefined } : {}),
       requestTimeoutMs,
     });

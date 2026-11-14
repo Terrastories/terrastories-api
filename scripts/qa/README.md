@@ -78,7 +78,7 @@ The SQLite fixture requires the normal test environment configuration. Vitest
 supplies it through the repository test setup. For a deployed target, supply
 `--base-url https://your-staging-host.example` and a fixture module that exports
 `createFixture({baseUrl})`. That module must provision isolated QA data and return
-`routes`, `journeys`, optional reasoned `exclusions`, and an asynchronous `close`
+`contract`, `routes`, `journeys`, optional reasoned `exclusions`, and an asynchronous `close`
 cleanup function. The in-process form also returns a `handler(Request)`.
 The SQLite fixture refuses HTTP mode because its database does not seed a remote
 server. Never point a provisioning fixture at community production data.

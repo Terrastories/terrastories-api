@@ -50,13 +50,16 @@ export const storiesPg = pgTable(
     id: serial('id').primaryKey(),
     title: pgText('title').notNull(),
     description: pgText('description'),
+    descriptionPlain: pgText('description_plain'),
     slug: pgText('slug').notNull(),
     communityId: pgInteger('community_id')
       .notNull()
       .references(() => communitiesPg.id),
-    createdBy: pgInteger('created_by').notNull(),
+    createdBy: pgInteger('created_by'),
     isRestricted: boolean('is_restricted').notNull().default(false),
     privacyLevel: pgText('privacy_level').notNull().default('public'),
+    topic: pgText('topic'),
+    topicNormalized: pgText('topic_normalized'),
     mediaUrls: jsonb('media_urls').$type<string[]>().default([]),
     // Direct file URL columns for dual-read capability (Issue #89)
     imageUrl: pgText('image_url'),
@@ -108,15 +111,18 @@ export const storiesSqlite = sqliteTable(
     id: integer('id').primaryKey({ autoIncrement: true }),
     title: sqliteText('title').notNull(),
     description: sqliteText('description'),
+    descriptionPlain: sqliteText('description_plain'),
     slug: sqliteText('slug').notNull(),
     communityId: integer('community_id')
       .notNull()
       .references(() => communitiesSqlite.id),
-    createdBy: integer('created_by').notNull(),
+    createdBy: integer('created_by'),
     isRestricted: integer('is_restricted', { mode: 'boolean' })
       .notNull()
       .default(false),
     privacyLevel: sqliteText('privacy_level').notNull().default('public'),
+    topic: sqliteText('topic'),
+    topicNormalized: sqliteText('topic_normalized'),
     mediaUrls: sqliteText('media_urls', { mode: 'json' })
       .$type<string[]>()
       .default([]),
@@ -240,6 +246,8 @@ export const storiesSqliteRelations = relations(
 export const insertStorySchema = createInsertSchema(storiesPg, {
   title: z.string().min(1, 'Title is required').max(500, 'Title too long'),
   description: z.string().max(5000, 'Description too long').optional(),
+  // Frozen V1 Zod validation keeps createdBy required and non-null during coexistence.
+  createdBy: z.number().int(),
   slug: z
     .string()
     .min(1, 'Slug is required')

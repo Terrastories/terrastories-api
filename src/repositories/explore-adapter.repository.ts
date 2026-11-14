@@ -53,6 +53,10 @@ import {
   containsNormalizedKey,
   normalizeSearchText,
 } from '../shared/utils/search-normalize.js';
+import {
+  communityToPhysical,
+  storyVisibilityToPhysical,
+} from '../policy/canonical-state.js';
 
 export interface ExploreCommunityRow {
   id: number;
@@ -156,12 +160,22 @@ export class ExploreAdapterRepository {
    * plain characters, not LIKE wildcards). The needle key is normalized
    * once, before the row loop.
    */
+  /** Active public community gate derived from the single-source state mapping. */
+  private publicCommunityGate() {
+    const { communities } = this.tables;
+    const { publicStories, isActive } = communityToPhysical({
+      visibility: 'public',
+      status: 'active',
+    });
+    return and(
+      eq(communities.publicStories, publicStories),
+      eq(communities.isActive, isActive)
+    );
+  }
+
   async publicCommunities(search?: string): Promise<ExploreCommunityRow[]> {
     const { communities } = this.tables;
-    const gate = and(
-      eq(communities.publicStories, true),
-      eq(communities.isActive, true)
-    );
+    const gate = this.publicCommunityGate();
     const rows: ExploreCommunityRow[] = await this.database
       .select({
         id: communities.id,
@@ -196,13 +210,7 @@ export class ExploreAdapterRepository {
         updatedAt: communities.updatedAt,
       })
       .from(communities)
-      .where(
-        and(
-          eq(communities.slug, slug),
-          eq(communities.publicStories, true),
-          eq(communities.isActive, true)
-        )
-      )
+      .where(and(eq(communities.slug, slug), this.publicCommunityGate()))
       .limit(1);
     return rows[0] ?? null;
   }
@@ -234,10 +242,11 @@ export class ExploreAdapterRepository {
   /** Publicly readable stories of the community (Rails `anonymous` audience). */
   private publicStoryGate(communityId: number) {
     const { stories } = this.tables;
+    const { privacyLevel, isRestricted } = storyVisibilityToPhysical('public');
     return and(
       eq(stories.communityId, communityId),
-      eq(stories.privacyLevel, 'public'),
-      eq(stories.isRestricted, false)
+      eq(stories.privacyLevel, privacyLevel),
+      eq(stories.isRestricted, isRestricted)
     );
   }
 
@@ -695,8 +704,7 @@ export class ExploreAdapterRepository {
           eq(files.communityId, communityId),
           eq(files.isActive, true),
           isNull(files.culturalRestrictions),
-          eq(communities.isActive, true),
-          eq(communities.publicStories, true)
+          this.publicCommunityGate()
         )
       )
       .orderBy(asc(files.id))
@@ -737,8 +745,7 @@ export class ExploreAdapterRepository {
           eq(files.communityId, media.communityId),
           eq(files.isActive, true),
           isNull(files.culturalRestrictions),
-          eq(communities.isActive, true),
-          eq(communities.publicStories, true)
+          this.publicCommunityGate()
         )
       )
       .limit(1);

@@ -434,7 +434,13 @@ export class PlaceRepository {
       .where(and(...whereConditions));
 
     const nearbyPlaces = candidates
-      .map((place: Place) => ({
+      .filter(
+        (
+          place: Place
+        ): place is Place & { latitude: number; longitude: number } =>
+          place.latitude !== null && place.longitude !== null
+      )
+      .map((place: Place & { latitude: number; longitude: number }) => ({
         place,
         distance: this.calculateHaversineDistance(
           latitude,

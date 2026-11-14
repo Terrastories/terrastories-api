@@ -22,6 +22,7 @@ import {
   type DialectTables,
 } from '../db/dialect.js';
 import type { CommunityClaimState } from '../shared/authorization/administrative-policy.js';
+import { communityToPhysical } from '../policy/canonical-state.js';
 import type { Community } from '../db/schema/communities.js';
 import type { Database } from '../db/index.js';
 
@@ -488,17 +489,21 @@ export class CommunityRepository {
         offset = 0,
       } = params;
 
+      const { publicStories, isActive } = communityToPhysical({
+        visibility: 'public',
+        status: 'active',
+      });
       const conditions = [
         // §6.1 status gate: disabled communities close every public path.
-        eq(this.communities.isActive, true),
+        eq(this.communities.isActive, isActive),
         // §4/§6.1 visibility gate: private communities are discoverable
         // only by their own members (same-community widening).
         viewerCommunityId !== null
           ? or(
-              eq(this.communities.publicStories, true),
+              eq(this.communities.publicStories, publicStories),
               eq(this.communities.id, viewerCommunityId)
             )
-          : eq(this.communities.publicStories, true),
+          : eq(this.communities.publicStories, publicStories),
       ];
 
       if (query?.trim()) {

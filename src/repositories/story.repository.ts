@@ -6,6 +6,7 @@
  */
 
 import type { TransitionalStoryReadAccess } from '../shared/authorization/sovereignty-policy.js';
+import { storyVisibilityToPhysical } from '../policy/canonical-state.js';
 import { normalizeSearchText } from '../shared/utils/search-normalize.js';
 import {
   eq,
@@ -80,7 +81,7 @@ export interface Story {
   description?: string | null;
   slug: string;
   communityId: number;
-  createdBy: number;
+  createdBy: number | null;
   mediaUrls: string[] | null;
   // Direct file URL columns for dual-read capability (Issue #89)
   imageUrl?: string | null;
@@ -466,13 +467,16 @@ export class StoryRepository {
       .where(eq(communitiesTable.id, story.communityId))
       .limit(1);
 
-    // Get author
+    // Get author (nullable in V2 storage per §6.3)
     const usersTable = this.getUsersTable();
-    const [author] = await this.db
-      .select()
-      .from(usersTable)
-      .where(eq(usersTable.id, story.createdBy))
-      .limit(1);
+    const [author] =
+      story.createdBy !== null
+        ? await this.db
+            .select()
+            .from(usersTable)
+            .where(eq(usersTable.id, story.createdBy))
+            .limit(1)
+        : [undefined];
 
     // Get places through proper database joins
     const storyPlacesTable = this.getStoryPlacesTable();
@@ -705,16 +709,23 @@ export class StoryRepository {
         .where(inArray(communitiesTable.id, communityIds))
         .execute();
 
-      // Bulk load authors for all stories
+      // Bulk load authors for all stories (createdBy is nullable per §6.3)
       const authorIds = [
-        ...new Set<number>(stories.map((s: Story) => s.createdBy)),
+        ...new Set<number>(
+          stories
+            .map((s: Story) => s.createdBy)
+            .filter((id: number | null): id is number => id !== null)
+        ),
       ];
       const usersTable = this.getUsersTable();
-      const authors = await this.db
-        .select()
-        .from(usersTable)
-        .where(inArray(usersTable.id, authorIds))
-        .execute();
+      const authors =
+        authorIds.length > 0
+          ? await this.db
+              .select()
+              .from(usersTable)
+              .where(inArray(usersTable.id, authorIds))
+              .execute()
+          : [];
 
       // Create lookup maps for efficient joins
       const communityMap = new Map(
@@ -867,7 +878,8 @@ export class StoryRepository {
       // Build stories with relations
       return stories.map((story: Story) => {
         const community = communityMap.get(story.communityId);
-        const author = authorMap.get(story.createdBy);
+        const author =
+          story.createdBy !== null ? authorMap.get(story.createdBy) : undefined;
 
         // Get places for this story
         const storyPlaces = placesByStory.get(story.id) || [];
@@ -1460,22 +1472,14 @@ export function storyAudienceCondition(
 ): SQL | undefined {
   const conditions = accesses
     .map((access) => {
-      if (access === 'public') {
-        return and(
-          eq(storiesTable.isRestricted, false),
-          eq(storiesTable.privacyLevel, 'public')
-        );
+      if (access === 'unavailable') {
+        return undefined;
       }
-      if (access === 'community') {
-        return and(
-          eq(storiesTable.isRestricted, false),
-          eq(storiesTable.privacyLevel, 'members_only')
-        );
-      }
-      // 'editors' matches no Fastify row (unknown privacy levels are
-      // unavailable) and 'unavailable' is readable by no role: neither
-      // contributes a condition.
-      return undefined;
+      const { privacyLevel, isRestricted } = storyVisibilityToPhysical(access);
+      return and(
+        eq(storiesTable.isRestricted, isRestricted),
+        eq(storiesTable.privacyLevel, privacyLevel)
+      );
     })
     .filter((condition): condition is SQL => condition !== undefined);
   if (conditions.length === 0) {

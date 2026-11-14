@@ -740,6 +740,29 @@ function verifySqliteSchema(sqlite: Database.Database): void {
     assert.ok(lookup, `missing SQLite non-unique index ${expectedIdx}`);
     assert.equal(Number(lookup.unique), 0, `${expectedIdx} must be non-unique`);
   }
+
+  // #189 Slice 1b: nullable content columns & relaxed V2 nullability.
+  for (const [table, nullableCols] of [
+    ['communities', ['description_plain']],
+    [
+      'stories',
+      ['created_by', 'topic', 'topic_normalized', 'description_plain'],
+    ],
+    ['places', ['latitude', 'longitude', 'type_of_place', 'description_plain']],
+  ] as const) {
+    const tableInfo = sqlite
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as any[];
+    for (const colName of nullableCols) {
+      const col = tableInfo.find((r) => String(r.name) === colName);
+      assert.ok(col, `missing SQLite column ${table}.${colName}`);
+      assert.equal(
+        Number(col.notnull),
+        0,
+        `${table}.${colName} must be nullable in SQLite`
+      );
+    }
+  }
 }
 
 /**
@@ -1300,6 +1323,41 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   ]) {
     assert.ok(indexes.has(indexName), `missing PostgreSQL index ${indexName}`);
   }
+
+  // #189 Slice 1b: nullable content columns & relaxed V2 nullability.
+  const slice1bCols = await client.unsafe(
+    `SELECT table_name, column_name, is_nullable
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND (
+         (table_name = 'communities' AND column_name = 'description_plain')
+         OR (table_name = 'stories' AND column_name IN ('created_by', 'topic', 'topic_normalized', 'description_plain'))
+         OR (table_name = 'places' AND column_name IN ('latitude', 'longitude', 'type_of_place', 'description_plain'))
+       )`
+  );
+  const nullableMap = new Map(
+    slice1bCols.map((row: any) => [
+      `${row.table_name}.${row.column_name}`,
+      String(row.is_nullable),
+    ])
+  );
+  for (const expectedNullable of [
+    'communities.description_plain',
+    'stories.created_by',
+    'stories.topic',
+    'stories.topic_normalized',
+    'stories.description_plain',
+    'places.latitude',
+    'places.longitude',
+    'places.type_of_place',
+    'places.description_plain',
+  ]) {
+    assert.equal(
+      nullableMap.get(expectedNullable),
+      'YES',
+      `${expectedNullable} must exist and be nullable in PostgreSQL`
+    );
+  }
 }
 
 async function verifyPostgresPreservation(
@@ -1630,6 +1688,137 @@ function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {
   nullableProbe.run('duplicate');
   assert.throws(() => nullableProbe.run('duplicate'));
   sqlite.exec('DROP TABLE null_unique_probe');
+
+  verifySqliteSlice1bBehavior(sqlite);
+}
+
+/**
+ * #189 Slice 1b: prove stories.created_by and places.latitude/longitude accept NULL,
+ * new content columns store text, and composite tenant FKs reject cross-community
+ * rows after migration 0008 rebuilds.
+ */
+function verifySqliteSlice1bBehavior(sqlite: Database.Database): void {
+  const now = Date.now();
+  sqlite.exec('SAVEPOINT slice1b_probe');
+  try {
+    const commA = Number(
+      sqlite
+        .prepare(
+          `INSERT INTO communities (name, slug, description_plain, created_at, updated_at)
+           VALUES ('Slice1b A', 'slice1b-a', 'Plain community text', ?, ?)`
+        )
+        .run(now, now).lastInsertRowid
+    );
+    const commB = Number(
+      sqlite
+        .prepare(
+          `INSERT INTO communities (name, slug, created_at, updated_at)
+           VALUES ('Slice1b B', 'slice1b-b', ?, ?)`
+        )
+        .run(now, now).lastInsertRowid
+    );
+
+    const placeA = Number(
+      sqlite
+        .prepare(
+          `INSERT INTO places
+           (name, description_plain, community_id, latitude, longitude, type_of_place, created_at, updated_at)
+           VALUES ('Unmapped Place', 'Plain place', ?, NULL, NULL, 'river', ?, ?)`
+        )
+        .run(commA, now, now).lastInsertRowid
+    );
+    const placeB = Number(
+      sqlite
+        .prepare(
+          `INSERT INTO places (name, community_id, created_at, updated_at)
+           VALUES ('Cross Place', ?, ?, ?)`
+        )
+        .run(commB, now, now).lastInsertRowid
+    );
+
+    const speakerB = Number(
+      sqlite
+        .prepare(
+          `INSERT INTO speakers (name, community_id, created_at, updated_at)
+           VALUES ('Cross Speaker', ?, ?, ?)`
+        )
+        .run(commB, now, now).lastInsertRowid
+    );
+
+    const storyA = Number(
+      sqlite
+        .prepare(
+          `INSERT INTO stories
+           (title, slug, description_plain, community_id, created_by, topic, topic_normalized, interview_location_id, created_at, updated_at)
+           VALUES ('Imported Story', 'imported-story-a', 'Plain story', ?, NULL, 'Río', 'rio', ?, ?, ?)`
+        )
+        .run(commA, placeA, now, now).lastInsertRowid
+    );
+
+    const storedStory = sqlite
+      .prepare(
+        'SELECT created_by, topic, topic_normalized, description_plain FROM stories WHERE id = ?'
+      )
+      .get(storyA) as any;
+    assert.equal(storedStory.created_by, null);
+    assert.equal(storedStory.topic, 'Río');
+    assert.equal(storedStory.topic_normalized, 'rio');
+    assert.equal(storedStory.description_plain, 'Plain story');
+
+    const storedPlace = sqlite
+      .prepare(
+        'SELECT latitude, longitude, type_of_place, description_plain FROM places WHERE id = ?'
+      )
+      .get(placeA) as any;
+    assert.equal(storedPlace.latitude, null);
+    assert.equal(storedPlace.longitude, null);
+    assert.equal(storedPlace.type_of_place, 'river');
+    assert.equal(storedPlace.description_plain, 'Plain place');
+
+    // Cross-community composite tenant FKs must still fail after rebuild.
+    assert.throws(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO stories (title, slug, community_id, interview_location_id, created_at, updated_at)
+           VALUES ('Cross Location', 'cross-location', ?, ?, ?, ?)`
+        )
+        .run(commA, placeB, now, now)
+    );
+    assert.throws(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO stories (title, slug, community_id, interviewer_id, created_at, updated_at)
+           VALUES ('Cross Interviewer', 'cross-interviewer', ?, ?, ?, ?)`
+        )
+        .run(commA, speakerB, now, now)
+    );
+    assert.throws(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO speakers (name, community_id, birthplace_id, created_at, updated_at)
+           VALUES ('Cross Birthplace', ?, ?, ?, ?)`
+        )
+        .run(commA, placeB, now, now)
+    );
+    assert.throws(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO story_places (community_id, story_id, place_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(commA, storyA, placeB, now, now)
+    );
+    assert.throws(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO story_speakers (community_id, story_id, speaker_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(commA, storyA, speakerB, now, now)
+    );
+  } finally {
+    sqlite.exec('ROLLBACK TO slice1b_probe; RELEASE slice1b_probe;');
+  }
 }
 
 async function verifyPostgresTransactionAndForeignKey(
@@ -1674,6 +1863,44 @@ async function verifyPostgresTransactionAndForeignKey(
     client.unsafe("INSERT INTO null_unique_probe (value) VALUES ('duplicate')")
   );
   await client.unsafe('DROP TABLE IF EXISTS null_unique_probe');
+
+  // #189 Slice 1b: nullable columns and composite tenant FK enforcement in PG.
+  await assert.rejects(
+    client.begin(async (tx) => {
+      const [{ id: commA }] = await tx`
+        INSERT INTO communities (name, slug, description_plain)
+        VALUES ('PG Slice1b A', 'pg-slice1b-a', 'Plain community text')
+        RETURNING id
+      `;
+      const [{ id: commB }] = await tx`
+        INSERT INTO communities (name, slug)
+        VALUES ('PG Slice1b B', 'pg-slice1b-b')
+        RETURNING id
+      `;
+      await tx`
+        INSERT INTO places (name, description_plain, community_id, latitude, longitude, type_of_place)
+        VALUES ('Unmapped PG Place', 'Plain place', ${commA}, NULL, NULL, 'river')
+      `;
+      const [{ id: placeB }] = await tx`
+        INSERT INTO places (name, community_id)
+        VALUES ('PG Cross Place', ${commB})
+        RETURNING id
+      `;
+      const [{ id: storyA }] = await tx`
+        INSERT INTO stories (title, slug, description_plain, community_id, created_by, topic, topic_normalized)
+        VALUES ('Imported PG Story', 'imported-pg-story', 'Plain story', ${commA}, NULL, 'Río', 'rio')
+        RETURNING id
+      `;
+      await assert.rejects(
+        tx`
+          INSERT INTO story_places (community_id, story_id, place_id)
+          VALUES (${commA}, ${storyA}, ${placeB})
+        `
+      );
+      throw new Error('slice1b_pg_probe_rollback');
+    }),
+    /slice1b_pg_probe_rollback/
+  );
 }
 
 async function verifySqliteFailedMigrationNotRecorded(): Promise<void> {
@@ -1751,8 +1978,9 @@ interface Snapshot {
   tables: Record<string, SnapshotTable>;
 }
 
-/** Tables 0005/0007 rebuild by hand: they must match the Drizzle snapshot exactly. */
+/** Tables 0005/0007/0008 rebuild by hand: they must match the Drizzle snapshot exactly. */
 const rebuiltTables = [
+  'places',
   'speakers',
   'stories',
   'story_places',
@@ -1890,7 +2118,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0007_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0008_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2280,6 +2508,7 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
     for (const file of [
       '0006_ms_timestamps.sql',
       '0007_story_edge_multiplicity_and_speaker_fields.sql',
+      '0008_slice1_content_columns.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')
@@ -2422,6 +2651,7 @@ async function runSqliteGate(): Promise<void> {
   verifySqlitePreservation(upgradeSqlite);
   verifySqliteStoredMilliseconds(upgradeSqlite, timestampColumns);
   await verifySqliteApplicationDates(upgradeDb);
+  verifySqliteSlice1bBehavior(upgradeSqlite);
   upgradeSqlite.close();
 
   // #192 partial-run repair: a stepwise runner dies half-way through 0006,

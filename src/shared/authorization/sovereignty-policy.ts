@@ -1,3 +1,14 @@
+import {
+  COMMUNITY_STATUSES,
+  COMMUNITY_VISIBILITIES,
+  STORY_VISIBILITIES,
+  communityFromPhysical,
+  storyVisibilityFromPhysical,
+  type CommunityStatus,
+  type CommunityVisibility,
+  type StoryVisibility,
+} from '../../policy/canonical-state.js';
+
 export const V2_COMMUNITY_ROLES = [
   'viewer',
   'member',
@@ -17,9 +28,9 @@ export function isV2CommunityRole(role: string): role is V2CommunityRole {
  * story content, distinct from `FieldVisibilityCategory`, which classifies
  * individual fields inside an already-authorized response.
  */
-export const STORY_AUDIENCES = ['public', 'community', 'editors'] as const;
+export const STORY_AUDIENCES = STORY_VISIBILITIES;
 
-export type StoryAudience = (typeof STORY_AUDIENCES)[number];
+export type StoryAudience = StoryVisibility;
 
 /**
  * Which authenticated roles may read each story audience inside their own
@@ -93,35 +104,15 @@ export function storyAccessForRole(
 
 /**
  * Transitional mapping from the Fastify V1 story columns to runtime read
- * access (SPEC-V2 §6.3). The physical columns stay until #145/#146; this
- * function is the single documented mapping and its SQL transcription in
- * `storyAudienceCondition` (story repository) must stay in sync:
- *
- * - `privacyLevel = 'public'` + unrestricted -> `public`.
- * - `privacyLevel = 'members_only'` + unrestricted -> `community`.
- * - `isRestricted = true` -> `unavailable`. V1 limited these rows to
- *   elder/admin audiences with no exact canonical equivalent (§6.3), so they
- *   stay unavailable in V2 runtime to every role until a community-approved
- *   disposition; `editors` is the closest retained audience but is never
- *   selected implicitly.
- * - any other `privacyLevel` (e.g. `'restricted'`, `'private'`, `''`,
- *   unknown) + unrestricted -> `unavailable` via the same
- *   explicit-disposition path; never `editors`, never `public`.
+ * access (SPEC-V2 §6.3). Delegates to the single-source `canonical-state`
+ * module and maps `'hidden'` to `'unavailable'` for existing V1 callers.
  */
 export function fastifyStoryToAudience(
   privacyLevel: string,
   isRestricted: boolean
 ): TransitionalStoryReadAccess {
-  if (isRestricted) {
-    return 'unavailable';
-  }
-  if (privacyLevel === 'public') {
-    return 'public';
-  }
-  if (privacyLevel === 'members_only') {
-    return 'community';
-  }
-  return 'unavailable';
+  const visibility = storyVisibilityFromPhysical(privacyLevel, isRestricted);
+  return visibility === 'hidden' ? 'unavailable' : visibility;
 }
 
 export const CONTENT_ROUTE_FAMILIES = [
@@ -168,28 +159,23 @@ export type FieldVisibilityCategory =
  * lifecycle, not a privacy flag. A private or disabled community overrides
  * any story-level public visibility for anonymous callers (§4).
  */
-export const COMMUNITY_VISIBILITIES = ['public', 'private'] as const;
-
-export type CommunityVisibility = (typeof COMMUNITY_VISIBILITIES)[number];
-
-export const COMMUNITY_STATUSES = ['active', 'disabled'] as const;
-
-export type CommunityStatus = (typeof COMMUNITY_STATUSES)[number];
+export {
+  COMMUNITY_VISIBILITIES,
+  COMMUNITY_STATUSES,
+  type CommunityVisibility,
+  type CommunityStatus,
+};
 
 /**
  * Transitional mapping from the Fastify community columns to the canonical
- * gates (SPEC-V2 §6.1). The physical columns stay until #145/#146:
- * `communities.publicStories === true` ⇔ `visibility: 'public'`, and
- * `communities.isActive === true` ⇔ `status: 'active'`.
+ * gates (SPEC-V2 §6.1). Delegates to the single-source `canonical-state`
+ * module.
  */
 export function fastifyCommunityToGates(
   publicStories: boolean,
   isActive: boolean
 ): { visibility: CommunityVisibility; status: CommunityStatus } {
-  return {
-    visibility: publicStories ? 'public' : 'private',
-    status: isActive ? 'active' : 'disabled',
-  };
+  return communityFromPhysical({ publicStories, isActive });
 }
 
 /**

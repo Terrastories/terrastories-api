@@ -1,6 +1,10 @@
 import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import {
+  communityStatusToPhysical,
+  userStatusToPhysical,
+} from '../policy/canonical-state.js';
+import {
   sessionLifetime,
   sessionRenewalInterval,
 } from '../shared/session-policy.js';
@@ -70,8 +74,8 @@ export class HonoFoundationRepository {
       .where(
         and(
           eq(users.email, email),
-          eq(users.isActive, true),
-          eq(communities.isActive, true),
+          eq(users.isActive, userStatusToPhysical('active').isActive),
+          eq(communities.isActive, communityStatusToPhysical('active')),
           communityId === undefined
             ? undefined
             : eq(users.communityId, communityId)
@@ -115,8 +119,8 @@ export class HonoFoundationRepository {
             eq(users.passwordHash, user.passwordHash),
             eq(users.role, sql`${user.role}`),
             eq(users.communityId, user.communityId),
-            eq(users.isActive, true),
-            eq(communities.isActive, true)
+            eq(users.isActive, userStatusToPhysical('active').isActive),
+            eq(communities.isActive, communityStatusToPhysical('active'))
           )
         );
       // PostgreSQL locks current authority through the write; a concurrent
@@ -193,8 +197,8 @@ export class HonoFoundationRepository {
         and(
           eq(sessions.tokenHash, tokenHash),
           gt(sessions.expiresAt, now.getTime()),
-          eq(users.isActive, true),
-          eq(communities.isActive, true)
+          eq(users.isActive, userStatusToPhysical('active').isActive),
+          eq(communities.isActive, communityStatusToPhysical('active'))
         )
       )
       .limit(1);
@@ -257,7 +261,7 @@ export class HonoFoundationRepository {
           eq(media.kind, 'branding'),
           eq(files.communityId, media.communityId),
           eq(files.isActive, true),
-          eq(communities.isActive, true),
+          eq(communities.isActive, communityStatusToPhysical('active')),
           isNull(files.culturalRestrictions)
         )
       )

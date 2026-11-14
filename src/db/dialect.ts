@@ -81,6 +81,11 @@ export function escapeLikePattern(value: string): string {
  * wildcards with a backslash. Folding is ASCII-reliable on both; non-ASCII case
  * folding is an intentional difference (SQLite lower() folds ASCII only) until
  * V2 application-normalized columns replace database folding (SPEC-V2 §6.2/§6.3).
+ *
+ * V2 Explore community-name search no longer uses this helper (#192): that
+ * surface filters the bounded public community list in application code under
+ * the shared normalization contract (src/shared/utils/search-normalize.ts).
+ * V1 repositories keep it; do not adopt it for new V2 search surfaces.
  */
 export function containsInsensitive(
   dialect: Dialect,

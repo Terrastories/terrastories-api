@@ -35,6 +35,9 @@ async function assertAuthIndexesInSnapshot(
   for (const expected of [
     'idx_users_community_email',
     'idx_users_reset_password_token',
+    'users_username_normalized_unique',
+    'users_community_email_normalized_unique',
+    'users_null_community_email_normalized_unique',
   ]) {
     assert.ok(
       indexNames.includes(expected),
@@ -47,12 +50,12 @@ async function main(): Promise<void> {
   console.log('🧭 Migration metadata regression gate');
   await assertAuthIndexesInSnapshot(
     'SQLite',
-    'src/db/migrations/meta/0008_snapshot.json',
+    'src/db/migrations/meta/0009_snapshot.json',
     'users'
   );
   await assertAuthIndexesInSnapshot(
     'PostgreSQL',
-    'src/db/migrations/postgres/meta/0007_snapshot.json',
+    'src/db/migrations/postgres/meta/0008_snapshot.json',
     'public.users'
   );
   console.log('✅ Migration metadata regression gate passed');

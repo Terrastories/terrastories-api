@@ -19,10 +19,9 @@
 --
 -- RUNNER ATOMICITY / CRASH SAFETY: some runners execute this file one
 -- statement at a time without a wrapping transaction (wrangler d1 migrations
--- gives no cross-statement guarantee this file may rely on; the Drizzle
--- better-sqlite3 migrator and every D1 batch ARE transactional per run, and
--- the Drizzle PostgreSQL migrator wraps each run in a transaction). The file
--- is therefore safe without a runner transaction:
+-- is such a runner; its cross-statement atomicity is NOT verified in this
+-- repository). The file is re-entrant only UP TO THE GUARD, i.e. before any
+-- destructive statement:
 -- 1. The guard table is re-entrant: it is dropped (IF EXISTS) before being
 --    created, so a re-run after an aborted attempt never dies on "table
 --    already exists", and it is dropped again as soon as the check passes.
@@ -31,6 +30,48 @@
 --    failure path leaves the production tables, rows, and their names
 --    untouched; after repairing the data, re-running applies the migration
 --    from the start.
+-- Once the rebuild starts (`ALTER TABLE stories RENAME TO stories_old`),
+-- safety REQUIRES an atomic runner: the Drizzle better-sqlite3 migrator
+-- applies the whole file in one transaction, and a Miniflare D1 batch is
+-- atomic per batch, so a failure anywhere leaves no partial rebuild behind.
+-- A non-atomic runner that dies mid-rebuild leaves residue and must be
+-- recovered by hand:
+--
+-- MANUAL RECOVERY (non-atomic run failed mid-rebuild). First inspect which
+-- rebuild tables exist:
+--   SELECT name FROM sqlite_master WHERE type = 'table' AND name IN
+--     ('stories', 'stories_old',
+--      'story_places', 'story_places_new',
+--      'story_speakers', 'story_speakers_new',
+--      'community_media', 'community_media_new');
+-- Invariants: `stories_old` holds the original stories rows until its DROP;
+-- a `*_new` table whose target still exists is a draft whose target rows are
+-- all still in place (the file drops the target only after the copy
+-- finishes), so that draft can always be dropped; a `*_new` table whose
+-- target is MISSING is the only copy of that table's rows and must be
+-- renamed into place, never dropped. Then either:
+-- a) RESTORE the pre-migration state — valid while `stories_old` exists and
+--    no join-table DROP has run (story_places, story_speakers, and
+--    community_media all still exist with their legacy schema):
+--      DROP TABLE IF EXISTS `stories`;
+--      DROP TABLE IF EXISTS `story_places_new`;
+--      DROP TABLE IF EXISTS `story_speakers_new`;
+--      DROP TABLE IF EXISTS `community_media_new`;
+--      ALTER TABLE `stories_old` RENAME TO `stories`;
+--    Renaming stories_old back also restores the original stories indexes
+--    (they stayed attached to stories_old under their old names). For a
+--    byte-exact pre-186 schema also drop the three additive
+--    *_community_id_id_unique indexes created before the rebuild.
+-- b) FINISH the partially applied rebuild: for each `*_new` whose target is
+--    missing, run `ALTER TABLE <x>_new RENAME TO <x>;` (its copy completed —
+--    the file renames immediately after the DROP). For each `*_new` whose
+--    target still exists the draft may be partial (a failed INSERT..SELECT
+--    is not resumable): drop it, then re-run that table's CREATE TABLE /
+--    INSERT..SELECT / DROP / RENAME block from this file by hand. Finally
+--    execute the file's remaining statements by hand, in file order.
+-- Either way, finish with `DROP TABLE IF EXISTS _186_cross_community_guard`.
+-- The runner records this migration only after every statement succeeds, so
+-- after either path it re-applies cleanly from the start.
 --
 -- D1 note: this migration deliberately uses no PRAGMA statements (D1 only
 -- supports PRAGMA defer_foreign_keys), so table rebuilds are ordered to keep

@@ -39,16 +39,35 @@ export function normalizeSearchText(value: string): string {
     .normalize('NFC');
 }
 
+/** A combining mark (Unicode general category M) at the start of a string. */
+const LEADING_MARK = /^\p{M}/u;
+
 /**
  * Literal substring match against a needle key already produced by
  * `normalizeSearchText`, so a caller filtering many rows does not
  * re-normalize the needle for every row.
+ *
+ * NFC absorbs a mark only when a precomposed code point exists; otherwise
+ * the mark stays a separate code point after its base letter (Guaraní
+ * "g̃" is g + U+0303, Navajo "ą́" is U+0105 + U+0301). A plain substring
+ * test would then let the bare base letter match the marked one, so an
+ * occurrence counts only when the haystack does not continue it with a
+ * combining mark.
  */
 export function containsNormalizedKey(
   haystack: string,
   needleKey: string
 ): boolean {
-  return normalizeSearchText(haystack).includes(needleKey);
+  if (needleKey === '') return true;
+  const key = normalizeSearchText(haystack);
+  for (
+    let at = key.indexOf(needleKey);
+    at !== -1;
+    at = key.indexOf(needleKey, at + 1)
+  ) {
+    if (!LEADING_MARK.test(key.slice(at + needleKey.length))) return true;
+  }
+  return false;
 }
 
 /**

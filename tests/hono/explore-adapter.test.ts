@@ -645,7 +645,7 @@ it('narrows the communities index by name search', async () => {
 it('searches community names Unicode-correctly (#192)', async () => {
   // Case-insensitive, accent-sensitive: the uppercase needle matches the
   // stored name under the application-defined case-comparison contract
-  // (NFC-composed, simple Unicode lowercase, re-composed); the ASCII-only
+  // (NFC-composed, ECMAScript default lowercase, final sigma folded, re-composed); the ASCII-only
   // transcription does not.
   const saoJoao = encodeURIComponent('SÃO JOÃO');
   expect(

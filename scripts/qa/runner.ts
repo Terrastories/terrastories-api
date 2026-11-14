@@ -108,6 +108,21 @@ export async function runJourneys(options: {
     throw new Error('Persona runner requires an explicit contract class');
   }
   const contract: ContractClass = options.contract;
+  // Fixtures can be loaded by dynamic import (run-personas.ts) without type
+  // checks, so reject an unknown label anywhere: a typo would otherwise fall
+  // into neither summary bucket.
+  const isContractClass = (value: unknown): value is ContractClass =>
+    value === 'canonical-v2' || value === 'legacy-v1';
+  for (const journey of options.journeys) {
+    if (journey.contract !== undefined && !isContractClass(journey.contract))
+      throw new Error(`Invalid contract class on journey '${journey.persona}'`);
+    for (const step of journey.steps) {
+      if (step.contract !== undefined && !isContractClass(step.contract))
+        throw new Error(
+          `Invalid contract class on step '${journey.persona}/${step.name}'`
+        );
+    }
+  }
   const baseUrl =
     options.baseUrl === undefined
       ? undefined

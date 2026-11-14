@@ -722,6 +722,12 @@ function runSanitiser(
  * Applies the same allowlist rules as `validateDescriptionForWrite` but drops
  * non-conforming `href` values while keeping anchor text instead of rejecting,
  * and reports `removedNodes` (stripped text-bearing elements) for human review.
+ *
+ * A legacy description must never block cutover (SPEC-V2 §6.9). This
+ * function can still throw `InvalidDescriptionError` (`INPUT_TOO_LARGE`,
+ * `TOO_COMPLEX`, `INVALID_TYPE`) on extreme input, and the migrator must
+ * catch it and record a manual disposition for that row in the manifest
+ * instead of aborting; the raw Rails value stays in the archive.
  */
 export function sanitizeDescriptionForMigration(
   input: string

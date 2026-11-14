@@ -19,14 +19,14 @@ import {
   integer as pgInteger,
   text,
   timestamp,
-  unique,
+  index,
   foreignKey,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
-  uniqueIndex,
+  index as sqliteIndex,
   foreignKey as sqliteForeignKey,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
@@ -51,8 +51,8 @@ export const storySpeakersPg = pgTable(
     updatedAt: timestamp('updated_at', { precision: 3 }).notNull().defaultNow(),
   },
   (table) => ({
-    // Composite unique constraint to prevent duplicate relationships
-    storySpeakerUnique: unique('story_speaker_unique').on(
+    // Non-unique lookup index; V2 retains story edge multiplicity (#189)
+    storySpeakerIdx: index('story_speakers_story_speaker_idx').on(
       table.storyId,
       table.speakerId
     ),
@@ -94,8 +94,8 @@ export const storySpeakersSqlite = sqliteTable(
       .$defaultFn(() => new Date()),
   },
   (table) => ({
-    // Composite unique constraint to prevent duplicate relationships
-    storySpeakerUnique: uniqueIndex('story_speaker_unique').on(
+    // Non-unique lookup index; V2 retains story edge multiplicity (#189)
+    storySpeakerIdx: sqliteIndex('story_speakers_story_speaker_idx').on(
       table.storyId,
       table.speakerId
     ),

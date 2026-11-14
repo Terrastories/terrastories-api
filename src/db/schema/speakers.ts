@@ -21,6 +21,7 @@ import {
   integer as pgInteger,
   index,
   unique,
+  foreignKey,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
@@ -28,11 +29,13 @@ import {
   text as sqliteText,
   index as sqliteIndex,
   uniqueIndex,
+  foreignKey as sqliteForeignKey,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
+import { placesPg, placesSqlite } from './places.js';
 
 // Cultural role validation schema
 export const CulturalRoleSchema = z.string().min(1).max(100);
@@ -51,6 +54,9 @@ export const speakersPg = pgTable(
     // Direct file URL column for dual-read capability (Issue #89)
     bioAudioUrl: pgText('bio_audio_url'),
     birthYear: pgInteger('birth_year'),
+    birthDate: pgText('birth_date'),
+    birthplaceId: pgInteger('birthplace_id'),
+    affiliation: pgText('affiliation'),
     elderStatus: boolean('elder_status').notNull().default(false),
     culturalRole: pgText('cultural_role'),
     isActive: boolean('is_active').notNull().default(true),
@@ -66,6 +72,12 @@ export const speakersPg = pgTable(
     elderStatusIdx: index('speakers_elder_status_idx').on(table.elderStatus),
     culturalRoleIdx: index('speakers_cultural_role_idx').on(table.culturalRole),
     activeIdx: index('speakers_is_active_idx').on(table.isActive),
+    // Composite tenant FK ensuring birthplace belongs to the same community (#189)
+    birthplaceFk: foreignKey({
+      name: 'speakers_birthplace_community_fk',
+      columns: [table.communityId, table.birthplaceId],
+      foreignColumns: [placesPg.communityId, placesPg.id],
+    }),
     // Parent key for composite tenant FKs from stories/story_speakers (#186)
     communityIdIdUnique: unique('speakers_community_id_id_unique').on(
       table.communityId,
@@ -88,6 +100,9 @@ export const speakersSqlite = sqliteTable(
     // Direct file URL column for dual-read capability (Issue #89)
     bioAudioUrl: sqliteText('bio_audio_url'),
     birthYear: integer('birth_year'),
+    birthDate: sqliteText('birth_date'),
+    birthplaceId: integer('birthplace_id'),
+    affiliation: sqliteText('affiliation'),
     elderStatus: integer('elder_status', { mode: 'boolean' })
       .notNull()
       .default(false),
@@ -117,6 +132,12 @@ export const speakersSqlite = sqliteTable(
       table.culturalRole
     ),
     activeIdx: sqliteIndex('speakers_is_active_idx').on(table.isActive),
+    // Composite tenant FK ensuring birthplace belongs to the same community (#189)
+    birthplaceFk: sqliteForeignKey({
+      name: 'speakers_birthplace_community_fk',
+      columns: [table.communityId, table.birthplaceId],
+      foreignColumns: [placesSqlite.communityId, placesSqlite.id],
+    }),
     // Parent key for composite tenant FKs from stories/story_speakers (#186)
     communityIdIdUnique: uniqueIndex('speakers_community_id_id_unique').on(
       table.communityId,

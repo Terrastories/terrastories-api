@@ -188,10 +188,9 @@ describe('Story Speakers Schema', () => {
   });
 
   describe('Constraints and Indexes', () => {
-    it('should have table constraints defined', () => {
+    it('should have table constraints and non-unique lookup index defined', () => {
       expect(storySpeakersPg).toBeDefined();
       expect(storySpeakersSqlite).toBeDefined();
-      // Unique constraints are defined in table creation
     });
   });
 

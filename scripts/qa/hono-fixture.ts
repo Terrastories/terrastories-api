@@ -9,13 +9,15 @@
  * A caller may instead supply a backend (same journeys, same expectations)
  * whose database handle, media store and request handler come from elsewhere
  * — the Workers build (#199) seeds D1, stores media in R2 and dispatches to
- * bundled workerd. In-process backends derive the route table from the
- * served app's own `app.routes` and pin the shared honoPersonaRouteTable()
- * stub to it; the Workers backend serves its app inside workerd, where
- * `app.routes` cannot be read, so it uses that pinned stub. Either way a
- * newly registered route fails coverage until a journey reaches it. Mirrors
- * sqlite-fixture.ts: refuses HTTP mode because its isolated database cannot
- * seed a deployed server.
+ * bundled workerd. Whenever this fixture builds the Hono app in-process —
+ * the default SQLite run and the in-process PostgreSQL run alike — coverage
+ * is the route table of the app it actually serves (routeTableOf); a backend
+ * instead states its coverage table explicitly (`routes`), and only a
+ * backend whose app runs out of process (Workers/workerd, where
+ * `app.routes` cannot be read from Node) uses the honoPersonaRouteTable()
+ * reconstruction. Either way a newly registered route fails coverage until
+ * a journey reaches it. Mirrors sqlite-fixture.ts: refuses HTTP mode
+ * because its isolated database cannot seed a deployed server.
  */
 import { sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
@@ -87,7 +89,12 @@ export const HONO_PERSONA_PASSWORD = 'QaHonoPassword123!';
  * system + three communities + places baseline; `putMedia` stores media
  * bytes under the key the served app reads them back by; `handler` receives
  * the fixture's Set-Cookie tracker and returns the request handler the
- * runner drives; `close` releases the backend even after a seeding failure.
+ * runner drives; `routes` is the backend's coverage table, stated by the
+ * backend rather than inferred from its presence — an in-process backend
+ * derives it from the Hono app it actually serves (routeTableOf), while the
+ * only out-of-process backend today (Workers/workerd, whose app runs where
+ * Node cannot read `app.routes`) passes honoPersonaRouteTable();
+ * `close` releases the backend even after a seeding failure.
  */
 export interface HonoQaBackend {
   db: WidenedQaDatabase;
@@ -95,17 +102,23 @@ export interface HonoQaBackend {
   passwordHash: string;
   putMedia: (key: string, bytes: Uint8Array) => Promise<void>;
   handler: (observeResponseCookies: (response: Response) => void) => Handler;
+  routes: Endpoint[];
   close: () => Promise<void>;
 }
 
 /**
- * The endpoint table of a Hono app's own `app.routes`: only method-ALL
- * middleware registrations are dropped (they are not callable endpoints) —
- * a concrete-method route stays in coverage even when its path is a
- * wildcard — and bodyLimit re-registers the login route, so keep the first
- * concrete entry.
+ * The endpoint table of a Hono app's own `app.routes`: every method-`ALL`
+ * registration is dropped — `app.use` middleware and any `app.all` handler
+ * alike, since coverage is per concrete method and neither names one (src
+ * currently registers no `app.all` routes, so only `app.use` middleware is
+ * dropped today) — a concrete-method route stays in coverage even when its
+ * path is a wildcard, and bodyLimit re-registers the login route, so keep
+ * the first concrete entry. Exported so an in-process backend can derive
+ * its `routes` from the app it serves with the same filtering.
  */
-function routeTableOf(app: ReturnType<typeof createHonoApp>): Endpoint[] {
+export function routeTableOf(
+  app: ReturnType<typeof createHonoApp>
+): Endpoint[] {
   const routes: Endpoint[] = [];
   const registered = new Set<string>();
   for (const route of app.routes) {
@@ -121,17 +134,15 @@ function routeTableOf(app: ReturnType<typeof createHonoApp>): Endpoint[] {
 }
 
 /**
- * The endpoint table for backends whose served app is out of reach: the
- * Workers build runs `createHonoApp` inside workerd, where `app.routes`
- * cannot be read from Node. Faithful because the bundled gateway's default
- * export is `createWorker(verifier)` from src/worker.ts, and `createWorker`
- * composes `createHonoApp` with options that do not change route
- * registration — registration is unconditional, so the stub collaborators
- * below are never invoked and cannot change the table. The in-process
- * fixture run derives its table from the app it actually serves and asserts
- * the two are equal, so this stub cannot drift from the real app; a
- * worker-only route registered outside `createHonoApp` would need its own
- * derivation here.
+ * The endpoint table the Workers backend states as its `routes`: the served
+ * app runs inside workerd, where its `app.routes` cannot be read from Node,
+ * so this reconstruction is derived from `createHonoApp` instead — the
+ * factory `createWorker` in src/worker.ts composes. Route registration in
+ * `createHonoApp` is unconditional, so the stub collaborators below cannot
+ * change the table. That derivation is the table's only evidence: the
+ * bundled worker's own route table is not independently checked, and a
+ * worker-only route registered outside `createHonoApp` would be absent here
+ * and escape coverage.
  */
 export function honoPersonaRouteTable(): Endpoint[] {
   const app = createHonoApp({
@@ -443,14 +454,12 @@ export async function createFixture(
     let handler: Handler;
     let routes: Endpoint[];
     if (backend) {
-      // The Workers app lives inside workerd, so its `app.routes` cannot
-      // be read from Node; coverage uses the honoPersonaRouteTable() stub.
-      // It is faithful: the bundled gateway's default export is
-      // createWorker(verifier) from src/worker.ts, and createWorker
-      // composes createHonoApp with options that do not change route
-      // registration; the in-process branch below pins the stub to the
-      // real app.
-      routes = honoPersonaRouteTable();
+      // The backend states its coverage table; the fixture does not infer
+      // one from `backend` presence. Only Workers/workerd runs the served
+      // app out of process (its `app.routes` cannot be read from Node) and
+      // passes the honoPersonaRouteTable() reconstruction; an in-process
+      // backend passes routeTableOf of the app it actually serves.
+      routes = backend.routes;
       handler = backend.handler(observeResponseCookies);
     } else {
       const app = createHonoApp({
@@ -459,21 +468,10 @@ export async function createFixture(
         secureCookies: false,
         storage: { read: async (key) => storage.get(key) ?? null },
       });
-      // Coverage comes from the app this fixture actually serves, not from
-      // the honoPersonaRouteTable() stub (see routeTableOf for the
-      // filtering).
+      // Coverage comes from the app this fixture actually serves — the
+      // default SQLite run and the in-process PostgreSQL run alike (see
+      // routeTableOf for the filtering).
       routes = routeTableOf(app);
-      // Pin the stub the Workers backend relies on: prove it equals the
-      // served app's table, so it cannot drift from the real app.
-      const served = routes.map((route) => `${route.method} ${route.path}`);
-      const stub = honoPersonaRouteTable().map(
-        (route) => `${route.method} ${route.path}`
-      );
-      if (JSON.stringify(served) !== JSON.stringify(stub))
-        throw new Error(
-          `honoPersonaRouteTable() drifted from the served Hono app: ` +
-            `served [${served.join(', ')}] vs stub [${stub.join(', ')}]`
-        );
       handler = async (request) => {
         const response = await app.fetch(request);
         observeResponseCookies(response);

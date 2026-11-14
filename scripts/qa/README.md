@@ -32,14 +32,13 @@ isolated SQLite database with an in-memory storage adapter, and returns the
 same shape (`routes`, `journeys`, `exclusions`, `handler`, `close`) plus
 `sessionCookieName: 'ts_session'` — the runner tracks that cookie name for
 the Hono stack instead of Fastify's `sessionId`. Its endpoint table is
-derived from `app.routes` itself (only method-`ALL` middleware registrations
-and `bodyLimit`'s duplicate login entry are dropped — a concrete-method
-route stays in coverage even on a wildcard path), so registering a
-new Hono route fails coverage until a journey reaches it or a reviewed
-exclusion names it; today every Hono endpoint is reached and the fixture
-excludes nothing. The in-process run also asserts that table equals the
-shared `honoPersonaRouteTable()` stub — the Workers backend's coverage
-source — so the stub cannot drift from the served app. Journeys cover
+derived from `app.routes` itself (all method-`ALL` registrations — `app.use`
+middleware and any `app.all` handler alike; src registers no `app.all`
+routes today — and `bodyLimit`'s duplicate login entry are dropped, and a
+concrete-method route stays in coverage even on a wildcard path), so
+registering a new Hono route fails coverage until a journey reaches it or a
+reviewed exclusion names it; today every Hono endpoint is reached and the
+fixture excludes nothing. Journeys cover
 anonymous Explore browsing (ruling #162
 option A), session lifecycle for viewer, member, editor and community admin
 (own-user profile without secrets, community-scoped media, logout/revoke
@@ -171,16 +170,17 @@ module and cannot run in workerd, and the hosted Workers auth method stays
 open (#194), so the Workers fixture pins a Workers-native verifier: real
 PBKDF2-SHA-256 through WebCrypto inside workerd (100 000 iterations), with
 `pbkdf2$…` encodings seeded from Node through the same algorithm — a full
-cryptographic check, not an equality stub. Route coverage uses the shared
-`honoPersonaRouteTable()` stub: the served app lives inside workerd, so its
-`app.routes` cannot be read from Node. The stub is faithful because the
-bundled gateway's default export is `createWorker(verifier)` from
-`src/worker.ts`, and `createWorker` composes `createHonoApp` with options
-that do not change route registration; the in-process fixture derives its
-own table from the app it actually serves and asserts the two are equal, so
-the stub cannot drift from the real app. Every endpoint must be reached
-with zero exclusions — today all 13 endpoints are, by 119 steps across the
-same personas.
+cryptographic check, not an equality stub. Route coverage uses the table the
+backend states (`backend.routes`): the served app lives inside workerd, so
+its `app.routes` cannot be read from Node, and the backend passes the shared
+`honoPersonaRouteTable()` table, which is derived from `createHonoApp` — the
+factory `createWorker` in `src/worker.ts` composes. That derivation is the
+table's only evidence: the bundled worker's own route table is not
+independently checked, and a worker-only route registered outside
+`createHonoApp` would escape coverage. The in-process SQLite and PostgreSQL
+runs, by contrast, derive coverage from the app they actually serve. Every
+endpoint must be reached with zero exclusions — today all 13 endpoints are,
+by 119 steps across the same personas.
 
 The wrapper `tests/scripts/qa-workers/workers-hono.test.ts` lives outside
 `tests/scripts/qa/`, so `qa:personas:sqlite` never collects it, and runs

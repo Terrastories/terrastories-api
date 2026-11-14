@@ -24,6 +24,7 @@ import {
 } from '../../tests/helpers/worker-runtime.js';
 import {
   createFixture as createHonoPersonaFixture,
+  honoPersonaRouteTable,
   HONO_PERSONA_PASSWORD,
   type HonoQaBackend,
 } from './hono-fixture.js';
@@ -61,8 +62,10 @@ async function pbkdf2Encoded(password: string): Promise<string> {
 /**
  * The worker gateway: injects the PBKDF2 verifier into `createWorker` and
  * adds no routes of its own, so every dispatched request is served by the
- * worker's own Hono app over the D1/R2 bindings — the same route table the
- * fixture's coverage asserts (honoPersonaRouteTable).
+ * worker's own Hono app over the D1/R2 bindings. That app's route table
+ * cannot be read from Node, so the backend below states
+ * honoPersonaRouteTable() — derived from `createHonoApp`, which
+ * `createWorker` composes — rather than the bundled worker's own table.
  */
 export const WORKER_GATEWAY = `import { createWorker } from './src/worker.js';
 const decodeBase64 = (encoded) => Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
@@ -110,6 +113,10 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         observeResponseCookies(response as unknown as Response);
         return response as unknown as Response;
       },
+      // Out of process: the served app's `app.routes` is unreadable from
+      // Node, so coverage uses the createHonoApp-derived
+      // honoPersonaRouteTable(), not the bundled worker's own table.
+      routes: honoPersonaRouteTable(),
       close: () => mf.dispose(),
     };
   } catch (error) {

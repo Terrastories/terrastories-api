@@ -2,14 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   ASSOCIATED_READ_ASSOCIATIONS,
   MEDIA_READ_ASSOCIATIONS,
+  READ_RULE_AUTHORITIES,
   READ_RULE_OVERRIDES,
   READ_RULE_OUTCOMES,
+  READ_RULE_REQUIRED_AUTHORITIES,
   READ_RULE_RESOURCES,
   READ_RULES,
   READ_RULE_VIEWERS,
   STORY_READ_ASSOCIATIONS,
   readRuleOutcome,
+  type ReadRuleInput,
   type ReadRuleOutcome,
+  type ReadRulePrivacyEvidence,
   type ReadRuleRow,
 } from '../../src/policy/read-rules.js';
 import {
@@ -79,6 +83,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         resource: 'place',
         association: 'via-readable-story',
         viewer: 'anonymous-public',
+        privacyEvidence: 'clear',
       })
     ).toBe('with-readable-stories');
     expect(
@@ -86,6 +91,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         resource: 'theme',
         association: 'via-readable-story',
         viewer: 'anonymous-public',
+        privacyEvidence: 'clear',
       })
     ).toBe('hidden');
     expect(
@@ -93,6 +99,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         resource: 'place',
         association: 'via-any-story',
         viewer: 'anonymous-public',
+        privacyEvidence: 'clear',
       })
     ).toBe('hidden');
     expect(
@@ -100,6 +107,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         resource: 'place',
         association: 'via-readable-story',
         viewer: 'elder',
+        privacyEvidence: 'clear',
       })
     ).toBe('hidden');
     expect(
@@ -107,6 +115,7 @@ describe('§6.4a read-rules table (#190): totality', () => {
         resource: 'place',
         association: 'via-readable-story',
         viewer: '',
+        privacyEvidence: 'clear',
       })
     ).toBe('hidden');
   });
@@ -123,17 +132,19 @@ describe('§6.4a read-rules table (#190): #162 override', () => {
   });
 
   it('hides every cell for every viewer when restricted or unevidenced', () => {
-    for (const [label, row] of allRows) {
-      for (const viewer of Object.keys(row)) {
-        expect(
-          readRuleOutcome({
-            resource: label.split('/')[0],
-            association: label.split('/')[1],
-            viewer,
-            restrictedOrUnevidenced: true,
-          }),
-          `${label}/${viewer}`
-        ).toBe('hidden');
+    for (const evidence of ['restricted', 'unevidenced'] as const) {
+      for (const [label, row] of allRows) {
+        for (const viewer of Object.keys(row)) {
+          expect(
+            readRuleOutcome({
+              resource: label.split('/')[0],
+              association: label.split('/')[1],
+              viewer,
+              privacyEvidence: evidence,
+            }),
+            `${evidence} ${label}/${viewer}`
+          ).toBe('hidden');
+        }
       }
     }
     // The highest privileges never escape the override (#162 option A).
@@ -142,7 +153,7 @@ describe('§6.4a read-rules table (#190): #162 override', () => {
         resource: 'story',
         association: 'audience-public',
         viewer: 'own-admin',
-        restrictedOrUnevidenced: true,
+        privacyEvidence: 'restricted',
       })
     ).toBe('hidden');
     expect(
@@ -150,7 +161,138 @@ describe('§6.4a read-rules table (#190): #162 override', () => {
         resource: 'place',
         association: 'story-less',
         viewer: 'super-admin',
-        restrictedOrUnevidenced: true,
+        privacyEvidence: 'unevidenced',
+      })
+    ).toBe('hidden');
+  });
+
+  it('requires the #162 evidence input and fails closed without it', () => {
+    // Cells whose ordinary outcome is NOT hidden: only the override can
+    // explain a `hidden` result here.
+    const permissive: Array<[string, string, string, ReadRuleOutcome]> = [
+      ['story', 'audience-public', 'own-admin', 'visible'],
+      [
+        'place',
+        'via-readable-story',
+        'anonymous-public',
+        'with-readable-stories',
+      ],
+      ['media', 'community-branding', 'own-viewer', 'visible'],
+    ];
+    for (const [resource, association, viewer, ordinary] of permissive) {
+      // Undefined and unknown evidence values reach the function through
+      // untyped callers and bad data; every one must fail closed.
+      for (const evidence of [
+        undefined,
+        'unknown',
+        '',
+        null,
+        true,
+      ] as unknown as ReadRulePrivacyEvidence[]) {
+        const input = {
+          resource,
+          association,
+          viewer,
+          privacyEvidence: evidence,
+        } as ReadRuleInput;
+        expect(
+          readRuleOutcome(input),
+          `${resource}/${association}/${viewer} evidence=${String(evidence)}`
+        ).toBe('hidden');
+      }
+      // The same cell with clear evidence resolves to its ordinary cell —
+      // proving the hidden above is the override, not the table.
+      expect(
+        readRuleOutcome({
+          resource,
+          association,
+          viewer,
+          privacyEvidence: 'clear',
+        })
+      ).toBe(ordinary);
+    }
+    // The original fail-open hole: a caller that omits the evidence key
+    // entirely (the input is REQUIRED at the type level, so this needs a
+    // cast) must still get hidden, never the ordinary cell.
+    expect(
+      readRuleOutcome({
+        resource: 'story',
+        association: 'audience-public',
+        viewer: 'own-admin',
+      } as ReadRuleInput)
+    ).toBe('hidden');
+  });
+});
+
+describe('§6.4a read-rules table (#190): §6.7 authority qualifiers', () => {
+  const profileMedia = (viewerAuthorities?: readonly string[]) =>
+    readRuleOutcome({
+      resource: 'media',
+      association: 'user-profile',
+      viewer: 'own-admin',
+      privacyEvidence: 'clear',
+      viewerAuthorities,
+    });
+
+  it('marks exactly the user-profile media cell for own-admin', () => {
+    expect(READ_RULE_AUTHORITIES).toEqual(['user-management']);
+    expect(READ_RULE_REQUIRED_AUTHORITIES).toEqual({
+      media: { 'user-profile': { 'own-admin': 'user-management' } },
+    });
+  });
+
+  it('only references cells and viewers the table actually defines', () => {
+    for (const [resource, byAssociation] of Object.entries(
+      READ_RULE_REQUIRED_AUTHORITIES
+    )) {
+      const rows = READ_RULES[resource as keyof typeof READ_RULES] as Record<
+        string,
+        ReadRuleRow
+      >;
+      for (const [association, byViewer] of Object.entries(byAssociation)) {
+        const row = rows[association];
+        expect(row, `${resource}/${association}`).toBeDefined();
+        for (const [viewer, authority] of Object.entries(byViewer)) {
+          expect(
+            (READ_RULE_VIEWERS as readonly string[]).includes(viewer),
+            `${resource}/${association}/${viewer}`
+          ).toBe(true);
+          expect(
+            (READ_RULE_AUTHORITIES as readonly string[]).includes(
+              authority as string
+            ),
+            `${resource}/${association}/${viewer}=${authority}`
+          ).toBe(true);
+          expect(row[viewer as keyof ReadRuleRow]).toBe('visible');
+        }
+      }
+    }
+  });
+
+  it('never returns visible for an own-admin without user-management authority', () => {
+    // §6.7: the spec cell is "visible (admin with user-management
+    // authority)" — a same-community admin holding no authorities (or a
+    // caller that passes none) must read hidden, never visible.
+    expect(profileMedia()).toBe('hidden');
+    expect(profileMedia([])).toBe('hidden');
+    expect(profileMedia(['community-settings'])).toBe('hidden');
+    expect(profileMedia(['user-management', 'community-settings'])).not.toBe(
+      'hidden'
+    );
+  });
+
+  it('returns the cell outcome for an own-admin holding the authority', () => {
+    expect(profileMedia(['user-management'])).toBe('visible');
+  });
+
+  it('lets the #162 override win over the authority qualifier', () => {
+    expect(
+      readRuleOutcome({
+        resource: 'media',
+        association: 'user-profile',
+        viewer: 'own-admin',
+        privacyEvidence: 'restricted',
+        viewerAuthorities: ['user-management'],
       })
     ).toBe('hidden');
   });

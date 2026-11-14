@@ -20,6 +20,12 @@
  * - Story rows restate the §6.2/§6.3 story audiences that
  *   `STORY_AUDIENCE_ROLES` (sovereignty-policy) already encodes;
  *   tests/unit/read-rules.test.ts asserts the two never diverge.
+ * - §6.7 authority qualifiers are layered over the cells instead of
+ *   widening them: `READ_RULE_REQUIRED_AUTHORITIES` marks the cells
+ *   whose outcome needs a named authority — the user-profile media cell
+ *   is visible to an admin only WITH user-management authority — and
+ *   `readRuleOutcome` resolves such a cell to `hidden` for a viewer
+ *   that does not hold the authority.
  */
 
 export const READ_RULE_VIEWERS = [
@@ -257,7 +263,9 @@ export const READ_RULES: ReadRuleTable = {
       'own-admin': 'visible',
     },
     // Account owner and authorized uploader are separately authorized
-    // (§6.7); they are not viewer columns of the table.
+    // (§6.7); they are not viewer columns of the table. The own-admin
+    // cell needs user-management authority on top (§6.7):
+    // READ_RULE_REQUIRED_AUTHORITIES gates it in readRuleOutcome.
     'user-profile': {
       'anonymous-public': 'hidden',
       'other-community': 'hidden',
@@ -289,10 +297,61 @@ export const READ_RULES: ReadRuleTable = {
 };
 
 /**
+ * §6.7 authorities a cell may require. The spec's user-profile media
+ * cell reads `visible (admin with user-management authority)`: the
+ * table cell names who would read it, the authority names the grant
+ * that must accompany the role.
+ */
+export const READ_RULE_AUTHORITIES = ['user-management'] as const;
+
+export type ReadRuleAuthority = (typeof READ_RULE_AUTHORITIES)[number];
+
+/**
+ * Cells whose outcome applies only when the viewer holds the named
+ * authority (§6.7). `readRuleOutcome` resolves them to `hidden` for a
+ * viewer without the authority — including a caller that passes no
+ * authorities — so the user-profile cell can never widen to every
+ * same-community admin.
+ */
+export const READ_RULE_REQUIRED_AUTHORITIES = {
+  media: {
+    'user-profile': { 'own-admin': 'user-management' },
+  },
+} as const satisfies Partial<{
+  [resource in ReadRuleResource]: Partial<{
+    [association: string]: Partial<Record<ReadRuleViewer, ReadRuleAuthority>>;
+  }>;
+}>;
+
+/**
+ * The #162 evidence for one row, a REQUIRED input to `readRuleOutcome`:
+ *
+ * - `restricted` — the row's `isRestricted` flag is true;
+ * - `unevidenced` — the row's privacy value is unknown/unevidenced:
+ *   missing, `''`, `'unknown'`, or any value the canonical audiences do
+ *   not name;
+ * - `clear` — unrestricted with a known privacy value; a place/speaker
+ *   has no privacy field of its own (§6.4), so an unrestricted one is
+ *   `clear`.
+ */
+export const READ_RULE_PRIVACY_EVIDENCE = [
+  'clear',
+  'restricted',
+  'unevidenced',
+] as const;
+
+export type ReadRulePrivacyEvidence =
+  (typeof READ_RULE_PRIVACY_EVIDENCE)[number];
+
+/**
  * The #162 override (option A), stated once for every cell of the table: a
  * restricted or unknown/unevidenced-privacy row is hidden for EVERY viewer —
  * including own-community admins and super admins — on every read surface.
  * Explore is a public surface; no session or privilege widens it.
+ * `readRuleOutcome` takes the evidence as a REQUIRED input and applies this
+ * override to every value except `clear`, so a missing or unrecognized
+ * evidence value fails closed to hidden instead of falling through to the
+ * cell.
  */
 export const READ_RULE_OVERRIDES = {
   restrictedOrUnevidencedPrivacy: {
@@ -308,24 +367,59 @@ export interface ReadRuleInput {
   resource: string;
   association: string;
   viewer: string;
-  /** Applies the #162 override over whatever the cell says. */
-  restrictedOrUnevidenced?: boolean;
+  /**
+   * REQUIRED #162 evidence for the row (its `isRestricted` flag and
+   * privacy value). Not optional: unknown or missing values fail closed
+   * to hidden for every viewer inside `readRuleOutcome`.
+   */
+  privacyEvidence: ReadRulePrivacyEvidence;
+  /**
+   * Authorities the viewer holds (§6.7). A cell that requires an
+   * authority resolves to `hidden` unless this list carries it; omitted
+   * means none. Fail closed.
+   */
+  viewerAuthorities?: readonly string[];
 }
 
 /**
- * Resolve one §6.4a cell (plus the #162 override). Unknown resources,
- * associations or viewers fail closed to `hidden`; community gates
- * (§4/§6.1) remain the caller's separate precondition.
+ * Resolve one §6.4a cell (plus the #162 override and §6.7 authority
+ * qualifiers). Unknown resources, associations or viewers fail closed to
+ * `hidden`; community gates (§4/§6.1) remain the caller's separate
+ * precondition.
  */
 export function readRuleOutcome(input: ReadRuleInput): ReadRuleOutcome {
-  if (input.restrictedOrUnevidenced) {
+  // #162 first, over every cell: the guard is `!== 'clear'`, not
+  // `=== 'restricted'`, so restricted rows, unevidenced rows AND any
+  // missing/unknown evidence value an untyped caller passes all fail
+  // closed to hidden for every viewer.
+  if (input.privacyEvidence !== 'clear') {
     return READ_RULE_OVERRIDES.restrictedOrUnevidencedPrivacy.outcome;
+  }
+  const authority = lookupRequiredAuthority(
+    input.resource,
+    input.association,
+    input.viewer
+  );
+  if (authority && !(input.viewerAuthorities ?? []).includes(authority)) {
+    return 'hidden';
   }
   const rows = lookupRows(input.resource);
   const row = rows ? lookupRow(rows, input.association) : undefined;
   if (!row) return 'hidden';
   const outcome = lookupOutcome(row, input.viewer);
   return outcome ?? 'hidden';
+}
+
+function lookupRequiredAuthority(
+  resource: string,
+  association: string,
+  viewer: string
+): ReadRuleAuthority | undefined {
+  const byResource = READ_RULE_REQUIRED_AUTHORITIES as Record<
+    string,
+    Record<string, Record<string, ReadRuleAuthority>> | undefined
+  >;
+  return byResource[resource]?.[association]?.[viewer];
 }
 
 function lookupRows(

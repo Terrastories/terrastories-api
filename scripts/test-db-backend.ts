@@ -1471,12 +1471,16 @@ function verifySqliteSnapshotDrift(
             table: String(row.table),
             from: String(row.from),
             to: String(row.to),
+            onDelete: String(row.on_delete).toLowerCase(),
+            onUpdate: String(row.on_update).toLowerCase(),
           }))
       )
       .map((columns) => ({
         table: columns[0].table,
         columnsFrom: columns.map((column) => column.from),
         columnsTo: columns.map((column) => column.to),
+        onDelete: columns[0].onDelete,
+        onUpdate: columns[0].onUpdate,
       }));
     const expectedForeignKeyTuples = Object.values(
       expected.foreignKeys ?? {}
@@ -1484,16 +1488,27 @@ function verifySqliteSnapshotDrift(
       table: foreignKey.tableTo,
       columnsFrom: foreignKey.columnsFrom,
       columnsTo: foreignKey.columnsTo,
+      onDelete: (foreignKey.onDelete ?? 'no action').toLowerCase(),
+      onUpdate: (foreignKey.onUpdate ?? 'no action').toLowerCase(),
     }));
     const tupleKey = (tuple: {
       table: string;
       columnsFrom: string[];
       columnsTo: string[];
-    }) => JSON.stringify([tuple.table, tuple.columnsFrom, tuple.columnsTo]);
+      onDelete: string;
+      onUpdate: string;
+    }) =>
+      JSON.stringify([
+        tuple.table,
+        tuple.columnsFrom,
+        tuple.columnsTo,
+        tuple.onDelete,
+        tuple.onUpdate,
+      ]);
     assert.deepEqual(
       appliedForeignKeyTuples.map(tupleKey).sort(),
       expectedForeignKeyTuples.map(tupleKey).sort(),
-      `${label}: ${table} foreign keys (table, from, to) must match the snapshot`
+      `${label}: ${table} foreign keys (table, from, to, on delete, on update) must match the snapshot`
     );
 
     // Constraint names live in the sqlite_master SQL text, not in PRAGMAs.

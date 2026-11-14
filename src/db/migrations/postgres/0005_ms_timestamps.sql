@@ -2,8 +2,9 @@
 -- timestamp column from microsecond (default) to millisecond precision so
 -- PostgreSQL stores exactly the instants SQLite/D1 stores (Unix milliseconds)
 -- and newest-first ordering cannot drift between backends. Narrowing rounds
--- each stored value to the nearest millisecond (ties round half to even, the
--- timestamp typmod cast's rint); whole-second and millisecond rows keep their
+-- each stored value to the nearest millisecond — ties round HALF UP on the
+-- int64-microsecond builds PostgreSQL ships (the repository contract pins
+-- the tie rule empirically); whole-second and millisecond rows keep their
 -- instants exactly. Defaults are unchanged (the SET DEFAULT statements
 -- re-state the existing now() defaults; they alter no value).
 --

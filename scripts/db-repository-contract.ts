@@ -2124,46 +2124,48 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
         'timestamp(3) must round a 0.6 ms offset up to the next millisecond'
       );
 
-      // Tie rounding: the timestamp typmod cast rounds half to EVEN (rint),
-      // not half up — .0005 rounds DOWN to .000 (0 is even) while .0015
-      // rounds UP to .002 (1 is odd). One probe each way pins the tie rule,
-      // which the .0004/.0006 probes above cannot see.
+      // Tie rounding: the timestamp typmod coercion rounds ties HALF UP on
+      // the int64-microsecond builds PostgreSQL ships — .0005 rounds UP to
+      // .001 (verified empirically on postgres 13; the pre-#192 review
+      // claimed half-to-even rint, which this probe disproves). The .0015
+      // probe (→ .002) is consistent with both rules; only the .0005 probe
+      // distinguishes them, which is why it is asserted explicitly.
       await (database as any).execute(sql`
         UPDATE stories
         SET created_at = timestamp '2026-02-01 00:00:00.0005'
         WHERE id = ${msOldest.id}
       `);
-      const tieRoundedDown = await stories.findById(msOldest.id);
+      const tieRoundedUp = await stories.findById(msOldest.id);
       assert.equal(
-        tieRoundedDown?.createdAt.getTime(),
-        Date.UTC(2026, 1, 1, 0, 0, 0, 0),
-        'timestamp(3) must round the 0.5 ms tie DOWN (half to even)'
+        tieRoundedUp?.createdAt.getTime(),
+        Date.UTC(2026, 1, 1, 0, 0, 0, 1),
+        'timestamp(3) must round the 0.5 ms tie UP (half up, int64-µs build)'
       );
       await (database as any).execute(sql`
         UPDATE stories
         SET created_at = timestamp '2026-02-01 00:00:00.0015'
         WHERE id = ${msOldest.id}
       `);
-      const tieRoundedUp = await stories.findById(msOldest.id);
+      const secondTieRoundedUp = await stories.findById(msOldest.id);
       assert.equal(
-        tieRoundedUp?.createdAt.getTime(),
+        secondTieRoundedUp?.createdAt.getTime(),
         Date.UTC(2026, 1, 1, 0, 0, 0, 2),
-        'timestamp(3) must round the 1.5 ms tie UP (half to even)'
+        'timestamp(3) must round the 1.5 ms tie UP to .002'
       );
 
       // Narrowing manufactures exact ties from formerly distinct
-      // microseconds: .0004 and .0005 both land on .000. With msOldest left
-      // at .002 by the probes above, the page must order the collapsed pair
-      // by the id tiebreak (id descending) — deterministically, not by an
-      // unstable µs remnant.
+      // microseconds: .0005 (the tie, rounds up) and .0006 both land on
+      // .001. With msOldest left at .002 by the probes above, the page must
+      // order the collapsed pair by the id tiebreak (id descending) —
+      // deterministically, not by an unstable µs remnant.
       await (database as any).execute(sql`
         UPDATE stories
-        SET created_at = timestamp '2026-02-01 00:00:00.0004'
+        SET created_at = timestamp '2026-02-01 00:00:00.0005'
         WHERE id = ${msNewest.id}
       `);
       await (database as any).execute(sql`
         UPDATE stories
-        SET created_at = timestamp '2026-02-01 00:00:00.0005'
+        SET created_at = timestamp '2026-02-01 00:00:00.0006'
         WHERE id = ${msMiddle.id}
       `);
       const collapsedExpected = [msOldest.id, msMiddle.id, msNewest.id];

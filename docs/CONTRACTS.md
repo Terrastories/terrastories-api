@@ -2,6 +2,9 @@
 
 This note explains how the persona contract harness separates approved V2 requirements from temporary V1 coexistence checks.
 
+- **Normative V2 route registry:** [`docs/V2-ROUTE-REGISTRY.md`](V2-ROUTE-REGISTRY.md) (Issue #134 route registry per [`SPEC-V2.md` §9](SPEC-V2.md#9-api-contract)).
+- **Ordered domain build plan:** [`docs/V2-DOMAIN-BUILD-PLAN.md`](V2-DOMAIN-BUILD-PLAN.md) (mergeable Hono implementation slices for #145/#146 across SQLite, PostgreSQL, and Workers D1).
+
 ## Contract classes: `canonical-v2` vs `legacy-v1`
 
 - **`canonical-v2`** — assertions derived from [`docs/SPEC-V2.md`](SPEC-V2.md) (the V2 product and architecture oracle). These run against the Hono V2 app on: in-process SQLite, real Node HTTP over the in-process SQLite database (`@hono/node-server`), in-process PostgreSQL 13, and Workers D1/R2 (in-process only).

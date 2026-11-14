@@ -43,7 +43,18 @@ const neverExposed = [
   'Restricted River',
   'Unknown Privacy',
   'Edge To Restricted',
+  'São Félix Privado',
+  'São Gabriel Inativo',
 ];
+
+/**
+ * #192: the Vila São Bento community name is STORED byte-for-byte in
+ * decomposed (NFD) form. A composed NFC needle must still match it, and
+ * the stored bytes must come back untouched — search never rewrites data.
+ * The source literal stays NFC; the normalization happens here so the
+ * file's bytes stay stable under version control.
+ */
+const VILA_SAO_BENTO_NFD = 'Vila São Bento'.normalize('NFD');
 
 const sqlite = new Sqlite(':memory:');
 sqlite.pragma('foreign_keys=ON');
@@ -100,6 +111,51 @@ const seed = async () => {
     isActive: false,
     createdAt: T1,
     updatedAt: T2,
+  });
+  // #192: a public active community whose name carries composed diacritics —
+  // the case the SQLite lower() fold cannot reach in the database, so the
+  // V2 contract normalizes in application code instead.
+  await insert(tables.communities, {
+    name: 'Comunidade São João',
+    description: 'Diacritic name search fixture',
+    slug: 'public-sao-joao',
+    publicStories: true,
+    isActive: true,
+    createdAt: T1,
+    updatedAt: T1,
+  });
+  // #192: a public active community whose name is STORED NFD (no other
+  // seeded name contains "são bento", so the needle below is unambiguous).
+  // updatedAt T0 keeps it last in the newest-update-first index order.
+  await insert(tables.communities, {
+    name: VILA_SAO_BENTO_NFD,
+    description: 'Stored-NFD name search fixture',
+    slug: 'public-vila-sao-bento',
+    publicStories: true,
+    isActive: true,
+    createdAt: T0,
+    updatedAt: T0,
+  });
+  // #192: a PRIVATE (publicStories false) and an INACTIVE community whose
+  // names contain 'São' — name search must never surface them, so the
+  // publication and lifecycle gates hold under search too.
+  await insert(tables.communities, {
+    name: 'São Félix Privado',
+    description: 'Private São-named community',
+    slug: 'private-sao-felix',
+    publicStories: false,
+    isActive: true,
+    createdAt: T1,
+    updatedAt: T1,
+  });
+  await insert(tables.communities, {
+    name: 'São Gabriel Inativo',
+    description: 'Inactive São-named community',
+    slug: 'inactive-sao-gabriel',
+    publicStories: true,
+    isActive: false,
+    createdAt: T1,
+    updatedAt: T1,
   });
   ids.a = communityA.id as number;
   ids.b = communityB.id as number;
@@ -538,6 +594,8 @@ it('serves the Rails communities index envelope for public active communities on
   expect(cards.map((c: { slug: string }) => c.slug)).toEqual([
     'public-alpha',
     'public-beta',
+    'public-sao-joao',
+    'public-vila-sao-bento',
   ]);
   const alpha = cards[0];
   expect(alpha).toMatchObject({
@@ -580,8 +638,62 @@ it('narrows the communities index by name search', async () => {
   ]);
   expect((await body('/explore/communities?search=zzz')).json.data).toEqual([]);
   expect((await body('/explore/communities?search=')).json.data).toHaveLength(
-    2
+    4
   );
+});
+
+it('searches community names Unicode-correctly (#192)', async () => {
+  // Case-insensitive, accent-sensitive: the uppercase needle matches the
+  // stored name under the application-defined case-comparison contract
+  // (NFC-composed, ECMAScript default lowercase, final sigma folded, re-composed); the ASCII-only
+  // transcription does not.
+  const saoJoao = encodeURIComponent('SÃO JOÃO');
+  expect(
+    (await body(`/explore/communities?search=${saoJoao}`)).json.data.map(
+      (c: { slug: string }) => c.slug
+    )
+  ).toEqual(['public-sao-joao']);
+  // Composed and decomposed forms match the same rows: the decomposed
+  // 'são' needle answers exactly what the composed one answers — both
+  // public active São-named communities.
+  const saoNfd = encodeURIComponent('são'.normalize('NFD'));
+  const saoNeedleRows = (await body(`/explore/communities?search=${saoNfd}`))
+    .json.data;
+  expect(saoNeedleRows.map((c: { slug: string }) => c.slug)).toEqual([
+    'public-sao-joao',
+    'public-vila-sao-bento',
+  ]);
+  // Accent-sensitive on purpose: "sao" does not match "São".
+  expect((await body('/explore/communities?search=sao')).json.data).toEqual([]);
+  // LIKE wildcards are literal characters, not patterns.
+  expect(
+    (await body(`/explore/communities?search=${encodeURIComponent('%')}`)).json
+      .data
+  ).toEqual([]);
+  expect(
+    (await body(`/explore/communities?search=${encodeURIComponent('_')}`)).json
+      .data
+  ).toEqual([]);
+  // A name stored NFD matches a composed NFC needle — and the returned
+  // name is byte-identical to the stored string: search never rewrites
+  // data.
+  const saoBentoRows = (
+    await body(`/explore/communities?search=${encodeURIComponent('SÃO BENTO')}`)
+  ).json.data;
+  expect(saoBentoRows.map((c: { slug: string }) => c.slug)).toEqual([
+    'public-vila-sao-bento',
+  ]);
+  expect(saoBentoRows[0].name).toBe(VILA_SAO_BENTO_NFD);
+  // The publication and lifecycle gates hold under search: 'são' matches
+  // exactly the two public active São-named communities and never the
+  // private (publicStories false) or the inactive one.
+  const saoRows = (
+    await body(`/explore/communities?search=${encodeURIComponent('são')}`)
+  ).json.data;
+  expect(saoRows.map((c: { slug: string }) => c.slug)).toEqual([
+    'public-sao-joao',
+    'public-vila-sao-bento',
+  ]);
 });
 
 it('answers community show with the Rails detail shape', async () => {

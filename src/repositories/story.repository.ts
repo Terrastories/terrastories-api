@@ -6,6 +6,7 @@
  */
 
 import type { TransitionalStoryReadAccess } from '../shared/authorization/sovereignty-policy.js';
+import { normalizeSearchText } from '../shared/utils/search-normalize.js';
 import {
   eq,
   and,
@@ -67,7 +68,7 @@ function sqlOr(...conditions: [SQL, ...SQL[]]): SQL {
 
 /** SPEC-V2 Section 6.3 application-defined tag comparison key. */
 export function normalizeTag(tag: string): string {
-  return tag.normalize('NFC').toLowerCase();
+  return normalizeSearchText(tag);
 }
 
 /**

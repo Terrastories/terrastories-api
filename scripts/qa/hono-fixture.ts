@@ -259,6 +259,7 @@ export async function createFixture(
     const communitySlug = fixtures.communities[0].slug;
     const privateCommunityId = fixtures.communities[1].id;
     const privateCommunitySlug = fixtures.communities[1].slug;
+    const privateCommunityName = fixtures.communities[1].name;
     // A second PUBLIC community owns the foreign fixtures: its rows are
     // publishable, so a 404 elsewhere is community scoping alone, and its
     // own Explore surface serves as the positive control.
@@ -475,6 +476,25 @@ export async function createFixture(
     // Unrestricted branding in the inactive community: /explore/media
     // withholds it through the isActive lifecycle gate alone.
     const inactiveFileId = await brandingFile(inactiveCommunity.id, null);
+    // #192: one more public ACTIVE community whose name carries composed
+    // diacritics, exercising the Unicode-correct Explore name search on the
+    // persona gates: SQLite/D1 lower() folds ASCII only, so only the
+    // application-normalized contract can match a case-variant needle. No
+    // branding or stories: this fixture exists for the community list and
+    // its search narrowing alone.
+    const [saoCommunity] = await db
+      .insert(communities)
+      .values({
+        name: 'QA Comunidade São João',
+        description: 'Unicode-correct name search fixture (#192)',
+        slug: `qa-sao-joao-${Date.now()}`,
+        publicStories: true,
+        isActive: true,
+        // PostgreSQL deliberately has no database default for timestamps.
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .returning();
     const [inactivePlace] = await db
       .insert(places)
       .values({
@@ -906,8 +926,10 @@ export async function createFixture(
         );
       };
     // Shared by the anonymous and session'd journeys: the list carries
-    // exactly the two seeded public communities as a slug set — the private
-    // demo and system communities stay absent, and any unexpected row fails.
+    // exactly the seeded public communities as a slug set (the two baseline
+    // communities plus the #192 diacritic-named São João community) — the
+    // private demo and system communities stay absent, and any unexpected
+    // row fails.
     // Set comparison (not order): the index sorts newest-update-first, and
     // the seeded rows share same-tick timestamps.
     const communitiesListCheck = (body: unknown): boolean => {
@@ -915,9 +937,14 @@ export async function createFixture(
         (body as { data?: { slug?: string }[] }).data?.map(
           (community) => community.slug
         ) ?? [];
+      // #192: the diacritic-named São João community is a third public
+      // active member of the exact set — the search steps below cannot
+      // narrow anything if the base list no longer carries it.
       return (
         JSON.stringify([...slugs].sort()) ===
-          JSON.stringify([communitySlug, foreignCommunitySlug].sort()) &&
+          JSON.stringify(
+            [communitySlug, foreignCommunitySlug, saoCommunity.slug].sort()
+          ) &&
         // #191: the exact set above already fails on any leak; this names the
         // deactivated-but-public community so the lifecycle-gate claim maps
         // to an assertion that mentions its fixture.
@@ -1035,6 +1062,69 @@ export async function createFixture(
         path: '/explore/communities',
         expected: 200,
         check: communitiesListCheck,
+      },
+      {
+        // #192 Unicode-correct name search: a case-variant, composed
+        // diacritic needle matches the São João card. This requires
+        // application-side normalization — SQLite/D1 lower() folds ASCII
+        // only, so a database-side fold cannot answer it (the old
+        // containsInsensitive path failed this exact needle there).
+        name: 'explore communities search matches case-variant diacritic',
+        method: 'GET',
+        path: `/explore/communities?search=${encodeURIComponent('SÃO JOÃO')}`,
+        expected: 200,
+        check: (body) => {
+          const rows = (body as { data?: { slug?: string; name?: string }[] })
+            .data;
+          return (
+            Array.isArray(rows) &&
+            rows.length === 1 &&
+            rows[0]?.slug === saoCommunity.slug &&
+            rows[0]?.name === saoCommunity.name
+          );
+        },
+      },
+      {
+        // Accent sensitivity on purpose: the ASCII-only transcription (a
+        // base letter without its mark) must NOT match the diacritic name,
+        // so the response carries exactly zero rows.
+        name: 'explore communities search rejects ASCII transcription',
+        method: 'GET',
+        path: `/explore/communities?search=${encodeURIComponent('sao joao')}`,
+        expected: 200,
+        check: (body) => {
+          const rows = (body as { data?: unknown }).data;
+          return Array.isArray(rows) && rows.length === 0;
+        },
+      },
+      {
+        // The publication and lifecycle gates hold under search: an exact
+        // name match on a public but DEACTIVATED community must surface
+        // zero rows (200), never the withheld card.
+        name: 'explore communities search hides the inactive public community',
+        method: 'GET',
+        path: `/explore/communities?search=${encodeURIComponent(
+          inactiveCommunity.name
+        )}`,
+        expected: 200,
+        check: (body) => {
+          const rows = (body as { data?: unknown }).data;
+          return Array.isArray(rows) && rows.length === 0;
+        },
+      },
+      {
+        // Same for the private (publicStories=false) community: its name
+        // never answers a search, even the exact name.
+        name: 'explore communities search hides the private community',
+        method: 'GET',
+        path: `/explore/communities?search=${encodeURIComponent(
+          privateCommunityName
+        )}`,
+        expected: 200,
+        check: (body) => {
+          const rows = (body as { data?: unknown }).data;
+          return Array.isArray(rows) && rows.length === 0;
+        },
       },
       {
         name: 'explore community detail',

@@ -44,11 +44,15 @@ import {
 } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
-import { containsInsensitive, dialectOf, tablesFor } from '../db/dialect.js';
+import { dialectOf, tablesFor } from '../db/dialect.js';
 import {
   communityMediaPg,
   communityMediaSqlite,
 } from '../db/schema/sessions.js';
+import {
+  containsNormalizedKey,
+  normalizeSearchText,
+} from '../shared/utils/search-normalize.js';
 
 export interface ExploreCommunityRow {
   id: number;
@@ -137,14 +141,28 @@ export class ExploreAdapterRepository {
     ) as typeof communityMediaSqlite;
   }
 
-  /** Public active communities, newest update first (Rails index order). */
+  /**
+   * Public active communities, newest update first (Rails index order).
+   *
+   * The projection is the whole public community list — unpaginated
+   * (Rails parity), so filtering it costs no more than serving the
+   * unfiltered list — with name search applied in application code under
+   * the application-defined case-comparison contract stated in
+   * src/shared/utils/search-normalize.ts: NFC-composed, default ECMAScript
+   * lowercase, final sigma folded, re-composed; accent-sensitive (a base
+   * letter without its mark does not match); no other case folding. Unicode-correct on both
+   * backends (SQLite/D1 `lower()` folds ASCII only; the old PostgreSQL
+   * path folded with collation-dependent ILIKE), and literal (`%`/`_` are
+   * plain characters, not LIKE wildcards). The needle key is normalized
+   * once, before the row loop.
+   */
   async publicCommunities(search?: string): Promise<ExploreCommunityRow[]> {
     const { communities } = this.tables;
     const gate = and(
       eq(communities.publicStories, true),
       eq(communities.isActive, true)
     );
-    return this.database
+    const rows: ExploreCommunityRow[] = await this.database
       .select({
         id: communities.id,
         name: communities.name,
@@ -154,15 +172,13 @@ export class ExploreAdapterRepository {
         updatedAt: communities.updatedAt,
       })
       .from(communities)
-      .where(
-        search && search !== ''
-          ? and(
-              gate,
-              containsInsensitive(this.dialect, communities.name, search)
-            )
-          : gate
-      )
+      .where(gate)
       .orderBy(desc(communities.updatedAt), desc(communities.id));
+    const needleKey =
+      search && search !== '' ? normalizeSearchText(search) : null;
+    return needleKey === null
+      ? rows
+      : rows.filter((row) => containsNormalizedKey(row.name, needleKey));
   }
 
   /** The community named by a public Explore slug, or null (withheld = null). */

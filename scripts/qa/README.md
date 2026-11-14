@@ -1,5 +1,10 @@
 # Persona QA
 
+See [`docs/CONTRACTS.md`](../../docs/CONTRACTS.md) for how `canonical-v2` vs
+`legacy-v1` contract classes work, how to add canonical contract cases, how
+released-V2 breaking changes are recorded, and where legacy differences receive
+their `SPEC-V2.md` dispositions.
+
 Run the isolated SQLite acceptance wrapper with:
 
 ```sh
@@ -63,7 +68,11 @@ canonical role would grant the community audience. The Vitest
 wrapper `tests/scripts/qa/hono.test.ts` runs inside
 `npm run qa:personas:sqlite` and, when `QA_REPORT_PATH` is set, writes a
 sibling report ending in `-hono.json` so parallel wrappers never race on one
-file.
+file. `tests/scripts/qa/hono-http.test.ts` runs the exact same Hono journeys
+over real Node HTTP (`createFixture({ transport: 'http' })` using
+`@hono/node-server` on `127.0.0.1:0`), writing `-hono-http.json` when
+`QA_REPORT_PATH` is set, and `tests/scripts/qa/hono-mismatch.test.ts` proves
+the harness fails closed on deliberate status and body mismatches.
 
 The SQLite fixture requires the normal test environment configuration. Vitest
 supplies it through the repository test setup. For a deployed target, supply

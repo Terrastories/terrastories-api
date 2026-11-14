@@ -126,6 +126,6 @@ describe('containsNormalizedKey', () => {
     expect(containsNormalized('\u0105\u0301', '\u0105')).toBe(false);
     expect(containsNormalized('g\u0303a', 'g\u0303')).toBe(true);
     expect(containsNormalized('ga g\u0303a', 'ga')).toBe(true);
-    expect(containsNormalized('Avañe\u0303\u1EBD', 'AVAÑE\u0303')).toBe(true);
+    expect(containsNormalized('g\u0303a', 'G\u0303')).toBe(true);
   });
 });

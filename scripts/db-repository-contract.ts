@@ -2123,6 +2123,187 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
         Date.UTC(2026, 1, 1, 0, 0, 0, 1),
         'timestamp(3) must round a 0.6 ms offset up to the next millisecond'
       );
+
+      // Tie rounding: the timestamp typmod cast rounds half to EVEN (rint),
+      // not half up — .0005 rounds DOWN to .000 (0 is even) while .0015
+      // rounds UP to .002 (1 is odd). One probe each way pins the tie rule,
+      // which the .0004/.0006 probes above cannot see.
+      await (database as any).execute(sql`
+        UPDATE stories
+        SET created_at = timestamp '2026-02-01 00:00:00.0005'
+        WHERE id = ${msOldest.id}
+      `);
+      const tieRoundedDown = await stories.findById(msOldest.id);
+      assert.equal(
+        tieRoundedDown?.createdAt.getTime(),
+        Date.UTC(2026, 1, 1, 0, 0, 0, 0),
+        'timestamp(3) must round the 0.5 ms tie DOWN (half to even)'
+      );
+      await (database as any).execute(sql`
+        UPDATE stories
+        SET created_at = timestamp '2026-02-01 00:00:00.0015'
+        WHERE id = ${msOldest.id}
+      `);
+      const tieRoundedUp = await stories.findById(msOldest.id);
+      assert.equal(
+        tieRoundedUp?.createdAt.getTime(),
+        Date.UTC(2026, 1, 1, 0, 0, 0, 2),
+        'timestamp(3) must round the 1.5 ms tie UP (half to even)'
+      );
+
+      // Narrowing manufactures exact ties from formerly distinct
+      // microseconds: .0004 and .0005 both land on .000. With msOldest left
+      // at .002 by the probes above, the page must order the collapsed pair
+      // by the id tiebreak (id descending) — deterministically, not by an
+      // unstable µs remnant.
+      await (database as any).execute(sql`
+        UPDATE stories
+        SET created_at = timestamp '2026-02-01 00:00:00.0004'
+        WHERE id = ${msNewest.id}
+      `);
+      await (database as any).execute(sql`
+        UPDATE stories
+        SET created_at = timestamp '2026-02-01 00:00:00.0005'
+        WHERE id = ${msMiddle.id}
+      `);
+      const collapsedExpected = [msOldest.id, msMiddle.id, msNewest.id];
+      const collapsedPage = await stories.findMany(
+        { communityId: msCommunity.id },
+        { page: 1, limit: 10 }
+      );
+      assert.deepEqual(
+        collapsedPage.data.map((story) => story.id),
+        collapsedExpected,
+        'µs values collapsed to one ms must order by the id tiebreak'
+      );
+      const collapsedTagged = await stories.findMany(
+        { communityId: msCommunity.id, tags: ['msprecision'] },
+        { page: 1, limit: 10 }
+      );
+      assert.deepEqual(
+        collapsedTagged.data.map((story) => story.id),
+        collapsedExpected,
+        'the keyset scan must order collapsed µs ties identically'
+      );
+    }
+
+    // 14a. Restored multi-page lossless keyset check: 200 rows across four
+    // DISTINCT millisecond instants with 50-row exact ties, paged through
+    // the tag-filtered keyset scan with limit 50. The 128-row scan batch
+    // ends inside the third tie bucket, so the cursor's equality arm
+    // (createdAt = cursor AND id < cursorId) must carry the tie across
+    // batches while the < arm separates the buckets. Concatenated pages must
+    // equal the raw-SQL ORDER BY created_at DESC, id DESC order with no
+    // duplicate and no gap — on both backends, which now share the storage
+    // precision to express it (the pre-#192 case could run on PostgreSQL
+    // only, because SQLite could not store sub-second instants).
+    {
+      const pagedCommunity = await communities.create({
+        name: 'Millisecond Keyset Community',
+      });
+      const pagedAuthor = await users.create({
+        email: 'ms-keyset@example.test',
+        passwordHash: 'repository-contract-hash',
+        firstName: 'Keyset',
+        lastName: 'Milliseconds',
+        communityId: pagedCommunity.id,
+      });
+      const pagedIds: number[] = [];
+      for (let index = 0; index < 200; index += 1) {
+        const created = await stories.create({
+          title: `Ms Keyset ${index}`,
+          slug: `ms-keyset-${index}`,
+          communityId: pagedCommunity.id,
+          createdBy: pagedAuthor.id,
+          tags: ['MsKeyset'],
+        });
+        pagedIds.push(created.id);
+      }
+      // Four distinct instants 1 ms apart; bucket membership by id % 4
+      // interleaves each tie bucket across the id range, so the expected
+      // order is NOT plain id-descending — only createdAt ordering can
+      // produce it. 200 consecutive autoincrement ids give exactly 50 per
+      // bucket; the sanity count proves the fixture before relying on it.
+      const bucketCounts = [0, 0, 0, 0];
+      for (const id of pagedIds) bucketCounts[id % 4] += 1;
+      assert.deepEqual(
+        bucketCounts,
+        [50, 50, 50, 50],
+        'the 200 sequential ids must split evenly across the four ms buckets'
+      );
+      const bucketBase = Date.UTC(2026, 6, 1, 12, 0, 0, 0);
+      for (let bucket = 0; bucket < 4; bucket += 1) {
+        await (database as any)
+          .update(dialectTables.stories)
+          .set({ createdAt: new Date(bucketBase + bucket) })
+          .where(
+            and(
+              eq(dialectTables.stories.communityId, pagedCommunity.id),
+              sql`${dialectTables.stories.id} % 4 = ${bucket}`
+            )
+          );
+      }
+      // Raw-SQL oracle read straight from storage, bypassing the repository
+      // and the query builder's ordering translation.
+      const rawOrderQuery = sql`
+        SELECT id FROM stories
+        WHERE community_id = ${pagedCommunity.id}
+        ORDER BY created_at DESC, id DESC
+      `;
+      const rawOrderResult =
+        dialectOf(database) === 'postgresql'
+          ? await (database as any).execute(rawOrderQuery)
+          : await (database as any).all(rawOrderQuery);
+      const rawOrderRows: any[] = Array.isArray(rawOrderResult)
+        ? rawOrderResult
+        : rawOrderResult.rows;
+      const expectedPagedIds = rawOrderRows.map((row: any) => Number(row.id));
+      assert.equal(expectedPagedIds.length, 200);
+      assert.notDeepEqual(
+        expectedPagedIds,
+        [...expectedPagedIds].sort((left, right) => right - left),
+        'the fixture must make createdAt ordering observable (not id order)'
+      );
+      assert.equal(
+        expectedPagedIds[127] % 4,
+        expectedPagedIds[128] % 4,
+        'the 128-row scan batch boundary must fall inside a ms tie bucket'
+      );
+
+      const pagedFirst = await stories.findMany(
+        { communityId: pagedCommunity.id, tags: ['mskeyset'] },
+        { page: 1, limit: 50 }
+      );
+      assert.equal(pagedFirst.total, 200);
+      assert.equal(pagedFirst.totalPages, 4);
+      const collectedPagedIds: number[] = [];
+      for (let page = 1; page <= 4; page += 1) {
+        const pageResult = await stories.findMany(
+          { communityId: pagedCommunity.id, tags: ['mskeyset'] },
+          { page, limit: 50 }
+        );
+        assert.equal(
+          pageResult.total,
+          200,
+          `ms page ${page} must keep the total`
+        );
+        collectedPagedIds.push(...pageResult.data.map((story) => story.id));
+      }
+      assert.equal(
+        new Set(collectedPagedIds).size,
+        200,
+        'ms pages must not repeat an id'
+      );
+      assert.deepEqual(
+        new Set(collectedPagedIds),
+        new Set(pagedIds),
+        'the union of all ms pages must be exactly the 200 story ids'
+      );
+      assert.deepEqual(
+        collectedPagedIds,
+        expectedPagedIds,
+        'ms pages must follow createdAt desc then id desc, matching the raw-SQL order'
+      );
     }
   }
 

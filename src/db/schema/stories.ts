@@ -85,12 +85,16 @@ export const storiesPg = pgTable(
       table.id
     ),
     // Composite tenant FKs (#186): interview metadata must reference rows of
-    // the story's own community, never another community's place/speaker.
+    // the story's own community, never another community's place/speaker. The
+    // explicit names stay short: PostgreSQL truncates identifiers at 63
+    // bytes, which would break the applied-vs-snapshot constraint-name gate.
     interviewLocationFk: foreignKey({
+      name: 'stories_interview_location_community_fk',
       columns: [table.communityId, table.interviewLocationId],
       foreignColumns: [placesPg.communityId, placesPg.id],
     }),
     interviewerFk: foreignKey({
+      name: 'stories_interviewer_community_fk',
       columns: [table.communityId, table.interviewerId],
       foreignColumns: [speakersPg.communityId, speakersPg.id],
     }),
@@ -149,12 +153,16 @@ export const storiesSqlite = sqliteTable(
       table.id
     ),
     // Composite tenant FKs (#186): interview metadata must reference rows of
-    // the story's own community, never another community's place/speaker.
+    // the story's own community, never another community's place/speaker. The
+    // explicit names stay short: PostgreSQL truncates identifiers at 63
+    // bytes, which would break the applied-vs-snapshot constraint-name gate.
     interviewLocationFk: sqliteForeignKey({
+      name: 'stories_interview_location_community_fk',
       columns: [table.communityId, table.interviewLocationId],
       foreignColumns: [placesSqlite.communityId, placesSqlite.id],
     }),
     interviewerFk: sqliteForeignKey({
+      name: 'stories_interviewer_community_fk',
       columns: [table.communityId, table.interviewerId],
       foreignColumns: [speakersSqlite.communityId, speakersSqlite.id],
     }),

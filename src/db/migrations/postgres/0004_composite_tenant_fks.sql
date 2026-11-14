@@ -113,9 +113,9 @@ ALTER TABLE "story_places" DROP CONSTRAINT "story_places_story_id_stories_id_fk"
 --> statement-breakpoint
 ALTER TABLE "story_places" DROP CONSTRAINT "story_places_place_id_places_id_fk";
 --> statement-breakpoint
-ALTER TABLE "story_places" ADD CONSTRAINT "story_places_community_id_story_id_stories_community_id_id_fk" FOREIGN KEY ("community_id","story_id") REFERENCES "stories"("community_id","id") ON UPDATE no action ON DELETE cascade;
+ALTER TABLE "story_places" ADD CONSTRAINT "story_places_story_community_fk" FOREIGN KEY ("community_id","story_id") REFERENCES "stories"("community_id","id") ON UPDATE no action ON DELETE cascade;
 --> statement-breakpoint
-ALTER TABLE "story_places" ADD CONSTRAINT "story_places_community_id_place_id_places_community_id_id_fk" FOREIGN KEY ("community_id","place_id") REFERENCES "places"("community_id","id") ON UPDATE no action ON DELETE cascade;
+ALTER TABLE "story_places" ADD CONSTRAINT "story_places_place_community_fk" FOREIGN KEY ("community_id","place_id") REFERENCES "places"("community_id","id") ON UPDATE no action ON DELETE cascade;
 --> statement-breakpoint
 ALTER TABLE "story_speakers" ADD COLUMN "community_id" integer;
 --> statement-breakpoint
@@ -127,18 +127,18 @@ ALTER TABLE "story_speakers" DROP CONSTRAINT "story_speakers_story_id_stories_id
 --> statement-breakpoint
 ALTER TABLE "story_speakers" DROP CONSTRAINT "story_speakers_speaker_id_speakers_id_fk";
 --> statement-breakpoint
-ALTER TABLE "story_speakers" ADD CONSTRAINT "story_speakers_community_id_story_id_stories_community_id_id_fk" FOREIGN KEY ("community_id","story_id") REFERENCES "stories"("community_id","id") ON UPDATE no action ON DELETE cascade;
+ALTER TABLE "story_speakers" ADD CONSTRAINT "story_speakers_story_community_fk" FOREIGN KEY ("community_id","story_id") REFERENCES "stories"("community_id","id") ON UPDATE no action ON DELETE cascade;
 --> statement-breakpoint
-ALTER TABLE "story_speakers" ADD CONSTRAINT "story_speakers_community_id_speaker_id_speakers_community_id_id_fk" FOREIGN KEY ("community_id","speaker_id") REFERENCES "speakers"("community_id","id") ON UPDATE no action ON DELETE cascade;
+ALTER TABLE "story_speakers" ADD CONSTRAINT "story_speakers_speaker_community_fk" FOREIGN KEY ("community_id","speaker_id") REFERENCES "speakers"("community_id","id") ON UPDATE no action ON DELETE cascade;
 --> statement-breakpoint
 ALTER TABLE "stories" DROP CONSTRAINT "stories_interview_location_id_places_id_fk";
 --> statement-breakpoint
 ALTER TABLE "stories" DROP CONSTRAINT "stories_interviewer_id_speakers_id_fk";
 --> statement-breakpoint
-ALTER TABLE "stories" ADD CONSTRAINT "stories_community_id_interview_location_id_places_community_id_id_fk" FOREIGN KEY ("community_id","interview_location_id") REFERENCES "places"("community_id","id") ON UPDATE no action ON DELETE no action;
+ALTER TABLE "stories" ADD CONSTRAINT "stories_interview_location_community_fk" FOREIGN KEY ("community_id","interview_location_id") REFERENCES "places"("community_id","id") ON UPDATE no action ON DELETE no action;
 --> statement-breakpoint
-ALTER TABLE "stories" ADD CONSTRAINT "stories_community_id_interviewer_id_speakers_community_id_id_fk" FOREIGN KEY ("community_id","interviewer_id") REFERENCES "speakers"("community_id","id") ON UPDATE no action ON DELETE no action;
+ALTER TABLE "stories" ADD CONSTRAINT "stories_interviewer_community_fk" FOREIGN KEY ("community_id","interviewer_id") REFERENCES "speakers"("community_id","id") ON UPDATE no action ON DELETE no action;
 --> statement-breakpoint
 ALTER TABLE "community_media" DROP CONSTRAINT "community_media_file_id_files_id_fk";
 --> statement-breakpoint
-ALTER TABLE "community_media" ADD CONSTRAINT "community_media_community_id_file_id_files_community_id_id_fk" FOREIGN KEY ("community_id","file_id") REFERENCES "files"("community_id","id") ON UPDATE no action ON DELETE cascade;
+ALTER TABLE "community_media" ADD CONSTRAINT "community_media_file_community_fk" FOREIGN KEY ("community_id","file_id") REFERENCES "files"("community_id","id") ON UPDATE no action ON DELETE cascade;

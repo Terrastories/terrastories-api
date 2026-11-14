@@ -57,12 +57,16 @@ export const storySpeakersPg = pgTable(
       table.speakerId
     ),
     // Composite tenant foreign keys (#186): each edge must stay inside one
-    // community on both the story side and the speaker side.
+    // community on both the story side and the speaker side. The explicit
+    // names stay short: PostgreSQL truncates identifiers at 63 bytes, which
+    // would break the applied-vs-snapshot constraint-name gate.
     storyCommunityFk: foreignKey({
+      name: 'story_speakers_story_community_fk',
       columns: [table.communityId, table.storyId],
       foreignColumns: [storiesPg.communityId, storiesPg.id],
     }).onDelete('cascade'),
     speakerCommunityFk: foreignKey({
+      name: 'story_speakers_speaker_community_fk',
       columns: [table.communityId, table.speakerId],
       foreignColumns: [speakersPg.communityId, speakersPg.id],
     }).onDelete('cascade'),
@@ -96,12 +100,16 @@ export const storySpeakersSqlite = sqliteTable(
       table.speakerId
     ),
     // Composite tenant foreign keys (#186): each edge must stay inside one
-    // community on both the story side and the speaker side.
+    // community on both the story side and the speaker side. The explicit
+    // names stay short: PostgreSQL truncates identifiers at 63 bytes, which
+    // would break the applied-vs-snapshot constraint-name gate.
     storyCommunityFk: sqliteForeignKey({
+      name: 'story_speakers_story_community_fk',
       columns: [table.communityId, table.storyId],
       foreignColumns: [storiesSqlite.communityId, storiesSqlite.id],
     }).onDelete('cascade'),
     speakerCommunityFk: sqliteForeignKey({
+      name: 'story_speakers_speaker_community_fk',
       columns: [table.communityId, table.speakerId],
       foreignColumns: [speakersSqlite.communityId, speakersSqlite.id],
     }).onDelete('cascade'),

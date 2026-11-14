@@ -61,6 +61,7 @@ export const communityMediaPg = pgTable(
     // Composite tenant FK (#186): branding media must reference a file of the
     // same community, never another community's file.
     foreignKey({
+      name: 'community_media_file_community_fk',
       columns: [table.communityId, table.fileId],
       foreignColumns: [filesPg.communityId, filesPg.id],
     }).onDelete('cascade'),
@@ -81,6 +82,7 @@ export const communityMediaSqlite = sqliteTable(
     // Composite tenant FK (#186): branding media must reference a file of the
     // same community, never another community's file.
     sqliteForeignKey({
+      name: 'community_media_file_community_fk',
       columns: [table.communityId, table.fileId],
       foreignColumns: [filesSqlite.communityId, filesSqlite.id],
     }).onDelete('cascade'),

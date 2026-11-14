@@ -893,8 +893,8 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "stories_community_id_interview_location_id_places_community_id_id_fk": {
-          "name": "stories_community_id_interview_location_id_places_community_id_id_fk",
+        "stories_interview_location_community_fk": {
+          "name": "stories_interview_location_community_fk",
           "tableFrom": "stories",
           "tableTo": "places",
           "columnsFrom": ["community_id", "interview_location_id"],
@@ -902,8 +902,8 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "stories_community_id_interviewer_id_speakers_community_id_id_fk": {
-          "name": "stories_community_id_interviewer_id_speakers_community_id_id_fk",
+        "stories_interviewer_community_fk": {
+          "name": "stories_interviewer_community_fk",
           "tableFrom": "stories",
           "tableTo": "speakers",
           "columnsFrom": ["community_id", "interviewer_id"],
@@ -982,8 +982,8 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "story_places_community_id_story_id_stories_community_id_id_fk": {
-          "name": "story_places_community_id_story_id_stories_community_id_id_fk",
+        "story_places_story_community_fk": {
+          "name": "story_places_story_community_fk",
           "tableFrom": "story_places",
           "tableTo": "stories",
           "columnsFrom": ["community_id", "story_id"],
@@ -991,8 +991,8 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "story_places_community_id_place_id_places_community_id_id_fk": {
-          "name": "story_places_community_id_place_id_places_community_id_id_fk",
+        "story_places_place_community_fk": {
+          "name": "story_places_place_community_fk",
           "tableFrom": "story_places",
           "tableTo": "places",
           "columnsFrom": ["community_id", "place_id"],
@@ -1071,8 +1071,8 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "story_speakers_community_id_story_id_stories_community_id_id_fk": {
-          "name": "story_speakers_community_id_story_id_stories_community_id_id_fk",
+        "story_speakers_story_community_fk": {
+          "name": "story_speakers_story_community_fk",
           "tableFrom": "story_speakers",
           "tableTo": "stories",
           "columnsFrom": ["community_id", "story_id"],
@@ -1080,8 +1080,8 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "story_speakers_community_id_speaker_id_speakers_community_id_id_fk": {
-          "name": "story_speakers_community_id_speaker_id_speakers_community_id_id_fk",
+        "story_speakers_speaker_community_fk": {
+          "name": "story_speakers_speaker_community_fk",
           "tableFrom": "story_speakers",
           "tableTo": "speakers",
           "columnsFrom": ["community_id", "speaker_id"],
@@ -1553,8 +1553,8 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "community_media_community_id_file_id_files_community_id_id_fk": {
-          "name": "community_media_community_id_file_id_files_community_id_id_fk",
+        "community_media_file_community_fk": {
+          "name": "community_media_file_community_fk",
           "tableFrom": "community_media",
           "tableTo": "files",
           "columnsFrom": ["community_id", "file_id"],

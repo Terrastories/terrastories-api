@@ -1,3 +1,4 @@
+export type ContractClass = 'canonical-v2' | 'legacy-v1';
 export interface Endpoint {
   method: string;
   path: string;
@@ -5,6 +6,7 @@ export interface Endpoint {
 export interface Step extends Endpoint {
   name: string;
   expected: number;
+  contract?: ContractClass;
   body?: unknown;
   rawBody?: string | Uint8Array;
   captureId?: string;
@@ -20,11 +22,13 @@ export interface Journey {
   persona: string;
   steps: Step[];
   skipped?: string;
+  contract?: ContractClass;
 }
 export interface Exclusion extends Endpoint {
   reason: string;
 }
 export interface Result extends Endpoint {
+  contract: ContractClass;
   persona: string;
   step: string;
   expected: number;
@@ -40,6 +44,24 @@ export interface Result extends Endpoint {
   message?: string;
 }
 export type Handler = (request: Request) => Promise<Response>;
+export function createHttpHandler(baseUrl: URL): Handler {
+  return async (request) =>
+    fetch(
+      new URL(
+        new URL(request.url).pathname + new URL(request.url).search,
+        baseUrl
+      ),
+      {
+        method: request.method,
+        headers: request.headers,
+        body: ['GET', 'HEAD'].includes(request.method)
+          ? undefined
+          : await request.arrayBuffer(),
+        redirect: 'manual',
+        signal: request.signal,
+      }
+    );
+}
 export function validateBaseUrl(value: string): URL {
   const url = new URL(value);
   if (
@@ -72,7 +94,9 @@ function matches(pattern: string, path: string): boolean {
   );
 }
 export async function runJourneys(options: {
-  handler: Handler;
+  handler?: Handler;
+  baseUrl?: string;
+  contract?: ContractClass;
   routes: Endpoint[];
   journeys: Journey[];
   exclusions?: Exclusion[];
@@ -80,6 +104,13 @@ export async function runJourneys(options: {
   /** Tracked session cookie name; stacks differ (Fastify sessionId, Hono ts_session). */
   sessionCookieName?: string;
 }) {
+  const contract: ContractClass = options.contract ?? 'canonical-v2';
+  const baseUrl =
+    options.baseUrl === undefined
+      ? undefined
+      : validateBaseUrl(options.baseUrl);
+  const handler = baseUrl ? createHttpHandler(baseUrl) : options.handler;
+  if (!handler) throw new Error('Persona runner requires a handler or baseUrl');
   const timeoutMs = validateRequestTimeout(options.requestTimeoutMs ?? 30_000);
   const sessionCookieName = options.sessionCookieName ?? 'sessionId';
   const sessionCookiePrefix = `${sessionCookieName}=`;
@@ -155,7 +186,7 @@ export async function runJourneys(options: {
           if (step.body !== undefined)
             headers.set('content-type', 'application/json');
           stage = 'Sending request';
-          response = await options.handler(
+          response = await handler(
             new Request(`http://qa.invalid${path}`, {
               method: step.method,
               headers,
@@ -276,6 +307,7 @@ export async function runJourneys(options: {
         cancelBody();
       }
       results.push({
+        contract: step.contract ?? journey.contract ?? contract,
         persona: journey.persona,
         step: step.name,
         method: step.method,
@@ -293,7 +325,18 @@ export async function runJourneys(options: {
       !reached.has(key(route)) &&
       !exclusions.some((exclusion) => key(exclusion) === key(route))
   );
+  const summarizeContract = (contractClass: ContractClass) => {
+    const classResults = results.filter(
+      (result) => result.contract === contractClass
+    );
+    const passed = classResults.filter((result) => result.pass).length;
+    return {
+      passed,
+      failed: classResults.length - passed,
+    };
+  };
   return {
+    contract,
     results,
     uncovered,
     exclusions,
@@ -307,6 +350,10 @@ export async function runJourneys(options: {
       total: options.routes.length,
       reached: reached.size,
       excluded: exclusions.length,
+    },
+    summary: {
+      'canonical-v2': summarizeContract('canonical-v2'),
+      'legacy-v1': summarizeContract('legacy-v1'),
     },
     pass:
       options.routes.length > 0 &&

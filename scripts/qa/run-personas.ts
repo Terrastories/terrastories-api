@@ -46,25 +46,11 @@ export async function main(args: string[]): Promise<number> {
     throw new Error('Fixture must export createFixture');
   const context = await module.createFixture({ baseUrl: url?.href });
   try {
-    const handler = url
-      ? async (request: Request) =>
-          fetch(
-            new URL(
-              new URL(request.url).pathname + new URL(request.url).search,
-              url
-            ),
-            {
-              method: request.method,
-              headers: request.headers,
-              body: ['GET', 'HEAD'].includes(request.method)
-                ? undefined
-                : await request.arrayBuffer(),
-              redirect: 'manual',
-              signal: request.signal,
-            }
-          )
-      : context.handler;
-    const report = await runJourneys({ ...context, handler, requestTimeoutMs });
+    const report = await runJourneys({
+      ...context,
+      ...(url ? { baseUrl: url.href, handler: undefined } : {}),
+      requestTimeoutMs,
+    });
     await writeFile(
       values.get('--report') ?? 'qa-report.json',
       JSON.stringify(report, null, 2) + '\n'

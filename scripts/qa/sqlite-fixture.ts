@@ -365,6 +365,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       ],
     });
     return {
+      contract: 'legacy-v1' as const,
       handler,
       mediaEvidence: {
         directory: mediaDirectory,

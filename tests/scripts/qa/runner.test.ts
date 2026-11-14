@@ -590,3 +590,135 @@ describe('response cancellation deadlines', () => {
     });
   });
 });
+
+describe('contract classification and HTTP baseUrl transport', () => {
+  it('defaults to canonical-v2 on report, results and summary', async () => {
+    const report = await runJourneys({
+      routes: [{ method: 'GET', path: '/items' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'list', method: 'GET', path: '/items', expected: 200 },
+          ],
+        },
+      ],
+      handler: async () => new Response('{}'),
+    });
+    expect(report.contract).toBe('canonical-v2');
+    expect(report.results[0]?.contract).toBe('canonical-v2');
+    expect(report.summary).toEqual({
+      'canonical-v2': { passed: 1, failed: 0 },
+      'legacy-v1': { passed: 0, failed: 0 },
+    });
+  });
+
+  it('labels legacy-v1 on report and results while still failing closed', async () => {
+    const report = await runJourneys({
+      contract: 'legacy-v1',
+      routes: [{ method: 'GET', path: '/items' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'ok', method: 'GET', path: '/items', expected: 200 },
+            { name: 'mismatch', method: 'GET', path: '/items', expected: 404 },
+          ],
+        },
+      ],
+      handler: async () => new Response('{}', { status: 200 }),
+    });
+    expect(report.contract).toBe('legacy-v1');
+    expect(report.results.map((result) => result.contract)).toEqual([
+      'legacy-v1',
+      'legacy-v1',
+    ]);
+    expect(report.summary).toEqual({
+      'canonical-v2': { passed: 0, failed: 0 },
+      'legacy-v1': { passed: 1, failed: 1 },
+    });
+    expect(report.pass).toBe(false);
+  });
+
+  it('counts per-class pass and fail totals across mixed journeys and steps', async () => {
+    const report = await runJourneys({
+      contract: 'canonical-v2',
+      routes: [{ method: 'GET', path: '/items' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'v2 pass', method: 'GET', path: '/items', expected: 200 },
+            {
+              name: 'v1 fail',
+              method: 'GET',
+              path: '/items',
+              expected: 404,
+              contract: 'legacy-v1',
+            },
+          ],
+        },
+        {
+          persona: 'legacy',
+          contract: 'legacy-v1',
+          steps: [
+            { name: 'v1 pass', method: 'GET', path: '/items', expected: 200 },
+          ],
+        },
+      ],
+      handler: async () => new Response('{}', { status: 200 }),
+    });
+    expect(report.summary).toEqual({
+      'canonical-v2': { passed: 1, failed: 0 },
+      'legacy-v1': { passed: 1, failed: 1 },
+    });
+    expect(report.pass).toBe(false);
+  });
+
+  it('requires a handler or baseUrl and sends real HTTP requests when baseUrl is set', async () => {
+    await expect(
+      runJourneys({
+        routes: [{ method: 'GET', path: '/items' }],
+        journeys: [],
+      })
+    ).rejects.toThrow('Persona runner requires a handler or baseUrl');
+
+    const { createServer } = await import('node:http');
+    const server = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ url: req.url }));
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve)
+    );
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('Expected TCP address');
+      const report = await runJourneys({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        routes: [{ method: 'GET', path: '/ping' }],
+        journeys: [
+          {
+            persona: 'viewer',
+            steps: [
+              {
+                name: 'ping',
+                method: 'GET',
+                path: '/ping?ok=1',
+                expected: 200,
+                check: (body) =>
+                  (body as { url?: string }).url === '/ping?ok=1',
+              },
+            ],
+          },
+        ],
+      });
+      expect(report.pass).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      );
+    }
+  });
+});

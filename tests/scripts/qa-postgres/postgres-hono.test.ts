@@ -60,6 +60,14 @@ describe(
             'unreached Hono endpoints need journeys or reviewed exclusions'
           ).toEqual([]);
           expect(report.pass).toBe(true);
+          expect(report.contract).toBe('canonical-v2');
+          expect(
+            report.results.every((result) => result.contract === 'canonical-v2')
+          ).toBe(true);
+          expect(report.summary).toEqual({
+            'canonical-v2': { passed: report.results.length, failed: 0 },
+            'legacy-v1': { passed: 0, failed: 0 },
+          });
           // #191: no cultural content may appear in any console or stream
           // line the app emitted while serving the journeys (empty today:
           // the app logs nothing, which this assertion keeps true).

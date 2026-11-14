@@ -21,12 +21,16 @@ import {
   integer as pgInteger,
   jsonb,
   index,
+  unique,
+  foreignKey,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
   integer,
   text as sqliteText,
   index as sqliteIndex,
+  uniqueIndex,
+  foreignKey as sqliteForeignKey,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
@@ -61,10 +65,8 @@ export const storiesPg = pgTable(
     tags: jsonb('tags').$type<string[]>().default([]),
     // Interview metadata fields for Indigenous storytelling context
     dateInterviewed: timestamp('date_interviewed'),
-    interviewLocationId: pgInteger('interview_location_id').references(
-      () => placesPg.id
-    ),
-    interviewerId: pgInteger('interviewer_id').references(() => speakersPg.id),
+    interviewLocationId: pgInteger('interview_location_id'),
+    interviewerId: pgInteger('interviewer_id'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -77,6 +79,21 @@ export const storiesPg = pgTable(
     audioUrlIdx: index('stories_audio_url_idx').on(table.audioUrl),
     // Privacy and access control indexes
     privacyLevelIdx: index('stories_privacy_level_idx').on(table.privacyLevel),
+    // Parent key for composite tenant FKs from story_places/story_speakers (#186)
+    communityIdIdUnique: unique('stories_community_id_id_unique').on(
+      table.communityId,
+      table.id
+    ),
+    // Composite tenant FKs (#186): interview metadata must reference rows of
+    // the story's own community, never another community's place/speaker.
+    interviewLocationFk: foreignKey({
+      columns: [table.communityId, table.interviewLocationId],
+      foreignColumns: [placesPg.communityId, placesPg.id],
+    }),
+    interviewerFk: foreignKey({
+      columns: [table.communityId, table.interviewerId],
+      foreignColumns: [speakersPg.communityId, speakersPg.id],
+    }),
   })
 );
 
@@ -106,12 +123,8 @@ export const storiesSqlite = sqliteTable(
     tags: sqliteText('tags', { mode: 'json' }).$type<string[]>().default([]),
     // Interview metadata fields for Indigenous storytelling context
     dateInterviewed: integer('date_interviewed', { mode: 'timestamp' }),
-    interviewLocationId: integer('interview_location_id').references(
-      () => placesSqlite.id
-    ),
-    interviewerId: integer('interviewer_id').references(
-      () => speakersSqlite.id
-    ),
+    interviewLocationId: integer('interview_location_id'),
+    interviewerId: integer('interviewer_id'),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -130,6 +143,21 @@ export const storiesSqlite = sqliteTable(
     privacyLevelIdx: sqliteIndex('stories_privacy_level_idx').on(
       table.privacyLevel
     ),
+    // Parent key for composite tenant FKs from story_places/story_speakers (#186)
+    communityIdIdUnique: uniqueIndex('stories_community_id_id_unique').on(
+      table.communityId,
+      table.id
+    ),
+    // Composite tenant FKs (#186): interview metadata must reference rows of
+    // the story's own community, never another community's place/speaker.
+    interviewLocationFk: sqliteForeignKey({
+      columns: [table.communityId, table.interviewLocationId],
+      foreignColumns: [placesSqlite.communityId, placesSqlite.id],
+    }),
+    interviewerFk: sqliteForeignKey({
+      columns: [table.communityId, table.interviewerId],
+      foreignColumns: [speakersSqlite.communityId, speakersSqlite.id],
+    }),
   })
 );
 

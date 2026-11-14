@@ -22,6 +22,7 @@ import {
   timestamp,
   jsonb,
   index,
+  unique,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
@@ -29,6 +30,7 @@ import {
   text as sqliteText,
   real,
   index as sqliteIndex,
+  uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
@@ -72,6 +74,11 @@ export const placesPg = pgTable(
     communityIdx: index('places_community_id_idx').on(table.communityId),
     // Index for photo URL queries (for media management)
     photoUrlIdx: index('places_photo_url_idx').on(table.photoUrl),
+    // Parent key for composite tenant FKs from stories/story_places (#186)
+    communityIdIdUnique: unique('places_community_id_id_unique').on(
+      table.communityId,
+      table.id
+    ),
   })
 );
 
@@ -108,6 +115,11 @@ export const placesSqlite = sqliteTable(
     communityIdx: sqliteIndex('places_community_id_idx').on(table.communityId),
     // Index for photo URL queries (for media management)
     photoUrlIdx: sqliteIndex('places_photo_url_idx').on(table.photoUrl),
+    // Parent key for composite tenant FKs from stories/story_places (#186)
+    communityIdIdUnique: uniqueIndex('places_community_id_id_unique').on(
+      table.communityId,
+      table.id
+    ),
   })
 );
 

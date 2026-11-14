@@ -384,6 +384,8 @@ export class StoryRepository {
       const associationTimestamp = new Date();
       const placeAssociations = distinctIdEntries(data.placeIds).map(
         ({ id: placeId, sourceIndex }, index) => ({
+          // Composite tenant FK (#186): join rows carry the story's community.
+          communityId: story.communityId,
           storyId: story.id,
           placeId,
           culturalContext: data.placeContexts?.[sourceIndex] || undefined,
@@ -403,6 +405,8 @@ export class StoryRepository {
       const speakerTimestamp = new Date();
       const speakerAssociations = distinctIdEntries(data.speakerIds).map(
         ({ id: speakerId, sourceIndex }, index) => ({
+          // Composite tenant FK (#186): join rows carry the story's community.
+          communityId: story.communityId,
           storyId: story.id,
           speakerId,
           storyRole: data.speakerRoles?.[sourceIndex] || undefined,
@@ -996,6 +1000,8 @@ export class StoryRepository {
         const updateTimestamp = new Date();
         const placeAssociations = distinctIdEntries(data.placeIds).map(
           ({ id: placeId, sourceIndex }, index) => ({
+            // Composite tenant FK (#186): join rows carry the story's community.
+            communityId: existingStory.communityId,
             storyId: id,
             placeId,
             culturalContext: data.placeContexts?.[sourceIndex] || undefined,
@@ -1022,6 +1028,8 @@ export class StoryRepository {
         const speakerUpdateTimestamp = new Date();
         const speakerAssociations = distinctIdEntries(data.speakerIds).map(
           ({ id: speakerId, sourceIndex }, index) => ({
+            // Composite tenant FK (#186): join rows carry the story's community.
+            communityId: existingStory.communityId,
             storyId: id,
             speakerId,
             storyRole: data.speakerRoles?.[sourceIndex] || undefined,

@@ -1025,11 +1025,21 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
 
   // #192: every timestamp column is millisecond precision (timestamp(3)) on
   // both the fresh schema and the upgraded one, matching SQLite/D1's Unix
-  // millisecond integers.
-  const impreciseTimestamps = columns.filter(
+  // millisecond integers — checked for BOTH timestamp data types so a
+  // timestamptz (or integer-epoch) column cannot escape the gate — and the
+  // timestamp column set must be exactly the set 0005 narrows, so a
+  // timestamp column the migration forgets fails here by name.
+  const timestampColumnRows = columns.filter(
     (row: any) =>
-      row.data_type === 'timestamp without time zone' &&
-      Number(row.datetime_precision) !== 3
+      row.data_type === 'timestamp without time zone' ||
+      row.data_type === 'timestamp with time zone'
+  );
+  assert.ok(
+    timestampColumnRows.length >= 24,
+    'the schema must expose its 24 timestamp columns'
+  );
+  const impreciseTimestamps = timestampColumnRows.filter(
+    (row: any) => Number(row.datetime_precision) !== 3
   );
   assert.deepEqual(
     impreciseTimestamps.map(
@@ -1037,6 +1047,32 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     ),
     [],
     'every timestamp column must be timestamp(3) (millisecond precision)'
+  );
+  const migrationSource = await readFile(
+    path.join(postgresMigrations, '0005_ms_timestamps.sql'),
+    'utf8'
+  );
+  const narrowedBy0005 = (
+    migrationSource.match(
+      /ALTER TABLE "([a-z_]+)" ALTER COLUMN "([a-z_]+)" SET DATA TYPE timestamp \(3\)/g
+    ) ?? []
+  ).map((statement) => {
+    const match = statement.match(
+      /ALTER TABLE "([a-z_]+)" ALTER COLUMN "([a-z_]+)"/
+    )!;
+    return `${match[1]}.${match[2]}`;
+  });
+  assert.equal(
+    narrowedBy0005.length,
+    24,
+    '0005 must narrow the 24 timestamp columns'
+  );
+  assert.deepEqual(
+    timestampColumnRows
+      .map((row: any) => `${row.table_name}.${row.column_name}`)
+      .sort(),
+    [...narrowedBy0005].sort(),
+    'the timestamp column set must be exactly what 0005 narrows (#192)'
   );
   assert.ok(
     columns.some(
@@ -1162,7 +1198,7 @@ async function verifyPostgresPreservation(
   );
 
   const [place] = await client.unsafe(
-    'SELECT id, community_id, latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1'
+    'SELECT id, community_id, latitude, longitude, media_urls, is_restricted, created_at, updated_at FROM places WHERE id = 1'
   );
   assert.equal(place.id, fixture.places[0].id);
   assert.equal(place.community_id, fixture.community.id);
@@ -1174,32 +1210,74 @@ async function verifyPostgresPreservation(
   assert.equal(place.longitude, Math.fround(fixture.places[0].longitude));
   assert.deepEqual(place.media_urls, fixture.places[0].mediaUrls);
   assert.equal(place.is_restricted, true);
+  // #192: 0005 narrows the columns to timestamp(3); the seeded whole-second
+  // (and any whole-millisecond) instants survive narrowing exactly.
+  assert.equal(
+    postgresTimestamp(place.created_at),
+    timestamp('2024-02-01T10:00:00.000Z')
+  );
+  assert.equal(
+    postgresTimestamp(place.updated_at),
+    timestamp('2025-06-01T10:00:00.000Z')
+  );
 
   const [story] = await client.unsafe(
-    'SELECT id, community_id, created_by, is_restricted FROM stories WHERE id = 1'
+    'SELECT id, community_id, created_by, is_restricted, created_at, updated_at FROM stories WHERE id = 1'
   );
   assert.equal(story.id, fixture.story.id);
   assert.equal(story.community_id, fixture.story.communityId);
   assert.equal(story.created_by, fixture.story.createdBy);
   assert.equal(story.is_restricted, true);
+  assert.equal(
+    postgresTimestamp(story.created_at),
+    timestamp('2024-04-01T10:00:00.000Z')
+  );
+  assert.equal(
+    postgresTimestamp(story.updated_at),
+    timestamp('2025-06-05T10:00:00.000Z')
+  );
 
   const [speaker] = await client.unsafe(
-    'SELECT id, community_id FROM speakers WHERE id = 1'
+    'SELECT id, community_id, created_at, updated_at FROM speakers WHERE id = 1'
   );
   assert.equal(speaker.id, fixture.speaker.id);
   assert.equal(speaker.community_id, fixture.speaker.communityId);
+  assert.equal(
+    postgresTimestamp(speaker.created_at),
+    timestamp('2024-03-01T10:00:00.000Z')
+  );
+  assert.equal(
+    postgresTimestamp(speaker.updated_at),
+    timestamp('2025-06-04T10:00:00.000Z')
+  );
 
   const [file] = await client.unsafe(
-    `SELECT id, community_id, uploaded_by, metadata, is_active FROM files WHERE id = '${fixture.file.id}'`
+    `SELECT id, community_id, uploaded_by, metadata, is_active, created_at, updated_at FROM files WHERE id = '${fixture.file.id}'`
   );
   assert.equal(file.id, fixture.file.id);
   assert.equal(file.community_id, fixture.file.communityId);
   assert.equal(file.uploaded_by, fixture.file.uploadedBy);
   assert.deepEqual(file.metadata, fixture.file.metadata);
   assert.equal(file.is_active, true);
+  assert.equal(
+    postgresTimestamp(file.created_at),
+    timestamp('2024-04-02T10:00:00.000Z')
+  );
+  assert.equal(
+    postgresTimestamp(file.updated_at),
+    timestamp('2025-06-06T10:00:00.000Z')
+  );
 
   const [storyPlace] = await client.unsafe(
-    'SELECT id, story_id, place_id, sort_order FROM story_places WHERE id = 1'
+    'SELECT id, story_id, place_id, sort_order, created_at, updated_at FROM story_places WHERE id = 1'
+  );
+  assert.equal(
+    postgresTimestamp(storyPlace.created_at),
+    timestamp('2024-04-03T10:00:00.000Z')
+  );
+  assert.equal(
+    postgresTimestamp(storyPlace.updated_at),
+    timestamp('2025-06-07T10:00:00.000Z')
   );
   assert.deepEqual(
     {
@@ -1217,7 +1295,15 @@ async function verifyPostgresPreservation(
   );
 
   const [storySpeaker] = await client.unsafe(
-    'SELECT id, story_id, speaker_id, story_role, sort_order FROM story_speakers WHERE id = 1'
+    'SELECT id, story_id, speaker_id, story_role, sort_order, created_at, updated_at FROM story_speakers WHERE id = 1'
+  );
+  assert.equal(
+    postgresTimestamp(storySpeaker.created_at),
+    timestamp('2024-04-04T10:00:00.000Z')
+  );
+  assert.equal(
+    postgresTimestamp(storySpeaker.updated_at),
+    timestamp('2025-06-08T10:00:00.000Z')
   );
   assert.deepEqual(
     {

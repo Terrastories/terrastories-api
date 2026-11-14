@@ -475,6 +475,25 @@ export async function createFixture(
     // Unrestricted branding in the inactive community: /explore/media
     // withholds it through the isActive lifecycle gate alone.
     const inactiveFileId = await brandingFile(inactiveCommunity.id, null);
+    // #192: one more public ACTIVE community whose name carries composed
+    // diacritics, exercising the Unicode-correct Explore name search on the
+    // persona gates: SQLite/D1 lower() folds ASCII only, so only the
+    // application-normalized contract can match a case-variant needle. No
+    // branding or stories: this fixture exists for the community list and
+    // its search narrowing alone.
+    const [saoCommunity] = await db
+      .insert(communities)
+      .values({
+        name: 'QA Comunidade São João',
+        description: 'Unicode-correct name search fixture (#192)',
+        slug: `qa-sao-joao-${Date.now()}`,
+        publicStories: true,
+        isActive: true,
+        // PostgreSQL deliberately has no database default for timestamps.
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .returning();
     const [inactivePlace] = await db
       .insert(places)
       .values({
@@ -906,8 +925,10 @@ export async function createFixture(
         );
       };
     // Shared by the anonymous and session'd journeys: the list carries
-    // exactly the two seeded public communities as a slug set — the private
-    // demo and system communities stay absent, and any unexpected row fails.
+    // exactly the seeded public communities as a slug set (the two baseline
+    // communities plus the #192 diacritic-named São João community) — the
+    // private demo and system communities stay absent, and any unexpected
+    // row fails.
     // Set comparison (not order): the index sorts newest-update-first, and
     // the seeded rows share same-tick timestamps.
     const communitiesListCheck = (body: unknown): boolean => {
@@ -915,9 +936,14 @@ export async function createFixture(
         (body as { data?: { slug?: string }[] }).data?.map(
           (community) => community.slug
         ) ?? [];
+      // #192: the diacritic-named São João community is a third public
+      // active member of the exact set — the search steps below cannot
+      // narrow anything if the base list no longer carries it.
       return (
         JSON.stringify([...slugs].sort()) ===
-          JSON.stringify([communitySlug, foreignCommunitySlug].sort()) &&
+          JSON.stringify(
+            [communitySlug, foreignCommunitySlug, saoCommunity.slug].sort()
+          ) &&
         // #191: the exact set above already fails on any leak; this names the
         // deactivated-but-public community so the lifecycle-gate claim maps
         // to an assertion that mentions its fixture.
@@ -1035,6 +1061,38 @@ export async function createFixture(
         path: '/explore/communities',
         expected: 200,
         check: communitiesListCheck,
+      },
+      {
+        // #192 Unicode-correct name search: a case-variant, composed
+        // diacritic needle matches the São João card. This requires
+        // application-side normalization — SQLite/D1 lower() folds ASCII
+        // only, so a database-side fold cannot answer it (the old
+        // containsInsensitive path failed this exact needle there).
+        name: 'explore communities search matches case-variant diacritic',
+        method: 'GET',
+        path: `/explore/communities?search=${encodeURIComponent('SÃO JOÃO')}`,
+        expected: 200,
+        check: (body) => {
+          const rows = (body as { data?: { slug?: string }[] }).data ?? [];
+          return (
+            rows.length === 1 &&
+            rows[0]?.slug === saoCommunity.slug &&
+            rows[0]?.name === saoCommunity.name
+          );
+        },
+      },
+      {
+        // Accent-sensitivity parity with PostgreSQL ILIKE: the ASCII-only
+        // transcription must NOT match the diacritic name (and therefore
+        // must not surface the card), while the list itself stays 200.
+        name: 'explore communities search rejects ASCII transcription',
+        method: 'GET',
+        path: `/explore/communities?search=${encodeURIComponent('sao joao')}`,
+        expected: 200,
+        check: (body) => {
+          const rows = (body as { data?: { slug?: string }[] }).data ?? [];
+          return rows.every((row) => row?.slug !== saoCommunity.slug);
+        },
       },
       {
         name: 'explore community detail',

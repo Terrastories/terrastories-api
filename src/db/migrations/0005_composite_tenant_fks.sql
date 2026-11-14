@@ -39,14 +39,14 @@
 -- so a run that dies mid-rebuild leaves residue tables, and this file ships
 -- no hand-recovery procedure for that state. Prepare BEFORE applying with
 -- any runner whose atomicity is not known:
--- 1. Take a backup to a new, timestamped file:
---      wrangler d1 export <database> --remote [--env <env>] --output <file>
--- 2. If the run fails after the guard, do not re-export. Restore into a NEW
---    database (wrangler d1 create, then wrangler d1 execute --remote
---    --file <backup>), rebind DB to it, repair the data, and re-apply from
---    the start. The export cannot be replayed over the failed database
---    because its tables still exist. The backup predates the apply, so the
---    migration bookkeeping is back at the pre-0005 state.
+-- 1. Record a D1 Time Travel bookmark:
+--      wrangler d1 time-travel info <database> [--env <env>]
+-- 2. If the run fails after the guard, restore in place to that bookmark:
+--      wrangler d1 time-travel restore <database> --bookmark=<bookmark>
+--    then repair the data and re-apply from the start. The bookmark
+--    predates the apply, so the migration bookkeeping is back at the
+--    pre-0005 state. Time Travel keeps 7 days on Workers Free.
+--    https://developers.cloudflare.com/d1/reference/time-travel/
 --
 -- D1 note: this migration deliberately uses no PRAGMA statements (D1 only
 -- supports PRAGMA defer_foreign_keys), so table rebuilds are ordered to keep

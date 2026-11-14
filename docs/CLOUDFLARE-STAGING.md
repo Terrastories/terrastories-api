@@ -64,22 +64,22 @@ and roadmap Phase 9; this document does not declare a release ready.
    npx wrangler deploy --env staging --dry-run
    npx wrangler secret put JWT_SECRET --env staging
    npx wrangler secret put SESSION_SECRET --env staging
-   npx wrangler d1 export terrastories-staging --remote --env staging --output "d1-backup-$(date -u +%Y%m%dT%H%M%SZ).sql"
+   npx wrangler d1 time-travel info terrastories-staging --env staging
    npx wrangler d1 migrations apply terrastories-staging --remote --env staging
    npx wrangler deploy --env staging
    ```
 
    Review the dry-run output and account before remote mutations. Provision the
    isolated D1 database and R2 bucket and configure their bindings before applying
-   migrations. Take the D1 backup immediately before the apply. The filename is
-   timestamped, so a later export never overwrites it; keep it until the apply
-   has succeeded. `wrangler d1 migrations apply` is not known to run a migration
-   file atomically. If a run fails after a migration's guard, do not re-export.
-   Restore into a new database instead: `wrangler d1 create <new-name>`, then
-   `wrangler d1 execute <new-name> --remote --file <backup>.sql`, point the
-   `DB` binding at the new database, repair the data, and re-apply. An export
-   cannot be replayed over the failed database, because its tables still exist.
-   See the header of `src/db/migrations/0005_composite_tenant_fks.sql`. Secrets are entered
+   migrations. Record the bookmark that `d1 time-travel info` prints
+   immediately before the apply. `wrangler d1 migrations apply` is not known to
+   run a migration file atomically. If a run fails after a migration's guard,
+   restore in place with
+   `npx wrangler d1 time-travel restore terrastories-staging --env staging --bookmark=<bookmark>`,
+   repair the data, and re-apply. Time Travel is always on: 7 days of history
+   on Workers Free, 30 on Paid
+   (https://developers.cloudflare.com/d1/reference/time-travel/). See the header
+   of `src/db/migrations/0005_composite_tenant_fks.sql`. Secrets are entered
    interactively or supplied from an approved
    environment-backed secret source. Seed only synthetic data through authorized
    V2 bootstrap/import tooling, not the development endpoint or demo seeder.

@@ -36,7 +36,7 @@ derived from `app.routes` itself (all method-`ALL` registrations — `app.use`
 middleware and any `app.all` handler alike; src registers no `app.all`
 routes today — and `bodyLimit`'s duplicate login entry are dropped, and a
 concrete-method route stays in coverage even on a wildcard path), so
-registering a new Hono route fails coverage until a journey reaches it or a
+registering a new concrete-method Hono route fails coverage until a journey reaches it or a
 reviewed exclusion names it; today every Hono endpoint is reached and the
 fixture excludes nothing. Journeys cover
 anonymous Explore browsing (ruling #162

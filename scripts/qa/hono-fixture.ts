@@ -15,8 +15,8 @@
  * instead states its coverage table explicitly (`routes`), and only a
  * backend whose app runs out of process (Workers/workerd, where
  * `app.routes` cannot be read from Node) uses the honoPersonaRouteTable()
- * reconstruction. Either way a newly registered route fails coverage until
- * a journey reaches it. Mirrors sqlite-fixture.ts: refuses HTTP mode
+ * reconstruction. Either way a newly registered concrete-method route (not
+ * app.all) fails coverage until a journey reaches it. Mirrors sqlite-fixture.ts: refuses HTTP mode
  * because its isolated database cannot seed a deployed server.
  */
 import { sql } from 'drizzle-orm';

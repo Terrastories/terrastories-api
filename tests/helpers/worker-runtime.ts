@@ -57,12 +57,14 @@ export async function bundleWorkerModule(contents: string): Promise<string> {
  */
 export function startWorkerRuntime(
   script: string,
-  bindings: Record<string, string> = { ENVIRONMENT: 'test' }
+  bindings: Record<string, string> = { ENVIRONMENT: 'test' },
+  options: { compatibilityDate?: string; compatibilityFlags?: string[] } = {}
 ): Miniflare {
   return new Miniflare({
     modules: true,
     script,
-    compatibilityDate,
+    compatibilityDate: options.compatibilityDate ?? compatibilityDate,
+    compatibilityFlags: options.compatibilityFlags,
     d1Databases: ['DB'],
     r2Buckets: ['MEDIA'],
     bindings,

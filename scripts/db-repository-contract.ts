@@ -2420,6 +2420,10 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
     size: 3,
     communityId: tenantFkCommunity.id,
     uploadedBy: tenantFkAuthor.id,
+    // PostgreSQL deliberately has no database default for these columns;
+    // supply the same instant SQLite's JS default would.
+    createdAt: new Date(),
+    updatedAt: new Date(),
   });
   const { communityMediaPg, communityMediaSqlite } = await import(
     '../src/db/schema/sessions.js'

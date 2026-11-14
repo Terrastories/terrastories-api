@@ -1353,9 +1353,14 @@ const rebuiltTables = [
 /**
  * Normalize a constraint expression for text comparison: collapse whitespace
  * runs, strip identifier quoting ("x", `x`, and [x] all denote the identifier
- * x; single-quoted string literals are untouched), and drop `<table>.`
- * qualification (the Drizzle snapshot qualifies column references with the
- * table name while the applied SQLite SQL does not).
+ * x), and drop `<table>.` qualification (the Drizzle snapshot qualifies column
+ * references with the table name while the applied SQLite SQL does not).
+ *
+ * Every rule applies ONLY outside single-quoted string literals, where '' is
+ * an escaped quote and never a terminator: a literal is data, so its bytes —
+ * quotes, dots, spacing — must compare exactly, not normalized. Whole-string
+ * normalization would equate `'br anding'` with `'br  anding'`, strip quote
+ * characters a literal contains, and delete `<table>.` text inside one.
  */
 function normalizeConstraintExpression(
   expression: string,
@@ -1365,11 +1370,43 @@ function normalizeConstraintExpression(
     `\\b${table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\.`,
     'g'
   );
-  return expression
-    .replace(/["`[\]]/g, '')
-    .replace(tableQualifier, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const normalizeOutsideLiteral = (text: string): string =>
+    text
+      .replace(/["`[\]]/g, '')
+      .replace(tableQualifier, '')
+      .replace(/\s+/g, ' ');
+
+  let result = '';
+  let outside = '';
+  let inLiteral = false;
+  let index = 0;
+  while (index < expression.length) {
+    const char = expression[index];
+    if (!inLiteral) {
+      if (char === "'") {
+        result += normalizeOutsideLiteral(outside) + "'";
+        outside = '';
+        inLiteral = true;
+      } else {
+        outside += char;
+      }
+      index += 1;
+    } else if (char === "'" && expression[index + 1] !== "'") {
+      // An unpaired quote closes the literal (including a trailing ' at the
+      // end of the expression); '' stays inside it as an escaped quote.
+      result += char;
+      inLiteral = false;
+      index += 1;
+    } else if (char === "'") {
+      result += "''";
+      index += 2;
+    } else {
+      result += char;
+      index += 1;
+    }
+  }
+  // An unterminated literal run stays verbatim; it still has to match.
+  return (result + normalizeOutsideLiteral(outside)).trim();
 }
 
 /**
@@ -1409,6 +1446,19 @@ function sqliteCheckExpression(
   return assert.fail(
     `CHECK constraint ${constraintName} has unbalanced parentheses`
   );
+}
+
+/**
+ * All `CONSTRAINT `name` CHECK` names a CREATE TABLE declares, so the drift
+ * gate can compare them as a set: an extra CHECK in the applied SQL that the
+ * snapshot does not declare must fail the gate, not only a missing one.
+ */
+function sqliteCheckConstraintNames(createSql: string): string[] {
+  const names: string[] = [];
+  for (const match of createSql.matchAll(/CONSTRAINT `([^`]+)` CHECK/g)) {
+    names.push(match[1] as string);
+  }
+  return names;
 }
 
 /**
@@ -1619,15 +1669,20 @@ function verifySqliteSnapshotDrift(
         `${label}: ${table} must declare FK constraint name ${foreignKey.name}`
       );
     }
-    for (const check of Object.values(expected.checkConstraints ?? {})) {
-      assert.match(
-        createSql,
-        new RegExp(`CONSTRAINT \`${check.name}\` CHECK`),
-        `${label}: ${table} must declare CHECK constraint name ${check.name}`
-      );
+    // Bidirectional name check: a CHECK the applied SQL declares but the
+    // snapshot does not must fail here too — comparing only snapshot names
+    // would let a smuggled-in predicate pass the gate.
+    const expectedChecks = Object.values(expected.checkConstraints ?? {});
+    assert.deepEqual(
+      sqliteCheckConstraintNames(createSql).sort(),
+      expectedChecks.map((check) => check.name).sort(),
+      `${label}: ${table} CHECK constraint names must match the snapshot`
+    );
+    for (const check of expectedChecks) {
       // The name alone proves nothing about the predicate: compare the
       // snapshot's expression against the applied sqlite_master SQL text
-      // (whitespace/quoting normalized) so an altered CHECK fails the gate.
+      // (whitespace/quoting normalized outside literals, literals compared
+      // byte-exact) so an altered CHECK fails the gate.
       assert.equal(
         normalizeConstraintExpression(
           sqliteCheckExpression(createSql, check.name),

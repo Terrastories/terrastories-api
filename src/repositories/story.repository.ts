@@ -6,6 +6,7 @@
  */
 
 import type { TransitionalStoryReadAccess } from '../shared/authorization/sovereignty-policy.js';
+import { storyVisibilityToPhysical } from '../policy/canonical-state.js';
 import { normalizeSearchText } from '../shared/utils/search-normalize.js';
 import {
   eq,
@@ -1460,22 +1461,14 @@ export function storyAudienceCondition(
 ): SQL | undefined {
   const conditions = accesses
     .map((access) => {
-      if (access === 'public') {
-        return and(
-          eq(storiesTable.isRestricted, false),
-          eq(storiesTable.privacyLevel, 'public')
-        );
+      if (access === 'unavailable') {
+        return undefined;
       }
-      if (access === 'community') {
-        return and(
-          eq(storiesTable.isRestricted, false),
-          eq(storiesTable.privacyLevel, 'members_only')
-        );
-      }
-      // 'editors' matches no Fastify row (unknown privacy levels are
-      // unavailable) and 'unavailable' is readable by no role: neither
-      // contributes a condition.
-      return undefined;
+      const { privacyLevel, isRestricted } = storyVisibilityToPhysical(access);
+      return and(
+        eq(storiesTable.isRestricted, isRestricted),
+        eq(storiesTable.privacyLevel, privacyLevel)
+      );
     })
     .filter((condition): condition is SQL => condition !== undefined);
   if (conditions.length === 0) {

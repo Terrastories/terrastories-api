@@ -1334,6 +1334,7 @@ interface SnapshotTable {
   columns: Record<string, SnapshotColumn>;
   indexes: Record<string, SnapshotIndex>;
   foreignKeys: Record<string, SnapshotForeignKey>;
+  uniqueConstraints?: Record<string, { name: string; columns: string[] }>;
   checkConstraints?: Record<string, { name: string; value: string }>;
 }
 
@@ -1350,10 +1351,72 @@ const rebuiltTables = [
 ] as const;
 
 /**
+ * Normalize a constraint expression for text comparison: collapse whitespace
+ * runs, strip identifier quoting ("x", `x`, and [x] all denote the identifier
+ * x; single-quoted string literals are untouched), and drop `<table>.`
+ * qualification (the Drizzle snapshot qualifies column references with the
+ * table name while the applied SQLite SQL does not).
+ */
+function normalizeConstraintExpression(
+  expression: string,
+  table: string
+): string {
+  const tableQualifier = new RegExp(
+    `\\b${table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\.`,
+    'g'
+  );
+  return expression
+    .replace(/["`[\]]/g, '')
+    .replace(tableQualifier, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Extract the parenthesized expression of `CONSTRAINT `name` CHECK (...)`
+ * from CREATE TABLE SQL, honoring nested parentheses and ignoring
+ * parentheses inside single-quoted string literals.
+ */
+function sqliteCheckExpression(
+  createSql: string,
+  constraintName: string
+): string {
+  const header = `CONSTRAINT \`${constraintName}\` CHECK`;
+  const headerIndex = createSql.indexOf(header);
+  assert.ok(
+    headerIndex >= 0,
+    `CREATE SQL must declare CHECK constraint ${constraintName}`
+  );
+  const open = createSql.indexOf('(', headerIndex + header.length);
+  assert.ok(open >= 0, `CHECK constraint ${constraintName} has no expression`);
+  let depth = 0;
+  let quoted = false;
+  for (let index = open; index < createSql.length; index += 1) {
+    const char = createSql[index];
+    if (quoted) {
+      quoted = char !== "'";
+    } else if (char === "'") {
+      quoted = true;
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        return createSql.slice(open + 1, index);
+      }
+    }
+  }
+  return assert.fail(
+    `CHECK constraint ${constraintName} has unbalanced parentheses`
+  );
+}
+
+/**
  * Compare a migrated SQLite database against meta/0005_snapshot.json — the
  * structure `drizzle-kit generate` derived from the Drizzle schema — so the
  * hand-written table rebuilds in 0005 cannot drift from the schema (a dropped
- * column, default, CHECK, index, or FK in the SQL would fail this gate).
+ * column, default, CHECK expression, index, inline UNIQUE, or FK in the SQL
+ * would fail this gate).
  *
  * PRAGMA foreign_key_list is name-blind (SQLite keeps CONSTRAINT names only in
  * the sqlite_master SQL text), so foreign keys are compared structurally and
@@ -1415,32 +1478,45 @@ function verifySqliteSnapshotDrift(
       );
     }
 
-    // Named indexes only: SQLite auto-indexes (origin 'u'/'pk') come from
-    // column constraints, which the column comparison above already covers.
-    const pragmaIndexes = new Map(
-      (sqlite.prepare(`PRAGMA index_list(${table})`).all() as any[])
-        .filter((row) => row.origin === 'c')
-        .map((row) => {
-          const columns = (
-            sqlite.prepare(`PRAGMA index_info(${row.name})`).all() as any[]
-          )
-            .slice()
-            .sort((left, right) => left.seqno - right.seqno)
-            .map((indexColumn) => indexColumn.name);
-          return [
-            String(row.name),
-            { unique: Number(row.unique) === 1, columns },
-          ];
-        })
-    );
+    // Named indexes AND inline UNIQUE constraints. PRAGMA table_info carries
+    // no uniqueness information, so a table-level UNIQUE(...) clause — which
+    // SQLite surfaces as an origin-'u' auto-index named
+    // sqlite_autoindex_<table>_<n>, not as a named CREATE INDEX — would
+    // otherwise be invisible to this gate. Comparing both origins (origin
+    // 'pk' stays excluded: PRIMARY KEY coverage is checked per column above)
+    // makes a dropped or smuggled-in UNIQUE (community_id, id) on a rebuilt
+    // table fail here.
+    const namedIndexes = new Map<
+      string,
+      { unique: boolean; columns: string[] }
+    >();
+    const inlineUniqueIndexes: Array<{ unique: boolean; columns: string[] }> =
+      [];
+    for (const row of sqlite
+      .prepare(`PRAGMA index_list(${table})`)
+      .all() as any[]) {
+      if (row.origin !== 'c' && row.origin !== 'u') continue;
+      const columns = (
+        sqlite.prepare(`PRAGMA index_info(${row.name})`).all() as any[]
+      )
+        .slice()
+        .sort((left, right) => left.seqno - right.seqno)
+        .map((indexColumn) => indexColumn.name);
+      const applied = { unique: Number(row.unique) === 1, columns };
+      if (String(row.name).startsWith('sqlite_autoindex_')) {
+        inlineUniqueIndexes.push(applied);
+      } else {
+        namedIndexes.set(String(row.name), applied);
+      }
+    }
     const expectedIndexes = Object.values(expected.indexes ?? {});
     assert.deepEqual(
-      [...pragmaIndexes.keys()].sort(),
+      [...namedIndexes.keys()].sort(),
       expectedIndexes.map((index) => index.name).sort(),
       `${label}: ${table} index names must match the snapshot`
     );
     for (const index of expectedIndexes) {
-      const applied = pragmaIndexes.get(index.name);
+      const applied = namedIndexes.get(index.name);
       assert.ok(applied, `${label}: ${table} must have index ${index.name}`);
       assert.equal(
         applied.unique,
@@ -1453,6 +1529,21 @@ function verifySqliteSnapshotDrift(
         `${label}: ${table} index ${index.name} columns must match the snapshot`
       );
     }
+    // Snapshot UNIQUE constraints apply as unnamed origin-'u' auto-indexes
+    // (their CONSTRAINT name lives only in the sqlite_master SQL text), so
+    // they are matched structurally; the set comparison also fails when the
+    // applied table declares an inline UNIQUE the snapshot does not have.
+    const inlineUniqueKey = (entry: { unique: boolean; columns: string[] }) =>
+      JSON.stringify([entry.unique, entry.columns]);
+    assert.deepEqual(
+      inlineUniqueIndexes.map(inlineUniqueKey).sort(),
+      Object.values(expected.uniqueConstraints ?? {})
+        .map((constraint) =>
+          inlineUniqueKey({ unique: true, columns: constraint.columns })
+        )
+        .sort(),
+      `${label}: ${table} inline UNIQUE constraints (unique, columns) must match the snapshot`
+    );
 
     const appliedForeignKeys = (
       sqlite.prepare(`PRAGMA foreign_key_list(${table})`).all() as any[]
@@ -1533,6 +1624,17 @@ function verifySqliteSnapshotDrift(
         createSql,
         new RegExp(`CONSTRAINT \`${check.name}\` CHECK`),
         `${label}: ${table} must declare CHECK constraint name ${check.name}`
+      );
+      // The name alone proves nothing about the predicate: compare the
+      // snapshot's expression against the applied sqlite_master SQL text
+      // (whitespace/quoting normalized) so an altered CHECK fails the gate.
+      assert.equal(
+        normalizeConstraintExpression(
+          sqliteCheckExpression(createSql, check.name),
+          table
+        ),
+        normalizeConstraintExpression(check.value, table),
+        `${label}: ${table} CHECK constraint ${check.name} expression must match the snapshot`
       );
     }
   }

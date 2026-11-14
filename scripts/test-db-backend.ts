@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   copyFile,
   mkdir,
@@ -1300,6 +1301,441 @@ async function verifySqliteFailedMigrationNotRecorded(): Promise<void> {
   sqlite.close();
 }
 
+/* ------------------------------------------------------------------ */
+/* #186 drift gate: applied SQLite schema vs the Drizzle snapshot.    */
+/* ------------------------------------------------------------------ */
+
+interface SnapshotColumn {
+  name: string;
+  type: string;
+  notNull: boolean;
+  primaryKey: boolean;
+  default?: boolean | number | string;
+}
+
+interface SnapshotIndex {
+  name: string;
+  columns: string[];
+  isUnique: boolean;
+}
+
+interface SnapshotForeignKey {
+  name: string;
+  tableFrom: string;
+  tableTo: string;
+  columnsFrom: string[];
+  columnsTo: string[];
+  onDelete: string;
+  onUpdate: string;
+}
+
+interface SnapshotTable {
+  name: string;
+  columns: Record<string, SnapshotColumn>;
+  indexes: Record<string, SnapshotIndex>;
+  foreignKeys: Record<string, SnapshotForeignKey>;
+  checkConstraints?: Record<string, { name: string; value: string }>;
+}
+
+interface Snapshot {
+  tables: Record<string, SnapshotTable>;
+}
+
+/** Tables 0005 rebuilds by hand: they must match the Drizzle snapshot exactly. */
+const rebuiltTables = [
+  'stories',
+  'story_places',
+  'story_speakers',
+  'community_media',
+] as const;
+
+/**
+ * Compare a migrated SQLite database against meta/0005_snapshot.json — the
+ * structure `drizzle-kit generate` derived from the Drizzle schema — so the
+ * hand-written table rebuilds in 0005 cannot drift from the schema (a dropped
+ * column, default, CHECK, index, or FK in the SQL would fail this gate).
+ *
+ * PRAGMA foreign_key_list is name-blind (SQLite keeps CONSTRAINT names only in
+ * the sqlite_master SQL text), so foreign keys are compared structurally and
+ * constraint names are checked against sqlite_master.
+ */
+function verifySqliteSnapshotDrift(
+  sqlite: Database.Database,
+  label: string
+): void {
+  const snapshot = JSON.parse(
+    readFileSync(
+      path.join(sqliteMigrations, 'meta', '0005_snapshot.json'),
+      'utf8'
+    )
+  ) as Snapshot;
+
+  for (const table of rebuiltTables) {
+    const expected = snapshot.tables[table];
+    assert.ok(expected, `snapshot must describe ${table}`);
+
+    const pragmaColumns = sqlite
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as any[];
+    const expectedColumns = Object.values(expected.columns);
+    assert.deepEqual(
+      pragmaColumns.map((column) => column.name),
+      expectedColumns.map((column) => column.name),
+      `${label}: ${table} column names/order must match the snapshot`
+    );
+    for (const pragmaColumn of pragmaColumns) {
+      const snapshotColumn = expectedColumns.find(
+        (column) => column.name === pragmaColumn.name
+      )!;
+      assert.equal(
+        String(pragmaColumn.type).toLowerCase(),
+        snapshotColumn.type.toLowerCase(),
+        `${label}: ${table}.${pragmaColumn.name} type must match the snapshot`
+      );
+      assert.equal(
+        Number(pragmaColumn.notnull),
+        snapshotColumn.notNull ? 1 : 0,
+        `${label}: ${table}.${pragmaColumn.name} NOT NULL must match the snapshot`
+      );
+      assert.equal(
+        Number(pragmaColumn.pk),
+        snapshotColumn.primaryKey ? 1 : 0,
+        `${label}: ${table}.${pragmaColumn.name} PRIMARY KEY must match the snapshot`
+      );
+      const expectedDefault =
+        snapshotColumn.default === undefined
+          ? null
+          : String(snapshotColumn.default);
+      assert.equal(
+        pragmaColumn.dflt_value === null
+          ? null
+          : String(pragmaColumn.dflt_value),
+        expectedDefault,
+        `${label}: ${table}.${pragmaColumn.name} DEFAULT must match the snapshot`
+      );
+    }
+
+    // Named indexes only: SQLite auto-indexes (origin 'u'/'pk') come from
+    // column constraints, which the column comparison above already covers.
+    const pragmaIndexes = new Map(
+      (sqlite.prepare(`PRAGMA index_list(${table})`).all() as any[])
+        .filter((row) => row.origin === 'c')
+        .map((row) => {
+          const columns = (
+            sqlite.prepare(`PRAGMA index_info(${row.name})`).all() as any[]
+          )
+            .slice()
+            .sort((left, right) => left.seqno - right.seqno)
+            .map((indexColumn) => indexColumn.name);
+          return [
+            String(row.name),
+            { unique: Number(row.unique) === 1, columns },
+          ];
+        })
+    );
+    const expectedIndexes = Object.values(expected.indexes ?? {});
+    assert.deepEqual(
+      [...pragmaIndexes.keys()].sort(),
+      expectedIndexes.map((index) => index.name).sort(),
+      `${label}: ${table} index names must match the snapshot`
+    );
+    for (const index of expectedIndexes) {
+      const applied = pragmaIndexes.get(index.name);
+      assert.ok(applied, `${label}: ${table} must have index ${index.name}`);
+      assert.equal(
+        applied.unique,
+        index.isUnique,
+        `${label}: ${table} index ${index.name} uniqueness must match the snapshot`
+      );
+      assert.deepEqual(
+        applied.columns,
+        index.columns,
+        `${label}: ${table} index ${index.name} columns must match the snapshot`
+      );
+    }
+
+    const appliedForeignKeys = (
+      sqlite.prepare(`PRAGMA foreign_key_list(${table})`).all() as any[]
+    ).reduce<Map<number, any[]>>((groups, row) => {
+      const group = groups.get(row.id) ?? [];
+      group.push(row);
+      groups.set(row.id, group);
+      return groups;
+    }, new Map());
+    const appliedForeignKeyTuples = [...appliedForeignKeys.values()]
+      .map((group) =>
+        group
+          .slice()
+          .sort((left, right) => left.seq - right.seq)
+          .map((row) => ({
+            table: String(row.table),
+            from: String(row.from),
+            to: String(row.to),
+          }))
+      )
+      .map((columns) => ({
+        table: columns[0].table,
+        columnsFrom: columns.map((column) => column.from),
+        columnsTo: columns.map((column) => column.to),
+      }));
+    const expectedForeignKeyTuples = Object.values(
+      expected.foreignKeys ?? {}
+    ).map((foreignKey) => ({
+      table: foreignKey.tableTo,
+      columnsFrom: foreignKey.columnsFrom,
+      columnsTo: foreignKey.columnsTo,
+    }));
+    const tupleKey = (tuple: {
+      table: string;
+      columnsFrom: string[];
+      columnsTo: string[];
+    }) => JSON.stringify([tuple.table, tuple.columnsFrom, tuple.columnsTo]);
+    assert.deepEqual(
+      appliedForeignKeyTuples.map(tupleKey).sort(),
+      expectedForeignKeyTuples.map(tupleKey).sort(),
+      `${label}: ${table} foreign keys (table, from, to) must match the snapshot`
+    );
+
+    // Constraint names live in the sqlite_master SQL text, not in PRAGMAs.
+    const createSql = String(
+      (
+        sqlite
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?"
+          )
+          .get(table) as any
+      ).sql
+    );
+    for (const foreignKey of Object.values(expected.foreignKeys ?? {})) {
+      assert.match(
+        createSql,
+        new RegExp(`CONSTRAINT \`${foreignKey.name}\` FOREIGN KEY`),
+        `${label}: ${table} must declare FK constraint name ${foreignKey.name}`
+      );
+    }
+    for (const check of Object.values(expected.checkConstraints ?? {})) {
+      assert.match(
+        createSql,
+        new RegExp(`CONSTRAINT \`${check.name}\` CHECK`),
+        `${label}: ${table} must declare CHECK constraint name ${check.name}`
+      );
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* #186 crash safety: cross-community guard abort and re-run.         */
+/* ------------------------------------------------------------------ */
+
+/** Row counts a 0000-only database seeded by this gate always holds. */
+const seededRowCounts: Array<[table: string, count: number]> = [
+  ['stories', 1],
+  ['story_places', 1],
+  ['story_speakers', 1],
+  ['community_media', 0],
+];
+
+/**
+ * A migration folder whose journal stops before 0005: the state an upgraded
+ * database is in when a runner picks up migration 0005.
+ */
+async function createSqlitePre186Folder(): Promise<string> {
+  const folder = await mkdtemp(
+    path.join(os.tmpdir(), 'terrastories-sqlite-pre186-')
+  );
+  await mkdir(path.join(folder, 'meta'));
+  const journal = JSON.parse(
+    await readFile(path.join(sqliteMigrations, 'meta', '_journal.json'), 'utf8')
+  ) as { entries: Array<{ tag: string }> };
+  const entries = journal.entries.filter(
+    (entry) => entry.tag !== '0005_composite_tenant_fks'
+  );
+  await writeFile(
+    path.join(folder, 'meta', '_journal.json'),
+    JSON.stringify({ ...journal, entries }, null, 2)
+  );
+  for (const entry of entries) {
+    await copyFile(
+      path.join(sqliteMigrations, `${entry.tag}.sql`),
+      path.join(folder, `${entry.tag}.sql`)
+    );
+  }
+  return folder;
+}
+
+async function createSeededPre186Sqlite(): Promise<{
+  sqlite: Database.Database;
+  otherPlaceId: number;
+}> {
+  const sqlite = new Database(':memory:');
+  sqlite.pragma('foreign_keys = ON');
+  const database = drizzleSqlite(sqlite);
+  const pre186Folder = await createSqlitePre186Folder();
+  try {
+    await migrateSqlite(database, { migrationsFolder: pre186Folder });
+  } finally {
+    await rm(pre186Folder, { recursive: true, force: true });
+  }
+  seedPreviousReleaseSqlite(sqlite);
+
+  // A cross-community edge the legacy single-column FKs allow: a second
+  // community, a place in it, and a story_places row binding story 1
+  // (community 1) to that place. Migration 0005 must refuse this data.
+  const now = sqliteTimestamp('2026-01-01T00:00:00.000Z');
+  sqlite
+    .prepare(
+      `INSERT INTO communities
+       (id, name, slug, public_stories, created_at, updated_at)
+       VALUES (2, 'Other Community', 'other-community', 1, ?, ?)`
+    )
+    .run(now, now);
+  const otherPlaceId = 9001;
+  sqlite
+    .prepare(
+      `INSERT INTO places
+       (id, name, community_id, latitude, longitude, created_at, updated_at)
+       VALUES (?, 'Other Community Place', 2, 1.5, 2.5, ?, ?)`
+    )
+    .run(otherPlaceId, now, now);
+  sqlite
+    .prepare(
+      `INSERT INTO story_places (id, story_id, place_id, created_at, updated_at)
+       VALUES (2, 1, ?, ?, ?)`
+    )
+    .run(otherPlaceId, now, now);
+  return { sqlite, otherPlaceId };
+}
+
+function assertJoinSurfaceIntact(
+  sqlite: Database.Database,
+  label: string
+): void {
+  for (const [table, baseline] of seededRowCounts) {
+    // The seeded cross-community edge adds one story_places row.
+    const expected = table === 'story_places' ? baseline + 1 : baseline;
+    const count = (
+      sqlite.prepare(`SELECT count(*) AS count FROM ${table}`).get() as any
+    ).count;
+    assert.equal(
+      count,
+      expected,
+      `${label}: ${table} must still exist with its rows after the failed migration`
+    );
+  }
+  const residue = (
+    sqlite
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('stories_old', 'story_places_new', 'story_speakers_new', 'community_media_new')"
+      )
+      .all() as any[]
+  ).map((row) => String(row.name));
+  assert.deepEqual(
+    residue,
+    [],
+    `${label}: a failed migration must not leave rebuild residue tables`
+  );
+}
+
+/**
+ * Migration 0005's statements, mirroring a runner that executes the file one
+ * statement at a time with no wrapping transaction (the production D1 path
+ * through `wrangler d1 migrations apply`, whose atomicity this repository
+ * cannot guarantee from source).
+ */
+async function compositeTenantFkStatements(): Promise<string[]> {
+  const source = await readFile(
+    path.join(sqliteMigrations, '0005_composite_tenant_fks.sql'),
+    'utf8'
+  );
+  return splitStatements(source);
+}
+
+async function verifySqliteCrossCommunityGuard(): Promise<void> {
+  const statements = await compositeTenantFkStatements();
+
+  // 1. Statement-by-statement (non-atomic runner): the guard aborts before
+  //    any destructive step, the tables survive, and a re-run after repair
+  //    succeeds — proving the guard table's re-entrancy.
+  {
+    const { sqlite, otherPlaceId } = await createSeededPre186Sqlite();
+    let aborted = false;
+    try {
+      for (const statement of statements) sqlite.exec(statement);
+    } catch (error) {
+      if (!/cross_community_rows/.test(String(error))) throw error;
+      aborted = true;
+    }
+    assert.equal(
+      aborted,
+      true,
+      'stepwise: the cross-community edge must abort migration 0005'
+    );
+    assertJoinSurfaceIntact(sqlite, 'stepwise');
+    const guardAfterAbort = sqlite
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='_186_cross_community_guard'"
+      )
+      .get();
+    assert.ok(
+      guardAfterAbort,
+      'stepwise: the aborted guard leaves its table behind (no transaction to roll it back)'
+    );
+    sqlite
+      .prepare('DELETE FROM story_places WHERE place_id = ?')
+      .run(otherPlaceId);
+    for (const statement of statements) sqlite.exec(statement);
+    assert.equal(
+      sqlite
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='_186_cross_community_guard'"
+        )
+        .get(),
+      undefined,
+      'stepwise: the re-run must drop the guard table'
+    );
+    verifySqliteSchema(sqlite);
+    verifySqliteSnapshotDrift(sqlite, 'stepwise re-run');
+    sqlite.close();
+  }
+
+  // 2. Drizzle migrator (atomic runner): same abort, fully rolled back. The
+  //    better-sqlite3 migrator throws synchronously, hence try/catch instead
+  //    of assert.rejects.
+  {
+    const { sqlite, otherPlaceId } = await createSeededPre186Sqlite();
+    const database = drizzleSqlite(sqlite);
+    let aborted = false;
+    try {
+      await migrateSqlite(database, { migrationsFolder: sqliteMigrations });
+    } catch (error) {
+      if (!/cross_community_rows/.test(String(error))) throw error;
+      aborted = true;
+    }
+    assert.equal(
+      aborted,
+      true,
+      'drizzle: the cross-community edge must abort migration 0005'
+    );
+    assertJoinSurfaceIntact(sqlite, 'drizzle');
+    assert.equal(
+      sqlite
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='_186_cross_community_guard'"
+        )
+        .get(),
+      undefined,
+      'drizzle: the transactional rollback must remove the guard table'
+    );
+    sqlite
+      .prepare('DELETE FROM story_places WHERE place_id = ?')
+      .run(otherPlaceId);
+    await migrateSqlite(database, { migrationsFolder: sqliteMigrations });
+    verifySqliteSchema(sqlite);
+    verifySqliteSnapshotDrift(sqlite, 'drizzle re-run');
+    sqlite.close();
+  }
+}
+
 async function resetPostgres(client: PostgresClient): Promise<void> {
   await client.unsafe('DROP SCHEMA IF EXISTS drizzle CASCADE');
   await client.unsafe('DROP SCHEMA IF EXISTS public CASCADE');
@@ -1346,19 +1782,20 @@ async function runSqliteGate(): Promise<void> {
   console.log('🪶 SQLite/D1-compatible integration gate');
   await verifyStaticPortabilityContract();
 
-  console.log('  1/4 fresh migration + shared repository contract');
+  console.log('  1/5 fresh migration + shared repository contract');
   const freshSqlite = new Database(':memory:');
   freshSqlite.pragma('foreign_keys = ON');
   const freshDb = drizzleSqlite(freshSqlite);
   await migrateSqlite(freshDb, { migrationsFolder: sqliteMigrations });
   verifySqliteSchema(freshSqlite);
+  verifySqliteSnapshotDrift(freshSqlite, 'fresh');
   await runRepositoryContract(freshDb);
   await runHonoFoundationContract(freshDb);
   verifySqliteTransactionAndForeignKey(freshSqlite);
   await migrateSqlite(freshDb, { migrationsFolder: sqliteMigrations });
   freshSqlite.close();
 
-  console.log('  2/4 previous-release upgrade + data preservation');
+  console.log('  2/5 previous-release upgrade + data preservation');
   const upgradeSqlite = new Database(':memory:');
   upgradeSqlite.pragma('foreign_keys = ON');
   const upgradeDb = drizzleSqlite(upgradeSqlite);
@@ -1371,11 +1808,12 @@ async function runSqliteGate(): Promise<void> {
   seedPreviousReleaseSqlite(upgradeSqlite);
   await migrateSqlite(upgradeDb, { migrationsFolder: sqliteMigrations });
   verifySqliteSchema(upgradeSqlite);
+  verifySqliteSnapshotDrift(upgradeSqlite, 'previous-release upgrade');
   verifySqlitePreservation(upgradeSqlite);
   await verifySqliteApplicationDates(upgradeDb);
   upgradeSqlite.close();
 
-  console.log('  3/4 deliberate dialect incompatibility rejection');
+  console.log('  3/5 deliberate dialect incompatibility rejection');
   validateMigrationText(
     'sqlite',
     await readFile(
@@ -1385,8 +1823,11 @@ async function runSqliteGate(): Promise<void> {
     'SQLite baseline'
   );
 
-  console.log('  4/4 failed migration recording guard');
+  console.log('  4/5 failed migration recording guard');
   await verifySqliteFailedMigrationNotRecorded();
+
+  console.log('  5/5 cross-community guard abort and re-run');
+  await verifySqliteCrossCommunityGuard();
   console.log('✅ SQLite/D1-compatible integration gate passed');
 }
 

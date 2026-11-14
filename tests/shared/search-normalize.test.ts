@@ -1,13 +1,19 @@
 /**
  * Shared search normalization contract (#192, SPEC-V2 §6.2): application
- * case-comparison for Explore community-name search. Both SQLite/D1
- * (`lower()` folds ASCII only) and PostgreSQL (Unicode ILIKE) must agree on
- * the result, so the folding happens in application code under the same NFC
- * + lower-case contract as tags (SPEC-V2 §6.3).
+ * case-comparison for Explore community-name search. The contract, stated
+ * on its own: the key is NFC-composed, simple Unicode-lowercased, then NFC
+ * re-composed (lowercasing itself can emit decomposed output);
+ * accent-sensitive (a base letter without its mark does not match); no
+ * full case folding. Both SQLite/D1 (`lower()` folds ASCII only) and
+ * PostgreSQL must agree on the result, so the folding happens in
+ * application code — the old PostgreSQL path folded case with
+ * collation-dependent ILIKE — under the same contract as tags (SPEC-V2
+ * §6.3).
  */
 import { describe, expect, it } from 'vitest';
 import {
   containsNormalized,
+  containsNormalizedKey,
   normalizeSearchText,
 } from '../../src/shared/utils/search-normalize.js';
 
@@ -24,6 +30,33 @@ describe('normalizeSearchText', () => {
     expect(nfd).not.toBe('são'); // sanity: the input really is decomposed
     expect(normalizeSearchText(nfd)).toBe('são');
     expect(normalizeSearchText(nfd)).toBe(normalizeSearchText('SÃO'));
+  });
+
+  it('re-composes lowercasing output that is itself decomposed', () => {
+    // "T" + combining diaeresis lowercases to a DECOMPOSED
+    // "t" + U+0308; the NFC re-compose turns it into the precomposed
+    // U+1E97 — the same key the precomposed "ẗ" itself produces, so the
+    // two forms of the same text share one key.
+    expect(normalizeSearchText('T\u0308')).toBe('\u1E97');
+    expect(normalizeSearchText('\u1E97')).toBe('\u1E97');
+    expect(normalizeSearchText('T\u0308')).toBe(normalizeSearchText('\u1E97'));
+  });
+
+  it('keeps simple lowercase: no full case folding', () => {
+    // Full case folding would map U+1E9B (LATIN SMALL LETTER LONG S WITH
+    // DOT ABOVE) to U+1E61 (ṡ); simple lowercase leaves it alone.
+    expect(normalizeSearchText('\u1E9B')).toBe('\u1E9B');
+    expect(containsNormalized('\u1E9B', 'ṡ')).toBe(false);
+  });
+
+  it('applies no special İ mapping (documented limitation)', () => {
+    // "İ" (U+0130) lowercases to decomposed "i" + U+0307, which NFC never
+    // composes back to a plain "i", so "İnstituto" does NOT contain
+    // "instituto". Simple lowercase only — this limitation is documented,
+    // not fixed with case folding.
+    expect(containsNormalized('İnstituto', 'instituto')).toBe(false);
+    expect(containsNormalized('instituto', 'İnstituto')).toBe(false);
+    expect(normalizeSearchText('İnstituto')).not.toContain('instituto');
   });
 });
 
@@ -58,5 +91,24 @@ describe('containsNormalized', () => {
 
   it('does not match an empty haystack for a non-empty needle', () => {
     expect(containsNormalized('', 'são')).toBe(false);
+  });
+});
+
+describe('containsNormalizedKey', () => {
+  const haystack = 'Comunidade São João';
+
+  it('matches a haystack against an already-normalized needle key', () => {
+    const key = normalizeSearchText('SÃO JOÃO');
+    expect(containsNormalizedKey(haystack, key)).toBe(true);
+    expect(containsNormalizedKey(haystack.normalize('NFD'), key)).toBe(true);
+  });
+
+  it('rejects keys the haystack does not contain', () => {
+    expect(
+      containsNormalizedKey(haystack, normalizeSearchText('sao joao'))
+    ).toBe(false);
+    expect(containsNormalizedKey(haystack, normalizeSearchText('zzz'))).toBe(
+      false
+    );
   });
 });

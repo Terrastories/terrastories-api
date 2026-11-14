@@ -49,7 +49,10 @@ import {
   communityMediaPg,
   communityMediaSqlite,
 } from '../db/schema/sessions.js';
-import { containsNormalized } from '../shared/utils/search-normalize.js';
+import {
+  containsNormalizedKey,
+  normalizeSearchText,
+} from '../shared/utils/search-normalize.js';
 
 export interface ExploreCommunityRow {
   id: number;
@@ -141,13 +144,17 @@ export class ExploreAdapterRepository {
   /**
    * Public active communities, newest update first (Rails index order).
    *
-   * The projection is the whole bounded public community list (no
-   * pagination, SPEC-V2 §6.2), so name search filters in application code
-   * under the shared NFC + lower-case contract
-   * (src/shared/utils/search-normalize.ts): Unicode-correct on both
-   * backends (SQLite/D1 `lower()` folds ASCII only), accent-sensitive on
-   * purpose, and literal (`%`/`_` are plain characters, not LIKE
-   * wildcards).
+   * The projection is the whole public community list — unpaginated
+   * (Rails parity), so filtering it costs no more than serving the
+   * unfiltered list — with name search applied in application code under
+   * the application-defined case-comparison contract stated in
+   * src/shared/utils/search-normalize.ts: NFC-composed, simple Unicode
+   * lowercase, re-composed; accent-sensitive (a base letter without its
+   * mark does not match); no full case folding. Unicode-correct on both
+   * backends (SQLite/D1 `lower()` folds ASCII only; the old PostgreSQL
+   * path folded with collation-dependent ILIKE), and literal (`%`/`_` are
+   * plain characters, not LIKE wildcards). The needle key is normalized
+   * once, before the row loop.
    */
   async publicCommunities(search?: string): Promise<ExploreCommunityRow[]> {
     const { communities } = this.tables;
@@ -167,9 +174,11 @@ export class ExploreAdapterRepository {
       .from(communities)
       .where(gate)
       .orderBy(desc(communities.updatedAt), desc(communities.id));
-    return search && search !== ''
-      ? rows.filter((row) => containsNormalized(row.name, search))
-      : rows;
+    const needleKey =
+      search && search !== '' ? normalizeSearchText(search) : null;
+    return needleKey === null
+      ? rows
+      : rows.filter((row) => containsNormalizedKey(row.name, needleKey));
   }
 
   /** The community named by a public Explore slug, or null (withheld = null). */

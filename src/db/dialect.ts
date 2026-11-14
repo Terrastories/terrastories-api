@@ -83,8 +83,9 @@ export function escapeLikePattern(value: string): string {
  * V2 application-normalized columns replace database folding (SPEC-V2 §6.2/§6.3).
  *
  * V2 Explore community-name search no longer uses this helper (#192): that
- * surface filters the bounded public community list in application code under
- * the shared normalization contract (src/shared/utils/search-normalize.ts).
+ * surface filters the unpaginated public community list (Rails parity) in
+ * application code under the application-defined contract stated in
+ * src/shared/utils/search-normalize.ts, not database folding.
  * V1 repositories keep it; do not adopt it for new V2 search surfaces.
  */
 export function containsInsensitive(

@@ -259,6 +259,7 @@ export async function createFixture(
     const communitySlug = fixtures.communities[0].slug;
     const privateCommunityId = fixtures.communities[1].id;
     const privateCommunitySlug = fixtures.communities[1].slug;
+    const privateCommunityName = fixtures.communities[1].name;
     // A second PUBLIC community owns the foreign fixtures: its rows are
     // publishable, so a 404 elsewhere is community scoping alone, and its
     // own Explore surface serves as the positive control.
@@ -1073,8 +1074,10 @@ export async function createFixture(
         path: `/explore/communities?search=${encodeURIComponent('SÃO JOÃO')}`,
         expected: 200,
         check: (body) => {
-          const rows = (body as { data?: { slug?: string }[] }).data ?? [];
+          const rows = (body as { data?: { slug?: string; name?: string }[] })
+            .data;
           return (
+            Array.isArray(rows) &&
             rows.length === 1 &&
             rows[0]?.slug === saoCommunity.slug &&
             rows[0]?.name === saoCommunity.name
@@ -1082,16 +1085,45 @@ export async function createFixture(
         },
       },
       {
-        // Accent-sensitivity parity with PostgreSQL ILIKE: the ASCII-only
-        // transcription must NOT match the diacritic name (and therefore
-        // must not surface the card), while the list itself stays 200.
+        // Accent sensitivity on purpose: the ASCII-only transcription (a
+        // base letter without its mark) must NOT match the diacritic name,
+        // so the response carries exactly zero rows.
         name: 'explore communities search rejects ASCII transcription',
         method: 'GET',
         path: `/explore/communities?search=${encodeURIComponent('sao joao')}`,
         expected: 200,
         check: (body) => {
-          const rows = (body as { data?: { slug?: string }[] }).data ?? [];
-          return rows.every((row) => row?.slug !== saoCommunity.slug);
+          const rows = (body as { data?: unknown }).data;
+          return Array.isArray(rows) && rows.length === 0;
+        },
+      },
+      {
+        // The publication and lifecycle gates hold under search: an exact
+        // name match on a public but DEACTIVATED community must surface
+        // zero rows (200), never the withheld card.
+        name: 'explore communities search hides the inactive public community',
+        method: 'GET',
+        path: `/explore/communities?search=${encodeURIComponent(
+          inactiveCommunity.name
+        )}`,
+        expected: 200,
+        check: (body) => {
+          const rows = (body as { data?: unknown }).data;
+          return Array.isArray(rows) && rows.length === 0;
+        },
+      },
+      {
+        // Same for the private (publicStories=false) community: its name
+        // never answers a search, even the exact name.
+        name: 'explore communities search hides the private community',
+        method: 'GET',
+        path: `/explore/communities?search=${encodeURIComponent(
+          privateCommunityName
+        )}`,
+        expected: 200,
+        check: (body) => {
+          const rows = (body as { data?: unknown }).data;
+          return Array.isArray(rows) && rows.length === 0;
         },
       },
       {

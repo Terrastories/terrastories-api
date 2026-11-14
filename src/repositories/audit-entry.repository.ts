@@ -1,0 +1,80 @@
+/**
+ * Content-free AuditEntry repository helpers (SPEC-V2 §6.8 and §7).
+ *
+ * Enforces append-only, content-free writes and provides only the single
+ * scheduled scrub mutation that nullifies `ip_address` and `user_agent`
+ * older than the configured retention deadline (max 90 days).
+ */
+
+import { and, isNotNull, lte, or } from 'drizzle-orm';
+import { tablesFor } from '../db/dialect.js';
+import type { AuditEntry } from '../db/schema/audit_entries.js';
+import {
+  auditNetworkMetadataCutoff,
+  validateContentFreeAuditEntry,
+  type ContentFreeAuditEntryInput,
+} from '../shared/utils/audit-entry.js';
+
+export async function writeAuditEntry(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  database: any,
+  input: ContentFreeAuditEntryInput
+): Promise<AuditEntry> {
+  const validated = validateContentFreeAuditEntry(input);
+  const { auditEntries } = tablesFor(database);
+
+  const [inserted] = await database
+    .insert(auditEntries)
+    .values({
+      communityId: validated.communityId,
+      actorId: validated.actorId,
+      action: validated.action,
+      resourceType: validated.resourceType,
+      resourceIds: validated.resourceIds,
+      outcome: validated.outcome,
+      ipAddress: validated.ipAddress,
+      userAgent: validated.userAgent,
+      createdAt: validated.createdAt ?? new Date(),
+    })
+    .returning();
+
+  return inserted as AuditEntry;
+}
+
+export interface ScrubAuditNetworkMetadataResult {
+  cutoff: Date;
+  scrubbedCount: number;
+}
+
+/**
+ * Scrub `ip_address` and `user_agent` on all audit entries created at or
+ * before the retention cutoff (default 90 days). Never modifies any other
+ * column and never deletes rows.
+ */
+export async function scrubExpiredAuditNetworkMetadata(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  database: any,
+  options: { now?: Date; retentionDays?: number } = {}
+): Promise<ScrubAuditNetworkMetadataResult> {
+  const cutoff = auditNetworkMetadataCutoff(options.now, options.retentionDays);
+  const { auditEntries } = tablesFor(database);
+
+  const updated = await database
+    .update(auditEntries)
+    .set({
+      ipAddress: null,
+      userAgent: null,
+    })
+    .where(
+      and(
+        lte(auditEntries.createdAt, cutoff),
+        or(isNotNull(auditEntries.ipAddress), isNotNull(auditEntries.userAgent))
+      )
+    )
+    .returning({ id: auditEntries.id });
+
+  return {
+    cutoff,
+    scrubbedCount: updated.length,
+  };
+}

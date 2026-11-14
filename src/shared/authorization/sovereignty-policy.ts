@@ -23,6 +23,38 @@ export function isV2CommunityRole(role: string): role is V2CommunityRole {
   return (V2_COMMUNITY_ROLES as readonly string[]).includes(role);
 }
 
+export class InvalidV2RoleError extends Error {
+  constructor(role: unknown) {
+    super(`Invalid V2 role: ${typeof role === 'string' ? role : typeof role}`);
+    this.name = 'InvalidV2RoleError';
+  }
+}
+
+/**
+ * V2-boundary role parser (SPEC-V2 §6.2): accepts strictly the 5 canonical V2
+ * roles (`viewer | member | editor | admin | super_admin`) and fails closed
+ * (`null`) on legacy `'elder'`, unknown strings, whitespace/case variants, and
+ * non-string values.
+ */
+export function parseV2Role(role: unknown): V2CommunityRole | null {
+  if (typeof role !== 'string') {
+    return null;
+  }
+  return isV2CommunityRole(role) ? role : null;
+}
+
+/**
+ * Strict V2-boundary role assertion throwing InvalidV2RoleError on legacy
+ * `'elder'` or any unrecognized value.
+ */
+export function requireV2Role(role: unknown): V2CommunityRole {
+  const parsed = parseV2Role(role);
+  if (!parsed) {
+    throw new InvalidV2RoleError(role);
+  }
+  return parsed;
+}
+
 /**
  * Canonical story audiences (SPEC-V2 §6.3). These are read audiences for
  * story content, distinct from `FieldVisibilityCategory`, which classifies

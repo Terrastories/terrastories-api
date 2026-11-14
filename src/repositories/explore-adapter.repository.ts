@@ -44,11 +44,12 @@ import {
 } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
-import { containsInsensitive, dialectOf, tablesFor } from '../db/dialect.js';
+import { dialectOf, tablesFor } from '../db/dialect.js';
 import {
   communityMediaPg,
   communityMediaSqlite,
 } from '../db/schema/sessions.js';
+import { containsNormalized } from '../shared/utils/search-normalize.js';
 
 export interface ExploreCommunityRow {
   id: number;
@@ -137,14 +138,24 @@ export class ExploreAdapterRepository {
     ) as typeof communityMediaSqlite;
   }
 
-  /** Public active communities, newest update first (Rails index order). */
+  /**
+   * Public active communities, newest update first (Rails index order).
+   *
+   * The projection is the whole bounded public community list (no
+   * pagination, SPEC-V2 §6.2), so name search filters in application code
+   * under the shared NFC + lower-case contract
+   * (src/shared/utils/search-normalize.ts): Unicode-correct on both
+   * backends (SQLite/D1 `lower()` folds ASCII only), accent-sensitive on
+   * purpose, and literal (`%`/`_` are plain characters, not LIKE
+   * wildcards).
+   */
   async publicCommunities(search?: string): Promise<ExploreCommunityRow[]> {
     const { communities } = this.tables;
     const gate = and(
       eq(communities.publicStories, true),
       eq(communities.isActive, true)
     );
-    return this.database
+    const rows: ExploreCommunityRow[] = await this.database
       .select({
         id: communities.id,
         name: communities.name,
@@ -154,15 +165,11 @@ export class ExploreAdapterRepository {
         updatedAt: communities.updatedAt,
       })
       .from(communities)
-      .where(
-        search && search !== ''
-          ? and(
-              gate,
-              containsInsensitive(this.dialect, communities.name, search)
-            )
-          : gate
-      )
+      .where(gate)
       .orderBy(desc(communities.updatedAt), desc(communities.id));
+    return search && search !== ''
+      ? rows.filter((row) => containsNormalized(row.name, search))
+      : rows;
   }
 
   /** The community named by a public Explore slug, or null (withheld = null). */

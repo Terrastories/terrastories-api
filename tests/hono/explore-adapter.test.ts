@@ -101,6 +101,19 @@ const seed = async () => {
     createdAt: T1,
     updatedAt: T2,
   });
+  // #192: a public active community whose name carries composed diacritics —
+  // the case the SQLite lower() fold cannot reach in the database, so the
+  // V2 contract normalizes in application code instead. updatedAt T1 keeps
+  // it last in the newest-update-first index order.
+  await insert(tables.communities, {
+    name: 'Comunidade São João',
+    description: 'Diacritic name search fixture',
+    slug: 'public-sao-joao',
+    publicStories: true,
+    isActive: true,
+    createdAt: T1,
+    updatedAt: T1,
+  });
   ids.a = communityA.id as number;
   ids.b = communityB.id as number;
   ids.c = communityC.id as number;
@@ -538,6 +551,7 @@ it('serves the Rails communities index envelope for public active communities on
   expect(cards.map((c: { slug: string }) => c.slug)).toEqual([
     'public-alpha',
     'public-beta',
+    'public-sao-joao',
   ]);
   const alpha = cards[0];
   expect(alpha).toMatchObject({
@@ -580,8 +594,32 @@ it('narrows the communities index by name search', async () => {
   ]);
   expect((await body('/explore/communities?search=zzz')).json.data).toEqual([]);
   expect((await body('/explore/communities?search=')).json.data).toHaveLength(
-    2
+    3
   );
+});
+
+it('searches community names Unicode-correctly (#192)', async () => {
+  // Case-insensitive, accent-sensitive: the uppercase needle matches the
+  // stored name under the shared NFC + lower-case contract, the ASCII-only
+  // transcription does not.
+  const saoJoao = encodeURIComponent('SÃO JOÃO');
+  expect(
+    (await body(`/explore/communities?search=${saoJoao}`)).json.data.map(
+      (c: { slug: string }) => c.slug
+    )
+  ).toEqual(['public-sao-joao']);
+  // Composed and decomposed forms match the same rows.
+  const saoNfd = encodeURIComponent('são'.normalize('NFD'));
+  expect(
+    (await body(`/explore/communities?search=${saoNfd}`)).json.data.map(
+      (c: { slug: string }) => c.slug
+    )
+  ).toEqual(['public-sao-joao']);
+  // Accent-sensitive on purpose: "sao" does not match "São".
+  expect((await body('/explore/communities?search=sao')).json.data).toEqual([]);
+  // LIKE wildcards are literal characters, not patterns.
+  expect((await body('/explore/communities?search=%')).json.data).toEqual([]);
+  expect((await body('/explore/communities?search=_')).json.data).toEqual([]);
 });
 
 it('answers community show with the Rails detail shape', async () => {

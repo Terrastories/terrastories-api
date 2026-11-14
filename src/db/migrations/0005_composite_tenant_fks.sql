@@ -17,6 +17,21 @@
 -- rolled back and NOT recorded. This migration never drops or repairs rows;
 -- repair the data first, then re-run.
 --
+-- RUNNER ATOMICITY / CRASH SAFETY: some runners execute this file one
+-- statement at a time without a wrapping transaction (wrangler d1 migrations
+-- gives no cross-statement guarantee this file may rely on; the Drizzle
+-- better-sqlite3 migrator and every D1 batch ARE transactional per run, and
+-- the Drizzle PostgreSQL migrator wraps each run in a transaction). The file
+-- is therefore safe without a runner transaction:
+-- 1. The guard table is re-entrant: it is dropped (IF EXISTS) before being
+--    created, so a re-run after an aborted attempt never dies on "table
+--    already exists", and it is dropped again as soon as the check passes.
+-- 2. The cross-community check runs BEFORE any RENAME/DROP of a real table
+--    (the unique-index creations ahead of it are additive), so the expected
+--    failure path leaves the production tables, rows, and their names
+--    untouched; after repairing the data, re-running applies the migration
+--    from the start.
+--
 -- D1 note: this migration deliberately uses no PRAGMA statements (D1 only
 -- supports PRAGMA defer_foreign_keys), so table rebuilds are ordered to keep
 -- every statement valid under immediate foreign-key enforcement:
@@ -25,6 +40,13 @@
 -- tables and community_media are rebuilt against it, and only then is
 -- stories_old dropped and the regular stories indexes recreated (their names
 -- stay attached to stories_old until it is dropped).
+--
+-- Foreign keys inside the rebuilt tables carry the same CONSTRAINT names the
+-- Drizzle schema and meta/0005_snapshot.json declare (SQLite keeps them in
+-- sqlite_master even though PRAGMA foreign_key_list does not expose names),
+-- so the applied database and the snapshot cannot drift apart on names.
+DROP TABLE IF EXISTS `_186_cross_community_guard`;
+--> statement-breakpoint
 CREATE TABLE `_186_cross_community_guard` (
 	`cross_community_rows` integer NOT NULL CHECK (`cross_community_rows` = 0)
 );
@@ -88,9 +110,9 @@ CREATE TABLE `stories` (
 	`interviewer_id` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
-	FOREIGN KEY (`community_id`) REFERENCES `communities`(`id`) ON UPDATE no action ON DELETE no action,
-	FOREIGN KEY (`community_id`,`interview_location_id`) REFERENCES `places`(`community_id`,`id`) ON UPDATE no action ON DELETE no action,
-	FOREIGN KEY (`community_id`,`interviewer_id`) REFERENCES `speakers`(`community_id`,`id`) ON UPDATE no action ON DELETE no action
+	CONSTRAINT `stories_community_id_communities_id_fk` FOREIGN KEY (`community_id`) REFERENCES `communities`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT `stories_interview_location_community_fk` FOREIGN KEY (`community_id`,`interview_location_id`) REFERENCES `places`(`community_id`,`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT `stories_interviewer_community_fk` FOREIGN KEY (`community_id`,`interviewer_id`) REFERENCES `speakers`(`community_id`,`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 INSERT INTO `stories` (`id`,`title`,`description`,`slug`,`community_id`,`created_by`,`is_restricted`,`privacy_level`,`media_urls`,`image_url`,`audio_url`,`language`,`tags`,`date_interviewed`,`interview_location_id`,`interviewer_id`,`created_at`,`updated_at`)
@@ -107,8 +129,8 @@ CREATE TABLE `story_places_new` (
 	`sort_order` integer DEFAULT 0,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
-	FOREIGN KEY (`community_id`,`story_id`) REFERENCES `stories`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`community_id`,`place_id`) REFERENCES `places`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade
+	CONSTRAINT `story_places_story_community_fk` FOREIGN KEY (`community_id`,`story_id`) REFERENCES `stories`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade,
+	CONSTRAINT `story_places_place_community_fk` FOREIGN KEY (`community_id`,`place_id`) REFERENCES `places`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
 INSERT INTO `story_places_new` (`id`,`community_id`,`story_id`,`place_id`,`cultural_context`,`sort_order`,`created_at`,`updated_at`)
@@ -131,8 +153,8 @@ CREATE TABLE `story_speakers_new` (
 	`sort_order` integer DEFAULT 0,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
-	FOREIGN KEY (`community_id`,`story_id`) REFERENCES `stories`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`community_id`,`speaker_id`) REFERENCES `speakers`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade
+	CONSTRAINT `story_speakers_story_community_fk` FOREIGN KEY (`community_id`,`story_id`) REFERENCES `stories`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade,
+	CONSTRAINT `story_speakers_speaker_community_fk` FOREIGN KEY (`community_id`,`speaker_id`) REFERENCES `speakers`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
 INSERT INTO `story_speakers_new` (`id`,`community_id`,`story_id`,`speaker_id`,`story_role`,`sort_order`,`created_at`,`updated_at`)
@@ -150,8 +172,8 @@ CREATE TABLE `community_media_new` (
 	`file_id` text PRIMARY KEY NOT NULL,
 	`community_id` integer NOT NULL,
 	`kind` text NOT NULL,
-	FOREIGN KEY (`community_id`) REFERENCES `communities`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`community_id`,`file_id`) REFERENCES `files`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade,
+	CONSTRAINT `community_media_community_id_communities_id_fk` FOREIGN KEY (`community_id`) REFERENCES `communities`(`id`) ON UPDATE no action ON DELETE cascade,
+	CONSTRAINT `community_media_file_community_fk` FOREIGN KEY (`community_id`,`file_id`) REFERENCES `files`(`community_id`,`id`) ON UPDATE no action ON DELETE cascade,
 	CONSTRAINT `community_media_kind_check` CHECK (`kind` = 'branding')
 );
 --> statement-breakpoint

@@ -167,6 +167,28 @@ export class RequiredFieldError extends ValidationError {
   }
 }
 
+export type InvalidDescriptionReason =
+  | 'INVALID_TYPE'
+  | 'INVALID_HREF'
+  | 'MAX_LENGTH_EXCEEDED';
+
+/**
+ * Typed validation error for SPEC-V2 §6.9 description rules.
+ * Never carries description content, plain-text projection, or offending href values.
+ */
+export class InvalidDescriptionError extends ValidationError {
+  public readonly reason: InvalidDescriptionReason;
+
+  constructor(
+    reason: InvalidDescriptionReason,
+    message: string,
+    context?: { maxLength?: number; actualLength?: number }
+  ) {
+    super(message, context);
+    this.reason = reason;
+  }
+}
+
 // Authentication Errors (401)
 export class InvalidCredentialsError extends AuthenticationError {
   constructor() {

@@ -352,7 +352,41 @@ describe('§6.4a read-rules table (#190): §6.7 owner grant', () => {
     // null-community profile-photo exception); the per-record owner
     // flag — never the column — carries the grant.
     for (const viewer of READ_RULE_VIEWERS) {
-      expect(userProfileMedia(viewer, true)).toBe('visible');
+      const ownerCapable =
+        viewer !== 'anonymous-public' && viewer !== 'other-community';
+      expect(userProfileMedia(viewer, true)).toBe(
+        ownerCapable ? 'visible' : 'hidden'
+      );
+    }
+  });
+
+  it('never grants the owner flag to anonymous, other-community, unknown or non-boolean input', () => {
+    for (const viewer of [
+      'anonymous-public',
+      'other-community',
+      'unknown',
+      '',
+    ]) {
+      expect(
+        readRuleOutcome({
+          resource: 'media',
+          association: 'user-profile',
+          viewer: viewer as never,
+          privacyEvidence: 'clear',
+          viewerIsOwner: true,
+        })
+      ).toBe('hidden');
+    }
+    for (const flag of [1, 'true', {}, null, undefined]) {
+      expect(
+        readRuleOutcome({
+          resource: 'media',
+          association: 'user-profile',
+          viewer: 'own-viewer',
+          privacyEvidence: 'clear',
+          viewerIsOwner: flag as never,
+        })
+      ).toBe('hidden');
     }
   });
 

@@ -32,7 +32,7 @@
  *   media row), and the REQUIRED `viewerIsOwner` input of
  *   `readRuleOutcome` carries that per-record relationship. The owner
  *   is not a viewer column; the flag resolves exactly those rows to
- *   `visible` and is ignored on every other row, so it never widens.
+ *   `visible` (for its owner only) and is ignored on every other row.
  */
 
 export const READ_RULE_VIEWERS = [
@@ -342,8 +342,8 @@ export const READ_RULE_REQUIRED_AUTHORITIES = {
  * anonymous caller is never the owner — carried by the REQUIRED
  * `viewerIsOwner` input of `readRuleOutcome`, never a viewer column.
  * `readRuleOutcome` resolves exactly these rows to `visible` for the
- * owner and ignores the flag on every other row, so it cannot widen a
- * cell.
+ * owner and ignores the flag on every other row; it widens only the
+ * granted rows, and only for their owner.
  */
 export const READ_RULE_OWNER_GRANTS = {
   media: ['user-profile'],
@@ -413,8 +413,9 @@ export interface ReadRuleInput {
    * attaches to). The caller resolves the relationship from the
    * session — an anonymous caller is never the owner. It resolves
    * exactly the `READ_RULE_OWNER_GRANTS` rows to `visible` and is
-   * ignored on every other row; a missing or non-boolean value from an
-   * untyped caller is falsy and fails closed to the ordinary cell.
+   * ignored on every other row. Only a strict `true` together with an
+   * owner-capable viewer column (own-* or super-admin) counts; anything
+   * else fails closed to the ordinary cell.
    */
   viewerIsOwner: boolean;
 }
@@ -425,6 +426,17 @@ export interface ReadRuleInput {
  * or viewers fail closed to `hidden`; community gates (§4/§6.1) remain
  * the caller's separate precondition.
  */
+// Owner-capable columns: own-community accounts, plus super-admin for the
+// null-community profile-photo exception (§6.7). Never anonymous or
+// other-community.
+const OWNER_VIEWERS: ReadonlySet<string> = new Set([
+  'super-admin',
+  'own-viewer',
+  'own-member',
+  'own-editor',
+  'own-admin',
+]);
+
 export function readRuleOutcome(input: ReadRuleInput): ReadRuleOutcome {
   // #162 first, over every cell: the guard is `!== 'clear'`, not
   // `=== 'restricted'`, so restricted rows, unevidenced rows AND any
@@ -437,9 +449,13 @@ export function readRuleOutcome(input: ReadRuleInput): ReadRuleOutcome {
   // hidden even for its owner (#162 wins, fail closed), and the owner
   // of a granted row needs no authority — exactly the
   // READ_RULE_OWNER_GRANTS rows resolve to `visible`, never any other
-  // row, so the flag cannot widen a cell.
+  // row; it widens only those rows, and only for their owner.
+  // The grant needs a strict boolean true AND an owner-capable viewer
+  // column, so an anonymous, other-community or unknown viewer never
+  // receives it (fail closed).
   if (
-    input.viewerIsOwner &&
+    input.viewerIsOwner === true &&
+    OWNER_VIEWERS.has(input.viewer) &&
     isOwnerGranted(input.resource, input.association)
   ) {
     return 'visible';

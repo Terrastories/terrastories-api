@@ -169,8 +169,11 @@ export class RequiredFieldError extends ValidationError {
 
 export type InvalidDescriptionReason =
   | 'INVALID_TYPE'
+  | 'INVALID_UNICODE'
   | 'INVALID_HREF'
-  | 'MAX_LENGTH_EXCEEDED';
+  | 'MAX_LENGTH_EXCEEDED'
+  | 'INPUT_TOO_LARGE'
+  | 'TOO_COMPLEX';
 
 /**
  * Typed validation error for SPEC-V2 §6.9 description rules.

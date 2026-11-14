@@ -12,11 +12,12 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { eq } from 'drizzle-orm';
+import { eq, getTableColumns, getTableName, is } from 'drizzle-orm';
 import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
 import { migrate as migrateSqlite } from 'drizzle-orm/better-sqlite3/migrator';
 import { drizzle as drizzlePostgres } from 'drizzle-orm/postgres-js';
 import { migrate as migratePostgres } from 'drizzle-orm/postgres-js/migrator';
+import { SQLiteTable, SQLiteTimestamp } from 'drizzle-orm/sqlite-core';
 import postgres from 'postgres';
 import { createPostgresClient } from '../src/db/index.js';
 import {
@@ -29,6 +30,7 @@ const rootDir = process.cwd();
 const { runHonoFoundationContract } = await import(
   './hono-foundation-contract.js'
 );
+const schemaIndex = await import('../src/db/schema/index.js');
 const sqliteMigrations = path.join(rootDir, 'src/db/migrations');
 const postgresMigrations = path.join(sqliteMigrations, 'postgres');
 const backend = process.argv[2];
@@ -715,6 +717,108 @@ async function verifySqliteApplicationDates(
   assert.equal(user.updatedAt.getTime(), timestamp(fixture.user.updatedAt));
 }
 
+/**
+ * #192: the Drizzle SQLite timestamp MODE lives only in the TypeScript
+ * schema — both modes are plain `integer` columns, invisible to PRAGMA and
+ * to the snapshot the drift gate compares against. Enumerate every
+ * timestamp-mode integer column from the live schema objects (every
+ * `*Sqlite` table exported by src/db/schema) and pin it to 'timestamp_ms',
+ * so a future column or table added with mode 'timestamp' fails here. Also
+ * proves structurally that plain integer columns such as
+ * sessions.expires_at are NOT timestamp columns and can never need 0006.
+ */
+function verifySqliteTimestampModes(): Array<{
+  table: string;
+  column: string;
+}> {
+  const columns: Array<{ table: string; column: string }> = [];
+  for (const [exportName, value] of Object.entries(schemaIndex)) {
+    if (!exportName.endsWith('Sqlite') || !is(value, SQLiteTable)) continue;
+    for (const column of Object.values(getTableColumns(value))) {
+      if (!is(column, SQLiteTimestamp)) continue;
+      assert.equal(
+        column.mode,
+        'timestamp_ms',
+        `${exportName}.${column.name} must be Drizzle mode timestamp_ms (#192)`
+      );
+      columns.push({ table: getTableName(value), column: column.name });
+    }
+  }
+  // Ten tables carry timestamps (attachments, communities, files, places,
+  // speakers, stories, story_places, story_speakers, themes, users) with 24
+  // columns; the bound keeps a deleted export from silently shrinking the
+  // enumeration to the set the migration happens to cover.
+  assert.equal(
+    columns.length,
+    24,
+    'the schema must expose 24 timestamp columns'
+  );
+  return columns;
+}
+
+/**
+ * #192: 0006 must convert exactly the schema's timestamp_ms columns, every
+ * statement shaped as the guarded seconds-only conversion. A forgotten
+ * column (still seconds, i.e. 1970 dates) or a smuggled non-timestamp
+ * column fails this set equality.
+ */
+async function verifySqliteMigrationColumnSet(
+  schemaColumns: Array<{ table: string; column: string }>
+): Promise<void> {
+  const source = await readFile(
+    path.join(sqliteMigrations, '0006_ms_timestamps.sql'),
+    'utf8'
+  );
+  const statementShape =
+    /^UPDATE `([a-z_]+)` SET `([a-z_]+)` = `\2` \* 1000 WHERE `\2` IS NOT NULL AND abs\(`\2`\) < 100000000000;?$/;
+  const migrated: string[] = [];
+  for (const statement of splitStatements(source)) {
+    // The file's first entry carries the header comment block; statements
+    // themselves are single UPDATE lines.
+    const stripped = statement
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('--'))
+      .join(' ')
+      .trim();
+    const match = stripped.match(statementShape);
+    assert.ok(
+      match,
+      `0006 statements must be guarded seconds-only conversions: ${statement}`
+    );
+    migrated.push(`${match[1]}.${match[2]}`);
+  }
+  assert.deepEqual(
+    migrated.sort(),
+    schemaColumns.map((column) => `${column.table}.${column.column}`).sort(),
+    '0006 must convert exactly the schema timestamp_ms column set'
+  );
+}
+
+/**
+ * #192: after the upgrade every stored timestamp must be in the millisecond
+ * range, on every timestamp column of every table — using the same
+ * plainly-seconds bound as 0006's guard. A table the migration forgot fails
+ * here even when it holds no fixture row to compare exactly (attachments,
+ * themes).
+ */
+function verifySqliteStoredMilliseconds(
+  sqlite: Database.Database,
+  columns: Array<{ table: string; column: string }>
+): void {
+  for (const { table, column } of columns) {
+    const row = sqlite
+      .prepare(
+        `SELECT count(*) AS seconds FROM ${table} WHERE ${column} IS NOT NULL AND abs(${column}) < 100000000000`
+      )
+      .get() as any;
+    assert.equal(
+      row.seconds,
+      0,
+      `${table}.${column} must hold Unix milliseconds after migration 0006 (#192)`
+    );
+  }
+}
+
 function verifySqlitePreservation(sqlite: Database.Database): void {
   const community = sqlite
     .prepare(
@@ -752,7 +856,7 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
 
   const place = sqlite
     .prepare(
-      'SELECT id, community_id, latitude, longitude, media_urls, is_restricted FROM places WHERE id = 1'
+      'SELECT id, community_id, latitude, longitude, media_urls, is_restricted, created_at, updated_at FROM places WHERE id = 1'
     )
     .get() as any;
   assert.equal(place.id, fixture.places[0].id);
@@ -761,26 +865,54 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
   assert.equal(place.longitude, fixture.places[0].longitude);
   assert.deepEqual(JSON.parse(place.media_urls), fixture.places[0].mediaUrls);
   assert.equal(place.is_restricted, 1);
+  // #192: every seeded table's raw storage is the same instant in
+  // milliseconds (the seed wrote seconds; migration 0006 multiplied).
+  assert.equal(
+    place.created_at,
+    sqliteTimestamp('2024-02-01T10:00:00.000Z') * 1000
+  );
+  assert.equal(
+    place.updated_at,
+    sqliteTimestamp('2025-06-01T10:00:00.000Z') * 1000
+  );
 
   const story = sqlite
     .prepare(
-      'SELECT id, community_id, created_by, is_restricted FROM stories WHERE id = 1'
+      'SELECT id, community_id, created_by, is_restricted, created_at, updated_at FROM stories WHERE id = 1'
     )
     .get() as any;
   assert.equal(story.id, fixture.story.id);
   assert.equal(story.community_id, fixture.story.communityId);
   assert.equal(story.created_by, fixture.story.createdBy);
   assert.equal(story.is_restricted, 1);
+  assert.equal(
+    story.created_at,
+    sqliteTimestamp('2024-04-01T10:00:00.000Z') * 1000
+  );
+  assert.equal(
+    story.updated_at,
+    sqliteTimestamp('2025-06-05T10:00:00.000Z') * 1000
+  );
 
   const speaker = sqlite
-    .prepare('SELECT id, community_id FROM speakers WHERE id = 1')
+    .prepare(
+      'SELECT id, community_id, created_at, updated_at FROM speakers WHERE id = 1'
+    )
     .get() as any;
   assert.equal(speaker.id, fixture.speaker.id);
   assert.equal(speaker.community_id, fixture.speaker.communityId);
+  assert.equal(
+    speaker.created_at,
+    sqliteTimestamp('2024-03-01T10:00:00.000Z') * 1000
+  );
+  assert.equal(
+    speaker.updated_at,
+    sqliteTimestamp('2025-06-04T10:00:00.000Z') * 1000
+  );
 
   const file = sqlite
     .prepare(
-      'SELECT id, community_id, uploaded_by, metadata, is_active FROM files WHERE id = ?'
+      'SELECT id, community_id, uploaded_by, metadata, is_active, created_at, updated_at FROM files WHERE id = ?'
     )
     .get(fixture.file.id) as any;
   assert.equal(file.id, fixture.file.id);
@@ -788,31 +920,51 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
   assert.equal(file.uploaded_by, fixture.file.uploadedBy);
   assert.deepEqual(JSON.parse(file.metadata), fixture.file.metadata);
   assert.equal(file.is_active, 1);
+  assert.equal(
+    file.created_at,
+    sqliteTimestamp('2024-04-02T10:00:00.000Z') * 1000
+  );
+  assert.equal(
+    file.updated_at,
+    sqliteTimestamp('2025-06-06T10:00:00.000Z') * 1000
+  );
 
   const storyPlace = sqlite
     .prepare(
-      'SELECT id, story_id, place_id, sort_order FROM story_places WHERE id = 1'
+      'SELECT id, story_id, place_id, sort_order, created_at, updated_at FROM story_places WHERE id = 1'
     )
     .get() as any;
-  assert.deepEqual(storyPlace, {
-    id: fixture.storyPlace.id,
-    story_id: fixture.storyPlace.storyId,
-    place_id: fixture.storyPlace.placeId,
-    sort_order: 0,
-  });
+  assert.equal(storyPlace.id, fixture.storyPlace.id);
+  assert.equal(storyPlace.story_id, fixture.storyPlace.storyId);
+  assert.equal(storyPlace.place_id, fixture.storyPlace.placeId);
+  assert.equal(storyPlace.sort_order, 0);
+  assert.equal(
+    storyPlace.created_at,
+    sqliteTimestamp('2024-04-03T10:00:00.000Z') * 1000
+  );
+  assert.equal(
+    storyPlace.updated_at,
+    sqliteTimestamp('2025-06-07T10:00:00.000Z') * 1000
+  );
 
   const storySpeaker = sqlite
     .prepare(
-      'SELECT id, story_id, speaker_id, story_role, sort_order FROM story_speakers WHERE id = 1'
+      'SELECT id, story_id, speaker_id, story_role, sort_order, created_at, updated_at FROM story_speakers WHERE id = 1'
     )
     .get() as any;
-  assert.deepEqual(storySpeaker, {
-    id: fixture.storySpeaker.id,
-    story_id: fixture.storySpeaker.storyId,
-    speaker_id: fixture.storySpeaker.speakerId,
-    story_role: 'narrator',
-    sort_order: 0,
-  });
+  assert.equal(storySpeaker.id, fixture.storySpeaker.id);
+  assert.equal(storySpeaker.story_id, fixture.storySpeaker.storyId);
+  assert.equal(storySpeaker.speaker_id, fixture.storySpeaker.speakerId);
+  assert.equal(storySpeaker.story_role, 'narrator');
+  assert.equal(storySpeaker.sort_order, 0);
+  assert.equal(
+    storySpeaker.created_at,
+    sqliteTimestamp('2024-04-04T10:00:00.000Z') * 1000
+  );
+  assert.equal(
+    storySpeaker.updated_at,
+    sqliteTimestamp('2025-06-08T10:00:00.000Z') * 1000
+  );
 }
 
 async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
@@ -1984,6 +2136,8 @@ async function runSqliteGate(): Promise<void> {
   process.env.DATABASE_URL = './dual-backend-ci.db';
   console.log('🪶 SQLite/D1-compatible integration gate');
   await verifyStaticPortabilityContract();
+  const timestampColumns = verifySqliteTimestampModes();
+  await verifySqliteMigrationColumnSet(timestampColumns);
 
   console.log('  1/5 fresh migration + shared repository contract');
   const freshSqlite = new Database(':memory:');
@@ -2013,6 +2167,22 @@ async function runSqliteGate(): Promise<void> {
   verifySqliteSchema(upgradeSqlite);
   verifySqliteSnapshotDrift(upgradeSqlite, 'previous-release upgrade');
   verifySqlitePreservation(upgradeSqlite);
+  verifySqliteStoredMilliseconds(upgradeSqlite, timestampColumns);
+  await verifySqliteApplicationDates(upgradeDb);
+
+  // #192 re-entrancy: re-running 0006 on the fully converted database (the
+  // realistic dates seeded above) must change nothing — the unit guard
+  // multiplies only plainly-seconds values. Mirror a stepwise runner by
+  // executing the statements directly, outside any migration journal.
+  const msTimestampsSource = await readFile(
+    path.join(sqliteMigrations, '0006_ms_timestamps.sql'),
+    'utf8'
+  );
+  for (const statement of splitStatements(msTimestampsSource)) {
+    upgradeSqlite.exec(statement);
+  }
+  verifySqlitePreservation(upgradeSqlite);
+  verifySqliteStoredMilliseconds(upgradeSqlite, timestampColumns);
   await verifySqliteApplicationDates(upgradeDb);
   upgradeSqlite.close();
 

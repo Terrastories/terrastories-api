@@ -1,10 +1,10 @@
 /**
  * Shared search normalization contract (#192, SPEC-V2 §6.2): application
  * case-comparison for Explore community-name search. The contract, stated
- * on its own: the key is NFC-composed, simple Unicode-lowercased, then NFC
- * re-composed (lowercasing itself can emit decomposed output);
- * accent-sensitive (a base letter without its mark does not match); no
- * full case folding. Both SQLite/D1 (`lower()` folds ASCII only) and
+ * on its own: the key is NFC-composed, lowercased with the ECMAScript
+ * default mapping, final sigma folded to σ, then NFC re-composed
+ * (lowercasing itself can emit decomposed output); accent-sensitive (a base
+ * letter without its mark does not match); no other case folding. Both SQLite/D1 (`lower()` folds ASCII only) and
  * PostgreSQL must agree on the result, so the folding happens in
  * application code — the old PostgreSQL path folded case with
  * collation-dependent ILIKE — under the same contract as tags (SPEC-V2
@@ -42,18 +42,26 @@ describe('normalizeSearchText', () => {
     expect(normalizeSearchText('T\u0308')).toBe(normalizeSearchText('\u1E97'));
   });
 
-  it('keeps simple lowercase: no full case folding', () => {
+  it('folds final sigma so a same-case Greek prefix matches', () => {
+    // toLowerCase() maps a word-final Σ to ς but a medial Σ to σ; the key
+    // folds ς to σ so the needle and the haystack agree.
+    expect(containsNormalized('ΑΣΑ', 'ΑΣ')).toBe(true);
+    expect(normalizeSearchText('ΟΔΟΣ')).toBe('οδοσ');
+  });
+
+  it('applies no Unicode case folding beyond the sigma fold', () => {
     // Full case folding would map U+1E9B (LATIN SMALL LETTER LONG S WITH
-    // DOT ABOVE) to U+1E61 (ṡ); simple lowercase leaves it alone.
+    // DOT ABOVE) to U+1E61 (ṡ); toLowerCase() leaves it alone.
     expect(normalizeSearchText('\u1E9B')).toBe('\u1E9B');
     expect(containsNormalized('\u1E9B', 'ṡ')).toBe(false);
   });
 
-  it('applies no special İ mapping (documented limitation)', () => {
+  it('keeps the default İ lowercase mapping (documented limitation)', () => {
     // "İ" (U+0130) lowercases to decomposed "i" + U+0307, which NFC never
     // composes back to a plain "i", so "İnstituto" does NOT contain
-    // "instituto". Simple lowercase only — this limitation is documented,
-    // not fixed with case folding.
+    // "instituto". This is the ECMAScript default (full, locale-independent)
+    // lowercase; the limitation is documented in SPEC-V2 §6.3, not fixed
+    // with case folding.
     expect(containsNormalized('İnstituto', 'instituto')).toBe(false);
     expect(containsNormalized('instituto', 'İnstituto')).toBe(false);
     expect(normalizeSearchText('İnstituto')).not.toContain('instituto');

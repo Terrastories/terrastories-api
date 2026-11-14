@@ -43,6 +43,8 @@ const neverExposed = [
   'Restricted River',
   'Unknown Privacy',
   'Edge To Restricted',
+  'São Félix Privado',
+  'São Gabriel Inativo',
 ];
 
 /**
@@ -112,8 +114,7 @@ const seed = async () => {
   });
   // #192: a public active community whose name carries composed diacritics —
   // the case the SQLite lower() fold cannot reach in the database, so the
-  // V2 contract normalizes in application code instead. updatedAt T1 keeps
-  // it last in the newest-update-first index order.
+  // V2 contract normalizes in application code instead.
   await insert(tables.communities, {
     name: 'Comunidade São João',
     description: 'Diacritic name search fixture',

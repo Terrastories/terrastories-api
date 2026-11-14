@@ -148,9 +148,9 @@ export class ExploreAdapterRepository {
    * (Rails parity), so filtering it costs no more than serving the
    * unfiltered list — with name search applied in application code under
    * the application-defined case-comparison contract stated in
-   * src/shared/utils/search-normalize.ts: NFC-composed, simple Unicode
-   * lowercase, re-composed; accent-sensitive (a base letter without its
-   * mark does not match); no full case folding. Unicode-correct on both
+   * src/shared/utils/search-normalize.ts: NFC-composed, default ECMAScript
+   * lowercase, final sigma folded, re-composed; accent-sensitive (a base
+   * letter without its mark does not match); no other case folding. Unicode-correct on both
    * backends (SQLite/D1 `lower()` folds ASCII only; the old PostgreSQL
    * path folded with collation-dependent ILIKE), and literal (`%`/`_` are
    * plain characters, not LIKE wildcards). The needle key is normalized

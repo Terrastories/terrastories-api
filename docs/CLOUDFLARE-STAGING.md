@@ -42,10 +42,22 @@ and roadmap Phase 9; this document does not declare a release ready.
    platform while retaining PostgreSQL and offline SQLite support.
 2. Pin Wrangler locally and commit a reviewed `wrangler.jsonc` with an isolated
    `staging` environment: dedicated Worker name, D1 `DB` and R2 `MEDIA` bindings,
-   compatibility date/flags, and `NODE_ENV=production`. These binding names are
+   compatibility date/flags, and `ENVIRONMENT` unset (unset means production —
+   the strictest rules). The configuration gate (#150,
+   `docs/OPERATIONS-GOVERNANCE.md`) then requires a real `PUBLIC_ORIGIN` in the
+   staging `vars` — the deployed workers.dev URL or custom origin — and refuses
+   to serve (`503 {"code":"config-refused"}` on every route, including
+   `/health`) while the committed `https://example.org` template or a missing
+   origin remains. Set `CORS_ORIGINS` only if a second origin needs credentialed
+   access. These binding names are
    proposed until the adapters define their contract. Do not bind production
    data. Use a workers.dev URL; do not change DNS. Confirm the intended account
    and resource costs before creating anything; paid resources need approval.
+   Local `wrangler dev` must not carry staging values: put
+   `ENVIRONMENT=development` and a local `PUBLIC_ORIGIN` (a loopback origin,
+   or empty to unset it — the committed template's `https://example.org` is
+   refused in every mode) in a gitignored `.dev.vars` file; Wrangler loads
+   `.dev.vars` only for local development, never for deploys.
 3. Supply `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` through the operator
    environment. Supply application secrets through Wrangler secrets; never
    commit their values. With production mode selected (explicitly or by an unset runtime mode), Node
@@ -154,3 +166,4 @@ resources. No teardown has been performed by this change.
 - [Node.js compatibility](https://developers.cloudflare.com/workers/runtime-apis/nodejs/)
 - [Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/)
 - [Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
+- [Local development variables (`.dev.vars`)](https://developers.cloudflare.com/workers/local-development/environment-variables/)

@@ -574,6 +574,105 @@ function verifySqliteSchema(sqlite: Database.Database): void {
   assert.ok(placeFks.some((row) => row.table === 'communities'));
   assert.ok(userFks.some((row) => row.table === 'communities'));
   assert.ok(themeFks.some((row) => row.table === 'communities'));
+
+  // #186: composite tenant FKs on the rebuilt tables, the backfilled
+  // community_id columns, and the composite parent keys.
+  for (const table of ['story_places', 'story_speakers']) {
+    const columns = columnNames(
+      sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]
+    );
+    assert.ok(
+      columns.has('community_id'),
+      `missing ${table}.community_id after the #186 rebuild`
+    );
+  }
+  for (const [table, indexName] of [
+    ['places', 'places_community_id_id_unique'],
+    ['speakers', 'speakers_community_id_id_unique'],
+    ['stories', 'stories_community_id_id_unique'],
+    ['files', 'files_community_id_id_unique'],
+  ] as const) {
+    const indexes = sqlite
+      .prepare(`PRAGMA index_list(${table})`)
+      .all() as any[];
+    const unique = indexes.find((row) => String(row.name) === indexName);
+    assert.ok(unique, `missing SQLite composite parent key ${indexName}`);
+    assert.equal(Number(unique.unique), 1, `${indexName} must be unique`);
+  }
+
+  const compositeTenantFk = (
+    table: string,
+    parentTable: string,
+    fromColumns: string[],
+    onDelete: string
+  ): void => {
+    const rows = sqlite
+      .prepare(`PRAGMA foreign_key_list(${table})`)
+      .all() as any[];
+    const groups = new Map<number, any[]>();
+    for (const row of rows) {
+      if (row.table !== parentTable) continue;
+      const group = groups.get(row.id) ?? [];
+      group.push(row);
+      groups.set(row.id, group);
+    }
+    const matched = [...groups.values()].some((group) => {
+      const ordered = [...group].sort((left, right) => left.seq - right.seq);
+      return (
+        ordered.length === fromColumns.length &&
+        fromColumns.every((column, index) => ordered[index].from === column) &&
+        ordered[0].to === 'community_id' &&
+        ordered[1].to === 'id' &&
+        ordered.every((row) => row.on_delete === onDelete)
+      );
+    });
+    assert.ok(
+      matched,
+      `${table} must reference ${parentTable}(community_id, id) via ${fromColumns.join(', ')} ON DELETE ${onDelete}`
+    );
+  };
+  compositeTenantFk(
+    'story_places',
+    'stories',
+    ['community_id', 'story_id'],
+    'CASCADE'
+  );
+  compositeTenantFk(
+    'story_places',
+    'places',
+    ['community_id', 'place_id'],
+    'CASCADE'
+  );
+  compositeTenantFk(
+    'story_speakers',
+    'stories',
+    ['community_id', 'story_id'],
+    'CASCADE'
+  );
+  compositeTenantFk(
+    'story_speakers',
+    'speakers',
+    ['community_id', 'speaker_id'],
+    'CASCADE'
+  );
+  compositeTenantFk(
+    'stories',
+    'places',
+    ['community_id', 'interview_location_id'],
+    'NO ACTION'
+  );
+  compositeTenantFk(
+    'stories',
+    'speakers',
+    ['community_id', 'interviewer_id'],
+    'NO ACTION'
+  );
+  compositeTenantFk(
+    'community_media',
+    'files',
+    ['community_id', 'file_id'],
+    'CASCADE'
+  );
 }
 
 /**
@@ -782,29 +881,63 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   }
 
   const constraintRows = await client.unsafe(
-    `SELECT conname FROM pg_constraint WHERE connamespace = 'public'::regnamespace`
+    `SELECT conname, pg_get_constraintdef(oid) AS definition
+     FROM pg_constraint WHERE connamespace = 'public'::regnamespace`
   );
-  const constraints = new Set(
-    constraintRows.map((row: any) => String(row.conname))
+  const constraints = new Map(
+    constraintRows.map((row: any) => [
+      String(row.conname),
+      String(row.definition),
+    ])
   );
   for (const constraint of [
     'users_community_id_communities_id_fk',
     'places_community_id_communities_id_fk',
     'speakers_community_id_communities_id_fk',
     'stories_community_id_communities_id_fk',
-    'stories_interview_location_id_places_id_fk',
-    'stories_interviewer_id_speakers_id_fk',
     'files_community_id_communities_id_fk',
     'files_uploaded_by_users_id_fk',
-    'story_places_story_id_stories_id_fk',
-    'story_places_place_id_places_id_fk',
-    'story_speakers_story_id_stories_id_fk',
-    'story_speakers_speaker_id_speakers_id_fk',
     'themes_community_id_communities_id_fk',
+    'community_media_community_id_communities_id_fk',
   ]) {
     assert.ok(
       constraints.has(constraint),
       `missing PostgreSQL FK ${constraint}`
+    );
+  }
+  // #186: composite (community_id, id) tenant foreign keys must exist on both
+  // the fresh schema and the upgraded one, and their definitions must pair
+  // community_id with the referenced id column.
+  for (const [constraint, expectPair] of [
+    ['stories_interview_location_community_fk', 'interview_location_id'],
+    ['stories_interviewer_community_fk', 'interviewer_id'],
+    ['story_places_story_community_fk', 'story_id'],
+    ['story_places_place_community_fk', 'place_id'],
+    ['story_speakers_story_community_fk', 'story_id'],
+    ['story_speakers_speaker_community_fk', 'speaker_id'],
+    ['community_media_file_community_fk', 'file_id'],
+  ] as const) {
+    const definition = constraints.get(constraint);
+    assert.ok(
+      definition,
+      `missing PostgreSQL composite tenant FK ${constraint}`
+    );
+    assert.match(
+      definition,
+      new RegExp(`FOREIGN KEY \\(community_id, ${expectPair}\\)`),
+      `${constraint} must be a composite tenant foreign key`
+    );
+  }
+  // #186: parent keys for the composite FKs.
+  for (const constraint of [
+    'places_community_id_id_unique',
+    'speakers_community_id_id_unique',
+    'stories_community_id_id_unique',
+    'files_community_id_id_unique',
+  ]) {
+    assert.ok(
+      constraints.has(constraint),
+      `missing PostgreSQL composite parent key ${constraint}`
     );
   }
 }

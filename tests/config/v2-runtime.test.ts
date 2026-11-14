@@ -4,6 +4,7 @@ import {
   validateNodeV2Runtime,
   validateV2RuntimeCore,
   validateWorkerV2Runtime,
+  v2RuntimeModeNotice,
 } from '../../src/config/v2-runtime.js';
 
 /** A valid production origin for the happy paths. */
@@ -163,6 +164,19 @@ describe('V2 runtime configuration gate (#150)', () => {
         })
       );
     });
+
+    it('refuses a padded http origin under the opt-in: the parsed origin governs', () => {
+      // The URL parser trims padding, so the exact-origin rule refuses the
+      // value; the Secure-cookie derivation reads the same parse, never a
+      // raw string prefix (PR #229 review).
+      refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'field-kit',
+          HONO_PUBLIC_ORIGIN: ' http://field-kit.local:3000',
+          HONO_ALLOW_PLAIN_HTTP: 'true',
+        })
+      );
+    });
   });
 
   describe('hostname normalization (PR #229 review)', () => {
@@ -191,6 +205,151 @@ describe('V2 runtime configuration gate (#150)', () => {
           HONO_PUBLIC_ORIGIN: origin,
         })
       );
+    });
+  });
+
+  describe('IPv4-mapped IPv6 loopback through full URLs (PR #229 review)', () => {
+    // The URL parser serializes [::ffff:127.0.0.1] as the hex form
+    // [::ffff:7f00:1], so the gate must recognize the hex spelling.
+    it('refuses the canonical hex form as a loopback production origin', () => {
+      const error = refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'production',
+          HONO_PUBLIC_ORIGIN: 'https://[::ffff:7f00:1]',
+        })
+      );
+      expect(error.message).toContain('HONO_PUBLIC_ORIGIN');
+      expect(error.message).toContain('loopback');
+    });
+
+    it('refuses the mapped loopback under the field-kit plain-HTTP opt-in', () => {
+      const error = refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'field-kit',
+          HONO_PUBLIC_ORIGIN: 'http://[::ffff:7f00:1]:3000',
+          HONO_ALLOW_PLAIN_HTTP: 'true',
+        })
+      );
+      expect(error.message).toContain('loopback');
+    });
+
+    it('refuses the dotted-quad spelling for not being the exact origin', () => {
+      // [::ffff:127.0.0.1] is never the serialized form, so the exact-origin
+      // rule catches it before the loopback rule needs to.
+      const error = refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'production',
+          HONO_PUBLIC_ORIGIN: 'https://[::ffff:127.0.0.1]',
+        })
+      );
+      expect(error.message).toContain('HONO_PUBLIC_ORIGIN');
+    });
+
+    it('allows the mapped loopback in development, like every loopback', () => {
+      expect(
+        validateNodeV2Runtime({
+          NODE_ENV: 'development',
+          HONO_PUBLIC_ORIGIN: 'http://[::ffff:7f00:1]:3001',
+        }).publicOrigin
+      ).toBe('http://[::ffff:7f00:1]:3001');
+    });
+
+    it('keeps accepting a mapped non-loopback address', () => {
+      expect(
+        validateNodeV2Runtime({
+          NODE_ENV: 'field-kit',
+          HONO_PUBLIC_ORIGIN: 'http://[::ffff:6501:203]:3000',
+          HONO_ALLOW_PLAIN_HTTP: 'true',
+        }).publicOrigin
+      ).toBe('http://[::ffff:6501:203]:3000');
+    });
+  });
+
+  describe('unspecified bind-any hosts (PR #229 review)', () => {
+    it.each(['https://0.0.0.0', 'https://[::]'])(
+      'refuses %s as a production origin',
+      (origin) => {
+        const error = refusal(() =>
+          validateNodeV2Runtime({
+            NODE_ENV: 'production',
+            HONO_PUBLIC_ORIGIN: origin,
+          })
+        );
+        expect(error.message).toContain('HONO_PUBLIC_ORIGIN');
+        expect(error.message).toContain('unspecified');
+      }
+    );
+  });
+
+  describe('relaxed modes cannot hide behind a deployed origin (PR #229 review)', () => {
+    it.each(['development', 'test'] as const)(
+      'refuses NODE_ENV=%s with an https non-loopback origin',
+      (NODE_ENV) => {
+        const error = refusal(() =>
+          validateNodeV2Runtime({
+            NODE_ENV,
+            HONO_PUBLIC_ORIGIN: okOrigin,
+          })
+        );
+        expect(error.message).toContain('HONO_PUBLIC_ORIGIN');
+        expect(error.message).toContain('production deployment signal');
+        expect(error.message).toContain('NODE_ENV');
+      }
+    );
+
+    it('refuses the same signal on the Workers binding set', () => {
+      const error = refusal(() =>
+        validateWorkerV2Runtime({
+          DB: {},
+          MEDIA: {},
+          ENVIRONMENT: 'development',
+          PUBLIC_ORIGIN: okOrigin,
+        } as unknown as Parameters<typeof validateWorkerV2Runtime>[0])
+      );
+      expect(error.message).toContain('PUBLIC_ORIGIN');
+      expect(error.message).toContain('ENVIRONMENT');
+    });
+
+    it('still accepts development on a loopback https origin', () => {
+      expect(
+        validateNodeV2Runtime({
+          NODE_ENV: 'development',
+          HONO_PUBLIC_ORIGIN: 'https://localhost:8443',
+        }).publicOrigin
+      ).toBe('https://localhost:8443');
+    });
+
+    it('still accepts development with no origin at all', () => {
+      expect(
+        validateNodeV2Runtime({ NODE_ENV: 'development' }).publicOrigin
+      ).toBeUndefined();
+    });
+
+    it('exposes a one-line content-free mode marker for relaxed modes only', () => {
+      const dev = v2RuntimeModeNotice(
+        validateNodeV2Runtime({ NODE_ENV: 'development' })
+      );
+      expect(dev).toContain('development');
+      expect(
+        v2RuntimeModeNotice(validateNodeV2Runtime({ NODE_ENV: 'test' }))
+      ).toContain('test');
+      expect(
+        v2RuntimeModeNotice(
+          validateNodeV2Runtime({
+            NODE_ENV: 'production',
+            HONO_PUBLIC_ORIGIN: okOrigin,
+          })
+        )
+      ).toBeUndefined();
+      expect(
+        v2RuntimeModeNotice(
+          validateNodeV2Runtime({
+            NODE_ENV: 'field-kit',
+            HONO_PUBLIC_ORIGIN: 'http://field-kit.local:3000',
+            HONO_ALLOW_PLAIN_HTTP: 'true',
+          })
+        )
+      ).toBeUndefined();
     });
   });
 

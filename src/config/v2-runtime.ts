@@ -78,6 +78,21 @@ const LOOPBACK_HOSTNAMES: readonly string[] = [
   '[::1]',
 ];
 
+/**
+ * Unspecified bind-any hosts (`0.0.0.0`, `[::]`): valid bind addresses,
+ * never a deployment origin — accepting one would silently break cookie
+ * and CORS scoping instead of failing closed.
+ */
+const UNSPECIFIED_HOSTNAMES: readonly string[] = ['0.0.0.0', '[::]'];
+
+/**
+ * Canonical IPv4-mapped IPv6 loopback (127/8) hostnames. The WHATWG URL
+ * parser serializes `http://[::ffff:127.0.0.1]` as the hex-piece form
+ * `[::ffff:7f00:1]` — never dotted quad — so only hex forms can reach this
+ * check through `URL.hostname` (PR #229 review).
+ */
+const IPV4_MAPPED_LOOPBACK = /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/;
+
 function isPlaceholderValue(value: string): boolean {
   const lowered = value.toLowerCase();
   return (
@@ -107,7 +122,7 @@ function isLoopbackHostname(raw: string): boolean {
     hostname.endsWith('.localhost') ||
     /^127(\.\d{1,3}){3}$/.test(hostname) ||
     hostname === '[0:0:0:0:0:0:0:1]' ||
-    hostname.startsWith('[::ffff:127.')
+    IPV4_MAPPED_LOOPBACK.test(hostname)
   );
 }
 
@@ -165,12 +180,17 @@ export function validateV2RuntimeCore(
     ((environment === 'field-kit' || environment === 'offline') &&
       input.allowPlainHttp !== true);
 
-  const checkOrigin = (value: string, name: string) => {
+  /**
+   * Validate one origin. Returns the parsed URL when the value is clean, so
+   * callers can layer further rules on the same parse — or `null` once a
+   * problem has been recorded for the value.
+   */
+  const checkOrigin = (value: string, name: string): URL | null => {
     if (value.includes('*')) {
       problems.push(
         `${name} must not use a wildcard origin; credentialed CORS requires an exact origin allowlist`
       );
-      return;
+      return null;
     }
     let parsed: URL;
     try {
@@ -179,35 +199,58 @@ export function validateV2RuntimeCore(
       problems.push(
         `${name} must be an absolute origin (scheme://host[:port])`
       );
-      return;
-    }
-    if (parsed.origin !== value) {
-      problems.push(`${name} must be an origin without a path or query`);
-      return;
+      return null;
     }
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
       problems.push(`${name} must use the https or http scheme`);
-      return;
+      return null;
     }
+    // Placeholder detection runs before the exact-origin comparison so a
+    // template value is named as such, not as a path/query mismatch.
     if (isPlaceholderValue(value) || isDocumentationHostname(parsed.hostname)) {
       problems.push(`${name} must not keep a template placeholder value`);
-      return;
+      return null;
     }
-    if (productionLike && isLoopbackHostname(parsed.hostname)) {
+    if (parsed.origin !== value) {
+      problems.push(`${name} must be an origin without a path or query`);
+      return null;
+    }
+    if (
+      productionLike &&
+      (isLoopbackHostname(parsed.hostname) ||
+        UNSPECIFIED_HOSTNAMES.includes(parsed.hostname))
+    ) {
       problems.push(
-        `${name} must not use a loopback host in ${environment} mode`
+        `${name} must not use a loopback or unspecified host in ${environment} mode`
       );
-      return;
+      return null;
     }
     if (parsed.protocol === 'http:' && httpsRequired) {
       problems.push(
         `${name} must use https in ${environment} mode; plain http is the field-kit trusted-LAN exception and requires its explicit opt-in`
       );
+      return null;
     }
+    return parsed;
   };
 
   if (input.publicOrigin !== undefined && input.publicOrigin !== '') {
-    checkOrigin(input.publicOrigin, names.publicOrigin);
+    const publicOrigin = checkOrigin(input.publicOrigin, names.publicOrigin);
+    // A relaxed mode may not hide behind a deployed origin: `https` on a
+    // non-loopback host is a production signal, so `development`/`test`
+    // refuse to serve it instead of silently disabling the gate (PR #229
+    // review). Local development keeps working on loopback or plain-HTTP
+    // origins, or with no origin at all.
+    if (
+      !productionLike &&
+      publicOrigin?.protocol === 'https:' &&
+      !isLoopbackHostname(publicOrigin.hostname) &&
+      !UNSPECIFIED_HOSTNAMES.includes(publicOrigin.hostname)
+    ) {
+      problems.push(
+        `${names.publicOrigin} is an https origin on a non-loopback host, which is a production deployment signal; ${names.environment} ${environment} may not relax the gate for it`
+      );
+    }
   } else if (productionLike) {
     problems.push(`${names.publicOrigin} is required in ${environment} mode`);
   }
@@ -239,6 +282,30 @@ function parseCorsOrigins(raw: string | undefined): string[] {
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
+}
+
+/** The origin's scheme through the gate's own URL parsing, never a raw prefix. */
+function originProtocol(value: string | undefined): string | undefined {
+  if (value === undefined || value === '') return undefined;
+  try {
+    return new URL(value).protocol;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * One-line, content-free marker for relaxed modes, logged by both
+ * entrypoints so a deployment that inherits `development`/`test` is visible
+ * in operator channels instead of silently serving with the gate off
+ * (PR #229 review). Names the mode only — never a setting value.
+ */
+export function v2RuntimeModeNotice(config: {
+  environment: V2RuntimeEnvironment;
+  productionLike: boolean;
+}): string | undefined {
+  if (config.productionLike) return undefined;
+  return `V2 runtime gate relaxed: mode "${config.environment}" — production origin, HTTPS and Secure-cookie enforcement disabled`;
 }
 
 /** Node V2 entrypoint environment (`src/hono-server.ts`). */
@@ -275,11 +342,13 @@ export function validateNodeV2Runtime(env: NodeV2Env): NodeV2RuntimeConfig {
     corsOrigins: parseCorsOrigins(env.HONO_CORS_ORIGINS),
     // Secure cookies follow the origin: browsers drop Secure cookies over
     // plain HTTP, so the §7 field-kit trusted-LAN exception must not set it.
+    // The scheme comes from the gate's own URL parsing — a raw string prefix
+    // disagrees with the parser on padded values (PR #229 review).
     secureCookies:
       env.NODE_ENV !== 'development' &&
       !(
         env.HONO_ALLOW_PLAIN_HTTP === 'true' &&
-        (env.HONO_PUBLIC_ORIGIN ?? '').toLowerCase().startsWith('http:')
+        originProtocol(env.HONO_PUBLIC_ORIGIN) === 'http:'
       ),
     allowPlainHttp: env.HONO_ALLOW_PLAIN_HTTP === 'true',
     names: {

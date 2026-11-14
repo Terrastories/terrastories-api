@@ -198,7 +198,7 @@ jobs:
           test "$(docker inspect --format='{{.State.Running}}' supply-chain-api)" = "true"
 
       - name: Record production image vulnerability report
-        uses: aquasecurity/trivy-action@d2a0b60797ff03db6132bd4e2b293f9b37081297 # pinned master
+        uses: aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec # pinned master
         with:
           version: v0.74.0
           scan-type: image
@@ -246,7 +246,7 @@ jobs:
           if-no-files-found: error
 
       - name: Enforce production image vulnerability policy
-        uses: aquasecurity/trivy-action@d2a0b60797ff03db6132bd4e2b293f9b37081297 # pinned master
+        uses: aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec # pinned master
         with:
           version: v0.74.0
           scan-type: image

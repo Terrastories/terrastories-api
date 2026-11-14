@@ -1094,8 +1094,10 @@ export class StoryRepository {
     // Keyset scan on (createdAt, id), the same order as the page: unlike
     // OFFSET, a row inserted or deleted mid-scan cannot shift later batches.
     // The cursor carries created_at exactly as the database stores it (not a
-    // JS Date): PostgreSQL timestamps keep microseconds, which a millisecond
-    // Date would truncate, skipping rows that share a millisecond.
+    // JS Date). #192 made both backends millisecond-precision (SQLite/D1 Unix
+    // ms integers, PostgreSQL timestamp(3)), so the raw cursor value and a
+    // JS Date now hold the same instant; the raw form is kept so the cursor
+    // can never disagree with storage if a column's precision changes again.
     const createdAtRaw = sql<string | number>`${storiesTable.createdAt}`;
     const cursorValue = (raw: string | number) =>
       this.dialect === 'postgresql' ? sql`${raw}::timestamp` : sql`${raw}`;

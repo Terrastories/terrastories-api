@@ -28,7 +28,7 @@ export const attachmentsPg = pgTable('attachments', {
   filename: pgText('filename').notNull(),
   contentType: pgText('content_type'),
   fileSize: pgInteger('file_size'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
 });
 
 // SQLite table for development/testing
@@ -40,7 +40,7 @@ export const attachmentsSqlite = sqliteTable('attachments', {
   filename: sqliteText('filename').notNull(),
   contentType: sqliteText('content_type'),
   fileSize: integer('file_size'),
-  createdAt: integer('created_at', { mode: 'timestamp' })
+  createdAt: integer('created_at', { mode: 'timestamp_ms' })
     .notNull()
     .$defaultFn(() => new Date()),
 });

@@ -66,8 +66,8 @@ export const placesPg = pgTable(
     photoUrl: pgText('photo_url'),
     culturalSignificance: pgText('cultural_significance'),
     isRestricted: boolean('is_restricted').notNull().default(false),
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+    createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { precision: 3 }).defaultNow().notNull(),
   },
   (table) => ({
     // Standard indexes for filtering
@@ -103,10 +103,10 @@ export const placesSqlite = sqliteTable(
     isRestricted: integer('is_restricted', { mode: 'boolean' })
       .notNull()
       .default(false),
-    createdAt: integer('created_at', { mode: 'timestamp' })
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
   },

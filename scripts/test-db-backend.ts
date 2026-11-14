@@ -213,9 +213,11 @@ function timestamp(value: string): number {
 }
 
 /**
- * SQLite date columns use Drizzle `integer(..., { mode: 'timestamp' })`, which
- * stores Unix seconds. Seed and compare raw SQLite values in seconds so the
- * fixture matches what the previous release actually wrote.
+ * SQLite date columns used Drizzle `integer(..., { mode: 'timestamp' })`, which
+ * stored Unix seconds; the previous release wrote whole-second values. Seed raw
+ * SQLite values in seconds so the fixture matches what that release actually
+ * wrote; migration 0006_ms_timestamps multiplies them by 1000, so comparisons
+ * against an UPGRADED database expect `sqliteTimestamp(...) * 1000`.
  */
 function sqliteTimestamp(value: string): number {
   const milliseconds = timestamp(value);
@@ -724,13 +726,15 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
   assert.equal(community.country, null);
   // Compatibility-only V1 field (not canonical per SPEC-V2 §6.1); asserted to keep the coexistence surface stable.
   assert.equal(community.beta, 0);
+  // #192: migration 0006 converts the seeded Unix seconds to Unix
+  // milliseconds, so the upgraded raw value is the same instant ×1000.
   assert.equal(
     community.created_at,
-    sqliteTimestamp(fixture.community.createdAt)
+    sqliteTimestamp(fixture.community.createdAt) * 1000
   );
   assert.equal(
     community.updated_at,
-    sqliteTimestamp(fixture.community.updatedAt)
+    sqliteTimestamp(fixture.community.updatedAt) * 1000
   );
 
   const user = sqlite
@@ -743,8 +747,8 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
   assert.equal(user.community_id, fixture.user.communityId);
   assert.equal(user.reset_password_token, null);
   assert.equal(user.sign_in_count, 0);
-  assert.equal(user.created_at, sqliteTimestamp(fixture.user.createdAt));
-  assert.equal(user.updated_at, sqliteTimestamp(fixture.user.updatedAt));
+  assert.equal(user.created_at, sqliteTimestamp(fixture.user.createdAt) * 1000);
+  assert.equal(user.updated_at, sqliteTimestamp(fixture.user.updatedAt) * 1000);
 
   const place = sqlite
     .prepare(
@@ -813,7 +817,7 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
 
 async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   const columns = await client.unsafe(
-    `SELECT table_name, column_name, column_default, data_type
+    `SELECT table_name, column_name, column_default, data_type, datetime_precision
      FROM information_schema.columns
      WHERE table_schema = 'public'`
   );
@@ -865,6 +869,31 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     lastLoginColumn.column_default,
     null,
     'users.last_login_at must not retain a legacy default'
+  );
+
+  // #192: every timestamp column is millisecond precision (timestamp(3)) on
+  // both the fresh schema and the upgraded one, matching SQLite/D1's Unix
+  // millisecond integers.
+  const impreciseTimestamps = columns.filter(
+    (row: any) =>
+      row.data_type === 'timestamp without time zone' &&
+      Number(row.datetime_precision) !== 3
+  );
+  assert.deepEqual(
+    impreciseTimestamps.map(
+      (row: any) => `${row.table_name}.${row.column_name}`
+    ),
+    [],
+    'every timestamp column must be timestamp(3) (millisecond precision)'
+  );
+  assert.ok(
+    columns.some(
+      (row: any) =>
+        row.table_name === 'stories' &&
+        row.column_name === 'created_at' &&
+        Number(row.datetime_precision) === 3
+    ),
+    'stories.created_at must exist at timestamp(3)'
   );
 
   const indexRows = await client.unsafe(
@@ -1193,7 +1222,7 @@ function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {
         `INSERT INTO communities (name, slug, created_at, updated_at)
          VALUES ('Rollback Probe', 'rollback-probe', ?, ?)`
       )
-      .run(Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000));
+      .run(Date.now(), Date.now());
     throw new Error('rollback probe');
   });
   assert.throws(transaction, /rollback probe/);
@@ -1209,7 +1238,7 @@ function verifySqliteTransactionAndForeignKey(sqlite: Database.Database): void {
          (email, password_hash, first_name, last_name, community_id, created_at, updated_at)
          VALUES ('orphan@example.test', 'hash', 'Orphan', 'User', 999999, ?, ?)`
       )
-      .run(Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000))
+      .run(Date.now(), Date.now())
   );
 
   sqlite.exec('CREATE TEMP TABLE null_unique_probe (value TEXT UNIQUE)');
@@ -1462,11 +1491,13 @@ function sqliteCheckConstraintNames(createSql: string): string[] {
 }
 
 /**
- * Compare a migrated SQLite database against meta/0005_snapshot.json — the
+ * Compare a migrated SQLite database against meta/0006_snapshot.json — the
  * structure `drizzle-kit generate` derived from the Drizzle schema — so the
  * hand-written table rebuilds in 0005 cannot drift from the schema (a dropped
  * column, default, CHECK expression, index, inline UNIQUE, or FK in the SQL
- * would fail this gate).
+ * would fail this gate). 0006 (ms timestamps) is data-only: its snapshot is
+ * content-identical to 0005's because SQLite snapshots do not record the
+ * Drizzle timestamp mode.
  *
  * PRAGMA foreign_key_list is name-blind (SQLite keeps CONSTRAINT names only in
  * the sqlite_master SQL text), so foreign keys are compared structurally and
@@ -1478,7 +1509,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0005_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0006_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -1718,10 +1749,10 @@ async function createSqlitePre186Folder(): Promise<string> {
   await mkdir(path.join(folder, 'meta'));
   const journal = JSON.parse(
     await readFile(path.join(sqliteMigrations, 'meta', '_journal.json'), 'utf8')
-  ) as { entries: Array<{ tag: string }> };
-  const entries = journal.entries.filter(
-    (entry) => entry.tag !== '0005_composite_tenant_fks'
-  );
+  ) as { entries: Array<{ tag: string; idx: number }> };
+  // Everything migration 0005 built on: entries 0000-0004 only, so later
+  // migrations (0006 and beyond) are excluded from the pre-186 state too.
+  const entries = journal.entries.filter((entry) => entry.idx < 5);
   await writeFile(
     path.join(folder, 'meta', '_journal.json'),
     JSON.stringify({ ...journal, entries }, null, 2)

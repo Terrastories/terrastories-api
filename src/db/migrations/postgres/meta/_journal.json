@@ -36,6 +36,13 @@
       "when": 1794614400000,
       "tag": "0004_composite_tenant_fks",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794658412252,
+      "tag": "0005_ms_timestamps",
+      "breakpoints": true
     }
   ]
 }

@@ -49,8 +49,8 @@ export const filesPg = pgTable(
     metadata: pgJsonb('metadata'), // { width, height, duration, etc. }
     culturalRestrictions: pgJsonb('cultural_restrictions'),
     isActive: pgBoolean('is_active').default(true).notNull(),
-    createdAt: timestamp('created_at').notNull(),
-    updatedAt: timestamp('updated_at').notNull(),
+    createdAt: timestamp('created_at', { precision: 3 }).notNull(),
+    updatedAt: timestamp('updated_at', { precision: 3 }).notNull(),
   },
   (table) => ({
     // Community isolation index for data sovereignty
@@ -103,10 +103,10 @@ export const filesSqlite = sqliteTable(
     metadata: sqliteText('metadata'), // JSON string for SQLite
     culturalRestrictions: sqliteText('cultural_restrictions'),
     isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
-    createdAt: integer('created_at', { mode: 'timestamp' })
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
   },

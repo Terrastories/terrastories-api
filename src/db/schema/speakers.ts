@@ -54,8 +54,8 @@ export const speakersPg = pgTable(
     elderStatus: boolean('elder_status').notNull().default(false),
     culturalRole: pgText('cultural_role'),
     isActive: boolean('is_active').notNull().default(true),
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+    createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { precision: 3 }).defaultNow().notNull(),
   },
   (table) => ({
     // Standard indexes for filtering
@@ -93,10 +93,10 @@ export const speakersSqlite = sqliteTable(
       .default(false),
     culturalRole: sqliteText('cultural_role'),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
-    createdAt: integer('created_at', { mode: 'timestamp' })
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
-    updatedAt: integer('updated_at', { mode: 'timestamp' })
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
   },

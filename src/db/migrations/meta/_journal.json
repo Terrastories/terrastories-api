@@ -64,6 +64,13 @@
       "when": 1794830400000,
       "tag": "0008_slice1_content_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794916800000,
+      "tag": "0009_users_identity_and_audit_entries",
+      "breakpoints": true
     }
   ]
 }

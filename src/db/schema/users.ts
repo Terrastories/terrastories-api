@@ -10,6 +10,7 @@ import {
   boolean,
   integer as pgInteger,
   unique,
+  uniqueIndex,
   index,
 } from 'drizzle-orm/pg-core';
 import {
@@ -17,6 +18,7 @@ import {
   integer,
   text as sqliteText,
   unique as sqliteUnique,
+  uniqueIndex as sqliteUniqueIndex,
   index as sqliteIndex,
 } from 'drizzle-orm/sqlite-core';
 import { relations, sql } from 'drizzle-orm';
@@ -24,11 +26,15 @@ import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod';
 import { communitiesPg, communitiesSqlite } from './communities.js';
 
+// Physical user roles enum (Zod validation & database enum).
+// Retains 'elder' until frozen /api/v1 coexistence ends (Slice 15); V2 boundaries
+// must use parseV2Role() from src/shared/authorization/sovereignty-policy.ts.
 export const UserRoleSchema = z.enum([
   'super_admin',
   'admin',
   'editor',
   'elder',
+  'member',
   'viewer',
 ]);
 export type UserRole = z.infer<typeof UserRoleSchema>;
@@ -39,17 +45,23 @@ export const usersPg = pgTable(
   {
     id: serial('id').primaryKey(),
     email: pgText('email').notNull(),
+    username: pgText('username'),
+    displayName: pgText('display_name'),
     passwordHash: pgText('password_hash').notNull(),
+    passwordVerifier: pgText('password_verifier'),
+    passwordAlgorithm: pgText('password_algorithm'),
+    passwordSalt: pgText('password_salt'),
+    passwordParams: pgText('password_params'),
+    usernameNormalized: pgText('username_normalized'),
+    emailNormalized: pgText('email_normalized'),
     firstName: pgText('first_name').notNull(),
     lastName: pgText('last_name').notNull(),
     role: pgText('role', {
-      enum: ['super_admin', 'admin', 'editor', 'elder', 'viewer'],
+      enum: ['super_admin', 'admin', 'editor', 'elder', 'member', 'viewer'],
     })
       .notNull()
       .default('viewer'),
-    communityId: pgInteger('community_id')
-      .notNull()
-      .references(() => communitiesPg.id),
+    communityId: pgInteger('community_id').references(() => communitiesPg.id),
     isActive: boolean('is_active').notNull().default(true),
     lastLoginAt: timestamp('last_login_at', { precision: 3 }),
     resetPasswordToken: pgText('reset_password_token'),
@@ -69,6 +81,17 @@ export const usersPg = pgTable(
       table.email,
       table.communityId
     ),
+    usernameNormalizedUnique: uniqueIndex(
+      'users_username_normalized_unique'
+    ).on(table.usernameNormalized),
+    communityEmailNormalizedUnique: uniqueIndex(
+      'users_community_email_normalized_unique'
+    ).on(table.communityId, table.emailNormalized),
+    nullCommunityEmailNormalizedUnique: uniqueIndex(
+      'users_null_community_email_normalized_unique'
+    )
+      .on(table.emailNormalized)
+      .where(sql`${table.communityId} IS NULL`),
     resetPasswordTokenIdx: index('idx_users_reset_password_token')
       .on(table.resetPasswordToken)
       .where(sql`${table.resetPasswordToken} IS NOT NULL`),
@@ -85,17 +108,23 @@ export const usersSqlite = sqliteTable(
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
     email: sqliteText('email').notNull(),
+    username: sqliteText('username'),
+    displayName: sqliteText('display_name'),
     passwordHash: sqliteText('password_hash').notNull(),
+    passwordVerifier: sqliteText('password_verifier'),
+    passwordAlgorithm: sqliteText('password_algorithm'),
+    passwordSalt: sqliteText('password_salt'),
+    passwordParams: sqliteText('password_params'),
+    usernameNormalized: sqliteText('username_normalized'),
+    emailNormalized: sqliteText('email_normalized'),
     firstName: sqliteText('first_name').notNull(),
     lastName: sqliteText('last_name').notNull(),
     role: sqliteText('role', {
-      enum: ['super_admin', 'admin', 'editor', 'elder', 'viewer'],
+      enum: ['super_admin', 'admin', 'editor', 'elder', 'member', 'viewer'],
     })
       .notNull()
       .default('viewer'),
-    communityId: integer('community_id')
-      .notNull()
-      .references(() => communitiesSqlite.id),
+    communityId: integer('community_id').references(() => communitiesSqlite.id),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
     lastLoginAt: integer('last_login_at', { mode: 'timestamp_ms' }),
     resetPasswordToken: sqliteText('reset_password_token'),
@@ -121,6 +150,17 @@ export const usersSqlite = sqliteTable(
       table.email,
       table.communityId
     ),
+    usernameNormalizedUnique: sqliteUniqueIndex(
+      'users_username_normalized_unique'
+    ).on(table.usernameNormalized),
+    communityEmailNormalizedUnique: sqliteUniqueIndex(
+      'users_community_email_normalized_unique'
+    ).on(table.communityId, table.emailNormalized),
+    nullCommunityEmailNormalizedUnique: sqliteUniqueIndex(
+      'users_null_community_email_normalized_unique'
+    )
+      .on(table.emailNormalized)
+      .where(sql`${table.communityId} IS NULL`),
     resetPasswordTokenIdx: sqliteIndex('idx_users_reset_password_token')
       .on(table.resetPasswordToken)
       .where(sql`${table.resetPasswordToken} IS NOT NULL`),
@@ -166,9 +206,11 @@ export const usersSqliteRelations = relations(usersSqlite, ({ one }) => ({
 }));
 
 // Zod schemas for validation - using PostgreSQL table as base for consistency
+// Frozen V1 insertUserSchema preserves required non-null communityId until Slice 15.
 export const insertUserSchema = createInsertSchema(usersPg, {
   email: z.string().email('Invalid email format'),
   role: UserRoleSchema.default('viewer'),
+  communityId: z.number().int(),
   isActive: z.boolean().default(true),
   lastLoginAt: z.date().optional(),
   resetPasswordToken: z.string().optional(),

@@ -13,7 +13,7 @@
  * - Pagination and filtering support
  */
 
-import { eq, and, desc, asc, count, or, ne } from 'drizzle-orm';
+import { eq, and, desc, asc, count, or, ne, isNull } from 'drizzle-orm';
 import { type User, type NewUser, type UserRole } from '../db/schema/users.js';
 import { type Community } from '../db/schema/communities.js';
 import {
@@ -94,6 +94,9 @@ export class UserRepository {
   async create(userData: NewUser): Promise<User> {
     try {
       const usersTable = this.tables.users;
+      if (userData.communityId == null) {
+        throw new Error('Invalid community ID');
+      }
 
       // Check if email already exists in this community
       const existingUser = await this.findByEmail(
@@ -734,7 +737,7 @@ export class UserRepository {
    */
   async compareAndSetMembership(
     id: number,
-    expected: { role: string; isActive: boolean; communityId: number },
+    expected: { role: string; isActive: boolean; communityId: number | null },
     patch: Partial<NewUser>,
     options: { requireOtherActiveAdmin?: boolean } = {}
   ): Promise<
@@ -755,7 +758,9 @@ export class UserRepository {
       eq(usersTable.id, id),
       eq(usersTable.role, expected.role as User['role']),
       eq(usersTable.isActive, expected.isActive),
-      eq(usersTable.communityId, expected.communityId)
+      expected.communityId === null
+        ? isNull(usersTable.communityId)
+        : eq(usersTable.communityId, expected.communityId)
     );
     const otherActiveAdmins = (executor: any) =>
       executor
@@ -763,7 +768,9 @@ export class UserRepository {
         .from(usersTable)
         .where(
           and(
-            eq(usersTable.communityId, expected.communityId),
+            expected.communityId === null
+              ? isNull(usersTable.communityId)
+              : eq(usersTable.communityId, expected.communityId),
             eq(usersTable.role, 'admin'),
             eq(usersTable.isActive, true),
             ne(usersTable.id, id)
@@ -773,7 +780,13 @@ export class UserRepository {
 
     if (this.dialect === 'postgresql') {
       return db.transaction(async (tx: any) => {
-        await provisioningLockQuery(tx, communitiesTable, expected.communityId);
+        if (expected.communityId !== null) {
+          await provisioningLockQuery(
+            tx,
+            communitiesTable,
+            expected.communityId
+          );
+        }
         if (options.requireOtherActiveAdmin) {
           const [others] = await otherActiveAdmins(tx);
           if (Number(others?.n ?? 0) === 0) {

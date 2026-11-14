@@ -9,3 +9,4 @@ export * from './themes.js';
 export * from './users.js';
 export * from './attachments.js';
 export * from './sessions.js';
+export * from './audit_entries.js';

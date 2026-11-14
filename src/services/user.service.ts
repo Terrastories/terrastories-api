@@ -236,7 +236,9 @@ export class UserService {
    */
   private async createValidatedUser(
     data: CreateUserRequest,
-    insert: (userData: CreateUserData) => Promise<User>
+    insert: (
+      userData: CreateUserData & { communityId: number }
+    ) => Promise<User>
   ): Promise<User> {
     try {
       // Validate email format
@@ -294,7 +296,7 @@ export class UserService {
       const passwordHash = await passwordService.hashPassword(data.password);
 
       // Create user data
-      const userData: CreateUserData = {
+      const userData = {
         email: data.email,
         passwordHash,
         firstName: data.firstName,
@@ -378,6 +380,9 @@ export class UserService {
         throw new AuthenticationError();
       }
       if (user.role !== 'super_admin') {
+        if (user.communityId === null) {
+          throw new AuthenticationError();
+        }
         const community = await this.communityService.getCommunityById(
           user.communityId
         );
@@ -426,6 +431,9 @@ export class UserService {
         throw new AuthenticationError();
       }
       if (user.role !== 'super_admin') {
+        if (user.communityId === null) {
+          throw new AuthenticationError();
+        }
         const community = await this.communityService.getCommunityById(
           user.communityId
         );
@@ -720,7 +728,7 @@ export class UserService {
       firstName: string;
       lastName: string;
       role: UserRole;
-      communityId: number;
+      communityId: number | null;
       communityName: string;
       isActive: boolean;
       createdAt: string;

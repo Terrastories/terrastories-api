@@ -54,6 +54,7 @@ export class HonoFoundationService {
     const created = await this.repository.createSession(
       await tokenDigest(token),
       user,
+      now,
       new Date(now.getTime() + sessionLifetime),
       previous && /^[a-f0-9]{64}$/.test(previous)
         ? await tokenDigest(previous)

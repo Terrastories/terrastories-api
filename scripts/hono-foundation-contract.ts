@@ -392,6 +392,33 @@ export async function runHonoFoundationContract(
     assert.ok(renewedCookie?.includes('Max-Age=43200'));
     instant = new Date(await expiry());
     await status(me(expired), 401, 'exact 12-hour idle boundary');
+    // #188 round 3: the same-user rotation lookup only reuses an unexpired
+    // row. Presenting the now-expired cookie must allocate a fresh row and
+    // leave the expired row unrotated rather than resurrecting it by id.
+    const staleRows = await db
+      .select({ id: sessions.id, tokenHash: sessions.tokenHash })
+      .from(sessions)
+      .where(eq(sessions.userId, viewerId));
+    assert.equal(staleRows.length, 1, 'one row before expired-rotation login');
+    const afterBoundary = await login(viewerEmail, undefined, expired);
+    const postRotation = await db
+      .select({ id: sessions.id, tokenHash: sessions.tokenHash })
+      .from(sessions)
+      .where(eq(sessions.userId, viewerId));
+    assert.equal(
+      postRotation.length,
+      2,
+      'expired presented cookie forces a fresh session row'
+    );
+    const staleRow = postRotation.find((row) => row.id === staleRows[0].id);
+    assert.ok(staleRow, 'expired row is neither deleted nor rotated by id');
+    assert.equal(
+      staleRow.tokenHash,
+      staleRows[0].tokenHash,
+      'expired row keeps its old digest'
+    );
+    await status(me(expired), 401, 'expired cookie stays revoked');
+    await status(me(afterBoundary), 200);
     await updateUser(viewerId, { passwordHash: 'malformed' });
     await status(
       postLogin(app, {
@@ -431,15 +458,61 @@ export async function runHonoFoundationContract(
     assert.equal(rejected.status, 401, 'password reset wins verifier race');
     assert.equal(rejected.headers.get('set-cookie'), null);
     await updateUser(viewerId, { passwordHash });
+    // #188 round 3: a cross-user login that fails the authority gate must
+    // leave the presenting user's session intact — the revoking delete is
+    // coupled to the verified session write and never runs when the login
+    // itself loses the verifier race.
+    const heldCookie = await login(viewerEmail);
+    const takeoverBarrier = new EventEmitter();
+    const takeoverReached = once(takeoverBarrier, 'entered');
+    const racingTakeover = createHonoApp({
+      ...options,
+      verifier: {
+        verify: async () => {
+          takeoverBarrier.emit('entered');
+          await once(takeoverBarrier, 'resume');
+          return true;
+        },
+      },
+    });
+    const pendingTakeover = postLogin(
+      racingTakeover,
+      { email: adminEmail, password },
+      { cookie: heldCookie }
+    );
+    await takeoverReached;
+    await updateUser(userIds[1], {
+      passwordHash: 'reset-during-verification',
+    });
+    takeoverBarrier.emit('resume');
+    const rejectedTakeover = await pendingTakeover;
+    assert.equal(
+      rejectedTakeover.status,
+      401,
+      'failed cross-user login must not authenticate'
+    );
+    assert.equal(rejectedTakeover.headers.get('set-cookie'), null);
+    await updateUser(userIds[1], { passwordHash });
+    await status(
+      me(heldCookie),
+      200,
+      'failed cross-user login keeps the presenting user session'
+    );
+    await status(action('logout', heldCookie), 204);
     // Shared-browser login (#188 review): user B signing in while user A's
     // valid cookie is present must get B's own fresh session row. A's
     // presented session is revoked, never rotated onto B's login.
     const sharedBrowserA = await login(viewerEmail);
-    const [viewerRow] = await db
+    const viewerRows = await db
       .select({ id: sessions.id })
       .from(sessions)
       .where(eq(sessions.userId, viewerId));
-    assert.ok(viewerRow, 'viewer holds exactly one fresh session row');
+    assert.equal(
+      viewerRows.length,
+      1,
+      'viewer holds exactly one fresh session row'
+    );
+    const viewerRow = viewerRows[0];
     const takeover = await postLogin(
       app,
       { email: adminEmail, password },

@@ -11,6 +11,7 @@ describe('persona runner fail-closed mechanics', () => {
   ];
   it('records a response and matches parameterized routes', async () => {
     const report = await runJourneys({
+      contract: 'canonical-v2',
       routes,
       journeys,
       handler: async () => new Response('{}'),
@@ -25,13 +26,21 @@ describe('persona runner fail-closed mechanics', () => {
         throw new Error('offline');
       },
     ]) {
-      expect((await runJourneys({ routes, journeys, handler })).pass).toBe(
-        false
-      );
+      expect(
+        (
+          await runJourneys({
+            contract: 'canonical-v2',
+            routes,
+            journeys,
+            handler,
+          })
+        ).pass
+      ).toBe(false);
     }
     expect(
       (
         await runJourneys({
+          contract: 'canonical-v2',
           routes,
           journeys: [
             {
@@ -46,6 +55,7 @@ describe('persona runner fail-closed mechanics', () => {
   });
   it('fails for uncovered routes and never counts skips', async () => {
     const report = await runJourneys({
+      contract: 'canonical-v2',
       routes,
       journeys: [{ ...journeys[0], skipped: 'not available' }],
       handler: async () => new Response('{}'),
@@ -60,6 +70,7 @@ describe('persona runner fail-closed mechanics', () => {
     ]) {
       await expect(
         runJourneys({
+          contract: 'canonical-v2',
           routes,
           journeys,
           exclusions: [exclusion],
@@ -86,6 +97,7 @@ describe('persona runner fail-closed mechanics', () => {
 describe('persona runner state and route selection', () => {
   it('counts the static route without counting an overlapping parameter route', async () => {
     const report = await runJourneys({
+      contract: 'canonical-v2',
       handler: async () => new Response('{}'),
       routes: [
         { method: 'GET', path: '/items/:id' },
@@ -110,6 +122,7 @@ describe('persona runner state and route selection', () => {
   it('captures created ids then uses the signed cookie in later calls', async () => {
     let count = 0;
     const report = await runJourneys({
+      contract: 'canonical-v2',
       handler: async (request) => {
         if (++count === 1) {
           const headers = new Headers();
@@ -156,6 +169,7 @@ describe('persona runner state and route selection', () => {
   it('reports missing created ids and never substitutes an unresolved capture', async () => {
     let calls = 0;
     const report = await runJourneys({
+      contract: 'canonical-v2',
       handler: async () => {
         calls++;
         return new Response('{}', { status: 201 });
@@ -197,6 +211,7 @@ describe('persona runner state and route selection', () => {
 describe('route inventory integrity', () => {
   it('fails when route discovery returns no routes', async () => {
     const report = await runJourneys({
+      contract: 'canonical-v2',
       routes: [],
       journeys: [
         {
@@ -212,6 +227,7 @@ describe('route inventory integrity', () => {
   });
   it('fails unmatched negative steps even when all known routes are reached', async () => {
     const report = await runJourneys({
+      contract: 'canonical-v2',
       routes: [{ method: 'GET', path: '/known' }],
       journeys: [
         {
@@ -235,6 +251,7 @@ describe('route inventory integrity', () => {
   });
   it('records a useful safe operation message without exposing exception credentials', async () => {
     const report = await runJourneys({
+      contract: 'canonical-v2',
       routes: [{ method: 'GET', path: '/known' }],
       journeys: [
         {
@@ -288,6 +305,7 @@ describe('session replay and request lifecycle', () => {
     for (const revoked of [true, false]) {
       const sent: string[] = [];
       const report = await runJourneys({
+        contract: 'canonical-v2',
         routes,
         journeys,
         handler: async (request) => {
@@ -316,6 +334,7 @@ describe('session replay and request lifecycle', () => {
   it('clears the tracked session cookie when Set-Cookie empties it', async () => {
     const sent: (string | null)[] = [];
     const report = await runJourneys({
+      contract: 'canonical-v2',
       sessionCookieName: 'ts_session',
       routes: [
         { method: 'POST', path: '/login' },
@@ -358,6 +377,7 @@ describe('session replay and request lifecycle', () => {
   it('tracks a non-default session cookie name across journey steps', async () => {
     const sent: string[] = [];
     const report = await runJourneys({
+      contract: 'canonical-v2',
       sessionCookieName: 'ts_session',
       routes: [
         { method: 'POST', path: '/login' },
@@ -387,6 +407,7 @@ describe('session replay and request lifecycle', () => {
   it('rejects replay without a saved cookie before sending a request', async () => {
     let calls = 0;
     const report = await runJourneys({
+      contract: 'canonical-v2',
       routes: [{ method: 'GET', path: '/me' }],
       journeys: [
         {
@@ -413,6 +434,7 @@ describe('session replay and request lifecycle', () => {
   it('times out a hanging handler and aborts its Request signal', async () => {
     let signal: AbortSignal | undefined;
     const report = await runJourneys({
+      contract: 'canonical-v2',
       requestTimeoutMs: 20,
       routes: [{ method: 'GET', path: '/slow' }],
       journeys: [
@@ -443,6 +465,7 @@ describe('session replay and request lifecycle', () => {
       },
     });
     const report = await runJourneys({
+      contract: 'canonical-v2',
       requestTimeoutMs: 20,
       routes: [{ method: 'GET', path: '/slow' }],
       journeys: [
@@ -474,6 +497,7 @@ describe('session replay and request lifecycle', () => {
     let finish: (response: Response) => void = () => {};
     let cancelled = false;
     const report = await runJourneys({
+      contract: 'canonical-v2',
       requestTimeoutMs: 20,
       routes: [{ method: 'GET', path: '/slow' }],
       journeys: [
@@ -505,6 +529,7 @@ describe('session replay and request lifecycle', () => {
   it('cancels status-only/media bodies instead of leaving them unread', async () => {
     let cancelled = false;
     const report = await runJourneys({
+      contract: 'canonical-v2',
       routes: [{ method: 'GET', path: '/media' }],
       journeys: [
         {
@@ -532,6 +557,7 @@ describe('session replay and request lifecycle', () => {
   it('consumes JSON before a throwing assertion and keeps thrown secrets out of the report', async () => {
     const response = new Response('{"ok":true}');
     const report = await runJourneys({
+      contract: 'canonical-v2',
       routes: [{ method: 'GET', path: '/json' }],
       journeys: [
         {
@@ -562,6 +588,7 @@ describe('response cancellation deadlines', () => {
   it('fails within the deadline when a status-only body cancellation never settles', async () => {
     let cancelled = false;
     const report = await runJourneys({
+      contract: 'canonical-v2',
       requestTimeoutMs: 20,
       routes: [{ method: 'GET', path: '/media' }],
       journeys: [
@@ -589,4 +616,152 @@ describe('response cancellation deadlines', () => {
       message: 'Closing response body exceeded request timeout',
     });
   });
+});
+
+describe('contract classification and HTTP baseUrl transport', () => {
+  it('requires an explicit contract class and records canonical-v2 on report, results and summary', async () => {
+    await expect(
+      runJourneys({
+        routes: [{ method: 'GET', path: '/items' }],
+        journeys: [],
+        handler: async () => new Response('{}'),
+      } as unknown as Parameters<typeof runJourneys>[0])
+    ).rejects.toThrow('Persona runner requires an explicit contract class');
+
+    const report = await runJourneys({
+      contract: 'canonical-v2',
+      routes: [{ method: 'GET', path: '/items' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'list', method: 'GET', path: '/items', expected: 200 },
+          ],
+        },
+      ],
+      handler: async () => new Response('{}'),
+    });
+    expect(report.contract).toBe('canonical-v2');
+    expect(report.results[0]?.contract).toBe('canonical-v2');
+    expect(report.summary).toEqual({
+      'canonical-v2': { passed: 1, failed: 0 },
+      'legacy-v1': { passed: 0, failed: 0 },
+    });
+  });
+
+  it('labels legacy-v1 on report and results while still failing closed', async () => {
+    const report = await runJourneys({
+      contract: 'legacy-v1',
+      routes: [{ method: 'GET', path: '/items' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'ok', method: 'GET', path: '/items', expected: 200 },
+            { name: 'mismatch', method: 'GET', path: '/items', expected: 404 },
+          ],
+        },
+      ],
+      handler: async () => new Response('{}', { status: 200 }),
+    });
+    expect(report.contract).toBe('legacy-v1');
+    expect(report.results.map((result) => result.contract)).toEqual([
+      'legacy-v1',
+      'legacy-v1',
+    ]);
+    expect(report.summary).toEqual({
+      'canonical-v2': { passed: 0, failed: 0 },
+      'legacy-v1': { passed: 1, failed: 1 },
+    });
+    expect(report.pass).toBe(false);
+  });
+
+  it('counts per-class pass and fail totals across mixed journeys and steps', async () => {
+    const report = await runJourneys({
+      contract: 'canonical-v2',
+      routes: [{ method: 'GET', path: '/items' }],
+      journeys: [
+        {
+          persona: 'viewer',
+          steps: [
+            { name: 'v2 pass', method: 'GET', path: '/items', expected: 200 },
+            {
+              name: 'v1 fail',
+              method: 'GET',
+              path: '/items',
+              expected: 404,
+              contract: 'legacy-v1',
+            },
+          ],
+        },
+        {
+          persona: 'legacy',
+          contract: 'legacy-v1',
+          steps: [
+            { name: 'v1 pass', method: 'GET', path: '/items', expected: 200 },
+          ],
+        },
+      ],
+      handler: async () => new Response('{}', { status: 200 }),
+    });
+    expect(report.summary).toEqual({
+      'canonical-v2': { passed: 1, failed: 0 },
+      'legacy-v1': { passed: 1, failed: 1 },
+    });
+    expect(report.pass).toBe(false);
+  });
+
+  it('requires a handler or baseUrl and sends real HTTP requests when baseUrl is set', async () => {
+    await expect(
+      runJourneys({
+        contract: 'canonical-v2',
+        routes: [{ method: 'GET', path: '/items' }],
+        journeys: [],
+      })
+    ).rejects.toThrow('Persona runner requires a handler or baseUrl');
+
+    const { createServer } = await import('node:http');
+    const server = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ url: req.url }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('Expected TCP address');
+      const report = await runJourneys({
+        contract: 'canonical-v2',
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        routes: [{ method: 'GET', path: '/ping' }],
+        journeys: [
+          {
+            persona: 'viewer',
+            steps: [
+              {
+                name: 'ping',
+                method: 'GET',
+                path: '/ping?ok=1',
+                expected: 200,
+                check: (body) =>
+                  (body as { url?: string }).url === '/ping?ok=1',
+              },
+            ],
+          },
+        ],
+      });
+      expect(report.pass).toBe(true);
+    } finally {
+      server.closeIdleConnections?.();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      );
+    }
+  }, 15_000);
 });

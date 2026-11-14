@@ -22,6 +22,14 @@ describe('SQLite frontend persona acceptance', () => {
         'unreached endpoints need journeys or reviewed exclusions'
       ).toEqual([]);
       expect(report.pass).toBe(true);
+      expect(report.contract).toBe('legacy-v1');
+      expect(
+        report.results.every((result) => result.contract === 'legacy-v1')
+      ).toBe(true);
+      expect(report.summary).toEqual({
+        'canonical-v2': { passed: 0, failed: 0 },
+        'legacy-v1': { passed: report.results.length, failed: 0 },
+      });
     } finally {
       await fixture.close();
     }

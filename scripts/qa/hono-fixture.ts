@@ -21,9 +21,14 @@
  * backend whose app runs out of process (Workers/workerd, where
  * `app.routes` cannot be read from Node) uses the honoPersonaRouteTable()
  * reconstruction. Either way a newly registered concrete-method route (not
- * app.all) fails coverage until a journey reaches it. Mirrors sqlite-fixture.ts: refuses HTTP mode
- * because its isolated database cannot seed a deployed server.
+ * app.all) fails coverage until a journey reaches it. Supports both the
+ * default in-process `app.fetch` handler and `{ transport: 'http' }` (serving
+ * the same app via `@hono/node-server` on `127.0.0.1` port 0); refuses
+ * external `--base-url` because its isolated database cannot seed a remote
+ * server.
  */
+import { once } from 'node:events';
+import { serve } from '@hono/node-server';
 import { sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
@@ -212,16 +217,51 @@ export function honoPersonaRouteTable(): Endpoint[] {
   return routeTableOf(app);
 }
 
+export interface ClosableHttpServer {
+  listening?: boolean;
+  closeIdleConnections?: () => void;
+  close: (callback?: (error?: Error) => void) => unknown;
+}
+
+/**
+ * Close an HTTP persona server without masking setup errors when the server
+ * never started listening or is already stopped.
+ */
+export async function closeServer(
+  activeServer: ClosableHttpServer | undefined
+): Promise<void> {
+  if (!activeServer || !activeServer.listening) return;
+  // Close idle keep-alive sockets so Node fetch keep-alive does not
+  // delay server.close().
+  activeServer.closeIdleConnections?.();
+  await new Promise<void>((resolve, reject) =>
+    activeServer.close((error) => {
+      if (
+        !error ||
+        (error as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING'
+      ) {
+        resolve();
+      } else {
+        reject(error);
+      }
+    })
+  );
+}
+
 export async function createFixture(
   options: {
     baseUrl?: string;
     backend?: HonoQaBackend;
+    transport?: 'in-process' | 'http';
   } = {}
 ) {
   if (options.baseUrl)
     throw new Error(
       'In-process persona fixtures support isolated in-process runs only'
     );
+  const transport = options.transport ?? 'in-process';
+  if (options.backend && transport === 'http')
+    throw new Error('HTTP transport cannot be combined with a custom backend');
   // Isolated in-memory SQLite by default; the same journeys run against a
   // freshly migrated PostgreSQL when DATABASE_URL and the reset guard select
   // it (scripts/qa/qa-database.ts), or against a caller-supplied backend —
@@ -252,6 +292,12 @@ export async function createFixture(
   } = tablesFor(db);
   const communityMedia =
     dialectOf(db) === 'postgresql' ? communityMediaPg : communityMediaSqlite;
+  let server: ReturnType<typeof serve> | undefined;
+  const closeActiveServer = async () => {
+    const activeServer = server;
+    server = undefined;
+    await closeServer(activeServer);
+  };
   try {
     const fixtures = await (backend ? backend.seedBaseline() : qa!.seed());
     // Public active community for Explore; Demo community stays private.
@@ -689,7 +735,8 @@ export async function createFixture(
           sessionCookieValue = setting.slice('ts_session='.length);
       }
     };
-    let handler: Handler;
+    let handler: Handler | undefined;
+    let baseUrl: string | undefined;
     let routes: Endpoint[];
     if (backend) {
       // The backend states its coverage table; the fixture does not infer
@@ -710,11 +757,31 @@ export async function createFixture(
       // default SQLite run and the in-process PostgreSQL run alike (see
       // routeTableOf for the filtering).
       routes = routeTableOf(app);
-      handler = async (request) => {
-        const response = await app.fetch(request);
-        observeResponseCookies(response);
-        return response;
-      };
+      if (transport === 'http') {
+        // Keep native Request identity: node-server's global override makes
+        // native Request.clone() fail Hono's instanceof Request dispatch.
+        server = serve({
+          fetch: async (request) => {
+            const response = await app.fetch(request);
+            observeResponseCookies(response);
+            return response;
+          },
+          hostname: '127.0.0.1',
+          port: 0,
+          overrideGlobalObjects: false,
+        });
+        if (!server.listening) await once(server, 'listening');
+        const address = server.address();
+        if (!address || typeof address === 'string')
+          throw new Error('Failed to bind HTTP persona server address');
+        baseUrl = `http://127.0.0.1:${address.port}`;
+      } else {
+        handler = async (request) => {
+          const response = await app.fetch(request);
+          observeResponseCookies(response);
+          return response;
+        };
+      }
     }
     /**
      * Exact id-set equality: same rows in any order, nothing extra, missing
@@ -1893,19 +1960,34 @@ export async function createFixture(
       },
     ];
     return {
-      handler,
+      contract: 'canonical-v2' as const,
+      ...(handler ? { handler } : {}),
+      ...(baseUrl ? { baseUrl } : {}),
       routes,
       journeys,
       exclusions: [],
       sessionCookieName: 'ts_session',
       close: async () => {
-        if (backend) await backend.close();
-        else await qa!.close();
+        try {
+          await closeActiveServer();
+        } finally {
+          if (backend) await backend.close();
+          else await qa!.close();
+        }
       },
     };
   } catch (error) {
-    if (backend) await backend.close();
-    else await qa!.close();
+    try {
+      await closeActiveServer();
+    } catch {
+      // Cleanup errors must never mask the setup error.
+    }
+    try {
+      if (backend) await backend.close();
+      else await qa!.close();
+    } catch {
+      // Cleanup errors must never mask the setup error.
+    }
     throw error;
   }
 }

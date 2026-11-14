@@ -1,4 +1,4 @@
-import { and, eq, gt, isNull, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import {
   sessionLifetime,
@@ -88,9 +88,22 @@ export class HonoFoundationRepository {
   ): Promise<boolean> {
     const sessions = this.sessions;
     const { users, communities } = this.tables;
+    // A presented session belonging to a different user is never rotated
+    // onto the new login: it is revoked, and the authenticating user always
+    // gets a row of their own (#188 — shared-browser login).
+    if (previousHash) {
+      await this.database
+        .delete(sessions)
+        .where(
+          and(
+            eq(sessions.tokenHash, previousHash),
+            ne(sessions.userId, user.id)
+          )
+        );
+    }
     let verified = this.database
       .select({
-        id: sql`coalesce((select ${sessions.id} from ${sessions} where ${sessions.tokenHash} = ${previousHash ?? ''}), ${tokenHash})`,
+        id: sql`coalesce((select ${sessions.id} from ${sessions} where ${sessions.tokenHash} = ${previousHash ?? ''} and ${sessions.userId} = ${user.id}), ${tokenHash})`,
         tokenHash: sql`${tokenHash}`,
         userId: users.id,
         expiresAt: sql`${expiresAt.getTime()}`,

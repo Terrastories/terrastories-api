@@ -431,6 +431,41 @@ export async function runHonoFoundationContract(
     assert.equal(rejected.status, 401, 'password reset wins verifier race');
     assert.equal(rejected.headers.get('set-cookie'), null);
     await updateUser(viewerId, { passwordHash });
+    // Shared-browser login (#188 review): user B signing in while user A's
+    // valid cookie is present must get B's own fresh session row. A's
+    // presented session is revoked, never rotated onto B's login.
+    const sharedBrowserA = await login(viewerEmail);
+    const [viewerRow] = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(eq(sessions.userId, viewerId));
+    assert.ok(viewerRow, 'viewer holds exactly one fresh session row');
+    const takeover = await postLogin(
+      app,
+      { email: adminEmail, password },
+      { cookie: sharedBrowserA }
+    );
+    assert.equal(takeover.status, 200);
+    assert.equal((await takeover.json()).user.email, adminEmail);
+    const sharedBrowserB = takeover.headers.get('set-cookie')!.split(';')[0];
+    assert.notEqual(sharedBrowserB, sharedBrowserA);
+    await status(
+      me(sharedBrowserA),
+      401,
+      'previous user cookie revoked on cross-user login'
+    );
+    const adminIdentity = await me(sharedBrowserB);
+    assert.equal(adminIdentity.status, 200);
+    assert.equal((await adminIdentity.json()).user.email, adminEmail);
+    const rotatedRow = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(eq(sessions.id, viewerRow.id));
+    assert.equal(
+      rotatedRow.length,
+      0,
+      'previous user session row is deleted, not rotated onto the new user'
+    );
   } finally {
     for (const id of fileIds) {
       await db.delete(media).where(eq(media.fileId, id));

@@ -398,3 +398,106 @@ describe('PostgreSQL persona QA CI release gate', () => {
     expect(readme).toContain(PG_JOB_NAME);
   });
 });
+
+const WORKERS_JOB_KEY = 'persona-qa-workers';
+const WORKERS_JOB_NAME = 'Persona QA gate (Workers D1)';
+
+describe('Workers persona QA CI release gate', () => {
+  const ci = readRepo('.github/workflows/ci.yml');
+  const job = parseWorkflowJob(ci, WORKERS_JOB_KEY);
+  const jobKeys = job.entries.filter((entry) => entry.indent === 4);
+
+  it('defines the Workers persona QA gate job', () => {
+    expect(job.text, `ci.yml must define a "${WORKERS_JOB_KEY}" job`).not.toBe(
+      ''
+    );
+    expect(valueOf(jobKeys, 'name')).toBe(WORKERS_JOB_NAME);
+    expect(valueOf(jobKeys, 'runs-on')).toBe('ubuntu-latest');
+    expect(valueOf(jobKeys, 'timeout-minutes')).toBe('15');
+    // The gate must run on its own, like the SQLite and PostgreSQL gates.
+    expect(entryByKey(jobKeys, 'needs')).toBeUndefined();
+
+    const permissions = childrenOf(
+      job.entries,
+      entryByKey(jobKeys, 'permissions')
+    );
+    expect(valueOf(permissions, 'contents')).toBe('read');
+  });
+
+  it('installs dependencies and runs the qa:personas:workers wrapper', () => {
+    // The gate must invoke the dedicated wrapper script, which runs the
+    // Workers persona wrapper (bundled src/worker.ts in workerd over D1/R2)
+    // and skips outside its QA_PERSONAS_WORKERS=1 gate marker.
+    const packageJson = JSON.parse(readRepo('package.json'));
+    expect(packageJson.scripts['qa:personas:workers']).toBe(
+      'QA_PERSONAS_WORKERS=1 vitest run tests/scripts/qa-workers/workers-hono.test.ts --maxWorkers=1'
+    );
+
+    expect(job.steps).toHaveLength(5);
+
+    const install = stepNamed(job.steps, 'Install dependencies');
+    expect(stepValue(install, 'run')).toBe('npm ci --legacy-peer-deps');
+
+    const gate = stepNamed(job.steps, 'Run persona QA gate (Workers D1)');
+    expect(gate).toBeDefined();
+    expect(stepValue(gate, 'run')).toBe('npm run qa:personas:workers');
+    // The wrapper only retains its report, including on failure, when
+    // QA_REPORT_PATH is absolute.
+    const gateEnv = stepParent(gate, 'env');
+    expect(valueOf(gateEnv, 'QA_REPORT_PATH')).toBe(
+      '${{ github.workspace }}/qa-report.json'
+    );
+
+    const setupNode = stepUsing(job.steps, 'actions/setup-node');
+    const setupNodeWith = stepParent(setupNode, 'with');
+    expect(valueOf(setupNodeWith, 'node-version')).toBe('20.19.0');
+    expect(valueOf(setupNodeWith, 'cache')).toBe("'npm'");
+  });
+
+  it('uses only SHA-pinned actions and never persists credentials', () => {
+    const uses = job.steps
+      .map((step) => stepValue(step, 'uses'))
+      .filter((value) => value !== undefined);
+    expect(uses.length).toBeGreaterThanOrEqual(3);
+
+    for (const ref of uses) {
+      expect(isShaPinned(ref), `${ref} must be 40-hex SHA pinned`).toBe(true);
+    }
+
+    const actionNames = uses.map((ref) => ref.slice(0, ref.lastIndexOf('@')));
+    expect(actionNames).toContain('actions/checkout');
+    expect(actionNames).toContain('actions/setup-node');
+    expect(actionNames).toContain('actions/upload-artifact');
+
+    const checkout = stepUsing(job.steps, 'actions/checkout');
+    const checkoutWith = stepParent(checkout, 'with');
+    expect(valueOf(checkoutWith, 'persist-credentials')).toBe('false');
+  });
+
+  it('fails closed on every step and uses no secrets', () => {
+    const continueOnError = (entries) =>
+      entries.find((entry) => entry.key === 'continue-on-error');
+    expect(continueOnError(jobKeys)).toBeUndefined();
+    for (const step of job.steps) {
+      const label = stepValue(step, 'name') ?? stepValue(step, 'uses');
+      expect(continueOnError(step), `step "${label}"`).toBeUndefined();
+    }
+    expect(job.text).not.toContain('secrets.');
+
+    // The Workers report is published for diagnosis even when the gate
+    // fails, and a missing report fails the upload instead of passing
+    // silently.
+    const upload = stepUsing(job.steps, 'actions/upload-artifact');
+    expect(stepValue(upload, 'if')).toBe('always()');
+    const uploadWith = stepParent(upload, 'with');
+    expect(valueOf(uploadWith, 'name')).toBe('persona-qa-report-workers');
+    expect(valueOf(uploadWith, 'path')).toBe('qa-report-workers-hono.json');
+    expect(valueOf(uploadWith, 'if-no-files-found')).toBe('error');
+  });
+
+  it('documents the check name alongside the other persona gates', () => {
+    const readme = readRepo('scripts/qa/README.md');
+
+    expect(readme).toContain(WORKERS_JOB_NAME);
+  });
+});

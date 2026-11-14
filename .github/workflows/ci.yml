@@ -275,3 +275,42 @@ jobs:
             qa-report-postgres.json
             qa-report-postgres-hono.json
           if-no-files-found: error
+
+  persona-qa-workers:
+    name: Persona QA gate (Workers D1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.19.0
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Run persona QA gate (Workers D1)
+        # The same persona journeys as the SQLite gate, dispatched into the
+        # real Workers build: src/worker.ts bundled and executing in workerd
+        # through Miniflare, D1 for data, R2 for media — so Node-only
+        # behaviour cannot hide a sovereignty leak from the hosted Workers
+        # Free profile. The script fails closed unless it is invoked through
+        # the dedicated gate (the npm script sets QA_PERSONAS_WORKERS=1,
+        # which alone lets the wrapper run).
+        run: npm run qa:personas:workers
+        env:
+          # Absolute path so the wrapper retains the report even when its
+          # assertions fail (see scripts/qa/README.md).
+          QA_REPORT_PATH: ${{ github.workspace }}/qa-report.json
+      - name: Upload persona QA report (Workers)
+        # Publish the report for diagnosis even when the gate fails; a
+        # missing report fails this upload instead of passing silently.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: persona-qa-report-workers
+          path: qa-report-workers-hono.json
+          if-no-files-found: error

@@ -1,54 +1,21 @@
 import { it, expect } from 'vitest';
-import { build } from 'esbuild';
-import { Miniflare } from 'miniflare';
-import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import {
+  applyD1Migrations,
+  bundleWorkerModule,
+  startWorkerRuntime,
+} from '../helpers/worker-runtime.js';
 it('serves the foundation through workerd D1/R2 without Node compatibility', async () => {
-  const bundle = await build({
-    stdin: {
-      contents: `import worker, {createWorker} from './src/worker.js';
+  // bundleWorkerModule fails the test when the bundle keeps any runtime import.
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(`import worker, {createWorker} from './src/worker.js';
       const verified=createWorker({async verify(p,h){return p==='ok' && h==='source-hash'}});
-      export default {fetch:(r,e)=>r.headers.has('x-test-verifier') ? verified.fetch(r,e) : worker.fetch(r,e)};`,
-      resolveDir: process.cwd(),
-      sourcefile: 'worker-fixture.ts',
-    },
-    bundle: true,
-    write: false,
-    platform: 'browser',
-    format: 'esm',
-    metafile: true,
-    external: ['path', 'os', 'crypto'],
-  });
-  for (const output of Object.values(bundle.metafile!.outputs))
-    expect(output.imports).toEqual([]);
-  const mf = new Miniflare({
-    modules: true,
-    script: bundle.outputFiles![0].text,
-    compatibilityDate: '2026-04-26',
-    d1Databases: ['DB'],
-    r2Buckets: ['MEDIA'],
-  });
+      export default {fetch:(r,e)=>r.headers.has('x-test-verifier') ? verified.fetch(r,e) : worker.fetch(r,e)};`)
+  );
   try {
     const db = await mf.getD1Database('DB');
     const bucket = await mf.getR2Bucket('MEDIA');
-    const directory = 'src/db/migrations';
-    const journal = JSON.parse(
-      await readFile(`${directory}/meta/_journal.json`, 'utf8')
-    );
-    const statements = [];
-    for (const entry of journal.entries) {
-      const source = await readFile(`${directory}/${entry.tag}.sql`, 'utf8');
-      statements.push(
-        ...source
-          .split('--> statement-breakpoint')
-          .map((sql) => sql.trim())
-          .filter(Boolean)
-      );
-    }
-    for (let offset = 0; offset < statements.length; offset += 50)
-      await db.batch(
-        statements.slice(offset, offset + 50).map((sql) => db.prepare(sql))
-      );
+    await applyD1Migrations(db);
     const token = 'a'.repeat(64);
     const digest = createHash('sha256').update(token).digest('hex');
     const own = '00000000-0000-4000-8000-000000000001';

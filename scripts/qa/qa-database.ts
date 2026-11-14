@@ -144,9 +144,11 @@ async function resetPostgresSchema(
  * system community, two private + two public test communities, and the three
  * places the journeys reference. Values are mirrored one-for-one so
  * `fixtures.communities[0..2]`, `fixtures.places[0]` and the
- * `systemCommunity` line up on both dialects.
+ * `systemCommunity` line up on every backend — PostgreSQL through its
+ * dedicated gate, and the Workers build's D1 handle (both dialects accept
+ * the same Drizzle values).
  */
-async function seedPostgresFixtures(
+export async function seedPersonaBaseline(
   db: WidenedQaDatabase
 ): Promise<TestFixtures> {
   const { communities, places } = tablesFor(db);
@@ -286,7 +288,7 @@ export async function openPersonaQaDatabase(): Promise<PersonaQaDatabase> {
     return {
       dialect: 'postgresql',
       db,
-      seed: () => seedPostgresFixtures(db),
+      seed: () => seedPersonaBaseline(db),
       close: () => client.end(),
     };
   } catch (error) {

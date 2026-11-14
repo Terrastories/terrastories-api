@@ -144,13 +144,13 @@ describe('Production Database Cleanup', () => {
 
         if (sqlite) {
           sqlite.exec(`
-            INSERT INTO story_places (story_id, place_id, cultural_context, sort_order) 
-            VALUES (1, 1, 'Cultural context', 1)
+            INSERT INTO story_places (community_id, story_id, place_id, cultural_context, sort_order)
+            VALUES (1, 1, 1, 'Cultural context', 1)
           `);
 
           sqlite.exec(`
-            INSERT INTO story_speakers (story_id, speaker_id, story_role, sort_order)
-            VALUES (1, 1, 'Narrator', 1)  
+            INSERT INTO story_speakers (community_id, story_id, speaker_id, story_role, sort_order)
+            VALUES (1, 1, 1, 'Narrator', 1)
           `);
         }
       } catch (error) {

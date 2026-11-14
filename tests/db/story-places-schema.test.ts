@@ -57,10 +57,13 @@ describe('Story Places Schema', () => {
     it('should have required columns', () => {
       // Just check that the tables have the expected structure
       expect(storyPlacesPg).toHaveProperty('id');
+      expect(storyPlacesPg).toHaveProperty('communityId');
       expect(storyPlacesPg).toHaveProperty('storyId');
       expect(storyPlacesPg).toHaveProperty('placeId');
       expect(storyPlacesPg).toHaveProperty('createdAt');
       expect(storyPlacesPg).toHaveProperty('updatedAt');
+      // #186: the composite tenant FK column exists on both dialects.
+      expect(storyPlacesSqlite).toHaveProperty('communityId');
     });
 
     it('should support both PostgreSQL and SQLite', () => {
@@ -84,6 +87,7 @@ describe('Story Places Schema', () => {
   describe('Zod Validation Schemas', () => {
     const validStoryPlace = {
       id: 1,
+      communityId: 2,
       storyId: 5,
       placeId: 3,
       culturalContext: 'A sacred site for ceremony',
@@ -93,6 +97,7 @@ describe('Story Places Schema', () => {
     };
 
     const validCreateStoryPlace = {
+      communityId: 2,
       storyId: 5,
       placeId: 3,
       culturalContext: 'A sacred site for ceremony',
@@ -143,6 +148,7 @@ describe('Story Places Schema', () => {
     it('should infer correct StoryPlace type', () => {
       const storyPlace: StoryPlace = {
         id: 1,
+        communityId: 2,
         storyId: 5,
         placeId: 3,
         culturalContext: 'A sacred site for ceremony',
@@ -155,6 +161,7 @@ describe('Story Places Schema', () => {
 
     it('should infer correct NewStoryPlace type', () => {
       const newStoryPlace: NewStoryPlace = {
+        communityId: 2,
         storyId: 5,
         placeId: 3,
         culturalContext: 'A sacred site for ceremony',
@@ -165,6 +172,7 @@ describe('Story Places Schema', () => {
 
     it('should infer correct CreateStoryPlace type', () => {
       const createStoryPlace: CreateStoryPlace = {
+        communityId: 2,
         storyId: 5,
         placeId: 3,
         culturalContext: 'A sacred site for ceremony',

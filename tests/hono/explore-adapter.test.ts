@@ -187,13 +187,24 @@ const seed = async () => {
     [fileIds.a, ids.a],
     [fileIds.aInactive, ids.a],
     [fileIds.aRestricted, ids.a],
-    [fileIds.cross, ids.b],
     [fileIds.b, ids.b],
     [fileIds.c, ids.c],
   ] as const)
     await db
       .insert(communityMediaSqlite)
       .values({ fileId, communityId, kind: 'branding' });
+  // Cross-tenant binding: a community A file bound to community B. #186's
+  // composite tenant FK rejects this binding at write time, so suspend FK
+  // enforcement for this one insert: it stands in for a pre-#186 legacy
+  // corrupt row and proves the media projection still withholds it.
+  sqlite.pragma('foreign_keys = OFF');
+  try {
+    await db
+      .insert(communityMediaSqlite)
+      .values({ fileId: fileIds.cross, communityId: ids.b, kind: 'branding' });
+  } finally {
+    sqlite.pragma('foreign_keys = ON');
+  }
 
   const place = (values: Record<string, unknown>) =>
     insert(tables.places, {
@@ -417,8 +428,15 @@ const seed = async () => {
     })) as Record<string, unknown>
   ).id as number;
 
-  const edge = async (storyId: number, placeId: number) => {
+  // #186: join rows carry the story's community and the composite tenant FKs
+  // keep every edge inside one community.
+  const edge = async (
+    storyId: number,
+    placeId: number,
+    communityId: number
+  ) => {
     await insert(tables.storyPlaces, {
+      communityId,
       storyId,
       placeId,
       culturalContext: 'secret-context',
@@ -427,8 +445,13 @@ const seed = async () => {
       updatedAt: T0,
     });
   };
-  const voice = async (storyId: number, speakerId: number) => {
+  const voice = async (
+    storyId: number,
+    speakerId: number,
+    communityId: number
+  ) => {
     await insert(tables.storySpeakers, {
+      communityId,
       storyId,
       speakerId,
       storyRole: 'narrator',
@@ -437,24 +460,35 @@ const seed = async () => {
       updatedAt: T0,
     });
   };
-  for (const placeId of [ids.p1, ids.p2, ids.p5]) await edge(ids.st1, placeId);
-  await edge(ids.st2, ids.p1);
-  await edge(ids.st3, ids.p3);
-  await edge(ids.st4, ids.p1);
-  await edge(ids.st5, ids.p1);
-  await edge(ids.st6, ids.p1);
-  await edge(ids.st6, ids.p6);
-  await edge(ids.stB, ids.pB);
-  await edge(ids.st7, ids.p2);
+  for (const placeId of [ids.p1, ids.p2, ids.p5])
+    await edge(ids.st1, placeId, ids.a);
+  await edge(ids.st2, ids.p1, ids.a);
+  await edge(ids.st3, ids.p3, ids.a);
+  await edge(ids.st4, ids.p1, ids.a);
+  await edge(ids.st5, ids.p1, ids.a);
+  await edge(ids.st6, ids.p1, ids.a);
+  await edge(ids.st6, ids.p6, ids.a);
+  await edge(ids.stB, ids.pB, ids.b);
+  await edge(ids.st7, ids.p2, ids.a);
   // Cross-tenant edge: community A's story pointing at community B's place.
-  await edge(ids.st2, ids.pB);
-  for (const speakerId of [ids.s1, ids.s2]) await voice(ids.st1, speakerId);
-  await voice(ids.st2, ids.s1);
-  await voice(ids.st3, ids.s3);
-  await voice(ids.st4, ids.s1);
-  await voice(ids.st5, ids.s1);
-  await voice(ids.stB, ids.sB);
-  await voice(ids.st7, ids.s1);
+  // #186's composite tenant FKs make the database reject this row at write
+  // time, so suspend FK enforcement just for this insert: it stands in for a
+  // pre-#186 legacy corrupt row and proves the repository-level projection
+  // guard (explore-adapter.repository) still never leaks the foreign place.
+  sqlite.pragma('foreign_keys = OFF');
+  try {
+    await edge(ids.st2, ids.pB, ids.a);
+  } finally {
+    sqlite.pragma('foreign_keys = ON');
+  }
+  for (const speakerId of [ids.s1, ids.s2])
+    await voice(ids.st1, speakerId, ids.a);
+  await voice(ids.st2, ids.s1, ids.a);
+  await voice(ids.st3, ids.s3, ids.a);
+  await voice(ids.st4, ids.s1, ids.a);
+  await voice(ids.st5, ids.s1, ids.a);
+  await voice(ids.stB, ids.sB, ids.b);
+  await voice(ids.st7, ids.s1, ids.a);
 };
 
 const get = async (path: string) =>
@@ -982,6 +1016,7 @@ it('caps unpaged map points for very large relations', async () => {
     await insert(
       t.storyPlaces,
       placeIds.map((placeId) => ({
+        communityId: community.id,
         storyId: story.id,
         placeId,
         sortOrder: 0,
@@ -990,6 +1025,7 @@ it('caps unpaged map points for very large relations', async () => {
       }))
     );
     await big.insert(t.storySpeakers).values({
+      communityId: community.id,
       storyId: story.id,
       speakerId: speaker.id,
       sortOrder: 0,

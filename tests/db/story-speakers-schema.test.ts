@@ -57,10 +57,13 @@ describe('Story Speakers Schema', () => {
     it('should have required columns', () => {
       // Just check that the tables have the expected structure
       expect(storySpeakersPg).toHaveProperty('id');
+      expect(storySpeakersPg).toHaveProperty('communityId');
       expect(storySpeakersPg).toHaveProperty('storyId');
       expect(storySpeakersPg).toHaveProperty('speakerId');
       expect(storySpeakersPg).toHaveProperty('createdAt');
       expect(storySpeakersPg).toHaveProperty('updatedAt');
+      // #186: the composite tenant FK column exists on both dialects.
+      expect(storySpeakersSqlite).toHaveProperty('communityId');
     });
 
     it('should support both PostgreSQL and SQLite', () => {
@@ -84,6 +87,7 @@ describe('Story Speakers Schema', () => {
   describe('Zod Validation Schemas', () => {
     const validStorySpeaker = {
       id: 1,
+      communityId: 2,
       storyId: 5,
       speakerId: 2,
       storyRole: 'Primary storyteller',
@@ -93,6 +97,7 @@ describe('Story Speakers Schema', () => {
     };
 
     const validCreateStorySpeaker = {
+      communityId: 2,
       storyId: 5,
       speakerId: 2,
       storyRole: 'Primary storyteller',
@@ -145,6 +150,7 @@ describe('Story Speakers Schema', () => {
     it('should infer correct StorySpeaker type', () => {
       const storySpeaker: StorySpeaker = {
         id: 1,
+        communityId: 2,
         storyId: 5,
         speakerId: 2,
         storyRole: 'Primary storyteller',
@@ -157,6 +163,7 @@ describe('Story Speakers Schema', () => {
 
     it('should infer correct NewStorySpeaker type', () => {
       const newStorySpeaker: NewStorySpeaker = {
+        communityId: 2,
         storyId: 5,
         speakerId: 2,
         storyRole: 'Primary storyteller',
@@ -167,6 +174,7 @@ describe('Story Speakers Schema', () => {
 
     it('should infer correct CreateStorySpeaker type', () => {
       const createStorySpeaker: CreateStorySpeaker = {
+        communityId: 2,
         storyId: 5,
         speakerId: 2,
         storyRole: 'Primary storyteller',

@@ -61,7 +61,7 @@
     "dotenv": "^17.2.1",
     "drizzle-orm": "^0.45.2",
     "drizzle-zod": "^0.8.3",
-    "fastify": "^5.12.1",
+    "fastify": "^5.12.8",
     "file-type": "^21.0.0",
     "hono": "^4.13.18",
     "mime-types": "^3.0.1",

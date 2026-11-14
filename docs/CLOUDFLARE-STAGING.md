@@ -64,13 +64,19 @@ and roadmap Phase 9; this document does not declare a release ready.
    npx wrangler deploy --env staging --dry-run
    npx wrangler secret put JWT_SECRET --env staging
    npx wrangler secret put SESSION_SECRET --env staging
+   npx wrangler d1 export terrastories-staging --remote --output d1-backup.sql
    npx wrangler d1 migrations apply terrastories-staging --remote --env staging
    npx wrangler deploy --env staging
    ```
 
    Review the dry-run output and account before remote mutations. Provision the
    isolated D1 database and R2 bucket and configure their bindings before applying
-   migrations. Secrets are entered interactively or supplied from an approved
+   migrations. Take the D1 backup immediately before the apply and keep the file:
+   `wrangler d1 migrations apply` is not known to run a migration file atomically,
+   so if a run fails after a migration's guard, restore the database from that
+   backup, repair the data, and re-apply (see the header of
+   `src/db/migrations/0005_composite_tenant_fks.sql`). Secrets are entered
+   interactively or supplied from an approved
    environment-backed secret source. Seed only synthetic data through authorized
    V2 bootstrap/import tooling, not the development endpoint or demo seeder.
 

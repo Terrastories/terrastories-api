@@ -34,44 +34,17 @@
 -- safety REQUIRES an atomic runner: the Drizzle better-sqlite3 migrator
 -- applies the whole file in one transaction, and a Miniflare D1 batch is
 -- atomic per batch, so a failure anywhere leaves no partial rebuild behind.
--- A non-atomic runner that dies mid-rebuild leaves residue and must be
--- recovered by hand:
---
--- MANUAL RECOVERY (non-atomic run failed mid-rebuild). First inspect which
--- rebuild tables exist:
---   SELECT name FROM sqlite_master WHERE type = 'table' AND name IN
---     ('stories', 'stories_old',
---      'story_places', 'story_places_new',
---      'story_speakers', 'story_speakers_new',
---      'community_media', 'community_media_new');
--- Invariants: `stories_old` holds the original stories rows until its DROP;
--- a `*_new` table whose target still exists is a draft whose target rows are
--- all still in place (the file drops the target only after the copy
--- finishes), so that draft can always be dropped; a `*_new` table whose
--- target is MISSING is the only copy of that table's rows and must be
--- renamed into place, never dropped. Then either:
--- a) RESTORE the pre-migration state — valid while `stories_old` exists and
---    no join-table DROP has run (story_places, story_speakers, and
---    community_media all still exist with their legacy schema):
---      DROP TABLE IF EXISTS `stories`;
---      DROP TABLE IF EXISTS `story_places_new`;
---      DROP TABLE IF EXISTS `story_speakers_new`;
---      DROP TABLE IF EXISTS `community_media_new`;
---      ALTER TABLE `stories_old` RENAME TO `stories`;
---    Renaming stories_old back also restores the original stories indexes
---    (they stayed attached to stories_old under their old names). For a
---    byte-exact pre-186 schema also drop the three additive
---    *_community_id_id_unique indexes created before the rebuild.
--- b) FINISH the partially applied rebuild: for each `*_new` whose target is
---    missing, run `ALTER TABLE <x>_new RENAME TO <x>;` (its copy completed —
---    the file renames immediately after the DROP). For each `*_new` whose
---    target still exists the draft may be partial (a failed INSERT..SELECT
---    is not resumable): drop it, then re-run that table's CREATE TABLE /
---    INSERT..SELECT / DROP / RENAME block from this file by hand. Finally
---    execute the file's remaining statements by hand, in file order.
--- Either way, finish with `DROP TABLE IF EXISTS _186_cross_community_guard`.
--- The runner records this migration only after every statement succeeds, so
--- after either path it re-applies cleanly from the start.
+-- Production `wrangler d1 migrations apply` is not known to be such a runner
+-- (see above: this repository cannot verify its cross-statement atomicity),
+-- so a run that dies mid-rebuild leaves residue tables, and this file ships
+-- no hand-recovery procedure for that state. Prepare BEFORE applying with
+-- any runner whose atomicity is not known:
+-- 1. Take a backup:
+--      wrangler d1 export <database> --remote --output <file>
+-- 2. If the run fails after the guard, restore the database from that
+--    backup, repair the data, and re-apply the migration from the start
+--    (the backup predates the apply, so the migration bookkeeping is back
+--    at the pre-0005 state and nothing re-runs partially).
 --
 -- D1 note: this migration deliberately uses no PRAGMA statements (D1 only
 -- supports PRAGMA defer_foreign_keys), so table rebuilds are ordered to keep

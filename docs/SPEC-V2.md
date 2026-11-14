@@ -490,13 +490,14 @@ Session
   id
   tokenHash            SHA-256 of a 256-bit opaque token
   userId
-  kind: standard | device
-  createdAt
-  lastSeenAt
-  idleExpiresAt
-  absoluteExpiresAt?
-  revokedAt?
-  revokedBy?
+  expiresAt            built: the single expiry column (epoch ms), 12 h sliding
+  kind                 V2 target: standard | device; built has standard only
+  createdAt            V2 target
+  lastSeenAt           V2 target
+  idleExpiresAt        V2 target: splits the built expiresAt
+  absoluteExpiresAt?   V2 target: splits the built expiresAt
+  revokedAt?           V2 target: built revokes by deleting the row
+  revokedBy?           V2 target: built revokes by deleting the row
 
 LoginCode
   id
@@ -507,6 +508,7 @@ LoginCode
   issuedBy?
   expiresAt?
   usedAt?
+  supersededAt?
   createdAt
 
 ClaimToken
@@ -540,6 +542,16 @@ AuditEntry
 ```
 
 Session lifetimes and the re-read rule are in Section 7. `admin_issued` codes expire in 72 hours or less; `recovery` codes are created at first-admin setup or at a migrated administrator's first V2 login, shown once, have no expiry and are invalidated when regenerated; every code is single-use and carries at least 100 bits. The ClaimToken lifecycle is in Section 7 (Bootstrap). `AuthThrottle` stores no raw IP. AuditEntry content rules are in Section 7 (Audit logging); IP/user-agent are retained at most 90 days.
+
+**Session** (#188). As built (durable-session Hono slice): the session cookie is `ts_session` — `HttpOnly`, `Secure` unless a deployment explicitly disables it, `SameSite=Strict`, `Path=/` — and carries a 256-bit random token whose plaintext exists only in the cookie; the row stores only its SHA-256 digest (`tokenHash`, unique). Expiry is one `expiresAt` 12 hours out, slid forward only by an authenticated request inside the final 15 minutes of the window; a lost renewal race re-reads authority rather than resurrecting a revoked row. Login with an existing valid cookie rotates that session row to the new digest (stable row id, one row per browser). Logout deletes the caller's row; explicit revoke deletes every row for the user; database triggers delete a user's sessions whenever the user's verifier, role, community or active status changes, and a community's sessions when the community's active status changes; every authenticated request re-reads identity, role and user/community status and fails closed when authoritative state is unreadable. V2 target beyond the built slice: the opt-in `device` session (60 days, community-admin revocable), the recorded `idleExpiresAt`/`absoluteExpiresAt` split of the built single expiry, `createdAt`/`lastSeenAt`, and `revokedAt`/`revokedBy` tombstones where the audit record must outlive the row — delete-based revocation stays conformant because Section 7 requires revocation, not retention. Tenancy and access: a Session belongs to one user; it is not community-scoped and never carries content. Only the server reads or writes session rows; no API returns a token or another account's sessions — a community admin manages (lists, revokes) the device sessions of their community's accounts by metadata only. Secrets: the raw token is never stored at rest, logged, exported or written into an audit entry; expired or revoked rows may be removed at any time, because possession of an old cookie grants nothing.
+
+**LoginCode** (#188). Tenancy: `communityId` is the target account's community when it has one; null only for a null-community account. `admin_issued` codes: a community admin with user-management authority creates one for a target account in their community (enrolment, a device that cannot run the client KDF, or assisted recovery); each expires in at most 72 hours, configurably less per deployment, is single-use, and is independent — issuing one code never invalidates another outstanding code. `recovery` codes: generated only at first-admin setup or at a migrated administrator's first V2 login (Section 7), exactly 10 at a time, each with at least 100 bits of entropy from the platform CSPRNG, no expiry, single-use; regenerating a set marks every earlier recovery code of that account `supersededAt` (or deletes it), and the new codes are shown exactly once on the printed recovery sheet. Redemption of any code is atomic with creating the resulting Session and setting `usedAt`; an already-used, superseded or expired code fails the same non-enumerating way as an unknown one. Access: codes are issued only by authenticated admins or the setup/first-login flows — there is no unauthenticated issuance — and redemption is throttled per account and per IP under `AuthThrottle`. Secrets: only `codeHash` (SHA-256) is stored; comparison is constant time; the raw code is returned once and never logged, exported or audited (issue/consume events are audited without the value, Section 7).
+
+**ClaimToken** (#188). Tenancy: `communityId` is required and names the one empty, never-administered community the token may claim (Section 7, Bootstrap). Lifecycle: issued only by authorized system action for such a community, with a lifetime of at most 72 hours, configurably less; single-use — `consumedAt`/`consumedBy` record the claim, at which the claimant sets their own credentials; reissuance before a claim marks the earlier token `supersededAt`; issuance closes permanently once the community has any administrator; consumed, expired and superseded tokens never authenticate anything. Access: the claim record — issuer and issue/consume timestamps — is visible to that community's administrators; the raw token never is, and it can neither authenticate an existing account nor escalate into a `super_admin` session. Secrets: only `tokenHash` is stored; the raw token is shown exactly once at issuance and never logged, exported or audited.
+
+**AuthThrottle** (#188). Operational state, not community content: never exported, never projected, never carrying raw identifiers — the key is a keyed hash of the account identifier or client IP. Lifecycle: a failed login updates the matching per-account and per-IP counters in one database round trip (one D1 batch on Workers, at most two rows written, Section 7); `blockedUntil` enforces exponential backoff; counters reset on success or window expiry, and the counters of an erased community's accounts disappear with the community. Access: only the authentication service reads or writes `AuthThrottle` rows; no user-facing API exposes them. The concrete window and backoff constants are named constants fixed by the authentication work and covered by tests (Section 6.10).
+
+**AuditEntry** (#188). Lifecycle: append-only, written by the server for exactly the audited action classes of Section 7 (Audit logging); entries are never updated, and deletion happens only through network-metadata age-out and community erasure. Content: actor/community/action/resource IDs and outcome only; IP address and user-agent appear only on authentication and security-event entries and age out within 90 days at most, configurably less. Tenancy: `communityId` is null only for system-level events (bootstrap, claim tokens, system lifecycle); entries obey the same community-isolation rules as the content they reference — same-community administrators read their community's entries through the administrative API, `super_admin` reads system entries, no public or member projection of audit data exists, and cross-community reads are denied. Audit entries are included in the community export on the same content-free terms and are removed with community erasure within 30 days, except that content-free entries recording the erasure itself may remain (Section 7, #187). Secrets: credentials, tokens, session identifiers, media, URLs and story/place/speaker content are never written to an audit entry (Section 7).
 
 ### 6.9 Import manifests and safe descriptions (#188, #197)
 

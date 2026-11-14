@@ -52,7 +52,13 @@ SET
 	"email_normalized" = CASE
 		WHEN octet_length("email") = char_length("email") THEN lower("email")
 		ELSE NULL
-	END;
+	END
+-- Legacy orphan rows (community_id naming a missing community, kept under a
+-- staged NOT VALID FK) are skipped: an earlier migration in the same
+-- transaction may have rewritten the table, and PostgreSQL then re-checks the
+-- FK on UPDATE. scripts/backfill-user-identity.ts fills them later.
+WHERE "community_id" IS NULL
+	OR EXISTS (SELECT 1 FROM "communities" c WHERE c."id" = "users"."community_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "users_username_normalized_unique" ON "users" USING btree ("username_normalized");
 --> statement-breakpoint

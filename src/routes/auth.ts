@@ -409,11 +409,19 @@ export async function authRoutes(
               validatedData.password
             );
 
+        // Frozen /api/v1 sessions require a community (null-community super_admin uses V2 auth).
+        if (user.communityId === null) {
+          return reply.status(401).send({
+            error: 'Authentication failed',
+            message: 'Invalid email or password',
+          });
+        }
+
         // Create secure session with user data
         const userSession: UserSession = {
           id: user.id,
           email: user.email,
-          role: user.role,
+          role: user.role as UserSession['role'],
           communityId: user.communityId,
           firstName: user.firstName,
           lastName: user.lastName,

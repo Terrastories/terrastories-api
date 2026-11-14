@@ -13,7 +13,7 @@
  * - Pagination and filtering support
  */
 
-import { eq, and, desc, asc, count, or, ne } from 'drizzle-orm';
+import { eq, and, desc, asc, count, or, ne, isNull } from 'drizzle-orm';
 import { type User, type NewUser, type UserRole } from '../db/schema/users.js';
 import { type Community } from '../db/schema/communities.js';
 import {
@@ -25,6 +25,7 @@ import {
   type DialectTables,
 } from '../db/dialect.js';
 import { provisioningLockQuery } from './community.repository.js';
+import { deriveUserIdentityColumns } from '../shared/utils/derived-columns.js';
 
 // Database type - using any temporarily to resolve union type incompatibility
 // TODO: Implement proper database abstraction layer for SQLite/PostgreSQL compatibility
@@ -94,6 +95,9 @@ export class UserRepository {
   async create(userData: NewUser): Promise<User> {
     try {
       const usersTable = this.tables.users;
+      if (userData.communityId == null) {
+        throw new Error('Invalid community ID');
+      }
 
       // Check if email already exists in this community
       const existingUser = await this.findByEmail(
@@ -124,6 +128,10 @@ export class UserRepository {
         .insert(usersTable)
         .values({
           ...userData,
+          ...deriveUserIdentityColumns({
+            email: userData.email,
+            username: userData.username,
+          }),
           createdAt: new Date(),
           updatedAt: new Date(),
         })
@@ -283,11 +291,25 @@ export class UserRepository {
         }
       }
 
+      const nextEmail =
+        updates.email !== undefined
+          ? updates.email.toLowerCase().trim()
+          : undefined;
+      const {
+        emailNormalized: _ignoredEmailNormalized,
+        usernameNormalized: _ignoredUsernameNormalized,
+        ...safeUpdates
+      } = updates;
+
       const updatedUsers = await this.database
         .update(usersTable)
         .set({
-          ...updates,
-          email: updates.email?.toLowerCase().trim(),
+          ...safeUpdates,
+          ...(nextEmail !== undefined ? { email: nextEmail } : {}),
+          ...deriveUserIdentityColumns({
+            email: nextEmail,
+            username: updates.username,
+          }),
           updatedAt: new Date(),
         })
         .where(
@@ -734,7 +756,7 @@ export class UserRepository {
    */
   async compareAndSetMembership(
     id: number,
-    expected: { role: string; isActive: boolean; communityId: number },
+    expected: { role: string; isActive: boolean; communityId: number | null },
     patch: Partial<NewUser>,
     options: { requireOtherActiveAdmin?: boolean } = {}
   ): Promise<
@@ -744,18 +766,29 @@ export class UserRepository {
   > {
     const usersTable = this.tables.users;
     const communitiesTable = this.tables.communities;
+    const nextEmail =
+      patch.email !== undefined ? patch.email.toLowerCase().trim() : undefined;
+    const {
+      emailNormalized: _ignoredEmailNormalized,
+      usernameNormalized: _ignoredUsernameNormalized,
+      ...safePatch
+    } = patch;
     const values = {
-      ...patch,
-      ...(patch.email !== undefined
-        ? { email: patch.email.toLowerCase().trim() }
-        : {}),
+      ...safePatch,
+      ...(nextEmail !== undefined ? { email: nextEmail } : {}),
+      ...deriveUserIdentityColumns({
+        email: nextEmail,
+        username: patch.username,
+      }),
       updatedAt: new Date(),
     };
     const matchesSnapshot = and(
       eq(usersTable.id, id),
       eq(usersTable.role, expected.role as User['role']),
       eq(usersTable.isActive, expected.isActive),
-      eq(usersTable.communityId, expected.communityId)
+      expected.communityId === null
+        ? isNull(usersTable.communityId)
+        : eq(usersTable.communityId, expected.communityId)
     );
     const otherActiveAdmins = (executor: any) =>
       executor
@@ -763,7 +796,9 @@ export class UserRepository {
         .from(usersTable)
         .where(
           and(
-            eq(usersTable.communityId, expected.communityId),
+            expected.communityId === null
+              ? isNull(usersTable.communityId)
+              : eq(usersTable.communityId, expected.communityId),
             eq(usersTable.role, 'admin'),
             eq(usersTable.isActive, true),
             ne(usersTable.id, id)
@@ -773,7 +808,13 @@ export class UserRepository {
 
     if (this.dialect === 'postgresql') {
       return db.transaction(async (tx: any) => {
-        await provisioningLockQuery(tx, communitiesTable, expected.communityId);
+        if (expected.communityId !== null) {
+          await provisioningLockQuery(
+            tx,
+            communitiesTable,
+            expected.communityId
+          );
+        }
         if (options.requireOtherActiveAdmin) {
           const [others] = await otherActiveAdmins(tx);
           if (Number(others?.n ?? 0) === 0) {
@@ -829,8 +870,17 @@ export class UserRepository {
       const usersTable = this.tables.users;
 
       // Update the user
+      const {
+        emailNormalized: _ignoredEmailNormalized,
+        usernameNormalized: _ignoredUsernameNormalized,
+        ...safeData
+      } = data;
       const updateData = {
-        ...data,
+        ...safeData,
+        ...deriveUserIdentityColumns({
+          email: data.email,
+          username: data.username,
+        }),
         updatedAt: new Date(),
       };
 

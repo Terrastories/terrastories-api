@@ -749,6 +749,24 @@ function verifySqliteSchema(sqlite: Database.Database): void {
       ['created_by', 'topic', 'topic_normalized', 'description_plain'],
     ],
     ['places', ['latitude', 'longitude', 'type_of_place', 'description_plain']],
+    [
+      'users',
+      [
+        'username',
+        'display_name',
+        'password_verifier',
+        'password_algorithm',
+        'password_salt',
+        'password_params',
+        'username_normalized',
+        'email_normalized',
+        'community_id',
+      ],
+    ],
+    [
+      'audit_entries',
+      ['community_id', 'actor_id', 'resource_type', 'ip_address', 'user_agent'],
+    ],
   ] as const) {
     const tableInfo = sqlite
       .prepare(`PRAGMA table_info(${table})`)
@@ -762,6 +780,20 @@ function verifySqliteSchema(sqlite: Database.Database): void {
         `${table}.${colName} must be nullable in SQLite`
       );
     }
+  }
+
+  // #137 Slice 3a: normalized user unique indexes & audit_entries indexes.
+  for (const [table, uniqueIdx] of [
+    ['users', 'users_username_normalized_unique'],
+    ['users', 'users_community_email_normalized_unique'],
+    ['users', 'users_null_community_email_normalized_unique'],
+  ] as const) {
+    const indexes = sqlite
+      .prepare(`PRAGMA index_list(${table})`)
+      .all() as any[];
+    const lookup = indexes.find((row) => String(row.name) === uniqueIdx);
+    assert.ok(lookup, `missing SQLite unique index ${uniqueIdx}`);
+    assert.equal(Number(lookup.unique), 1, `${uniqueIdx} must be unique`);
   }
 }
 
@@ -829,17 +861,17 @@ function verifySqliteTimestampModes(): Array<{
       columns.push({ table: getTableName(value), column: column.name });
     }
   }
-  // Ten tables carry timestamps (attachments, communities, files, places,
-  // speakers, stories, story_places, story_speakers, themes, users) with 24
-  // columns; the bound keeps a deleted export from silently shrinking the
-  // enumeration to the set the migration happens to cover.
+  // Eleven tables carry timestamps (the 10 pre-0006 tables with 24 columns
+  // plus audit_entries.created_at introduced in 0009 directly as timestamp_ms).
   assert.equal(
     columns.length,
-    24,
-    'the schema must expose 24 timestamp columns'
+    25,
+    'the schema must expose 25 timestamp columns'
   );
   return columns;
 }
+
+const post0006TimestampColumns = new Set(['audit_entries.created_at']);
 
 /**
  * #192: 0006 must convert exactly the schema's timestamp_ms columns, every
@@ -908,8 +940,11 @@ async function verifySqliteMigrationColumnSet(
   );
   assert.deepEqual(
     migrated.sort(),
-    schemaColumns.map((column) => `${column.table}.${column.column}`).sort(),
-    '0006 must convert exactly the schema timestamp_ms column set'
+    schemaColumns
+      .map((column) => `${column.table}.${column.column}`)
+      .filter((key) => !post0006TimestampColumns.has(key))
+      .sort(),
+    '0006 must convert exactly the pre-0006 schema timestamp_ms column set'
   );
 }
 
@@ -1189,9 +1224,19 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   assert.deepEqual(
     timestampColumnRows
       .map((row: any) => `${row.table_name}.${row.column_name}`)
+      .filter((key: string) => !post0006TimestampColumns.has(key))
       .sort(),
     [...narrowedBy0005].sort(),
-    'the timestamp column set must be exactly what 0005 narrows (#192)'
+    'the pre-0005 timestamp column set must be exactly what 0005 narrows (#192)'
+  );
+  assert.ok(
+    timestampColumnRows.some(
+      (row: any) =>
+        row.table_name === 'audit_entries' &&
+        row.column_name === 'created_at' &&
+        Number(row.datetime_precision) === 3
+    ),
+    'audit_entries.created_at must exist at timestamp(3)'
   );
   assert.ok(
     columns.some(
@@ -1324,8 +1369,8 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     assert.ok(indexes.has(indexName), `missing PostgreSQL index ${indexName}`);
   }
 
-  // #189 Slice 1b: nullable content columns & relaxed V2 nullability.
-  const slice1bCols = await client.unsafe(
+  // #189 Slice 1b + #137 Slice 3a: nullable columns & identity/audit schema.
+  const sliceCols = await client.unsafe(
     `SELECT table_name, column_name, is_nullable
      FROM information_schema.columns
      WHERE table_schema = 'public'
@@ -1333,10 +1378,12 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
          (table_name = 'communities' AND column_name = 'description_plain')
          OR (table_name = 'stories' AND column_name IN ('created_by', 'topic', 'topic_normalized', 'description_plain'))
          OR (table_name = 'places' AND column_name IN ('latitude', 'longitude', 'type_of_place', 'description_plain'))
+         OR (table_name = 'users' AND column_name IN ('community_id', 'username', 'display_name', 'password_verifier', 'password_algorithm', 'password_salt', 'password_params', 'username_normalized', 'email_normalized'))
+         OR (table_name = 'audit_entries' AND column_name IN ('community_id', 'actor_id', 'resource_type', 'ip_address', 'user_agent'))
        )`
   );
   const nullableMap = new Map(
-    slice1bCols.map((row: any) => [
+    sliceCols.map((row: any) => [
       `${row.table_name}.${row.column_name}`,
       String(row.is_nullable),
     ])
@@ -1351,12 +1398,36 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     'places.longitude',
     'places.type_of_place',
     'places.description_plain',
+    'users.community_id',
+    'users.username',
+    'users.display_name',
+    'users.password_verifier',
+    'users.password_algorithm',
+    'users.password_salt',
+    'users.password_params',
+    'users.username_normalized',
+    'users.email_normalized',
+    'audit_entries.community_id',
+    'audit_entries.actor_id',
+    'audit_entries.resource_type',
+    'audit_entries.ip_address',
+    'audit_entries.user_agent',
   ]) {
     assert.equal(
       nullableMap.get(expectedNullable),
       'YES',
       `${expectedNullable} must exist and be nullable in PostgreSQL`
     );
+  }
+  for (const indexName of [
+    'users_username_normalized_unique',
+    'users_community_email_normalized_unique',
+    'users_null_community_email_normalized_unique',
+    'idx_audit_entries_community_created_at',
+    'idx_audit_entries_actor',
+    'idx_audit_entries_network_scrub',
+  ]) {
+    assert.ok(indexes.has(indexName), `missing PostgreSQL index ${indexName}`);
   }
 }
 
@@ -1901,6 +1972,55 @@ async function verifyPostgresTransactionAndForeignKey(
     }),
     /slice1b_pg_probe_rollback/
   );
+
+  // #137 Slice 3a: null-community super_admin, member role, 3 unique rules, trigger, audit_entries.
+  await assert.rejects(
+    client.begin(async (tx) => {
+      const [{ id: comm }] = await tx`
+        INSERT INTO communities (name, slug) VALUES ('PG Slice3a', 'pg-slice3a') RETURNING id
+      `;
+      const [{ id: saId }] = await tx`
+        INSERT INTO users (email, email_normalized, username, username_normalized, password_hash, first_name, last_name, role, community_id)
+        VALUES ('SA@Example.org', 'sa@example.org', 'SuperRoot', 'superroot', 'h', 'Super', 'Admin', 'super_admin', NULL)
+        RETURNING id
+      `;
+      await tx`
+        INSERT INTO users (email, email_normalized, password_hash, first_name, last_name, role, community_id)
+        VALUES ('m@example.org', 'm@example.org', 'h', 'Mem', 'Ber', 'member', ${comm})
+      `;
+      await tx`
+        INSERT INTO sessions (id, token_hash, user_id, expires_at) VALUES ('pg-s1', 'pg-th1', ${saId}, 9999999999999)
+      `;
+      await tx`UPDATE users SET password_verifier = 'v2' WHERE id = ${saId}`;
+      const [{ cnt }] =
+        await tx`SELECT count(*)::int AS cnt FROM sessions WHERE user_id = ${saId}`;
+      assert.equal(
+        cnt,
+        0,
+        'PG trigger must revoke session on password_verifier update'
+      );
+      await assert.rejects(
+        tx.savepoint(
+          async (sp) =>
+            sp`INSERT INTO users (email, email_normalized, password_hash, first_name, last_name, role, community_id) VALUES ('sa@example.org', 'sa@example.org', 'h', 'Dup', 'SA', 'super_admin', NULL)`
+        )
+      );
+      await tx`
+        INSERT INTO audit_entries (community_id, actor_id, action, resource_type, resource_ids, outcome, ip_address)
+        VALUES (${comm}, ${saId}, 'claim_token.issue', 'claim_token', '[1]'::jsonb, 'success', '203.0.113.1')
+      `;
+      await assert.rejects(
+        tx.savepoint(async (sp) => sp`DELETE FROM users WHERE id = ${saId}`)
+      );
+      await assert.rejects(
+        tx.savepoint(
+          async (sp) => sp`DELETE FROM communities WHERE id = ${comm}`
+        )
+      );
+      throw new Error('slice3a_pg_probe_rollback');
+    }),
+    /slice3a_pg_probe_rollback/
+  );
 }
 
 async function verifySqliteFailedMigrationNotRecorded(): Promise<void> {
@@ -1978,7 +2098,7 @@ interface Snapshot {
   tables: Record<string, SnapshotTable>;
 }
 
-/** Tables 0005/0007/0008 rebuild by hand: they must match the Drizzle snapshot exactly. */
+/** Tables 0005/0007/0008/0009 rebuild by hand: they must match the Drizzle snapshot exactly. */
 const rebuiltTables = [
   'places',
   'speakers',
@@ -1986,6 +2106,10 @@ const rebuiltTables = [
   'story_places',
   'story_speakers',
   'community_media',
+  'users',
+  'sessions',
+  'files',
+  'audit_entries',
 ] as const;
 
 /**
@@ -2118,7 +2242,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0008_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0009_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2509,6 +2633,7 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0006_ms_timestamps.sql',
       '0007_story_edge_multiplicity_and_speaker_fields.sql',
       '0008_slice1_content_columns.sql',
+      '0009_users_identity_and_audit_entries.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')

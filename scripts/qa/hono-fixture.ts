@@ -47,6 +47,7 @@ import {
   type ReadRulePrivacyEvidence,
 } from '../../src/policy/read-rules.js';
 import type { TestFixtures } from '../../tests/helpers/database.js';
+import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
@@ -331,6 +332,7 @@ export async function createFixture(
         .insert(users)
         .values({
           email: credentials[role].email,
+          ...deriveUserIdentityColumns({ email: credentials[role].email }),
           passwordHash,
           firstName: 'QA',
           lastName: 'Hono',
@@ -356,6 +358,7 @@ export async function createFixture(
       .insert(users)
       .values({
         email: foreignViewerCredentials.email,
+        ...deriveUserIdentityColumns({ email: foreignViewerCredentials.email }),
         passwordHash,
         firstName: 'QA',
         lastName: 'Hono',

@@ -14,6 +14,7 @@ import {
 } from './schema/index.js';
 import { getConfig, isDevelopmentEnvironment } from '../shared/config/index.js';
 import { hashPassword } from '../services/password.service.js';
+import { deriveUserIdentityColumns } from '../shared/utils/derived-columns.js';
 
 /**
  * Development Database Seeder
@@ -158,6 +159,7 @@ async function seedDatabase(): Promise<SeedData> {
           firstName: 'Super',
           lastName: 'Admin',
           email: 'super@example.com',
+          ...deriveUserIdentityColumns({ email: 'super@example.com' }),
           passwordHash: superAdminPassword,
           role: 'super_admin',
           communityId: testCommunities[0].id,
@@ -169,6 +171,7 @@ async function seedDatabase(): Promise<SeedData> {
           firstName: 'Admin',
           lastName: 'User',
           email: 'admin@demo.com',
+          ...deriveUserIdentityColumns({ email: 'admin@demo.com' }),
           passwordHash: hashedPassword,
           role: 'admin',
           communityId: testCommunities[0].id,
@@ -180,6 +183,7 @@ async function seedDatabase(): Promise<SeedData> {
           firstName: 'Editor',
           lastName: 'User',
           email: 'editor@demo.com',
+          ...deriveUserIdentityColumns({ email: 'editor@demo.com' }),
           passwordHash: hashedPassword,
           role: 'editor',
           communityId: testCommunities[0].id,
@@ -191,6 +195,7 @@ async function seedDatabase(): Promise<SeedData> {
           firstName: 'Elder',
           lastName: 'Wisdom',
           email: 'elder@indigenous.com',
+          ...deriveUserIdentityColumns({ email: 'elder@indigenous.com' }),
           passwordHash: hashedPassword,
           role: 'admin',
           communityId: testCommunities[1].id,
@@ -202,6 +207,7 @@ async function seedDatabase(): Promise<SeedData> {
           firstName: 'Community',
           lastName: 'Member',
           email: 'member@indigenous.com',
+          ...deriveUserIdentityColumns({ email: 'member@indigenous.com' }),
           passwordHash: hashedPassword,
           role: 'viewer',
           communityId: testCommunities[1].id,

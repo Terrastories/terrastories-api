@@ -10,6 +10,7 @@
 import { asc, desc, is, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 import { PgDatabase } from 'drizzle-orm/pg-core';
 import { attachmentsPg, attachmentsSqlite } from './schema/attachments.js';
+import { auditEntriesPg, auditEntriesSqlite } from './schema/audit_entries.js';
 import { communitiesPg, communitiesSqlite } from './schema/communities.js';
 import { filesPg, filesSqlite } from './schema/files.js';
 import { placesPg, placesSqlite } from './schema/places.js';
@@ -27,6 +28,7 @@ export type Dialect = 'postgresql' | 'sqlite';
 
 const sqliteTables = {
   attachments: attachmentsSqlite,
+  auditEntries: auditEntriesSqlite,
   communities: communitiesSqlite,
   files: filesSqlite,
   places: placesSqlite,
@@ -40,6 +42,7 @@ const sqliteTables = {
 
 const postgresTables = {
   attachments: attachmentsPg,
+  auditEntries: auditEntriesPg,
   communities: communitiesPg,
   files: filesPg,
   places: placesPg,

@@ -5984,6 +5984,26 @@ export async function createFixture(
             expected: 404,
           },
           {
+            name: 'upload staging media for an explicit delete',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaDeleteFile',
+            ...qaMultipart({
+              filename: 'qa-delete.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+          },
+          {
+            // The explicit delete of a still-referenced file must succeed and
+            // remove both the row and its bytes on every backend.
+            name: 'delete staging media removes its bytes',
+            method: 'DELETE',
+            path: '/v2/media/{qaDeleteFile}',
+            expected: 204,
+          },
+          {
             name: 'logout',
             method: 'POST',
             path: '/v2/auth/logout',

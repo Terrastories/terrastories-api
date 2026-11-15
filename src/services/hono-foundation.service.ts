@@ -20,11 +20,16 @@ export interface StorageReadRange {
   end: number;
 }
 
+export interface StorageReadResult {
+  body: Uint8Array | ReadableStream<Uint8Array>;
+  size: number;
+}
+
 export interface FoundationStorage {
   read(
     key: string,
     range?: StorageReadRange
-  ): Promise<Uint8Array | ReadableStream<Uint8Array> | null>;
+  ): Promise<StorageReadResult | null>;
 }
 
 import { sessionLifetime } from '../shared/session-policy.js';
@@ -91,7 +96,9 @@ export class HonoFoundationService {
       !validStorageKey(file.storageKey)
     )
       return null;
-    const bytes = await this.storage.read(file.storageKey);
-    return bytes === null ? null : { bytes, mimeType: file.mimeType };
+    const stored = await this.storage.read(file.storageKey);
+    return stored === null
+      ? null
+      : { bytes: stored.body, mimeType: file.mimeType };
   }
 }

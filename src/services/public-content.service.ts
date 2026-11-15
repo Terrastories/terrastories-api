@@ -762,14 +762,26 @@ export class PublicContentService {
       if (!stored) {
         return null;
       }
+      if (!Number.isSafeInteger(stored.size) || stored.size !== totalLength) {
+        if (stored.body instanceof ReadableStream) {
+          await stored.body.cancel().catch(() => {});
+        }
+        return new Response(JSON.stringify(INTERNAL_ERROR_BODY), {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
       const contentLength = range.end - range.start + 1;
-      return new Response(toResponseBody(stored), {
+      return new Response(toResponseBody(stored.body), {
         status: 206,
         headers: {
           ...baseHeaders,
           'Content-Type': file.mimeType,
           'Content-Disposition': 'attachment',
-          'Content-Range': `bytes ${range.start}-${range.end}/${totalLength}`,
+          'Content-Range': `bytes ${range.start}-${range.end}/${stored.size}`,
           'Content-Length': String(contentLength),
         },
       });
@@ -779,14 +791,26 @@ export class PublicContentService {
     if (!stored) {
       return null;
     }
+    if (!Number.isSafeInteger(stored.size) || stored.size !== totalLength) {
+      if (stored.body instanceof ReadableStream) {
+        await stored.body.cancel().catch(() => {});
+      }
+      return new Response(JSON.stringify(INTERNAL_ERROR_BODY), {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
 
-    return new Response(toResponseBody(stored), {
+    return new Response(toResponseBody(stored.body), {
       status: 200,
       headers: {
         ...baseHeaders,
         'Content-Type': file.mimeType,
         'Content-Disposition': 'attachment',
-        'Content-Length': String(totalLength),
+        'Content-Length': String(stored.size),
       },
     });
   }

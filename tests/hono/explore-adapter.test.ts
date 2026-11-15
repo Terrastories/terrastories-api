@@ -572,7 +572,8 @@ beforeAll(async () => {
     storage: {
       read: async (key: string) => {
         storageReads++;
-        return storage.get(key) ?? null;
+        const bytes = storage.get(key);
+        return bytes ? { body: bytes, size: bytes.byteLength } : null;
       },
     },
   };

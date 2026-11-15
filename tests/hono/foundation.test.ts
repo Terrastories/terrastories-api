@@ -28,14 +28,20 @@ it('keeps resolved storage bytes inside their authorized tenant', async () => {
   await symlink('../2/private', `${root}/communities/1/escape`);
   const storage = await createLocalStorage(root);
   const own = await storage.read('communities/1/own');
-  expect(own).toBeInstanceOf(ReadableStream);
-  expect(await new Response(own as ReadableStream).text()).toBe('own');
+  expect(own).not.toBeNull();
+  expect(own?.size).toBe(3);
+  expect(own?.body).toBeInstanceOf(ReadableStream);
+  expect(await new Response(own?.body as ReadableStream).text()).toBe('own');
   const ownPartial = await storage.read('communities/1/own', {
     start: 1,
     end: 2,
   });
-  expect(ownPartial).toBeInstanceOf(ReadableStream);
-  expect(await new Response(ownPartial as ReadableStream).text()).toBe('wn');
+  expect(ownPartial).not.toBeNull();
+  expect(ownPartial?.size).toBe(3);
+  expect(ownPartial?.body).toBeInstanceOf(ReadableStream);
+  expect(await new Response(ownPartial?.body as ReadableStream).text()).toBe(
+    'wn'
+  );
   expect(await storage.read('communities/1/escape')).toBeNull();
   expect(await storage.read('communities/1/../2/private')).toBeNull();
   const denied = await createLocalStorage(root, async () => {

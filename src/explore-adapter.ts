@@ -101,11 +101,13 @@ export function registerExploreAdapter(
       !validStorageKey(file.storageKey)
     )
       return c.json(notFoundBody, 404);
-    const bytes = await options.storage.read(file.storageKey);
-    if (bytes === null) return c.json(notFoundBody, 404);
+    const stored = await options.storage.read(file.storageKey);
+    if (stored === null) return c.json(notFoundBody, 404);
     // Download disposition + sandbox prevents active branding formats executing.
     return new Response(
-      bytes instanceof Uint8Array ? new Uint8Array(bytes) : bytes,
+      stored.body instanceof Uint8Array
+        ? new Uint8Array(stored.body)
+        : stored.body,
       {
         headers: {
           'Content-Type': file.mimeType,

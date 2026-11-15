@@ -50,7 +50,7 @@ const STORY_PUBLIC_ALLOWED =
     viewerIsOwner: false,
   }) === 'visible';
 
-const PLACE_ASSOCIATED_ALLOWED =
+export const PLACE_ASSOCIATED_ALLOWED =
   readRuleOutcome({
     resource: 'place',
     association: ASSOCIATED_VIA_READABLE_STORY,
@@ -59,7 +59,7 @@ const PLACE_ASSOCIATED_ALLOWED =
     viewerIsOwner: false,
   }) === 'with-readable-stories';
 
-const SPEAKER_ASSOCIATED_ALLOWED =
+export const SPEAKER_ASSOCIATED_ALLOWED =
   readRuleOutcome({
     resource: 'speaker',
     association: ASSOCIATED_VIA_READABLE_STORY,

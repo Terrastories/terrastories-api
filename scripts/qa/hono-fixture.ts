@@ -1085,7 +1085,10 @@ export async function createFixture(
           read: async (key, range) => {
             const bytes = storage.get(key);
             if (!bytes) return null;
-            return range ? bytes.subarray(range.start, range.end + 1) : bytes;
+            return {
+              body: range ? bytes.subarray(range.start, range.end + 1) : bytes,
+              size: bytes.byteLength,
+            };
           },
         },
       });

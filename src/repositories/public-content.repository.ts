@@ -54,9 +54,11 @@ import {
   type PublicCommunityRow,
 } from './public-communities.repository.js';
 import {
+  PLACE_ASSOCIATED_ALLOWED,
   PUBLIC_ASSOCIATED_MEDIA_ALLOWED,
   PUBLIC_BRANDING_MEDIA_ALLOWED,
   PUBLIC_STORY_MEDIA_ALLOWED,
+  SPEAKER_ASSOCIATED_ALLOWED,
   activeUnrestrictedFileCondition,
   isValidCoordinates,
   publicPlaceBaseCondition,
@@ -1213,7 +1215,7 @@ export class PublicContentRepository {
     placeIds: number[]
   ): Promise<Map<number, PublicPlaceRecord>> {
     const result = new Map<number, PublicPlaceRecord>();
-    if (placeIds.length === 0) {
+    if (!PLACE_ASSOCIATED_ALLOWED || placeIds.length === 0) {
       return result;
     }
 
@@ -1296,7 +1298,7 @@ export class PublicContentRepository {
     speakerIds: number[]
   ): Promise<Map<number, PublicSpeakerRecord>> {
     const result = new Map<number, PublicSpeakerRecord>();
-    if (!PUBLIC_ASSOCIATED_MEDIA_ALLOWED || speakerIds.length === 0) {
+    if (!SPEAKER_ASSOCIATED_ALLOWED || speakerIds.length === 0) {
       return result;
     }
 

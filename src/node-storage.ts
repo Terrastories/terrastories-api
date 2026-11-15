@@ -22,10 +22,19 @@ export async function createLocalStorage(
         );
         if (!filename.startsWith(tenantRoot + path.sep)) return null;
         const file = await openFile(filename, 'r');
-        const stream = range
-          ? file.createReadStream({ start: range.start, end: range.end })
-          : file.createReadStream();
-        return Readable.toWeb(stream);
+        try {
+          const stat = await file.stat();
+          const stream = range
+            ? file.createReadStream({ start: range.start, end: range.end })
+            : file.createReadStream();
+          return {
+            body: Readable.toWeb(stream) as ReadableStream<Uint8Array>,
+            size: stat.size,
+          };
+        } catch (error) {
+          await file.close().catch(() => {});
+          throw error;
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
         throw error;

@@ -1489,6 +1489,8 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
       ) => Promise<unknown[]>;
     };
     let beforeNextBatch: (() => void) | null = null;
+    const recordedBatches: Array<Array<{ sql: string; params: unknown[] }>> =
+      [];
     d1Like.batch = async (stmts) => {
       if (beforeNextBatch) {
         const hook = beforeNextBatch;
@@ -1496,6 +1498,7 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
         hook();
       }
       const queries = stmts.map((s) => s.toSQL());
+      recordedBatches.push(queries);
       return batchSqlite.transaction(() =>
         queries.map(({ sql: querySql, params }) => {
           const stmt = batchSqlite.prepare(querySql);
@@ -1529,6 +1532,15 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
       );
       expect(ok.status).toBe('created');
       if (ok.status !== 'created') return;
+      const createQueries = recordedBatches[0]!;
+      expect(createQueries[1]!.sql).toContain('s.created_by =');
+      expect(createQueries[1]!.sql).toContain('s.created_at =');
+      expect(createQueries[1]!.params).toContain(actor!.id);
+      expect(createQueries[1]!.params).toContain(T0.getTime());
+      expect(createQueries[2]!.sql).toContain('"created_by" =');
+      expect(createQueries[2]!.sql).toContain('"created_at" =');
+      expect(createQueries[2]!.params).toContain(actor!.id);
+      expect(createQueries[2]!.params).toContain(T0.getTime());
 
       expect(await batchDb.select().from(batchTables.storyPlaces)).toHaveLength(
         2

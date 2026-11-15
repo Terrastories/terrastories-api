@@ -213,9 +213,10 @@ export class StoryWritesRepository {
     communityId: number,
     placeId: number,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: any = this.db
+    executor: any = this.db,
+    lockShare = false
   ): Promise<{ id: number } | null> {
-    const rows = await executor
+    const query = executor
       .select({ id: this.tables.places.id })
       .from(this.tables.places)
       .where(
@@ -226,6 +227,10 @@ export class StoryWritesRepository {
         )
       )
       .limit(1);
+    const rows =
+      lockShare && dialectOf(this.connection) === 'postgresql'
+        ? await query.for('share')
+        : await query;
     return rows[0] ?? null;
   }
 
@@ -233,9 +238,10 @@ export class StoryWritesRepository {
     communityId: number,
     speakerId: number,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: any = this.db
+    executor: any = this.db,
+    lockShare = false
   ): Promise<{ id: number } | null> {
-    const rows = await executor
+    const query = executor
       .select({ id: this.tables.speakers.id })
       .from(this.tables.speakers)
       .where(
@@ -245,6 +251,10 @@ export class StoryWritesRepository {
         )
       )
       .limit(1);
+    const rows =
+      lockShare && dialectOf(this.connection) === 'postgresql'
+        ? await query.for('share')
+        : await query;
     return rows[0] ?? null;
   }
 
@@ -252,12 +262,15 @@ export class StoryWritesRepository {
     communityId: number,
     placeIds: ReadonlyArray<number>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: any = this.db
+    executor: any = this.db,
+    lockShare = false
   ): Promise<Set<number>> {
     const uniqueIds = Array.from(new Set(placeIds));
     const found = new Set<number>();
+    const useLockShare =
+      lockShare && dialectOf(this.connection) === 'postgresql';
     for (const chunk of chunkArray(uniqueIds, D1_IN_CLAUSE_CHUNK_SIZE)) {
-      const rows = await executor
+      const query = executor
         .select({ id: this.tables.places.id })
         .from(this.tables.places)
         .where(
@@ -267,6 +280,7 @@ export class StoryWritesRepository {
             inArray(this.tables.places.id, chunk)
           )
         );
+      const rows = useLockShare ? await query.for('share') : await query;
       for (const row of rows as Array<{ id: number }>) {
         found.add(row.id);
       }
@@ -278,12 +292,15 @@ export class StoryWritesRepository {
     communityId: number,
     speakerIds: ReadonlyArray<number>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: any = this.db
+    executor: any = this.db,
+    lockShare = false
   ): Promise<Set<number>> {
     const uniqueIds = Array.from(new Set(speakerIds));
     const found = new Set<number>();
+    const useLockShare =
+      lockShare && dialectOf(this.connection) === 'postgresql';
     for (const chunk of chunkArray(uniqueIds, D1_IN_CLAUSE_CHUNK_SIZE)) {
-      const rows = await executor
+      const query = executor
         .select({ id: this.tables.speakers.id })
         .from(this.tables.speakers)
         .where(
@@ -292,6 +309,7 @@ export class StoryWritesRepository {
             inArray(this.tables.speakers.id, chunk)
           )
         );
+      const rows = useLockShare ? await query.for('share') : await query;
       for (const row of rows as Array<{ id: number }>) {
         found.add(row.id);
       }
@@ -387,14 +405,14 @@ export class StoryWritesRepository {
         ...this.buildD1EdgeInsertStatements(
           'places',
           communityId,
-          { slug },
+          { slug, createdBy: actorId, createdAtMs: nowMs },
           input.placeIds,
           nowMs
         ),
         ...this.buildD1EdgeInsertStatements(
           'speakers',
           communityId,
-          { slug },
+          { slug, createdBy: actorId, createdAtMs: nowMs },
           input.speakerIds,
           nowMs
         ),
@@ -423,7 +441,9 @@ export class StoryWritesRepository {
               .where(
                 and(
                   eq(this.tables.stories.communityId, communityId),
-                  eq(this.tables.stories.slug, slug)
+                  eq(this.tables.stories.slug, slug),
+                  eq(this.tables.stories.createdBy, actorId),
+                  eq(this.tables.stories.createdAt, now)
                 )
               )
           )
@@ -474,12 +494,14 @@ export class StoryWritesRepository {
         return true;
       }
 
+      const lockShare = dialectOf(this.connection) === 'postgresql';
       return (async () => {
         if (input.interviewLocationId !== null) {
           const place = await this.findCommunityUnrestrictedPlace(
             communityId,
             input.interviewLocationId,
-            tx
+            tx,
+            lockShare
           );
           if (!place) return false;
         }
@@ -487,7 +509,8 @@ export class StoryWritesRepository {
           const speaker = await this.findCommunitySpeaker(
             communityId,
             input.interviewerId,
-            tx
+            tx,
+            lockShare
           );
           if (!speaker) return false;
         }
@@ -505,7 +528,8 @@ export class StoryWritesRepository {
           const foundPlaces = await this.findExistingUnrestrictedPlaceIds(
             communityId,
             input.placeIds,
-            tx
+            tx,
+            true
           );
           if (input.placeIds.some((id) => !foundPlaces.has(id))) {
             return { status: 'invalid_reference' };
@@ -515,7 +539,8 @@ export class StoryWritesRepository {
           const foundSpeakers = await this.findExistingSpeakerIds(
             communityId,
             input.speakerIds,
-            tx
+            tx,
+            true
           );
           if (input.speakerIds.some((id) => !foundSpeakers.has(id))) {
             return { status: 'invalid_reference' };
@@ -900,7 +925,8 @@ export class StoryWritesRepository {
           const place = await this.findCommunityUnrestrictedPlace(
             communityId,
             input.interviewLocationId,
-            tx
+            tx,
+            true
           );
           if (!place) {
             return 'invalid_reference';
@@ -910,7 +936,8 @@ export class StoryWritesRepository {
           const speaker = await this.findCommunitySpeaker(
             communityId,
             input.interviewerId,
-            tx
+            tx,
+            true
           );
           if (!speaker) {
             return 'invalid_reference';
@@ -1082,7 +1109,9 @@ export class StoryWritesRepository {
   private buildD1EdgeInsertStatements(
     edgeKind: 'places' | 'speakers',
     communityId: number,
-    storyRef: { slug: string } | { storyId: number },
+    storyRef:
+      | { slug: string; createdBy: number; createdAtMs: number }
+      | { storyId: number },
     targetIds: ReadonlyArray<number>,
     nowMs: number
   ) {
@@ -1095,7 +1124,7 @@ export class StoryWritesRepository {
     }));
     const storyFilter =
       'slug' in storyRef
-        ? sql`s.community_id = ${communityId} AND s.slug = ${storyRef.slug} AND s.is_restricted = 0 AND s.privacy_level IN ('public', 'members_only', 'editors')`
+        ? sql`s.community_id = ${communityId} AND s.slug = ${storyRef.slug} AND s.created_by = ${storyRef.createdBy} AND s.created_at = ${storyRef.createdAtMs} AND s.is_restricted = 0 AND s.privacy_level IN ('public', 'members_only', 'editors')`
         : sql`s.id = ${storyRef.storyId} AND s.community_id = ${communityId} AND s.is_restricted = 0 AND s.privacy_level IN ('public', 'members_only', 'editors')`;
 
     return chunkArray(entries, D1_EDGE_INSERT_CHUNK_SIZE).map((chunk) => {
@@ -1203,9 +1232,15 @@ export class StoryWritesRepository {
               ? await this.findExistingUnrestrictedPlaceIds(
                   communityId,
                   targetIds,
-                  tx
+                  tx,
+                  true
                 )
-              : await this.findExistingSpeakerIds(communityId, targetIds, tx);
+              : await this.findExistingSpeakerIds(
+                  communityId,
+                  targetIds,
+                  tx,
+                  true
+                );
           if (targetIds.some((id) => !found.has(id))) {
             return 'invalid_reference';
           }

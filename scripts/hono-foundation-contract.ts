@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from 'node:assert/strict';
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { serve } from '@hono/node-server';
 import { EventEmitter, once } from 'node:events';
@@ -1049,6 +1049,121 @@ export async function runHonoFoundationContract(
             .where(eq(tables.attachments.id, raceAttachment.id))
         ).length,
         1
+      );
+
+      // PostgreSQL SELECT ... FOR UPDATE race (PR #246): concurrent story
+      // visibility toggle waiting behind an uncommitted visibility change must
+      // observe the committed visibility and emit zero duplicate audit entries.
+      const patchRaceStory = (body: unknown) =>
+        send(app, `/v2/stories/${raceStory.id}`, {
+          method: 'PATCH',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify(body),
+        });
+      let storyToggleDone = false;
+      let pendingStoryToggle!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.stories)
+          .set({ privacyLevel: 'public' })
+          .where(eq(tables.stories.id, raceStory.id));
+        pendingStoryToggle = patchRaceStory({ visibility: 'public' });
+        void pendingStoryToggle.finally(() => {
+          storyToggleDone = true;
+        });
+        const deadline = Date.now() + 2000;
+        while (!storyToggleDone && Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      });
+      assert.equal((await pendingStoryToggle).status, 200);
+      const storyAuditsAfterLock = await db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            eq(tables.auditEntries.resourceType, 'story')
+          )
+        )
+        .orderBy(asc(tables.auditEntries.id));
+      assert.equal(
+        storyAuditsAfterLock.length,
+        0,
+        'concurrent public story toggle blocked behind committed public transition must not emit duplicate audit'
+      );
+
+      const [st1, st2] = await Promise.all([
+        patchRaceStory({ visibility: 'members_only' }),
+        patchRaceStory({ visibility: 'members_only' }),
+      ]);
+      assert.equal(st1.status, 200);
+      assert.equal(st2.status, 200);
+      const storyAuditsAfterBurst = await db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            eq(tables.auditEntries.resourceType, 'story')
+          )
+        )
+        .orderBy(asc(tables.auditEntries.id));
+      assert.deepEqual(
+        storyAuditsAfterBurst.map((row: any) => row.action),
+        ['story.visibility.members_only']
+      );
+
+      // PostgreSQL FOR SHARE target lock race (PR #246): concurrent story
+      // creation referencing a place that is being restricted in another
+      // transaction must wait and fail closed with 400 invalid_reference.
+      const [restrictRacePlace] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'PG Lock Share Place' })
+        .returning();
+      let createStoryDone = false;
+      let pendingStoryCreate!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.places)
+          .set({ isRestricted: true })
+          .where(eq(tables.places.id, restrictRacePlace.id));
+        pendingStoryCreate = send(app, '/v2/stories', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify({
+            title: 'Blocked Target Story',
+            placeIds: [restrictRacePlace.id],
+          }),
+        });
+        void pendingStoryCreate.finally(() => {
+          createStoryDone = true;
+        });
+        const deadline = Date.now() + 2000;
+        while (!createStoryDone && Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      });
+      assert.equal(
+        (await pendingStoryCreate).status,
+        400,
+        'POST /v2/stories waiting behind FOR SHARE on a newly restricted place must reject with 400'
       );
     }
   } finally {

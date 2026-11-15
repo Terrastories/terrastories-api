@@ -2,8 +2,10 @@ import { sessionLifetime } from './shared/session-policy.js';
 import { registerExploreAdapter } from './explore-adapter.js';
 import { ExploreAdapterRepository } from './repositories/explore-adapter.repository.js';
 import { CommunityReadsRepository } from './repositories/community-reads.repository.js';
+import { CommunityWritesRepository } from './repositories/community-writes.repository.js';
 import { PublicCommunitiesRepository } from './repositories/public-communities.repository.js';
 import { registerCommunityReadRoutes } from './routes/community-reads.hono.js';
+import { registerCommunityWriteRoutes } from './routes/community-writes.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
@@ -77,7 +79,7 @@ export function createHonoApp(options: FoundationOptions) {
     cors({
       origin: (origin) => (corsOrigins.has(origin) ? origin : undefined),
       credentials: true,
-      allowMethods: ['GET', 'POST', 'OPTIONS'],
+      allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowHeaders: ['Content-Type'],
     })
   );
@@ -181,8 +183,16 @@ export function createHonoApp(options: FoundationOptions) {
     deleteCookie(c, 'ts_session', cookie);
     return c.body(null, 204);
   });
+  const communityReadsRepository = new CommunityReadsRepository(
+    options.repository.connection
+  );
   registerCommunityReadRoutes(app, {
-    repository: new CommunityReadsRepository(options.repository.connection),
+    repository: communityReadsRepository,
+    publicOrigin: configuredOrigin,
+  });
+  registerCommunityWriteRoutes(app, {
+    repository: new CommunityWritesRepository(options.repository.connection),
+    readsRepository: communityReadsRepository,
     publicOrigin: configuredOrigin,
   });
   app.get('/v2/media/:id', async (c) => {

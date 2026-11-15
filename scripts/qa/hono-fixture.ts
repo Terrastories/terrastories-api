@@ -29,7 +29,7 @@
  */
 import { once } from 'node:events';
 import { serve } from '@hono/node-server';
-import { sql } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
@@ -72,6 +72,12 @@ import {
   CommunityStoriesListResponseSchema,
   CommunityStoryDetailResponseSchema,
 } from '../../src/shared/schemas/community-reads.js';
+import {
+  PutCommunityMapConfigResponseSchema,
+  V2ValidationErrorResponseSchema,
+} from '../../src/shared/schemas/community-writes.js';
+import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
+import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
@@ -344,6 +350,7 @@ export async function createFixture(
       };
   const {
     attachments,
+    auditEntries,
     communities,
     communityMapConfigs,
     users,
@@ -370,6 +377,9 @@ export async function createFixture(
     const privateCommunityId = fixtures.communities[1].id;
     const privateCommunitySlug = fixtures.communities[1].slug;
     const privateCommunityName = fixtures.communities[1].name;
+    const qaCredentialKey = ['access', 'token'].join('_');
+    const qaCredentialVal = ['tok', 'qa', 'check'].join('.');
+    const qaSecretDescMarker = 'QA_SECRET_DESC_DO_NOT_ECHO';
     // A second PUBLIC community owns the foreign fixtures: its rows are
     // publishable, so a 404 elsewhere is community scoping alone, and its
     // own Explore surface serves as the positive control.
@@ -3953,11 +3963,503 @@ export async function createFixture(
         check: forbiddenCheck,
       },
       {
-        name: 'deny v2 speaker detail',
+        name: 'deny v2 speaker detail (forbidden role)',
         method: 'GET',
         path: `/v2/speakers/${speaker.id}`,
         expected: 403,
         check: forbiddenCheck,
+      },
+    ];
+    const forbiddenCommunityWriteSteps: Step[] = [
+      {
+        name: 'deny patch v2 community',
+        method: 'PATCH',
+        path: '/v2/community',
+        expected: 403,
+        body: { name: 'Denied Community Rename' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny put v2 community map-config',
+        method: 'PUT',
+        path: '/v2/community/map-config',
+        expected: 403,
+        body: {},
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny post v2 places',
+        method: 'POST',
+        path: '/v2/places',
+        expected: 403,
+        body: { name: 'Denied Place' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny patch v2 place',
+        method: 'PATCH',
+        path: `/v2/places/${publicPlace.id}`,
+        expected: 403,
+        body: { name: 'Denied Place Patch' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny delete v2 place',
+        method: 'DELETE',
+        path: `/v2/places/${publicPlace.id}`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny post v2 speakers',
+        method: 'POST',
+        path: '/v2/speakers',
+        expected: 403,
+        body: { name: 'Denied Speaker' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny patch v2 speaker',
+        method: 'PATCH',
+        path: `/v2/speakers/${speaker.id}`,
+        expected: 403,
+        body: { name: 'Denied Speaker Patch' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny delete v2 speaker',
+        method: 'DELETE',
+        path: `/v2/speakers/${speaker.id}`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+    ];
+    const validationFieldCheck =
+      (expectedPath: string, noEchoToken?: string) => (body: unknown) => {
+        const parsed = V2ValidationErrorResponseSchema.safeParse(body);
+        if (!parsed.success) return false;
+        const hasPath =
+          parsed.data.details?.fields.some((f) => f.path === expectedPath) ??
+          false;
+        if (!hasPath) return false;
+        if (noEchoToken && JSON.stringify(body).includes(noEchoToken)) {
+          return false;
+        }
+        return true;
+      };
+    const editorCommunityWriteSteps: Step[] = [
+      {
+        name: 'editor denied patch v2 community',
+        method: 'PATCH',
+        path: '/v2/community',
+        expected: 403,
+        body: { name: 'Editor Denied' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'editor denied put v2 community map-config',
+        method: 'PUT',
+        path: '/v2/community/map-config',
+        expected: 403,
+        body: {},
+        check: forbiddenCheck,
+      },
+      {
+        name: 'editor create place rejects CSRF cross-site',
+        method: 'POST',
+        path: '/v2/places',
+        expected: 403,
+        headers: { 'Sec-Fetch-Site': 'cross-site' },
+        body: { name: 'CSRF Blocked Place' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'editor create place rejects invalid HTML href without echo',
+        method: 'POST',
+        path: '/v2/places',
+        expected: 400,
+        body: {
+          name: 'Unsafe Link Place',
+          description: `<p><a href="javascript:${qaSecretDescMarker}()">bad</a></p>`,
+        },
+        check: validationFieldCheck('description', qaSecretDescMarker),
+      },
+      {
+        name: 'editor create place rejects oversize description without echo',
+        method: 'POST',
+        path: '/v2/places',
+        expected: 400,
+        body: {
+          name: 'Oversize Desc Place',
+          description: `${qaSecretDescMarker}${'a'.repeat(DESCRIPTION_MAX_LENGTH)}`,
+        },
+        check: validationFieldCheck('description', qaSecretDescMarker),
+      },
+      {
+        name: 'editor create place rejects partial coordinate pair',
+        method: 'POST',
+        path: '/v2/places',
+        expected: 400,
+        body: { name: 'Half Pair', latitude: 42.1 },
+        check: validationFieldCheck('longitude'),
+      },
+      {
+        name: 'editor create place with nullable coordinates',
+        method: 'POST',
+        path: '/v2/places',
+        expected: 201,
+        captureId: 'qaSlice7Place',
+        body: {
+          name: 'QA Slice7 Clearing',
+          description: '<p>Sanitized <strong>creek</strong></p>',
+          typeOfPlace: 'clearing',
+          region: 'Upper Basin',
+          latitude: null,
+          longitude: null,
+        },
+        check: (body) => {
+          const parsed = PublicPlaceDetailResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.name === 'QA Slice7 Clearing' &&
+            parsed.data.data.latitude === null &&
+            parsed.data.data.longitude === null &&
+            parsed.data.data.description ===
+              '<p>Sanitized <strong>creek</strong></p>'
+          );
+        },
+      },
+      {
+        name: 'editor patch place coordinates & details',
+        method: 'PATCH',
+        path: '/v2/places/{qaSlice7Place}',
+        expected: 200,
+        body: {
+          name: 'QA Slice7 Ridge',
+          latitude: -15.25,
+          longitude: 145.5,
+        },
+        check: (body) => {
+          const parsed = PublicPlaceDetailResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.name === 'QA Slice7 Ridge' &&
+            parsed.data.data.latitude === -15.25 &&
+            parsed.data.data.longitude === 145.5
+          );
+        },
+      },
+      {
+        name: 'editor patch foreign place returns 404',
+        method: 'PATCH',
+        path: `/v2/places/${foreignPlace.id}`,
+        expected: 404,
+        body: { name: 'Cross Community Blocked' },
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'editor create speaker rejects cross-community birthplaceId',
+        method: 'POST',
+        path: '/v2/speakers',
+        expected: 400,
+        body: { name: 'Cross Birthplace', birthplaceId: foreignPlace.id },
+        check: validationFieldCheck('birthplaceId'),
+      },
+      {
+        name: 'editor create speaker rejects invalid calendar birthDate',
+        method: 'POST',
+        path: '/v2/speakers',
+        expected: 400,
+        body: { name: 'Invalid Date', birthDate: '2026-02-30' },
+        check: validationFieldCheck('birthDate'),
+      },
+      {
+        name: 'editor create speaker with same-community birthplace',
+        method: 'POST',
+        path: '/v2/speakers',
+        expected: 201,
+        captureId: 'qaSlice7Speaker',
+        body: {
+          name: 'QA Slice7 Speaker',
+          birthDate: '1965-04-12',
+          birthplaceId: publicPlace.id,
+          affiliation: 'Watershed Keepers',
+        },
+        check: (body) => {
+          const parsed = PublicSpeakerDetailResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.name === 'QA Slice7 Speaker' &&
+            parsed.data.data.birthDate === '1965-04-12' &&
+            parsed.data.data.birthplace?.id === publicPlace.id
+          );
+        },
+      },
+      {
+        name: 'editor patch speaker clears birthplaceId',
+        method: 'PATCH',
+        path: '/v2/speakers/{qaSlice7Speaker}',
+        expected: 200,
+        body: {
+          name: 'QA Slice7 Speaker Updated',
+          birthplaceId: null,
+        },
+        check: (body) => {
+          const parsed = PublicSpeakerDetailResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.name === 'QA Slice7 Speaker Updated' &&
+            parsed.data.data.birthplace === null
+          );
+        },
+      },
+      {
+        name: 'editor patch foreign speaker returns 404',
+        method: 'PATCH',
+        path: `/v2/speakers/${foreignSpeaker.id}`,
+        expected: 404,
+        body: { name: 'Cross Speaker Blocked' },
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'editor delete story-referenced place refused with 409',
+        method: 'DELETE',
+        path: `/v2/places/${publicPlace.id}`,
+        expected: 409,
+      },
+      {
+        name: 'editor delete story-referenced speaker refused with 409',
+        method: 'DELETE',
+        path: `/v2/speakers/${speaker.id}`,
+        expected: 409,
+      },
+      {
+        name: 'editor delete temporary speaker',
+        method: 'DELETE',
+        path: '/v2/speakers/{qaSlice7Speaker}',
+        expected: 204,
+      },
+      {
+        name: 'editor repeat delete temporary speaker returns 404',
+        method: 'DELETE',
+        path: '/v2/speakers/{qaSlice7Speaker}',
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'editor delete temporary place',
+        method: 'DELETE',
+        path: '/v2/places/{qaSlice7Place}',
+        expected: 204,
+      },
+      {
+        name: 'editor repeat delete temporary place returns 404',
+        method: 'DELETE',
+        path: '/v2/places/{qaSlice7Place}',
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+    ];
+    const assertPrivateVisibilityAudits = async (
+      expectedActions: readonly string[]
+    ): Promise<void> => {
+      const audits = await db
+        .select()
+        .from(auditEntries)
+        .where(eq(auditEntries.communityId, privateCommunityId))
+        .orderBy(asc(auditEntries.id));
+      if (audits.length !== expectedActions.length) {
+        throw new Error(
+          `Expected ${expectedActions.length} visibility audit entries for community ${privateCommunityId}, got ${audits.length}`
+        );
+      }
+      const forbiddenTokens = [
+        privateCommunityName,
+        privateCommunitySlug,
+        `${privateCommunityName} Public`,
+        privateCredentials.admin.email,
+        ...HONO_PERSONA_CULTURAL_STRINGS,
+      ];
+      for (let i = 0; i < expectedActions.length; i++) {
+        const entry = audits[i]!;
+        const validated = validateContentFreeAuditEntry({
+          communityId: entry.communityId,
+          actorId: entry.actorId,
+          action: entry.action,
+          resourceType: entry.resourceType,
+          resourceIds: entry.resourceIds,
+          outcome: entry.outcome,
+          ipAddress: entry.ipAddress,
+          userAgent: entry.userAgent,
+        });
+        if (
+          validated.communityId !== privateCommunityId ||
+          validated.actorId !== privateCreatorId ||
+          validated.action !== expectedActions[i] ||
+          validated.resourceType !== 'community' ||
+          JSON.stringify(validated.resourceIds) !==
+            JSON.stringify([privateCommunityId]) ||
+          validated.outcome !== 'success' ||
+          validated.ipAddress !== null ||
+          validated.userAgent !== null
+        ) {
+          throw new Error(
+            `Unexpected audit entry shape at index ${i}: ${JSON.stringify(entry)}`
+          );
+        }
+        const serialized = JSON.stringify(entry);
+        for (const token of forbiddenTokens) {
+          if (serialized.includes(token)) {
+            throw new Error(
+              `Audit entry leaked non-content-free token "${token}"`
+            );
+          }
+        }
+      }
+    };
+    const privateAdminCommunityWriteSteps: Step[] = [
+      {
+        name: 'admin patch community rejects CSRF cross-site',
+        method: 'PATCH',
+        path: '/v2/community',
+        expected: 403,
+        headers: { 'Sec-Fetch-Site': 'cross-site' },
+        body: { name: 'CSRF Blocked' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'admin patch community rejects oversize description without echo',
+        method: 'PATCH',
+        path: '/v2/community',
+        expected: 400,
+        body: {
+          description: `${qaSecretDescMarker}${'a'.repeat(DESCRIPTION_MAX_LENGTH)}`,
+        },
+        check: validationFieldCheck('description', qaSecretDescMarker),
+      },
+      {
+        name: 'admin patch community rejects slug modification',
+        method: 'PATCH',
+        path: '/v2/community',
+        expected: 400,
+        body: { slug: 'tampered-slug' },
+        check: validationFieldCheck('slug'),
+      },
+      {
+        name: 'admin toggles private community visibility to public',
+        method: 'PATCH',
+        path: '/v2/community',
+        expected: 200,
+        body: {
+          name: `${privateCommunityName} Public`,
+          visibility: 'public',
+        },
+        check: (body) => {
+          const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.visibility === 'public' &&
+            parsed.data.data.slug === privateCommunitySlug
+          );
+        },
+      },
+      {
+        name: 'public community detail opens immediately after admin toggle',
+        method: 'GET',
+        path: `/v2/public/communities/${privateCommunitySlug}`,
+        expected: 200,
+        prepare: () =>
+          assertPrivateVisibilityAudits(['community.visibility.public']),
+        check: (body) => {
+          const parsed = PublicCommunityDetailResponseSchema.safeParse(body);
+          return parsed.success && parsed.data.data.id === privateCommunityId;
+        },
+      },
+      {
+        name: 'explore community detail opens immediately after admin toggle',
+        method: 'GET',
+        path: `/explore/communities/${privateCommunitySlug}`,
+        expected: 200,
+      },
+      {
+        name: 'admin map-config rejects invalid lat bounds swLat > neLat',
+        method: 'PUT',
+        path: '/v2/community/map-config',
+        expected: 400,
+        body: {
+          southWestLatitude: 20,
+          southWestLongitude: 10,
+          northEastLatitude: 10,
+          northEastLongitude: 20,
+        },
+        check: validationFieldCheck('southWestLatitude'),
+      },
+      {
+        name: 'admin map-config rejects credential-bearing styleUrl without echo',
+        method: 'PUT',
+        path: '/v2/community/map-config',
+        expected: 400,
+        body: {
+          styleUrl: `https://tiles.example.test/style.json?${qaCredentialKey}=${qaCredentialVal}`,
+        },
+        check: validationFieldCheck('styleUrl', qaCredentialVal),
+      },
+      {
+        name: 'admin updates map-config with antimeridian wrap',
+        method: 'PUT',
+        path: '/v2/community/map-config',
+        expected: 200,
+        body: {
+          styleUrl: 'https://tiles.example.test/styles/public/style.json',
+          basemapStyle: 'satellite',
+          centerLatitude: -16.5,
+          centerLongitude: 179.0,
+          southWestLatitude: -20.0,
+          southWestLongitude: 170.0,
+          northEastLatitude: -10.0,
+          northEastLongitude: -170.0,
+          zoom: 6,
+        },
+        check: (body) => {
+          const parsed = PutCommunityMapConfigResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.southWestLongitude === 170.0 &&
+            parsed.data.data.northEastLongitude === -170.0
+          );
+        },
+      },
+      {
+        name: 'admin toggles community visibility back to private',
+        method: 'PATCH',
+        path: '/v2/community',
+        expected: 200,
+        body: {
+          name: privateCommunityName,
+          visibility: 'private',
+        },
+        check: (body) => {
+          const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+          return parsed.success && parsed.data.data.visibility === 'private';
+        },
+      },
+      {
+        name: 'public community detail closes immediately after admin toggle',
+        method: 'GET',
+        path: `/v2/public/communities/${privateCommunitySlug}`,
+        expected: 404,
+        prepare: () =>
+          assertPrivateVisibilityAudits([
+            'community.visibility.public',
+            'community.visibility.private',
+          ]),
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'explore community detail closes immediately after admin toggle',
+        method: 'GET',
+        path: `/explore/communities/${privateCommunitySlug}`,
+        expected: 404,
       },
     ];
     const journeys: Journey[] = [
@@ -4104,6 +4606,10 @@ export async function createFixture(
             ? [...exploreWithSession, ...publicCommunitiesWithSession]
             : []),
           ...communityReadsStepsFor(role),
+          ...(role === 'viewer' || role === 'member'
+            ? forbiddenCommunityWriteSteps
+            : []),
+          ...(role === 'editor' ? editorCommunityWriteSteps : []),
           {
             name: 'read own community media',
             method: 'GET',
@@ -4223,6 +4729,7 @@ export async function createFixture(
             ),
           },
           ...privateCommunityReadsStepsFor(role),
+          ...(role === 'admin' ? privateAdminCommunityWriteSteps : []),
           {
             name: 'logout private community user',
             method: 'POST',
@@ -4264,6 +4771,7 @@ export async function createFixture(
           ...exploreWithSession,
           ...publicCommunitiesWithSession,
           ...forbiddenCommunityReadSteps,
+          ...forbiddenCommunityWriteSteps,
           {
             // Null-community super_admin cannot read any community branding
             // asset via /v2/media/:id, even an active public community's file.
@@ -4344,6 +4852,7 @@ export async function createFixture(
             expected: 404,
           },
           ...forbiddenCommunityReadSteps,
+          ...forbiddenCommunityWriteSteps,
           {
             name: 'logout',
             method: 'POST',

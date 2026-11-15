@@ -1,0 +1,808 @@
+import { and, eq, isNull, ne, notExists, sql } from 'drizzle-orm';
+import type { DrizzleD1Database } from 'drizzle-orm/d1';
+import type { Database } from '../db/index.js';
+import { dialectOf, tablesFor } from '../db/dialect.js';
+import {
+  communityFromPhysical,
+  communityVisibilityToPhysical,
+  type CommunityVisibility,
+} from '../policy/canonical-state.js';
+import type { PublicMapConfigRow } from './public-communities.repository.js';
+import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
+
+export interface CommunitySettingsUpdateInput {
+  name?: string;
+  description?: string | null;
+  descriptionPlain?: string | null;
+  locale?: string;
+  country?: string | null;
+  visibility?: CommunityVisibility;
+}
+
+export interface MapConfigUpsertInput {
+  styleUrl: string | null;
+  basemapStyle: string | null;
+  centerLatitude: number | null;
+  centerLongitude: number | null;
+  southWestLatitude: number | null;
+  southWestLongitude: number | null;
+  northEastLatitude: number | null;
+  northEastLongitude: number | null;
+  zoom: number | null;
+  pitch: number | null;
+  bearing: number | null;
+  threeDimensional: boolean | null;
+  projection: string | null;
+  staticMapFileId: string | null;
+}
+
+function buildVisibilityAuditEntry(
+  communityId: number,
+  actorId: number,
+  nextVisibility: CommunityVisibility
+) {
+  return validateContentFreeAuditEntry({
+    communityId,
+    actorId,
+    action:
+      nextVisibility === 'public'
+        ? 'community.visibility.public'
+        : 'community.visibility.private',
+    resourceType: 'community',
+    resourceIds: [communityId],
+    outcome: 'success',
+    ipAddress: null,
+    userAgent: null,
+  });
+}
+
+export interface PlaceCreateInput {
+  name: string;
+  description: string | null;
+  descriptionPlain: string | null;
+  typeOfPlace: string | null;
+  region: string | null;
+  latitude: number | null;
+  longitude: number | null;
+}
+
+export interface PlaceUpdateInput {
+  name?: string;
+  description?: string | null;
+  descriptionPlain?: string | null;
+  typeOfPlace?: string | null;
+  region?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+}
+
+export type PlaceDeleteOutcome = 'deleted' | 'not_found' | 'conflict';
+
+export interface SpeakerCreateInput {
+  name: string;
+  birthDate: string | null;
+  birthplaceId: number | null;
+  affiliation: string | null;
+}
+
+export interface SpeakerUpdateInput {
+  name?: string;
+  birthDate?: string | null;
+  birthplaceId?: number | null;
+  affiliation?: string | null;
+}
+
+export type SpeakerDeleteOutcome = 'deleted' | 'not_found' | 'conflict';
+
+export function isForeignKeyConstraintError(
+  err: unknown,
+  seen: Set<unknown> = new Set()
+): boolean {
+  if (!err || typeof err !== 'object' || seen.has(err)) return false;
+  seen.add(err);
+  const { code, message, cause } = err as {
+    code?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  };
+  if (code === '23503' || code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
+    return true;
+  }
+  if (
+    typeof message === 'string' &&
+    message.includes('FOREIGN KEY constraint failed')
+  ) {
+    return true;
+  }
+  return cause ? isForeignKeyConstraintError(cause, seen) : false;
+}
+
+export class CommunityWritesRepository {
+  // Drizzle PG / better-sqlite3 / D1 share runtime methods with union-incompatible TS overloads.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly db: any;
+  private readonly tables;
+
+  constructor(readonly connection: Database | DrizzleD1Database) {
+    this.db = connection;
+    this.tables = tablesFor(connection);
+  }
+
+  private hasD1Batch(): boolean {
+    return typeof this.db.batch === 'function';
+  }
+
+  async activeCommunityExists(communityId: number): Promise<boolean> {
+    const rows = await this.db
+      .select({ id: this.tables.communities.id })
+      .from(this.tables.communities)
+      .where(
+        and(
+          eq(this.tables.communities.id, communityId),
+          eq(this.tables.communities.isActive, true)
+        )
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async updateCommunitySettings(
+    communityId: number,
+    actorId: number,
+    input: CommunitySettingsUpdateInput,
+    now: Date = new Date()
+  ): Promise<{ updated: boolean }> {
+    const buildSetPayload = () => {
+      const values: Record<string, unknown> = {
+        updatedAt: now,
+      };
+      if (input.name !== undefined) {
+        values.name = input.name;
+      }
+      if (input.description !== undefined) {
+        values.description = input.description;
+        values.descriptionPlain = input.descriptionPlain ?? null;
+      }
+      if (input.locale !== undefined) {
+        values.locale = input.locale;
+      }
+      if (input.country !== undefined) {
+        values.country = input.country;
+      }
+      if (input.visibility !== undefined) {
+        values.publicStories = communityVisibilityToPhysical(input.visibility);
+      }
+      return values;
+    };
+
+    const buildConditionalAuditInsert = (
+      executor: typeof this.db,
+      nextVisibility: CommunityVisibility
+    ) => {
+      const audit = buildVisibilityAuditEntry(
+        communityId,
+        actorId,
+        nextVisibility
+      );
+      const nextPublicStories = communityVisibilityToPhysical(nextVisibility);
+      return executor.insert(this.tables.auditEntries).select(
+        executor
+          .select({
+            id: sql`NULL`.as('id'),
+            communityId: this.tables.communities.id,
+            actorId: sql`${audit.actorId}`.as('actor_id'),
+            action: sql`${audit.action}`.as('action'),
+            resourceType: sql`${audit.resourceType}`.as('resource_type'),
+            resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+              'resource_ids'
+            ),
+            outcome: sql`${audit.outcome}`.as('outcome'),
+            ipAddress: sql`NULL`.as('ip_address'),
+            userAgent: sql`NULL`.as('user_agent'),
+            createdAt: sql`${now.getTime()}`.as('created_at'),
+          })
+          .from(this.tables.communities)
+          .where(
+            and(
+              eq(this.tables.communities.id, communityId),
+              eq(this.tables.communities.isActive, true),
+              ne(this.tables.communities.publicStories, nextPublicStories)
+            )
+          )
+      );
+    };
+
+    if (this.hasD1Batch()) {
+      const updateQuery = this.db
+        .update(this.tables.communities)
+        .set(buildSetPayload())
+        .where(
+          and(
+            eq(this.tables.communities.id, communityId),
+            eq(this.tables.communities.isActive, true)
+          )
+        )
+        .returning({ id: this.tables.communities.id });
+
+      if (input.visibility !== undefined) {
+        // Insert the audit entry BEFORE the update changes public_stories,
+        // guarded in SQL on active + effective visibility transition so D1's
+        // single atomic batch never emits a stale, duplicate, or 0-row audit.
+        const auditQuery = buildConditionalAuditInsert(
+          this.db,
+          input.visibility
+        );
+        const [, updatedRows] = await this.db.batch([auditQuery, updateQuery]);
+        return {
+          updated: Array.isArray(updatedRows) && updatedRows.length > 0,
+        };
+      }
+
+      const [updatedRows] = await this.db.batch([updateQuery]);
+      return { updated: Array.isArray(updatedRows) && updatedRows.length > 0 };
+    }
+
+    if (dialectOf(this.connection) === 'postgresql') {
+      return this.db.transaction(async (tx: typeof this.db) => {
+        const existingRows = await tx
+          .select({
+            id: this.tables.communities.id,
+            publicStories: this.tables.communities.publicStories,
+            isActive: this.tables.communities.isActive,
+          })
+          .from(this.tables.communities)
+          .where(
+            and(
+              eq(this.tables.communities.id, communityId),
+              eq(this.tables.communities.isActive, true)
+            )
+          )
+          .limit(1)
+          .for('update');
+        const existing = existingRows[0];
+        if (!existing) {
+          return { updated: false };
+        }
+
+        const previousVisibility = communityFromPhysical(existing).visibility;
+        const nextVisibility = input.visibility ?? previousVisibility;
+
+        const updatedRows = await tx
+          .update(this.tables.communities)
+          .set(buildSetPayload())
+          .where(
+            and(
+              eq(this.tables.communities.id, communityId),
+              eq(this.tables.communities.isActive, true)
+            )
+          )
+          .returning({ id: this.tables.communities.id });
+
+        if (updatedRows.length === 0) {
+          return { updated: false };
+        }
+
+        if (nextVisibility !== previousVisibility) {
+          const audit = buildVisibilityAuditEntry(
+            communityId,
+            actorId,
+            nextVisibility
+          );
+          await tx.insert(this.tables.auditEntries).values({
+            ...audit,
+            createdAt: now,
+          });
+        }
+
+        return { updated: true };
+      });
+    }
+
+    // better-sqlite3 transactions are synchronous
+    return this.db.transaction((tx: typeof this.db) => {
+      if (input.visibility !== undefined) {
+        buildConditionalAuditInsert(tx, input.visibility).run();
+      }
+
+      const updated = tx
+        .update(this.tables.communities)
+        .set(buildSetPayload())
+        .where(
+          and(
+            eq(this.tables.communities.id, communityId),
+            eq(this.tables.communities.isActive, true)
+          )
+        )
+        .returning({ id: this.tables.communities.id })
+        .all();
+
+      return { updated: updated.length > 0 };
+    });
+  }
+
+  async findCommunityFile(
+    communityId: number,
+    fileId: string
+  ): Promise<{ id: string } | null> {
+    const rows = await this.db
+      .select({ id: this.tables.files.id })
+      .from(this.tables.files)
+      .where(
+        and(
+          eq(this.tables.files.id, fileId),
+          eq(this.tables.files.communityId, communityId),
+          eq(this.tables.files.isActive, true),
+          isNull(this.tables.files.culturalRestrictions)
+        )
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async upsertCommunityMapConfig(
+    communityId: number,
+    input: MapConfigUpsertInput,
+    now: Date = new Date()
+  ): Promise<PublicMapConfigRow | null> {
+    const rows = await this.db
+      .insert(this.tables.communityMapConfigs)
+      .values({
+        communityId,
+        styleUrl: input.styleUrl,
+        basemapStyle: input.basemapStyle,
+        centerLatitude: input.centerLatitude,
+        centerLongitude: input.centerLongitude,
+        southWestLatitude: input.southWestLatitude,
+        southWestLongitude: input.southWestLongitude,
+        northEastLatitude: input.northEastLatitude,
+        northEastLongitude: input.northEastLongitude,
+        zoom: input.zoom,
+        pitch: input.pitch,
+        bearing: input.bearing,
+        threeDimensional: input.threeDimensional,
+        projection: input.projection,
+        staticMapFileId: input.staticMapFileId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: this.tables.communityMapConfigs.communityId,
+        set: {
+          styleUrl: input.styleUrl,
+          basemapStyle: input.basemapStyle,
+          centerLatitude: input.centerLatitude,
+          centerLongitude: input.centerLongitude,
+          southWestLatitude: input.southWestLatitude,
+          southWestLongitude: input.southWestLongitude,
+          northEastLatitude: input.northEastLatitude,
+          northEastLongitude: input.northEastLongitude,
+          zoom: input.zoom,
+          pitch: input.pitch,
+          bearing: input.bearing,
+          threeDimensional: input.threeDimensional,
+          projection: input.projection,
+          staticMapFileId: input.staticMapFileId,
+          updatedAt: now,
+        },
+      })
+      .returning({
+        communityId: this.tables.communityMapConfigs.communityId,
+        styleUrl: this.tables.communityMapConfigs.styleUrl,
+        basemapStyle: this.tables.communityMapConfigs.basemapStyle,
+        centerLatitude: this.tables.communityMapConfigs.centerLatitude,
+        centerLongitude: this.tables.communityMapConfigs.centerLongitude,
+        southWestLatitude: this.tables.communityMapConfigs.southWestLatitude,
+        southWestLongitude: this.tables.communityMapConfigs.southWestLongitude,
+        northEastLatitude: this.tables.communityMapConfigs.northEastLatitude,
+        northEastLongitude: this.tables.communityMapConfigs.northEastLongitude,
+        zoom: this.tables.communityMapConfigs.zoom,
+        pitch: this.tables.communityMapConfigs.pitch,
+        bearing: this.tables.communityMapConfigs.bearing,
+        threeDimensional: this.tables.communityMapConfigs.threeDimensional,
+        projection: this.tables.communityMapConfigs.projection,
+        staticMapFileId: this.tables.communityMapConfigs.staticMapFileId,
+        createdAt: this.tables.communityMapConfigs.createdAt,
+        updatedAt: this.tables.communityMapConfigs.updatedAt,
+      });
+
+    return rows[0] ?? null;
+  }
+
+  async createPlace(
+    communityId: number,
+    input: PlaceCreateInput,
+    now: Date = new Date()
+  ): Promise<{ id: number } | null> {
+    const rows = await this.db
+      .insert(this.tables.places)
+      .values({
+        communityId,
+        name: input.name,
+        description: input.description,
+        descriptionPlain: input.descriptionPlain,
+        typeOfPlace: input.typeOfPlace,
+        region: input.region,
+        latitude: input.latitude,
+        longitude: input.longitude,
+        isRestricted: false,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: this.tables.places.id });
+    return rows[0] ?? null;
+  }
+
+  async updatePlace(
+    communityId: number,
+    placeId: number,
+    input: PlaceUpdateInput,
+    now: Date = new Date()
+  ): Promise<boolean> {
+    const setPayload: Record<string, unknown> = {
+      updatedAt: now,
+    };
+    if (input.name !== undefined) {
+      setPayload.name = input.name;
+    }
+    if (input.description !== undefined) {
+      setPayload.description = input.description;
+      setPayload.descriptionPlain = input.descriptionPlain ?? null;
+    }
+    if (input.typeOfPlace !== undefined) {
+      setPayload.typeOfPlace = input.typeOfPlace;
+    }
+    if (input.region !== undefined) {
+      setPayload.region = input.region;
+    }
+    if (input.latitude !== undefined && input.longitude !== undefined) {
+      setPayload.latitude = input.latitude;
+      setPayload.longitude = input.longitude;
+    }
+
+    const rows = await this.db
+      .update(this.tables.places)
+      .set(setPayload)
+      .where(
+        and(
+          eq(this.tables.places.id, placeId),
+          eq(this.tables.places.communityId, communityId),
+          eq(this.tables.places.isRestricted, false)
+        )
+      )
+      .returning({ id: this.tables.places.id });
+    return rows.length > 0;
+  }
+
+  private deleteOwnerAttachmentsQuery(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    communityId: number,
+    ownerType: 'place' | 'speaker',
+    ownerId: number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ownerGoneGuard?: any
+  ) {
+    const base = and(
+      eq(this.tables.attachments.communityId, communityId),
+      eq(this.tables.attachments.ownerType, ownerType),
+      eq(this.tables.attachments.ownerId, ownerId)
+    );
+    return executor
+      .delete(this.tables.attachments)
+      .where(ownerGoneGuard ? and(base, ownerGoneGuard) : base);
+  }
+
+  private placeReferenceGuards(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    communityId: number,
+    placeId: number
+  ) {
+    return [
+      notExists(
+        executor
+          .select({ one: sql`1` })
+          .from(this.tables.storyPlaces)
+          .where(
+            and(
+              eq(this.tables.storyPlaces.communityId, communityId),
+              eq(this.tables.storyPlaces.placeId, placeId)
+            )
+          )
+      ),
+      notExists(
+        executor
+          .select({ one: sql`1` })
+          .from(this.tables.stories)
+          .where(
+            and(
+              eq(this.tables.stories.communityId, communityId),
+              eq(this.tables.stories.interviewLocationId, placeId)
+            )
+          )
+      ),
+      notExists(
+        executor
+          .select({ one: sql`1` })
+          .from(this.tables.speakers)
+          .where(
+            and(
+              eq(this.tables.speakers.communityId, communityId),
+              eq(this.tables.speakers.birthplaceId, placeId)
+            )
+          )
+      ),
+    ];
+  }
+
+  private speakerReferenceGuards(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    communityId: number,
+    speakerId: number
+  ) {
+    return [
+      notExists(
+        executor
+          .select({ one: sql`1` })
+          .from(this.tables.storySpeakers)
+          .where(
+            and(
+              eq(this.tables.storySpeakers.communityId, communityId),
+              eq(this.tables.storySpeakers.speakerId, speakerId)
+            )
+          )
+      ),
+      notExists(
+        executor
+          .select({ one: sql`1` })
+          .from(this.tables.stories)
+          .where(
+            and(
+              eq(this.tables.stories.communityId, communityId),
+              eq(this.tables.stories.interviewerId, speakerId)
+            )
+          )
+      ),
+    ];
+  }
+
+  private async deleteGuardedOwner(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    table: any,
+    ownerType: 'place' | 'speaker',
+    communityId: number,
+    ownerId: number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    readableScope: any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    physicalOwnerScope: any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    referenceGuards: (executor: any) => any[]
+  ): Promise<PlaceDeleteOutcome> {
+    try {
+      if (this.hasD1Batch()) {
+        // Put NOT EXISTS reference guards inside DELETE itself so a concurrent
+        // story_places/story_speakers insert never silently cascades, and gate
+        // attachment cleanup on the owner row actually being gone afterward.
+        const deleteOwner = this.db
+          .delete(table)
+          .where(and(readableScope, ...referenceGuards(this.db)))
+          .returning({ id: table.id });
+
+        const ownerGoneGuard = notExists(
+          this.db
+            .select({ one: sql`1` })
+            .from(table)
+            .where(physicalOwnerScope)
+        );
+        const deleteAttachments = this.deleteOwnerAttachmentsQuery(
+          this.db,
+          communityId,
+          ownerType,
+          ownerId,
+          ownerGoneGuard
+        );
+
+        const existingOwnerCheck = this.db
+          .select({ id: table.id })
+          .from(table)
+          .where(readableScope)
+          .limit(1);
+
+        const [deletedRows, , existingRows] = await this.db.batch([
+          deleteOwner,
+          deleteAttachments,
+          existingOwnerCheck,
+        ]);
+
+        if (Array.isArray(deletedRows) && deletedRows.length > 0) {
+          return 'deleted';
+        }
+        return Array.isArray(existingRows) && existingRows.length > 0
+          ? 'conflict'
+          : 'not_found';
+      }
+
+      if (dialectOf(this.connection) === 'postgresql') {
+        return await this.db.transaction(async (tx: typeof this.db) => {
+          const existingRows = await tx
+            .select({ id: table.id })
+            .from(table)
+            .where(readableScope)
+            .limit(1)
+            .for('update');
+          if (existingRows.length === 0) {
+            return 'not_found';
+          }
+
+          const deleted = await tx
+            .delete(table)
+            .where(and(readableScope, ...referenceGuards(tx)))
+            .returning({ id: table.id });
+
+          if (deleted.length === 0) {
+            return 'conflict';
+          }
+
+          await this.deleteOwnerAttachmentsQuery(
+            tx,
+            communityId,
+            ownerType,
+            ownerId
+          );
+          return 'deleted';
+        });
+      }
+
+      // better-sqlite3 synchronous transaction
+      return this.db.transaction((tx: typeof this.db) => {
+        const deleted = tx
+          .delete(table)
+          .where(and(readableScope, ...referenceGuards(tx)))
+          .returning({ id: table.id })
+          .all();
+
+        if (deleted.length > 0) {
+          this.deleteOwnerAttachmentsQuery(
+            tx,
+            communityId,
+            ownerType,
+            ownerId
+          ).run();
+          return 'deleted';
+        }
+
+        const existing = tx
+          .select({ id: table.id })
+          .from(table)
+          .where(readableScope)
+          .limit(1)
+          .get();
+
+        return existing ? 'conflict' : 'not_found';
+      });
+    } catch (err) {
+      if (isForeignKeyConstraintError(err)) {
+        return 'conflict';
+      }
+      throw err;
+    }
+  }
+
+  async deletePlace(
+    communityId: number,
+    placeId: number
+  ): Promise<PlaceDeleteOutcome> {
+    const physicalScope = and(
+      eq(this.tables.places.id, placeId),
+      eq(this.tables.places.communityId, communityId)
+    );
+    const readableScope = and(
+      physicalScope,
+      eq(this.tables.places.isRestricted, false)
+    );
+    return this.deleteGuardedOwner(
+      this.tables.places,
+      'place',
+      communityId,
+      placeId,
+      readableScope,
+      physicalScope,
+      (executor) => this.placeReferenceGuards(executor, communityId, placeId)
+    );
+  }
+
+  async findCommunityUnrestrictedPlace(
+    communityId: number,
+    placeId: number
+  ): Promise<{ id: number } | null> {
+    const rows = await this.db
+      .select({ id: this.tables.places.id })
+      .from(this.tables.places)
+      .where(
+        and(
+          eq(this.tables.places.id, placeId),
+          eq(this.tables.places.communityId, communityId),
+          eq(this.tables.places.isRestricted, false)
+        )
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async createSpeaker(
+    communityId: number,
+    input: SpeakerCreateInput,
+    now: Date = new Date()
+  ): Promise<{ id: number } | null> {
+    const rows = await this.db
+      .insert(this.tables.speakers)
+      .values({
+        communityId,
+        name: input.name,
+        birthDate: input.birthDate,
+        birthplaceId: input.birthplaceId,
+        affiliation: input.affiliation,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: this.tables.speakers.id });
+    return rows[0] ?? null;
+  }
+
+  async updateSpeaker(
+    communityId: number,
+    speakerId: number,
+    input: SpeakerUpdateInput,
+    now: Date = new Date()
+  ): Promise<boolean> {
+    const setPayload: Record<string, unknown> = {
+      updatedAt: now,
+    };
+    if (input.name !== undefined) {
+      setPayload.name = input.name;
+    }
+    if (input.birthDate !== undefined) {
+      setPayload.birthDate = input.birthDate;
+    }
+    if (input.birthplaceId !== undefined) {
+      setPayload.birthplaceId = input.birthplaceId;
+    }
+    if (input.affiliation !== undefined) {
+      setPayload.affiliation = input.affiliation;
+    }
+
+    const rows = await this.db
+      .update(this.tables.speakers)
+      .set(setPayload)
+      .where(
+        and(
+          eq(this.tables.speakers.id, speakerId),
+          eq(this.tables.speakers.communityId, communityId)
+        )
+      )
+      .returning({ id: this.tables.speakers.id });
+    return rows.length > 0;
+  }
+
+  async deleteSpeaker(
+    communityId: number,
+    speakerId: number
+  ): Promise<SpeakerDeleteOutcome> {
+    const scope = and(
+      eq(this.tables.speakers.id, speakerId),
+      eq(this.tables.speakers.communityId, communityId)
+    );
+    return this.deleteGuardedOwner(
+      this.tables.speakers,
+      'speaker',
+      communityId,
+      speakerId,
+      scope,
+      scope,
+      (executor) =>
+        this.speakerReferenceGuards(executor, communityId, speakerId)
+    );
+  }
+}

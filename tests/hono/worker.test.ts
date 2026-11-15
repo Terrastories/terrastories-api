@@ -9,6 +9,7 @@ import {
   MAX_PUBLIC_FILTER_VALUES,
   MAX_PUBLIC_TOTAL_FILTER_VALUES,
 } from '../../src/shared/schemas/public-content.js';
+import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 it('serves the foundation through workerd D1/R2 without Node compatibility', async () => {
   // bundleWorkerModule fails the test when the bundle keeps any runtime import.
   const mf = startWorkerRuntime(
@@ -225,6 +226,164 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
     );
     expect(media416.status).toBe(416);
     expect(media416.headers.get('Content-Range')).toBe('bytes */16');
+
+    // Slice 7 real workerd D1 atomic audit & race-safe delete assertions (#145)
+    await db
+      .prepare(
+        "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,is_active,created_at,updated_at) VALUES(2,'pub-admin@example.org','source-hash','Pub','Admin','admin',3,1,0,0)"
+      )
+      .run();
+    const pubAdminLogin = await mf.dispatchFetch(
+      'https://worker.test/v2/auth/login',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-test-verifier': 'yes',
+        },
+        body: JSON.stringify({
+          email: 'pub-admin@example.org',
+          password: 'ok',
+        }),
+      }
+    );
+    expect(pubAdminLogin.status).toBe(200);
+    const pubAdminCookie = pubAdminLogin.headers
+      .get('set-cookie')!
+      .split(';')[0]!;
+
+    const patchJson = (path: string, body: unknown, method = 'PATCH') =>
+      mf.dispatchFetch(`https://worker.test${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          cookie: pubAdminCookie,
+        },
+        body: JSON.stringify(body),
+      });
+
+    expect(
+      (
+        await patchJson('/v2/community', {
+          name: 'Pub Sensitive Title',
+          visibility: 'private',
+        })
+      ).status
+    ).toBe(200);
+    // No-op private -> private must not emit a second audit entry
+    expect(
+      (await patchJson('/v2/community', { visibility: 'private' })).status
+    ).toBe(200);
+    expect(
+      (await patchJson('/v2/community', { visibility: 'public' })).status
+    ).toBe(200);
+
+    const d1Audits = (
+      await db
+        .prepare(
+          'SELECT community_id, actor_id, action, resource_type, resource_ids, outcome, ip_address, user_agent FROM audit_entries WHERE community_id = 3 ORDER BY id ASC'
+        )
+        .all<{
+          community_id: number | null;
+          actor_id: number | null;
+          action: string;
+          resource_type: string | null;
+          resource_ids: string;
+          outcome: string;
+          ip_address: string | null;
+          user_agent: string | null;
+        }>()
+    ).results;
+    expect(d1Audits).toHaveLength(2);
+    expect(d1Audits.map((row) => row.action)).toEqual([
+      'community.visibility.private',
+      'community.visibility.public',
+    ]);
+    for (const row of d1Audits) {
+      const validated = validateContentFreeAuditEntry({
+        communityId: row.community_id,
+        actorId: row.actor_id,
+        action: row.action,
+        resourceType: row.resource_type,
+        resourceIds: JSON.parse(row.resource_ids) as number[],
+        outcome: row.outcome,
+        ipAddress: row.ip_address,
+        userAgent: row.user_agent,
+      });
+      expect(validated).toMatchObject({
+        communityId: 3,
+        actorId: 2,
+        resourceType: 'community',
+        resourceIds: [3],
+        outcome: 'success',
+        ipAddress: null,
+        userAgent: null,
+      });
+      const serialized = JSON.stringify(row);
+      expect(serialized).not.toContain('Pub Sensitive Title');
+      expect(serialized).not.toContain('pub-admin@example.org');
+    }
+
+    // Referenced place & speaker retain attachments on 409; unreferenced lose them on 204
+    await db.batch([
+      db
+        .prepare(
+          "INSERT INTO attachments(community_id,owner_type,owner_id,file_id,role,ordinal,created_at) VALUES(3,'place',10,?,'place_photo',0,0)"
+        )
+        .bind(pubMedia),
+      db
+        .prepare(
+          "INSERT INTO attachments(community_id,owner_type,owner_id,file_id,role,ordinal,created_at) VALUES(3,'speaker',20,?,'speaker_photo',0,0)"
+        )
+        .bind(pubMedia),
+    ]);
+    expect(
+      (await asCookie('/v2/places/10', pubAdminCookie, 'DELETE')).status
+    ).toBe(409);
+    expect(
+      (await asCookie('/v2/speakers/20', pubAdminCookie, 'DELETE')).status
+    ).toBe(409);
+    const preservedAttachments = (
+      await db
+        .prepare(
+          "SELECT owner_type, owner_id FROM attachments WHERE community_id = 3 AND owner_type IN ('place', 'speaker')"
+        )
+        .all()
+    ).results;
+    expect(preservedAttachments).toHaveLength(2);
+
+    const createdPlaceRes = await patchJson(
+      '/v2/places',
+      { name: 'Temp D1 Place' },
+      'POST'
+    );
+    expect(createdPlaceRes.status).toBe(201);
+    const createdPlaceId = (
+      (await createdPlaceRes.json()) as { data: { id: number } }
+    ).data.id;
+    await db
+      .prepare(
+        "INSERT INTO attachments(community_id,owner_type,owner_id,file_id,role,ordinal,created_at) VALUES(3,'place',?,?,'place_photo',0,0)"
+      )
+      .bind(createdPlaceId, pubMedia)
+      .run();
+    expect(
+      (await asCookie(`/v2/places/${createdPlaceId}`, pubAdminCookie, 'DELETE'))
+        .status
+    ).toBe(204);
+    const deletedPlaceAttachments = (
+      await db
+        .prepare(
+          "SELECT id FROM attachments WHERE community_id = 3 AND owner_type = 'place' AND owner_id = ?"
+        )
+        .bind(createdPlaceId)
+        .all()
+    ).results;
+    expect(deletedPlaceAttachments).toHaveLength(0);
+    expect(
+      (await asCookie(`/v2/places/${createdPlaceId}`, pubAdminCookie, 'DELETE'))
+        .status
+    ).toBe(404);
   } finally {
     await mf.dispose();
   }

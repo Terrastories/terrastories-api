@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from 'node:assert/strict';
-import { eq, sql } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { serve } from '@hono/node-server';
 import { EventEmitter, once } from 'node:events';
@@ -19,6 +19,7 @@ import {
   sessionLifetime,
   sessionRenewalInterval,
 } from '../src/shared/session-policy.js';
+import { validateContentFreeAuditEntry } from '../src/shared/utils/audit-entry.js';
 const status = async (
   response: Promise<Response>,
   expected: number,
@@ -859,7 +860,211 @@ export async function runHonoFoundationContract(
         'no session row may revive after re-enable'
       );
     }
+
+    // Slice 7 audit existence & content-freedom contract on both SQLite and PostgreSQL (#145)
+    const slice7AdminCookie = await login(adminEmail);
+    const patchCommunity = (body: unknown) =>
+      send(app, '/v2/community', {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          cookie: slice7AdminCookie,
+        },
+        body: JSON.stringify(body),
+      });
+    await status(
+      patchCommunity({ name: 'Hono Sensitive Name', visibility: 'public' }),
+      200
+    );
+    await status(patchCommunity({ visibility: 'public' }), 200);
+    await status(patchCommunity({ visibility: 'private' }), 200);
+
+    const communityAudits = await db
+      .select()
+      .from(tables.auditEntries)
+      .where(eq(tables.auditEntries.communityId, communityA))
+      .orderBy(asc(tables.auditEntries.id));
+    assert.deepEqual(
+      communityAudits.map((row: any) => row.action),
+      ['community.visibility.public', 'community.visibility.private'],
+      'effective visibility transitions must emit content-free audit rows without no-op duplicates'
+    );
+    for (const row of communityAudits) {
+      const validated = validateContentFreeAuditEntry({
+        communityId: row.communityId,
+        actorId: row.actorId,
+        action: row.action,
+        resourceType: row.resourceType,
+        resourceIds: row.resourceIds,
+        outcome: row.outcome,
+        ipAddress: row.ipAddress,
+        userAgent: row.userAgent,
+      });
+      assert.equal(validated.communityId, communityA);
+      assert.equal(validated.actorId, adminId);
+      assert.equal(validated.resourceType, 'community');
+      assert.deepEqual(validated.resourceIds, [communityA]);
+      assert.equal(validated.outcome, 'success');
+      assert.equal(validated.ipAddress, null);
+      assert.equal(validated.userAgent, null);
+      const serialized = JSON.stringify(row);
+      assert.ok(!serialized.includes('Hono Sensitive Name'));
+      assert.ok(!serialized.includes(adminEmail));
+    }
+
+    if (dialectOf(database) === 'postgresql') {
+      // PostgreSQL SELECT ... FOR UPDATE race (#145): concurrent toggle waiting
+      // on a committed visibility flip must observe the updated visibility and
+      // emit zero duplicate audit entries.
+      let toggleDone = false;
+      let pendingToggle!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.communities)
+          .set({ publicStories: true })
+          .where(eq(tables.communities.id, communityA));
+        pendingToggle = patchCommunity({ visibility: 'public' });
+        void pendingToggle.finally(() => {
+          toggleDone = true;
+        });
+        const deadline = Date.now() + 2000;
+        while (!toggleDone && Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      });
+      assert.equal((await pendingToggle).status, 200);
+      const auditsAfterLock = await db
+        .select()
+        .from(tables.auditEntries)
+        .where(eq(tables.auditEntries.communityId, communityA))
+        .orderBy(asc(tables.auditEntries.id));
+      assert.equal(
+        auditsAfterLock.length,
+        2,
+        'concurrent public toggle blocked behind FOR UPDATE must not emit duplicate audit'
+      );
+
+      // Two simultaneous private toggles: only the first effective change emits an audit
+      const [t1, t2] = await Promise.all([
+        patchCommunity({ visibility: 'private' }),
+        patchCommunity({ visibility: 'private' }),
+      ]);
+      assert.equal(t1.status, 200);
+      assert.equal(t2.status, 200);
+      const auditsAfterBurst = await db
+        .select()
+        .from(tables.auditEntries)
+        .where(eq(tables.auditEntries.communityId, communityA))
+        .orderBy(asc(tables.auditEntries.id));
+      assert.deepEqual(
+        auditsAfterBurst.map((row: any) => row.action),
+        [
+          'community.visibility.public',
+          'community.visibility.private',
+          'community.visibility.private',
+        ]
+      );
+
+      // PostgreSQL concurrent story_places insert vs DELETE /v2/places/:id race:
+      // must block behind the uncommitted FK lock, then return 409 without
+      // cascading the link or deleting attachments.
+      const [racePlace] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'PG Race Place' })
+        .returning();
+      const [raceStory] = await db
+        .insert(tables.stories)
+        .values({
+          communityId: communityA,
+          title: 'PG Race Story',
+          slug: `pg-race-${tag}`,
+          language: 'en',
+          privacyLevel: 'editors_only',
+          isRestricted: false,
+        })
+        .returning();
+      const [raceAttachment] = await db
+        .insert(tables.attachments)
+        .values({
+          communityId: communityA,
+          fileId: fileIds[0],
+          ownerType: 'place',
+          ownerId: racePlace.id,
+          role: 'place_photo',
+          ordinal: 0,
+          createdAt: instant,
+        })
+        .returning();
+
+      let delDone = false;
+      let pendingDelete!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx.insert(tables.storyPlaces).values({
+          communityId: communityA,
+          storyId: raceStory.id,
+          placeId: racePlace.id,
+          sortOrder: 0,
+        });
+        pendingDelete = send(app, `/v2/places/${racePlace.id}`, {
+          method: 'DELETE',
+          headers: { cookie: slice7AdminCookie },
+        });
+        void pendingDelete.finally(() => {
+          delDone = true;
+        });
+        const deadline = Date.now() + 2000;
+        while (!delDone && Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      });
+      assert.equal(
+        (await pendingDelete).status,
+        409,
+        'concurrent story_places insert must cause DELETE /v2/places to return 409'
+      );
+      assert.equal(
+        (
+          await db
+            .select()
+            .from(tables.storyPlaces)
+            .where(eq(tables.storyPlaces.placeId, racePlace.id))
+        ).length,
+        1
+      );
+      assert.equal(
+        (
+          await db
+            .select()
+            .from(tables.attachments)
+            .where(eq(tables.attachments.id, raceAttachment.id))
+        ).length,
+        1
+      );
+    }
   } finally {
+    for (const id of communityIds) {
+      await db
+        .delete(tables.storyPlaces)
+        .where(eq(tables.storyPlaces.communityId, id));
+      await db
+        .delete(tables.attachments)
+        .where(eq(tables.attachments.communityId, id));
+      await db.delete(tables.stories).where(eq(tables.stories.communityId, id));
+      await db.delete(tables.places).where(eq(tables.places.communityId, id));
+      await db
+        .delete(tables.auditEntries)
+        .where(eq(tables.auditEntries.communityId, id));
+    }
     for (const id of fileIds) {
       await db.delete(media).where(eq(media.fileId, id));
       await db.delete(tables.files).where(eq(tables.files.id, id));

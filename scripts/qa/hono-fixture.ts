@@ -76,6 +76,11 @@ import {
   PutCommunityMapConfigResponseSchema,
   V2ValidationErrorResponseSchema,
 } from '../../src/shared/schemas/community-writes.js';
+import {
+  ExternalMediaLinksListResponseSchema,
+  ExternalMediaLinkWriteResponseSchema,
+  StoryWriteResponseSchema,
+} from '../../src/shared/schemas/story-writes.js';
 import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
@@ -4033,6 +4038,68 @@ export async function createFixture(
         expected: 403,
         check: forbiddenCheck,
       },
+      {
+        name: 'deny post v2 stories',
+        method: 'POST',
+        path: '/v2/stories',
+        expected: 403,
+        body: { title: 'Denied Story' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny patch v2 story',
+        method: 'PATCH',
+        path: `/v2/stories/${publicStory.id}`,
+        expected: 403,
+        body: { title: 'Denied Story Patch' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny delete v2 story',
+        method: 'DELETE',
+        path: `/v2/stories/${publicStory.id}`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny put v2 story places',
+        method: 'PUT',
+        path: `/v2/stories/${publicStory.id}/places`,
+        expected: 403,
+        body: { placeIds: [] },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny put v2 story speakers',
+        method: 'PUT',
+        path: `/v2/stories/${publicStory.id}/speakers`,
+        expected: 403,
+        body: { speakerIds: [] },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny post v2 story external links',
+        method: 'POST',
+        path: `/v2/stories/${publicStory.id}/external-links`,
+        expected: 403,
+        body: { url: 'https://denied.example.test/media' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny patch v2 story external links reorder',
+        method: 'PATCH',
+        path: `/v2/stories/${publicStory.id}/external-links/reorder`,
+        expected: 403,
+        body: { linkIds: [] },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny delete v2 story external link',
+        method: 'DELETE',
+        path: `/v2/stories/${publicStory.id}/external-links/1`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
     ];
     const validationFieldCheck =
       (expectedPath: string, noEchoToken?: string) => (body: unknown) => {
@@ -4047,6 +4114,67 @@ export async function createFixture(
         }
         return true;
       };
+    let qaSlice8StoryId = 0;
+    let qaSlice8LinkAId = 0;
+    let qaSlice8LinkBId = 0;
+    const qaSlice8ReorderBody: { linkIds: number[] } = { linkIds: [] };
+    const assertEditorStoryAudits = async (
+      expectedActions: readonly string[]
+    ): Promise<void> => {
+      const audits = await db
+        .select()
+        .from(auditEntries)
+        .where(
+          sql`${auditEntries.communityId} = ${communityId} AND ${auditEntries.resourceType} = 'story'`
+        )
+        .orderBy(asc(auditEntries.id));
+      if (audits.length !== expectedActions.length) {
+        throw new Error(
+          `Expected ${expectedActions.length} story visibility audit entries for community ${communityId}, got ${audits.length}`
+        );
+      }
+      const forbiddenTokens = [
+        'QA Slice8 Story',
+        'QA Slice8 Story Published',
+        credentials.editor.email,
+        ...HONO_PERSONA_CULTURAL_STRINGS,
+      ];
+      for (let i = 0; i < expectedActions.length; i++) {
+        const entry = audits[i]!;
+        const validated = validateContentFreeAuditEntry({
+          communityId: entry.communityId,
+          actorId: entry.actorId,
+          action: entry.action,
+          resourceType: entry.resourceType,
+          resourceIds: entry.resourceIds,
+          outcome: entry.outcome,
+          ipAddress: entry.ipAddress,
+          userAgent: entry.userAgent,
+        });
+        if (
+          validated.communityId !== communityId ||
+          validated.action !== expectedActions[i] ||
+          validated.resourceType !== 'story' ||
+          JSON.stringify(validated.resourceIds) !==
+            JSON.stringify([qaSlice8StoryId]) ||
+          validated.outcome !== 'success' ||
+          validated.ipAddress !== null ||
+          validated.userAgent !== null
+        ) {
+          throw new Error(
+            `Unexpected story audit entry at index ${i}: ${JSON.stringify(entry)}`
+          );
+        }
+        const serialized = JSON.stringify(entry);
+        for (const token of forbiddenTokens) {
+          if (serialized.includes(token)) {
+            throw new Error(
+              `Story audit entry leaked non-content-free token "${token}"`
+            );
+          }
+        }
+      }
+    };
     const editorCommunityWriteSteps: Step[] = [
       {
         name: 'editor denied patch v2 community',
@@ -4259,6 +4387,304 @@ export async function createFixture(
         expected: 404,
         check: publicNotFoundCheck,
       },
+      {
+        name: 'editor create story rejects CSRF cross-site',
+        method: 'POST',
+        path: '/v2/stories',
+        expected: 403,
+        headers: { 'Sec-Fetch-Site': 'cross-site' },
+        body: { title: 'CSRF Blocked Story' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'editor create story rejects restricted visibility',
+        method: 'POST',
+        path: '/v2/stories',
+        expected: 400,
+        body: { title: 'Bad Visibility', visibility: 'restricted' },
+        check: validationFieldCheck('visibility'),
+      },
+      {
+        name: 'editor create story rejects cross-community interview location',
+        method: 'POST',
+        path: '/v2/stories',
+        expected: 400,
+        body: {
+          title: 'Cross Location Story',
+          interviewLocationId: foreignPlace.id,
+        },
+        check: validationFieldCheck('interviewLocationId'),
+      },
+      {
+        name: 'editor create editors-only story with multiplicity edges',
+        method: 'POST',
+        path: '/v2/stories',
+        expected: 201,
+        captureId: 'qaSlice8Story',
+        body: {
+          title: 'QA Slice8 Story',
+          description: '<p>Initial <strong>story</strong> body</p>',
+          visibility: 'editors',
+          topic: '  QA Coastal Song  ',
+          language: 'en',
+          interviewLocationId: publicPlace.id,
+          interviewerId: speaker.id,
+          placeIds: [publicPlace.id, publicPlace.id],
+          speakerIds: [speaker.id, speaker.id],
+        },
+        check: (body) => {
+          const parsed = StoryWriteResponseSchema.safeParse(body);
+          if (!parsed.success) return false;
+          qaSlice8StoryId = parsed.data.data.id;
+          return (
+            parsed.data.data.title === 'QA Slice8 Story' &&
+            parsed.data.data.visibility === 'editors' &&
+            parsed.data.data.topic === 'QA Coastal Song' &&
+            parsed.data.data.places.map((p) => p.id).join(',') ===
+              `${publicPlace.id},${publicPlace.id}` &&
+            parsed.data.data.speakers.map((s) => s.id).join(',') ===
+              `${speaker.id},${speaker.id}`
+          );
+        },
+      },
+      {
+        name: 'qa slice8 editors story starts hidden on public projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/{qaSlice8Story}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'qa slice8 editors story starts hidden on explore projection',
+        method: 'GET',
+        path: `/explore/communities/${communitySlug}/stories/{qaSlice8Story}`,
+        expected: 404,
+      },
+      {
+        name: 'editor update story visibility to public',
+        method: 'PATCH',
+        path: '/v2/stories/{qaSlice8Story}',
+        expected: 200,
+        body: {
+          title: 'QA Slice8 Story Published',
+          description: '<p>Updated <em>narrative</em></p>',
+          visibility: 'public',
+          topic: '  QA Coastal Revised  ',
+        },
+        check: (body) => {
+          const parsed = StoryWriteResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.title === 'QA Slice8 Story Published' &&
+            parsed.data.data.visibility === 'public' &&
+            parsed.data.data.topic === 'QA Coastal Revised'
+          );
+        },
+      },
+      {
+        name: 'qa slice8 story opens immediately on public projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/{qaSlice8Story}`,
+        expected: 200,
+        prepare: () => assertEditorStoryAudits(['story.visibility.public']),
+        check: (body) => {
+          const parsed = PublicStoryDetailResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.id === qaSlice8StoryId &&
+            parsed.data.data.places.map((p) => p.id).join(',') ===
+              `${publicPlace.id},${publicPlace.id}`
+          );
+        },
+      },
+      {
+        name: 'qa slice8 story opens immediately on explore projection',
+        method: 'GET',
+        path: `/explore/communities/${communitySlug}/stories/{qaSlice8Story}`,
+        expected: 200,
+      },
+      {
+        name: 'editor replace story places keeps multiplicity and rejects cross-community or restricted targets',
+        method: 'PUT',
+        path: '/v2/stories/{qaSlice8Story}/places',
+        expected: 400,
+        body: { placeIds: [publicPlace.id, foreignPlace.id] },
+        check: validationFieldCheck('placeIds'),
+      },
+      {
+        name: 'editor replace story places rejects own restricted place',
+        method: 'PUT',
+        path: '/v2/stories/{qaSlice8Story}/places',
+        expected: 400,
+        body: { placeIds: [restrictedPlace.id] },
+        check: validationFieldCheck('placeIds'),
+      },
+      {
+        name: 'editor replace story places preserves duplicate order',
+        method: 'PUT',
+        path: '/v2/stories/{qaSlice8Story}/places',
+        expected: 200,
+        body: {
+          placeIds: [publicPlace.id, unassociatedPlace.id, publicPlace.id],
+        },
+        check: (body) => {
+          const parsed = StoryWriteResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.places.map((p) => p.id).join(',') ===
+              `${publicPlace.id},${unassociatedPlace.id},${publicPlace.id}`
+          );
+        },
+      },
+      {
+        name: 'editor replace story speakers rejects cross-community speaker',
+        method: 'PUT',
+        path: '/v2/stories/{qaSlice8Story}/speakers',
+        expected: 400,
+        body: { speakerIds: [foreignSpeaker.id] },
+        check: validationFieldCheck('speakerIds'),
+      },
+      {
+        name: 'editor replace story speakers preserves multiplicity',
+        method: 'PUT',
+        path: '/v2/stories/{qaSlice8Story}/speakers',
+        expected: 200,
+        body: { speakerIds: [speaker.id, withdrawnSpeaker.id, speaker.id] },
+        check: (body) => {
+          const parsed = StoryWriteResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.speakers.map((s) => s.id).join(',') ===
+              `${speaker.id},${withdrawnSpeaker.id},${speaker.id}`
+          );
+        },
+      },
+      {
+        name: 'editor reject restricted story write paths with 404 (no oracle)',
+        method: 'PATCH',
+        path: `/v2/stories/${restrictedStory.id}`,
+        expected: 404,
+        body: {
+          title: 'Bypass Attempt',
+          interviewLocationId: foreignPlace.id,
+        },
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'editor external link rejects javascript scheme without echo',
+        method: 'POST',
+        path: '/v2/stories/{qaSlice8Story}/external-links',
+        expected: 400,
+        body: { url: `javascript:alert('${qaSecretDescMarker}')` },
+        check: validationFieldCheck('url', qaSecretDescMarker),
+      },
+      {
+        name: 'editor adds first external link',
+        method: 'POST',
+        path: '/v2/stories/{qaSlice8Story}/external-links',
+        expected: 201,
+        captureId: 'qaSlice8LinkA',
+        body: { url: 'https://video.example.test/qa/first' },
+        check: (body) => {
+          const parsed = ExternalMediaLinkWriteResponseSchema.safeParse(body);
+          if (!parsed.success) return false;
+          qaSlice8LinkAId = parsed.data.data.id;
+          return (
+            parsed.data.data.url === 'https://video.example.test/qa/first' &&
+            parsed.data.data.ordinal === 0
+          );
+        },
+      },
+      {
+        name: 'editor adds second external link',
+        method: 'POST',
+        path: '/v2/stories/{qaSlice8Story}/external-links',
+        expected: 201,
+        captureId: 'qaSlice8LinkB',
+        body: { url: 'http://audio.example.test/qa/second' },
+        check: (body) => {
+          const parsed = ExternalMediaLinkWriteResponseSchema.safeParse(body);
+          if (!parsed.success) return false;
+          qaSlice8LinkBId = parsed.data.data.id;
+          return (
+            parsed.data.data.url === 'http://audio.example.test/qa/second' &&
+            parsed.data.data.ordinal === 1
+          );
+        },
+      },
+      {
+        name: 'editor reorders external links atomically',
+        method: 'PATCH',
+        path: '/v2/stories/{qaSlice8Story}/external-links/reorder',
+        expected: 200,
+        prepare: () => {
+          qaSlice8ReorderBody.linkIds = [qaSlice8LinkBId, qaSlice8LinkAId];
+        },
+        body: qaSlice8ReorderBody,
+        check: (body) => {
+          const parsed = ExternalMediaLinksListResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.map((l) => `${l.id}:${l.ordinal}`).join(',') ===
+              `${qaSlice8LinkBId}:0,${qaSlice8LinkAId}:1`
+          );
+        },
+      },
+      {
+        name: 'editor deletes first external link',
+        method: 'DELETE',
+        path: '/v2/stories/{qaSlice8Story}/external-links/{qaSlice8LinkA}',
+        expected: 204,
+      },
+      {
+        name: 'editor repeat delete external link returns 404',
+        method: 'DELETE',
+        path: '/v2/stories/{qaSlice8Story}/external-links/{qaSlice8LinkA}',
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'editor flips story visibility back to editors',
+        method: 'PATCH',
+        path: '/v2/stories/{qaSlice8Story}',
+        expected: 200,
+        body: { visibility: 'editors' },
+        check: (body) => {
+          const parsed = StoryWriteResponseSchema.safeParse(body);
+          return parsed.success && parsed.data.data.visibility === 'editors';
+        },
+      },
+      {
+        name: 'qa slice8 story closes immediately on public projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/{qaSlice8Story}`,
+        expected: 404,
+        prepare: () =>
+          assertEditorStoryAudits([
+            'story.visibility.public',
+            'story.visibility.editors',
+          ]),
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'qa slice8 story closes immediately on explore projection',
+        method: 'GET',
+        path: `/explore/communities/${communitySlug}/stories/{qaSlice8Story}`,
+        expected: 404,
+      },
+      {
+        name: 'editor deletes temporary slice8 story',
+        method: 'DELETE',
+        path: '/v2/stories/{qaSlice8Story}',
+        expected: 204,
+      },
+      {
+        name: 'editor repeat delete temporary slice8 story returns 404',
+        method: 'DELETE',
+        path: '/v2/stories/{qaSlice8Story}',
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
     ];
     const assertPrivateVisibilityAudits = async (
       expectedActions: readonly string[]
@@ -4460,6 +4886,31 @@ export async function createFixture(
         method: 'GET',
         path: `/explore/communities/${privateCommunitySlug}`,
         expected: 404,
+      },
+      {
+        name: 'admin creates temporary story in private community',
+        method: 'POST',
+        path: '/v2/stories',
+        expected: 201,
+        captureId: 'qaSlice8AdminStory',
+        body: {
+          title: 'QA Private Admin Story',
+          visibility: 'editors',
+        },
+        check: (body) => {
+          const parsed = StoryWriteResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.title === 'QA Private Admin Story' &&
+            parsed.data.data.visibility === 'editors'
+          );
+        },
+      },
+      {
+        name: 'admin deletes temporary story in private community',
+        method: 'DELETE',
+        path: '/v2/stories/{qaSlice8AdminStory}',
+        expected: 204,
       },
     ];
     const journeys: Journey[] = [

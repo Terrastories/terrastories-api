@@ -1396,7 +1396,7 @@ export class StoryWritesRepository {
       const ordinalExpr =
         input.ordinal !== undefined
           ? sql`${input.ordinal}`
-          : sql`(SELECT COALESCE(MAX(eml.ordinal), -1) + 1 FROM external_media_links AS eml WHERE eml.community_id = ${this.tables.stories.communityId} AND eml.story_id = ${this.tables.stories.id})`;
+          : sql`(SELECT COALESCE(MAX(eml.ordinal), -1) + 1 FROM external_media_links AS eml WHERE eml.community_id = ${communityId} AND eml.story_id = ${storyId})`;
 
       const insertLink = this.db
         .insert(this.tables.externalMediaLinks)
@@ -1414,7 +1414,7 @@ export class StoryWritesRepository {
             .where(
               and(
                 readableScope,
-                sql`(SELECT COUNT(*) FROM external_media_links AS eml WHERE eml.community_id = ${this.tables.stories.communityId} AND eml.story_id = ${this.tables.stories.id}) < ${maxLinks}`
+                sql`(SELECT COUNT(*) FROM external_media_links AS eml WHERE eml.community_id = ${communityId} AND eml.story_id = ${storyId}) < ${maxLinks}`
               )
             )
         )

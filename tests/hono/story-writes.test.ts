@@ -15,6 +15,9 @@ import { HonoFoundationRepository } from '../../src/repositories/hono-foundation
 import { StoryWritesRepository } from '../../src/repositories/story-writes.repository.js';
 import { V2ValidationErrorResponseSchema } from '../../src/shared/schemas/community-writes.js';
 import {
+  ExternalMediaLinksListResponseSchema,
+  ExternalMediaLinkWriteResponseSchema,
+  MAX_EXTERNAL_LINKS_PER_STORY,
   MAX_STORY_EDGE_IDS,
   StoryWriteResponseSchema,
 } from '../../src/shared/schemas/story-writes.js';
@@ -1130,6 +1133,301 @@ describe('Slice 8 StoryPlace and StorySpeaker edge routes', () => {
   });
 });
 
+describe('Slice 8 ExternalMediaLink routes', () => {
+  it('adds http/https links with deterministic ordinals, reorders atomically as a permutation, and deletes cleanly', async () => {
+    const storyId = ids.createdDraftStory!;
+    // Empty reorder succeeds on empty list
+    const emptyReorder = await requestJson(
+      'PATCH',
+      `/v2/stories/${storyId}/external-links/reorder`,
+      {
+        cookie: cookies.editor,
+        body: { linkIds: [] },
+      }
+    );
+    expect(emptyReorder.status).toBe(200);
+    expect(
+      ExternalMediaLinksListResponseSchema.parse(emptyReorder.json).data
+    ).toEqual([]);
+
+    const add1 = await requestJson(
+      'POST',
+      `/v2/stories/${storyId}/external-links`,
+      {
+        cookie: cookies.editor,
+        body: { url: 'https://video.example.test/watch/alpha' },
+      }
+    );
+    expect(add1.status).toBe(201);
+    const link1 = ExternalMediaLinkWriteResponseSchema.parse(add1.json).data;
+    expect(link1.url).toBe('https://video.example.test/watch/alpha');
+    expect(link1.ordinal).toBe(0);
+
+    const add2 = await requestJson(
+      'POST',
+      `/v2/stories/${storyId}/external-links`,
+      {
+        cookie: cookies.admin,
+        body: { url: 'http://audio.example.test/track/beta' },
+      }
+    );
+    expect(add2.status).toBe(201);
+    const link2 = ExternalMediaLinkWriteResponseSchema.parse(add2.json).data;
+    expect(link2.ordinal).toBe(1);
+
+    const add3 = await requestJson(
+      'POST',
+      `/v2/stories/${storyId}/external-links`,
+      {
+        cookie: cookies.editor,
+        body: { url: 'https://archive.example.test/doc/gamma', ordinal: 5 },
+      }
+    );
+    expect(add3.status).toBe(201);
+    const link3 = ExternalMediaLinkWriteResponseSchema.parse(add3.json).data;
+    expect(link3.ordinal).toBe(5);
+
+    const reorderRes = await requestJson(
+      'PATCH',
+      `/v2/stories/${storyId}/external-links/reorder`,
+      {
+        cookie: cookies.editor,
+        body: { linkIds: [link3.id, link1.id, link2.id] },
+      }
+    );
+    expect(reorderRes.status).toBe(200);
+    const reordered = ExternalMediaLinksListResponseSchema.parse(
+      reorderRes.json
+    ).data;
+    expect(reordered.map((l) => [l.id, l.ordinal])).toEqual([
+      [link3.id, 0],
+      [link1.id, 1],
+      [link2.id, 2],
+    ]);
+
+    // Reflected in story detail readback
+    const readRes = await requestJson('GET', `/v2/stories/${storyId}`, {
+      cookie: cookies.editor,
+    });
+    expect(
+      StoryWriteResponseSchema.parse(readRes.json).data.externalMediaLinks.map(
+        (l) => l.id
+      )
+    ).toEqual([link3.id, link1.id, link2.id]);
+
+    // Delete middle link
+    const delRes = await requestJson(
+      'DELETE',
+      `/v2/stories/${storyId}/external-links/${link1.id}`,
+      { cookie: cookies.admin }
+    );
+    expect(delRes.status).toBe(204);
+    expect(delRes.json).toBeNull();
+
+    const readAfterDel = await requestJson('GET', `/v2/stories/${storyId}`, {
+      cookie: cookies.editor,
+    });
+    expect(
+      StoryWriteResponseSchema.parse(
+        readAfterDel.json
+      ).data.externalMediaLinks.map((l) => l.id)
+    ).toEqual([link3.id, link2.id]);
+
+    ids.remainingLinkA = link3.id;
+    ids.remainingLinkB = link2.id;
+  });
+
+  it('rejects non-http(s) URLs without echo, invalid permutations, foreign/restricted stories, and disallowed callers', async () => {
+    const storyId = ids.createdDraftStory!;
+    const foreignLink = await db
+      .insert(tables.externalMediaLinks)
+      .values({
+        communityId: ids.foreign!,
+        storyId: ids.stForeign!,
+        url: 'https://foreign.example.test/media',
+        ordinal: 0,
+        createdAt: T0,
+      })
+      .returning({ id: tables.externalMediaLinks.id });
+    const foreignLinkId = foreignLink[0]!.id;
+
+    // Restricted story link for cross-story delete isolation test
+    const restrictedLink = await db
+      .insert(tables.externalMediaLinks)
+      .values({
+        communityId: ids.own!,
+        storyId: ids.stRestrictedFlag!,
+        url: 'https://own.example.test/restricted-link',
+        ordinal: 0,
+        createdAt: T0,
+      })
+      .returning({ id: tables.externalMediaLinks.id });
+    const restrictedLinkId = restrictedLink[0]!.id;
+
+    for (const badCookie of [
+      cookies.viewer,
+      cookies.member,
+      cookies.super,
+      cookies.disabledAdmin,
+    ]) {
+      expect(
+        (
+          await requestJson('POST', `/v2/stories/${storyId}/external-links`, {
+            cookie: badCookie,
+            body: { url: 'https://ok.example.test/a' },
+          })
+        ).status
+      ).toBe(403);
+      expect(
+        (
+          await requestJson(
+            'PATCH',
+            `/v2/stories/${storyId}/external-links/reorder`,
+            {
+              cookie: badCookie,
+              body: { linkIds: [ids.remainingLinkA, ids.remainingLinkB] },
+            }
+          )
+        ).status
+      ).toBe(403);
+      expect(
+        (
+          await requestJson(
+            'DELETE',
+            `/v2/stories/${storyId}/external-links/${ids.remainingLinkA}`,
+            { cookie: badCookie }
+          )
+        ).status
+      ).toBe(403);
+    }
+
+    // Invalid URL schemes and relative URLs rejected with 400 and never echoed
+    const secretUrlCanary = 'CANARY_BAD_URL_TOKEN';
+    for (const badUrl of [
+      `javascript:alert('${secretUrlCanary}')`,
+      `data:text/html,<p>${secretUrlCanary}</p>`,
+      `file:///etc/${secretUrlCanary}`,
+      `ftp://files.example.test/${secretUrlCanary}`,
+      `/relative/${secretUrlCanary}.mp4`,
+      '',
+    ]) {
+      const r = await requestJson(
+        'POST',
+        `/v2/stories/${storyId}/external-links`,
+        {
+          cookie: cookies.editor,
+          body: { url: badUrl },
+        }
+      );
+      expect(r.status).toBe(400);
+      expect(V2ValidationErrorResponseSchema.safeParse(r.json).success).toBe(
+        true
+      );
+      expect(JSON.stringify(r.json)).not.toContain(secretUrlCanary);
+    }
+
+    // Reorder permutation rejections
+    for (const badPermutation of [
+      [],
+      [ids.remainingLinkA!],
+      [ids.remainingLinkA!, ids.remainingLinkA!],
+      [ids.remainingLinkA!, ids.remainingLinkB!, 9999999],
+      [ids.remainingLinkA!, foreignLinkId],
+      [ids.remainingLinkA!, restrictedLinkId],
+    ]) {
+      const r = await requestJson(
+        'PATCH',
+        `/v2/stories/${storyId}/external-links/reorder`,
+        {
+          cookie: cookies.editor,
+          body: { linkIds: badPermutation },
+        }
+      );
+      expect(r.status).toBe(400);
+    }
+
+    // Cross-story / restricted story / foreign story delete/add/reorder return 404
+    expect(
+      (
+        await requestJson(
+          'DELETE',
+          `/v2/stories/${storyId}/external-links/${foreignLinkId}`,
+          { cookie: cookies.admin }
+        )
+      ).status
+    ).toBe(404);
+    expect(
+      (
+        await requestJson(
+          'DELETE',
+          `/v2/stories/${storyId}/external-links/${restrictedLinkId}`,
+          { cookie: cookies.admin }
+        )
+      ).status
+    ).toBe(404);
+
+    for (const hiddenStoryId of [
+      ids.stRestrictedFlag!,
+      ids.stRestrictedLevel!,
+      ids.stForeign!,
+      9999999,
+    ]) {
+      expect(
+        (
+          await requestJson(
+            'POST',
+            `/v2/stories/${hiddenStoryId}/external-links`,
+            {
+              cookie: cookies.admin,
+              body: { url: 'https://ok.example.test/x' },
+            }
+          )
+        ).status
+      ).toBe(404);
+      expect(
+        (
+          await requestJson(
+            'PATCH',
+            `/v2/stories/${hiddenStoryId}/external-links/reorder`,
+            {
+              cookie: cookies.admin,
+              body: { linkIds: [restrictedLinkId] },
+            }
+          )
+        ).status
+      ).toBe(404);
+      expect(
+        (
+          await requestJson(
+            'DELETE',
+            `/v2/stories/${hiddenStoryId}/external-links/${restrictedLinkId}`,
+            { cookie: cookies.admin }
+          )
+        ).status
+      ).toBe(404);
+    }
+
+    // Bad route param IDs
+    expect(
+      (
+        await requestJson(
+          'DELETE',
+          `/v2/stories/${storyId}/external-links/not-an-id`,
+          { cookie: cookies.admin }
+        )
+      ).status
+    ).toBe(400);
+
+    // Restricted link was NOT deleted
+    expect(
+      await db
+        .select()
+        .from(tables.externalMediaLinks)
+        .where(eq(tables.externalMediaLinks.id, restrictedLinkId))
+    ).toHaveLength(1);
+  });
+});
+
 describe('Slice 8 D1 batch atomicity and race safety', () => {
   it('rolls back D1 batch atomically on concurrent target restriction and avoids stale audits', async () => {
     const batchSqlite = new Sqlite(':memory:');
@@ -1321,10 +1619,74 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
         MAX_STORY_EDGE_IDS
       );
 
-      // 5. Restricted story delete in D1 returns false and preserves attachments
+      // 5. ExternalMediaLink add, cap, race-safe reorder, and restricted delete guard in D1
+      const addA = await repo.addExternalLink(
+        comm!.id,
+        ok.id,
+        { url: 'https://media.example.test/1' },
+        MAX_EXTERNAL_LINKS_PER_STORY,
+        T0
+      );
+      const addB = await repo.addExternalLink(
+        comm!.id,
+        ok.id,
+        { url: 'https://media.example.test/2' },
+        MAX_EXTERNAL_LINKS_PER_STORY,
+        T0
+      );
+      expect(addA.status).toBe('created');
+      expect(addB.status).toBe('created');
+      if (addA.status !== 'created' || addB.status !== 'created') return;
+      expect(addA.link.ordinal).toBe(0);
+      expect(addB.link.ordinal).toBe(1);
+
+      const capBlocked = await repo.addExternalLink(
+        comm!.id,
+        ok.id,
+        { url: 'https://media.example.test/over-cap' },
+        2,
+        T0
+      );
+      expect(capBlocked.status).toBe('limit_exceeded');
+
+      // Concurrent add during reorder aborts all ordinal updates -> conflict, original ordinals preserved
+      beforeNextBatch = () => {
+        batchSqlite
+          .prepare(
+            'INSERT INTO external_media_links (community_id, story_id, url, ordinal, created_at) VALUES (?, ?, ?, ?, ?)'
+          )
+          .run(
+            comm!.id,
+            ok.id,
+            'https://media.example.test/3',
+            2,
+            T0.getTime()
+          );
+      };
+      const reorderRace = await repo.reorderExternalLinks(
+        comm!.id,
+        ok.id,
+        [addB.link.id, addA.link.id],
+        T0
+      );
+      expect(reorderRace.status).toBe('conflict');
+      const linksAfterRace = await batchDb
+        .select()
+        .from(batchTables.externalMediaLinks)
+        .orderBy(asc(batchTables.externalMediaLinks.ordinal));
+      expect(linksAfterRace.map((l) => [l.url, l.ordinal])).toEqual([
+        ['https://media.example.test/1', 0],
+        ['https://media.example.test/2', 1],
+        ['https://media.example.test/3', 2],
+      ]);
+
+      // 6. Restricted story guards both deleteStory and deleteExternalLink in D1
       batchSqlite
         .prepare('UPDATE stories SET is_restricted = 1 WHERE id = ?')
         .run(ok.id);
+      expect(
+        await repo.deleteExternalLink(comm!.id, ok.id, addA.link.id, T0)
+      ).toBe(false);
       const delRestricted = await repo.deleteStory(comm!.id, ok.id);
       expect(delRestricted).toBe(false);
       expect(await batchDb.select().from(batchTables.stories)).toHaveLength(1);

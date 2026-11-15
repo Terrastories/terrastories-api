@@ -88,4 +88,46 @@ export function registerStoryWriteRoutes(
     );
     return respond(c, result);
   });
+
+  app.post('/v2/stories/:id/external-links', jsonBodyLimit, async (c) => {
+    const actor = actorOf(c);
+    const parsed = await parseJsonRequestBody(c);
+    if (!parsed.ok) {
+      return c.json({ error: parsed.error }, parsed.status);
+    }
+    const result = await service.addExternalLink(
+      actor,
+      c.req.param('id'),
+      parsed.body
+    );
+    return respond(c, result);
+  });
+
+  app.patch(
+    '/v2/stories/:id/external-links/reorder',
+    jsonBodyLimit,
+    async (c) => {
+      const actor = actorOf(c);
+      const parsed = await parseJsonRequestBody(c);
+      if (!parsed.ok) {
+        return c.json({ error: parsed.error }, parsed.status);
+      }
+      const result = await service.reorderExternalLinks(
+        actor,
+        c.req.param('id'),
+        parsed.body
+      );
+      return respond(c, result);
+    }
+  );
+
+  app.delete('/v2/stories/:id/external-links/:linkId', async (c) => {
+    const actor = actorOf(c);
+    const result = await service.deleteExternalLink(
+      actor,
+      c.req.param('id'),
+      c.req.param('linkId')
+    );
+    return respond(c, result);
+  });
 }

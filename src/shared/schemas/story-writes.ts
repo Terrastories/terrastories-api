@@ -5,6 +5,11 @@ import {
   type CommunityStoryDetailResponse,
 } from './community-reads.js';
 import {
+  isSafeExternalMediaUrl,
+  PublicExternalMediaLinkSchema,
+  type PublicExternalMediaLink,
+} from './public-content.js';
+import {
   addDescriptionValidationIssues,
   makeDatabaseIdSchema,
   NullableTrimmedText,
@@ -130,3 +135,70 @@ export const PutStorySpeakersRequestSchema = z
 export type PutStorySpeakersRequest = z.infer<
   typeof PutStorySpeakersRequestSchema
 >;
+
+/**
+ * Maximum external media links allowed per story (`POST` and `reorder`),
+ * keeping D1 `IN (...)` permutation checks under the 100-bound-parameter cap.
+ */
+export const MAX_EXTERNAL_LINKS_PER_STORY = 75;
+
+export const CreateExternalMediaLinkRequestSchema = z
+  .object({
+    url: z
+      .string()
+      .trim()
+      .min(1, 'URL must not be empty')
+      .max(2048, 'URL must be at most 2048 characters')
+      .refine((v) => isSafeExternalMediaUrl(v), {
+        message: 'URL must be a valid absolute http: or https: URL',
+      }),
+    ordinal: z
+      .number()
+      .int('Ordinal must be an integer')
+      .min(0, 'Ordinal must be non-negative')
+      .max(10_000, 'Ordinal must be at most 10000')
+      .optional(),
+  })
+  .strict();
+
+export type CreateExternalMediaLinkRequest = z.infer<
+  typeof CreateExternalMediaLinkRequestSchema
+>;
+
+export const ReorderExternalMediaLinksRequestSchema = z
+  .object({
+    linkIds: z
+      .array(makeDatabaseIdSchema('linkId'))
+      .max(
+        MAX_EXTERNAL_LINKS_PER_STORY,
+        `linkIds cannot exceed ${MAX_EXTERNAL_LINKS_PER_STORY} items`
+      ),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (new Set(data.linkIds).size !== data.linkIds.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['linkIds'],
+        message: 'linkIds must not contain duplicate IDs',
+      });
+    }
+  });
+
+export type ReorderExternalMediaLinksRequest = z.infer<
+  typeof ReorderExternalMediaLinksRequestSchema
+>;
+
+export const ExternalMediaLinkWriteResponseSchema = z.object({
+  data: PublicExternalMediaLinkSchema,
+});
+export type ExternalMediaLinkWriteResponse = {
+  data: PublicExternalMediaLink;
+};
+
+export const ExternalMediaLinksListResponseSchema = z.object({
+  data: z.array(PublicExternalMediaLinkSchema),
+});
+export type ExternalMediaLinksListResponse = {
+  data: PublicExternalMediaLink[];
+};

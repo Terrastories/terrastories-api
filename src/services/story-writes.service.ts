@@ -3,10 +3,14 @@ import {
   isForeignKeyConstraintError,
   isNotNullConstraintError,
 } from '../repositories/community-writes.repository.js';
-import { StoryWritesRepository } from '../repositories/story-writes.repository.js';
+import {
+  StoryWritesRepository,
+  type ExternalMediaLinkRow,
+} from '../repositories/story-writes.repository.js';
 import { CommunityReadsService } from './community-reads.service.js';
 import {
   authorizeCommunityWriteCaller,
+  CONFLICT_BODY,
   type CommunityWriteResult,
 } from './community-writes.service.js';
 import {
@@ -21,11 +25,18 @@ import {
   type V2ValidationFieldError,
 } from '../shared/schemas/community-writes.js';
 import {
+  CreateExternalMediaLinkRequestSchema,
   CreateStoryRequestSchema,
+  ExternalMediaLinksListResponseSchema,
+  ExternalMediaLinkWriteResponseSchema,
+  MAX_EXTERNAL_LINKS_PER_STORY,
   PatchStoryRequestSchema,
   PutStoryPlacesRequestSchema,
   PutStorySpeakersRequestSchema,
+  ReorderExternalMediaLinksRequestSchema,
   StoryWriteResponseSchema,
+  type ExternalMediaLinksListResponse,
+  type ExternalMediaLinkWriteResponse,
   type StoryWriteResponse,
 } from '../shared/schemas/story-writes.js';
 import { isDatabaseIdString } from '../shared/types/public.js';
@@ -570,5 +581,197 @@ export class StoryWritesService {
       rawBody,
       origin
     );
+  }
+
+  private serializeExternalMediaLink(row: ExternalMediaLinkRow) {
+    const createdAt =
+      row.createdAt instanceof Date
+        ? row.createdAt
+        : new Date(row.createdAt as unknown as number);
+    return {
+      id: row.id,
+      url: row.url,
+      ordinal: row.ordinal,
+      createdAt: createdAt.toISOString(),
+    };
+  }
+
+  async addExternalLink(
+    actor: FoundationUser,
+    rawStoryId: string,
+    rawBody: unknown
+  ): Promise<CommunityWriteResult<ExternalMediaLinkWriteResponse>> {
+    const caller = await authorizeCommunityWriteCaller(this.repository, actor, [
+      'editor',
+      'admin',
+    ]);
+    if (!caller) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    if (!isDatabaseIdString(rawStoryId)) {
+      return { status: 400, body: BAD_REQUEST_BODY };
+    }
+    const storyId = Number(rawStoryId);
+
+    const parsed = CreateExternalMediaLinkRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
+      };
+    }
+
+    try {
+      const outcome = await this.repository.addExternalLink(
+        caller.communityId,
+        storyId,
+        {
+          url: parsed.data.url,
+          ordinal: parsed.data.ordinal,
+        },
+        MAX_EXTERNAL_LINKS_PER_STORY
+      );
+      if (outcome.status === 'not_found') {
+        return { status: 404, body: NOT_FOUND_BODY };
+      }
+      if (outcome.status === 'limit_exceeded') {
+        return {
+          status: 400,
+          body: makeValidationErrorBody([
+            {
+              path: 'url',
+              message: `Story cannot exceed ${MAX_EXTERNAL_LINKS_PER_STORY} external media links`,
+            },
+          ]),
+        };
+      }
+
+      const checked = ExternalMediaLinkWriteResponseSchema.safeParse({
+        data: this.serializeExternalMediaLink(outcome.link),
+      });
+      if (!checked.success) {
+        return { status: 500, body: INTERNAL_ERROR_BODY };
+      }
+      return { status: 201, body: checked.data };
+    } catch {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+  }
+
+  async reorderExternalLinks(
+    actor: FoundationUser,
+    rawStoryId: string,
+    rawBody: unknown
+  ): Promise<CommunityWriteResult<ExternalMediaLinksListResponse>> {
+    const caller = await authorizeCommunityWriteCaller(this.repository, actor, [
+      'editor',
+      'admin',
+    ]);
+    if (!caller) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    if (!isDatabaseIdString(rawStoryId)) {
+      return { status: 400, body: BAD_REQUEST_BODY };
+    }
+    const storyId = Number(rawStoryId);
+
+    const parsed = ReorderExternalMediaLinksRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
+      };
+    }
+
+    try {
+      const existingStory = await this.repository.findReadableStory(
+        caller.communityId,
+        storyId
+      );
+      if (!existingStory) {
+        return { status: 404, body: NOT_FOUND_BODY };
+      }
+
+      const existingIds = await this.repository.findStoryExternalLinkIds(
+        caller.communityId,
+        storyId
+      );
+      const providedSet = new Set(parsed.data.linkIds);
+      if (
+        parsed.data.linkIds.length !== existingIds.length ||
+        existingIds.some((id) => !providedSet.has(id))
+      ) {
+        return {
+          status: 400,
+          body: makeValidationErrorBody([
+            {
+              path: 'linkIds',
+              message:
+                'linkIds must be an exact permutation of all external media links on this story',
+            },
+          ]),
+        };
+      }
+
+      const outcome = await this.repository.reorderExternalLinks(
+        caller.communityId,
+        storyId,
+        parsed.data.linkIds
+      );
+      if (outcome.status === 'not_found') {
+        return { status: 404, body: NOT_FOUND_BODY };
+      }
+      if (outcome.status === 'conflict') {
+        return { status: 409, body: CONFLICT_BODY };
+      }
+
+      const checked = ExternalMediaLinksListResponseSchema.safeParse({
+        data: outcome.links.map((link) =>
+          this.serializeExternalMediaLink(link)
+        ),
+      });
+      if (!checked.success) {
+        return { status: 500, body: INTERNAL_ERROR_BODY };
+      }
+      return { status: 200, body: checked.data };
+    } catch {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+  }
+
+  async deleteExternalLink(
+    actor: FoundationUser,
+    rawStoryId: string,
+    rawLinkId: string
+  ): Promise<CommunityWriteResult<never>> {
+    const caller = await authorizeCommunityWriteCaller(this.repository, actor, [
+      'editor',
+      'admin',
+    ]);
+    if (!caller) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    if (!isDatabaseIdString(rawStoryId) || !isDatabaseIdString(rawLinkId)) {
+      return { status: 400, body: BAD_REQUEST_BODY };
+    }
+    const storyId = Number(rawStoryId);
+    const linkId = Number(rawLinkId);
+
+    try {
+      const deleted = await this.repository.deleteExternalLink(
+        caller.communityId,
+        storyId,
+        linkId
+      );
+      if (!deleted) {
+        return { status: 404, body: NOT_FOUND_BODY };
+      }
+      return { status: 204 };
+    } catch {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
   }
 }

@@ -47,7 +47,15 @@ import {
   type ReadRulePrivacyEvidence,
 } from '../../src/policy/read-rules.js';
 import type { TestFixtures } from '../../tests/helpers/database.js';
-import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
+import {
+  deriveTopicNormalized,
+  deriveUserIdentityColumns,
+} from '../../src/shared/utils/derived-columns.js';
+import {
+  PUBLIC_COMMUNITY_FILTER_CATEGORIES,
+  PublicCommunitiesListResponseSchema,
+  PublicCommunityDetailResponseSchema,
+} from '../../src/shared/schemas/public-communities.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
@@ -131,6 +139,7 @@ export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
   'QA foreign story description',
   'QA members-only story',
   'QA members-only story description',
+  'QA members-only topic',
   'QA inactive community story',
   'QA inactive community story description',
   'QA private community story',
@@ -144,6 +153,7 @@ export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
   'QA private community place',
   'QA hono speaker',
   'QA members-only speaker',
+  'QA members-only affiliation',
   'QA foreign speaker',
   'QA inactive community speaker',
   'QA private community speaker',
@@ -291,7 +301,9 @@ export async function createFixture(
         storage.set(key, bytes);
       };
   const {
+    attachments,
     communities,
+    communityMapConfigs,
     users,
     places,
     speakers,
@@ -459,6 +471,52 @@ export async function createFixture(
       fixtures.systemCommunity.id,
       JSON.stringify({ accessLevel: 'family' })
     );
+    const sponsorLogoFileId = crypto.randomUUID();
+    const sponsorLogoPath = `communities/${communityId}/${sponsorLogoFileId}.png`;
+    await db.insert(files).values({
+      id: sponsorLogoFileId,
+      filename: `${sponsorLogoFileId}.png`,
+      originalName: 'qa-sponsor-logo.png',
+      path: sponsorLogoPath,
+      url: `/v2/media/${sponsorLogoFileId}`,
+      mimeType: 'image/png',
+      size: mediaBytes.length,
+      uploadedBy: creatorId,
+      communityId,
+      culturalRestrictions: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await db.insert(attachments).values({
+      communityId,
+      fileId: sponsorLogoFileId,
+      ownerType: 'community',
+      ownerId: communityId,
+      role: 'sponsor_logo',
+      ordinal: 0,
+      createdAt: new Date(),
+    });
+    await putMedia(sponsorLogoPath, mediaBytes);
+    const mapConfigTimestamp = new Date();
+    await db.insert(communityMapConfigs).values({
+      communityId,
+      styleUrl: 'https://tiles.example.test/style.json',
+      basemapStyle: 'terrain',
+      centerLatitude: -3.1,
+      centerLongitude: -60.02,
+      southWestLatitude: -4,
+      southWestLongitude: -61,
+      northEastLatitude: -2,
+      northEastLongitude: -59,
+      zoom: 8,
+      pitch: 15,
+      bearing: 0,
+      threeDimensional: true,
+      projection: 'mercator',
+      staticMapFileId: readableFileId,
+      createdAt: mapConfigTimestamp,
+      updatedAt: mapConfigTimestamp,
+    });
     // Explore gates (#162 option A), each fixture withholding exactly one
     // property: every gated story is fully evidenced — the restricted and
     // unknown-privacy stories share the public story's edges, the
@@ -473,6 +531,7 @@ export async function createFixture(
       .values([
         {
           name: 'QA public place',
+          typeOfPlace: 'QA public place type',
           communityId,
           latitude: -3,
           longitude: -60,
@@ -530,6 +589,7 @@ export async function createFixture(
       .insert(speakers)
       .values({
         name: 'QA members-only speaker',
+        affiliation: 'QA members-only affiliation',
         communityId,
         isActive: true,
       })
@@ -639,7 +699,7 @@ export async function createFixture(
     const [saoCommunity] = await db
       .insert(communities)
       .values({
-        name: 'QA Comunidade São João',
+        name: 'QA Comunidade São João ΑΣΑ',
         description: 'Unicode-correct name search fixture (#192)',
         slug: `qa-sao-joao-${Date.now()}`,
         publicStories: true,
@@ -753,6 +813,9 @@ export async function createFixture(
           communityId,
           createdBy: creatorId,
           privacyLevel: 'members',
+          language: 'qa-members-lang',
+          topic: 'QA members-only topic',
+          topicNormalized: deriveTopicNormalized('QA members-only topic'),
           description: 'QA members-only story description',
         },
         {
@@ -1798,6 +1861,297 @@ export async function createFixture(
         expected: 404,
       },
     ];
+    let canonicalPublicListJson = '';
+    let canonicalPublicDetailJson = '';
+    const publicNotFoundCheck = (body: unknown): boolean =>
+      keysExactly(body, ['error']) &&
+      (body as { error?: string }).error === 'Not found';
+    const checkPublicMapConfig = (
+      mapConfig: Record<string, unknown> | null | undefined
+    ): boolean => {
+      if (!mapConfig) return false;
+      const expectedStaticUrlSuffix = `/v2/public/communities/${encodeURIComponent(communitySlug)}/media/${readableFileId}`;
+      return (
+        mapConfig.styleUrl === 'https://tiles.example.test/style.json' &&
+        mapConfig.basemapStyle === 'terrain' &&
+        mapConfig.centerLatitude === -3.1 &&
+        mapConfig.centerLongitude === -60.02 &&
+        mapConfig.southWestLatitude === -4 &&
+        mapConfig.southWestLongitude === -61 &&
+        mapConfig.northEastLatitude === -2 &&
+        mapConfig.northEastLongitude === -59 &&
+        mapConfig.zoom === 8 &&
+        mapConfig.pitch === 15 &&
+        mapConfig.bearing === 0 &&
+        mapConfig.threeDimensional === true &&
+        mapConfig.projection === 'mercator' &&
+        mapConfig.staticMapFileId === readableFileId &&
+        typeof mapConfig.staticMapUrl === 'string' &&
+        mapConfig.staticMapUrl.endsWith(expectedStaticUrlSuffix)
+      );
+    };
+    const checkPublicBranding = (
+      branding:
+        | {
+            displayImage?: { fileId?: string; url?: string } | null;
+            backgroundImage?: unknown;
+            sponsorLogos?: Array<{
+              fileId?: string;
+              url?: string;
+              ordinal?: number;
+            }>;
+          }
+        | undefined
+    ): boolean => {
+      if (!branding) return false;
+      const mediaPrefix = `/v2/public/communities/${encodeURIComponent(communitySlug)}/media/`;
+      return (
+        branding.displayImage?.fileId === readableFileId &&
+        typeof branding.displayImage?.url === 'string' &&
+        branding.displayImage.url.endsWith(`${mediaPrefix}${readableFileId}`) &&
+        branding.backgroundImage === null &&
+        Array.isArray(branding.sponsorLogos) &&
+        branding.sponsorLogos.length === 1 &&
+        branding.sponsorLogos[0]?.fileId === sponsorLogoFileId &&
+        branding.sponsorLogos[0]?.ordinal === 0 &&
+        typeof branding.sponsorLogos[0]?.url === 'string' &&
+        branding.sponsorLogos[0].url.endsWith(
+          `${mediaPrefix}${sponsorLogoFileId}`
+        )
+      );
+    };
+    const publicCommunitiesListCheck = (body: unknown): boolean => {
+      if (!keysExactly(body, ['data'])) return false;
+      const parsed = PublicCommunitiesListResponseSchema.safeParse(body);
+      if (!parsed.success) return false;
+      const slugs = parsed.data.data.map((community) => community.slug);
+      const expectedSlugs = [
+        communitySlug,
+        foreignCommunitySlug,
+        saoCommunity.slug,
+      ].sort();
+      if (JSON.stringify([...slugs].sort()) !== JSON.stringify(expectedSlugs)) {
+        return false;
+      }
+      if (
+        slugs.includes(inactiveCommunity.slug) ||
+        slugs.includes(privateCommunitySlug)
+      ) {
+        return false;
+      }
+      const own = parsed.data.data.find(
+        (community) => community.slug === communitySlug
+      );
+      if (!own) return false;
+      const text = JSON.stringify(body) ?? '';
+      return (
+        own.id === communityId &&
+        own.visibility === 'public' &&
+        own.status === 'active' &&
+        checkPublicBranding(own.branding) &&
+        checkPublicMapConfig(
+          own.mapConfig as unknown as Record<string, unknown>
+        ) &&
+        !text.includes(String(restrictedFileId)) &&
+        !text.includes('mapboxAccessToken')
+      );
+    };
+    const publicCommunityDetailCheck = (body: unknown): boolean => {
+      if (!keysExactly(body, ['data'])) return false;
+      const parsed = PublicCommunityDetailResponseSchema.safeParse(body);
+      if (!parsed.success) return false;
+      const data = parsed.data.data;
+      const optionValues = (category: string): (number | string)[] =>
+        data.filters
+          .filter((option) => option.category === category)
+          .map((option) => option.value);
+      const text = JSON.stringify(body) ?? '';
+      return (
+        data.id === communityId &&
+        data.slug === communitySlug &&
+        data.visibility === 'public' &&
+        data.status === 'active' &&
+        checkPublicBranding(data.branding) &&
+        checkPublicMapConfig(
+          data.mapConfig as unknown as Record<string, unknown>
+        ) &&
+        data.storiesCount === 2 &&
+        idsExactlyAsSet(data.points, [publicPlace.id]) &&
+        data.points.length === 1 &&
+        data.points[0]?.properties.name === 'QA public place' &&
+        data.points[0]?.properties.description === null &&
+        data.points[0]?.properties.region === null &&
+        data.points[0]?.properties.typeOfPlace === 'QA public place type' &&
+        JSON.stringify(data.categories) ===
+          JSON.stringify(PUBLIC_COMMUNITY_FILTER_CATEGORIES) &&
+        JSON.stringify(optionValues('place')) ===
+          JSON.stringify([publicPlace.id]) &&
+        JSON.stringify(optionValues('speaker')) ===
+          JSON.stringify([speaker.id]) &&
+        JSON.stringify(optionValues('typeOfPlace')) ===
+          JSON.stringify(['QA public place type']) &&
+        optionValues('region').length === 0 &&
+        optionValues('topic').length === 0 &&
+        JSON.stringify(optionValues('language')) === JSON.stringify(['en']) &&
+        optionValues('affiliation').length === 0 &&
+        !text.includes('qa-members-lang') &&
+        !text.includes(String(restrictedFileId)) &&
+        !text.includes('QA members-only place') &&
+        !text.includes('QA members-only speaker') &&
+        !text.includes('QA members-only topic') &&
+        !text.includes('QA members-only affiliation') &&
+        !text.includes('QA restricted place') &&
+        !text.includes('QA unassociated place') &&
+        !text.includes('mapboxAccessToken')
+      );
+    };
+    const searchSaoCheck = (body: unknown): boolean => {
+      const parsed = PublicCommunitiesListResponseSchema.safeParse(body);
+      return (
+        parsed.success &&
+        parsed.data.data.length === 1 &&
+        parsed.data.data[0]?.slug === saoCommunity.slug &&
+        parsed.data.data[0]?.name === saoCommunity.name
+      );
+    };
+    const emptyPublicListCheck = (body: unknown): boolean => {
+      const parsed = PublicCommunitiesListResponseSchema.safeParse(body);
+      return parsed.success && parsed.data.data.length === 0;
+    };
+    const publicCommunities: Step[] = [
+      {
+        name: 'v2 public communities list',
+        method: 'GET',
+        path: '/v2/public/communities',
+        expected: 200,
+        check: (body) => {
+          if (!publicCommunitiesListCheck(body)) return false;
+          canonicalPublicListJson = JSON.stringify(body);
+          return true;
+        },
+      },
+      {
+        name: 'v2 public communities search matches case-variant diacritic',
+        method: 'GET',
+        path: `/v2/public/communities?search=${encodeURIComponent('SÃO JOÃO')}`,
+        expected: 200,
+        check: searchSaoCheck,
+      },
+      {
+        name: 'v2 public communities search folds final sigma',
+        method: 'GET',
+        path: `/v2/public/communities?search=${encodeURIComponent('ΑΣ')}`,
+        expected: 200,
+        check: searchSaoCheck,
+      },
+      {
+        name: 'v2 public communities search rejects ASCII transcription',
+        method: 'GET',
+        path: `/v2/public/communities?search=${encodeURIComponent('sao joao')}`,
+        expected: 200,
+        check: emptyPublicListCheck,
+      },
+      {
+        name: 'v2 public communities search hides inactive public community',
+        method: 'GET',
+        path: `/v2/public/communities?search=${encodeURIComponent(
+          inactiveCommunity.name
+        )}`,
+        expected: 200,
+        check: emptyPublicListCheck,
+      },
+      {
+        name: 'v2 public communities search hides private community',
+        method: 'GET',
+        path: `/v2/public/communities?search=${encodeURIComponent(
+          privateCommunityName
+        )}`,
+        expected: 200,
+        check: emptyPublicListCheck,
+      },
+      {
+        name: 'v2 public community detail',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}`,
+        expected: 200,
+        check: (body) => {
+          if (!publicCommunityDetailCheck(body)) return false;
+          canonicalPublicDetailJson = JSON.stringify(body);
+          return true;
+        },
+      },
+      {
+        name: 'v2 public community detail hides private community identically',
+        method: 'GET',
+        path: `/v2/public/communities/${privateCommunitySlug}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public community detail hides inactive community identically',
+        method: 'GET',
+        path: `/v2/public/communities/${inactiveCommunity.slug}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public community detail returns 404 for unknown slug',
+        method: 'GET',
+        path: '/v2/public/communities/qa-hono-nonexistent',
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+    ];
+    const publicCommunitiesWithSession: Step[] = [
+      {
+        name: 'v2 public communities list matches anonymous projection',
+        method: 'GET',
+        path: '/v2/public/communities',
+        expected: 200,
+        check: (body) =>
+          publicCommunitiesListCheck(body) &&
+          canonicalPublicListJson !== '' &&
+          JSON.stringify(body) === canonicalPublicListJson,
+      },
+      {
+        name: 'v2 public communities Unicode search while authenticated',
+        method: 'GET',
+        path: `/v2/public/communities?search=${encodeURIComponent('ΑΣ')}`,
+        expected: 200,
+        check: searchSaoCheck,
+      },
+      {
+        name: 'v2 public community detail matches anonymous projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}`,
+        expected: 200,
+        check: (body) =>
+          publicCommunityDetailCheck(body) &&
+          canonicalPublicDetailJson !== '' &&
+          JSON.stringify(body) === canonicalPublicDetailJson,
+      },
+      {
+        name: 'v2 public community detail hides private community while authenticated',
+        method: 'GET',
+        path: `/v2/public/communities/${privateCommunitySlug}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public community detail hides inactive community while authenticated',
+        method: 'GET',
+        path: `/v2/public/communities/${inactiveCommunity.slug}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public community detail returns 404 for unknown slug while authenticated',
+        method: 'GET',
+        path: '/v2/public/communities/qa-hono-nonexistent',
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+    ];
     const journeys: Journey[] = [
       {
         persona: 'anonymous',
@@ -1817,6 +2171,7 @@ export async function createFixture(
             check: (body) => (body as { status?: string }).status === 'ready',
           },
           ...explore,
+          ...publicCommunities,
           {
             name: 'require authentication',
             method: 'GET',
@@ -1914,7 +2269,7 @@ export async function createFixture(
           // (counts/points/filters) and the members-only 404 hold for every
           // role the README names, each while authenticated.
           ...(role === 'member' || role === 'editor' || role === 'admin'
-            ? exploreWithSession
+            ? [...exploreWithSession, ...publicCommunitiesWithSession]
             : []),
           {
             name: 'read own community media',
@@ -2049,6 +2404,7 @@ export async function createFixture(
           // Explore with a session: super_admin sees the same anonymous
           // projection; privilege never widens the public surface.
           ...exploreWithSession,
+          ...publicCommunitiesWithSession,
           {
             // Null-community super_admin cannot read any community branding
             // asset via /v2/media/:id, even an active public community's file.
@@ -2176,6 +2532,7 @@ export async function createFixture(
             path: `/v2/media/${readableFileId}`,
             expected: 404,
           },
+          ...publicCommunitiesWithSession,
         ],
       },
       {

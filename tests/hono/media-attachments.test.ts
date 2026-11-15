@@ -1,7 +1,6 @@
 /**
  * Focused §6.7 Attachment create/reorder/delete, null-community tenant check,
- * owner-delete byte-cleanup scheduling, and D1 batch-bound tests for Slice 9
- * (#140).
+ * owner-delete byte cleanup, and D1 batch-bound tests for Slice 9 (#140).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Sqlite from 'better-sqlite3';
@@ -178,7 +177,7 @@ async function attach(
   });
 }
 
-describe('Slice 9 attachments, cleanup scheduling, and D1 bounds (#140)', () => {
+describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
   beforeAll(async () => {
     migrate(db, { migrationsFolder: './src/db/migrations' });
     const now = new Date('2026-06-01T12:00:00.000Z');
@@ -328,11 +327,25 @@ describe('Slice 9 attachments, cleanup scheduling, and D1 bounds (#140)', () => 
     });
     expect(del.status).toBe(204);
 
+    // Deleting the last relation of the first file removes its files row and
+    // bytes in the same transaction; the second file stays attached.
+    const [firstRow] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, firstId));
+    expect(firstRow).toBeUndefined();
+    // The first file's bytes are gone from storage.
+    const firstKey = `communities/${ids.community}/media/${firstId}`;
+    expect(memStore.has(firstKey)).toBe(false);
     // The remaining relation keeps the second file referenced.
-    expect(cleanup.pending().some((item) => item.fileId === secondId)).toBe(
-      false
-    );
-    // Deleting the last relation schedules the first file's bytes.
+    const [secondRow] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, secondId));
+    expect(secondRow).toBeDefined();
+    expect(memStore.has(secondRow!.storageKey!)).toBe(true);
+
+    // Deleting the last relation of the second file now removes its row+bytes.
     const delLast = await app.request(
       `${API_ORIGIN}/v2/attachments/${att2.id}`,
       {
@@ -341,23 +354,13 @@ describe('Slice 9 attachments, cleanup scheduling, and D1 bounds (#140)', () => 
       }
     );
     expect(delLast.status).toBe(204);
-    const pending = cleanup.pending();
-    // Deleting each last relation schedules that file's bytes; both files are
-    // now unreferenced.
-    expect(pending.some((item) => item.fileId === firstId)).toBe(true);
-    expect(pending.some((item) => item.fileId === secondId)).toBe(true);
-    expect(pending.find((item) => item.fileId === firstId)?.reason).toBe(
-      'last_attachment_deleted'
-    );
-    expect(pending.find((item) => item.fileId === secondId)?.reason).toBe(
-      'last_attachment_deleted'
-    );
-
-    // The restart-safe sweeper removes the now-unreferenced bytes.
-    const swept = await cleanup.sweepUnreferencedFiles({
-      fileIds: [secondId],
-    });
-    expect(swept.deletedCount).toBe(1);
+    const [secondRowAfter] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, secondId));
+    expect(secondRowAfter).toBeUndefined();
+    const secondKey = `communities/${ids.community}/media/${secondId}`;
+    expect(memStore.has(secondKey)).toBe(false);
   });
 
   it('enforces the §6.7 null-community check and the owner/role matrix', async () => {
@@ -546,13 +549,16 @@ describe('Slice 9 attachments, cleanup scheduling, and D1 bounds (#140)', () => 
     }
   });
 
-  it('schedules unreferenced byte cleanup when stories, places, and speakers are deleted', async () => {
+  it('removes files rows and bytes for files that become unreferenced on story/place/speaker delete, keeping shared ones', async () => {
     const storyFile = await upload({ cookie: cookies.editor });
     const storyFileId = storyFile.fileId!;
     const placeFile = await upload({ cookie: cookies.editor });
     const placeFileId = placeFile.fileId!;
     const speakerFile = await upload({ cookie: cookies.editor });
     const speakerFileId = speakerFile.fileId!;
+    // A file shared by the doomed story and a surviving place must survive.
+    const sharedFile = await upload({ cookie: cookies.editor });
+    const sharedFileId = sharedFile.fileId!;
 
     const storyId = await insertRow(tables.stories, {
       title: 'Doomed Story',
@@ -577,11 +583,20 @@ describe('Slice 9 attachments, cleanup scheduling, and D1 bounds (#140)', () => 
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    const survivorPlaceId = await insertRow(tables.places, {
+      name: 'Survivor Place',
+      communityId: ids.community,
+      isRestricted: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
 
     for (const [fileId, ownerType, ownerId, role] of [
       [storyFileId, 'story', storyId, 'story_media'],
       [placeFileId, 'place', placeId, 'place_photo'],
       [speakerFileId, 'speaker', speakerId, 'speaker_photo'],
+      [sharedFileId, 'story', storyId, 'story_media'],
+      [sharedFileId, 'place', survivorPlaceId, 'place_photo'],
     ] as const) {
       const res = await attach(cookies.editor, {
         fileId,
@@ -617,31 +632,24 @@ describe('Slice 9 attachments, cleanup scheduling, and D1 bounds (#140)', () => 
       ).status
     ).toBe(204);
 
-    const pending = cleanup.pending();
+    // Files whose last relation was removed are gone from DB and storage.
     for (const fileId of [storyFileId, placeFileId, speakerFileId]) {
-      const item = pending.find((entry) => entry.fileId === fileId);
-      expect(item, `cleanup scheduled for ${fileId}`).toBeDefined();
-      expect(item!.reason).toBe('owner_deleted');
-      // The File row survives until the sweeper runs (restart-safe).
       const [row] = await db
         .select()
         .from(tables.files)
         .where(eq(tables.files.id, fileId));
-      expect(row).toBeDefined();
-      expect(memStore.has(row!.storageKey!)).toBe(true);
+      expect(row, `files row removed for ${fileId}`).toBeUndefined();
+      const key = `communities/${ids.community}/media/${fileId}`;
+      expect(memStore.has(key), `bytes removed for ${fileId}`).toBe(false);
     }
 
-    const swept = await cleanup.sweepUnreferencedFiles({
-      fileIds: [storyFileId, placeFileId, speakerFileId],
-    });
-    expect(swept.deletedCount).toBe(3);
-    for (const fileId of [storyFileId, placeFileId, speakerFileId]) {
-      const [row] = await db
-        .select()
-        .from(tables.files)
-        .where(eq(tables.files.id, fileId));
-      expect(row).toBeUndefined();
-    }
+    // The shared file is still attached to the surviving place, so it stays.
+    const [sharedRow] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, sharedFileId));
+    expect(sharedRow, 'shared file row kept').toBeDefined();
+    expect(memStore.has(sharedRow!.storageKey!)).toBe(true);
   });
 
   it('keeps each D1 attachment write within one bounded batch and <=100 params per statement', async () => {

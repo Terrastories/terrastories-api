@@ -30,6 +30,11 @@ import {
 import { readRuleOutcome, type ReadRuleViewer } from '../policy/read-rules.js';
 import { communityFromPhysical } from '../policy/canonical-state.js';
 import {
+  buildUnreferencedFilesDelete,
+  toFileByteCleanups,
+  type FileByteCleanup,
+} from '../services/media-cleanup.service.js';
+import {
   validateContentFreeAuditEntry,
   type ValidatedAuditEntryRecord,
 } from '../shared/utils/audit-entry.js';
@@ -101,6 +106,8 @@ export type AttachmentWriteOutcome =
       fileId: string;
       storageKey: string;
       communityId: number | null;
+      /** Set when this delete also removed the now-unreferenced `files` row. */
+      removedFile: FileByteCleanup | null;
     }
   | { status: 'forbidden' }
   | { status: 'not_found' }
@@ -2423,24 +2430,36 @@ export class MediaWritesRepository {
     );
 
     if (this.hasD1Batch()) {
-      const [deletedRows] = await this.db.batch([
-        this.db
-          .delete(this.tables.attachments)
-          .where(scope)
-          .returning({ id: this.tables.attachments.id }),
-        this.db.insert(this.tables.auditEntries).values({
-          ...audit,
-          createdAt: now,
-        }),
+      // Delete the attachment and the now-unreferenced files row in one D1
+      // batch. The files DELETE re-checks NOT EXISTS against attachments so a
+      // concurrent relation added before this batch commits keeps the row.
+      const deleteAttachment = this.db
+        .delete(this.tables.attachments)
+        .where(scope)
+        .returning({ id: this.tables.attachments.id });
+      const deleteFiles = buildUnreferencedFilesDelete(
+        this.db,
+        this.connection,
+        [fileId]
+      );
+      const [deletedRows, ...fileResults] = await this.db.batch([
+        deleteAttachment,
+        ...deleteFiles,
       ]);
       if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
         return { status: 'not_found' };
       }
+      const removedRows = fileResults.flatMap((rows: unknown) =>
+        Array.isArray(rows) ? rows : []
+      ) as Array<{ id: string; storageKey: string | null; path: string }>;
       return {
         status: 'deleted',
         fileId,
         storageKey: file.storageKey ?? file.path,
         communityId: attachment.communityId,
+        removedFile:
+          toFileByteCleanups(removedRows).find((f) => f.fileId === fileId) ??
+          null,
       };
     }
 
@@ -2455,11 +2474,23 @@ export class MediaWritesRepository {
           ...audit,
           createdAt: now,
         });
+        const removedRows = (
+          await Promise.all(
+            buildUnreferencedFilesDelete(tx, this.connection, [fileId])
+          )
+        ).flat() as Array<{
+          id: string;
+          storageKey: string | null;
+          path: string;
+        }>;
         return {
           status: 'deleted',
           fileId,
           storageKey: file.storageKey ?? file.path,
           communityId: attachment.communityId,
+          removedFile:
+            toFileByteCleanups(removedRows).find((f) => f.fileId === fileId) ??
+            null,
         };
       });
     }
@@ -2477,11 +2508,20 @@ export class MediaWritesRepository {
           createdAt: now,
         })
         .run();
+      const removedRows = buildUnreferencedFilesDelete(tx, this.connection, [
+        fileId,
+      ]).flatMap(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (statement: any) => statement.returning().all()
+      ) as Array<{ id: string; storageKey: string | null; path: string }>;
       return {
         status: 'deleted',
         fileId,
         storageKey: file.storageKey ?? file.path,
         communityId: attachment.communityId,
+        removedFile:
+          toFileByteCleanups(removedRows).find((f) => f.fileId === fileId) ??
+          null,
       };
     });
   }

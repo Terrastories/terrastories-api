@@ -611,3 +611,49 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
     await mf.dispose();
   }
 });
+
+it('runs the orphan sweep from the scheduled() cron handler', async () => {
+  // The scheduled handler is only triggerable when Miniflare's
+  // unsafeTriggerHandlers is enabled; the sweep itself must delete an object
+  // whose files row is gone and keep a still-referenced object.
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(
+      `import worker from './src/worker.js'; export default worker;`
+    ),
+    { ENVIRONMENT: 'test' },
+    { unsafeTriggerHandlers: true }
+  );
+  try {
+    const db = await mf.getD1Database('DB');
+    const bucket = await mf.getR2Bucket('MEDIA');
+    await applyD1Migrations(db);
+    await db.batch([
+      db.prepare(
+        "INSERT INTO communities(id,name,slug,created_at,updated_at) VALUES(1,'Sweep','sweep',0,0)"
+      ),
+      db.prepare(
+        "INSERT INTO files(id,filename,original_name,path,storage_key,url,mime_type,size,community_id,uploaded_by,created_at,updated_at) VALUES('11111111-1111-4111-8111-111111111111','keep','keep','communities/1/keep','communities/1/keep','https://ignored.invalid','image/png',3,1,NULL,0,0)"
+      ),
+    ]);
+    // Referenced object (has a files row) and orphan object (no files row).
+    await bucket.put('communities/1/keep', 'abc');
+    await bucket.put('communities/1/orphan', 'xyz');
+
+    // Dispatch with a scheduled time 48 h in the future: the freshly-put
+    // objects (uploaded "now") are then older than the 24 h grace window, so
+    // the orphan is swept and the referenced object is kept.
+    const scheduledTime = Date.now() + 48 * 60 * 60 * 1000;
+    const res = await mf.dispatchFetch(
+      `http://localhost/cdn-cgi/handler/scheduled?cron=0+3+*+*+*&time=${scheduledTime}`,
+      { method: 'POST' }
+    );
+    expect(res.status).toBe(200);
+
+    // The orphan (no files row) is removed.
+    expect(await bucket.get('communities/1/orphan')).toBeNull();
+    // The referenced object survives because its files row still exists.
+    expect(await bucket.get('communities/1/keep')).not.toBeNull();
+  } finally {
+    await mf.dispose();
+  }
+});

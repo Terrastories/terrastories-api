@@ -58,7 +58,11 @@ export async function bundleWorkerModule(contents: string): Promise<string> {
 export function startWorkerRuntime(
   script: string,
   bindings: Record<string, string> = { ENVIRONMENT: 'test' },
-  options: { compatibilityDate?: string; compatibilityFlags?: string[] } = {}
+  options: {
+    compatibilityDate?: string;
+    compatibilityFlags?: string[];
+    unsafeTriggerHandlers?: boolean;
+  } = {}
 ): Miniflare {
   return new Miniflare({
     modules: true,
@@ -68,6 +72,7 @@ export function startWorkerRuntime(
     d1Databases: ['DB'],
     r2Buckets: ['MEDIA'],
     bindings,
+    unsafeTriggerHandlers: options.unsafeTriggerHandlers,
   });
 }
 

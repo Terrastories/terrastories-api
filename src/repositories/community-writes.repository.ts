@@ -9,6 +9,11 @@ import {
 } from '../policy/canonical-state.js';
 import type { PublicMapConfigRow } from './public-communities.repository.js';
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
+import {
+  buildUnreferencedFilesDelete,
+  toFileByteCleanups,
+  type FileByteCleanup,
+} from '../services/media-cleanup.service.js';
 
 export interface CommunitySettingsUpdateInput {
   name?: string;
@@ -601,10 +606,57 @@ export class CommunityWritesRepository {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     physicalOwnerScope: any,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    referenceGuards: (executor: any) => any[]
+    referenceGuards: (executor: any) => any[],
+    removedFiles?: FileByteCleanup[]
   ): Promise<PlaceDeleteOutcome> {
+    // Capture the owner's attachment file ids before the delete so any files
+    // that become unreferenced are removed in the same transaction/batch.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const collectFiles = (rows: any) => {
+      if (removedFiles) removedFiles.push(...toFileByteCleanups(rows));
+    };
+    const attachmentFileIds = async (
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      executor: any
+    ): Promise<string[]> => {
+      const result = await executor
+        .select({ fileId: this.tables.attachments.fileId })
+        .from(this.tables.attachments)
+        .where(
+          and(
+            eq(this.tables.attachments.communityId, communityId),
+            eq(this.tables.attachments.ownerType, ownerType),
+            eq(this.tables.attachments.ownerId, ownerId)
+          )
+        );
+      const rows = (Array.isArray(result) ? result : []) as Array<{
+        fileId: string | null;
+      }>;
+      return rows
+        .map((row) => row.fileId)
+        .filter((id): id is string => typeof id === 'string');
+    };
+    // better-sqlite3 query builders resolve synchronously.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const attachmentFileIdsSync = (executor: any): string[] => {
+      const rows = executor
+        .select({ fileId: this.tables.attachments.fileId })
+        .from(this.tables.attachments)
+        .where(
+          and(
+            eq(this.tables.attachments.communityId, communityId),
+            eq(this.tables.attachments.ownerType, ownerType),
+            eq(this.tables.attachments.ownerId, ownerId)
+          )
+        )
+        .all() as Array<{ fileId: string | null }>;
+      return rows
+        .map((row) => row.fileId)
+        .filter((id): id is string => typeof id === 'string');
+    };
     try {
       if (this.hasD1Batch()) {
+        const fileIds = await attachmentFileIds(this.db);
         // Put NOT EXISTS reference guards inside DELETE itself so a concurrent
         // story_places/story_speakers insert never silently cascades, and gate
         // attachment cleanup on the owner row actually being gone afterward.
@@ -633,13 +685,20 @@ export class CommunityWritesRepository {
           .where(readableScope)
           .limit(1);
 
-        const [deletedRows, , existingRows] = await this.db.batch([
-          deleteOwner,
-          deleteAttachments,
-          existingOwnerCheck,
-        ]);
+        const [deletedRows, , existingRows, ...fileResults] =
+          await this.db.batch([
+            deleteOwner,
+            deleteAttachments,
+            existingOwnerCheck,
+            ...buildUnreferencedFilesDelete(this.db, this.connection, fileIds),
+          ]);
 
         if (Array.isArray(deletedRows) && deletedRows.length > 0) {
+          collectFiles(
+            fileResults.flatMap((rows: unknown) =>
+              Array.isArray(rows) ? rows : []
+            )
+          );
           return 'deleted';
         }
         return Array.isArray(existingRows) && existingRows.length > 0
@@ -649,6 +708,7 @@ export class CommunityWritesRepository {
 
       if (dialectOf(this.connection) === 'postgresql') {
         return await this.db.transaction(async (tx: typeof this.db) => {
+          const fileIds = await attachmentFileIds(tx);
           const existingRows = await tx
             .select({ id: table.id })
             .from(table)
@@ -674,12 +734,20 @@ export class CommunityWritesRepository {
             ownerType,
             ownerId
           );
+          collectFiles(
+            (
+              await Promise.all(
+                buildUnreferencedFilesDelete(tx, this.connection, fileIds)
+              )
+            ).flat()
+          );
           return 'deleted';
         });
       }
 
       // better-sqlite3 synchronous transaction
       return this.db.transaction((tx: typeof this.db) => {
+        const fileIds = attachmentFileIdsSync(tx);
         const deleted = tx
           .delete(table)
           .where(and(readableScope, ...referenceGuards(tx)))
@@ -693,6 +761,12 @@ export class CommunityWritesRepository {
             ownerType,
             ownerId
           ).run();
+          collectFiles(
+            buildUnreferencedFilesDelete(tx, this.connection, fileIds).flatMap(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (statement: any) => statement.returning().all()
+            )
+          );
           return 'deleted';
         }
 
@@ -715,7 +789,8 @@ export class CommunityWritesRepository {
 
   async deletePlace(
     communityId: number,
-    placeId: number
+    placeId: number,
+    removedFiles?: FileByteCleanup[]
   ): Promise<PlaceDeleteOutcome> {
     const physicalScope = and(
       eq(this.tables.places.id, placeId),
@@ -732,7 +807,8 @@ export class CommunityWritesRepository {
       placeId,
       readableScope,
       physicalScope,
-      (executor) => this.placeReferenceGuards(executor, communityId, placeId)
+      (executor) => this.placeReferenceGuards(executor, communityId, placeId),
+      removedFiles
     );
   }
 
@@ -811,7 +887,8 @@ export class CommunityWritesRepository {
 
   async deleteSpeaker(
     communityId: number,
-    speakerId: number
+    speakerId: number,
+    removedFiles?: FileByteCleanup[]
   ): Promise<SpeakerDeleteOutcome> {
     const scope = and(
       eq(this.tables.speakers.id, speakerId),
@@ -825,7 +902,8 @@ export class CommunityWritesRepository {
       scope,
       scope,
       (executor) =>
-        this.speakerReferenceGuards(executor, communityId, speakerId)
+        this.speakerReferenceGuards(executor, communityId, speakerId),
+      removedFiles
     );
   }
 }

@@ -50,10 +50,7 @@ import {
   MediaWritesRepository,
   buildMediaAuditEntry,
 } from '../repositories/media-writes.repository.js';
-import {
-  findUnreferencedFiles,
-  type MediaCleanupCoordinator,
-} from './media-cleanup.service.js';
+import { type MediaCleanupCoordinator } from './media-cleanup.service.js';
 
 class UploadCategoryLimitError extends Error {
   constructor(message: string) {
@@ -440,17 +437,12 @@ export class MediaWritesService {
     let streamedUpload: StreamedFileUpload | null = null;
     let partialStorageKey: string | null = null;
 
-    const cleanupPartialStorage = async (
-      key: string | null,
-      fileId?: string
-    ) => {
+    const cleanupPartialStorage = async (key: string | null) => {
       if (!key) return;
-      await this.cleanup.deleteImmediatelyOrSchedule({
-        fileId: fileId ?? 'staging',
-        storageKey: key,
-        communityId: actor.communityId,
-        reason: 'upload_rollback',
-      });
+      // Staging bytes have no `files` row (rolled-back upload). Delete them
+      // best-effort; any leftover is removed by the orphan sweeper once it ages
+      // past the grace window.
+      await this.cleanup.deleteStorageBestEffort(key, 'upload_rollback');
     };
 
     try {
@@ -625,10 +617,7 @@ export class MediaWritesService {
 
       const binding = this.parseUploadBindingFields(actor, parsed.fields);
       if (!binding.ok) {
-        await cleanupPartialStorage(
-          parsed.fileResult.storageKey,
-          parsed.fileResult.fileId
-        );
+        await cleanupPartialStorage(parsed.fileResult.storageKey);
         if (binding.status === 403) {
           await this.auditDecision({
             communityId: actor.communityId,
@@ -645,10 +634,7 @@ export class MediaWritesService {
         binding.userPhotoTargetUserId !== null &&
         parsed.fileResult.rule.category !== 'image'
       ) {
-        await cleanupPartialStorage(
-          parsed.fileResult.storageKey,
-          parsed.fileResult.fileId
-        );
+        await cleanupPartialStorage(parsed.fileResult.storageKey);
         return {
           status: 400,
           body: makeValidationErrorBody([
@@ -670,10 +656,7 @@ export class MediaWritesService {
       });
 
       if (dbOutcome.status === 'forbidden') {
-        await cleanupPartialStorage(
-          parsed.fileResult.storageKey,
-          parsed.fileResult.fileId
-        );
+        await cleanupPartialStorage(parsed.fileResult.storageKey);
         await this.auditDecision({
           communityId: actor.communityId,
           actorId: actor.id,
@@ -685,10 +668,7 @@ export class MediaWritesService {
       }
 
       if (dbOutcome.status === 'invalid_target') {
-        await cleanupPartialStorage(
-          parsed.fileResult.storageKey,
-          parsed.fileResult.fileId
-        );
+        await cleanupPartialStorage(parsed.fileResult.storageKey);
         return { status: 404, body: NOT_FOUND_BODY };
       }
 
@@ -721,10 +701,7 @@ export class MediaWritesService {
       const cleanupKey = streamedUpload
         ? (streamedUpload as StreamedFileUpload).storageKey
         : partialStorageKey;
-      const cleanupId = streamedUpload
-        ? (streamedUpload as StreamedFileUpload).fileId
-        : undefined;
-      await cleanupPartialStorage(cleanupKey, cleanupId);
+      await cleanupPartialStorage(cleanupKey);
 
       if (error instanceof EarlyUploadRejectionError) {
         if (error.status === 403) {
@@ -817,12 +794,13 @@ export class MediaWritesService {
         };
       }
 
-      await this.cleanup.deleteImmediatelyOrSchedule({
-        fileId,
-        storageKey: outcome.storageKey,
-        communityId: outcome.communityId,
-        reason: 'file_deleted',
-      });
+      // The files row is already removed by the delete above; drop the bytes
+      // best-effort. Any leftover (storage delete failed / process died) is
+      // removed by the restart-safe orphan sweeper.
+      await this.cleanup.deleteStorageBestEffort(
+        outcome.storageKey,
+        'file_deleted'
+      );
       return { status: 204 };
     } catch {
       return { status: 500, body: INTERNAL_ERROR_BODY };
@@ -1020,20 +998,11 @@ export class MediaWritesService {
       return { status: 404, body: NOT_FOUND_BODY };
     }
 
-    // Deleting the last relation schedules byte cleanup within 30 days; the
-    // sweeper re-checks NOT EXISTS so a still-referenced file is never swept.
-    try {
-      const unreferenced = await findUnreferencedFiles(
-        this.repository.connection,
-        this.repository.connection,
-        [outcome.fileId],
-        'last_attachment_deleted'
-      );
-      if (unreferenced.length > 0) {
-        await this.cleanup.schedule(unreferenced);
-      }
-    } catch {
-      // Scheduling is best-effort; the restart-safe sweeper remains the backstop.
+    // The files row for an unreferenced last relation was removed in the same
+    // transaction as this delete; drop its bytes best-effort. Any leftover is
+    // removed by the restart-safe orphan sweeper.
+    if (outcome.removedFile) {
+      await this.cleanup.deleteFilesBestEffort([outcome.removedFile]);
     }
     return { status: 204 };
   }

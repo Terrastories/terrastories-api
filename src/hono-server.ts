@@ -5,10 +5,14 @@ import { createLocalStorage } from './node-storage.js';
 import { getDb } from './db/index.js';
 import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
+import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
 import {
   validateNodeV2Runtime,
   v2RuntimeModeNotice,
 } from './config/v2-runtime.js';
+
+/** Named interval between restart-safe orphan sweeps on the Node server. */
+const ORPHAN_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 // #150: refuse to start on insecure/default production configuration before
 // any adapter or database is opened. Messages name settings, never values.
@@ -20,6 +24,10 @@ if (modeNotice) {
   // eslint-disable-next-line no-console -- startup marker, content-free
   console.warn(modeNotice);
 }
+const db = await getDb();
+const storage = await createLocalStorage(
+  process.env.HONO_STORAGE_ROOT ?? './uploads'
+);
 const app = createHonoApp({
   verifier: {
     verify: (...args) =>
@@ -27,20 +35,36 @@ const app = createHonoApp({
         ? nodePasswordVerifier.verify(...args)
         : Promise.reject(new Error('Production verifier not configured')),
   },
-  repository: new HonoFoundationRepository(await getDb()),
+  repository: new HonoFoundationRepository(db),
   publicOrigin: runtimeConfig.publicOrigin,
   corsOrigins: runtimeConfig.corsOrigins,
   // HTTP cookies are allowed only for this opt-in loopback development listener.
   secureCookies: runtimeConfig.secureCookies,
-  storage: await createLocalStorage(
-    process.env.HONO_STORAGE_ROOT ?? './uploads'
-  ),
+  storage,
 });
 const server = serve({
   fetch: app.fetch,
   hostname: '127.0.0.1',
   port: runtimeConfig.port,
 });
+
+// Restart-safe orphan sweeper: run once at startup, then on an unref'd
+// interval so a long-lived Node server eventually removes bytes whose `files`
+// row is gone. Unref'd so it never holds the process open.
+const cleanup = new MediaCleanupCoordinator(db, storage);
+void cleanup.sweepOrphanObjects().catch(() => {});
+const sweepTimer = setInterval(() => {
+  void cleanup.sweepOrphanObjects().catch(() => {});
+}, ORPHAN_SWEEP_INTERVAL_MS);
+sweepTimer.unref();
+
+let shuttingDown = false;
+const shutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearInterval(sweepTimer);
+  server.close(() => process.exit(0));
+};
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, () => server.close(() => process.exit(0)));
+  process.on(signal, shutdown);
 }

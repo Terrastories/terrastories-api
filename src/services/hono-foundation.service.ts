@@ -29,6 +29,26 @@ export interface StoragePutOptions {
   contentType?: string;
 }
 
+export interface StorageListEntry {
+  key: string;
+  /** Last-modified time; used by the orphan sweeper's grace window. */
+  uploaded: Date;
+}
+
+export interface StorageListResult {
+  entries: StorageListEntry[];
+  /** True when more keys exist under the prefix (caller may paginate). */
+  truncated: boolean;
+  /** Opaque continuation token for the next page. */
+  cursor?: string;
+}
+
+export interface StorageListOptions {
+  prefix?: string;
+  cursor?: string;
+  limit?: number;
+}
+
 export interface FoundationStorage {
   read(
     key: string,
@@ -40,6 +60,11 @@ export interface FoundationStorage {
     options?: StoragePutOptions
   ): Promise<{ size: number }>;
   delete?(key: string): Promise<void>;
+  /**
+   * Enumerate stored objects under `prefix` for the restart-safe orphan
+   * sweeper. Optional: adapters without listing skip orphan sweeping.
+   */
+  list?(options?: StorageListOptions): Promise<StorageListResult>;
 }
 
 import { sessionLifetime } from '../shared/session-policy.js';

@@ -5962,10 +5962,12 @@ export async function createFixture(
             expected: 204,
           },
           {
-            name: 'delete now-unreferenced staging bytes',
+            // Detaching the last relation already removed the files row and
+            // bytes; the explicit delete now finds nothing (§6.7 inline cleanup).
+            name: 'delete already-removed staging bytes is 404',
             method: 'DELETE',
             path: '/v2/media/{qaStageFile}',
-            expected: 204,
+            expected: 404,
           },
           {
             name: 'detach speaker photo',
@@ -5974,10 +5976,12 @@ export async function createFixture(
             expected: 204,
           },
           {
-            name: 'delete now-unreferenced speaker bytes',
+            // Detaching the last relation already removed the files row and
+            // bytes; the explicit delete now finds nothing (§6.7 inline cleanup).
+            name: 'delete already-removed speaker bytes is 404',
             method: 'DELETE',
             path: '/v2/media/{qaSpeakerFile}',
-            expected: 204,
+            expected: 404,
           },
           {
             name: 'logout',

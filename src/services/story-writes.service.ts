@@ -47,7 +47,7 @@ import {
 import { InvalidDescriptionError } from '../shared/utils/safe-description.js';
 import {
   findOwnerAttachmentFileIds,
-  findUnreferencedFiles,
+  type FileByteCleanup,
   type MediaCleanupCoordinator,
 } from './media-cleanup.service.js';
 
@@ -427,36 +427,30 @@ export class StoryWritesService {
     const storyId = Number(rawStoryId);
 
     // Capture attachment file ids before the delete so any bytes that become
-    // unreferenced can be scheduled for restart-safe cleanup.
+    // unreferenced can be removed in the same transaction and their bytes
+    // deleted best-effort afterward.
     const attachmentFileIds = await findOwnerAttachmentFileIds(
       this.repository.connection,
       caller.communityId,
       'story',
       storyId
     );
+    const removedFiles: FileByteCleanup[] = [];
 
     try {
       const deleted = await this.repository.deleteStory(
         caller.communityId,
-        storyId
+        storyId,
+        removedFiles
       );
       if (!deleted) {
         return { status: 404, body: NOT_FOUND_BODY };
       }
       if (this.cleanup && attachmentFileIds.length > 0) {
-        try {
-          const unreferenced = await findUnreferencedFiles(
-            this.repository.connection,
-            this.repository.connection,
-            attachmentFileIds,
-            'owner_deleted'
-          );
-          if (unreferenced.length > 0) {
-            await this.cleanup.schedule(unreferenced);
-          }
-        } catch {
-          // The restart-safe sweeper remains the backstop.
-        }
+        // The files rows for now-unreferenced attachments were removed in the
+        // same transaction; drop their bytes best-effort. Any leftover is
+        // removed by the restart-safe orphan sweeper.
+        await this.cleanup.deleteFilesBestEffort(removedFiles);
       }
       return { status: 204 };
     } catch {

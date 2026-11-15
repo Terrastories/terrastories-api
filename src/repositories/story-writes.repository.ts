@@ -8,6 +8,11 @@ import {
   type StoryVisibility,
 } from '../policy/canonical-state.js';
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
+import {
+  buildUnreferencedFilesDelete,
+  toFileByteCleanups,
+  type FileByteCleanup,
+} from '../services/media-cleanup.service.js';
 
 /**
  * Maximum IDs passed to a single SQLite/D1 `IN (...)` target validation query,
@@ -1041,9 +1046,56 @@ export class StoryWritesRepository {
     });
   }
 
-  async deleteStory(communityId: number, storyId: number): Promise<boolean> {
+  async deleteStory(
+    communityId: number,
+    storyId: number,
+    removedFiles?: FileByteCleanup[]
+  ): Promise<boolean> {
     const readableScope = this.readableStoryScope(communityId, storyId);
     const physicalScope = this.physicalStoryScope(communityId, storyId);
+
+    const collectFiles = (rows: unknown) => {
+      if (removedFiles) removedFiles.push(...toFileByteCleanups(rows as never));
+    };
+
+    const attachmentFileIds = async (
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      executor: any
+    ): Promise<string[]> => {
+      const result = await executor
+        .select({ fileId: this.tables.attachments.fileId })
+        .from(this.tables.attachments)
+        .where(
+          and(
+            eq(this.tables.attachments.communityId, communityId),
+            eq(this.tables.attachments.ownerType, 'story'),
+            eq(this.tables.attachments.ownerId, storyId)
+          )
+        );
+      const rows = (Array.isArray(result) ? result : []) as Array<{
+        fileId: string | null;
+      }>;
+      return rows
+        .map((row) => row.fileId)
+        .filter((id): id is string => typeof id === 'string');
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const attachmentFileIdsSync = (executor: any): string[] => {
+      const rows = executor
+        .select({ fileId: this.tables.attachments.fileId })
+        .from(this.tables.attachments)
+        .where(
+          and(
+            eq(this.tables.attachments.communityId, communityId),
+            eq(this.tables.attachments.ownerType, 'story'),
+            eq(this.tables.attachments.ownerId, storyId)
+          )
+        )
+        .all() as Array<{ fileId: string | null }>;
+      return rows
+        .map((row) => row.fileId)
+        .filter((id): id is string => typeof id === 'string');
+    };
 
     const buildDeleteAttachments = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1064,21 +1116,32 @@ export class StoryWritesRepository {
       );
 
     if (this.hasD1Batch()) {
+      const fileIds = await attachmentFileIds(this.db);
       const deleteStoryQuery = this.db
         .delete(this.tables.stories)
         .where(readableScope)
         .returning({ id: this.tables.stories.id });
       const deleteAttachmentsQuery = buildDeleteAttachments(this.db);
 
-      const [deletedRows] = await this.db.batch([
+      const [deletedRows, ...fileResults] = await this.db.batch([
         deleteStoryQuery,
         deleteAttachmentsQuery,
+        ...buildUnreferencedFilesDelete(this.db, this.connection, fileIds),
       ]);
-      return Array.isArray(deletedRows) && deletedRows.length > 0;
+      if (Array.isArray(deletedRows) && deletedRows.length > 0) {
+        collectFiles(
+          fileResults.flatMap((rows: unknown) =>
+            Array.isArray(rows) ? rows : []
+          )
+        );
+        return true;
+      }
+      return false;
     }
 
     if (dialectOf(this.connection) === 'postgresql') {
       return this.db.transaction(async (tx: typeof this.db) => {
+        const fileIds = await attachmentFileIds(tx);
         const deleted = await tx
           .delete(this.tables.stories)
           .where(readableScope)
@@ -1087,12 +1150,20 @@ export class StoryWritesRepository {
           return false;
         }
         await buildDeleteAttachments(tx);
+        collectFiles(
+          (
+            await Promise.all(
+              buildUnreferencedFilesDelete(tx, this.connection, fileIds)
+            )
+          ).flat()
+        );
         return true;
       });
     }
 
     // better-sqlite3 transactions are synchronous
     return this.db.transaction((tx: typeof this.db) => {
+      const fileIds = attachmentFileIdsSync(tx);
       const deleted = tx
         .delete(this.tables.stories)
         .where(readableScope)
@@ -1102,6 +1173,12 @@ export class StoryWritesRepository {
         return false;
       }
       buildDeleteAttachments(tx).run();
+      collectFiles(
+        buildUnreferencedFilesDelete(tx, this.connection, fileIds).flatMap(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (statement: any) => statement.returning().all()
+        )
+      );
       return true;
     });
   }

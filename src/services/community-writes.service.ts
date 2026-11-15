@@ -37,7 +37,7 @@ import { deriveDescriptionForWrite } from '../shared/utils/derived-columns.js';
 import { InvalidDescriptionError } from '../shared/utils/safe-description.js';
 import {
   findOwnerAttachmentFileIds,
-  findUnreferencedFiles,
+  type FileByteCleanup,
   type MediaCleanupCoordinator,
 } from './media-cleanup.service.js';
 
@@ -94,21 +94,15 @@ export class CommunityWritesService {
   ) {}
 
   private async scheduleOwnerAttachmentCleanup(
-    fileIds: ReadonlyArray<string>
+    fileIds: ReadonlyArray<string>,
+    removedFiles?: FileByteCleanup[]
   ): Promise<void> {
     if (!this.cleanup || fileIds.length === 0) return;
-    try {
-      const unreferenced = await findUnreferencedFiles(
-        this.repository.connection,
-        this.repository.connection,
-        fileIds,
-        'owner_deleted'
-      );
-      if (unreferenced.length > 0) {
-        await this.cleanup.schedule(unreferenced);
-      }
-    } catch {
-      // The restart-safe sweeper remains the backstop.
+    // The repository removes now-unreferenced files rows inside the owner
+    // delete transaction and reports them here; delete their bytes
+    // best-effort. Any leftover is removed by the restart-safe orphan sweeper.
+    if (removedFiles && removedFiles.length > 0) {
+      await this.cleanup.deleteFilesBestEffort(removedFiles);
     }
   }
 
@@ -478,11 +472,13 @@ export class CommunityWritesService {
       'place',
       placeId
     );
+    const removedFiles: FileByteCleanup[] = [];
 
     try {
       const outcome = await this.repository.deletePlace(
         caller.communityId,
-        placeId
+        placeId,
+        removedFiles
       );
       if (outcome === 'not_found') {
         return { status: 404, body: NOT_FOUND_BODY };
@@ -496,7 +492,10 @@ export class CommunityWritesService {
           },
         };
       }
-      await this.scheduleOwnerAttachmentCleanup(attachmentFileIds);
+      await this.scheduleOwnerAttachmentCleanup(
+        attachmentFileIds,
+        removedFiles
+      );
       return { status: 204 };
     } catch {
       return { status: 500, body: INTERNAL_ERROR_BODY };
@@ -672,11 +671,13 @@ export class CommunityWritesService {
       'speaker',
       speakerId
     );
+    const removedFiles: FileByteCleanup[] = [];
 
     try {
       const outcome = await this.repository.deleteSpeaker(
         caller.communityId,
-        speakerId
+        speakerId,
+        removedFiles
       );
       if (outcome === 'not_found') {
         return { status: 404, body: NOT_FOUND_BODY };
@@ -690,7 +691,10 @@ export class CommunityWritesService {
           },
         };
       }
-      await this.scheduleOwnerAttachmentCleanup(attachmentFileIds);
+      await this.scheduleOwnerAttachmentCleanup(
+        attachmentFileIds,
+        removedFiles
+      );
       return { status: 204 };
     } catch {
       return { status: 500, body: INTERNAL_ERROR_BODY };

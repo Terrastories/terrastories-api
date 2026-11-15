@@ -1,11 +1,45 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
+import {
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  rename,
+  stat,
+  unlink,
+} from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
   validStorageKey,
   type FoundationStorage,
 } from './services/hono-foundation.service.js';
+
+const DEFAULT_LIST_LIMIT = 200;
+
+/** Recursively collect regular-file storage keys under a directory. */
+async function walkStorageDir(
+  root: string,
+  directory: string,
+  out: string[]
+): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  for (const entry of entries) {
+    const absolute = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await walkStorageDir(root, absolute, out);
+    } else if (entry.isFile()) {
+      const key = path.relative(root, absolute).split(path.sep).join('/');
+      if (!key.startsWith('.')) out.push(key);
+    }
+  }
+}
 
 export async function createLocalStorage(
   directory: string,
@@ -136,6 +170,33 @@ export async function createLocalStorage(
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
         throw error;
       }
+    },
+
+    async list(options) {
+      const prefix = options?.prefix ?? '';
+      const limit = options?.limit ?? DEFAULT_LIST_LIMIT;
+      // Enumerate all keys once, filter by prefix, sort for a stable cursor.
+      const all: string[] = [];
+      await walkStorageDir(root, root, all);
+      const matched = all
+        .filter((key) => key.startsWith(prefix))
+        .sort()
+        .filter((key) => (options?.cursor ? key > options.cursor! : true));
+      const page = matched.slice(0, limit);
+      const truncated = matched.length > page.length;
+      const entries = await Promise.all(
+        page.map(async (key) => ({
+          key,
+          uploaded: await stat(path.join(root, key))
+            .then((s) => s.mtime)
+            .catch(() => new Date(0)),
+        }))
+      );
+      return {
+        entries,
+        truncated,
+        cursor: truncated ? page[page.length - 1] : undefined,
+      };
     },
   };
 }

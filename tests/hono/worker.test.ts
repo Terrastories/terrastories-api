@@ -384,6 +384,155 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
       (await asCookie(`/v2/places/${createdPlaceId}`, pubAdminCookie, 'DELETE'))
         .status
     ).toBe(404);
+
+    // Slice 8 story + edges + external links lifecycle on real D1 workerd
+    const createdStoryRes = await patchJson(
+      '/v2/stories',
+      {
+        title: 'D1 Worker Story',
+        description: '<p>Worker <strong>river</strong></p>',
+        visibility: 'public',
+        topic: '  Worker Tradition  ',
+        interviewLocationId: 10,
+        interviewerId: 20,
+        placeIds: [10, 10],
+        speakerIds: [20, 20],
+      },
+      'POST'
+    );
+    expect(createdStoryRes.status).toBe(201);
+    const createdStoryBody = (await createdStoryRes.json()) as {
+      data: {
+        id: number;
+        places: Array<{ id: number }>;
+        speakers: Array<{ id: number }>;
+      };
+    };
+    const d1StoryId = createdStoryBody.data.id;
+    expect(createdStoryBody.data.places.map((p) => p.id)).toEqual([10, 10]);
+    expect(createdStoryBody.data.speakers.map((s) => s.id)).toEqual([20, 20]);
+
+    expect(
+      (
+        await mf.dispatchFetch(
+          `https://worker.test/v2/public/communities/pub/stories/${d1StoryId}`
+        )
+      ).status
+    ).toBe(200);
+
+    expect(
+      (
+        await patchJson(`/v2/stories/${d1StoryId}`, {
+          visibility: 'editors',
+        })
+      ).status
+    ).toBe(200);
+    expect(
+      (
+        await mf.dispatchFetch(
+          `https://worker.test/v2/public/communities/pub/stories/${d1StoryId}`
+        )
+      ).status
+    ).toBe(404);
+
+    const d1StoryAudits = (
+      await db
+        .prepare(
+          "SELECT action FROM audit_entries WHERE community_id = 3 AND resource_type = 'story' ORDER BY id ASC"
+        )
+        .all<{ action: string }>()
+    ).results;
+    expect(d1StoryAudits.map((a) => a.action)).toEqual([
+      'story.visibility.public',
+      'story.visibility.editors',
+    ]);
+
+    expect(
+      (
+        await patchJson(
+          `/v2/stories/${d1StoryId}/places`,
+          { placeIds: [10] },
+          'PUT'
+        )
+      ).status
+    ).toBe(200);
+    expect(
+      (
+        await patchJson(
+          `/v2/stories/${d1StoryId}/speakers`,
+          { speakerIds: [] },
+          'PUT'
+        )
+      ).status
+    ).toBe(200);
+
+    expect(
+      (
+        await patchJson(
+          `/v2/stories/${d1StoryId}/external-links`,
+          { url: 'javascript:alert(1)' },
+          'POST'
+        )
+      ).status
+    ).toBe(400);
+    const linkARes = await patchJson(
+      `/v2/stories/${d1StoryId}/external-links`,
+      { url: 'https://worker-media.example.test/1' },
+      'POST'
+    );
+    expect(linkARes.status).toBe(201);
+    const linkABody = (await linkARes.json()) as {
+      data: { id: number; ordinal: number };
+    };
+    const linkAId = linkABody.data.id;
+    expect(linkABody.data.ordinal).toBe(0);
+    const linkBRes = await patchJson(
+      `/v2/stories/${d1StoryId}/external-links`,
+      { url: 'https://worker-media.example.test/2' },
+      'POST'
+    );
+    expect(linkBRes.status).toBe(201);
+    const linkBBody = (await linkBRes.json()) as {
+      data: { id: number; ordinal: number };
+    };
+    const linkBId = linkBBody.data.id;
+    expect(linkBBody.data.ordinal).toBe(1);
+
+    const reorderRes = await patchJson(
+      `/v2/stories/${d1StoryId}/external-links/reorder`,
+      { linkIds: [linkBId, linkAId] }
+    );
+    expect(reorderRes.status).toBe(200);
+    const reorderedLinks = (
+      (await reorderRes.json()) as {
+        data: Array<{ id: number; ordinal: number }>;
+      }
+    ).data;
+    expect(reorderedLinks.map((l) => [l.id, l.ordinal])).toEqual([
+      [linkBId, 0],
+      [linkAId, 1],
+    ]);
+
+    expect(
+      (
+        await asCookie(
+          `/v2/stories/${d1StoryId}/external-links/${linkAId}`,
+          pubAdminCookie,
+          'DELETE'
+        )
+      ).status
+    ).toBe(204);
+    expect(
+      (await asCookie(`/v2/stories/${d1StoryId}`, pubAdminCookie, 'DELETE'))
+        .status
+    ).toBe(204);
+    const leftoverLinks = (
+      await db
+        .prepare('SELECT id FROM external_media_links WHERE story_id = ?')
+        .bind(d1StoryId)
+        .all()
+    ).results;
+    expect(leftoverLinks).toHaveLength(0);
   } finally {
     await mf.dispose();
   }

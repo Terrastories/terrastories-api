@@ -4,9 +4,11 @@ import { ExploreAdapterRepository } from './repositories/explore-adapter.reposit
 import { CommunityReadsRepository } from './repositories/community-reads.repository.js';
 import { CommunityWritesRepository } from './repositories/community-writes.repository.js';
 import { PublicCommunitiesRepository } from './repositories/public-communities.repository.js';
+import { StoryWritesRepository } from './repositories/story-writes.repository.js';
 import { registerCommunityReadRoutes } from './routes/community-reads.hono.js';
 import { registerCommunityWriteRoutes } from './routes/community-writes.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
+import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
@@ -192,6 +194,11 @@ export function createHonoApp(options: FoundationOptions) {
   });
   registerCommunityWriteRoutes(app, {
     repository: new CommunityWritesRepository(options.repository.connection),
+    readsRepository: communityReadsRepository,
+    publicOrigin: configuredOrigin,
+  });
+  registerStoryWriteRoutes(app, {
+    repository: new StoryWritesRepository(options.repository.connection),
     readsRepository: communityReadsRepository,
     publicOrigin: configuredOrigin,
   });

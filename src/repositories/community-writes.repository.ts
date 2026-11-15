@@ -94,6 +94,29 @@ export interface SpeakerUpdateInput {
 
 export type SpeakerDeleteOutcome = 'deleted' | 'not_found' | 'conflict';
 
+export function isNotNullConstraintError(
+  err: unknown,
+  seen: Set<unknown> = new Set()
+): boolean {
+  if (!err || typeof err !== 'object' || seen.has(err)) return false;
+  seen.add(err);
+  const { code, message, cause } = err as {
+    code?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  };
+  if (code === '23502' || code === 'SQLITE_CONSTRAINT_NOTNULL') {
+    return true;
+  }
+  if (
+    typeof message === 'string' &&
+    message.includes('NOT NULL constraint failed')
+  ) {
+    return true;
+  }
+  return cause ? isNotNullConstraintError(cause, seen) : false;
+}
+
 export function isForeignKeyConstraintError(
   err: unknown,
   seen: Set<unknown> = new Set()

@@ -33,7 +33,9 @@ export type PublicCommunitiesResult<T> =
   | { status: 200; body: T }
   | { status: 400 | 404; body: V2ErrorResponse };
 
-const NOT_FOUND_BODY: V2ErrorResponse = Object.freeze({ error: 'Not found' });
+export const NOT_FOUND_BODY: V2ErrorResponse = Object.freeze({
+  error: 'Not found',
+});
 // Compared after lowercasing and removing '-' and '_', so accessToken,
 // access-token and access_token all match. Includes signed-URL parameters.
 const CREDENTIAL_PARAM_NAMES = new Set([
@@ -86,7 +88,11 @@ export function sanitizePublicStyleUrl(styleUrl: string | null): string | null {
   return styleUrl;
 }
 
-function publicMediaUrl(origin: string, slug: string, fileId: string): string {
+export function publicMediaUrl(
+  origin: string,
+  slug: string,
+  fileId: string
+): string {
   return `${origin}/v2/public/communities/${encodeURIComponent(slug)}/media/${encodeURIComponent(fileId)}`;
 }
 
@@ -178,7 +184,9 @@ function projectSummary(
   };
 }
 
-function projectPointFeature(place: PublicPlaceRow): PublicMapPointFeature {
+export function projectPointFeature(
+  place: PublicPlaceRow
+): PublicMapPointFeature {
   return {
     type: 'Feature',
     id: place.id,

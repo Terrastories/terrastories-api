@@ -152,6 +152,10 @@ export class PublicCommunitiesRepository {
     ) as typeof communityMediaSqlite;
   }
 
+  get connection(): Database | DrizzleD1Database {
+    return this.database as Database | DrizzleD1Database;
+  }
+
   publicCommunities(search?: string): Promise<PublicCommunityRow[]> {
     return this.explore.publicCommunities(search);
   }

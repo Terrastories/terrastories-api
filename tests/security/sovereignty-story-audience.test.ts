@@ -400,9 +400,9 @@ describe('V2 sovereignty story audiences', () => {
   });
 
   it('denies an unknown physical role every story read on the community story-by-id route (unknown roles read nothing)', async () => {
-    // A physical Fastify `viewer` maps to V2 member and Fastify rows never
-    // map to the `editors` audience, so admin and member reach coincide on
-    // every unrestricted story — only an UNKNOWN role separates them.
+    // A physical Fastify `viewer` maps to V2 member, and this suite seeds no
+    // `editors` story, so admin and member reach coincide on every
+    // unrestricted story here — only an UNKNOWN role separates them.
     // It must read nothing (SPEC-V2 §6.2 fail-closed): even an
     // unrestricted members_only story and a public story mask as 404.
     const timestamp = Date.now();

@@ -112,10 +112,9 @@ export function roleCanReadStoryAccess(
 /**
  * Every runtime read access a role may hold, used to build list/count
  * filters (SPEC-V2 §6.2/§6.3). Never contains `unavailable`: that access is
- * readable by no role. On the current Fastify schema `editors` matches no
- * row (unknown privacy levels are unavailable), but the canonical grant
- * stays so migration can select it explicitly. `super_admin` holds none: it
- * has no authenticated community-content access.
+ * readable by no role. `editors` matches unrestricted stories with
+ * `privacyLevel = 'editors'` (readable by `editor` and `admin` only).
+ * `super_admin` holds none: it has no authenticated community-content access.
  */
 export function storyAccessForRole(
   role: V2CommunityRole

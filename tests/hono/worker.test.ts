@@ -533,6 +533,80 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
         .all()
     ).results;
     expect(leftoverLinks).toHaveLength(0);
+
+    // Slice 9 R2 + D1 streaming multipart upload, metadata, Range download, and delete
+    const pngBytes = Uint8Array.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+    ]);
+    const boundary = 'r2WorkerUploadBoundary';
+    const enc = new TextEncoder();
+    const mpHead = enc.encode(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="r2-smoke.png"\r\nContent-Type: image/png\r\n\r\n`
+    );
+    const mpTail = enc.encode(`\r\n--${boundary}--\r\n`);
+    const mpBody = new Uint8Array(
+      mpHead.byteLength + pngBytes.byteLength + mpTail.byteLength
+    );
+    mpBody.set(mpHead, 0);
+    mpBody.set(pngBytes, mpHead.byteLength);
+    mpBody.set(mpTail, mpHead.byteLength + pngBytes.byteLength);
+
+    const r2UpRes = await mf.dispatchFetch('https://worker.test/v2/media', {
+      method: 'POST',
+      headers: {
+        cookie: pubAdminCookie,
+        origin: 'https://worker.test',
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body: mpBody,
+    });
+    expect(r2UpRes.status).toBe(201);
+    const r2UpBody = (await r2UpRes.json()) as {
+      data: { id: string; checksum: string; byteSize: number };
+    };
+    const r2FileId = r2UpBody.data.id;
+    expect(r2UpBody.data.checksum).toBe(
+      createHash('sha256').update(pngBytes).digest('hex')
+    );
+    expect(r2UpBody.data.byteSize).toBe(pngBytes.byteLength);
+
+    const r2MetaRes = await asCookie(
+      `/v2/media/${r2FileId}/metadata`,
+      pubAdminCookie
+    );
+    expect(r2MetaRes.status).toBe(200);
+
+    const r2RangeRes = await mf.dispatchFetch(
+      `https://worker.test/v2/media/${r2FileId}`,
+      {
+        headers: {
+          cookie: pubAdminCookie,
+          range: 'bytes=0-3',
+        },
+      }
+    );
+    expect(r2RangeRes.status).toBe(206);
+    expect(new Uint8Array(await r2RangeRes.arrayBuffer())).toEqual(
+      pngBytes.subarray(0, 4)
+    );
+
+    const storedR2 = await bucket.get(`communities/3/media/${r2FileId}`);
+    expect(storedR2).not.toBeNull();
+
+    const r2DelRes = await mf.dispatchFetch(
+      `https://worker.test/v2/media/${r2FileId}`,
+      {
+        method: 'DELETE',
+        headers: {
+          cookie: pubAdminCookie,
+          origin: 'https://worker.test',
+        },
+      }
+    );
+    expect(r2DelRes.status).toBe(204);
+    expect(await bucket.get(`communities/3/media/${r2FileId}`)).toBeNull();
   } finally {
     await mf.dispose();
   }

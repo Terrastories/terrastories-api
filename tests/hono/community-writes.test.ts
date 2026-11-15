@@ -6,14 +6,17 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { eq, asc } from 'drizzle-orm';
+import { eq, asc, and } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { nodePasswordVerifier } from '../../src/node-password.js';
 import { tablesFor } from '../../src/db/dialect.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { CommunityReadsRepository } from '../../src/repositories/community-reads.repository.js';
-import { CommunityWritesRepository } from '../../src/repositories/community-writes.repository.js';
+import {
+  CommunityWritesRepository,
+  isForeignKeyConstraintError,
+} from '../../src/repositories/community-writes.repository.js';
 import { CommunityReadsService } from '../../src/services/community-reads.service.js';
 import { CommunityWritesService } from '../../src/services/community-writes.service.js';
 import {
@@ -537,45 +540,244 @@ describe('Slice 7 PATCH /v2/community', () => {
     expect(JSON.stringify(unsafeHrefRes.json)).not.toContain(secretMarker);
   });
 
-  it('keeps PATCH /v2/community + audit insert atomic via D1 db.batch() contract', async () => {
-    const batchCalls: unknown[][] = [];
-    // Minimal D1 batch stub confirming single atomic batch with 2 statements
-    const mockD1 = {
-      batch: async (stmts: unknown[]) => {
-        batchCalls.push(stmts);
-        return [[{ id: 1 }], []];
-      },
-      select: () => ({
-        from: () => ({
-          where: () => ({
-            limit: async () => [
-              { id: 1, publicStories: false, isActive: true },
-            ],
-          }),
+  it('keeps PATCH /v2/community + conditional audit insert atomic via D1 db.batch() and prevents concurrent/0-row audit races', async () => {
+    const batchSqlite = new Sqlite(':memory:');
+    batchSqlite.pragma('foreign_keys = ON');
+    const batchDb = drizzle(batchSqlite);
+    migrate(batchDb, { migrationsFolder: 'src/db/migrations' });
+
+    const batchTables = tablesFor(batchDb);
+    const [activeComm] = await batchDb
+      .insert(batchTables.communities)
+      .values({
+        name: 'D1 Nation',
+        slug: 'd1-nation',
+        publicStories: false,
+        isActive: true,
+        createdAt: T0,
+        updatedAt: T0,
+      })
+      .returning({ id: batchTables.communities.id });
+    const [inactiveComm] = await batchDb
+      .insert(batchTables.communities)
+      .values({
+        name: 'D1 Inactive',
+        slug: 'd1-inactive',
+        publicStories: false,
+        isActive: false,
+        createdAt: T0,
+        updatedAt: T0,
+      })
+      .returning({ id: batchTables.communities.id });
+    const [actor] = await batchDb
+      .insert(batchTables.users)
+      .values({
+        email: 'd1-admin@example.test',
+        username: 'd1-admin',
+        ...deriveUserIdentityColumns({
+          email: 'd1-admin@example.test',
+          username: 'd1-admin',
         }),
-      }),
-      update: () => ({
-        set: () => ({
-          where: () => ({
-            returning: () => ({ sql: 'update communities' }),
-          }),
-        }),
-      }),
-      insert: () => ({
-        values: () => ({ sql: 'insert audit_entries' }),
-      }),
+        firstName: 'D1',
+        lastName: 'Admin',
+        passwordHash: 'hash',
+        role: 'admin',
+        communityId: activeComm!.id,
+        isActive: true,
+        createdAt: T0,
+        updatedAt: T0,
+      })
+      .returning({ id: batchTables.users.id });
+
+    const batchCalls: string[][] = [];
+    let beforeNextBatch: (() => void) | null = null;
+    // Wrap Drizzle's SQLite query builders with a D1-compatible .batch() that
+    // runs each generated SQL statement sequentially inside one SQLite tx.
+    const d1Like = Object.create(batchDb) as typeof batchDb & {
+      batch: (
+        stmts: Array<{ toSQL: () => { sql: string; params: unknown[] } }>
+      ) => Promise<unknown[]>;
+    };
+    d1Like.batch = async (stmts) => {
+      if (beforeNextBatch) {
+        const hook = beforeNextBatch;
+        beforeNextBatch = null;
+        hook();
+      }
+      const queries = stmts.map((s) => s.toSQL());
+      batchCalls.push(queries.map((q) => q.sql));
+      return batchSqlite.transaction(() =>
+        queries.map(({ sql: querySql, params }) => {
+          const stmt = batchSqlite.prepare(querySql);
+          return stmt.reader ? stmt.all(...params) : stmt.run(...params);
+        })
+      )();
     };
 
-    const repo = new CommunityWritesRepository(mockD1 as never);
-    const result = await repo.updateCommunitySettings(
-      1,
-      2,
-      { visibility: 'public' },
-      T0
+    try {
+      const repo = new CommunityWritesRepository(d1Like as never);
+
+      // 1. Effective transition private -> public emits conditional audit BEFORE update
+      const r1 = await repo.updateCommunitySettings(
+        activeComm!.id,
+        actor!.id,
+        { visibility: 'public' },
+        T0
+      );
+      expect(r1.updated).toBe(true);
+      expect(batchCalls).toHaveLength(1);
+      expect(batchCalls[0]).toHaveLength(2);
+      expect(batchCalls[0]![0]).toMatch(/^insert into "audit_entries"/i);
+      expect(batchCalls[0]![1]).toMatch(/^update "communities"/i);
+
+      // 2. No-op toggle (public -> public) updates row without adding an audit entry
+      const r2 = await repo.updateCommunitySettings(
+        activeComm!.id,
+        actor!.id,
+        { visibility: 'public' },
+        T0
+      );
+      expect(r2.updated).toBe(true);
+
+      // 3. Concurrent-toggle race: community flipped to 'private' before batch runs,
+      //    so an update requesting 'private' is a no-op by the time batch executes -> 0 new audits;
+      //    then community flipped back to 'public' before a 'private' request -> 1 new audit.
+      beforeNextBatch = () => {
+        batchSqlite
+          .prepare('UPDATE communities SET public_stories = 0 WHERE id = ?')
+          .run(activeComm!.id);
+      };
+      const r3 = await repo.updateCommunitySettings(
+        activeComm!.id,
+        actor!.id,
+        { visibility: 'private' },
+        T0
+      );
+      expect(r3.updated).toBe(true);
+
+      // 4. 0-row update (inactive or missing community) must emit ZERO audit entries
+      const r4 = await repo.updateCommunitySettings(
+        inactiveComm!.id,
+        actor!.id,
+        { visibility: 'public' },
+        T0
+      );
+      expect(r4.updated).toBe(false);
+      const r5 = await repo.updateCommunitySettings(
+        999999,
+        actor!.id,
+        { visibility: 'public' },
+        T0
+      );
+      expect(r5.updated).toBe(false);
+
+      // 5. Concurrent-toggle burst across alternating/duplicate targets:
+      //    current is private (0) -> [public, public, private, private, public]
+      //    effective changes: public, private, public (3 more -> 4 total with initial #1)
+      const toggleSequence: Array<'public' | 'private'> = [
+        'public',
+        'public',
+        'private',
+        'private',
+        'public',
+      ];
+      const burstResults = await Promise.all(
+        toggleSequence.map((visibility) =>
+          repo.updateCommunitySettings(
+            activeComm!.id,
+            actor!.id,
+            { visibility },
+            T0
+          )
+        )
+      );
+      expect(burstResults.every((r) => r.updated)).toBe(true);
+
+      const d1Audits = await batchDb
+        .select()
+        .from(batchTables.auditEntries)
+        .orderBy(asc(batchTables.auditEntries.id));
+      expect(d1Audits.map((a) => a.action)).toEqual([
+        'community.visibility.public',
+        'community.visibility.public',
+        'community.visibility.private',
+        'community.visibility.public',
+      ]);
+      expect(d1Audits.every((a) => a.communityId === activeComm!.id)).toBe(
+        true
+      );
+    } finally {
+      batchSqlite.close();
+    }
+  });
+
+  it('prevents concurrent-toggle audit loss and 0-row audits on better-sqlite3', async () => {
+    const repo = new CommunityWritesRepository(db);
+    const [inactive] = await db
+      .select({ id: tables.communities.id })
+      .from(tables.communities)
+      .where(eq(tables.communities.id, ids.disabled!));
+    expect(inactive).toBeDefined();
+
+    // 0-row update on inactive community & missing community writes zero audits
+    const beforeCount = (
+      await db.select({ id: tables.auditEntries.id }).from(tables.auditEntries)
+    ).length;
+
+    expect(
+      await repo.updateCommunitySettings(
+        ids.disabled!,
+        ids.uDisabledAdmin!,
+        { visibility: 'public' },
+        T0
+      )
+    ).toEqual({ updated: false });
+    expect(
+      await repo.updateCommunitySettings(
+        999999,
+        ids.uAdmin!,
+        { visibility: 'public' },
+        T0
+      )
+    ).toEqual({ updated: false });
+    expect(
+      (
+        await db
+          .select({ id: tables.auditEntries.id })
+          .from(tables.auditEntries)
+      ).length
+    ).toBe(beforeCount);
+
+    // Concurrent-toggle burst via HTTP PATCH /v2/community (own is currently private)
+    const seq: Array<'public' | 'public' | 'private' | 'public' | 'private'> = [
+      'public',
+      'public',
+      'private',
+      'public',
+      'private',
+    ];
+    const responses = await Promise.all(
+      seq.map((visibility) =>
+        requestJson('PATCH', '/v2/community', {
+          cookie: cookies.admin,
+          body: { visibility },
+        })
+      )
     );
-    expect(result.updated).toBe(true);
-    expect(batchCalls).toHaveLength(1);
-    expect(batchCalls[0]).toHaveLength(2);
+    expect(responses.every((r) => r.status === 200)).toBe(true);
+
+    const allOwnAudits = await db
+      .select()
+      .from(tables.auditEntries)
+      .where(eq(tables.auditEntries.communityId, ids.own!))
+      .orderBy(asc(tables.auditEntries.id));
+    // Initial test emitted 2 (public, private); this burst has 4 effective transitions
+    expect(allOwnAudits.slice(beforeCount).map((a) => a.action)).toEqual([
+      'community.visibility.public',
+      'community.visibility.private',
+      'community.visibility.public',
+      'community.visibility.private',
+    ]);
   });
 });
 
@@ -1300,5 +1502,569 @@ describe('Slice 7 Speaker CRUD (/v2/speakers)', () => {
         })
       ).status
     ).toBe(404);
+  });
+});
+
+describe('Slice 7 race-safe 409 deletes & attachment preservation', () => {
+  it('preserves attachments on 409/404 and cleans up attachments only when owner row is deleted (SQLite & D1 batch)', async () => {
+    // SQLite HTTP test: referenced place & speaker keep attachments on 409, unreferenced lose them on 204
+    const refPlaceId = ids.plOwnPublic!;
+    const unrefPlaceId = await insertRow(tables.places, {
+      communityId: ids.own!,
+      name: 'Temp Attachment Place',
+      createdAt: T0,
+      updatedAt: T0,
+    });
+    const restrictedPlaceId = await insertRow(tables.places, {
+      communityId: ids.own!,
+      name: 'Restricted Attachment Place',
+      isRestricted: true,
+      createdAt: T0,
+      updatedAt: T0,
+    });
+    const refSpeakerId = await insertRow(tables.speakers, {
+      communityId: ids.own!,
+      name: 'Referenced Attachment Speaker',
+      createdAt: T0,
+      updatedAt: T0,
+    });
+    await db.insert(tables.storySpeakers).values({
+      storyId: ids.stOwnPublic!,
+      speakerId: refSpeakerId,
+      communityId: ids.own!,
+      sortOrder: 0,
+    });
+    const unrefSpeakerId = await insertRow(tables.speakers, {
+      communityId: ids.own!,
+      name: 'Temp Attachment Speaker',
+      createdAt: T0,
+      updatedAt: T0,
+    });
+
+    const attRefPlace = await insertRow(tables.attachments, {
+      communityId: ids.own!,
+      fileId: fileIds.ownActive,
+      ownerType: 'place',
+      ownerId: refPlaceId,
+      role: 'place_photo',
+      ordinal: 0,
+      createdAt: T0,
+    });
+    const attUnrefPlace = await insertRow(tables.attachments, {
+      communityId: ids.own!,
+      fileId: fileIds.ownActive,
+      ownerType: 'place',
+      ownerId: unrefPlaceId,
+      role: 'place_photo',
+      ordinal: 0,
+      createdAt: T0,
+    });
+    const attRestrictedPlace = await insertRow(tables.attachments, {
+      communityId: ids.own!,
+      fileId: fileIds.ownActive,
+      ownerType: 'place',
+      ownerId: restrictedPlaceId,
+      role: 'place_photo',
+      ordinal: 0,
+      createdAt: T0,
+    });
+    const attRefSpeaker = await insertRow(tables.attachments, {
+      communityId: ids.own!,
+      fileId: fileIds.ownActive,
+      ownerType: 'speaker',
+      ownerId: refSpeakerId,
+      role: 'speaker_photo',
+      ordinal: 0,
+      createdAt: T0,
+    });
+    const attUnrefSpeaker = await insertRow(tables.attachments, {
+      communityId: ids.own!,
+      fileId: fileIds.ownActive,
+      ownerType: 'speaker',
+      ownerId: unrefSpeakerId,
+      role: 'speaker_photo',
+      ordinal: 0,
+      createdAt: T0,
+    });
+
+    expect(
+      (
+        await requestJson('DELETE', `/v2/places/${refPlaceId}`, {
+          cookie: cookies.editor,
+        })
+      ).status
+    ).toBe(409);
+    expect(
+      (
+        await requestJson('DELETE', `/v2/places/${restrictedPlaceId}`, {
+          cookie: cookies.editor,
+        })
+      ).status
+    ).toBe(404);
+    expect(
+      (
+        await requestJson('DELETE', `/v2/speakers/${refSpeakerId}`, {
+          cookie: cookies.editor,
+        })
+      ).status
+    ).toBe(409);
+
+    expect(
+      await db
+        .select({ id: tables.attachments.id })
+        .from(tables.attachments)
+        .where(eq(tables.attachments.id, attRefPlace))
+    ).toHaveLength(1);
+    expect(
+      await db
+        .select({ id: tables.attachments.id })
+        .from(tables.attachments)
+        .where(eq(tables.attachments.id, attRestrictedPlace))
+    ).toHaveLength(1);
+    expect(
+      await db
+        .select({ id: tables.attachments.id })
+        .from(tables.attachments)
+        .where(eq(tables.attachments.id, attRefSpeaker))
+    ).toHaveLength(1);
+
+    expect(
+      (
+        await requestJson('DELETE', `/v2/places/${unrefPlaceId}`, {
+          cookie: cookies.editor,
+        })
+      ).status
+    ).toBe(204);
+    expect(
+      (
+        await requestJson('DELETE', `/v2/speakers/${unrefSpeakerId}`, {
+          cookie: cookies.editor,
+        })
+      ).status
+    ).toBe(204);
+
+    expect(
+      await db
+        .select({ id: tables.attachments.id })
+        .from(tables.attachments)
+        .where(eq(tables.attachments.id, attUnrefPlace))
+    ).toHaveLength(0);
+    expect(
+      await db
+        .select({ id: tables.attachments.id })
+        .from(tables.attachments)
+        .where(eq(tables.attachments.id, attUnrefSpeaker))
+    ).toHaveLength(0);
+
+    // D1 batch race test: link added right before batch executes must return 'conflict',
+    // never cascade-delete the link, and never delete the owner's attachments.
+    const d1Sqlite = new Sqlite(':memory:');
+    d1Sqlite.pragma('foreign_keys = ON');
+    const d1Db = drizzle(d1Sqlite);
+    migrate(d1Db, { migrationsFolder: 'src/db/migrations' });
+    const d1Tables = tablesFor(d1Db);
+
+    try {
+      const [comm] = await d1Db
+        .insert(d1Tables.communities)
+        .values({
+          name: 'D1 Del',
+          slug: 'd1-del',
+          createdAt: T0,
+          updatedAt: T0,
+        })
+        .returning({ id: d1Tables.communities.id });
+      const [usr] = await d1Db
+        .insert(d1Tables.users)
+        .values({
+          email: 'd1del@example.test',
+          username: 'd1del',
+          ...deriveUserIdentityColumns({
+            email: 'd1del@example.test',
+            username: 'd1del',
+          }),
+          firstName: 'D1',
+          lastName: 'Del',
+          passwordHash: 'hash',
+          role: 'editor',
+          communityId: comm!.id,
+          createdAt: T0,
+          updatedAt: T0,
+        })
+        .returning({ id: d1Tables.users.id });
+      const fId = '88888888-8888-4888-8888-888888888801';
+      await d1Db.insert(d1Tables.files).values({
+        id: fId,
+        filename: 'a.png',
+        originalName: 'a.png',
+        path: 'communities/1/a.png',
+        storageKey: 'communities/1/a.png',
+        url: 'https://storage.invalid/a.png',
+        mimeType: 'image/png',
+        size: 10,
+        byteSize: 10,
+        communityId: comm!.id,
+        uploadedBy: usr!.id,
+        createdAt: T0,
+        updatedAt: T0,
+      });
+      const [story] = await d1Db
+        .insert(d1Tables.stories)
+        .values({
+          communityId: comm!.id,
+          title: 'D1 Story',
+          slug: 'd1-story',
+          language: 'en',
+          privacyLevel: 'public',
+          isRestricted: false,
+          createdAt: T0,
+          updatedAt: T0,
+        })
+        .returning({ id: d1Tables.stories.id });
+      const [place] = await d1Db
+        .insert(d1Tables.places)
+        .values({
+          communityId: comm!.id,
+          name: 'D1 Raced Place',
+          createdAt: T0,
+          updatedAt: T0,
+        })
+        .returning({ id: d1Tables.places.id });
+      const [speaker] = await d1Db
+        .insert(d1Tables.speakers)
+        .values({
+          communityId: comm!.id,
+          name: 'D1 Raced Speaker',
+          createdAt: T0,
+          updatedAt: T0,
+        })
+        .returning({ id: d1Tables.speakers.id });
+      const [restrictedPlace] = await d1Db
+        .insert(d1Tables.places)
+        .values({
+          communityId: comm!.id,
+          name: 'D1 Restricted Place',
+          isRestricted: true,
+          createdAt: T0,
+          updatedAt: T0,
+        })
+        .returning({ id: d1Tables.places.id });
+
+      await d1Db.insert(d1Tables.attachments).values([
+        {
+          communityId: comm!.id,
+          fileId: fId,
+          ownerType: 'place',
+          ownerId: place!.id,
+          role: 'place_photo',
+          ordinal: 0,
+          createdAt: T0,
+        },
+        {
+          communityId: comm!.id,
+          fileId: fId,
+          ownerType: 'speaker',
+          ownerId: speaker!.id,
+          role: 'speaker_photo',
+          ordinal: 0,
+          createdAt: T0,
+        },
+        {
+          communityId: comm!.id,
+          fileId: fId,
+          ownerType: 'place',
+          ownerId: restrictedPlace!.id,
+          role: 'place_photo',
+          ordinal: 0,
+          createdAt: T0,
+        },
+      ]);
+
+      let injectRace: (() => void) | null = null;
+      const d1Like = Object.create(d1Db) as typeof d1Db & {
+        batch: (
+          stmts: Array<{ toSQL: () => { sql: string; params: unknown[] } }>
+        ) => Promise<unknown[]>;
+      };
+      d1Like.batch = async (stmts) => {
+        if (injectRace) {
+          const fn = injectRace;
+          injectRace = null;
+          fn();
+        }
+        const queries = stmts.map((s) => s.toSQL());
+        return d1Sqlite.transaction(() =>
+          queries.map(({ sql: querySql, params }) => {
+            const stmt = d1Sqlite.prepare(querySql);
+            return stmt.reader ? stmt.all(...params) : stmt.run(...params);
+          })
+        )();
+      };
+
+      const d1Repo = new CommunityWritesRepository(d1Like as never);
+
+      // Inject story_places right as deletePlace's batch executes
+      injectRace = () => {
+        d1Sqlite
+          .prepare(
+            'INSERT INTO story_places (community_id, story_id, place_id, sort_order, created_at, updated_at) VALUES (?, ?, ?, 0, 0, 0)'
+          )
+          .run(comm!.id, story!.id, place!.id);
+      };
+      expect(await d1Repo.deletePlace(comm!.id, place!.id)).toBe('conflict');
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.places)
+          .where(eq(d1Tables.places.id, place!.id))
+      ).toHaveLength(1);
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.storyPlaces)
+          .where(eq(d1Tables.storyPlaces.placeId, place!.id))
+      ).toHaveLength(1);
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.attachments)
+          .where(
+            and(
+              eq(d1Tables.attachments.ownerType, 'place'),
+              eq(d1Tables.attachments.ownerId, place!.id)
+            )
+          )
+      ).toHaveLength(1);
+
+      // Inject story_speakers right as deleteSpeaker's batch executes
+      injectRace = () => {
+        d1Sqlite
+          .prepare(
+            'INSERT INTO story_speakers (community_id, story_id, speaker_id, sort_order, created_at, updated_at) VALUES (?, ?, ?, 0, 0, 0)'
+          )
+          .run(comm!.id, story!.id, speaker!.id);
+      };
+      expect(await d1Repo.deleteSpeaker(comm!.id, speaker!.id)).toBe(
+        'conflict'
+      );
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.speakers)
+          .where(eq(d1Tables.speakers.id, speaker!.id))
+      ).toHaveLength(1);
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.storySpeakers)
+          .where(eq(d1Tables.storySpeakers.speakerId, speaker!.id))
+      ).toHaveLength(1);
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.attachments)
+          .where(
+            and(
+              eq(d1Tables.attachments.ownerType, 'speaker'),
+              eq(d1Tables.attachments.ownerId, speaker!.id)
+            )
+          )
+      ).toHaveLength(1);
+
+      // Restricted place returns 'not_found' and does NOT delete its attachment
+      expect(await d1Repo.deletePlace(comm!.id, restrictedPlace!.id)).toBe(
+        'not_found'
+      );
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.attachments)
+          .where(
+            and(
+              eq(d1Tables.attachments.ownerType, 'place'),
+              eq(d1Tables.attachments.ownerId, restrictedPlace!.id)
+            )
+          )
+      ).toHaveLength(1);
+
+      // Unlink story_places / story_speakers, then delete succeeds and deletes attachments
+      await d1Db
+        .delete(d1Tables.storyPlaces)
+        .where(eq(d1Tables.storyPlaces.placeId, place!.id));
+      await d1Db
+        .delete(d1Tables.storySpeakers)
+        .where(eq(d1Tables.storySpeakers.speakerId, speaker!.id));
+
+      expect(await d1Repo.deletePlace(comm!.id, place!.id)).toBe('deleted');
+      expect(await d1Repo.deleteSpeaker(comm!.id, speaker!.id)).toBe('deleted');
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.attachments)
+          .where(
+            and(
+              eq(d1Tables.attachments.ownerType, 'place'),
+              eq(d1Tables.attachments.ownerId, place!.id)
+            )
+          )
+      ).toHaveLength(0);
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.attachments)
+          .where(
+            and(
+              eq(d1Tables.attachments.ownerType, 'speaker'),
+              eq(d1Tables.attachments.ownerId, speaker!.id)
+            )
+          )
+      ).toHaveLength(0);
+      expect(await d1Repo.deletePlace(comm!.id, place!.id)).toBe('not_found');
+      expect(await d1Repo.deleteSpeaker(comm!.id, speaker!.id)).toBe(
+        'not_found'
+      );
+    } finally {
+      d1Sqlite.close();
+    }
+  });
+});
+
+describe('isForeignKeyConstraintError', () => {
+  it('maps only real FK violations (23503, SQLITE_CONSTRAINT_FOREIGNKEY, D1 FK message) and rejects UNIQUE/NOT NULL/CHECK', async () => {
+    // Real FK errors -> true
+    expect(isForeignKeyConstraintError({ code: '23503' })).toBe(true);
+    expect(
+      isForeignKeyConstraintError({ code: 'SQLITE_CONSTRAINT_FOREIGNKEY' })
+    ).toBe(true);
+    expect(
+      isForeignKeyConstraintError(
+        new Error('D1_ERROR: FOREIGN KEY constraint failed: SQLITE_CONSTRAINT')
+      )
+    ).toBe(true);
+    expect(
+      isForeignKeyConstraintError({
+        code: 'SQLITE_CONSTRAINT',
+        message: 'FOREIGN KEY constraint failed',
+      })
+    ).toBe(true);
+    expect(
+      isForeignKeyConstraintError({
+        message: 'Failed query: delete from places',
+        cause: { code: '23503' },
+      })
+    ).toBe(true);
+    expect(
+      isForeignKeyConstraintError({
+        message: 'Failed query: delete from speakers',
+        cause: new Error('D1_ERROR: FOREIGN KEY constraint failed'),
+      })
+    ).toBe(true);
+
+    // Non-FK constraint violations -> false (must never become 409)
+    expect(
+      isForeignKeyConstraintError({
+        code: '23505',
+        message: 'duplicate key value violates unique constraint',
+      })
+    ).toBe(false);
+    expect(
+      isForeignKeyConstraintError({
+        code: '23502',
+        message: 'null value in column violates not-null constraint',
+      })
+    ).toBe(false);
+    expect(
+      isForeignKeyConstraintError({
+        code: '23514',
+        message: 'new row for relation violates check constraint',
+      })
+    ).toBe(false);
+    expect(
+      isForeignKeyConstraintError({
+        code: 'SQLITE_CONSTRAINT_UNIQUE',
+        message: 'UNIQUE constraint failed: places.id',
+      })
+    ).toBe(false);
+    expect(
+      isForeignKeyConstraintError({
+        code: 'SQLITE_CONSTRAINT_NOTNULL',
+        message: 'NOT NULL constraint failed: places.name',
+      })
+    ).toBe(false);
+    expect(
+      isForeignKeyConstraintError({
+        code: 'SQLITE_CONSTRAINT_CHECK',
+        message: 'CHECK constraint failed',
+      })
+    ).toBe(false);
+    expect(
+      isForeignKeyConstraintError({
+        code: 'SQLITE_CONSTRAINT',
+        message: 'UNIQUE constraint failed: communities.slug',
+      })
+    ).toBe(false);
+    expect(
+      isForeignKeyConstraintError({
+        code: 'SQLITE_CONSTRAINT',
+        message: 'NOT NULL constraint failed: places.name',
+      })
+    ).toBe(false);
+    expect(
+      isForeignKeyConstraintError({
+        code: 'SQLITE_CONSTRAINT',
+        message: 'CHECK constraint failed: places',
+      })
+    ).toBe(false);
+    expect(isForeignKeyConstraintError(null)).toBe(false);
+    expect(isForeignKeyConstraintError(undefined)).toBe(false);
+    expect(isForeignKeyConstraintError('FOREIGN KEY constraint failed')).toBe(
+      false
+    );
+
+    const cyclic: Record<string, unknown> = { code: '23505' };
+    cyclic.cause = cyclic;
+    expect(isForeignKeyConstraintError(cyclic)).toBe(false);
+
+    // Verify repository maps D1 FK errors to 'conflict' and rethrows non-FK constraint errors
+    const makeThrowingD1Repo = (thrown: unknown) => {
+      const stub = {
+        batch: async () => {
+          throw thrown;
+        },
+        delete: () => ({
+          where: () => ({
+            returning: () => ({}),
+          }),
+        }),
+        select: () => ({
+          from: () => ({
+            where: () => ({
+              limit: () => ({}),
+            }),
+          }),
+        }),
+      };
+      return new CommunityWritesRepository(stub as never);
+    };
+
+    await expect(
+      makeThrowingD1Repo(
+        new Error('D1_ERROR: FOREIGN KEY constraint failed: SQLITE_CONSTRAINT')
+      ).deletePlace(1, 1)
+    ).resolves.toBe('conflict');
+
+    await expect(
+      makeThrowingD1Repo({
+        code: 'SQLITE_CONSTRAINT',
+        message: 'UNIQUE constraint failed: places.id',
+      }).deletePlace(1, 1)
+    ).rejects.toMatchObject({ code: 'SQLITE_CONSTRAINT' });
+
+    await expect(
+      makeThrowingD1Repo({
+        code: 'SQLITE_CONSTRAINT_CHECK',
+        message: 'CHECK constraint failed',
+      }).deleteSpeaker(1, 1)
+    ).rejects.toMatchObject({ code: 'SQLITE_CONSTRAINT_CHECK' });
   });
 });

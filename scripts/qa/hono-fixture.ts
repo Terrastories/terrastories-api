@@ -29,7 +29,7 @@
  */
 import { once } from 'node:events';
 import { serve } from '@hono/node-server';
-import { sql } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
@@ -77,6 +77,7 @@ import {
   V2ValidationErrorResponseSchema,
 } from '../../src/shared/schemas/community-writes.js';
 import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
+import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
@@ -349,6 +350,7 @@ export async function createFixture(
       };
   const {
     attachments,
+    auditEntries,
     communities,
     communityMapConfigs,
     users,
@@ -4258,6 +4260,63 @@ export async function createFixture(
         check: publicNotFoundCheck,
       },
     ];
+    const assertPrivateVisibilityAudits = async (
+      expectedActions: readonly string[]
+    ): Promise<void> => {
+      const audits = await db
+        .select()
+        .from(auditEntries)
+        .where(eq(auditEntries.communityId, privateCommunityId))
+        .orderBy(asc(auditEntries.id));
+      if (audits.length !== expectedActions.length) {
+        throw new Error(
+          `Expected ${expectedActions.length} visibility audit entries for community ${privateCommunityId}, got ${audits.length}`
+        );
+      }
+      const forbiddenTokens = [
+        privateCommunityName,
+        privateCommunitySlug,
+        `${privateCommunityName} Public`,
+        privateCredentials.admin.email,
+        ...HONO_PERSONA_CULTURAL_STRINGS,
+      ];
+      for (let i = 0; i < expectedActions.length; i++) {
+        const entry = audits[i]!;
+        const validated = validateContentFreeAuditEntry({
+          communityId: entry.communityId,
+          actorId: entry.actorId,
+          action: entry.action,
+          resourceType: entry.resourceType,
+          resourceIds: entry.resourceIds,
+          outcome: entry.outcome,
+          ipAddress: entry.ipAddress,
+          userAgent: entry.userAgent,
+        });
+        if (
+          validated.communityId !== privateCommunityId ||
+          validated.actorId !== privateCreatorId ||
+          validated.action !== expectedActions[i] ||
+          validated.resourceType !== 'community' ||
+          JSON.stringify(validated.resourceIds) !==
+            JSON.stringify([privateCommunityId]) ||
+          validated.outcome !== 'success' ||
+          validated.ipAddress !== null ||
+          validated.userAgent !== null
+        ) {
+          throw new Error(
+            `Unexpected audit entry shape at index ${i}: ${JSON.stringify(entry)}`
+          );
+        }
+        const serialized = JSON.stringify(entry);
+        for (const token of forbiddenTokens) {
+          if (serialized.includes(token)) {
+            throw new Error(
+              `Audit entry leaked non-content-free token "${token}"`
+            );
+          }
+        }
+      }
+    };
     const privateAdminCommunityWriteSteps: Step[] = [
       {
         name: 'admin patch community rejects CSRF cross-site',
@@ -4309,6 +4368,8 @@ export async function createFixture(
         method: 'GET',
         path: `/v2/public/communities/${privateCommunitySlug}`,
         expected: 200,
+        prepare: () =>
+          assertPrivateVisibilityAudits(['community.visibility.public']),
         check: (body) => {
           const parsed = PublicCommunityDetailResponseSchema.safeParse(body);
           return parsed.success && parsed.data.data.id === privateCommunityId;
@@ -4387,6 +4448,11 @@ export async function createFixture(
         method: 'GET',
         path: `/v2/public/communities/${privateCommunitySlug}`,
         expected: 404,
+        prepare: () =>
+          assertPrivateVisibilityAudits([
+            'community.visibility.public',
+            'community.visibility.private',
+          ]),
         check: publicNotFoundCheck,
       },
       {

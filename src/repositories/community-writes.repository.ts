@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, ne, notExists, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -94,18 +94,27 @@ export interface SpeakerUpdateInput {
 
 export type SpeakerDeleteOutcome = 'deleted' | 'not_found' | 'conflict';
 
-function isForeignKeyConstraintError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const code = (err as { code?: unknown }).code;
+export function isForeignKeyConstraintError(
+  err: unknown,
+  seen: Set<unknown> = new Set()
+): boolean {
+  if (!err || typeof err !== 'object' || seen.has(err)) return false;
+  seen.add(err);
+  const { code, message, cause } = err as {
+    code?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  };
+  if (code === '23503' || code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
+    return true;
+  }
   if (
-    code === '23503' ||
-    code === 'SQLITE_CONSTRAINT_FOREIGNKEY' ||
-    code === 'SQLITE_CONSTRAINT'
+    typeof message === 'string' &&
+    message.includes('FOREIGN KEY constraint failed')
   ) {
     return true;
   }
-  const cause = (err as { cause?: unknown }).cause;
-  return cause ? isForeignKeyConstraintError(cause) : false;
+  return cause ? isForeignKeyConstraintError(cause, seen) : false;
 }
 
 export class CommunityWritesRepository {
@@ -166,33 +175,47 @@ export class CommunityWritesRepository {
       return values;
     };
 
-    if (this.hasD1Batch()) {
-      const existingRows = await this.db
-        .select({
-          id: this.tables.communities.id,
-          publicStories: this.tables.communities.publicStories,
-          isActive: this.tables.communities.isActive,
-        })
-        .from(this.tables.communities)
-        .where(
-          and(
-            eq(this.tables.communities.id, communityId),
-            eq(this.tables.communities.isActive, true)
+    const buildConditionalAuditInsert = (
+      executor: typeof this.db,
+      nextVisibility: CommunityVisibility
+    ) => {
+      const audit = buildVisibilityAuditEntry(
+        communityId,
+        actorId,
+        nextVisibility
+      );
+      const nextPublicStories = communityVisibilityToPhysical(nextVisibility);
+      return executor.insert(this.tables.auditEntries).select(
+        executor
+          .select({
+            id: sql`NULL`.as('id'),
+            communityId: this.tables.communities.id,
+            actorId: sql`${audit.actorId}`.as('actor_id'),
+            action: sql`${audit.action}`.as('action'),
+            resourceType: sql`${audit.resourceType}`.as('resource_type'),
+            resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+              'resource_ids'
+            ),
+            outcome: sql`${audit.outcome}`.as('outcome'),
+            ipAddress: sql`NULL`.as('ip_address'),
+            userAgent: sql`NULL`.as('user_agent'),
+            createdAt: sql`${now.getTime()}`.as('created_at'),
+          })
+          .from(this.tables.communities)
+          .where(
+            and(
+              eq(this.tables.communities.id, communityId),
+              eq(this.tables.communities.isActive, true),
+              ne(this.tables.communities.publicStories, nextPublicStories)
+            )
           )
-        )
-        .limit(1);
-      const existing = existingRows[0];
-      if (!existing) {
-        return { updated: false };
-      }
+      );
+    };
 
-      const previousVisibility = communityFromPhysical(existing).visibility;
-      const nextVisibility = input.visibility ?? previousVisibility;
-      const setPayload = buildSetPayload();
-
+    if (this.hasD1Batch()) {
       const updateQuery = this.db
         .update(this.tables.communities)
-        .set(setPayload)
+        .set(buildSetPayload())
         .where(
           and(
             eq(this.tables.communities.id, communityId),
@@ -201,17 +224,15 @@ export class CommunityWritesRepository {
         )
         .returning({ id: this.tables.communities.id });
 
-      if (nextVisibility !== previousVisibility) {
-        const audit = buildVisibilityAuditEntry(
-          communityId,
-          actorId,
-          nextVisibility
+      if (input.visibility !== undefined) {
+        // Insert the audit entry BEFORE the update changes public_stories,
+        // guarded in SQL on active + effective visibility transition so D1's
+        // single atomic batch never emits a stale, duplicate, or 0-row audit.
+        const auditQuery = buildConditionalAuditInsert(
+          this.db,
+          input.visibility
         );
-        const auditQuery = this.db.insert(this.tables.auditEntries).values({
-          ...audit,
-          createdAt: now,
-        });
-        const [updatedRows] = await this.db.batch([updateQuery, auditQuery]);
+        const [, updatedRows] = await this.db.batch([auditQuery, updateQuery]);
         return {
           updated: Array.isArray(updatedRows) && updatedRows.length > 0,
         };
@@ -236,7 +257,8 @@ export class CommunityWritesRepository {
               eq(this.tables.communities.isActive, true)
             )
           )
-          .limit(1);
+          .limit(1)
+          .for('update');
         const existing = existingRows[0];
         if (!existing) {
           return { updated: false };
@@ -278,27 +300,9 @@ export class CommunityWritesRepository {
 
     // better-sqlite3 transactions are synchronous
     return this.db.transaction((tx: typeof this.db) => {
-      const existing = tx
-        .select({
-          id: this.tables.communities.id,
-          publicStories: this.tables.communities.publicStories,
-          isActive: this.tables.communities.isActive,
-        })
-        .from(this.tables.communities)
-        .where(
-          and(
-            eq(this.tables.communities.id, communityId),
-            eq(this.tables.communities.isActive, true)
-          )
-        )
-        .limit(1)
-        .get();
-      if (!existing) {
-        return { updated: false };
+      if (input.visibility !== undefined) {
+        buildConditionalAuditInsert(tx, input.visibility).run();
       }
-
-      const previousVisibility = communityFromPhysical(existing).visibility;
-      const nextVisibility = input.visibility ?? previousVisibility;
 
       const updated = tx
         .update(this.tables.communities)
@@ -312,25 +316,7 @@ export class CommunityWritesRepository {
         .returning({ id: this.tables.communities.id })
         .all();
 
-      if (updated.length === 0) {
-        return { updated: false };
-      }
-
-      if (nextVisibility !== previousVisibility) {
-        const audit = buildVisibilityAuditEntry(
-          communityId,
-          actorId,
-          nextVisibility
-        );
-        tx.insert(this.tables.auditEntries)
-          .values({
-            ...audit,
-            createdAt: now,
-          })
-          .run();
-      }
-
-      return { updated: true };
+      return { updated: updated.length > 0 };
     });
   }
 
@@ -487,200 +473,35 @@ export class CommunityWritesRepository {
     return rows.length > 0;
   }
 
-  async deletePlace(
+  private deleteOwnerAttachmentsQuery(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    communityId: number,
+    ownerType: 'place' | 'speaker',
+    ownerId: number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ownerGoneGuard?: any
+  ) {
+    const base = and(
+      eq(this.tables.attachments.communityId, communityId),
+      eq(this.tables.attachments.ownerType, ownerType),
+      eq(this.tables.attachments.ownerId, ownerId)
+    );
+    return executor
+      .delete(this.tables.attachments)
+      .where(ownerGoneGuard ? and(base, ownerGoneGuard) : base);
+  }
+
+  private placeReferenceGuards(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
     communityId: number,
     placeId: number
-  ): Promise<PlaceDeleteOutcome> {
-    try {
-      if (this.hasD1Batch()) {
-        const existingRows = await this.db
-          .select({ id: this.tables.places.id })
-          .from(this.tables.places)
-          .where(
-            and(
-              eq(this.tables.places.id, placeId),
-              eq(this.tables.places.communityId, communityId),
-              eq(this.tables.places.isRestricted, false)
-            )
-          )
-          .limit(1);
-        if (existingRows.length === 0) {
-          return 'not_found';
-        }
-
-        const [storyPlaceRef, interviewRef, birthplaceRef] = await Promise.all([
-          this.db
-            .select({ id: this.tables.storyPlaces.id })
-            .from(this.tables.storyPlaces)
-            .where(
-              and(
-                eq(this.tables.storyPlaces.communityId, communityId),
-                eq(this.tables.storyPlaces.placeId, placeId)
-              )
-            )
-            .limit(1),
-          this.db
-            .select({ id: this.tables.stories.id })
-            .from(this.tables.stories)
-            .where(
-              and(
-                eq(this.tables.stories.communityId, communityId),
-                eq(this.tables.stories.interviewLocationId, placeId)
-              )
-            )
-            .limit(1),
-          this.db
-            .select({ id: this.tables.speakers.id })
-            .from(this.tables.speakers)
-            .where(
-              and(
-                eq(this.tables.speakers.communityId, communityId),
-                eq(this.tables.speakers.birthplaceId, placeId)
-              )
-            )
-            .limit(1),
-        ]);
-
-        if (
-          storyPlaceRef.length > 0 ||
-          interviewRef.length > 0 ||
-          birthplaceRef.length > 0
-        ) {
-          return 'conflict';
-        }
-
-        const deleteAttachments = this.db
-          .delete(this.tables.attachments)
-          .where(
-            and(
-              eq(this.tables.attachments.communityId, communityId),
-              eq(this.tables.attachments.ownerType, 'place'),
-              eq(this.tables.attachments.ownerId, placeId)
-            )
-          );
-        const deletePlace = this.db
-          .delete(this.tables.places)
-          .where(
-            and(
-              eq(this.tables.places.id, placeId),
-              eq(this.tables.places.communityId, communityId),
-              eq(this.tables.places.isRestricted, false)
-            )
-          )
-          .returning({ id: this.tables.places.id });
-
-        const [, deletedRows] = await this.db.batch([
-          deleteAttachments,
-          deletePlace,
-        ]);
-        return Array.isArray(deletedRows) && deletedRows.length > 0
-          ? 'deleted'
-          : 'not_found';
-      }
-
-      if (dialectOf(this.connection) === 'postgresql') {
-        return await this.db.transaction(async (tx: typeof this.db) => {
-          const existingRows = await tx
-            .select({ id: this.tables.places.id })
-            .from(this.tables.places)
-            .where(
-              and(
-                eq(this.tables.places.id, placeId),
-                eq(this.tables.places.communityId, communityId),
-                eq(this.tables.places.isRestricted, false)
-              )
-            )
-            .limit(1);
-          if (existingRows.length === 0) {
-            return 'not_found';
-          }
-
-          const [storyPlaceRef, interviewRef, birthplaceRef] =
-            await Promise.all([
-              tx
-                .select({ id: this.tables.storyPlaces.id })
-                .from(this.tables.storyPlaces)
-                .where(
-                  and(
-                    eq(this.tables.storyPlaces.communityId, communityId),
-                    eq(this.tables.storyPlaces.placeId, placeId)
-                  )
-                )
-                .limit(1),
-              tx
-                .select({ id: this.tables.stories.id })
-                .from(this.tables.stories)
-                .where(
-                  and(
-                    eq(this.tables.stories.communityId, communityId),
-                    eq(this.tables.stories.interviewLocationId, placeId)
-                  )
-                )
-                .limit(1),
-              tx
-                .select({ id: this.tables.speakers.id })
-                .from(this.tables.speakers)
-                .where(
-                  and(
-                    eq(this.tables.speakers.communityId, communityId),
-                    eq(this.tables.speakers.birthplaceId, placeId)
-                  )
-                )
-                .limit(1),
-            ]);
-
-          if (
-            storyPlaceRef.length > 0 ||
-            interviewRef.length > 0 ||
-            birthplaceRef.length > 0
-          ) {
-            return 'conflict';
-          }
-
-          await tx
-            .delete(this.tables.attachments)
-            .where(
-              and(
-                eq(this.tables.attachments.communityId, communityId),
-                eq(this.tables.attachments.ownerType, 'place'),
-                eq(this.tables.attachments.ownerId, placeId)
-              )
-            );
-          const deleted = await tx
-            .delete(this.tables.places)
-            .where(
-              and(
-                eq(this.tables.places.id, placeId),
-                eq(this.tables.places.communityId, communityId),
-                eq(this.tables.places.isRestricted, false)
-              )
-            )
-            .returning({ id: this.tables.places.id });
-
-          return deleted.length > 0 ? 'deleted' : 'not_found';
-        });
-      }
-
-      // better-sqlite3 synchronous transaction
-      return this.db.transaction((tx: typeof this.db) => {
-        const existing = tx
-          .select({ id: this.tables.places.id })
-          .from(this.tables.places)
-          .where(
-            and(
-              eq(this.tables.places.id, placeId),
-              eq(this.tables.places.communityId, communityId),
-              eq(this.tables.places.isRestricted, false)
-            )
-          )
-          .limit(1)
-          .get();
-        if (!existing) {
-          return 'not_found';
-        }
-
-        const storyPlaceRef = tx
-          .select({ id: this.tables.storyPlaces.id })
+  ) {
+    return [
+      notExists(
+        executor
+          .select({ one: sql`1` })
           .from(this.tables.storyPlaces)
           .where(
             and(
@@ -688,10 +509,10 @@ export class CommunityWritesRepository {
               eq(this.tables.storyPlaces.placeId, placeId)
             )
           )
-          .limit(1)
-          .get();
-        const interviewRef = tx
-          .select({ id: this.tables.stories.id })
+      ),
+      notExists(
+        executor
+          .select({ one: sql`1` })
           .from(this.tables.stories)
           .where(
             and(
@@ -699,10 +520,10 @@ export class CommunityWritesRepository {
               eq(this.tables.stories.interviewLocationId, placeId)
             )
           )
-          .limit(1)
-          .get();
-        const birthplaceRef = tx
-          .select({ id: this.tables.speakers.id })
+      ),
+      notExists(
+        executor
+          .select({ one: sql`1` })
           .from(this.tables.speakers)
           .where(
             and(
@@ -710,35 +531,156 @@ export class CommunityWritesRepository {
               eq(this.tables.speakers.birthplaceId, placeId)
             )
           )
+      ),
+    ];
+  }
+
+  private speakerReferenceGuards(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    communityId: number,
+    speakerId: number
+  ) {
+    return [
+      notExists(
+        executor
+          .select({ one: sql`1` })
+          .from(this.tables.storySpeakers)
+          .where(
+            and(
+              eq(this.tables.storySpeakers.communityId, communityId),
+              eq(this.tables.storySpeakers.speakerId, speakerId)
+            )
+          )
+      ),
+      notExists(
+        executor
+          .select({ one: sql`1` })
+          .from(this.tables.stories)
+          .where(
+            and(
+              eq(this.tables.stories.communityId, communityId),
+              eq(this.tables.stories.interviewerId, speakerId)
+            )
+          )
+      ),
+    ];
+  }
+
+  private async deleteGuardedOwner(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    table: any,
+    ownerType: 'place' | 'speaker',
+    communityId: number,
+    ownerId: number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    readableScope: any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    physicalOwnerScope: any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    referenceGuards: (executor: any) => any[]
+  ): Promise<PlaceDeleteOutcome> {
+    try {
+      if (this.hasD1Batch()) {
+        // Put NOT EXISTS reference guards inside DELETE itself so a concurrent
+        // story_places/story_speakers insert never silently cascades, and gate
+        // attachment cleanup on the owner row actually being gone afterward.
+        const deleteOwner = this.db
+          .delete(table)
+          .where(and(readableScope, ...referenceGuards(this.db)))
+          .returning({ id: table.id });
+
+        const ownerGoneGuard = notExists(
+          this.db
+            .select({ one: sql`1` })
+            .from(table)
+            .where(physicalOwnerScope)
+        );
+        const deleteAttachments = this.deleteOwnerAttachmentsQuery(
+          this.db,
+          communityId,
+          ownerType,
+          ownerId,
+          ownerGoneGuard
+        );
+
+        const existingOwnerCheck = this.db
+          .select({ id: table.id })
+          .from(table)
+          .where(readableScope)
+          .limit(1);
+
+        const [deletedRows, , existingRows] = await this.db.batch([
+          deleteOwner,
+          deleteAttachments,
+          existingOwnerCheck,
+        ]);
+
+        if (Array.isArray(deletedRows) && deletedRows.length > 0) {
+          return 'deleted';
+        }
+        return Array.isArray(existingRows) && existingRows.length > 0
+          ? 'conflict'
+          : 'not_found';
+      }
+
+      if (dialectOf(this.connection) === 'postgresql') {
+        return await this.db.transaction(async (tx: typeof this.db) => {
+          const existingRows = await tx
+            .select({ id: table.id })
+            .from(table)
+            .where(readableScope)
+            .limit(1)
+            .for('update');
+          if (existingRows.length === 0) {
+            return 'not_found';
+          }
+
+          const deleted = await tx
+            .delete(table)
+            .where(and(readableScope, ...referenceGuards(tx)))
+            .returning({ id: table.id });
+
+          if (deleted.length === 0) {
+            return 'conflict';
+          }
+
+          await this.deleteOwnerAttachmentsQuery(
+            tx,
+            communityId,
+            ownerType,
+            ownerId
+          );
+          return 'deleted';
+        });
+      }
+
+      // better-sqlite3 synchronous transaction
+      return this.db.transaction((tx: typeof this.db) => {
+        const deleted = tx
+          .delete(table)
+          .where(and(readableScope, ...referenceGuards(tx)))
+          .returning({ id: table.id })
+          .all();
+
+        if (deleted.length > 0) {
+          this.deleteOwnerAttachmentsQuery(
+            tx,
+            communityId,
+            ownerType,
+            ownerId
+          ).run();
+          return 'deleted';
+        }
+
+        const existing = tx
+          .select({ id: table.id })
+          .from(table)
+          .where(readableScope)
           .limit(1)
           .get();
 
-        if (storyPlaceRef || interviewRef || birthplaceRef) {
-          return 'conflict';
-        }
-
-        tx.delete(this.tables.attachments)
-          .where(
-            and(
-              eq(this.tables.attachments.communityId, communityId),
-              eq(this.tables.attachments.ownerType, 'place'),
-              eq(this.tables.attachments.ownerId, placeId)
-            )
-          )
-          .run();
-        const deleted = tx
-          .delete(this.tables.places)
-          .where(
-            and(
-              eq(this.tables.places.id, placeId),
-              eq(this.tables.places.communityId, communityId),
-              eq(this.tables.places.isRestricted, false)
-            )
-          )
-          .returning({ id: this.tables.places.id })
-          .all();
-
-        return deleted.length > 0 ? 'deleted' : 'not_found';
+        return existing ? 'conflict' : 'not_found';
       });
     } catch (err) {
       if (isForeignKeyConstraintError(err)) {
@@ -746,6 +688,29 @@ export class CommunityWritesRepository {
       }
       throw err;
     }
+  }
+
+  async deletePlace(
+    communityId: number,
+    placeId: number
+  ): Promise<PlaceDeleteOutcome> {
+    const physicalScope = and(
+      eq(this.tables.places.id, placeId),
+      eq(this.tables.places.communityId, communityId)
+    );
+    const readableScope = and(
+      physicalScope,
+      eq(this.tables.places.isRestricted, false)
+    );
+    return this.deleteGuardedOwner(
+      this.tables.places,
+      'place',
+      communityId,
+      placeId,
+      readableScope,
+      physicalScope,
+      (executor) => this.placeReferenceGuards(executor, communityId, placeId)
+    );
   }
 
   async findCommunityUnrestrictedPlace(
@@ -825,214 +790,19 @@ export class CommunityWritesRepository {
     communityId: number,
     speakerId: number
   ): Promise<SpeakerDeleteOutcome> {
-    try {
-      if (this.hasD1Batch()) {
-        const existingRows = await this.db
-          .select({ id: this.tables.speakers.id })
-          .from(this.tables.speakers)
-          .where(
-            and(
-              eq(this.tables.speakers.id, speakerId),
-              eq(this.tables.speakers.communityId, communityId)
-            )
-          )
-          .limit(1);
-        if (existingRows.length === 0) {
-          return 'not_found';
-        }
-
-        const [storySpeakerRef, interviewerRef] = await Promise.all([
-          this.db
-            .select({ id: this.tables.storySpeakers.id })
-            .from(this.tables.storySpeakers)
-            .where(
-              and(
-                eq(this.tables.storySpeakers.communityId, communityId),
-                eq(this.tables.storySpeakers.speakerId, speakerId)
-              )
-            )
-            .limit(1),
-          this.db
-            .select({ id: this.tables.stories.id })
-            .from(this.tables.stories)
-            .where(
-              and(
-                eq(this.tables.stories.communityId, communityId),
-                eq(this.tables.stories.interviewerId, speakerId)
-              )
-            )
-            .limit(1),
-        ]);
-
-        if (storySpeakerRef.length > 0 || interviewerRef.length > 0) {
-          return 'conflict';
-        }
-
-        const deleteAttachments = this.db
-          .delete(this.tables.attachments)
-          .where(
-            and(
-              eq(this.tables.attachments.communityId, communityId),
-              eq(this.tables.attachments.ownerType, 'speaker'),
-              eq(this.tables.attachments.ownerId, speakerId)
-            )
-          );
-        const deleteSpeaker = this.db
-          .delete(this.tables.speakers)
-          .where(
-            and(
-              eq(this.tables.speakers.id, speakerId),
-              eq(this.tables.speakers.communityId, communityId)
-            )
-          )
-          .returning({ id: this.tables.speakers.id });
-
-        const [, deletedRows] = await this.db.batch([
-          deleteAttachments,
-          deleteSpeaker,
-        ]);
-        return Array.isArray(deletedRows) && deletedRows.length > 0
-          ? 'deleted'
-          : 'not_found';
-      }
-
-      if (dialectOf(this.connection) === 'postgresql') {
-        return await this.db.transaction(async (tx: typeof this.db) => {
-          const existingRows = await tx
-            .select({ id: this.tables.speakers.id })
-            .from(this.tables.speakers)
-            .where(
-              and(
-                eq(this.tables.speakers.id, speakerId),
-                eq(this.tables.speakers.communityId, communityId)
-              )
-            )
-            .limit(1);
-          if (existingRows.length === 0) {
-            return 'not_found';
-          }
-
-          const [storySpeakerRef, interviewerRef] = await Promise.all([
-            tx
-              .select({ id: this.tables.storySpeakers.id })
-              .from(this.tables.storySpeakers)
-              .where(
-                and(
-                  eq(this.tables.storySpeakers.communityId, communityId),
-                  eq(this.tables.storySpeakers.speakerId, speakerId)
-                )
-              )
-              .limit(1),
-            tx
-              .select({ id: this.tables.stories.id })
-              .from(this.tables.stories)
-              .where(
-                and(
-                  eq(this.tables.stories.communityId, communityId),
-                  eq(this.tables.stories.interviewerId, speakerId)
-                )
-              )
-              .limit(1),
-          ]);
-
-          if (storySpeakerRef.length > 0 || interviewerRef.length > 0) {
-            return 'conflict';
-          }
-
-          await tx
-            .delete(this.tables.attachments)
-            .where(
-              and(
-                eq(this.tables.attachments.communityId, communityId),
-                eq(this.tables.attachments.ownerType, 'speaker'),
-                eq(this.tables.attachments.ownerId, speakerId)
-              )
-            );
-          const deleted = await tx
-            .delete(this.tables.speakers)
-            .where(
-              and(
-                eq(this.tables.speakers.id, speakerId),
-                eq(this.tables.speakers.communityId, communityId)
-              )
-            )
-            .returning({ id: this.tables.speakers.id });
-
-          return deleted.length > 0 ? 'deleted' : 'not_found';
-        });
-      }
-
-      // better-sqlite3 synchronous transaction
-      return this.db.transaction((tx: typeof this.db) => {
-        const existing = tx
-          .select({ id: this.tables.speakers.id })
-          .from(this.tables.speakers)
-          .where(
-            and(
-              eq(this.tables.speakers.id, speakerId),
-              eq(this.tables.speakers.communityId, communityId)
-            )
-          )
-          .limit(1)
-          .get();
-        if (!existing) {
-          return 'not_found';
-        }
-
-        const storySpeakerRef = tx
-          .select({ id: this.tables.storySpeakers.id })
-          .from(this.tables.storySpeakers)
-          .where(
-            and(
-              eq(this.tables.storySpeakers.communityId, communityId),
-              eq(this.tables.storySpeakers.speakerId, speakerId)
-            )
-          )
-          .limit(1)
-          .get();
-        const interviewerRef = tx
-          .select({ id: this.tables.stories.id })
-          .from(this.tables.stories)
-          .where(
-            and(
-              eq(this.tables.stories.communityId, communityId),
-              eq(this.tables.stories.interviewerId, speakerId)
-            )
-          )
-          .limit(1)
-          .get();
-
-        if (storySpeakerRef || interviewerRef) {
-          return 'conflict';
-        }
-
-        tx.delete(this.tables.attachments)
-          .where(
-            and(
-              eq(this.tables.attachments.communityId, communityId),
-              eq(this.tables.attachments.ownerType, 'speaker'),
-              eq(this.tables.attachments.ownerId, speakerId)
-            )
-          )
-          .run();
-        const deleted = tx
-          .delete(this.tables.speakers)
-          .where(
-            and(
-              eq(this.tables.speakers.id, speakerId),
-              eq(this.tables.speakers.communityId, communityId)
-            )
-          )
-          .returning({ id: this.tables.speakers.id })
-          .all();
-
-        return deleted.length > 0 ? 'deleted' : 'not_found';
-      });
-    } catch (err) {
-      if (isForeignKeyConstraintError(err)) {
-        return 'conflict';
-      }
-      throw err;
-    }
+    const scope = and(
+      eq(this.tables.speakers.id, speakerId),
+      eq(this.tables.speakers.communityId, communityId)
+    );
+    return this.deleteGuardedOwner(
+      this.tables.speakers,
+      'speaker',
+      communityId,
+      speakerId,
+      scope,
+      scope,
+      (executor) =>
+        this.speakerReferenceGuards(executor, communityId, speakerId)
+    );
   }
 }

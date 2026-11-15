@@ -1,6 +1,8 @@
 import { sessionLifetime } from './shared/session-policy.js';
 import { registerExploreAdapter } from './explore-adapter.js';
 import { ExploreAdapterRepository } from './repositories/explore-adapter.repository.js';
+import { PublicCommunitiesRepository } from './repositories/public-communities.repository.js';
+import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
@@ -146,6 +148,12 @@ export function createHonoApp(options: FoundationOptions) {
       return c.json({ user: publicUser(result.user) });
     }
   );
+  // Canonical V2 unauthenticated public routes must register before the
+  // `/v2/*` session gate.
+  registerPublicCommunityRoutes(app, {
+    repository: new PublicCommunitiesRepository(options.repository.connection),
+    publicOrigin: configuredOrigin,
+  });
   app.use('/v2/*', async (c, next) => {
     const user = await service.actor(getCookie(c, 'ts_session'), now());
     if (!user) return c.json({ error: 'Unauthorized' }, 401);

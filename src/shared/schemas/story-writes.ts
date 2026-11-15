@@ -112,3 +112,21 @@ export type PatchStoryRequest = z.infer<typeof PatchStoryRequestSchema>;
 
 export const StoryWriteResponseSchema = CommunityStoryDetailResponseSchema;
 export type StoryWriteResponse = CommunityStoryDetailResponse;
+
+export const PutStoryPlacesRequestSchema = z
+  .object({
+    placeIds: StoryPlaceIdsSchema,
+  })
+  .strict();
+
+export type PutStoryPlacesRequest = z.infer<typeof PutStoryPlacesRequestSchema>;
+
+export const PutStorySpeakersRequestSchema = z
+  .object({
+    speakerIds: StorySpeakerIdsSchema,
+  })
+  .strict();
+
+export type PutStorySpeakersRequest = z.infer<
+  typeof PutStorySpeakersRequestSchema
+>;

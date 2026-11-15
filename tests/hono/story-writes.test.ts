@@ -876,6 +876,260 @@ describe('Slice 8 story CRUD routes', () => {
   });
 });
 
+describe('Slice 8 StoryPlace and StorySpeaker edge routes', () => {
+  it('replaces places and speakers atomically preserving multiplicity, exact order, empty clear, and D1 cap', async () => {
+    const storyId = ids.createdDraftStory!;
+
+    const putPlaces1 = await requestJson(
+      'PUT',
+      `/v2/stories/${storyId}/places`,
+      {
+        cookie: cookies.editor,
+        body: { placeIds: [ids.plOwnB, ids.plOwnA, ids.plOwnB] },
+      }
+    );
+    expect(putPlaces1.status).toBe(200);
+    const bodyPlaces1 = StoryWriteResponseSchema.parse(putPlaces1.json);
+    expect(bodyPlaces1.data.places.map((p) => p.id)).toEqual([
+      ids.plOwnB,
+      ids.plOwnA,
+      ids.plOwnB,
+    ]);
+
+    const dbPlaceEdges1 = await db
+      .select()
+      .from(tables.storyPlaces)
+      .where(eq(tables.storyPlaces.storyId, storyId))
+      .orderBy(asc(tables.storyPlaces.sortOrder), asc(tables.storyPlaces.id));
+    expect(dbPlaceEdges1.map((e) => [e.placeId, e.sortOrder])).toEqual([
+      [ids.plOwnB!, 0],
+      [ids.plOwnA!, 1],
+      [ids.plOwnB!, 2],
+    ]);
+
+    const putSpeakers1 = await requestJson(
+      'PUT',
+      `/v2/stories/${storyId}/speakers`,
+      {
+        cookie: cookies.admin,
+        body: { speakerIds: [ids.spOwnA, ids.spOwnB, ids.spOwnA] },
+      }
+    );
+    expect(putSpeakers1.status).toBe(200);
+    const bodySpeakers1 = StoryWriteResponseSchema.parse(putSpeakers1.json);
+    expect(bodySpeakers1.data.speakers.map((s) => s.id)).toEqual([
+      ids.spOwnA,
+      ids.spOwnB,
+      ids.spOwnA,
+    ]);
+
+    // Supports the exact MAX_STORY_EDGE_IDS cap (100 entries)
+    const maxPlaces = Array.from({ length: MAX_STORY_EDGE_IDS }, (_, idx) =>
+      idx % 2 === 0 ? ids.plOwnA! : ids.plOwnB!
+    );
+    const putPlacesMax = await requestJson(
+      'PUT',
+      `/v2/stories/${storyId}/places`,
+      {
+        cookie: cookies.editor,
+        body: { placeIds: maxPlaces },
+      }
+    );
+    expect(putPlacesMax.status).toBe(200);
+    expect(
+      StoryWriteResponseSchema.parse(putPlacesMax.json).data.places.map(
+        (p) => p.id
+      )
+    ).toEqual(maxPlaces);
+
+    // Clear edges cleanly with []
+    const clearPlaces = await requestJson(
+      'PUT',
+      `/v2/stories/${storyId}/places`,
+      {
+        cookie: cookies.editor,
+        body: { placeIds: [] },
+      }
+    );
+    expect(clearPlaces.status).toBe(200);
+    expect(
+      StoryWriteResponseSchema.parse(clearPlaces.json).data.places
+    ).toEqual([]);
+
+    const clearSpeakers = await requestJson(
+      'PUT',
+      `/v2/stories/${storyId}/speakers`,
+      {
+        cookie: cookies.admin,
+        body: { speakerIds: [] },
+      }
+    );
+    expect(clearSpeakers.status).toBe(200);
+    expect(
+      StoryWriteResponseSchema.parse(clearSpeakers.json).data.speakers
+    ).toEqual([]);
+  });
+
+  it('rejects cross-community, restricted targets, restricted stories (no oracle), over-cap lists, and disallowed roles while keeping existing edges', async () => {
+    const storyId = ids.createdDraftStory!;
+    expect(
+      (
+        await requestJson('PUT', `/v2/stories/${storyId}/places`, {
+          cookie: cookies.editor,
+          body: { placeIds: [ids.plOwnA] },
+        })
+      ).status
+    ).toBe(200);
+    expect(
+      (
+        await requestJson('PUT', `/v2/stories/${storyId}/speakers`, {
+          cookie: cookies.editor,
+          body: { speakerIds: [ids.spOwnA] },
+        })
+      ).status
+    ).toBe(200);
+
+    for (const badCookie of [
+      cookies.viewer,
+      cookies.member,
+      cookies.super,
+      cookies.disabledAdmin,
+    ]) {
+      expect(
+        (
+          await requestJson('PUT', `/v2/stories/${storyId}/places`, {
+            cookie: badCookie,
+            body: { placeIds: [ids.plOwnB] },
+          })
+        ).status
+      ).toBe(403);
+      expect(
+        (
+          await requestJson('PUT', `/v2/stories/${storyId}/speakers`, {
+            cookie: badCookie,
+            body: { speakerIds: [ids.spOwnB] },
+          })
+        ).status
+      ).toBe(403);
+    }
+
+    // Cross-origin CSRF & non-JSON
+    expect(
+      (
+        await requestJson('PUT', `/v2/stories/${storyId}/places`, {
+          cookie: cookies.editor,
+          headers: { origin: FOREIGN_ORIGIN },
+          body: { placeIds: [ids.plOwnB] },
+        })
+      ).status
+    ).toBe(403);
+    expect(
+      (
+        await requestJson('PUT', `/v2/stories/${storyId}/speakers`, {
+          cookie: cookies.editor,
+          headers: { 'content-type': 'text/plain' },
+          body: 'speakerIds=[]',
+        })
+      ).status
+    ).toBe(415);
+
+    // Over cap (101 items) & invalid shapes
+    expect(
+      (
+        await requestJson('PUT', `/v2/stories/${storyId}/places`, {
+          cookie: cookies.editor,
+          body: {
+            placeIds: Array.from(
+              { length: MAX_STORY_EDGE_IDS + 1 },
+              () => ids.plOwnA!
+            ),
+          },
+        })
+      ).status
+    ).toBe(400);
+    expect(
+      (
+        await requestJson('PUT', `/v2/stories/${storyId}/speakers`, {
+          cookie: cookies.editor,
+          body: {
+            speakerIds: Array.from(
+              { length: MAX_STORY_EDGE_IDS + 1 },
+              () => ids.spOwnA!
+            ),
+          },
+        })
+      ).status
+    ).toBe(400);
+
+    // Bad story ID
+    expect(
+      (
+        await requestJson('PUT', '/v2/stories/abc/places', {
+          cookie: cookies.editor,
+          body: { placeIds: [] },
+        })
+      ).status
+    ).toBe(400);
+
+    // Cross-community / restricted / missing targets return 400 and leave prior edges intact
+    for (const badPlaceIds of [
+      [ids.plForeign!],
+      [ids.plOwnA!, ids.plOwnRestricted!],
+      [9999999],
+    ]) {
+      const r = await requestJson('PUT', `/v2/stories/${storyId}/places`, {
+        cookie: cookies.editor,
+        body: { placeIds: badPlaceIds },
+      });
+      expect(r.status).toBe(400);
+      expect(V2ValidationErrorResponseSchema.safeParse(r.json).success).toBe(
+        true
+      );
+    }
+    for (const badSpeakerIds of [[ids.spForeign!], [9999999]]) {
+      const r = await requestJson('PUT', `/v2/stories/${storyId}/speakers`, {
+        cookie: cookies.editor,
+        body: { speakerIds: badSpeakerIds },
+      });
+      expect(r.status).toBe(400);
+      expect(V2ValidationErrorResponseSchema.safeParse(r.json).success).toBe(
+        true
+      );
+    }
+
+    // Restricted / foreign / missing stories return 404 even with bad targets (no oracle)
+    for (const hiddenId of [
+      ids.stRestrictedFlag!,
+      ids.stRestrictedLevel!,
+      ids.stForeign!,
+      9999999,
+    ]) {
+      const rp = await requestJson('PUT', `/v2/stories/${hiddenId}/places`, {
+        cookie: cookies.admin,
+        body: { placeIds: [ids.plForeign] },
+      });
+      expect(rp.status).toBe(404);
+      expect(rp.json).toEqual({ error: 'Not found' });
+
+      const rs = await requestJson('PUT', `/v2/stories/${hiddenId}/speakers`, {
+        cookie: cookies.admin,
+        body: { speakerIds: [ids.spForeign] },
+      });
+      expect(rs.status).toBe(404);
+      expect(rs.json).toEqual({ error: 'Not found' });
+    }
+
+    // Original edges survived every invalid request
+    const storyAfter = await requestJson('GET', `/v2/stories/${storyId}`, {
+      cookie: cookies.editor,
+    });
+    expect(storyAfter.status).toBe(200);
+    const parsedAfter = StoryWriteResponseSchema.parse(storyAfter.json);
+    expect(parsedAfter.data.places.map((p) => p.id)).toEqual([ids.plOwnA]);
+    expect(parsedAfter.data.speakers.map((s) => s.id)).toEqual([ids.spOwnA]);
+  });
+});
+
 describe('Slice 8 D1 batch atomicity and race safety', () => {
   it('rolls back D1 batch atomically on concurrent target restriction and avoids stale audits', async () => {
     const batchSqlite = new Sqlite(':memory:');
@@ -1035,7 +1289,39 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
         await batchDb.select().from(batchTables.auditEntries)
       ).toHaveLength(1);
 
-      // 4. Restricted story delete in D1 returns false and preserves attachments
+      // 4. Chunked 100-item replaceStoryPlaces succeeds and concurrent restriction rolls back DELETE+INSERT atomically
+      batchSqlite
+        .prepare('UPDATE places SET is_restricted = 0 WHERE id = ?')
+        .run(place!.id);
+      const maxEdgeList = Array.from(
+        { length: MAX_STORY_EDGE_IDS },
+        () => place!.id
+      );
+      const replaceOk = await repo.replaceStoryPlaces(
+        comm!.id,
+        ok.id,
+        maxEdgeList,
+        T0
+      );
+      expect(replaceOk).toBe('updated');
+      expect(await batchDb.select().from(batchTables.storyPlaces)).toHaveLength(
+        MAX_STORY_EDGE_IDS
+      );
+
+      beforeNextBatch = () => {
+        batchSqlite
+          .prepare('UPDATE places SET is_restricted = 1 WHERE id = ?')
+          .run(place!.id);
+      };
+      await expect(
+        repo.replaceStoryPlaces(comm!.id, ok.id, [place!.id], T0)
+      ).rejects.toThrow(/NOT NULL/);
+      // Previous 100 edges were NOT deleted because the D1 batch rolled back
+      expect(await batchDb.select().from(batchTables.storyPlaces)).toHaveLength(
+        MAX_STORY_EDGE_IDS
+      );
+
+      // 5. Restricted story delete in D1 returns false and preserves attachments
       batchSqlite
         .prepare('UPDATE stories SET is_restricted = 1 WHERE id = ?')
         .run(ok.id);

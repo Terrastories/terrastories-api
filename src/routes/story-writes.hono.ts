@@ -58,4 +58,34 @@ export function registerStoryWriteRoutes(
     const result = await service.deleteStory(actor, c.req.param('id'));
     return respond(c, result);
   });
+
+  app.put('/v2/stories/:id/places', jsonBodyLimit, async (c) => {
+    const actor = actorOf(c);
+    const parsed = await parseJsonRequestBody(c);
+    if (!parsed.ok) {
+      return c.json({ error: parsed.error }, parsed.status);
+    }
+    const result = await service.replaceStoryPlaces(
+      actor,
+      c.req.param('id'),
+      parsed.body,
+      originFor(c)
+    );
+    return respond(c, result);
+  });
+
+  app.put('/v2/stories/:id/speakers', jsonBodyLimit, async (c) => {
+    const actor = actorOf(c);
+    const parsed = await parseJsonRequestBody(c);
+    if (!parsed.ok) {
+      return c.json({ error: parsed.error }, parsed.status);
+    }
+    const result = await service.replaceStorySpeakers(
+      actor,
+      c.req.param('id'),
+      parsed.body,
+      originFor(c)
+    );
+    return respond(c, result);
+  });
 }

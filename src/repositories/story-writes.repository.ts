@@ -365,54 +365,23 @@ export class StoryWritesRepository {
         .returning({ id: this.tables.stories.id });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const statements: any[] = [insertStory];
-
-      const placeEntries = input.placeIds.map((placeId, sortOrder) => ({
-        sortOrder,
-        targetId: placeId,
-      }));
-      for (const chunk of chunkArray(placeEntries, D1_EDGE_INSERT_CHUNK_SIZE)) {
-        const unionValues = sql.join(
-          chunk.map(
-            (entry) =>
-              sql`SELECT ${entry.sortOrder} AS sort_order, ${entry.targetId} AS place_id`
-          ),
-          sql` UNION ALL `
-        );
-        statements.push(
-          this.db.insert(this.tables.storyPlaces).select(sql`
-            SELECT NULL, s.community_id, s.id, p.id, NULL, v.sort_order, ${nowMs}, ${nowMs}
-            FROM (${unionValues}) AS v
-            JOIN stories s ON s.community_id = ${communityId} AND s.slug = ${slug} AND s.is_restricted = 0
-            LEFT JOIN places p ON p.community_id = s.community_id AND p.id = v.place_id AND p.is_restricted = 0
-          `)
-        );
-      }
-
-      const speakerEntries = input.speakerIds.map((speakerId, sortOrder) => ({
-        sortOrder,
-        targetId: speakerId,
-      }));
-      for (const chunk of chunkArray(
-        speakerEntries,
-        D1_EDGE_INSERT_CHUNK_SIZE
-      )) {
-        const unionValues = sql.join(
-          chunk.map(
-            (entry) =>
-              sql`SELECT ${entry.sortOrder} AS sort_order, ${entry.targetId} AS speaker_id`
-          ),
-          sql` UNION ALL `
-        );
-        statements.push(
-          this.db.insert(this.tables.storySpeakers).select(sql`
-            SELECT NULL, s.community_id, s.id, sp.id, NULL, v.sort_order, ${nowMs}, ${nowMs}
-            FROM (${unionValues}) AS v
-            JOIN stories s ON s.community_id = ${communityId} AND s.slug = ${slug} AND s.is_restricted = 0
-            LEFT JOIN speakers sp ON sp.community_id = s.community_id AND sp.id = v.speaker_id
-          `)
-        );
-      }
+      const statements: any[] = [
+        insertStory,
+        ...this.buildD1EdgeInsertStatements(
+          'places',
+          communityId,
+          { slug },
+          input.placeIds,
+          nowMs
+        ),
+        ...this.buildD1EdgeInsertStatements(
+          'speakers',
+          communityId,
+          { slug },
+          input.speakerIds,
+          nowMs
+        ),
+      ];
 
       if (input.visibility !== 'editors') {
         const auditAction = `story.visibility.${input.visibility}`;
@@ -1091,5 +1060,262 @@ export class StoryWritesRepository {
       buildDeleteAttachments(tx).run();
       return true;
     });
+  }
+
+  private buildD1EdgeInsertStatements(
+    edgeKind: 'places' | 'speakers',
+    communityId: number,
+    storyRef: { slug: string } | { storyId: number },
+    targetIds: ReadonlyArray<number>,
+    nowMs: number
+  ) {
+    if (targetIds.length === 0) {
+      return [];
+    }
+    const entries = targetIds.map((targetId, sortOrder) => ({
+      sortOrder,
+      targetId,
+    }));
+    const storyFilter =
+      'slug' in storyRef
+        ? sql`s.community_id = ${communityId} AND s.slug = ${storyRef.slug} AND s.is_restricted = 0 AND s.privacy_level IN ('public', 'members_only', 'editors')`
+        : sql`s.id = ${storyRef.storyId} AND s.community_id = ${communityId} AND s.is_restricted = 0 AND s.privacy_level IN ('public', 'members_only', 'editors')`;
+
+    return chunkArray(entries, D1_EDGE_INSERT_CHUNK_SIZE).map((chunk) => {
+      const unionValues = sql.join(
+        chunk.map(
+          (entry) =>
+            sql`SELECT ${entry.sortOrder} AS sort_order, ${entry.targetId} AS target_id`
+        ),
+        sql` UNION ALL `
+      );
+      if (edgeKind === 'places') {
+        return this.db.insert(this.tables.storyPlaces).select(sql`
+          SELECT NULL, s.community_id, s.id, p.id, NULL, v.sort_order, ${nowMs}, ${nowMs}
+          FROM (${unionValues}) AS v
+          JOIN stories s ON ${storyFilter}
+          LEFT JOIN places p ON p.community_id = s.community_id AND p.id = v.target_id AND p.is_restricted = 0
+        `);
+      }
+      return this.db.insert(this.tables.storySpeakers).select(sql`
+        SELECT NULL, s.community_id, s.id, sp.id, NULL, v.sort_order, ${nowMs}, ${nowMs}
+        FROM (${unionValues}) AS v
+        JOIN stories s ON ${storyFilter}
+        LEFT JOIN speakers sp ON sp.community_id = s.community_id AND sp.id = v.target_id
+      `);
+    });
+  }
+
+  private async replaceStoryEdges(
+    edgeKind: 'places' | 'speakers',
+    communityId: number,
+    storyId: number,
+    targetIds: ReadonlyArray<number>,
+    now: Date = new Date()
+  ): Promise<StoryUpdateOutcome> {
+    const readableScope = this.readableStoryScope(communityId, storyId);
+    const edgeTable =
+      edgeKind === 'places'
+        ? this.tables.storyPlaces
+        : this.tables.storySpeakers;
+    const targetColumnName = edgeKind === 'places' ? 'placeId' : 'speakerId';
+
+    if (this.hasD1Batch()) {
+      const nowMs = now.getTime();
+      const deleteExisting = this.db.delete(edgeTable).where(
+        and(
+          eq(edgeTable.communityId, communityId),
+          eq(edgeTable.storyId, storyId),
+          exists(
+            this.db
+              .select({ one: sql`1` })
+              .from(this.tables.stories)
+              .where(readableScope)
+          )
+        )
+      );
+      const insertStatements = this.buildD1EdgeInsertStatements(
+        edgeKind,
+        communityId,
+        { storyId },
+        targetIds,
+        nowMs
+      );
+      const touchStory = this.db
+        .update(this.tables.stories)
+        .set({ updatedAt: now })
+        .where(readableScope)
+        .returning({ id: this.tables.stories.id });
+
+      const results = await this.db.batch([
+        deleteExisting,
+        ...insertStatements,
+        touchStory,
+      ]);
+      const updatedRows = results[results.length - 1];
+      return Array.isArray(updatedRows) && updatedRows.length > 0
+        ? 'updated'
+        : 'not_found';
+    }
+
+    const buildEdgeRows = () =>
+      targetIds.map((targetId, sortOrder) => ({
+        communityId,
+        storyId,
+        [targetColumnName]: targetId,
+        sortOrder,
+        createdAt: now,
+        updatedAt: now,
+      }));
+
+    if (dialectOf(this.connection) === 'postgresql') {
+      return this.db.transaction(async (tx: typeof this.db) => {
+        const existingRows = await tx
+          .select({ id: this.tables.stories.id })
+          .from(this.tables.stories)
+          .where(readableScope)
+          .limit(1)
+          .for('update');
+        if (existingRows.length === 0) {
+          return 'not_found';
+        }
+
+        if (targetIds.length > 0) {
+          const found =
+            edgeKind === 'places'
+              ? await this.findExistingUnrestrictedPlaceIds(
+                  communityId,
+                  targetIds,
+                  tx
+                )
+              : await this.findExistingSpeakerIds(communityId, targetIds, tx);
+          if (targetIds.some((id) => !found.has(id))) {
+            return 'invalid_reference';
+          }
+        }
+
+        await tx
+          .delete(edgeTable)
+          .where(
+            and(
+              eq(edgeTable.communityId, communityId),
+              eq(edgeTable.storyId, storyId)
+            )
+          );
+
+        if (targetIds.length > 0) {
+          await tx.insert(edgeTable).values(buildEdgeRows());
+        }
+
+        await tx
+          .update(this.tables.stories)
+          .set({ updatedAt: now })
+          .where(readableScope);
+
+        return 'updated';
+      });
+    }
+
+    // better-sqlite3 transactions are synchronous
+    return this.db.transaction((tx: typeof this.db) => {
+      const existing = tx
+        .select({ id: this.tables.stories.id })
+        .from(this.tables.stories)
+        .where(readableScope)
+        .limit(1)
+        .get() as { id: number } | undefined;
+      if (!existing) {
+        return 'not_found';
+      }
+
+      if (targetIds.length > 0) {
+        const uniqueTargets = Array.from(new Set(targetIds));
+        const found = new Set<number>();
+        for (const chunk of chunkArray(
+          uniqueTargets,
+          D1_IN_CLAUSE_CHUNK_SIZE
+        )) {
+          const rows =
+            edgeKind === 'places'
+              ? (tx
+                  .select({ id: this.tables.places.id })
+                  .from(this.tables.places)
+                  .where(
+                    and(
+                      eq(this.tables.places.communityId, communityId),
+                      eq(this.tables.places.isRestricted, false),
+                      inArray(this.tables.places.id, chunk)
+                    )
+                  )
+                  .all() as Array<{ id: number }>)
+              : (tx
+                  .select({ id: this.tables.speakers.id })
+                  .from(this.tables.speakers)
+                  .where(
+                    and(
+                      eq(this.tables.speakers.communityId, communityId),
+                      inArray(this.tables.speakers.id, chunk)
+                    )
+                  )
+                  .all() as Array<{ id: number }>);
+          for (const row of rows) {
+            found.add(row.id);
+          }
+        }
+        if (uniqueTargets.some((id) => !found.has(id))) {
+          return 'invalid_reference';
+        }
+      }
+
+      tx.delete(edgeTable)
+        .where(
+          and(
+            eq(edgeTable.communityId, communityId),
+            eq(edgeTable.storyId, storyId)
+          )
+        )
+        .run();
+
+      if (targetIds.length > 0) {
+        tx.insert(edgeTable).values(buildEdgeRows()).run();
+      }
+
+      tx.update(this.tables.stories)
+        .set({ updatedAt: now })
+        .where(readableScope)
+        .run();
+
+      return 'updated';
+    });
+  }
+
+  replaceStoryPlaces(
+    communityId: number,
+    storyId: number,
+    placeIds: ReadonlyArray<number>,
+    now: Date = new Date()
+  ): Promise<StoryUpdateOutcome> {
+    return this.replaceStoryEdges(
+      'places',
+      communityId,
+      storyId,
+      placeIds,
+      now
+    );
+  }
+
+  replaceStorySpeakers(
+    communityId: number,
+    storyId: number,
+    speakerIds: ReadonlyArray<number>,
+    now: Date = new Date()
+  ): Promise<StoryUpdateOutcome> {
+    return this.replaceStoryEdges(
+      'speakers',
+      communityId,
+      storyId,
+      speakerIds,
+      now
+    );
   }
 }

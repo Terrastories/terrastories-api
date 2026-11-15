@@ -23,6 +23,8 @@ import {
 import {
   CreateStoryRequestSchema,
   PatchStoryRequestSchema,
+  PutStoryPlacesRequestSchema,
+  PutStorySpeakersRequestSchema,
   StoryWriteResponseSchema,
   type StoryWriteResponse,
 } from '../shared/schemas/story-writes.js';
@@ -419,5 +421,154 @@ export class StoryWritesService {
     } catch {
       return { status: 500, body: INTERNAL_ERROR_BODY };
     }
+  }
+
+  private async replaceStoryEdges(
+    edgeKind: 'places' | 'speakers',
+    actor: FoundationUser,
+    rawStoryId: string,
+    rawBody: unknown,
+    origin: string
+  ): Promise<CommunityWriteResult<StoryWriteResponse>> {
+    const caller = await authorizeCommunityWriteCaller(this.repository, actor, [
+      'editor',
+      'admin',
+    ]);
+    if (!caller) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    if (!isDatabaseIdString(rawStoryId)) {
+      return { status: 400, body: BAD_REQUEST_BODY };
+    }
+    const storyId = Number(rawStoryId);
+
+    const parsed =
+      edgeKind === 'places'
+        ? PutStoryPlacesRequestSchema.safeParse(rawBody)
+        : PutStorySpeakersRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
+      };
+    }
+
+    const targetIds =
+      edgeKind === 'places'
+        ? (parsed.data as { placeIds: number[] }).placeIds
+        : (parsed.data as { speakerIds: number[] }).speakerIds;
+    const fieldName = edgeKind === 'places' ? 'placeIds' : 'speakerIds';
+    const notFoundTargetMessage =
+      edgeKind === 'places'
+        ? 'One or more referenced places were not found in this community'
+        : 'One or more referenced speakers were not found in this community';
+
+    try {
+      // Verify story readability before probing target IDs so missing,
+      // foreign, or #162-restricted stories never leak target existence.
+      const existingStory = await this.repository.findReadableStory(
+        caller.communityId,
+        storyId
+      );
+      if (!existingStory) {
+        return { status: 404, body: NOT_FOUND_BODY };
+      }
+
+      if (targetIds.length > 0) {
+        const foundTargets =
+          edgeKind === 'places'
+            ? await this.repository.findExistingUnrestrictedPlaceIds(
+                caller.communityId,
+                targetIds
+              )
+            : await this.repository.findExistingSpeakerIds(
+                caller.communityId,
+                targetIds
+              );
+        if (targetIds.some((id) => !foundTargets.has(id))) {
+          return {
+            status: 400,
+            body: makeValidationErrorBody([
+              { path: fieldName, message: notFoundTargetMessage },
+            ]),
+          };
+        }
+      }
+
+      const outcome =
+        edgeKind === 'places'
+          ? await this.repository.replaceStoryPlaces(
+              caller.communityId,
+              storyId,
+              targetIds
+            )
+          : await this.repository.replaceStorySpeakers(
+              caller.communityId,
+              storyId,
+              targetIds
+            );
+
+      if (outcome === 'not_found') {
+        return { status: 404, body: NOT_FOUND_BODY };
+      }
+      if (outcome === 'invalid_reference') {
+        return {
+          status: 400,
+          body: makeValidationErrorBody([
+            { path: fieldName, message: notFoundTargetMessage },
+          ]),
+        };
+      }
+
+      const readBack = await this.readsService.getStoryById(
+        actor,
+        String(storyId),
+        origin
+      );
+      if (readBack.status !== 200) {
+        return readBack;
+      }
+
+      const checked = StoryWriteResponseSchema.safeParse(readBack.body);
+      if (!checked.success) {
+        return { status: 500, body: INTERNAL_ERROR_BODY };
+      }
+      return { status: 200, body: checked.data };
+    } catch (err) {
+      if (isForeignKeyConstraintError(err) || isNotNullConstraintError(err)) {
+        return {
+          status: 400,
+          body: makeValidationErrorBody([
+            { path: fieldName, message: notFoundTargetMessage },
+          ]),
+        };
+      }
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+  }
+
+  replaceStoryPlaces(
+    actor: FoundationUser,
+    rawStoryId: string,
+    rawBody: unknown,
+    origin: string
+  ): Promise<CommunityWriteResult<StoryWriteResponse>> {
+    return this.replaceStoryEdges('places', actor, rawStoryId, rawBody, origin);
+  }
+
+  replaceStorySpeakers(
+    actor: FoundationUser,
+    rawStoryId: string,
+    rawBody: unknown,
+    origin: string
+  ): Promise<CommunityWriteResult<StoryWriteResponse>> {
+    return this.replaceStoryEdges(
+      'speakers',
+      actor,
+      rawStoryId,
+      rawBody,
+      origin
+    );
   }
 }

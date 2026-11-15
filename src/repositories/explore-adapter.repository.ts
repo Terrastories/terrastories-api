@@ -63,6 +63,10 @@ export interface ExploreCommunityRow {
   name: string;
   description: string | null;
   slug: string;
+  locale: string;
+  country: string | null;
+  publicStories: boolean;
+  isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -80,6 +84,7 @@ export interface ExploreThemeRow {
 export interface ExplorePlaceRow {
   id: number;
   name: string;
+  typeOfPlace: string | null;
   description: string | null;
   region: string | null;
   latitude: number;
@@ -161,7 +166,7 @@ export class ExploreAdapterRepository {
    * once, before the row loop.
    */
   /** Active public community gate derived from the single-source state mapping. */
-  private publicCommunityGate() {
+  publicCommunityGate() {
     const { communities } = this.tables;
     const { publicStories, isActive } = communityToPhysical({
       visibility: 'public',
@@ -182,6 +187,10 @@ export class ExploreAdapterRepository {
         name: communities.name,
         description: communities.description,
         slug: communities.slug,
+        locale: communities.locale,
+        country: communities.country,
+        publicStories: communities.publicStories,
+        isActive: communities.isActive,
         createdAt: communities.createdAt,
         updatedAt: communities.updatedAt,
       })
@@ -206,6 +215,10 @@ export class ExploreAdapterRepository {
         name: communities.name,
         description: communities.description,
         slug: communities.slug,
+        locale: communities.locale,
+        country: communities.country,
+        publicStories: communities.publicStories,
+        isActive: communities.isActive,
         createdAt: communities.createdAt,
         updatedAt: communities.updatedAt,
       })
@@ -240,7 +253,7 @@ export class ExploreAdapterRepository {
   }
 
   /** Publicly readable stories of the community (Rails `anonymous` audience). */
-  private publicStoryGate(communityId: number) {
+  publicStoryGate(communityId: number) {
     const { stories } = this.tables;
     const { privacyLevel, isRestricted } = storyVisibilityToPhysical('public');
     return and(
@@ -271,10 +284,7 @@ export class ExploreAdapterRepository {
    * stories with at least one visible place edge and one visible speaker
    * edge, plus the caller's bounded filters.
    */
-  private storyRelationConditions(
-    communityId: number,
-    query?: ExploreStoryQuery
-  ) {
+  storyRelationConditions(communityId: number, query?: ExploreStoryQuery) {
     const { places, speakers, stories } = this.tables;
     const conditions = [
       this.publicStoryGate(communityId),
@@ -381,6 +391,7 @@ export class ExploreAdapterRepository {
     return {
       id: places.id,
       name: places.name,
+      typeOfPlace: places.typeOfPlace,
       description: places.description,
       region: places.region,
       latitude: places.latitude,
@@ -388,7 +399,7 @@ export class ExploreAdapterRepository {
     };
   }
 
-  private visiblePlaceConditions(communityId: number) {
+  visiblePlaceConditions(communityId: number) {
     const { places } = this.tables;
     return and(
       eq(places.communityId, communityId),

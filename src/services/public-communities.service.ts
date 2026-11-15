@@ -34,13 +34,22 @@ export type PublicCommunitiesResult<T> =
   | { status: 400 | 404; body: V2ErrorResponse };
 
 const NOT_FOUND_BODY: V2ErrorResponse = Object.freeze({ error: 'Not found' });
+// Compared after lowercasing and removing '-' and '_', so accessToken,
+// access-token and access_token all match. Includes signed-URL parameters.
 const CREDENTIAL_PARAM_NAMES = new Set([
-  'access_token',
+  'accesstoken',
   'token',
-  'api_key',
   'apikey',
   'key',
   'secret',
+  'sig',
+  'signature',
+  'keypairid',
+  'xamzsignature',
+  'xamzcredential',
+  'xamzsecuritytoken',
+  'xgoogsignature',
+  'xgoogcredential',
 ]);
 
 /**
@@ -62,8 +71,15 @@ export function sanitizePublicStyleUrl(styleUrl: string | null): string | null {
   if (parsed.username !== '' || parsed.password !== '') {
     return null;
   }
+  // A fragment can carry credentials (#access_token=...) and is never needed
+  // to fetch a style document, so any fragment withholds the URL.
+  if (parsed.hash !== '') {
+    return null;
+  }
   for (const paramName of parsed.searchParams.keys()) {
-    if (CREDENTIAL_PARAM_NAMES.has(paramName.toLowerCase())) {
+    if (
+      CREDENTIAL_PARAM_NAMES.has(paramName.toLowerCase().replace(/[-_]/g, ''))
+    ) {
       return null;
     }
   }

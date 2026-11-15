@@ -420,7 +420,9 @@ export class PublicCommunitiesRepository {
       } else if (row.role === 'sponsor_logo') {
         entry.sponsorLogos.push({
           fileId: row.fileId,
-          ordinal: row.ordinal ?? 0,
+          // The response schema requires ordinal >= 0 and the column has no CHECK;
+          // clamp so one bad row cannot turn the public list into a 500.
+          ordinal: Math.max(0, row.ordinal ?? 0),
         });
       }
     }

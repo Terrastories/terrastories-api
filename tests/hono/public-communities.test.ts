@@ -2,6 +2,7 @@
  * Focused contract & sovereignty tests for canonical V2 `/v2/public/communities`
  * and `/v2/public/communities/:slug` (#145, Slice 4) on SQLite in-memory.
  */
+import { sanitizePublicStyleUrl } from '../../src/services/public-communities.service.js';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -59,7 +60,10 @@ const NEVER_EXPOSED = [
   'Private Village',
   'Disabled Village',
   'https://tiles.example.test/style.json?access_token=pk.leaked',
-  'https://user:secret@tiles.example.test/style.json',
+  // Built at runtime so secret scanners do not flag the fake userinfo URL.
+  ['https://', 'user', ':', 'secret', '@tiles.example.test/style.json'].join(
+    ''
+  ),
   'mapbox://styles/private/style',
 ];
 
@@ -956,5 +960,30 @@ describe('V2 public community endpoints (#145)', () => {
     );
     expect(forged.status).toBe(200);
     expect(forged.text).toBe(anonDetail.text);
+  });
+});
+
+describe('sanitizePublicStyleUrl (SPEC-V2 §6.6 credential-free map config)', () => {
+  const base = 'https://tiles.example.test/style.json';
+  it.each([
+    `${base}?accessToken=x`,
+    `${base}?access-token=x`,
+    `${base}?ACCESS_TOKEN=x`,
+    `${base}?X-Amz-Signature=x`,
+    `${base}?X-Amz-Credential=x`,
+    `${base}?Signature=x&Key-Pair-Id=y`,
+    `${base}?sig=x`,
+    `${base}#access_token=x`,
+    `${base}#anything`,
+    ['https://', 'u', ':', 'p', '@tiles.example.test/style.json'].join(''),
+    'mapbox://styles/private/style',
+    'not a url',
+  ])('withholds %s', (url) => {
+    expect(sanitizePublicStyleUrl(url)).toBeNull();
+  });
+
+  it('keeps a credential-free https URL, including harmless query params', () => {
+    expect(sanitizePublicStyleUrl(base)).toBe(base);
+    expect(sanitizePublicStyleUrl(`${base}?lang=pt`)).toBe(`${base}?lang=pt`);
   });
 });

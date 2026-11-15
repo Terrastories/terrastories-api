@@ -14,7 +14,10 @@ import {
   type FoundationStorage,
   type PasswordVerifier,
 } from './services/hono-foundation.service.js';
-import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
+import {
+  MediaCleanupCoordinator,
+  WORKER_ORPHAN_SWEEP_LIMIT,
+} from './services/media-cleanup.service.js';
 import {
   validateWorkerV2Runtime,
   V2RuntimeConfigError,
@@ -243,7 +246,9 @@ export function createWorker(
     /**
      * Daily cron trigger: run the restart-safe orphan sweeper so bytes whose
      * `files` row is gone (failed storage delete, crash between commit and
-     * delete) are eventually removed.
+     * delete) are eventually removed. The per-run cap keeps the sweep inside
+     * the Workers Free subrequest budget, and a failure is logged content-free
+     * rather than swallowed.
      */
     scheduled: async (
       _controller: ScheduledController,
@@ -267,7 +272,14 @@ export function createWorker(
               now: () => new Date(_controller.scheduledTime || Date.now()),
             }
           );
-          await cleanup.sweepOrphanObjects();
+          try {
+            await cleanup.sweepOrphanObjects({
+              limit: WORKER_ORPHAN_SWEEP_LIMIT,
+            });
+          } catch {
+            // eslint-disable-next-line no-console -- workerd's only operator channel
+            console.warn('media cleanup: scheduled orphan sweep failed');
+          }
         })()
       );
     },

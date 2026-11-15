@@ -35,8 +35,10 @@ async function walkStorageDir(
     if (entry.isDirectory()) {
       await walkStorageDir(root, absolute, out);
     } else if (entry.isFile()) {
-      const key = path.relative(root, absolute).split(path.sep).join('/');
-      if (!key.startsWith('.')) out.push(key);
+      // Dot-prefixed names are listed on purpose: an interrupted upload leaves
+      // a `.tmp-*` file beside its target, and the orphan sweeper must still be
+      // able to see and remove those bytes.
+      out.push(path.relative(root, absolute).split(path.sep).join('/'));
     }
   }
 }

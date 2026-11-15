@@ -50,12 +50,17 @@ const server = serve({
 
 // Restart-safe orphan sweeper: run once at startup, then on an unref'd
 // interval so a long-lived Node server eventually removes bytes whose `files`
-// row is gone. Unref'd so it never holds the process open.
+// row is gone. Unref'd so it never holds the process open. A failed sweep is
+// reported content-free instead of being swallowed.
 const cleanup = new MediaCleanupCoordinator(db, storage);
-void cleanup.sweepOrphanObjects().catch(() => {});
-const sweepTimer = setInterval(() => {
-  void cleanup.sweepOrphanObjects().catch(() => {});
-}, ORPHAN_SWEEP_INTERVAL_MS);
+const sweepOrphanObjects = () => {
+  void cleanup.sweepOrphanObjects().catch(() => {
+    // eslint-disable-next-line no-console -- operator channel; content-free
+    console.warn('media cleanup: orphan sweep failed');
+  });
+};
+sweepOrphanObjects();
+const sweepTimer = setInterval(sweepOrphanObjects, ORPHAN_SWEEP_INTERVAL_MS);
 sweepTimer.unref();
 
 let shuttingDown = false;

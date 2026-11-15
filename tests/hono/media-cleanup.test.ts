@@ -188,4 +188,111 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     expect(store.has(freshKey)).toBe(true);
     expect(store.has(staleKey)).toBe(false);
   });
+
+  it('keeps an object referenced only through the legacy path column', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const [comm] = await db
+      .insert(tables.communities)
+      .values({
+        name: 'Legacy Path Comm',
+        slug: 'legacy-path-comm',
+        publicStories: true,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    const legacyKey = `communities/${comm!.id}/media/legacy`;
+    const legacyFileId = crypto.randomUUID();
+    await db.insert(tables.files).values({
+      id: legacyFileId,
+      filename: legacyFileId,
+      originalName: 'legacy.png',
+      // No storage_key: only the legacy path column points at the bytes.
+      path: legacyKey,
+      storageKey: null,
+      url: `/v2/media/${legacyFileId}`,
+      mimeType: 'image/png',
+      size: 3,
+      byteSize: 3,
+      checksum: null,
+      communityId: comm!.id,
+      uploadedBy: null,
+      culturalRestrictions: null,
+      isActive: true,
+      createdAt: OLD,
+      updatedAt: OLD,
+    });
+
+    const { store, storage } = createListableStorage();
+    store.set(legacyKey, { bytes: Uint8Array.from([1]), uploaded: OLD });
+    const cleanup = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: () => {},
+    });
+    const result = await cleanup.sweepOrphanObjects({
+      olderThan: new Date(OLD.getTime() + 1),
+    });
+    expect(result.deletedCount).toBe(0);
+    expect(store.has(legacyKey), 'legacy-path reference must be honoured').toBe(
+      true
+    );
+  });
+
+  it('keeps sweeping after a storage delete fails and logs content-free warnings', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { store, storage } = createListableStorage();
+    const staleA = 'communities/1/media/stale-a';
+    const staleB = 'communities/1/media/stale-b';
+    const uploaded = new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000);
+    store.set(staleA, { bytes: Uint8Array.from([1]), uploaded });
+    store.set(staleB, { bytes: Uint8Array.from([2]), uploaded });
+
+    const logs: string[] = [];
+    let failedOnce = false;
+    const flaky: typeof storage = {
+      ...storage,
+      async delete(key) {
+        if (!failedOnce) {
+          failedOnce = true;
+          throw new Error(`r2 delete failed for ${key}`);
+        }
+        store.delete(key);
+      },
+    };
+    const cleanup = new MediaCleanupCoordinator(db, flaky, {
+      now: () => now,
+      log: (line) => logs.push(line),
+    });
+    const result = await cleanup.sweepOrphanObjects();
+    expect(result.deletedCount).toBe(1);
+    expect(result.failedCount).toBe(1);
+    expect(store.has(staleB)).toBe(false);
+    expect(logs.length).toBeGreaterThan(0);
+    for (const line of logs) {
+      expect(line).not.toContain(staleA);
+      expect(line).not.toContain('r2 delete failed');
+    }
+  });
+
+  it('bounds a run by the per-run cap', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { store, storage } = createListableStorage();
+    const uploaded = new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000);
+    for (let i = 0; i < 5; i++) {
+      store.set(`communities/1/media/stale-${i}`, {
+        bytes: Uint8Array.from([i]),
+        uploaded,
+      });
+    }
+    const cleanup = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: () => {},
+    });
+    const result = await cleanup.sweepOrphanObjects({ limit: 2 });
+    expect(result.scanned).toBe(2);
+    expect(result.deletedCount).toBe(2);
+    expect(store.size).toBe(3);
+  });
 });

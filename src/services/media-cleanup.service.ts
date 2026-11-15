@@ -22,7 +22,7 @@
  * grace window.
  */
 
-import { and, eq, inArray, lte, notExists } from 'drizzle-orm';
+import { and, eq, inArray, lte, notExists, or } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -166,8 +166,18 @@ export async function lockFileRowsForCleanup(
 /** Named grace window: bytes are never swept before they are this old. */
 export const ORPHAN_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
 
-/** Named per-run bound so a sweep never enumerates an unbounded keyspace. */
+/**
+ * Named per-run bound so a sweep never enumerates an unbounded keyspace.
+ * Sized for a long-lived Node process; Workers pass WORKER_ORPHAN_SWEEP_LIMIT.
+ */
 export const ORPHAN_SWEEP_LIMIT = 500;
+
+/**
+ * Workers Free allows 50 subrequests per invocation. One swept object costs at
+ * most one reference SELECT plus one delete, and each prefix costs one list
+ * page, so 20 objects keep a whole scheduled run at <= 42 subrequests.
+ */
+export const WORKER_ORPHAN_SWEEP_LIMIT = 20;
 
 /** Storage prefixes that can hold community/system bytes. */
 export const ORPHAN_SWEEP_PREFIXES = ['communities/', 'users/'] as const;
@@ -380,6 +390,10 @@ export class MediaCleanupCoordinator {
    * bytes remain (storage delete failed, or the process died between commit and
    * delete). Only objects older than the grace window are considered; a
    * referenced object or a fresh in-flight upload is always kept.
+   *
+   * One bad object, page, or prefix never aborts the run: each is logged
+   * content-free and the sweep continues, so a single unreadable object cannot
+   * stop garbage collection for the rest of the keyspace.
    */
   async sweepOrphanObjects(
     opts: { olderThan?: Date; limit?: number } = {}
@@ -399,16 +413,33 @@ export class MediaCleanupCoordinator {
       let cursor: string | undefined;
       do {
         if (scanned >= limit) break;
-        const page = await this.storage.list({
-          prefix,
-          cursor,
-          limit: Math.min(200, limit - scanned),
-        });
+        let page;
+        try {
+          page = await this.storage.list({
+            prefix,
+            cursor,
+            limit: Math.min(200, limit - scanned),
+          });
+        } catch {
+          // Content-free: no key, no URL, no error text.
+          this.log('media cleanup: storage list failed; prefix skipped');
+          break;
+        }
         for (const entry of page.entries) {
           if (scanned >= limit) break;
           scanned++;
-          if (entry.uploaded.getTime() >= cutoff.getTime()) continue;
-          if (await this.isStorageKeyReferenced(entry.key)) continue;
+          try {
+            if (entry.uploaded.getTime() >= cutoff.getTime()) continue;
+            // One query covers both stored-key spellings.
+            if (await this.isStorageKeyReferenced(entry.key)) continue;
+          } catch {
+            // Content-free: an unreadable candidate is left for the next run.
+            failedCount++;
+            this.log(
+              'media cleanup: reference check failed; object left in place'
+            );
+            continue;
+          }
           const ok = await this.deleteStorageBestEffort(
             entry.key,
             'owner_deleted'
@@ -424,6 +455,11 @@ export class MediaCleanupCoordinator {
     return { deletedCount, failedCount, scanned };
   }
 
+  /**
+   * True when any `files` row still points at this stored object, under either
+   * the canonical `storage_key` or the legacy `path` spelling. One query, so a
+   * sweep spends a single subrequest per candidate.
+   */
   private async isStorageKeyReferenced(key: string): Promise<boolean> {
     const tables = tablesFor(this.connection);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -431,15 +467,9 @@ export class MediaCleanupCoordinator {
     const rows = await db
       .select({ id: tables.files.id })
       .from(tables.files)
-      .where(eq(tables.files.storageKey, key))
+      .where(or(eq(tables.files.storageKey, key), eq(tables.files.path, key)))
       .limit(1);
-    if (Array.isArray(rows) && rows.length > 0) return true;
-    const pathRows = await db
-      .select({ id: tables.files.id })
-      .from(tables.files)
-      .where(eq(tables.files.path, key))
-      .limit(1);
-    return Array.isArray(pathRows) && pathRows.length > 0;
+    return Array.isArray(rows) && rows.length > 0;
   }
 }
 

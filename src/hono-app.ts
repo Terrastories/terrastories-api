@@ -3,12 +3,15 @@ import { registerExploreAdapter } from './explore-adapter.js';
 import { ExploreAdapterRepository } from './repositories/explore-adapter.repository.js';
 import { CommunityReadsRepository } from './repositories/community-reads.repository.js';
 import { CommunityWritesRepository } from './repositories/community-writes.repository.js';
+import { MediaWritesRepository } from './repositories/media-writes.repository.js';
 import { PublicCommunitiesRepository } from './repositories/public-communities.repository.js';
 import { StoryWritesRepository } from './repositories/story-writes.repository.js';
 import { registerCommunityReadRoutes } from './routes/community-reads.hono.js';
 import { registerCommunityWriteRoutes } from './routes/community-writes.hono.js';
+import { registerMediaRoutes } from './routes/media-writes.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
+import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
@@ -35,6 +38,7 @@ export interface FoundationOptions {
   publicOrigin?: string;
   corsOrigins?: string[];
   now?: () => Date;
+  mediaCleanup?: MediaCleanupCoordinator;
 }
 const loginSchema = z
   .object({
@@ -197,31 +201,19 @@ export function createHonoApp(options: FoundationOptions) {
     readsRepository: communityReadsRepository,
     publicOrigin: configuredOrigin,
   });
+  const mediaCleanup =
+    options.mediaCleanup ??
+    new MediaCleanupCoordinator(options.repository.connection, options.storage);
   registerStoryWriteRoutes(app, {
     repository: new StoryWritesRepository(options.repository.connection),
     readsRepository: communityReadsRepository,
     publicOrigin: configuredOrigin,
   });
-  app.get('/v2/media/:id', async (c) => {
-    const id = z.string().uuid().safeParse(c.req.param('id'));
-    if (!id.success) return c.json({ error: 'Not found' }, 404);
-    const file = await service.media(id.data, c.get('actor'));
-    if (!file) return c.json({ error: 'Not found' }, 404);
-    // Download disposition + sandbox prevents active branding formats executing.
-    return new Response(
-      file.bytes instanceof Uint8Array
-        ? new Uint8Array(file.bytes)
-        : file.bytes,
-      {
-        headers: {
-          'Content-Type': file.mimeType,
-          'Content-Disposition': 'attachment',
-          'Cache-Control': 'no-store',
-          'X-Content-Type-Options': 'nosniff',
-          'Content-Security-Policy': "default-src 'none'; sandbox",
-        },
-      }
-    );
+  registerMediaRoutes(app, {
+    repository: new MediaWritesRepository(options.repository.connection),
+    storage: options.storage,
+    cleanup: mediaCleanup,
+    publicOrigin: configuredOrigin,
   });
   // Transitional Explore read adapter (#198): Rails-shaped public reads for
   // the existing Explore client; removed once the V2 frontend is canonical.

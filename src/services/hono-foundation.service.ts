@@ -9,7 +9,7 @@ export interface PasswordVerifier {
 
 const invalidParts = new Set(['', '.', '..']);
 export const validStorageKey = (key: string) =>
-  /^communities\/[1-9][0-9]*\//.test(key) &&
+  /^(?:communities|users)\/[1-9][0-9]*\//.test(key) &&
   !key.includes('\\') &&
   !key.split('/').some((part) => invalidParts.has(part));
 
@@ -25,11 +25,21 @@ export interface StorageReadResult {
   size: number;
 }
 
+export interface StoragePutOptions {
+  contentType?: string;
+}
+
 export interface FoundationStorage {
   read(
     key: string,
     range?: StorageReadRange
   ): Promise<StorageReadResult | null>;
+  put?(
+    key: string,
+    body: Uint8Array | ReadableStream<Uint8Array>,
+    options?: StoragePutOptions
+  ): Promise<{ size: number }>;
+  delete?(key: string): Promise<void>;
 }
 
 import { sessionLifetime } from '../shared/session-policy.js';

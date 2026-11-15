@@ -1,8 +1,16 @@
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+import type {
+  D1Database,
+  R2Bucket,
+  R2MultipartUpload,
+  R2UploadedPart,
+} from '@cloudflare/workers-types';
 import { drizzle } from 'drizzle-orm/d1';
 import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
-import type { PasswordVerifier } from './services/hono-foundation.service.js';
+import {
+  validStorageKey,
+  type PasswordVerifier,
+} from './services/hono-foundation.service.js';
 import {
   validateWorkerV2Runtime,
   V2RuntimeConfigError,
@@ -106,6 +114,80 @@ export function createWorker(
             return { body: fixed.readable, size: object.size };
           }
           return { body: stream, size: object.size };
+        },
+        async put(key, body, options) {
+          if (!validStorageKey(key)) {
+            throw new Error('Invalid storage key');
+          }
+          const httpMetadata = options?.contentType
+            ? { contentType: options.contentType }
+            : undefined;
+          if (body instanceof Uint8Array) {
+            await env.MEDIA.put(key, body, { httpMetadata });
+            return { size: body.byteLength };
+          }
+          // R2 minimum part size for multipart uploads is 5 MiB; uploads <= 5 MiB
+          // complete with a single put, while larger streams use R2 multipart parts
+          // so isolate memory remains bounded well below Workers Free limits.
+          const PART_SIZE = 5 * 1024 * 1024;
+          const reader = body.getReader();
+          const buffer = new Uint8Array(PART_SIZE);
+          let buffered = 0;
+          let totalSize = 0;
+          let upload: R2MultipartUpload | null = null;
+          const uploadedParts: R2UploadedPart[] = [];
+          let partNumber = 1;
+          try {
+            const flushPart = async (length: number) => {
+              const slice = buffer.slice(0, length);
+              if (!upload) {
+                upload = await env.MEDIA.createMultipartUpload(key, {
+                  httpMetadata,
+                });
+              }
+              uploadedParts.push(await upload.uploadPart(partNumber++, slice));
+              buffered = 0;
+            };
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (!value || value.byteLength === 0) continue;
+              let offset = 0;
+              while (offset < value.byteLength) {
+                const space = PART_SIZE - buffered;
+                const copyLen = Math.min(space, value.byteLength - offset);
+                buffer.set(value.subarray(offset, offset + copyLen), buffered);
+                buffered += copyLen;
+                offset += copyLen;
+                totalSize += copyLen;
+                if (buffered === PART_SIZE) {
+                  await flushPart(PART_SIZE);
+                }
+              }
+            }
+            if (!upload) {
+              await env.MEDIA.put(key, buffer.slice(0, buffered), {
+                httpMetadata,
+              });
+            } else {
+              if (buffered > 0) {
+                await flushPart(buffered);
+              }
+              await (upload as R2MultipartUpload).complete(uploadedParts);
+            }
+            return { size: totalSize };
+          } catch (error) {
+            if (upload) {
+              await (upload as R2MultipartUpload).abort().catch(() => {});
+            }
+            throw error;
+          } finally {
+            reader.releaseLock();
+          }
+        },
+        async delete(key) {
+          if (!validStorageKey(key)) return;
+          await env.MEDIA.delete(key);
         },
       },
     });

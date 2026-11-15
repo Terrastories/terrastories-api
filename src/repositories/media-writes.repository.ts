@@ -17,6 +17,10 @@ import type {
   AttachmentRole,
 } from '../db/schema/attachments.js';
 import {
+  ATTACHMENT_ROLE_ALLOWED_CATEGORIES,
+  MEDIA_MIME_RULES,
+} from '../shared/schemas/media-v2.js';
+import {
   activeUnrestrictedFileCondition,
   ownCommunityViewerForRole,
   readablePlaceConditionForViewer,
@@ -100,6 +104,7 @@ export type AttachmentWriteOutcome =
     }
   | { status: 'forbidden' }
   | { status: 'not_found' }
+  | { status: 'type_mismatch' }
   | { status: 'invalid_set' };
 
 type AttachmentOwnerResolution =
@@ -1835,6 +1840,15 @@ export class MediaWritesRepository {
     return await (query as Promise<unknown[]>);
   }
 
+  private attachmentTypeMatches(
+    role: AttachmentRole,
+    mimeType: string
+  ): boolean {
+    const allowed = ATTACHMENT_ROLE_ALLOWED_CATEGORIES[role];
+    const rule = MEDIA_MIME_RULES[mimeType];
+    return rule !== undefined && allowed.includes(rule.category);
+  }
+
   async createAttachment(input: {
     actor: FoundationUser;
     fileId: string;
@@ -1868,6 +1882,9 @@ export class MediaWritesRepository {
         authority.communityId
       );
       if (!file) return { status: 'not_found' };
+      if (!this.attachmentTypeMatches(input.role, file.mimeType)) {
+        return { status: 'type_mismatch' };
+      }
 
       const maxRows = await this.db
         .select({
@@ -1946,6 +1963,9 @@ export class MediaWritesRepository {
           authority.communityId
         );
         if (!file) return { status: 'not_found' };
+        if (!this.attachmentTypeMatches(input.role, file.mimeType)) {
+          return { status: 'type_mismatch' };
+        }
         const maxRows = await tx
           .select({
             maxOrd: sql<number>`COALESCE(MAX(${this.tables.attachments.ordinal}), -1)`,
@@ -2015,6 +2035,9 @@ export class MediaWritesRepository {
       authority.communityId
     );
     if (!file) return { status: 'not_found' };
+    if (!this.attachmentTypeMatches(input.role, file.mimeType)) {
+      return { status: 'type_mismatch' };
+    }
 
     return this.db.transaction((tx: typeof this.db) => {
       const maxRows = tx

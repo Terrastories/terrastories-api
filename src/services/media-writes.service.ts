@@ -882,6 +882,14 @@ export class MediaWritesService {
       });
       return { status: 404, body: NOT_FOUND_BODY };
     }
+    if (outcome.status === 'type_mismatch') {
+      return {
+        status: 400,
+        body: makeValidationErrorBody([
+          { path: 'file', message: 'File type does not match attachment role' },
+        ]),
+      };
+    }
     if (outcome.status !== 'created') {
       return { status: 400, body: NOT_FOUND_BODY };
     }

@@ -977,6 +977,87 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
     }
   });
 
+  it('writes no attachment.delete success audit when the row is already gone at D1 batch time', async () => {
+    const { db: batchDb, sqlite: batchSqlite, batchCalls } = createD1BatchDb();
+    try {
+      migrate(batchDb, { migrationsFolder: './src/db/migrations' });
+      const batchTables = tablesFor(batchDb);
+      const now = new Date('2026-06-01T12:00:00.000Z');
+      const seeded = await seedD1MediaFixture(batchDb, now);
+      const fileId = crypto.randomUUID();
+      await batchDb.insert(batchTables.files).values({
+        id: fileId,
+        filename: fileId,
+        originalName: 'd1-race.png',
+        path: `communities/${seeded.communityId}/media/${fileId}`,
+        storageKey: `communities/${seeded.communityId}/media/${fileId}`,
+        url: `/v2/media/${fileId}`,
+        mimeType: 'image/png',
+        size: PNG_BYTES.byteLength,
+        byteSize: PNG_BYTES.byteLength,
+        checksum: null,
+        communityId: seeded.communityId,
+        uploadedBy: seeded.actorId,
+        culturalRestrictions: null,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const [attachment] = await batchDb
+        .insert(batchTables.attachments)
+        .values({
+          communityId: seeded.communityId,
+          fileId,
+          ownerType: 'story',
+          ownerId: seeded.storyId,
+          role: 'story_media',
+          ordinal: 0,
+          createdAt: now,
+        })
+        .returning();
+
+      // Simulate a concurrent DELETE that commits after this call has read the
+      // attachment but before its D1 batch runs: the conditional audit
+      // INSERT ... SELECT then matches no attachment row and the DELETE matches
+      // nothing, so the outcome is 404 and no success audit is written.
+      batchDb.batch = async (stmts) => {
+        const queries = stmts.map((s) => s.toSQL());
+        batchCalls.push(queries);
+        return batchSqlite.transaction(() => {
+          batchSqlite
+            .prepare('DELETE FROM attachments WHERE id = ?')
+            .run(attachment!.id);
+          batchSqlite.prepare('DELETE FROM files WHERE id = ?').run(fileId);
+          return queries.map(({ sql, params }) => {
+            const stmt = batchSqlite.prepare(sql);
+            return stmt.reader ? stmt.all(...params) : stmt.run(...params);
+          });
+        })();
+      };
+
+      const repo = new MediaWritesRepository(batchDb as never);
+      const outcome = await repo.deleteAttachment(
+        {
+          id: seeded.actorId,
+          email: seeded.email,
+          role: 'editor',
+          communityId: seeded.communityId,
+          isActive: true,
+        },
+        attachment!.id,
+        now
+      );
+      expect(outcome.status).toBe('not_found');
+
+      // The conditional audit insert produced no row: the delete was a 404.
+      expect(
+        await batchDb.select().from(batchTables.auditEntries)
+      ).toHaveLength(0);
+    } finally {
+      batchSqlite.close();
+    }
+  });
+
   it('removes unreferenced files in the D1 delete batch for story, place, and speaker deletes', async () => {
     const { db: batchDb, sqlite: batchSqlite } = createD1BatchDb();
     try {

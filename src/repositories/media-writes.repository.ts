@@ -2443,26 +2443,48 @@ export class MediaWritesRepository {
     );
 
     if (this.hasD1Batch()) {
-      // Delete the attachment, record the success audit entry, and remove the
-      // now-unreferenced files row in one D1 batch. The files DELETE re-checks
-      // NOT EXISTS against attachments so a concurrent relation added before
-      // this batch commits keeps the row.
+      // Record the success audit entry only when the attachment row still
+      // exists, then delete it, then remove the now-unreferenced files row, all
+      // in one D1 batch. The audit is an INSERT ... SELECT ... WHERE the
+      // attachment row exists, placed BEFORE the DELETE, so a concurrent delete
+      // that already removed the row (this DELETE then matches nothing -> 404)
+      // writes no success audit. The files DELETE re-checks NOT EXISTS against
+      // attachments so a concurrent relation added before this batch commits
+      // keeps the row.
+      const insertAudit = this.db.insert(this.tables.auditEntries).select(
+        this.db
+          .select({
+            id: sql`NULL`.as('id'),
+            communityId:
+              attachment.communityId === null
+                ? sql`NULL`.as('community_id')
+                : this.tables.attachments.communityId,
+            actorId: sql`${audit.actorId}`.as('actor_id'),
+            action: sql`${audit.action}`.as('action'),
+            resourceType: sql`${audit.resourceType}`.as('resource_type'),
+            resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+              'resource_ids'
+            ),
+            outcome: sql`${audit.outcome}`.as('outcome'),
+            ipAddress: sql`NULL`.as('ip_address'),
+            userAgent: sql`NULL`.as('user_agent'),
+            createdAt: sql`${now.getTime()}`.as('created_at'),
+          })
+          .from(this.tables.attachments)
+          .where(scope)
+      );
       const deleteAttachment = this.db
         .delete(this.tables.attachments)
         .where(scope)
         .returning({ id: this.tables.attachments.id });
-      const insertAudit = this.db.insert(this.tables.auditEntries).values({
-        ...audit,
-        createdAt: now,
-      });
       const deleteFiles = buildUnreferencedFilesDelete(
         this.db,
         this.connection,
         [fileId]
       );
-      const [deletedRows, , ...fileResults] = await this.db.batch([
-        deleteAttachment,
+      const [, deletedRows, ...fileResults] = await this.db.batch([
         insertAudit,
+        deleteAttachment,
         ...deleteFiles,
       ]);
       if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
@@ -2484,15 +2506,10 @@ export class MediaWritesRepository {
 
     if (dialectOf(this.connection) === 'postgresql') {
       return this.db.transaction(async (tx: typeof this.db) => {
-        // Lock the files row before the guarded delete so an attach that is
-        // still uncommitted cannot have its relation cascaded away (see
-        // lockFileRowsForCleanup).
-        const lockedFileIds = await lockFileRowsForCleanup(
-          tx,
-          this.connection,
-          [fileId]
-        );
-        if (lockedFileIds.length === 0) return { status: 'not_found' };
+        // Delete the attachment row before taking any files lock: every PG
+        // delete path must order its locks attachments-then-files (the
+        // story/place/speaker deletes do the same). Locking the files row first
+        // here could deadlock against those paths under READ COMMITTED.
         const deleted = await tx
           .delete(this.tables.attachments)
           .where(scope)
@@ -2502,6 +2519,15 @@ export class MediaWritesRepository {
           ...audit,
           createdAt: now,
         });
+        // Now that the relation is gone, lock the files row so an attach that is
+        // still uncommitted cannot have its relation cascaded away (see
+        // lockFileRowsForCleanup). An empty set means the row is already gone, so
+        // there is nothing left to clean up.
+        const lockedFileIds = await lockFileRowsForCleanup(
+          tx,
+          this.connection,
+          [fileId]
+        );
         const removedRows = (
           await Promise.all(
             buildUnreferencedFilesDelete(tx, this.connection, lockedFileIds)

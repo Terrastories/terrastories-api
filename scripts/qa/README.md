@@ -224,12 +224,11 @@ SQLite fixture (`createFixture({ backend })` in `scripts/qa/hono-fixture.ts`),
 so no Node-only behaviour can hide a sovereignty leak from the hosted
 Workers Free profile.
 
-Passwords: bcrypt — the in-process fixture's verifier — is a Node native
-module and cannot run in workerd, and the hosted Workers auth method stays
-open (#194), so the Workers fixture pins a Workers-native verifier: real
-PBKDF2-SHA-256 through WebCrypto inside workerd (100 000 iterations), with
-`pbkdf2$…` encodings seeded from Node through the same algorithm — a full
-cryptographic check, not an equality stub. Route coverage uses the table the
+Passwords: client-stretched login (SPEC-V2 §7) — the journeys present the
+same stretched key the browser would compute, and no password KDF runs
+inside workerd. (Interim state during the Slice 10 auth rollout; the
+journey seeds and expectations migrate to the client-stretched protocol in
+this slice.) Route coverage uses the table the
 backend states (`backend.routes`): the served app lives inside workerd, so
 its `app.routes` cannot be read from Node, and the backend passes the shared
 `honoPersonaRouteTable()` table, which is derived from `createHonoApp` — the

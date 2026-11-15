@@ -14,7 +14,13 @@ import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { MAX_DATABASE_ID } from './shared/types/public.js';
+import {
+  AUTH_LOGIN_FAILURE_BODY,
+  DERIVED_KEY_PATTERN,
+  AuthLoginRejected,
+  clientIpOf,
+  sessionCookieMaxAge,
+} from './shared/auth-policy.js';
 import type {
   FoundationUser,
   HonoFoundationRepository,
@@ -23,7 +29,6 @@ import {
   HonoFoundationService,
   tokenDigest,
   type FoundationStorage,
-  type PasswordVerifier,
 } from './services/hono-foundation.service.js';
 import { HonoAuthRepository } from './repositories/hono-auth.repository.js';
 import { HonoAuthService } from './services/hono-auth.service.js';
@@ -32,7 +37,6 @@ export type RequestHandler = (request: Request) => Promise<Response>;
 export interface FoundationOptions {
   repository: HonoFoundationRepository;
   storage: FoundationStorage;
-  verifier: PasswordVerifier;
   /**
    * Prelogin HMAC key (`AUTH_SERVER_SECRET`). Without it `POST
    * /v2/auth/prelogin` fails closed with 503 instead of answering with a
@@ -52,9 +56,19 @@ const preloginSchema = z
   .strict();
 const loginSchema = z
   .object({
-    email: z.string().email().max(254),
-    password: z.string().min(1).max(128),
-    communityId: z.number().int().positive().max(MAX_DATABASE_ID).optional(),
+    identifier: z.string().min(1).max(254),
+    communitySlug: z.string().min(1).max(255).optional(),
+    derivedKey: z.string().regex(DERIVED_KEY_PATTERN),
+    upgrade: z
+      .object({
+        algorithm: z.string().min(1).max(64),
+        salt: z.string().min(1).max(128),
+        params: z.record(z.string(), z.unknown()),
+        derivedKey: z.string().regex(DERIVED_KEY_PATTERN),
+      })
+      .strict()
+      .optional(),
+    deviceSession: z.boolean().optional(),
   })
   .strict();
 const publicUser = (user: FoundationUser) => ({
@@ -70,11 +84,11 @@ export function createHonoApp(options: FoundationOptions) {
   const app = new Hono<{ Variables: { actor: FoundationUser } }>();
   const service = new HonoFoundationService(
     options.repository,
-    options.storage,
-    options.verifier
+    options.storage
   );
   const authService = new HonoAuthService(
     new HonoAuthRepository(options.repository.connection),
+    options.repository,
     options.serverSecret
   );
   const configuredOrigin =
@@ -186,17 +200,40 @@ export function createHonoApp(options: FoundationOptions) {
       }
       const parsed = loginSchema.safeParse(body);
       if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);
-      const { email, password, communityId } = parsed.data;
-      const result = await service.login(
-        email,
-        password,
-        communityId,
-        now(),
-        getCookie(c, 'ts_session')
-      );
-      if (!result) return c.json({ error: 'Invalid credentials' }, 401);
-      setCookie(c, 'ts_session', result.token, cookie);
-      return c.json({ user: publicUser(result.user) });
+      // Unconfigured secret is a server fault, not a credential failure: the
+      // body stays content-free and names no setting (SPEC-V2 §7).
+      if (!options.serverSecret)
+        return c.json({ error: 'Service unavailable' }, 503);
+      try {
+        const result = await authService.login(
+          {
+            ...parsed.data,
+            previousToken: getCookie(c, 'ts_session'),
+          },
+          clientIpOf(c.req.raw.headers),
+          now()
+        );
+        const maxAge = sessionCookieMaxAge(result.kind);
+        setCookie(
+          c,
+          'ts_session',
+          result.token,
+          maxAge === null
+            ? {
+                httpOnly: true,
+                secure: options.secureCookies ?? true,
+                sameSite: 'Strict',
+                path: '/',
+              }
+            : { ...cookie, maxAge }
+        );
+        return c.json({ user: publicUser(result.user) });
+      } catch (error) {
+        // Every rejected attempt answers one identical 401 body (§6.2, §7).
+        if (error instanceof AuthLoginRejected)
+          return c.json(AUTH_LOGIN_FAILURE_BODY, 401);
+        throw error;
+      }
     }
   );
   // Canonical V2 unauthenticated public routes must register before the

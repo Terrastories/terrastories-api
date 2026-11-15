@@ -161,7 +161,6 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     const app = createHonoApp({
       repository: new HonoFoundationRepository(db),
       storage: { read: async () => null },
-      verifier: { verify: async () => false },
       serverSecret: secret,
       secureCookies: false,
     });

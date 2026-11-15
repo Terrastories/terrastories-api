@@ -7,8 +7,11 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { hash } from 'bcrypt';
-import { nodePasswordVerifier } from '../../src/node-password.js';
+import {
+  argon2Seed,
+  makeDerivedKey,
+  makeServerSecret,
+} from './auth-test-utils.js';
 import { sql } from 'drizzle-orm';
 import { tablesFor } from '../../src/db/dialect.js';
 import { communityMediaSqlite } from '../../src/db/schema/sessions.js';
@@ -43,7 +46,7 @@ let originApp: ReturnType<typeof createHonoApp>;
 
 const ids: Record<string, number> = {};
 const fileIds: Record<string, string> = {};
-const PASSWORD = 'PublicCommunitiesTestPassword123!';
+const TEST_DERIVED_KEY = makeDerivedKey();
 
 const NEVER_EXPOSED = [
   'pk-secret-mapbox-token',
@@ -148,7 +151,7 @@ async function seed() {
   ids.priv = priv.id as number;
   ids.disabled = disabled.id as number;
 
-  const passwordHash = (await hash(PASSWORD, 4)).replace('$2b$', '$2a$');
+  const seed = await argon2Seed(TEST_DERIVED_KEY);
   const createUser = async (
     key: string,
     email: string,
@@ -159,7 +162,7 @@ async function seed() {
       email,
       username: key === 'super_admin' ? 'pub_super' : `pub_${key}`,
       ...deriveUserIdentityColumns({ email, username: `pub_${key}` }),
-      passwordHash,
+      ...seed,
       firstName: 'Pub',
       lastName: key,
       role: sql`${role}`,
@@ -587,7 +590,7 @@ async function loginCookie(email: string): Promise<string> {
     new Request('http://localhost/v2/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password: PASSWORD }),
+      body: JSON.stringify({ identifier: email, derivedKey: TEST_DERIVED_KEY }),
     })
   );
   expect(res.status).toBe(200);
@@ -604,9 +607,9 @@ beforeAll(async () => {
   await seed();
   const options = {
     repository: new HonoFoundationRepository(db),
-    verifier: nodePasswordVerifier,
     secureCookies: false,
     storage: { read: async () => null },
+    serverSecret: makeServerSecret(),
   };
   app = createHonoApp(options);
   originApp = createHonoApp({

@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   applyD1Migrations,
   bundleWorkerModule,
@@ -12,10 +12,23 @@ import {
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 it('serves the foundation through workerd D1/R2 without Node compatibility', async () => {
   // bundleWorkerModule fails the test when the bundle keeps any runtime import.
+  // AUTH_SERVER_SECRET and both persona stretched keys are runtime values.
+  const authSecret = randomBytes(24).toString('hex');
+  const viewerKey = randomBytes(32).toString('hex');
+  const pubAdminKey = randomBytes(32).toString('hex');
+  const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+  const personaSalt = randomBytes(16).toString('base64');
+  const personaParams = JSON.stringify({
+    memoryKiB: 19 * 1024,
+    iterations: 2,
+    parallelism: 1,
+  });
   const mf = startWorkerRuntime(
-    await bundleWorkerModule(`import worker, {createWorker} from './src/worker.js';
-      const verified=createWorker({async verify(p,h){return p==='ok' && h==='source-hash'}});
-      export default {fetch:(r,e)=>r.headers.has('x-test-verifier') ? verified.fetch(r,e) : worker.fetch(r,e)};`)
+    await bundleWorkerModule(
+      `import worker from './src/worker.js';
+       export default worker;`
+    ),
+    { ENVIRONMENT: 'test', AUTH_SERVER_SECRET: authSecret }
   );
   try {
     const db = await mf.getD1Database('DB');
@@ -33,9 +46,16 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
       db.prepare(
         "INSERT INTO communities(id,name,slug,created_at,updated_at) VALUES(1,'Own','own',0,0),(2,'Other','other',0,0)"
       ),
-      db.prepare(
-        "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,created_at,updated_at) VALUES(1,'viewer@example.org','source-hash','Test','Viewer','viewer',1,0,0)"
-      ),
+      db
+        .prepare(
+          "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,created_at,updated_at,password_algorithm,password_salt,password_params,password_verifier) VALUES(1,'viewer@example.org','source-hash','Test','Viewer','viewer',1,0,0,?,?,?,?)"
+        )
+        .bind(
+          'client-argon2id+sha256',
+          personaSalt,
+          personaParams,
+          sha256(viewerKey)
+        ),
       insertSession('initial'),
       ...[own, foreign].map((id, index) =>
         db
@@ -65,15 +85,18 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
     expect(await media.text()).toBe('bytes');
     expect((await request(`/v2/media/${foreign}`)).status).toBe(404);
     expect((await request(`/v2/media/${own}`, 'GET', false)).status).toBe(401);
-    const login = await mf.dispatchFetch('https://worker.test/v2/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: 'viewer@example.org',
-        password: 'password',
-      }),
-    });
-    expect(login.status).toBe(503);
+    const rejectedLogin = await mf.dispatchFetch(
+      'https://worker.test/v2/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          identifier: 'viewer@example.org',
+          derivedKey: randomBytes(32).toString('hex'),
+        }),
+      }
+    );
+    expect(rejectedLogin.status).toBe(401);
     expect((await request('/v2/auth/logout', 'POST')).status).toBe(204);
     expect((await request('/v2/auth/me')).status).toBe(401);
     await insertSession('replacement').run();
@@ -88,10 +111,12 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-test-verifier': 'yes',
-          cookie,
+          ...(cookie === '' ? {} : { cookie }),
         },
-        body: JSON.stringify({ email: 'viewer@example.org', password: 'ok' }),
+        body: JSON.stringify({
+          identifier: 'viewer@example.org',
+          derivedKey: viewerKey,
+        }),
       });
     const loggedIn = await verifyLogin();
     expect(loggedIn.status).toBe(200);
@@ -230,20 +255,23 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
     // Slice 7 real workerd D1 atomic audit & race-safe delete assertions (#145)
     await db
       .prepare(
-        "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,is_active,created_at,updated_at) VALUES(2,'pub-admin@example.org','source-hash','Pub','Admin','admin',3,1,0,0)"
+        "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,is_active,created_at,updated_at,password_algorithm,password_salt,password_params,password_verifier) VALUES(2,'pub-admin@example.org','source-hash','Pub','Admin','admin',3,1,0,0,?,?,?,?)"
+      )
+      .bind(
+        'client-argon2id+sha256',
+        personaSalt,
+        personaParams,
+        sha256(pubAdminKey)
       )
       .run();
     const pubAdminLogin = await mf.dispatchFetch(
       'https://worker.test/v2/auth/login',
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-test-verifier': 'yes',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: 'pub-admin@example.org',
-          password: 'ok',
+          identifier: 'pub-admin@example.org',
+          derivedKey: pubAdminKey,
         }),
       }
     );

@@ -2,7 +2,6 @@ import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
 import { drizzle } from 'drizzle-orm/d1';
 import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
-import type { PasswordVerifier } from './services/hono-foundation.service.js';
 import {
   validateWorkerV2Runtime,
   V2RuntimeConfigError,
@@ -27,14 +26,11 @@ export interface WorkerBindings {
   AUTH_SERVER_SECRET?: string;
 }
 
-/** Auth method remains injectable pending the Workers Free measurements (#194). */
-export function createWorker(
-  verifier: PasswordVerifier = {
-    async verify() {
-      throw new Error('Worker verifier not configured');
-    },
-  }
-) {
+/**
+ * The Workers entrypoint. Client-stretched authentication runs entirely in
+ * the app (SPEC-V2 §7), so there is no auth method to inject here.
+ */
+export function createWorker() {
   const apps = new WeakMap<WorkerBindings, ReturnType<typeof createHonoApp>>();
   // Throttle the one-line refusal log per isolate: module state persists for
   // the isolate's lifetime, which is at least as stable a key as the `env`
@@ -64,7 +60,6 @@ export function createWorker(
     });
     const app = createHonoApp({
       repository: new HonoFoundationRepository(drizzle(client)),
-      verifier,
       serverSecret: runtimeConfig.serverSecret,
       publicOrigin: runtimeConfig.publicOrigin,
       corsOrigins: runtimeConfig.corsOrigins,

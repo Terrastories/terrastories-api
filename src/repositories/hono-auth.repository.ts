@@ -12,6 +12,10 @@ import { and, eq, inArray, or, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
+import type {
+  FoundationUser,
+  HonoFoundationRepository,
+} from './hono-foundation.repository.js';
 import {
   AUTH_THROTTLE_BACKOFF_MAX_MS,
   AUTH_THROTTLE_KEY_ACCOUNT,
@@ -20,8 +24,11 @@ import {
   AUTH_THROTTLE_WINDOW_MS,
   ARGON2ID_ALGORITHM,
   authThrottleBackoffMs,
+  sessionLifetimesFor,
   type PasswordAlgorithm,
+  type SessionKind,
 } from '../shared/auth-policy.js';
+import { sha256Hex } from '../shared/auth-crypto.js';
 
 /** The account columns login, upgrade and password change need. */
 export interface AuthAccount {
@@ -30,6 +37,9 @@ export interface AuthAccount {
   role: string;
   isActive: boolean;
   communityIsActive: boolean | null;
+  email: string;
+  username: string | null;
+  displayName: string | null;
   passwordHash: string;
   passwordVerifier: string | null;
   passwordAlgorithm: string | null;
@@ -43,6 +53,9 @@ interface RawAuthAccount {
   role: string;
   isActive: number | boolean;
   communityIsActive: number | boolean | null;
+  email: string;
+  username: string | null;
+  displayName: string | null;
   passwordHash: string;
   passwordVerifier: string | null;
   passwordAlgorithm: string | null;
@@ -94,6 +107,9 @@ const AUTH_COLUMNS = (tables: ReturnType<typeof tablesFor>) => ({
   role: tables.users.role,
   isActive: tables.users.isActive,
   communityIsActive: tables.communities.isActive,
+  email: tables.users.email,
+  username: tables.users.username,
+  displayName: tables.users.displayName,
   passwordHash: tables.users.passwordHash,
   passwordVerifier: tables.users.passwordVerifier,
   passwordAlgorithm: tables.users.passwordAlgorithm,
@@ -296,8 +312,14 @@ export class HonoAuthRepository {
     return mixOf(rows);
   }
 
-  /** Atomic verifier write (upgrade / password change), authority-guarded. */
-  async writeVerifier(
+  /**
+   * Atomic verifier write (upgrade / password change), authority-guarded by
+   * the re-read `password_hash`: a rejected request leaves the row byte-
+   * identical and a concurrent reset wins the race. The
+   * `users_revoke_sessions` trigger revokes the account's other sessions as a
+   * consequence of the change (§6.8), so no extra delete is issued here.
+   */
+  async writeVerifierAtomically(
     account: Pick<AuthAccount, 'id' | 'passwordHash'>,
     verifier: VerifierWrite
   ): Promise<boolean> {
@@ -319,6 +341,57 @@ export class HonoAuthRepository {
       )
       .returning({ id: users.id });
     return updated.length > 0;
+  }
+
+  /**
+   * Complete a verified login: when the caller passes a `verifier`, store it
+   * first — the wrapped Rails-bcrypt upgrade saves verifier, salt, params and
+   * algorithm in one atomic write (SPEC-V2 §7 step 4). A plain Argon2id login
+   * passes `verifier: null` and writes nothing: the session write below is
+   * itself authority-gated (the INSERT…SELECT re-reads the account), so a
+   * no-op verifier re-write would only spend a D1 row write and risk
+   * flipping a NULL salt to `''`.
+   *
+   * The verifier write is authority-guarded by the re-read `password_hash`,
+   * so a concurrent reset makes it return `false` and no session is created.
+   * On success the `users_revoke_sessions` trigger has already revoked the
+   * account's other sessions, exactly as for a password change (§6.8).
+   *
+   * `previousToken`, when presented and well-formed, rotates the presented
+   * same-user session row in place; a presented cookie belonging to another
+   * user is revoked and this login gets a fresh row (#188).
+   */
+  async establishLogin(input: {
+    repository: HonoFoundationRepository;
+    account: AuthAccount;
+    user: FoundationUser;
+    verifier: VerifierWrite | null;
+    kind: SessionKind;
+    now: Date;
+    previousToken?: string | undefined;
+  }): Promise<{ token: string } | null> {
+    const { repository, account, user, verifier, kind, now } = input;
+    if (verifier !== null)
+      if (!(await this.writeVerifierAtomically(account, verifier))) return null;
+    const token = Array.from(
+      crypto.getRandomValues(new Uint8Array(32)),
+      (byte) => byte.toString(16).padStart(2, '0')
+    ).join('');
+    const lifetimes = sessionLifetimesFor(kind, now.getTime());
+    const previousHash =
+      input.previousToken === undefined
+        ? undefined
+        : await sha256Hex(input.previousToken);
+    const created = await repository.createSession({
+      tokenHash: await sha256Hex(token),
+      user,
+      kind,
+      createdAt: now,
+      idleExpiresAt: new Date(lifetimes.idleExpiresAt),
+      absoluteExpiresAt: new Date(lifetimes.absoluteExpiresAt),
+      previousHash,
+    });
+    return created ? { token } : null;
   }
 
   // -------------------------------------------------------------------------
@@ -437,10 +510,11 @@ export class HonoAuthRepository {
       });
       return;
     }
-    // better-sqlite3 (drizzle "sync" mode) exposes only synchronous transactions.
+    // better-sqlite3 (drizzle "sync" mode) exposes only synchronous
+    // transactions; the callback runs inline, nothing to await or call.
     db.transaction((tx: typeof db) => {
       for (const statement of statementsFor(tx)) statement.run();
-    })();
+    });
   }
 
   /** Current throttle state of one account or IP key. */

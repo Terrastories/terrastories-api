@@ -7,9 +7,12 @@ import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { eq, asc, and } from 'drizzle-orm';
-import { hash } from 'bcrypt';
-import { nodePasswordVerifier } from '../../src/node-password.js';
 import { tablesFor } from '../../src/db/dialect.js';
+import {
+  argon2Seed,
+  makeDerivedKey,
+  makeServerSecret,
+} from './auth-test-utils.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { CommunityReadsRepository } from '../../src/repositories/community-reads.repository.js';
@@ -35,7 +38,7 @@ const db = drizzle(sqlite);
 const tables = tablesFor(db);
 
 // Build test secret values at runtime so no static credential-shaped literals exist.
-const TEST_PASS = ['Slice7', 'WriteTest', '2026!'].join('-');
+const TEST_DERIVED_KEY = makeDerivedKey();
 const TOKEN_QUERY_KEY = ['access', 'token'].join('_');
 const TOKEN_QUERY_VAL = ['tok', 'example', '999'].join('.');
 const T0 = new Date('2026-06-01T12:00:00.000Z');
@@ -66,13 +69,22 @@ async function insertRow<T extends { $inferInsert: Record<string, unknown> }>(
 }
 
 async function loginAs(email: string, communityId?: number): Promise<string> {
+  let communitySlug: string | undefined;
+  if (communityId !== undefined) {
+    const [row] = await db
+      .select({ slug: tables.communities.slug })
+      .from(tables.communities)
+      .where(eq(tables.communities.id, communityId))
+      .limit(1);
+    communitySlug = row?.slug;
+  }
   const res = await app.request(`${API_ORIGIN}/v2/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      email,
-      password: TEST_PASS,
-      ...(communityId === undefined ? {} : { communityId }),
+      identifier: email,
+      derivedKey: TEST_DERIVED_KEY,
+      ...(communitySlug === undefined ? {} : { communitySlug }),
     }),
   });
   expect(res.status).toBe(200);
@@ -123,7 +135,7 @@ async function requestJson(
 
 beforeAll(async () => {
   migrate(db, { migrationsFolder: 'src/db/migrations' });
-  const passwordHash = await hash(TEST_PASS, 4);
+  const seed = await argon2Seed(TEST_DERIVED_KEY);
 
   ids.own = await insertRow(tables.communities, {
     name: 'Own Nation',
@@ -173,7 +185,7 @@ beforeAll(async () => {
       ...deriveUserIdentityColumns({ email, username }),
       firstName: role,
       lastName: 'Tester',
-      passwordHash,
+      ...seed,
       role,
       communityId,
       isActive: true,
@@ -264,11 +276,11 @@ beforeAll(async () => {
 
   app = createHonoApp({
     repository: new HonoFoundationRepository(db),
-    verifier: nodePasswordVerifier,
     secureCookies: false,
     publicOrigin: API_ORIGIN,
     corsOrigins: [CLIENT_ORIGIN],
     storage: { read: async () => null },
+    serverSecret: makeServerSecret(),
   });
 
   cookies.super = await loginAs('super@slice7.example.test');

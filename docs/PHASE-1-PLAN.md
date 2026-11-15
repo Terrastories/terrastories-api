@@ -67,10 +67,7 @@ refresh cadence quantizes the persisted idle deadline by up to 15 minutes.
 Opt-in 60-day device sessions remain a #137 follow-up. Login rotates the supplied identifier. Browser mutations require the configured public origin or explicit CORS allowlist.
 No password reset, key rotation, cleanup scheduler, rate-limit
 policy, or full identity resolver is claimed here; #137/#138 own those gates.
-Node Rails bcrypt verification is RETAIN for development behind `PasswordVerifier`; Workers
-verification awaits the auth design/#194. Current-policy upgrades remain #137.
-The Node verifier uses the existing native bcrypt dependency. Unsupported hash
-formats fail closed, including deferred Fastify Argon2id.
+The development-only Rails bcrypt verifier behind `PasswordVerifier` is retired: authentication is the §7 client-stretching protocol everywhere (#137, Slice 10) and Workers verification awaits #194 only for the remaining measurements. Current-policy upgrades remain #137.
 
 The only media case is active community branding through an explicit
 `community_media` relation. Same-community canonical roles may download it;

@@ -33,7 +33,7 @@ import { asc, eq, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
-import { nodePasswordVerifier } from '../../src/node-password.js';
+import { toHex } from '../../src/shared/auth-crypto.js';
 import { dialectOf, tablesFor } from '../../src/db/dialect.js';
 import {
   communityMediaPg,
@@ -276,11 +276,6 @@ export function routeTableOf(
 export function honoPersonaRouteTable(): Endpoint[] {
   const app = createHonoApp({
     repository: { connection: null } as unknown as HonoFoundationRepository,
-    verifier: {
-      async verify() {
-        return false;
-      },
-    },
     storage: {
       async read() {
         return null;
@@ -1413,8 +1408,8 @@ export async function createFixture(
     } else {
       const app = createHonoApp({
         repository: new HonoFoundationRepository(db),
-        verifier: nodePasswordVerifier,
         secureCookies: false,
+        serverSecret: toHex(crypto.getRandomValues(new Uint8Array(24))),
         storage: {
           read: async (key, range) => {
             const bytes = storage.get(key);

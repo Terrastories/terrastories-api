@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { asc, eq, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { serve } from '@hono/node-server';
-import { EventEmitter, once } from 'node:events';
+import { once } from 'node:events';
 import type { Database } from '../src/db/index.js';
 import { dialectOf, tablesFor } from '../src/db/dialect.js';
 import {
@@ -14,7 +14,11 @@ import {
 } from '../src/db/schema/sessions.js';
 import { HonoFoundationRepository } from '../src/repositories/hono-foundation.repository.js';
 import { createHonoApp } from '../src/hono-app.js';
-import { nodePasswordVerifier } from '../src/node-password.js';
+import {
+  ARGON2ID_ALGORITHM,
+  ARGON2ID_PARAMS_JSON,
+} from '../src/shared/auth-policy.js';
+import { sha256Hex, toHex } from '../src/shared/auth-crypto.js';
 import {
   sessionLifetime,
   sessionRenewalInterval,
@@ -45,9 +49,20 @@ export async function runHonoFoundationContract(
   const sessions =
     dialectOf(database) === 'postgresql' ? sessionsPg : sessionsSqlite;
   const tag = crypto.randomUUID();
+  const slugA = `hono-${tag}-a`;
+  const slugB = `hono-${tag}-b`;
   const password = 'Foundation-password-42!';
-  // bcrypt emits $2b$; Rails/Devise preserves the compatible $2a$ encoding.
+  // The legacy `password_hash` stays the Rails-era anchor the session write
+  // re-reads; client-stretched auth verifies against the seeded verifier
+  // instead (SPEC-V2 §7). Seed both so every seeded account can log in.
   const passwordHash = (await hash(password, 4)).replace('$2b$', '$2a$');
+  const stretchedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const wrongKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const stretchedVerifier = await sha256Hex(stretchedKey);
+  const stretchedSalt = Buffer.from(
+    crypto.getRandomValues(new Uint8Array(16))
+  ).toString('base64');
+  const serverSecret = toHex(crypto.getRandomValues(new Uint8Array(24)));
   const communityIds: number[] = [];
   const userIds: number[] = [];
   const fileIds: string[] = [];
@@ -56,8 +71,8 @@ export async function runHonoFoundationContract(
   const repository = new HonoFoundationRepository(database);
   const options = {
     repository,
-    verifier: nodePasswordVerifier,
     secureCookies: false,
+    serverSecret,
     now: () => instant,
     storage: {
       read: async (_key: string) => {
@@ -90,13 +105,17 @@ export async function runHonoFoundationContract(
   const bind = (communityId: number) =>
     db.update(media).set({ communityId }).where(eq(media.fileId, fileIds[0]));
   const login = async (
-    email: string,
-    communityId?: number,
+    identifier: string,
+    communitySlug?: string,
     previous?: string
   ) => {
     const response = await postLogin(
       app,
-      { email, password, communityId },
+      {
+        identifier,
+        derivedKey: stretchedKey,
+        ...(communitySlug === undefined ? {} : { communitySlug }),
+      },
       previous ? { cookie: previous } : {}
     );
     const body = await response.text();
@@ -129,12 +148,16 @@ export async function runHonoFoundationContract(
     }
     const [communityA, communityB] = communityIds;
     const viewerEmail = `viewer-${tag}@example.test`;
-    const credentials = { email: viewerEmail, password };
+    const credentials = { identifier: viewerEmail, derivedKey: stretchedKey };
     const adminEmail = `admin-${tag}@example.test`;
     const systemEmail = `system-${tag}@example.test`;
     const duplicateEmail = `duplicate-${tag}@example.test`;
     const userDefaults = {
       passwordHash,
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordSalt: stretchedSalt,
+      passwordParams: ARGON2ID_PARAMS_JSON,
+      passwordVerifier: stretchedVerifier,
       firstName: 'Hono',
       lastName: 'Contract',
     };
@@ -237,25 +260,43 @@ export async function runHonoFoundationContract(
     await status(postLogin(app, credentials, { Origin: foreignOrigin }), 403);
     await status(me(), 401);
     for (const payload of [
-      { email: viewerEmail, password: 'wrong' },
-      { email: `missing-${tag}@example.test`, password },
-      { email: duplicateEmail, password },
-      { email: viewerEmail, password, communityId: communityB },
-      { email: viewerEmail, password, communityId: 2147483647 },
+      { identifier: viewerEmail, derivedKey: wrongKey },
+      { identifier: `missing-${tag}@example.test`, derivedKey: stretchedKey },
+      { identifier: duplicateEmail, derivedKey: stretchedKey },
+      {
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
+        communitySlug: slugB,
+      },
+      {
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
+        communitySlug: 'no-such-community',
+      },
     ])
       await status(postLogin(app, payload), 401);
     for (const payload of [
       {},
-      { email: viewerEmail, password, communityId: '1junk' },
-      { email: viewerEmail, password: 1 },
-      ...[0, -1, 1.5, 2147483648, 3000000000, Number.MAX_SAFE_INTEGER].map(
-        (communityId) => ({ email: viewerEmail, password, communityId })
-      ),
+      { identifier: viewerEmail },
+      { identifier: viewerEmail, derivedKey: 1 },
+      { identifier: 'x'.repeat(255), derivedKey: stretchedKey },
+      { identifier: viewerEmail, derivedKey: 'g'.repeat(64) },
+      { identifier: viewerEmail, derivedKey: 'a'.repeat(63) },
+      {
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
+        communitySlug: 'slug'.repeat(80),
+      },
+      {
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
+        upgrade: { algorithm: ARGON2ID_ALGORITHM },
+      },
     ]) {
       await status(postLogin(app, payload), 400);
     }
     await status(postRaw(app, '{'), 400);
-    await login(duplicateEmail, communityA);
+    await login(duplicateEmail, slugA);
     const attackerCookie = `ts_session=${'a'.repeat(64)}`;
     const cookie = await login(viewerEmail, undefined, attackerCookie);
     assert.notEqual(cookie, attackerCookie, 'fixation rejected');
@@ -421,14 +462,18 @@ export async function runHonoFoundationContract(
     );
     await status(me(expired), 401, 'expired cookie stays revoked');
     await status(me(afterBoundary), 200);
-    await updateUser(viewerId, { passwordHash: 'malformed' });
+    await updateUser(viewerId, { passwordVerifier: 'malformed' });
     await status(
       postLogin(app, {
-        ...credentials,
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
       }),
       401
     );
-    await updateUser(viewerId, { passwordHash });
+    await updateUser(viewerId, { passwordVerifier: stretchedVerifier });
+    // #137: the client-stretched verifier — not the legacy password_hash —
+    // is the authentication factor. A tampered/malformed stored verifier
+    // fails closed with the uniform 401 (SPEC-V2 §7 "Verifier registry").
     const currentCookie = await login(viewerEmail);
     for (const dependency of ['readiness', 'session'] as const) {
       const unavailable = new HonoFoundationRepository(database);
@@ -440,67 +485,40 @@ export async function runHonoFoundationContract(
         'private detail'
       );
     }
-    const barrier = new EventEmitter();
-    const reached = once(barrier, 'entered');
-    const racing = createHonoApp({
-      ...options,
-      verifier: {
-        verify: async () => {
-          barrier.emit('entered');
-          await once(barrier, 'resume');
-          return true;
-        },
-      },
-    });
-    const pending = postLogin(racing, credentials);
-    await reached;
-    await updateUser(viewerId, { passwordHash: 'reset-during-verification' });
-    barrier.emit('resume');
-    const rejected = await pending;
-    assert.equal(rejected.status, 401, 'password reset wins verifier race');
-    assert.equal(rejected.headers.get('set-cookie'), null);
-    await updateUser(viewerId, { passwordHash });
+    // (#137) The pre-slice barrier parked the login request inside the
+    // credential check and reset the password mid-flight. Client-stretched
+    // logins re-read authority in createSession's INSERT…SELECT (and the
+    // wrapped-bcrypt upgrade in a password_hash-guarded UPDATE), so the
+    // reset-wins property is pinned by the stale-anchor repository tests in
+    // tests/hono/auth-login.test.ts and by the PostgreSQL concurrent-disable
+    // case below — not by a black-box timing barrier.
     // #188 round 3: a cross-user login that fails the authority gate must
     // leave the presenting user's session intact — the revoking delete is
     // coupled to the verified session write and never runs when the login
-    // itself loses the verifier race.
+    // itself loses the race. Deterministic form: the failing account is
+    // deactivated before the attempt, so its login is rejected and the
+    // presenting cookie still authenticates afterwards.
     const heldCookie = await login(viewerEmail);
-    const takeoverBarrier = new EventEmitter();
-    const takeoverReached = once(takeoverBarrier, 'entered');
-    const racingTakeover = createHonoApp({
-      ...options,
-      verifier: {
-        verify: async () => {
-          takeoverBarrier.emit('entered');
-          await once(takeoverBarrier, 'resume');
-          return true;
-        },
-      },
-    });
-    const pendingTakeover = postLogin(
-      racingTakeover,
-      { email: adminEmail, password },
-      { cookie: heldCookie }
-    );
-    await takeoverReached;
-    await updateUser(userIds[1], {
-      passwordHash: 'reset-during-verification',
-    });
-    takeoverBarrier.emit('resume');
-    const rejectedTakeover = await pendingTakeover;
-    assert.equal(
-      rejectedTakeover.status,
+    await updateUser(userIds[1], { isActive: false });
+    await status(
+      postLogin(
+        app,
+        { identifier: adminEmail, derivedKey: stretchedKey },
+        { cookie: heldCookie }
+      ),
       401,
-      'failed cross-user login must not authenticate'
+      'authority-denied cross-user login must not authenticate'
     );
-    assert.equal(rejectedTakeover.headers.get('set-cookie'), null);
-    await updateUser(userIds[1], { passwordHash });
+    await updateUser(userIds[1], { isActive: true });
     await status(
       me(heldCookie),
       200,
       'failed cross-user login keeps the presenting user session'
     );
     await status(action('logout', heldCookie), 204);
+    // Fault-injection sessions are cleared before the shared-browser count,
+    // mirroring the PostgreSQL lock-race block below.
+    await db.delete(sessions).where(eq(sessions.userId, viewerId));
     // Shared-browser login (#188 review): user B signing in while user A's
     // valid cookie is present must get B's own fresh session row. A's
     // presented session is revoked, never rotated onto B's login.
@@ -517,7 +535,7 @@ export async function runHonoFoundationContract(
     const viewerRow = viewerRows[0];
     const takeover = await postLogin(
       app,
-      { email: adminEmail, password },
+      { identifier: adminEmail, derivedKey: stretchedKey },
       { cookie: sharedBrowserA }
     );
     assert.equal(takeover.status, 200);
@@ -648,7 +666,13 @@ export async function runHonoFoundationContract(
       await updateUser(nullSuperId, change);
       await status(me(superSessionCookie), 401);
       if ('isActive' in change) {
-        await status(postLogin(app, { email: nullSuperEmail, password }), 401);
+        await status(
+          postLogin(app, {
+            identifier: nullSuperEmail,
+            derivedKey: stretchedKey,
+          }),
+          401
+        );
       }
       await updateUser(nullSuperId, restore);
       await status(
@@ -713,8 +737,17 @@ export async function runHonoFoundationContract(
     );
     assert.ok(adminId > 0);
 
-    await status(postLogin(app, { email: disabledViewerEmail, password }), 401);
-    await status(postLogin(app, { email: elderEmail, password }), 401);
+    await status(
+      postLogin(app, {
+        identifier: disabledViewerEmail,
+        derivedKey: stretchedKey,
+      }),
+      401
+    );
+    await status(
+      postLogin(app, { identifier: elderEmail, derivedKey: stretchedKey }),
+      401
+    );
 
     // Ambiguous email (SPEC-V2 §6.2): sharing an email with a disabled-community,
     // inactive, or legacy elder account must remain ambiguous (401 without
@@ -779,7 +812,10 @@ export async function runHonoFoundationContract(
           .returning();
         userIds.push(row.id);
       }
-      const noLocator = await postLogin(app, { email: sharedEmail, password });
+      const noLocator = await postLogin(app, {
+        identifier: sharedEmail,
+        derivedKey: stretchedKey,
+      });
       assert.equal(
         noLocator.status,
         401,
@@ -788,7 +824,7 @@ export async function runHonoFoundationContract(
       assert.deepEqual(await noLocator.json(), {
         error: 'Invalid credentials',
       });
-      const narrowedCookie = await login(sharedEmail, communityA);
+      const narrowedCookie = await login(sharedEmail, slugA);
       await status(me(narrowedCookie), 200);
       await status(action('logout', narrowedCookie), 204);
     }

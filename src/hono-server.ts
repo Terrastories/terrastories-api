@@ -1,6 +1,5 @@
 /** Opt-in Node coexistence listener; never imported by the Fastify entrypoint. */
 import { serve } from '@hono/node-server';
-import { nodePasswordVerifier } from './node-password.js';
 import { createLocalStorage } from './node-storage.js';
 import { getDb } from './db/index.js';
 import { createHonoApp } from './hono-app.js';
@@ -21,12 +20,6 @@ if (modeNotice) {
   console.warn(modeNotice);
 }
 const app = createHonoApp({
-  verifier: {
-    verify: (...args) =>
-      process.env.NODE_ENV === 'development'
-        ? nodePasswordVerifier.verify(...args)
-        : Promise.reject(new Error('Production verifier not configured')),
-  },
   repository: new HonoFoundationRepository(await getDb()),
   // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
   // production-like modes; prelogin fails closed when absent.

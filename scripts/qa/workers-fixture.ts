@@ -9,12 +9,11 @@
  * Node-only behaviour can hide a sovereignty leak from the hosted Workers
  * Free profile.
  *
- * Passwords: bcrypt — the in-process fixture's verifier — is a Node native
- * module and cannot run in workerd, and the hosted Workers auth method stays
- * open (#194). This fixture pins a Workers-native verifier: real PBKDF2
- * through WebCrypto inside workerd, with `pbkdf2$` encodings seeded from
- * Node through the same WebCrypto algorithm. It is a full cryptographic
- * check (a wrong password derives different bits), not an equality stub.
+ * Passwords: client-stretched login (SPEC-V2 §7) — the fixture computes the
+ * same stretched key the browser would and the journeys present it directly;
+ * no password KDF runs inside workerd. (Interim state during the Slice 10
+ * auth rollout: seeds and journeys migrate to the client-stretched protocol
+ * here as the login route lands.)
  */
 import { drizzle } from 'drizzle-orm/d1';
 import {
@@ -60,25 +59,16 @@ async function pbkdf2Encoded(password: string): Promise<string> {
 }
 
 /**
- * The worker gateway: injects the PBKDF2 verifier into `createWorker` and
- * adds no routes of its own, so every dispatched request is served by the
- * worker's own Hono app over the D1/R2 bindings. That app's route table
- * cannot be read from Node, so the backend below states
- * honoPersonaRouteTable() — derived from `createHonoApp`, which
- * `createWorker` composes — rather than the bundled worker's own table.
+ * The worker gateway: adds no routes of its own, so every dispatched request
+ * is served by the worker's own Hono app over the D1/R2 bindings. Client-
+ * stretched login runs inside that app (SPEC-V2 §7); there is no auth method
+ * to inject here. That app's route table cannot be read from Node, so the
+ * backend below states honoPersonaRouteTable() — derived from
+ * `createHonoApp`, which `createWorker` composes — rather than the bundled
+ * worker's own table.
  */
-export const WORKER_GATEWAY = `import { createWorker } from './src/worker.js';
-const decodeBase64 = (encoded) => Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
-const encodeBase64 = (bytes) => btoa(String.fromCharCode(...bytes));
-async function verify(password, encoded) {
-  const parts = String(encoded).split('$');
-  if (parts.length !== 5 || parts[0] !== 'pbkdf2' || parts[1] !== 'sha256' || !/^[1-9][0-9]*$/.test(parts[2]))
-    return false;
-  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: decodeBase64(parts[3]), iterations: Number(parts[2]) }, material, 256);
-  return encodeBase64(new Uint8Array(bits)) === parts[4];
-}
-export default { fetch: (request, env) => createWorker({ verify }).fetch(request, env) };
+export const WORKER_GATEWAY = `import worker from './src/worker.js';
+export default worker;
 `;
 
 export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {

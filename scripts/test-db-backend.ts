@@ -861,17 +861,23 @@ function verifySqliteTimestampModes(): Array<{
       columns.push({ table: getTableName(value), column: column.name });
     }
   }
-  // Eleven tables carry timestamps (the 10 pre-0006 tables with 24 columns
-  // plus audit_entries.created_at introduced in 0009 directly as timestamp_ms).
+  // Thirteen tables carry timestamps (the 10 pre-0006 tables with 24 columns,
+  // audit_entries.created_at introduced in 0009, and community_map_configs +
+  // external_media_links introduced in 0010 directly as timestamp_ms).
   assert.equal(
     columns.length,
-    25,
-    'the schema must expose 25 timestamp columns'
+    28,
+    'the schema must expose 28 timestamp columns'
   );
   return columns;
 }
 
-const post0006TimestampColumns = new Set(['audit_entries.created_at']);
+const post0006TimestampColumns = new Set([
+  'audit_entries.created_at',
+  'community_map_configs.created_at',
+  'community_map_configs.updated_at',
+  'external_media_links.created_at',
+]);
 
 /**
  * #192: 0006 must convert exactly the schema's timestamp_ms columns, every
@@ -2098,7 +2104,7 @@ interface Snapshot {
   tables: Record<string, SnapshotTable>;
 }
 
-/** Tables 0005/0007/0008/0009 rebuild by hand: they must match the Drizzle snapshot exactly. */
+/** Tables 0005/0007/0008/0009/0010 rebuild or add by hand: they must match the Drizzle snapshot exactly. */
 const rebuiltTables = [
   'places',
   'speakers',
@@ -2110,6 +2116,9 @@ const rebuiltTables = [
   'sessions',
   'files',
   'audit_entries',
+  'attachments',
+  'community_map_configs',
+  'external_media_links',
 ] as const;
 
 /**
@@ -2242,7 +2251,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0009_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0010_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2634,6 +2643,7 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0007_story_edge_multiplicity_and_speaker_fields.sql',
       '0008_slice1_content_columns.sql',
       '0009_users_identity_and_audit_entries.sql',
+      '0010_canonical_media_and_map_configs.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')

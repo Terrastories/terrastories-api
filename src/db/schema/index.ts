@@ -1,4 +1,6 @@
 export * from './communities.js';
+export * from './community_map_configs.js';
+export * from './external_media_links.js';
 export * from './files.js';
 export * from './places.js';
 export * from './speakers.js';

@@ -75,6 +75,12 @@ describe('Attachments Schema', () => {
     it('should export Attachment type', () => {
       const attachment: Attachment = {
         id: 1,
+        communityId: null,
+        fileId: null,
+        ownerType: null,
+        ownerId: null,
+        role: null,
+        ordinal: 0,
         attachableId: 1,
         attachableType: 'Story',
         url: 'https://example.com/image.jpg',

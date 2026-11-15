@@ -11,6 +11,7 @@ import type { PublicMapConfigRow } from './public-communities.repository.js';
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
 import {
   buildUnreferencedFilesDelete,
+  lockFileRowsForCleanup,
   toFileByteCleanups,
   type FileByteCleanup,
 } from '../services/media-cleanup.service.js';
@@ -734,10 +735,18 @@ export class CommunityWritesRepository {
             ownerType,
             ownerId
           );
+          // Lock the candidate rows before the guarded delete so an attach that
+          // is still uncommitted cannot have its relation cascaded away (see
+          // lockFileRowsForCleanup).
+          const lockedFileIds = await lockFileRowsForCleanup(
+            tx,
+            this.connection,
+            fileIds
+          );
           collectFiles(
             (
               await Promise.all(
-                buildUnreferencedFilesDelete(tx, this.connection, fileIds)
+                buildUnreferencedFilesDelete(tx, this.connection, lockedFileIds)
               )
             ).flat()
           );

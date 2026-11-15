@@ -119,6 +119,50 @@ export function toFileByteCleanups(
   }));
 }
 
+/** Maximum ids per lock/DELETE statement: keeps bound parameters bounded. */
+const FILE_ID_CHUNK = 80;
+
+/**
+ * Lock candidate `files` rows immediately before a guarded unreferenced-file
+ * delete (PostgreSQL only).
+ *
+ * The lock is `FOR UPDATE`, the only row-lock strength that conflicts with the
+ * `FOR KEY SHARE` an attachment insert takes on the referenced row. Without it a
+ * READ COMMITTED delete can run its `NOT EXISTS` check against a snapshot taken
+ * while such an insert is still uncommitted, then block on that insert's row
+ * lock and cascade the brand-new relation away once the insert commits. With the
+ * lock, the racing insert either commits first — and the delete, running as its
+ * own statement after the wait, then sees it and keeps the row — or waits until
+ * this transaction ends and fails its foreign-key check cleanly. Holding
+ * `FOR UPDATE` also means no relation can be added while the delete runs, so
+ * that statement cannot go stale again. D1 and SQLite serialize writers, so
+ * callers skip this there.
+ *
+ * Returns the subset of `fileIds` that exist and are now locked; ids whose row
+ * is already gone are dropped because no delete can match them.
+ */
+export async function lockFileRowsForCleanup(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  executor: any,
+  connection: Database | DrizzleD1Database,
+  fileIds: ReadonlyArray<string>
+): Promise<string[]> {
+  const tables = tablesFor(connection);
+  const unique = Array.from(new Set(fileIds)).filter(Boolean);
+  if (unique.length === 0) return [];
+  const locked = new Set<string>();
+  for (let i = 0; i < unique.length; i += FILE_ID_CHUNK) {
+    const chunk = unique.slice(i, i + FILE_ID_CHUNK);
+    const rows = (await executor
+      .select({ id: tables.files.id })
+      .from(tables.files)
+      .where(inArray(tables.files.id, chunk))
+      .for('update')) as Array<{ id: string }>;
+    for (const row of rows) locked.add(row.id);
+  }
+  return unique.filter((id) => locked.has(id));
+}
+
 /** Named grace window: bytes are never swept before they are this old. */
 export const ORPHAN_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
 

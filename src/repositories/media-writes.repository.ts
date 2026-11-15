@@ -31,6 +31,7 @@ import { readRuleOutcome, type ReadRuleViewer } from '../policy/read-rules.js';
 import { communityFromPhysical } from '../policy/canonical-state.js';
 import {
   buildUnreferencedFilesDelete,
+  lockFileRowsForCleanup,
   toFileByteCleanups,
   type FileByteCleanup,
 } from '../services/media-cleanup.service.js';
@@ -1973,6 +1974,18 @@ export class MediaWritesRepository {
         if (!this.attachmentTypeMatches(input.role, file.mimeType)) {
           return { status: 'type_mismatch' };
         }
+        // Serialize against an in-flight unreferenced-file delete: that path
+        // takes FOR UPDATE on the row before its guarded delete, which
+        // conflicts with the FOR KEY SHARE taken here (and by the foreign-key
+        // check on the insert below). Whichever transaction gets the row first
+        // wins: a delete that commits first makes this attach fail closed with
+        // 404 instead of inserting a relation that would be cascaded away.
+        const lockedFiles = await tx
+          .select({ id: this.tables.files.id })
+          .from(this.tables.files)
+          .where(eq(this.tables.files.id, input.fileId))
+          .for('key share');
+        if (lockedFiles.length === 0) return { status: 'not_found' };
         const maxRows = await tx
           .select({
             maxOrd: sql<number>`COALESCE(MAX(${this.tables.attachments.ordinal}), -1)`,
@@ -2471,6 +2484,15 @@ export class MediaWritesRepository {
 
     if (dialectOf(this.connection) === 'postgresql') {
       return this.db.transaction(async (tx: typeof this.db) => {
+        // Lock the files row before the guarded delete so an attach that is
+        // still uncommitted cannot have its relation cascaded away (see
+        // lockFileRowsForCleanup).
+        const lockedFileIds = await lockFileRowsForCleanup(
+          tx,
+          this.connection,
+          [fileId]
+        );
+        if (lockedFileIds.length === 0) return { status: 'not_found' };
         const deleted = await tx
           .delete(this.tables.attachments)
           .where(scope)
@@ -2482,7 +2504,7 @@ export class MediaWritesRepository {
         });
         const removedRows = (
           await Promise.all(
-            buildUnreferencedFilesDelete(tx, this.connection, [fileId])
+            buildUnreferencedFilesDelete(tx, this.connection, lockedFileIds)
           )
         ).flat() as Array<{
           id: string;

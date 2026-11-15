@@ -54,6 +54,9 @@ export async function runHonoFoundationContract(
   let instant = new Date('2026-11-11T12:00:00Z');
   let reads = 0;
   const repository = new HonoFoundationRepository(database);
+  // Content-free record of every storage delete the media cleanup performs, so
+  // the inline-delete race below can assert that live bytes survive.
+  const deletedStorageKeys: string[] = [];
   const options = {
     repository,
     verifier: nodePasswordVerifier,
@@ -64,6 +67,9 @@ export async function runHonoFoundationContract(
         reads++;
         const body = new Uint8Array([1, 2, 3]);
         return { body, size: body.byteLength };
+      },
+      delete: async (key: string) => {
+        deletedStorageKeys.push(key);
       },
     },
   };
@@ -1179,6 +1185,177 @@ export async function runHonoFoundationContract(
         (await pendingStoryCreate).status,
         400,
         'POST /v2/stories waiting behind FOR SHARE on a newly restricted place must reject with 400'
+      );
+
+      // PostgreSQL inline unreferenced-file delete vs concurrent attach (#140):
+      // an attach that commits after the detach began must keep the files row
+      // and its bytes; the detach may never cascade the new relation away.
+      // The delete path takes FOR UPDATE on the candidate files row before
+      // its guarded DELETE, which conflicts with the FOR KEY SHARE the attach
+      // takes, so the two serialize.
+      const waitForLockWaiter = async (tx: any, waitMs = 3000) => {
+        const deadline = Date.now() + waitMs;
+        while (Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pid <> pg_backend_pid() and wait_event_type = 'Lock' limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) return;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      };
+      const [raceFile] = await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, fileIds[2]));
+      const raceFileKey = String(raceFile.storageKey ?? raceFile.path);
+      const [detachOwner] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'PG File Detach Place' })
+        .returning();
+      const [attachOwner] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'PG File Attach Place' })
+        .returning();
+      const [detachAttachment] = await db
+        .insert(tables.attachments)
+        .values({
+          communityId: communityA,
+          fileId: fileIds[2],
+          ownerType: 'place',
+          ownerId: detachOwner.id,
+          role: 'place_photo',
+          ordinal: 0,
+          createdAt: instant,
+        })
+        .returning();
+
+      let fileDetachDone = false;
+      let pendingFileDetach!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        // Session B: an attach that has inserted its relation but not
+        // committed, exactly as POST /v2/attachments leaves the row before
+        // COMMIT.
+        await tx.insert(tables.attachments).values({
+          communityId: communityA,
+          fileId: fileIds[2],
+          ownerType: 'place',
+          ownerId: attachOwner.id,
+          role: 'place_photo',
+          ordinal: 0,
+          createdAt: instant,
+        });
+        pendingFileDetach = send(
+          app,
+          `/v2/attachments/${detachAttachment.id}`,
+          {
+            method: 'DELETE',
+            headers: { cookie: slice7AdminCookie },
+          }
+        );
+        void pendingFileDetach.finally(() => {
+          fileDetachDone = true;
+        });
+        await waitForLockWaiter(tx);
+      });
+      assert.equal(
+        fileDetachDone,
+        false,
+        'DELETE /v2/attachments must still be waiting while the racing attach holds its row lock'
+      );
+      assert.equal(
+        (await pendingFileDetach).status,
+        204,
+        'DELETE /v2/attachments must complete once the racing attach commits'
+      );
+      assert.equal(
+        (
+          await db
+            .select({ id: tables.files.id })
+            .from(tables.files)
+            .where(eq(tables.files.id, fileIds[2]))
+        ).length,
+        1,
+        'the files row must survive because the racing attach committed first'
+      );
+      const survivingAttachments = await db
+        .select()
+        .from(tables.attachments)
+        .where(eq(tables.attachments.fileId, fileIds[2]));
+      assert.equal(
+        survivingAttachments.length,
+        1,
+        'exactly the racing attach may remain; the detach may not cascade it'
+      );
+      assert.equal(survivingAttachments[0].ownerId, attachOwner.id);
+      assert.ok(
+        !deletedStorageKeys.includes(raceFileKey),
+        'the bytes of a still-referenced file must never be deleted'
+      );
+
+      // Mirror order: an uncommitted file delete must make POST
+      // /v2/attachments fail closed instead of inserting a relation that the
+      // delete then cascades away.
+      const vanishFileId = crypto.randomUUID();
+      await db.insert(tables.files).values({
+        id: vanishFileId,
+        filename: 'vanish.png',
+        originalName: 'vanish.png',
+        path: `communities/${communityA}/${vanishFileId}`,
+        url: `https://ignored.invalid/${vanishFileId}`,
+        mimeType: 'image/png',
+        size: 3,
+        communityId: communityA,
+        uploadedBy: null,
+        createdAt: instant,
+        updatedAt: instant,
+      });
+      fileIds.push(vanishFileId);
+      const [attachOwnerAlone] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'PG File Vanish Place' })
+        .returning();
+      let attachDone = false;
+      let pendingAttach!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx.delete(tables.files).where(eq(tables.files.id, vanishFileId));
+        pendingAttach = send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify({
+            fileId: vanishFileId,
+            ownerType: 'place',
+            ownerId: attachOwnerAlone.id,
+            role: 'place_photo',
+          }),
+        });
+        void pendingAttach.finally(() => {
+          attachDone = true;
+        });
+        await waitForLockWaiter(tx);
+      });
+      assert.equal(
+        attachDone,
+        false,
+        'POST /v2/attachments must still be waiting behind the uncommitted file delete'
+      );
+      assert.equal(
+        (await pendingAttach).status,
+        404,
+        'POST /v2/attachments must fail closed with 404 once the file row is gone'
+      );
+      assert.equal(
+        (
+          await db
+            .select()
+            .from(tables.attachments)
+            .where(eq(tables.attachments.fileId, vanishFileId))
+        ).length,
+        0,
+        'a 404 attach must leave no relation behind'
       );
     }
   } finally {

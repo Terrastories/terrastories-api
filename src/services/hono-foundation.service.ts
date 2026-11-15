@@ -18,7 +18,7 @@ export interface FoundationStorage {
 }
 
 import { sessionLifetime } from '../shared/session-policy.js';
-const roles = new Set(['viewer', 'member', 'editor', 'admin', 'super_admin']);
+import { parseV2Role } from '../shared/authorization/sovereignty-policy.js';
 
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -49,7 +49,7 @@ export class HonoFoundationService {
     const user = candidates.length === 1 ? candidates[0] : undefined;
     const hash = user?.passwordHash ?? '';
     const valid = await this.verifier.verify(password, hash);
-    if (!valid || !user || !roles.has(user.role)) return null;
+    if (!valid || !user || !parseV2Role(user.role)) return null;
     const token = hex(crypto.getRandomValues(new Uint8Array(32)));
     const created = await this.repository.createSession(
       await tokenDigest(token),
@@ -69,11 +69,11 @@ export class HonoFoundationService {
   ): Promise<FoundationUser | null> {
     if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
     const user = await this.repository.session(await tokenDigest(token), now);
-    return user && roles.has(user.role) ? user : null;
+    return user && parseV2Role(user.role) ? user : null;
   }
 
   async media(id: string, user: FoundationUser) {
-    if (user.role === 'super_admin') return null;
+    if (user.role === 'super_admin' || user.communityId === null) return null;
     const file = await this.repository.brandingFile(id, user.communityId);
     if (!file) return null;
     if (

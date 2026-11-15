@@ -38,6 +38,8 @@ const loginSchema = z
 const publicUser = (user: FoundationUser) => ({
   id: user.id,
   email: user.email,
+  username: user.username,
+  displayName: user.displayName,
   role: user.role,
   communityId: user.communityId,
 });

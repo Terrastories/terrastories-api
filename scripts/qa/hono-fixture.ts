@@ -53,7 +53,7 @@ import type { Endpoint, Handler, Journey, Step } from './runner.js';
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
 
 /** The public projection /v2/auth/me and login may ever return. */
-const publicUserKeys = 'communityId,email,id,role';
+const publicUserKeys = 'communityId,displayName,email,id,role,username';
 
 /** Wrong password and unknown user must answer the same body. */
 const invalidCredentials = (body: unknown): boolean =>
@@ -79,7 +79,12 @@ const leaksSecret = (body: unknown, cookieValue: () => string): boolean => {
 };
 
 const ownUser =
-  (email: string, role: Role, cookieValue: () => string) =>
+  (
+    email: string,
+    role: Role,
+    cookieValue: () => string,
+    expectedCommunityId?: number | null
+  ) =>
   (body: unknown): boolean => {
     const user = (body as { user?: Record<string, unknown> }).user;
     return (
@@ -88,6 +93,10 @@ const ownUser =
       user.email === email &&
       user.role === role &&
       typeof user.id === 'number' &&
+      (user.username === null || typeof user.username === 'string') &&
+      (user.displayName === null || typeof user.displayName === 'string') &&
+      (expectedCommunityId === undefined ||
+        user.communityId === expectedCommunityId) &&
       !leaksSecret(body, cookieValue)
     );
   };
@@ -326,24 +335,47 @@ export async function createFixture(
       super_admin: { email: 'qa-hono-super@example.test', password },
     };
     // The schema enum predates the V2 member role; the raw binding stores it.
+    // Canonical V2 super_admin carries null communityId (§6.2).
     let creatorId = 0;
     for (const role of Object.keys(credentials) as Role[]) {
+      const username = role === 'super_admin' ? 'qa_hono_super' : null;
+      const displayName = role === 'super_admin' ? 'QA Super Admin' : 'QA Hono';
       const [user] = await db
         .insert(users)
         .values({
           email: credentials[role].email,
-          ...deriveUserIdentityColumns({ email: credentials[role].email }),
+          username,
+          displayName,
+          ...deriveUserIdentityColumns({
+            email: credentials[role].email,
+            username,
+          }),
           passwordHash,
           firstName: 'QA',
           lastName: 'Hono',
           role: sql`${role}`,
-          communityId:
-            role === 'super_admin' ? fixtures.systemCommunity.id : communityId,
+          communityId: role === 'super_admin' ? null : communityId,
           isActive: true,
         })
         .returning();
       if (role === 'admin') creatorId = user.id;
     }
+    // Legacy V1 elder role in the active community: V2 boundary must reject
+    // login with the same uniform 401 failure (SPEC-V2 §6.2).
+    const elderCredentials = {
+      email: 'qa-hono-elder@example.test',
+      password,
+    };
+    await db.insert(users).values({
+      email: elderCredentials.email,
+      ...deriveUserIdentityColumns({ email: elderCredentials.email }),
+      passwordHash,
+      firstName: 'QA',
+      lastName: 'Elder',
+      role: sql`${'elder'}`,
+      communityId,
+      isActive: true,
+    });
     // A viewer of the foreign public community: proves the foreign media
     // fixture is servable to its own community on /v2/media, so the 404 for
     // community personas is attributable to community scoping.
@@ -525,6 +557,79 @@ export async function createFixture(
     // Unrestricted branding in the inactive community: /explore/media
     // withholds it through the isActive lifecycle gate alone.
     const inactiveFileId = await brandingFile(inactiveCommunity.id, null);
+    // Disabled community users (#137 Slice 3b / SPEC-V2 §6.2, §7): own-admin
+    // may authenticate and reach /v2/auth/me (sovereignty surface) while
+    // community-content/media reads still fail closed; viewer/member/editor
+    // are rejected 401.
+    const disabledAdminCredentials = {
+      email: 'qa-hono-disabled-admin@example.test',
+      password,
+    };
+    const disabledViewerCredentials = {
+      email: 'qa-hono-disabled-viewer@example.test',
+      password,
+    };
+    const disabledMemberCredentials = {
+      email: 'qa-hono-disabled-member@example.test',
+      password,
+    };
+    const disabledEditorCredentials = {
+      email: 'qa-hono-disabled-editor@example.test',
+      password,
+    };
+    await db.insert(users).values([
+      {
+        email: disabledAdminCredentials.email,
+        username: 'qa_hono_disabled_admin',
+        displayName: 'QA Disabled Admin',
+        ...deriveUserIdentityColumns({
+          email: disabledAdminCredentials.email,
+          username: 'qa_hono_disabled_admin',
+        }),
+        passwordHash,
+        firstName: 'QA',
+        lastName: 'DisabledAdmin',
+        role: 'admin',
+        communityId: inactiveCommunity.id,
+        isActive: true,
+      },
+      {
+        email: disabledViewerCredentials.email,
+        ...deriveUserIdentityColumns({
+          email: disabledViewerCredentials.email,
+        }),
+        passwordHash,
+        firstName: 'QA',
+        lastName: 'DisabledViewer',
+        role: 'viewer',
+        communityId: inactiveCommunity.id,
+        isActive: true,
+      },
+      {
+        email: disabledMemberCredentials.email,
+        ...deriveUserIdentityColumns({
+          email: disabledMemberCredentials.email,
+        }),
+        passwordHash,
+        firstName: 'QA',
+        lastName: 'DisabledMember',
+        role: 'member',
+        communityId: inactiveCommunity.id,
+        isActive: true,
+      },
+      {
+        email: disabledEditorCredentials.email,
+        ...deriveUserIdentityColumns({
+          email: disabledEditorCredentials.email,
+        }),
+        passwordHash,
+        firstName: 'QA',
+        lastName: 'DisabledEditor',
+        role: 'editor',
+        communityId: inactiveCommunity.id,
+        isActive: true,
+      },
+    ]);
     // #192: one more public ACTIVE community whose name carries composed
     // diacritics, exercising the Unicode-correct Explore name search on the
     // persona gates: SQLite/D1 lower() folds ASCII only, so only the
@@ -1740,6 +1845,38 @@ export async function createFixture(
             },
             check: invalidCredentials,
           },
+          {
+            name: 'reject disabled community viewer identically',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            body: disabledViewerCredentials,
+            check: invalidCredentials,
+          },
+          {
+            name: 'reject disabled community member identically',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            body: disabledMemberCredentials,
+            check: invalidCredentials,
+          },
+          {
+            name: 'reject disabled community editor identically',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            body: disabledEditorCredentials,
+            check: invalidCredentials,
+          },
+          {
+            name: 'reject legacy elder role identically',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            body: elderCredentials,
+            check: invalidCredentials,
+          },
         ],
       },
       ...(['viewer', 'member', 'editor', 'admin'] as const).map((role) => ({
@@ -1751,14 +1888,24 @@ export async function createFixture(
             path: '/v2/auth/login',
             expected: 200,
             body: credentials[role],
-            check: ownUser(credentials[role].email, role, liveSessionCookie),
+            check: ownUser(
+              credentials[role].email,
+              role,
+              liveSessionCookie,
+              communityId
+            ),
           },
           {
             name: 'read own profile without secrets',
             method: 'GET',
             path: '/v2/auth/me',
             expected: 200,
-            check: ownUser(credentials[role].email, role, liveSessionCookie),
+            check: ownUser(
+              credentials[role].email,
+              role,
+              liveSessionCookie,
+              communityId
+            ),
           },
           // #191 option A across the full claimed matrix: member — the
           // persona whose canonical role would grant the community audience —
@@ -1883,7 +2030,8 @@ export async function createFixture(
             check: ownUser(
               credentials.super_admin.email,
               'super_admin',
-              liveSessionCookie
+              liveSessionCookie,
+              null
             ),
           },
           {
@@ -1894,15 +2042,24 @@ export async function createFixture(
             check: ownUser(
               credentials.super_admin.email,
               'super_admin',
-              liveSessionCookie
+              liveSessionCookie,
+              null
             ),
           },
           // Explore with a session: super_admin sees the same anonymous
           // projection; privilege never widens the public surface.
           ...exploreWithSession,
           {
+            // Null-community super_admin cannot read any community branding
+            // asset via /v2/media/:id, even an active public community's file.
+            name: 'deny readable community branding media',
+            method: 'GET',
+            path: `/v2/media/${readableFileId}`,
+            expected: 404,
+          },
+          {
             // Cultural restrictions withhold this file even from the highest
-            // role, inside the super admin's OWN system community.
+            // role, inside the system community.
             name: 'reject restricted media of own community',
             method: 'GET',
             path: `/v2/media/${superAdminRestrictedFileId}`,
@@ -1923,6 +2080,71 @@ export async function createFixture(
         ],
       },
       {
+        // Own-community admin of a DISABLED community (#137 Slice 3b):
+        // permitted to authenticate and hold a session (/v2/auth/me) for the
+        // sovereignty surface, while all media/content routes stay denied.
+        persona: 'disabled_admin',
+        steps: [
+          {
+            name: 'login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: disabledAdminCredentials,
+            check: ownUser(
+              disabledAdminCredentials.email,
+              'admin',
+              liveSessionCookie,
+              inactiveCommunity.id
+            ),
+          },
+          {
+            name: 'read own profile without secrets',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: ownUser(
+              disabledAdminCredentials.email,
+              'admin',
+              liveSessionCookie,
+              inactiveCommunity.id
+            ),
+          },
+          {
+            name: 'deny own disabled community branding media',
+            method: 'GET',
+            path: `/v2/media/${inactiveFileId}`,
+            expected: 404,
+          },
+          {
+            name: 'deny active community branding media',
+            method: 'GET',
+            path: `/v2/media/${readableFileId}`,
+            expected: 404,
+          },
+          {
+            name: 'hide inactive community detail while authenticated',
+            method: 'GET',
+            path: `/explore/communities/${inactiveCommunity.slug}`,
+            expected: 404,
+          },
+          {
+            name: 'logout',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            saveCookieAs: 'disabled-admin-pre-logout',
+          },
+          {
+            name: 'reject replayed cookie after logout',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 401,
+            useSavedCookie: 'disabled-admin-pre-logout',
+          },
+        ],
+      },
+      {
         // Own-community reader of the foreign public community: positive
         // control proving the foreign media fixture is servable on /v2/media
         // to a user of its own community, so community personas' 404s above
@@ -1938,7 +2160,8 @@ export async function createFixture(
             check: ownUser(
               foreignViewerCredentials.email,
               'viewer',
-              liveSessionCookie
+              liveSessionCookie,
+              foreignCommunityId
             ),
           },
           {

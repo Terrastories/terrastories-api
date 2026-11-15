@@ -539,6 +539,325 @@ export async function runHonoFoundationContract(
       0,
       'previous user session row is deleted, not rotated onto the new user'
     );
+    await status(action('logout', sharedBrowserB), 204);
+
+    // Slice 3b (#137): null-community super_admin, disabled-community admin/viewer,
+    // legacy elder rejection, ambiguous-email ordering, revocation triggers, and
+    // PostgreSQL concurrent community-disable locking on both SQLite and PostgreSQL.
+    const [disabledCommunity] = await db
+      .insert(tables.communities)
+      .values({
+        name: 'Hono disabled',
+        slug: `hono-${tag}-disabled`,
+        isActive: false,
+      })
+      .returning();
+    communityIds.push(disabledCommunity.id);
+    const disabledFileId = crypto.randomUUID();
+    await db.insert(tables.files).values({
+      id: disabledFileId,
+      filename: 'disabled-branding.png',
+      originalName: 'disabled-branding.png',
+      path: `communities/${disabledCommunity.id}/${disabledFileId}`,
+      url: 'https://ignored.invalid/disabled',
+      mimeType: 'image/png',
+      size: 3,
+      communityId: disabledCommunity.id,
+      uploadedBy: viewerId,
+      createdAt: instant,
+      updatedAt: instant,
+    });
+    fileIds.push(disabledFileId);
+    await db.insert(media).values({
+      fileId: disabledFileId,
+      communityId: disabledCommunity.id,
+      kind: 'branding',
+    });
+
+    const nullSuperEmail = `null-super-${tag}@example.test`;
+    const disabledAdminEmail = `disabled-admin-${tag}@example.test`;
+    const disabledViewerEmail = `disabled-viewer-${tag}@example.test`;
+    const elderEmail = `elder-${tag}@example.test`;
+    const slice3bUsers: Record<string, number> = {};
+    for (const [email, username, displayName, role, communityId] of [
+      [nullSuperEmail, `super_${tag}`, 'Null Super', 'super_admin', null],
+      [
+        disabledAdminEmail,
+        `dadmin_${tag}`,
+        'Disabled Admin',
+        'admin',
+        disabledCommunity.id,
+      ],
+      [disabledViewerEmail, null, null, 'viewer', disabledCommunity.id],
+      [elderEmail, null, null, 'elder', communityA],
+    ] as const) {
+      const [row] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email,
+          username,
+          displayName,
+          role,
+          communityId,
+        })
+        .returning();
+      userIds.push(row.id);
+      slice3bUsers[email] = row.id;
+    }
+    const nullSuperId = slice3bUsers[nullSuperEmail];
+    const adminId = userIds[1];
+
+    const nullSuperCookie = await login(nullSuperEmail);
+    const nullSuperMe = await me(nullSuperCookie);
+    assert.equal(nullSuperMe.status, 200);
+    const nullSuperBody = (await nullSuperMe.json()) as {
+      user: Record<string, unknown>;
+    };
+    assert.deepEqual(Object.keys(nullSuperBody.user).sort(), [
+      'communityId',
+      'displayName',
+      'email',
+      'id',
+      'role',
+      'username',
+    ]);
+    assert.equal(nullSuperBody.user.communityId, null);
+    assert.equal(nullSuperBody.user.username, `super_${tag}`);
+    assert.equal(nullSuperBody.user.displayName, 'Null Super');
+    assert.equal(nullSuperBody.user.role, 'super_admin');
+    await status(readMedia(nullSuperCookie, fileIds[0]), 404);
+    const rotatedNullSuper = await login(
+      nullSuperEmail,
+      undefined,
+      nullSuperCookie
+    );
+    await status(me(nullSuperCookie), 401);
+    await status(me(rotatedNullSuper), 200);
+    await status(action('logout', rotatedNullSuper), 204);
+
+    // Role change and deactivation permanently revoke null-community super_admin sessions.
+    for (const [change, restore] of [
+      [{ role: 'admin' }, { role: 'super_admin' }],
+      [{ isActive: false }, { isActive: true }],
+    ]) {
+      const superSessionCookie = await login(nullSuperEmail);
+      await status(me(superSessionCookie), 200);
+      await updateUser(nullSuperId, change);
+      await status(me(superSessionCookie), 401);
+      if ('isActive' in change) {
+        await status(postLogin(app, { email: nullSuperEmail, password }), 401);
+      }
+      await updateUser(nullSuperId, restore);
+      await status(
+        me(superSessionCookie),
+        401,
+        'restoring super_admin role/status must not revive revoked session'
+      );
+    }
+
+    const disabledAdminCookie = await login(disabledAdminEmail);
+    const disabledAdminMe = await me(disabledAdminCookie);
+    assert.equal(disabledAdminMe.status, 200);
+    assert.equal(
+      (await disabledAdminMe.json()).user.communityId,
+      disabledCommunity.id
+    );
+    await status(readMedia(disabledAdminCookie, disabledFileId), 404);
+    await status(readMedia(disabledAdminCookie, fileIds[0]), 404);
+
+    // Disabled-community admin session is revoked on community re-enable and
+    // stays revoked on re-disable; an active-community admin's session is
+    // revoked immediately when their community is disabled (before re-login).
+    await updateCommunity(disabledCommunity.id, { isActive: true });
+    await status(
+      me(disabledAdminCookie),
+      401,
+      'disabled-admin session revoked on community re-enable'
+    );
+    const enabledAdminCookie = await login(disabledAdminEmail);
+    await status(me(enabledAdminCookie), 200);
+    await updateCommunity(disabledCommunity.id, { isActive: false });
+    await status(
+      me(disabledAdminCookie),
+      401,
+      're-disabling must not revive previously revoked disabled-admin session'
+    );
+    await status(
+      me(enabledAdminCookie),
+      401,
+      'active-community admin session revoked on disable before re-login'
+    );
+    const reloginDisabledAdminCookie = await login(disabledAdminEmail);
+    await status(me(reloginDisabledAdminCookie), 200);
+    await status(action('logout', reloginDisabledAdminCookie), 204);
+
+    const activeAdminCookie = await login(adminEmail);
+    await status(me(activeAdminCookie), 200);
+    await updateCommunity(communityA, { isActive: false });
+    await status(
+      me(activeAdminCookie),
+      401,
+      'active community admin cookie returns 401 after community disable'
+    );
+    const reauthedDisabledAdminCookie = await login(adminEmail);
+    await status(me(reauthedDisabledAdminCookie), 200);
+    await updateCommunity(communityA, { isActive: true });
+    await status(me(activeAdminCookie), 401);
+    await status(
+      me(reauthedDisabledAdminCookie),
+      401,
+      'community re-enable revokes disabled-state admin session'
+    );
+    assert.ok(adminId > 0);
+
+    await status(postLogin(app, { email: disabledViewerEmail, password }), 401);
+    await status(postLogin(app, { email: elderEmail, password }), 401);
+
+    // Ambiguous email (SPEC-V2 §6.2): sharing an email with a disabled-community,
+    // inactive, or legacy elder account must remain ambiguous (401 without
+    // communityId) regardless of which row is inserted first.
+    const ambiguousPairs: ReadonlyArray<
+      readonly [string, ReadonlyArray<readonly [string, number, boolean]>]
+    > = [
+      [
+        `ambig-active-first-disabled-${tag}@example.test`,
+        [
+          ['viewer', communityA, true],
+          ['viewer', disabledCommunity.id, true],
+        ],
+      ],
+      [
+        `ambig-disabled-first-${tag}@example.test`,
+        [
+          ['viewer', disabledCommunity.id, true],
+          ['viewer', communityA, true],
+        ],
+      ],
+      [
+        `ambig-active-first-inactive-${tag}@example.test`,
+        [
+          ['viewer', communityA, true],
+          ['viewer', communityB, false],
+        ],
+      ],
+      [
+        `ambig-inactive-first-${tag}@example.test`,
+        [
+          ['viewer', communityB, false],
+          ['viewer', communityA, true],
+        ],
+      ],
+      [
+        `ambig-active-first-elder-${tag}@example.test`,
+        [
+          ['viewer', communityA, true],
+          ['elder', communityB, true],
+        ],
+      ],
+      [
+        `ambig-elder-first-${tag}@example.test`,
+        [
+          ['elder', communityB, true],
+          ['viewer', communityA, true],
+        ],
+      ],
+    ];
+    for (const [sharedEmail, entries] of ambiguousPairs) {
+      for (const [role, communityId, isActive] of entries) {
+        const [row] = await db
+          .insert(tables.users)
+          .values({
+            ...userDefaults,
+            email: sharedEmail,
+            role,
+            communityId,
+            isActive,
+          })
+          .returning();
+        userIds.push(row.id);
+      }
+      const noLocator = await postLogin(app, { email: sharedEmail, password });
+      assert.equal(
+        noLocator.status,
+        401,
+        `ambiguous email ${sharedEmail} must return 401 without communityId`
+      );
+      assert.deepEqual(await noLocator.json(), {
+        error: 'Invalid credentials',
+      });
+      const narrowedCookie = await login(sharedEmail, communityA);
+      await status(me(narrowedCookie), 200);
+      await status(action('logout', narrowedCookie), 204);
+    }
+
+    if (dialectOf(database) === 'postgresql') {
+      // PostgreSQL lock race (#137): createSession must lock the communities row
+      // (`INNER JOIN communities` + bare `FOR SHARE`) so a concurrent community
+      // disable cannot leave a session that survives and revives on re-enable.
+      await db.delete(sessions).where(eq(sessions.userId, viewerId));
+      const preRaceCookie = await login(viewerEmail);
+      let loginDone = false;
+      let pendingRaceLogin!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.communities)
+          .set({ isActive: false })
+          .where(eq(tables.communities.id, communityA));
+        pendingRaceLogin = postLogin(app, credentials);
+        void pendingRaceLogin.finally(() => {
+          loginDone = true;
+        });
+        const deadline = Date.now() + 2000;
+        while (!loginDone && Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      });
+      const raceResponse = await pendingRaceLogin;
+      const raceCookie = raceResponse.headers.get('set-cookie')?.split(';')[0];
+      assert.equal(
+        raceResponse.status,
+        401,
+        'concurrent community disable must block and reject viewer login'
+      );
+      assert.equal(raceCookie, undefined);
+      const remainingRows = await db
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(eq(sessions.userId, viewerId));
+      assert.equal(
+        remainingRows.length,
+        0,
+        'no session row may remain after concurrent community disable'
+      );
+      await updateCommunity(communityA, { isActive: true });
+      await status(
+        me(preRaceCookie),
+        401,
+        'pre-race cookie must stay rejected after re-enable'
+      );
+      if (raceCookie) {
+        await status(
+          me(raceCookie),
+          401,
+          'raced login cookie must be rejected after re-enable'
+        );
+      }
+      const postReenableRows = await db
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(eq(sessions.userId, viewerId));
+      assert.equal(
+        postReenableRows.length,
+        0,
+        'no session row may revive after re-enable'
+      );
+    }
   } finally {
     for (const id of fileIds) {
       await db.delete(media).where(eq(media.fileId, id));

@@ -124,23 +124,30 @@ export class HonoFoundationRepository {
     communityId?: number
   ): Promise<FoundationUser[]> {
     const { users, communities } = this.tables;
-    const rows: RawFoundationUser[] = await this.database
-      .select(this.projection())
-      .from(users)
-      .leftJoin(communities, eq(users.communityId, communities.id))
-      .where(
-        and(
-          eq(users.email, email),
-          this.allowedAuthConditions(),
-          communityId === undefined
-            ? undefined
-            : eq(users.communityId, communityId)
+    // Resolve up to 2 matching accounts on the identifier (+ community locator)
+    // FIRST, before checking allowedAuthConditions(), so an active account
+    // sharing an email with a disabled/inactive/elder account stays ambiguous
+    // without a community locator (SPEC-V2 §6.2).
+    const rows: (RawFoundationUser & { allowed: number })[] =
+      await this.database
+        .select({
+          ...this.projection(),
+          allowed: sql<number>`case when ${this.allowedAuthConditions()} then 1 else 0 end`,
+        })
+        .from(users)
+        .leftJoin(communities, eq(users.communityId, communities.id))
+        .where(
+          and(
+            eq(users.email, email),
+            communityId === undefined
+              ? undefined
+              : eq(users.communityId, communityId)
+          )
         )
-      )
-      .limit(2);
-    return rows
-      .map((row) => this.toFoundationUser(row))
-      .filter((user): user is FoundationUser => user !== null);
+        .limit(2);
+    if (rows.length !== 1 || Number(rows[0].allowed) !== 1) return [];
+    const user = this.toFoundationUser(rows[0]);
+    return user ? [user] : [];
   }
 
   async createSession(
@@ -163,7 +170,7 @@ export class HonoFoundationRepository {
     // write establishes the login, so a login that loses the authority race
     // never destroys the other user's session.
     const verifiedInsert = (database: typeof db) => {
-      let verified = database
+      const base = database
         .select({
           // Only an unexpired same-user row is rotated in place; an expired
           // presented row is never resurrected — the login allocates a fresh
@@ -173,26 +180,35 @@ export class HonoFoundationRepository {
           userId: users.id,
           expiresAt: sql`${expiresAt.getTime()}`,
         })
-        .from(users)
-        .leftJoin(communities, eq(users.communityId, communities.id))
-        .where(
-          and(
-            eq(users.id, user.id),
-            eq(users.passwordHash, user.passwordHash),
-            eq(users.role, role),
-            user.communityId === null
-              ? isNull(users.communityId)
-              : eq(users.communityId, user.communityId),
-            this.allowedAuthConditions()
-          )
-        );
+        .from(users);
+      const joined =
+        user.communityId === null
+          ? base.leftJoin(communities, eq(users.communityId, communities.id))
+          : base.innerJoin(communities, eq(users.communityId, communities.id));
+      let verified = joined.where(
+        and(
+          eq(users.id, user.id),
+          eq(users.passwordHash, user.passwordHash),
+          eq(users.role, role),
+          user.communityId === null
+            ? isNull(users.communityId)
+            : eq(users.communityId, user.communityId),
+          this.allowedAuthConditions()
+        )
+      );
       // PostgreSQL locks current authority through the write; a concurrent
-      // reset either changes this selection or waits and then revokes the new
-      // session. Lock `of: users` because `communities` is the nullable side
-      // of the LEFT JOIN. SQLite/D1 serialize this single write statement
-      // without interactive locks.
-      if (dialectOf(this.database) === 'postgresql')
-        verified = verified.for('share', { of: users });
+      // reset or community disable either changes this selection or waits
+      // and then revokes the new session. Community-scoped logins use an
+      // INNER JOIN with bare `FOR SHARE` to lock both `users` and
+      // `communities`; only the null-community `super_admin` path uses
+      // `LEFT JOIN` and locks `users` alone. SQLite/D1 serialize this
+      // single write statement without interactive locks.
+      if (dialectOf(this.database) === 'postgresql') {
+        verified =
+          user.communityId === null
+            ? verified.for('share', { of: users })
+            : verified.for('share');
+      }
       // Stable row IDs ensure concurrent rotations always write a fresh digest.
       return database
         .insert(sessions)

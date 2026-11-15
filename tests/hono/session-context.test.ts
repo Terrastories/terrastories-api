@@ -350,6 +350,153 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     }
   });
 
+  it('repository.candidates() and POST /v2/auth/login keep ambiguous emails 401 across both insertion orders (SPEC-V2 §6.2)', async () => {
+    const {
+      db,
+      repository,
+      app,
+      password,
+      passwordHash,
+      activeCommunity,
+      disabledCommunity,
+    } = await setup();
+
+    const cases = [
+      [
+        'active-first-disabled@shared.test',
+        [
+          {
+            role: 'viewer' as const,
+            communityId: activeCommunity.id,
+            isActive: true,
+          },
+          {
+            role: 'viewer' as const,
+            communityId: disabledCommunity.id,
+            isActive: true,
+          },
+        ],
+      ],
+      [
+        'disabled-first-active@shared.test',
+        [
+          {
+            role: 'viewer' as const,
+            communityId: disabledCommunity.id,
+            isActive: true,
+          },
+          {
+            role: 'viewer' as const,
+            communityId: activeCommunity.id,
+            isActive: true,
+          },
+        ],
+      ],
+      [
+        'active-first-elder@shared.test',
+        [
+          {
+            role: 'viewer' as const,
+            communityId: activeCommunity.id,
+            isActive: true,
+          },
+          {
+            role: 'elder' as const,
+            communityId: disabledCommunity.id,
+            isActive: true,
+          },
+        ],
+      ],
+      [
+        'elder-first-active@shared.test',
+        [
+          {
+            role: 'elder' as const,
+            communityId: disabledCommunity.id,
+            isActive: true,
+          },
+          {
+            role: 'viewer' as const,
+            communityId: activeCommunity.id,
+            isActive: true,
+          },
+        ],
+      ],
+      [
+        'active-first-inactive@shared.test',
+        [
+          {
+            role: 'viewer' as const,
+            communityId: activeCommunity.id,
+            isActive: true,
+          },
+          {
+            role: 'viewer' as const,
+            communityId: disabledCommunity.id,
+            isActive: false,
+          },
+        ],
+      ],
+      [
+        'inactive-first-active@shared.test',
+        [
+          {
+            role: 'viewer' as const,
+            communityId: disabledCommunity.id,
+            isActive: false,
+          },
+          {
+            role: 'viewer' as const,
+            communityId: activeCommunity.id,
+            isActive: true,
+          },
+        ],
+      ],
+    ] as const;
+
+    for (const [sharedEmail, rows] of cases) {
+      for (const entry of rows) {
+        await db.insert(usersSqlite).values({
+          email: sharedEmail,
+          passwordHash,
+          firstName: 'Shared',
+          lastName: 'User',
+          role: entry.role,
+          communityId: entry.communityId,
+          isActive: entry.isActive,
+        });
+      }
+
+      expect(
+        await repository.candidates(sharedEmail),
+        `candidates(${sharedEmail}) without communityId must be empty`
+      ).toEqual([]);
+      expect(
+        await repository.candidates(sharedEmail, activeCommunity.id),
+        `candidates(${sharedEmail}, activeCommunity) must resolve the active account`
+      ).toHaveLength(1);
+
+      const unlocated = await app.request('http://localhost/v2/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: sharedEmail, password }),
+      });
+      expect(unlocated.status).toBe(401);
+      expect(await unlocated.json()).toEqual({ error: 'Invalid credentials' });
+
+      const located = await app.request('http://localhost/v2/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          email: sharedEmail,
+          password,
+          communityId: activeCommunity.id,
+        }),
+      });
+      expect(located.status).toBe(200);
+    }
+  });
+
   it('repository.createSession() and session() handle null communityId, disabled-community admin, and reject elder/disabled non-admins', async () => {
     const { db, repository, users, passwordHash, getNow } = await setup();
     const now = getNow();
@@ -685,5 +832,187 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
         })
       ).status
     ).toBe(200);
+  });
+
+  it('revokes active community admin, disabled-community admin, and null-community super_admin sessions on authority triggers', async () => {
+    const {
+      db,
+      app,
+      password,
+      passwordHash,
+      activeCommunity,
+      disabledCommunity,
+      users,
+    } = await setup();
+
+    const [activeAdmin] = await db
+      .insert(usersSqlite)
+      .values({
+        email: 'admin@active.test',
+        username: 'active_admin',
+        displayName: 'Active Admin',
+        passwordHash,
+        firstName: 'Active',
+        lastName: 'Admin',
+        role: 'admin',
+        communityId: activeCommunity.id,
+        isActive: true,
+      })
+      .returning();
+
+    const login = (email: string) =>
+      app.request('http://localhost/v2/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+
+    // 1. Active community admin's cookie returns 401 after community disable
+    //    (before re-login); re-login succeeds while disabled, and re-enable
+    //    revokes that session too.
+    const activeAdminLogin = await login(activeAdmin.email);
+    expect(activeAdminLogin.status).toBe(200);
+    const activeAdminCookie = activeAdminLogin.headers
+      .get('set-cookie')!
+      .split(';')[0];
+    expect(
+      (
+        await app.request('http://localhost/v2/auth/me', {
+          headers: { cookie: activeAdminCookie },
+        })
+      ).status
+    ).toBe(200);
+
+    await db
+      .update(communitiesSqlite)
+      .set({ isActive: false })
+      .where(eq(communitiesSqlite.id, activeCommunity.id));
+    expect(
+      (
+        await app.request('http://localhost/v2/auth/me', {
+          headers: { cookie: activeAdminCookie },
+        })
+      ).status
+    ).toBe(401);
+
+    const disabledStateRelogin = await login(activeAdmin.email);
+    expect(disabledStateRelogin.status).toBe(200);
+    const disabledStateCookie = disabledStateRelogin.headers
+      .get('set-cookie')!
+      .split(';')[0];
+    await db
+      .update(communitiesSqlite)
+      .set({ isActive: true })
+      .where(eq(communitiesSqlite.id, activeCommunity.id));
+    expect(
+      (
+        await app.request('http://localhost/v2/auth/me', {
+          headers: { cookie: activeAdminCookie },
+        })
+      ).status
+    ).toBe(401);
+    expect(
+      (
+        await app.request('http://localhost/v2/auth/me', {
+          headers: { cookie: disabledStateCookie },
+        })
+      ).status
+    ).toBe(401);
+
+    // 2. Disabled-community admin session is revoked on re-enable and remains
+    //    revoked on subsequent disable per communities_revoke_sessions trigger.
+    const disabledAdminLogin = await login(users.disabledAdmin.email);
+    expect(disabledAdminLogin.status).toBe(200);
+    const disabledAdminCookie = disabledAdminLogin.headers
+      .get('set-cookie')!
+      .split(';')[0];
+    expect(
+      (
+        await app.request('http://localhost/v2/auth/me', {
+          headers: { cookie: disabledAdminCookie },
+        })
+      ).status
+    ).toBe(200);
+
+    await db
+      .update(communitiesSqlite)
+      .set({ isActive: true })
+      .where(eq(communitiesSqlite.id, disabledCommunity.id));
+    expect(
+      (
+        await app.request('http://localhost/v2/auth/me', {
+          headers: { cookie: disabledAdminCookie },
+        })
+      ).status
+    ).toBe(401);
+
+    const enabledAdminLogin = await login(users.disabledAdmin.email);
+    expect(enabledAdminLogin.status).toBe(200);
+    const enabledAdminCookie = enabledAdminLogin.headers
+      .get('set-cookie')!
+      .split(';')[0];
+    await db
+      .update(communitiesSqlite)
+      .set({ isActive: false })
+      .where(eq(communitiesSqlite.id, disabledCommunity.id));
+    expect(
+      (
+        await app.request('http://localhost/v2/auth/me', {
+          headers: { cookie: disabledAdminCookie },
+        })
+      ).status
+    ).toBe(401);
+    expect(
+      (
+        await app.request('http://localhost/v2/auth/me', {
+          headers: { cookie: enabledAdminCookie },
+        })
+      ).status
+    ).toBe(401);
+
+    // 3. Role change and deactivation permanently revoke null-community
+    //    super_admin sessions (users_revoke_sessions trigger).
+    for (const [change, restore] of [
+      [{ role: 'admin' as const }, { role: 'super_admin' as const }],
+      [{ isActive: false }, { isActive: true }],
+    ]) {
+      const superLogin = await login(users.nullSuperAdmin.email);
+      expect(superLogin.status).toBe(200);
+      const superCookie = superLogin.headers.get('set-cookie')!.split(';')[0];
+      expect(
+        (
+          await app.request('http://localhost/v2/auth/me', {
+            headers: { cookie: superCookie },
+          })
+        ).status
+      ).toBe(200);
+
+      await db
+        .update(usersSqlite)
+        .set(change)
+        .where(eq(usersSqlite.id, users.nullSuperAdmin.id));
+      expect(
+        (
+          await app.request('http://localhost/v2/auth/me', {
+            headers: { cookie: superCookie },
+          })
+        ).status
+      ).toBe(401);
+      if ('isActive' in change) {
+        expect((await login(users.nullSuperAdmin.email)).status).toBe(401);
+      }
+
+      await db
+        .update(usersSqlite)
+        .set(restore)
+        .where(eq(usersSqlite.id, users.nullSuperAdmin.id));
+      expect(
+        (
+          await app.request('http://localhost/v2/auth/me', {
+            headers: { cookie: superCookie },
+          })
+        ).status
+      ).toBe(401);
+    }
   });
 });

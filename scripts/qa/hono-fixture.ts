@@ -559,13 +559,22 @@ export async function createFixture(
     const inactiveFileId = await brandingFile(inactiveCommunity.id, null);
     // Disabled community users (#137 Slice 3b / SPEC-V2 §6.2, §7): own-admin
     // may authenticate and reach /v2/auth/me (sovereignty surface) while
-    // community-content/media reads still fail closed; viewer is rejected 401.
+    // community-content/media reads still fail closed; viewer/member/editor
+    // are rejected 401.
     const disabledAdminCredentials = {
       email: 'qa-hono-disabled-admin@example.test',
       password,
     };
     const disabledViewerCredentials = {
       email: 'qa-hono-disabled-viewer@example.test',
+      password,
+    };
+    const disabledMemberCredentials = {
+      email: 'qa-hono-disabled-member@example.test',
+      password,
+    };
+    const disabledEditorCredentials = {
+      email: 'qa-hono-disabled-editor@example.test',
       password,
     };
     await db.insert(users).values([
@@ -593,6 +602,30 @@ export async function createFixture(
         firstName: 'QA',
         lastName: 'DisabledViewer',
         role: 'viewer',
+        communityId: inactiveCommunity.id,
+        isActive: true,
+      },
+      {
+        email: disabledMemberCredentials.email,
+        ...deriveUserIdentityColumns({
+          email: disabledMemberCredentials.email,
+        }),
+        passwordHash,
+        firstName: 'QA',
+        lastName: 'DisabledMember',
+        role: 'member',
+        communityId: inactiveCommunity.id,
+        isActive: true,
+      },
+      {
+        email: disabledEditorCredentials.email,
+        ...deriveUserIdentityColumns({
+          email: disabledEditorCredentials.email,
+        }),
+        passwordHash,
+        firstName: 'QA',
+        lastName: 'DisabledEditor',
+        role: 'editor',
         communityId: inactiveCommunity.id,
         isActive: true,
       },
@@ -1818,6 +1851,22 @@ export async function createFixture(
             path: '/v2/auth/login',
             expected: 401,
             body: disabledViewerCredentials,
+            check: invalidCredentials,
+          },
+          {
+            name: 'reject disabled community member identically',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            body: disabledMemberCredentials,
+            check: invalidCredentials,
+          },
+          {
+            name: 'reject disabled community editor identically',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            body: disabledEditorCredentials,
             check: invalidCredentials,
           },
           {

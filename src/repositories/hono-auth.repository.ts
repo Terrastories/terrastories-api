@@ -74,6 +74,20 @@ export interface VerifierWrite {
 const toFlag = (value: number | boolean | null): boolean | null =>
   value === null ? null : value === true || value === 1;
 
+/** Sum a per-algorithm `count(*)` grouping into the prelogin mix (§7 step 1). */
+function mixOf(
+  rows: ReadonlyArray<{ algorithm: string | null; total: number | string }>
+): { upgraded: number; total: number } {
+  let upgraded = 0;
+  let total = 0;
+  for (const row of rows) {
+    const count = Number(row.total);
+    total += count;
+    if (row.algorithm === ARGON2ID_ALGORITHM) upgraded += count;
+  }
+  return { upgraded, total };
+}
+
 const AUTH_COLUMNS = (tables: ReturnType<typeof tablesFor>) => ({
   id: tables.users.id,
   communityId: tables.users.communityId,
@@ -262,14 +276,24 @@ export class HonoAuthRepository {
       .from(users)
       .where(eq(users.communityId, communityId))
       .groupBy(users.passwordAlgorithm);
-    let upgraded = 0;
-    let total = 0;
-    for (const row of rows) {
-      const count = Number(row.total);
-      total += count;
-      if (row.algorithm === ARGON2ID_ALGORITHM) upgraded += count;
-    }
-    return { upgraded, total };
+    return mixOf(rows);
+  }
+
+  /**
+   * The same mix for the whole deployment, used when prelogin has no
+   * resolvable community (no slug sent, or a slug that names no community):
+   * the fake must still mirror the population it is hiding in.
+   */
+  async globalAlgorithmMix(): Promise<{ upgraded: number; total: number }> {
+    const { users } = this.tables;
+    const rows = await this.db
+      .select({
+        algorithm: users.passwordAlgorithm,
+        total: sql<number>`count(*)`,
+      })
+      .from(users)
+      .groupBy(users.passwordAlgorithm);
+    return mixOf(rows);
   }
 
   /** Atomic verifier write (upgrade / password change), authority-guarded. */

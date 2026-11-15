@@ -28,6 +28,9 @@ const app = createHonoApp({
         : Promise.reject(new Error('Production verifier not configured')),
   },
   repository: new HonoFoundationRepository(await getDb()),
+  // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
+  // production-like modes; prelogin fails closed when absent.
+  serverSecret: runtimeConfig.serverSecret,
   publicOrigin: runtimeConfig.publicOrigin,
   corsOrigins: runtimeConfig.corsOrigins,
   // HTTP cookies are allowed only for this opt-in loopback development listener.

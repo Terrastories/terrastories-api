@@ -25,17 +25,31 @@ import {
   type FoundationStorage,
   type PasswordVerifier,
 } from './services/hono-foundation.service.js';
+import { HonoAuthRepository } from './repositories/hono-auth.repository.js';
+import { HonoAuthService } from './services/hono-auth.service.js';
 
 export type RequestHandler = (request: Request) => Promise<Response>;
 export interface FoundationOptions {
   repository: HonoFoundationRepository;
   storage: FoundationStorage;
   verifier: PasswordVerifier;
+  /**
+   * Prelogin HMAC key (`AUTH_SERVER_SECRET`). Without it `POST
+   * /v2/auth/prelogin` fails closed with 503 instead of answering with a
+   * predictable fake (SPEC-V2 §7 step 1).
+   */
+  serverSecret?: string;
   secureCookies?: boolean;
   publicOrigin?: string;
   corsOrigins?: string[];
   now?: () => Date;
 }
+const preloginSchema = z
+  .object({
+    identifier: z.string().min(1).max(254),
+    communitySlug: z.string().min(1).max(255).optional(),
+  })
+  .strict();
 const loginSchema = z
   .object({
     email: z.string().email().max(254),
@@ -58,6 +72,10 @@ export function createHonoApp(options: FoundationOptions) {
     options.repository,
     options.storage,
     options.verifier
+  );
+  const authService = new HonoAuthService(
+    new HonoAuthRepository(options.repository.connection),
+    options.serverSecret
   );
   const configuredOrigin =
     options.publicOrigin === undefined
@@ -121,6 +139,33 @@ export function createHonoApp(options: FoundationOptions) {
     await options.repository.readiness();
     return c.json({ status: 'ready' });
   });
+  app.post(
+    '/v2/auth/prelogin',
+    bodyLimit({
+      maxSize: 4096,
+      onError: (c) => c.json({ error: 'Request too large' }, 413),
+    }),
+    async (c) => {
+      if (
+        c.req.header('Content-Type')?.split(';')[0].trim() !==
+        'application/json'
+      )
+        return c.json({ error: 'Expected JSON' }, 415);
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: 'Invalid request' }, 400);
+      }
+      const parsed = preloginSchema.safeParse(body);
+      if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);
+      const result = await authService.prelogin(parsed.data);
+      // Unconfigured secret is a server fault, not a credential failure: the
+      // body stays content-free and names no setting (SPEC-V2 §7).
+      if (!result) return c.json({ error: 'Service unavailable' }, 503);
+      return c.json(result);
+    }
+  );
   app.post(
     '/v2/auth/login',
     bodyLimit({

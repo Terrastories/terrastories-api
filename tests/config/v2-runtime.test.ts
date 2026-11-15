@@ -10,6 +10,9 @@ import {
 /** A valid production origin for the happy paths. */
 const okOrigin = 'https://api.terrastories.org';
 
+/** A valid prelogin HMAC key for production-like calls (not a literal credential). */
+const okSecret = 'prelogin-hsm-material-9f8e7d6c5b4a3f2';
+
 const refusal = (fn: () => unknown): V2RuntimeConfigError => {
   try {
     fn();
@@ -56,6 +59,7 @@ describe('V2 runtime configuration gate (#150)', () => {
       const config = validateNodeV2Runtime({
         NODE_ENV: 'production',
         HONO_PUBLIC_ORIGIN: okOrigin,
+        AUTH_SERVER_SECRET: okSecret,
       });
       expect(config.publicOrigin).toBe(okOrigin);
       expect(config.secureCookies).toBe(true);
@@ -142,6 +146,7 @@ describe('V2 runtime configuration gate (#150)', () => {
         NODE_ENV: 'field-kit',
         HONO_PUBLIC_ORIGIN: 'http://field-kit.local:3000',
         HONO_ALLOW_PLAIN_HTTP: 'true',
+        AUTH_SERVER_SECRET: okSecret,
       });
       expect(config.secureCookies).toBe(false);
     });
@@ -151,6 +156,7 @@ describe('V2 runtime configuration gate (#150)', () => {
         NODE_ENV: 'field-kit',
         HONO_PUBLIC_ORIGIN: 'https://field-kit.local',
         HONO_ALLOW_PLAIN_HTTP: 'true',
+        AUTH_SERVER_SECRET: okSecret,
       });
       expect(config.secureCookies).toBe(true);
     });
@@ -260,6 +266,7 @@ describe('V2 runtime configuration gate (#150)', () => {
           NODE_ENV: 'field-kit',
           HONO_PUBLIC_ORIGIN: 'http://[::ffff:6501:203]:3000',
           HONO_ALLOW_PLAIN_HTTP: 'true',
+          AUTH_SERVER_SECRET: okSecret,
         }).publicOrigin
       ).toBe('http://[::ffff:6501:203]:3000');
     });
@@ -338,6 +345,7 @@ describe('V2 runtime configuration gate (#150)', () => {
           validateNodeV2Runtime({
             NODE_ENV: 'production',
             HONO_PUBLIC_ORIGIN: okOrigin,
+            AUTH_SERVER_SECRET: okSecret,
           })
         )
       ).toBeUndefined();
@@ -347,6 +355,7 @@ describe('V2 runtime configuration gate (#150)', () => {
             NODE_ENV: 'field-kit',
             HONO_PUBLIC_ORIGIN: 'http://field-kit.local:3000',
             HONO_ALLOW_PLAIN_HTTP: 'true',
+            AUTH_SERVER_SECRET: okSecret,
           })
         )
       ).toBeUndefined();
@@ -386,6 +395,7 @@ describe('V2 runtime configuration gate (#150)', () => {
           NODE_ENV,
           HONO_PUBLIC_ORIGIN: httpOrigin,
           HONO_ALLOW_PLAIN_HTTP: 'true',
+          AUTH_SERVER_SECRET: okSecret,
         });
         expect(config.httpsRequired).toBe(false);
         expect(config.publicOrigin).toBe(httpOrigin);
@@ -456,6 +466,7 @@ describe('V2 runtime configuration gate (#150)', () => {
           NODE_ENV: 'production',
           HONO_PUBLIC_ORIGIN: okOrigin,
           HONO_CORS_ORIGINS: '',
+          AUTH_SERVER_SECRET: okSecret,
         }).corsOrigins
       ).toEqual([]);
     });
@@ -470,6 +481,7 @@ describe('V2 runtime configuration gate (#150)', () => {
         validateNodeV2Runtime({
           NODE_ENV: 'production',
           HONO_PUBLIC_ORIGIN: okOrigin,
+          AUTH_SERVER_SECRET: okSecret,
         }).secureCookies
       ).toBe(true);
     });
@@ -480,11 +492,13 @@ describe('V2 runtime configuration gate (#150)', () => {
           environment: 'production',
           publicOrigin: okOrigin,
           secureCookies: false,
+          authServerSecret: okSecret,
           names: {
             environment: 'NODE_ENV',
             publicOrigin: 'HONO_PUBLIC_ORIGIN',
             corsOrigins: 'HONO_CORS_ORIGINS',
             secureCookies: 'secureCookies',
+            authServerSecret: 'AUTH_SERVER_SECRET',
           },
         })
       );
@@ -498,11 +512,13 @@ describe('V2 runtime configuration gate (#150)', () => {
         publicOrigin: 'http://field-kit.local:3000',
         secureCookies: false,
         allowPlainHttp: true,
+        authServerSecret: okSecret,
         names: {
           environment: 'NODE_ENV',
           publicOrigin: 'HONO_PUBLIC_ORIGIN',
           corsOrigins: 'HONO_CORS_ORIGINS',
           secureCookies: 'secureCookies',
+          authServerSecret: 'AUTH_SERVER_SECRET',
         },
       });
       expect(config.secureCookies).toBe(false);
@@ -541,6 +557,7 @@ describe('V2 runtime configuration gate (#150)', () => {
         ...bindings,
         PUBLIC_ORIGIN: okOrigin,
         CORS_ORIGINS: 'https://app.terrastories.org',
+        AUTH_SERVER_SECRET: okSecret,
       });
       expect(config.environment).toBe('production');
       expect(config.httpsRequired).toBe(true);
@@ -600,6 +617,100 @@ describe('V2 runtime configuration gate (#150)', () => {
       );
       expect(both.message).toContain('DB D1 binding is missing');
       expect(both.message).toContain('MEDIA R2 binding is missing');
+    });
+  });
+  describe('V2 prelogin AUTH_SERVER_SECRET (#137)', () => {
+    it('requires the secret in production and names only the setting', () => {
+      const error = refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'production',
+          HONO_PUBLIC_ORIGIN: okOrigin,
+        })
+      );
+      expect(error.message).toContain('AUTH_SERVER_SECRET');
+      expect(error.message).toContain('required');
+      expect(error.message).not.toContain(okSecret);
+    });
+
+    it('requires the secret on the Workers binding set', () => {
+      const error = refusal(() =>
+        validateWorkerV2Runtime({
+          DB: {},
+          MEDIA: {},
+          PUBLIC_ORIGIN: okOrigin,
+        } as unknown as Parameters<typeof validateWorkerV2Runtime>[0])
+      );
+      expect(error.message).toContain('AUTH_SERVER_SECRET');
+      expect(error.message).toContain('required');
+      expect(error.message).not.toContain(okSecret);
+    });
+
+    it('requires the secret in field-kit and offline mode too', () => {
+      for (const NODE_ENV of ['field-kit', 'offline'] as const) {
+        const error = refusal(() =>
+          validateNodeV2Runtime({
+            NODE_ENV,
+            HONO_PUBLIC_ORIGIN: 'https://field-kit.local',
+          })
+        );
+        expect(error.message).toContain('AUTH_SERVER_SECRET');
+      }
+    });
+
+    it('refuses a sub-32-character secret without echoing it', () => {
+      const short = 'short-secret-1234';
+      const error = refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'production',
+          HONO_PUBLIC_ORIGIN: okOrigin,
+          AUTH_SERVER_SECRET: short,
+        })
+      );
+      expect(error.message).toContain('AUTH_SERVER_SECRET');
+      expect(error.message).toContain('32 characters');
+      expect(error.message).not.toContain(short);
+    });
+
+    it('refuses a placeholder secret without echoing it', () => {
+      const placeholderValue = 'replace-with-prelogin-secret-0123456789abcdef';
+      const error = refusal(() =>
+        validateNodeV2Runtime({
+          NODE_ENV: 'production',
+          HONO_PUBLIC_ORIGIN: okOrigin,
+          AUTH_SERVER_SECRET: placeholderValue,
+        })
+      );
+      expect(error.message).toContain('AUTH_SERVER_SECRET');
+      expect(error.message).toContain('placeholder');
+      expect(error.message).not.toContain('replace-with');
+    });
+
+    it('starts in development and test without the secret', () => {
+      for (const NODE_ENV of ['development', 'test'] as const) {
+        expect(
+          validateNodeV2Runtime({ NODE_ENV }).serverSecret
+        ).toBeUndefined();
+        expect(
+          validateWorkerV2Runtime({
+            ENVIRONMENT: NODE_ENV,
+            DB: {},
+            MEDIA: {},
+          } as unknown as Parameters<typeof validateWorkerV2Runtime>[0])
+            .serverSecret
+        ).toBeUndefined();
+      }
+    });
+
+    it('carries a compliant secret through to the config without logging it', () => {
+      const config = validateNodeV2Runtime({
+        NODE_ENV: 'production',
+        HONO_PUBLIC_ORIGIN: okOrigin,
+        AUTH_SERVER_SECRET: okSecret,
+      });
+      expect(config.serverSecret).toBe(okSecret);
+      expect(v2RuntimeModeNotice(config)).toBeUndefined();
+      // v2RuntimeModeNotice is content-free and never recites the secret.
+      expect(v2RuntimeModeNotice(config) ?? '').not.toContain(okSecret);
     });
   });
 });

@@ -19,6 +19,12 @@ export interface WorkerBindings {
   ENVIRONMENT?: string;
   PUBLIC_ORIGIN?: string;
   CORS_ORIGINS?: string;
+  /**
+   * Prelogin HMAC key (SPEC-V2 §7 step 1), supplied with `wrangler secret
+   * put` — never a `vars` value. Validated by the runtime gate in
+   * production-like modes; prelogin fails closed when absent.
+   */
+  AUTH_SERVER_SECRET?: string;
 }
 
 /** Auth method remains injectable pending the Workers Free measurements (#194). */
@@ -59,6 +65,7 @@ export function createWorker(
     const app = createHonoApp({
       repository: new HonoFoundationRepository(drizzle(client)),
       verifier,
+      serverSecret: runtimeConfig.serverSecret,
       publicOrigin: runtimeConfig.publicOrigin,
       corsOrigins: runtimeConfig.corsOrigins,
       storage: {

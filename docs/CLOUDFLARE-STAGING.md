@@ -60,9 +60,12 @@ and roadmap Phase 9; this document does not declare a release ready.
    `.dev.vars` only for local development, never for deploys.
 3. Supply `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` through the operator
    environment. Supply application secrets through Wrangler secrets; never
-   commit their values. With production mode selected (explicitly or by an unset runtime mode), Node
-   startup rejects missing or known-placeholder `JWT_SECRET`
-   and `SESSION_SECRET` (minimum 32 characters each). Supply unique values and
+   commit their values. With production mode selected (explicitly or by an unset runtime mode), startup refuses
+   missing or known-placeholder secrets: Node startup rejects missing or
+   known-placeholder `JWT_SECRET`/`SESSION_SECRET` (minimum 32 characters each),
+   and the V2 runtime gate refuses missing, sub-32-character or placeholder
+   `AUTH_SERVER_SECRET` (the prelogin HMAC key, SPEC-V2 §7) on both Node startup
+   and every Worker served in production mode. Supply unique values for both and
    verify secret presence without printing them; review the final Worker adapter
    for its exact secret requirements. D1/R2 use bindings rather than `DATABASE_URL` or
    local upload-directory variables.
@@ -76,6 +79,7 @@ and roadmap Phase 9; this document does not declare a release ready.
    npx wrangler deploy --env staging --dry-run
    npx wrangler secret put JWT_SECRET --env staging
    npx wrangler secret put SESSION_SECRET --env staging
+   npx wrangler secret put AUTH_SERVER_SECRET --env staging
    npx wrangler d1 info terrastories-staging --env staging
    npx wrangler d1 export terrastories-staging --remote --env staging --output "d1-backup-$(date -u +%Y%m%dT%H%M%SZ).sql"
    npx wrangler d1 time-travel info terrastories-staging --env staging

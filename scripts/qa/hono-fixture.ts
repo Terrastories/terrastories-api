@@ -29,7 +29,7 @@
  */
 import { once } from 'node:events';
 import { serve } from '@hono/node-server';
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
@@ -4692,7 +4692,12 @@ export async function createFixture(
       const audits = await db
         .select()
         .from(auditEntries)
-        .where(eq(auditEntries.communityId, privateCommunityId))
+        .where(
+          and(
+            eq(auditEntries.communityId, privateCommunityId),
+            eq(auditEntries.resourceType, 'community')
+          )
+        )
         .orderBy(asc(auditEntries.id));
       if (audits.length !== expectedActions.length) {
         throw new Error(

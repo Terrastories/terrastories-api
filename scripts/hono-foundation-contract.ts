@@ -882,7 +882,12 @@ export async function runHonoFoundationContract(
     const communityAudits = await db
       .select()
       .from(tables.auditEntries)
-      .where(eq(tables.auditEntries.communityId, communityA))
+      .where(
+        and(
+          eq(tables.auditEntries.communityId, communityA),
+          eq(tables.auditEntries.resourceType, 'community')
+        )
+      )
       .orderBy(asc(tables.auditEntries.id));
     assert.deepEqual(
       communityAudits.map((row: any) => row.action),
@@ -941,7 +946,12 @@ export async function runHonoFoundationContract(
       const auditsAfterLock = await db
         .select()
         .from(tables.auditEntries)
-        .where(eq(tables.auditEntries.communityId, communityA))
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            eq(tables.auditEntries.resourceType, 'community')
+          )
+        )
         .orderBy(asc(tables.auditEntries.id));
       assert.equal(
         auditsAfterLock.length,
@@ -959,7 +969,12 @@ export async function runHonoFoundationContract(
       const auditsAfterBurst = await db
         .select()
         .from(tables.auditEntries)
-        .where(eq(tables.auditEntries.communityId, communityA))
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            eq(tables.auditEntries.resourceType, 'community')
+          )
+        )
         .orderBy(asc(tables.auditEntries.id));
       assert.deepEqual(
         auditsAfterBurst.map((row: any) => row.action),
@@ -1185,6 +1200,9 @@ export async function runHonoFoundationContract(
       await db.delete(tables.files).where(eq(tables.files.id, id));
     }
     for (const id of userIds) {
+      await db
+        .delete(tables.auditEntries)
+        .where(eq(tables.auditEntries.actorId, id));
       await db.delete(sessions).where(eq(sessions.userId, id));
       await db.delete(tables.users).where(eq(tables.users.id, id));
     }

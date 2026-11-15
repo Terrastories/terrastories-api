@@ -2343,6 +2343,7 @@ const rebuiltTables = [
   'attachments',
   'community_map_configs',
   'external_media_links',
+  'auth_throttle',
 ] as const;
 
 /**
@@ -2475,7 +2476,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0010_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0011_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2868,6 +2869,7 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0008_slice1_content_columns.sql',
       '0009_users_identity_and_audit_entries.sql',
       '0010_canonical_media_and_map_configs.sql',
+      '0011_auth_throttle_and_session_lifetimes.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')

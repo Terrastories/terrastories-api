@@ -4,7 +4,10 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { hash } from 'bcrypt';
 import { eq } from 'drizzle-orm';
-import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
+import {
+  HonoFoundationRepository,
+  type FoundationUser,
+} from '../../src/repositories/hono-foundation.repository.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { nodePasswordVerifier } from '../../src/node-password.js';
 import { tokenDigest } from '../../src/services/hono-foundation.service.js';
@@ -20,6 +23,24 @@ import {
   sessionRenewalInterval,
 } from '../../src/shared/session-policy.js';
 import type { V2CommunityRole } from '../../src/shared/authorization/sovereignty-policy.js';
+
+/** Slice 10: the repository takes one explicit session-lifetime input. */
+function createSession(
+  repository: HonoFoundationRepository,
+  tokenHash: string,
+  user: FoundationUser,
+  now: Date,
+  expiresAt: Date
+) {
+  return repository.createSession({
+    tokenHash,
+    user,
+    kind: 'standard',
+    createdAt: now,
+    idleExpiresAt: expiresAt,
+    absoluteExpiresAt: new Date(now.getTime() + sessionLifetime),
+  });
+}
 
 describe('Slice 3b HonoFoundationRepository & session middleware context (#137)', () => {
   const openDbs: Sqlite.Database[] = [];
@@ -508,7 +529,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     // Null-community super_admin establishes and reads back a session (IS NULL path).
     const superHash = await tokenDigest('s'.repeat(64));
     expect(
-      await repository.createSession(
+      await createSession(
+        repository,
         superHash,
         {
           id: users.nullSuperAdmin.id,
@@ -533,7 +555,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
 
     // Wrong communityId expectation fails closed (null vs non-null mismatch).
     expect(
-      await repository.createSession(
+      await createSession(
+        repository,
         await tokenDigest('w'.repeat(64)),
         {
           id: users.nullSuperAdmin.id,
@@ -552,7 +575,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     // Disabled-community own-admin establishes and holds a session.
     const adminHash = await tokenDigest('a'.repeat(64));
     expect(
-      await repository.createSession(
+      await createSession(
+        repository,
         adminHash,
         {
           id: users.disabledAdmin.id,
@@ -613,7 +637,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
       ],
     ] as const) {
       expect(
-        await repository.createSession(
+        await createSession(
+          repository,
           await tokenDigest(label.padEnd(64, '0').slice(0, 64)),
           candidate,
           now,

@@ -32,7 +32,7 @@ export interface FoundationStorage {
   ): Promise<StorageReadResult | null>;
 }
 
-import { sessionLifetime } from '../shared/session-policy.js';
+import { sessionLifetimesFor } from '../shared/auth-policy.js';
 import { parseV2Role } from '../shared/authorization/sovereignty-policy.js';
 
 const hex = (bytes: Uint8Array) =>
@@ -66,15 +66,19 @@ export class HonoFoundationService {
     const valid = await this.verifier.verify(password, hash);
     if (!valid || !user || !parseV2Role(user.role)) return null;
     const token = hex(crypto.getRandomValues(new Uint8Array(32)));
-    const created = await this.repository.createSession(
-      await tokenDigest(token),
+    const lifetimes = sessionLifetimesFor('standard', now.getTime());
+    const created = await this.repository.createSession({
+      tokenHash: await tokenDigest(token),
       user,
-      now,
-      new Date(now.getTime() + sessionLifetime),
-      previous && /^[a-f0-9]{64}$/.test(previous)
-        ? await tokenDigest(previous)
-        : undefined
-    );
+      kind: 'standard',
+      createdAt: now,
+      idleExpiresAt: new Date(lifetimes.idleExpiresAt),
+      absoluteExpiresAt: new Date(lifetimes.absoluteExpiresAt),
+      previousHash:
+        previous && /^[a-f0-9]{64}$/.test(previous)
+          ? await tokenDigest(previous)
+          : undefined,
+    });
     return created ? { token, user } : null;
   }
 

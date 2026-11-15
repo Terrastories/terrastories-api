@@ -12,6 +12,14 @@ import { PgDatabase } from 'drizzle-orm/pg-core';
 import { attachmentsPg, attachmentsSqlite } from './schema/attachments.js';
 import { auditEntriesPg, auditEntriesSqlite } from './schema/audit_entries.js';
 import { communitiesPg, communitiesSqlite } from './schema/communities.js';
+import {
+  communityMapConfigsPg,
+  communityMapConfigsSqlite,
+} from './schema/community_map_configs.js';
+import {
+  externalMediaLinksPg,
+  externalMediaLinksSqlite,
+} from './schema/external_media_links.js';
 import { filesPg, filesSqlite } from './schema/files.js';
 import { placesPg, placesSqlite } from './schema/places.js';
 import { speakersPg, speakersSqlite } from './schema/speakers.js';
@@ -30,6 +38,8 @@ const sqliteTables = {
   attachments: attachmentsSqlite,
   auditEntries: auditEntriesSqlite,
   communities: communitiesSqlite,
+  communityMapConfigs: communityMapConfigsSqlite,
+  externalMediaLinks: externalMediaLinksSqlite,
   files: filesSqlite,
   places: placesSqlite,
   speakers: speakersSqlite,
@@ -44,6 +54,8 @@ const postgresTables = {
   attachments: attachmentsPg,
   auditEntries: auditEntriesPg,
   communities: communitiesPg,
+  communityMapConfigs: communityMapConfigsPg,
+  externalMediaLinks: externalMediaLinksPg,
   files: filesPg,
   places: placesPg,
   speakers: speakersPg,

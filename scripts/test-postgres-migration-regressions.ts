@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
@@ -11,7 +19,7 @@ const previousReleaseFixture = path.join(
   rootDir,
   'tests/fixtures/db/postgres-previous-release.sql'
 );
-const snapshotPath = path.join(migrationsFolder, 'meta/0008_snapshot.json');
+const snapshotPath = path.join(migrationsFolder, 'meta/0009_snapshot.json');
 
 const canonicalUniqueConstraints = [
   'communities_slug_unique',
@@ -437,6 +445,173 @@ async function verifyFreshSnapshotConstraintNames(
   );
 }
 
+async function createPostgresMigrationsFolderThrough(
+  lastTag: string
+): Promise<string> {
+  const folder = await mkdtemp(
+    path.join(os.tmpdir(), 'terrastories-pg-through-')
+  );
+  await mkdir(path.join(folder, 'meta'));
+  const journal = JSON.parse(
+    await readFile(path.join(migrationsFolder, 'meta', '_journal.json'), 'utf8')
+  ) as { entries: Array<{ tag: string }> };
+  const end = journal.entries.findIndex((entry) => entry.tag === lastTag);
+  assert.ok(end >= 0, `PostgreSQL migration ${lastTag} must exist`);
+  const entries = journal.entries.slice(0, end + 1);
+  for (const entry of entries) {
+    await copyFile(
+      path.join(migrationsFolder, `${entry.tag}.sql`),
+      path.join(folder, `${entry.tag}.sql`)
+    );
+  }
+  await writeFile(
+    path.join(folder, 'meta', '_journal.json'),
+    JSON.stringify({ ...journal, entries }, null, 2)
+  );
+  return folder;
+}
+
+async function verifySlice2BackfillAndOrphanUpgrade(
+  client: ReturnType<typeof postgres>
+): Promise<void> {
+  await resetDatabase(client);
+  const through0008 = await createPostgresMigrationsFolderThrough(
+    '0008_users_identity_and_audit_entries'
+  );
+  try {
+    await migrate(drizzle(client), { migrationsFolder: through0008 });
+  } finally {
+    await rm(through0008, { recursive: true, force: true });
+  }
+
+  const fileA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const fileB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const orphanFile = '99999999-9999-4999-8999-999999999999';
+
+  await client`
+    INSERT INTO communities (id, name, slug, created_at, updated_at)
+    VALUES (1, 'Slice2 PG Comm', 'slice2-pg-comm', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+  `;
+  await client`
+    INSERT INTO users (id, email, email_normalized, password_hash, first_name, last_name, role, community_id, created_at, updated_at)
+    VALUES (1, 's2pg@example.org', 's2pg@example.org', 'hash', 'S2', 'PG', 'editor', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+  `;
+  await client`
+    INSERT INTO files (id, filename, original_name, path, url, mime_type, size, community_id, uploaded_by, created_at, updated_at)
+    VALUES
+      (${fileB}, 'b.png', 'b.png', 'uploads/1/b.png', ${`/v2/media/${fileB}`}, 'image/png', 222, 1, 1, '2026-01-01T00:00:02.000Z', '2026-01-01T00:00:02.000Z'),
+      (${fileA}, 'a.png', 'a.png', 'uploads/1/a.png', ${`/v2/media/${fileA}`}, 'image/png', 111, 1, 1, '2026-01-01T00:00:01.000Z', '2026-01-01T00:00:01.000Z')
+  `;
+  await client`
+    INSERT INTO community_media (file_id, community_id, kind)
+    VALUES
+      (${fileB}, 1, 'branding'),
+      (${fileA}, 1, 'branding')
+  `;
+  for (let i = 1; i <= 3; i += 1) {
+    await client`
+      INSERT INTO attachments (attachable_id, attachable_type, url, filename, content_type, file_size, created_at)
+      VALUES (10, 'Story', ${`https://example.org/${i}.jpg`}, ${`${i}.jpg`}, 'image/jpeg', 100, '2026-01-01T00:00:01.000Z')
+    `;
+  }
+  await client`DELETE FROM attachments WHERE id = 3`;
+
+  // Simulate legacy orphaned files row under NOT VALID FKs so 0009's orphan-skipping
+  // UPDATE guard is exercised directly.
+  await client.unsafe(
+    'ALTER TABLE files DROP CONSTRAINT files_community_id_communities_id_fk'
+  );
+  await client.unsafe(
+    'ALTER TABLE files DROP CONSTRAINT files_uploaded_by_users_id_fk'
+  );
+  await client`
+    INSERT INTO files (id, filename, original_name, path, url, mime_type, size, community_id, uploaded_by, created_at, updated_at)
+    VALUES (${orphanFile}, 'orphan.png', 'orphan.png', 'uploads/orphan/x.png', ${`/v2/media/${orphanFile}`}, 'image/png', 333, 999995, 999996, '2026-01-01T00:00:03.000Z', '2026-01-01T00:00:03.000Z')
+  `;
+  await client.unsafe(
+    'ALTER TABLE files ADD CONSTRAINT files_community_id_communities_id_fk FOREIGN KEY (community_id) REFERENCES communities(id) NOT VALID'
+  );
+  await client.unsafe(
+    'ALTER TABLE files ADD CONSTRAINT files_uploaded_by_users_id_fk FOREIGN KEY (uploaded_by) REFERENCES users(id) NOT VALID'
+  );
+
+  await migrate(drizzle(client), { migrationsFolder });
+  await assertSnapshotConstraintNames(client);
+
+  const fileRows = await client`
+    SELECT id, path, storage_key, size, byte_size, checksum, community_id, uploaded_by
+    FROM files
+    ORDER BY path
+  `;
+  const byId = new Map(fileRows.map((row) => [String(row.id), row]));
+  assert.equal(byId.get(fileA)?.storage_key, 'uploads/1/a.png');
+  assert.equal(Number(byId.get(fileA)?.byte_size), 111);
+  assert.equal(byId.get(fileA)?.checksum, null);
+  assert.equal(byId.get(fileB)?.storage_key, 'uploads/1/b.png');
+  assert.equal(Number(byId.get(fileB)?.byte_size), 222);
+  assert.equal(byId.get(fileB)?.checksum, null);
+  assert.equal(byId.get(orphanFile)?.community_id, 999995);
+  assert.equal(byId.get(orphanFile)?.uploaded_by, 999996);
+  assert.equal(byId.get(orphanFile)?.storage_key, null);
+  assert.equal(byId.get(orphanFile)?.byte_size, null);
+
+  const [{ cmCount }] = await client`
+    SELECT count(*)::int AS "cmCount" FROM community_media
+  `;
+  assert.equal(cmCount, 2, 'community_media rows must remain intact');
+
+  const attachmentRows = await client`
+    SELECT id, community_id, file_id, owner_type, owner_id, role, ordinal, url, created_at
+    FROM attachments
+    ORDER BY id
+  `;
+  assert.deepEqual(
+    attachmentRows.map((row) => Number(row.id)),
+    [1, 2, 4, 5],
+    'community_media backfill must preserve V1 attachments and advance past sequence high-water mark'
+  );
+  assert.deepEqual(
+    {
+      community_id: attachmentRows[2].community_id,
+      file_id: String(attachmentRows[2].file_id),
+      owner_type: attachmentRows[2].owner_type,
+      owner_id: attachmentRows[2].owner_id,
+      role: attachmentRows[2].role,
+      ordinal: attachmentRows[2].ordinal,
+      url: attachmentRows[2].url,
+    },
+    {
+      community_id: 1,
+      file_id: fileA,
+      owner_type: 'community',
+      owner_id: 1,
+      role: 'community_display_image',
+      ordinal: 0,
+      url: null,
+    }
+  );
+  assert.deepEqual(
+    {
+      community_id: attachmentRows[3].community_id,
+      file_id: String(attachmentRows[3].file_id),
+      owner_type: attachmentRows[3].owner_type,
+      owner_id: attachmentRows[3].owner_id,
+      role: attachmentRows[3].role,
+      ordinal: attachmentRows[3].ordinal,
+      url: attachmentRows[3].url,
+    },
+    {
+      community_id: 1,
+      file_id: fileB,
+      owner_type: 'community',
+      owner_id: 1,
+      role: 'community_display_image',
+      ordinal: 1,
+      url: null,
+    }
+  );
+}
+
 async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   assert.ok(databaseUrl, 'DATABASE_URL is required');
@@ -446,15 +621,19 @@ async function main(): Promise<void> {
   try {
     console.log('🐘 PostgreSQL migration regression gate');
     console.log(
-      '  1/4 previous-schema ownership orphan expand-contract upgrade'
+      '  1/5 previous-schema ownership orphan expand-contract upgrade'
     );
     await verifyLegacyCommunityOwnershipOrphanUpgrade(client);
-    console.log('  2/4 cross-schema constraint-name collision upgrade');
+    console.log('  2/5 cross-schema constraint-name collision upgrade');
     await verifyConstraintNameCollisionUpgrade(client);
-    console.log('  3/4 orphan-theme expand-contract upgrade');
+    console.log('  3/5 orphan-theme expand-contract upgrade');
     await verifyOrphanThemeUpgrade(client);
-    console.log('  4/4 applied constraints match Drizzle snapshot semantics');
+    console.log('  4/5 applied constraints match Drizzle snapshot semantics');
     await verifyFreshSnapshotConstraintNames(client);
+    console.log(
+      '  5/5 Slice 2 files/community_media backfill and orphan files guard'
+    );
+    await verifySlice2BackfillAndOrphanUpgrade(client);
     console.log('✅ PostgreSQL migration regression gate passed');
   } finally {
     await client.end();

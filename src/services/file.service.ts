@@ -295,7 +295,7 @@ export class FileService {
       fileId,
       communityId || undefined
     );
-    if (!file) {
+    if (!file || file.communityId === null) {
       throw new Error('File not found');
     }
 

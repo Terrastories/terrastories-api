@@ -37,15 +37,14 @@ export const filesPg = pgTable(
     filename: pgText('filename').notNull(),
     originalName: pgText('original_name').notNull(),
     path: pgText('path').notNull(),
+    storageKey: pgText('storage_key'),
     url: pgText('url').notNull(),
     mimeType: pgText('mime_type').notNull(),
     size: pgBigint('size', { mode: 'number' }).notNull(),
-    communityId: pgInteger('community_id')
-      .notNull()
-      .references(() => communitiesPg.id),
-    uploadedBy: pgInteger('uploaded_by')
-      .notNull()
-      .references(() => usersPg.id),
+    byteSize: pgBigint('byte_size', { mode: 'number' }),
+    checksum: pgText('checksum'),
+    communityId: pgInteger('community_id').references(() => communitiesPg.id),
+    uploadedBy: pgInteger('uploaded_by').references(() => usersPg.id),
     metadata: pgJsonb('metadata'), // { width, height, duration, etc. }
     culturalRestrictions: pgJsonb('cultural_restrictions'),
     isActive: pgBoolean('is_active').default(true).notNull(),
@@ -91,15 +90,14 @@ export const filesSqlite = sqliteTable(
     filename: sqliteText('filename').notNull(),
     originalName: sqliteText('original_name').notNull(),
     path: sqliteText('path').notNull(),
+    storageKey: sqliteText('storage_key'),
     url: sqliteText('url').notNull(),
     mimeType: sqliteText('mime_type').notNull(),
     size: integer('size').notNull(),
-    communityId: integer('community_id')
-      .notNull()
-      .references(() => communitiesSqlite.id),
-    uploadedBy: integer('uploaded_by')
-      .notNull()
-      .references(() => usersSqlite.id),
+    byteSize: integer('byte_size'),
+    checksum: sqliteText('checksum'),
+    communityId: integer('community_id').references(() => communitiesSqlite.id),
+    uploadedBy: integer('uploaded_by').references(() => usersSqlite.id),
     metadata: sqliteText('metadata'), // JSON string for SQLite
     culturalRestrictions: sqliteText('cultural_restrictions'),
     isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
@@ -226,8 +224,8 @@ export interface FileUploadResult {
   url: string;
   size: number;
   mimeType: string;
-  communityId: number;
-  uploadedBy: number;
+  communityId: number | null;
+  uploadedBy: number | null;
   metadata?: FileMetadata;
   culturalRestrictions?: CulturalRestrictions;
   createdAt: Date;

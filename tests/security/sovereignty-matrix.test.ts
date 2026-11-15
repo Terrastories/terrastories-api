@@ -383,8 +383,8 @@ describe('V2 story audiences (SPEC-V2 §6.2/§6.3)', () => {
     for (const role of V2_COMMUNITY_ROLES) {
       expect(storyAccessForRole(role)).not.toContain('unavailable');
     }
-    // Canonical audiences stay untouched; on the Fastify schema the
-    // `editors` audience simply matches no row at runtime.
+    // Canonical audiences stay untouched; `editors` matches rows written
+    // with `privacyLevel = 'editors'` and `isRestricted = false`.
     expect(storyAccessForRole('admin')).toEqual([
       'public',
       'community',

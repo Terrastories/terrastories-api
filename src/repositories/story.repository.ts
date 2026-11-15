@@ -1449,9 +1449,8 @@ export class StoryRepository {
  * SQL transcription of `fastifyStoryToAudience` (sovereignty policy):
  * - public      = unrestricted + privacyLevel 'public'
  * - community   = unrestricted + privacyLevel 'members_only'
- * - editors     = matches no Fastify row at runtime, so it contributes no
- *                 condition here (SPEC-V2 §6.3: migration may select the
- *                 editors audience explicitly, never implicitly)
+ * - editors     = unrestricted + privacyLevel 'editors' (readable by
+ *                 editor and admin only)
  * - unavailable = restricted rows and any other privacyLevel; readable by
  *                 no role, so it contributes no condition either
  *

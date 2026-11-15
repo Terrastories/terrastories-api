@@ -23,7 +23,12 @@ import {
   cleanupTestDb,
   createTestData,
 } from '../helpers/database.js';
-import { placesSqlite, speakersSqlite } from '../../src/db/schema/index.js';
+import {
+  placesSqlite,
+  speakersSqlite,
+  storiesSqlite,
+} from '../../src/db/schema/index.js';
+import { storyAccessForPhysicalRole } from '../../src/shared/authorization/sovereignty-policy.js';
 
 describe('StoryRepository', () => {
   let storyRepository: StoryRepository;
@@ -700,6 +705,64 @@ describe('StoryRepository', () => {
       // Assert
       expect(queryTime).toBeLessThan(1000); // Should complete in under 1 second
       expect(result.data.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("storyAudienceCondition ('editors' branch)", () => {
+    it("returns unrestricted ('editors', false) story to editor and admin only, never restricted ('editors', true), and returns neither to member/viewer/elder", async () => {
+      const now = new Date();
+      const [unrestrictedEditorsStory] = await (testDb as any)
+        .insert(storiesSqlite)
+        .values({
+          title: 'Editors Draft Story',
+          slug: 'editors-draft-story',
+          communityId: testData.community.id,
+          createdBy: testData.users.editor.id,
+          privacyLevel: 'editors',
+          isRestricted: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const [restrictedEditorsStory] = await (testDb as any)
+        .insert(storiesSqlite)
+        .values({
+          title: 'Restricted Editors Draft Story',
+          slug: 'restricted-editors-draft-story',
+          communityId: testData.community.id,
+          createdBy: testData.users.admin.id,
+          privacyLevel: 'editors',
+          isRestricted: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      for (const role of ['editor', 'admin'] as const) {
+        const result = await storyRepository.findMany(
+          {
+            communityId: testData.community.id,
+            storyAudiences: storyAccessForPhysicalRole(role),
+          },
+          { page: 1, limit: 50 }
+        );
+        const ids = result.data.map((s) => s.id);
+        expect(ids).toContain(unrestrictedEditorsStory.id);
+        expect(ids).not.toContain(restrictedEditorsStory.id);
+      }
+
+      for (const role of ['member', 'viewer', 'elder'] as const) {
+        const result = await storyRepository.findMany(
+          {
+            communityId: testData.community.id,
+            storyAudiences: storyAccessForPhysicalRole(role),
+          },
+          { page: 1, limit: 50 }
+        );
+        const ids = result.data.map((s) => s.id);
+        expect(ids).not.toContain(unrestrictedEditorsStory.id);
+        expect(ids).not.toContain(restrictedEditorsStory.id);
+      }
     });
   });
 });

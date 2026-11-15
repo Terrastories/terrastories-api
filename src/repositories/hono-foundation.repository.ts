@@ -1,9 +1,14 @@
-import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import {
   communityStatusToPhysical,
   userStatusToPhysical,
 } from '../policy/canonical-state.js';
+import {
+  V2_COMMUNITY_ROLES,
+  parseV2Role,
+  type V2CommunityRole,
+} from '../shared/authorization/sovereignty-policy.js';
 import {
   sessionLifetime,
   sessionRenewalInterval,
@@ -20,9 +25,21 @@ import {
 export interface FoundationUser {
   id: number;
   email: string;
+  username: string | null;
+  displayName: string | null;
+  passwordHash: string;
+  role: V2CommunityRole;
+  communityId: number | null;
+}
+
+interface RawFoundationUser {
+  id: number;
+  email: string;
+  username: string | null;
+  displayName: string | null;
   passwordHash: string;
   role: string;
-  communityId: number;
+  communityId: number | null;
 }
 
 export class HonoFoundationRepository {
@@ -56,9 +73,49 @@ export class HonoFoundationRepository {
     return {
       id: users.id,
       email: users.email,
+      username: users.username,
+      displayName: users.displayName,
       passwordHash: users.passwordHash,
       role: users.role,
       communityId: users.communityId,
+    };
+  }
+
+  /**
+   * Canonical V2 authentication and session-validity gate (SPEC-V2 §6.2, §7):
+   * - Active users with a canonical V2 role (legacy `elder` rejected);
+   * - A `super_admin` with `community_id IS NULL`;
+   * - Active users of an active community;
+   * - An own-community `admin` of a disabled community (sovereignty surface only).
+   */
+  private allowedAuthConditions() {
+    const { users, communities } = this.tables;
+    return and(
+      eq(users.isActive, userStatusToPhysical('active').isActive),
+      inArray(users.role, [...V2_COMMUNITY_ROLES]),
+      or(
+        and(isNull(users.communityId), eq(users.role, 'super_admin')),
+        eq(communities.isActive, communityStatusToPhysical('active')),
+        and(
+          eq(communities.isActive, communityStatusToPhysical('disabled')),
+          eq(users.role, 'admin')
+        )
+      )
+    );
+  }
+
+  private toFoundationUser(row: RawFoundationUser): FoundationUser | null {
+    const role = parseV2Role(row.role);
+    if (!role) return null;
+    if (row.communityId === null && role !== 'super_admin') return null;
+    return {
+      id: row.id,
+      email: row.email,
+      username: row.username,
+      displayName: row.displayName,
+      passwordHash: row.passwordHash,
+      role,
+      communityId: row.communityId,
     };
   }
 
@@ -67,21 +124,23 @@ export class HonoFoundationRepository {
     communityId?: number
   ): Promise<FoundationUser[]> {
     const { users, communities } = this.tables;
-    return this.database
+    const rows: RawFoundationUser[] = await this.database
       .select(this.projection())
       .from(users)
-      .innerJoin(communities, eq(users.communityId, communities.id))
+      .leftJoin(communities, eq(users.communityId, communities.id))
       .where(
         and(
           eq(users.email, email),
-          eq(users.isActive, userStatusToPhysical('active').isActive),
-          eq(communities.isActive, communityStatusToPhysical('active')),
+          this.allowedAuthConditions(),
           communityId === undefined
             ? undefined
             : eq(users.communityId, communityId)
         )
       )
       .limit(2);
+    return rows
+      .map((row) => this.toFoundationUser(row))
+      .filter((user): user is FoundationUser => user !== null);
   }
 
   async createSession(
@@ -91,6 +150,9 @@ export class HonoFoundationRepository {
     expiresAt: Date,
     previousHash?: string
   ): Promise<boolean> {
+    const role = parseV2Role(user.role);
+    if (!role) return false;
+    if (user.communityId === null && role !== 'super_admin') return false;
     const sessions = this.sessions;
     const { users, communities } = this.tables;
     const db = this.database;
@@ -112,23 +174,25 @@ export class HonoFoundationRepository {
           expiresAt: sql`${expiresAt.getTime()}`,
         })
         .from(users)
-        .innerJoin(communities, eq(users.communityId, communities.id))
+        .leftJoin(communities, eq(users.communityId, communities.id))
         .where(
           and(
             eq(users.id, user.id),
             eq(users.passwordHash, user.passwordHash),
-            eq(users.role, sql`${user.role}`),
-            eq(users.communityId, user.communityId),
-            eq(users.isActive, userStatusToPhysical('active').isActive),
-            eq(communities.isActive, communityStatusToPhysical('active'))
+            eq(users.role, role),
+            user.communityId === null
+              ? isNull(users.communityId)
+              : eq(users.communityId, user.communityId),
+            this.allowedAuthConditions()
           )
         );
       // PostgreSQL locks current authority through the write; a concurrent
       // reset either changes this selection or waits and then revokes the new
-      // session. SQLite/D1 serialize this single write statement without
-      // interactive locks.
+      // session. Lock `of: users` because `communities` is the nullable side
+      // of the LEFT JOIN. SQLite/D1 serialize this single write statement
+      // without interactive locks.
       if (dialectOf(this.database) === 'postgresql')
-        verified = verified.for('share');
+        verified = verified.for('share', { of: users });
       // Stable row IDs ensure concurrent rotations always write a fresh digest.
       return database
         .insert(sessions)
@@ -188,25 +252,27 @@ export class HonoFoundationRepository {
   ): Promise<FoundationUser | null> {
     const { users, communities } = this.tables;
     const sessions = this.sessions;
-    const rows: (FoundationUser & { expiresAt: number })[] = await this.database
-      .select({ ...this.projection(), expiresAt: sessions.expiresAt })
-      .from(sessions)
-      .innerJoin(users, eq(sessions.userId, users.id))
-      .innerJoin(communities, eq(users.communityId, communities.id))
-      .where(
-        and(
-          eq(sessions.tokenHash, tokenHash),
-          gt(sessions.expiresAt, now.getTime()),
-          eq(users.isActive, userStatusToPhysical('active').isActive),
-          eq(communities.isActive, communityStatusToPhysical('active'))
+    const rows: (RawFoundationUser & { expiresAt: number })[] =
+      await this.database
+        .select({ ...this.projection(), expiresAt: sessions.expiresAt })
+        .from(sessions)
+        .innerJoin(users, eq(sessions.userId, users.id))
+        .leftJoin(communities, eq(users.communityId, communities.id))
+        .where(
+          and(
+            eq(sessions.tokenHash, tokenHash),
+            gt(sessions.expiresAt, now.getTime()),
+            this.allowedAuthConditions()
+          )
         )
-      )
-      .limit(1);
-    const user = rows[0];
+        .limit(1);
+    const row = rows[0];
+    const user = row ? this.toFoundationUser(row) : null;
     if (
       user &&
+      row &&
       renew &&
-      now.getTime() >= user.expiresAt - sessionLifetime + sessionRenewalInterval
+      now.getTime() >= row.expiresAt - sessionLifetime + sessionRenewalInterval
     ) {
       const touched = await this.database
         .update(sessions)
@@ -214,7 +280,7 @@ export class HonoFoundationRepository {
         .where(
           and(
             eq(sessions.tokenHash, tokenHash),
-            eq(sessions.expiresAt, user.expiresAt),
+            eq(sessions.expiresAt, row.expiresAt),
             gt(sessions.expiresAt, now.getTime())
           )
         )
@@ -222,7 +288,7 @@ export class HonoFoundationRepository {
       // A lost renewal race must re-read authority, never resurrect a revoked row.
       if (!touched.length) return this.session(tokenHash, now, false);
     }
-    return user ?? null;
+    return user;
   }
 
   async revokeSession(tokenHash: string): Promise<void> {
@@ -239,11 +305,18 @@ export class HonoFoundationRepository {
 
   async brandingFile(
     fileId: string,
-    communityId: number
+    communityId: number | null
   ): Promise<{
     storageKey: string;
     mimeType: string;
   } | null> {
+    if (
+      communityId === null ||
+      !Number.isInteger(communityId) ||
+      communityId <= 0
+    ) {
+      return null;
+    }
     const { files, communities } = this.tables;
     const media = this.communityMedia;
     const rows = await this.database

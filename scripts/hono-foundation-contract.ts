@@ -539,6 +539,112 @@ export async function runHonoFoundationContract(
       0,
       'previous user session row is deleted, not rotated onto the new user'
     );
+    await status(action('logout', sharedBrowserB), 204);
+
+    // Slice 3b (#137): null-community super_admin, disabled-community admin/viewer,
+    // and legacy elder rejection on both SQLite and PostgreSQL (including PG
+    // `FOR SHARE OF users` over the LEFT JOIN).
+    const [disabledCommunity] = await db
+      .insert(tables.communities)
+      .values({
+        name: 'Hono disabled',
+        slug: `hono-${tag}-disabled`,
+        isActive: false,
+      })
+      .returning();
+    communityIds.push(disabledCommunity.id);
+    const disabledFileId = crypto.randomUUID();
+    await db.insert(tables.files).values({
+      id: disabledFileId,
+      filename: 'disabled-branding.png',
+      originalName: 'disabled-branding.png',
+      path: `communities/${disabledCommunity.id}/${disabledFileId}`,
+      url: 'https://ignored.invalid/disabled',
+      mimeType: 'image/png',
+      size: 3,
+      communityId: disabledCommunity.id,
+      uploadedBy: viewerId,
+      createdAt: instant,
+      updatedAt: instant,
+    });
+    fileIds.push(disabledFileId);
+    await db.insert(media).values({
+      fileId: disabledFileId,
+      communityId: disabledCommunity.id,
+      kind: 'branding',
+    });
+
+    const nullSuperEmail = `null-super-${tag}@example.test`;
+    const disabledAdminEmail = `disabled-admin-${tag}@example.test`;
+    const disabledViewerEmail = `disabled-viewer-${tag}@example.test`;
+    const elderEmail = `elder-${tag}@example.test`;
+    for (const [email, username, displayName, role, communityId] of [
+      [nullSuperEmail, `super_${tag}`, 'Null Super', 'super_admin', null],
+      [
+        disabledAdminEmail,
+        `dadmin_${tag}`,
+        'Disabled Admin',
+        'admin',
+        disabledCommunity.id,
+      ],
+      [disabledViewerEmail, null, null, 'viewer', disabledCommunity.id],
+      [elderEmail, null, null, 'elder', communityA],
+    ] as const) {
+      const [row] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email,
+          username,
+          displayName,
+          role,
+          communityId,
+        })
+        .returning();
+      userIds.push(row.id);
+    }
+
+    const nullSuperCookie = await login(nullSuperEmail);
+    const nullSuperMe = await me(nullSuperCookie);
+    assert.equal(nullSuperMe.status, 200);
+    const nullSuperBody = (await nullSuperMe.json()) as {
+      user: Record<string, unknown>;
+    };
+    assert.deepEqual(Object.keys(nullSuperBody.user).sort(), [
+      'communityId',
+      'displayName',
+      'email',
+      'id',
+      'role',
+      'username',
+    ]);
+    assert.equal(nullSuperBody.user.communityId, null);
+    assert.equal(nullSuperBody.user.username, `super_${tag}`);
+    assert.equal(nullSuperBody.user.displayName, 'Null Super');
+    assert.equal(nullSuperBody.user.role, 'super_admin');
+    await status(readMedia(nullSuperCookie, fileIds[0]), 404);
+    const rotatedNullSuper = await login(
+      nullSuperEmail,
+      undefined,
+      nullSuperCookie
+    );
+    await status(me(nullSuperCookie), 401);
+    await status(me(rotatedNullSuper), 200);
+    await status(action('logout', rotatedNullSuper), 204);
+
+    const disabledAdminCookie = await login(disabledAdminEmail);
+    const disabledAdminMe = await me(disabledAdminCookie);
+    assert.equal(disabledAdminMe.status, 200);
+    assert.equal(
+      (await disabledAdminMe.json()).user.communityId,
+      disabledCommunity.id
+    );
+    await status(readMedia(disabledAdminCookie, disabledFileId), 404);
+    await status(readMedia(disabledAdminCookie, fileIds[0]), 404);
+    await status(action('logout', disabledAdminCookie), 204);
+
+    await status(postLogin(app, { email: disabledViewerEmail, password }), 401);
+    await status(postLogin(app, { email: elderEmail, password }), 401);
   } finally {
     for (const id of fileIds) {
       await db.delete(media).where(eq(media.fileId, id));

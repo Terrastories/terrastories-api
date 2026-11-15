@@ -249,7 +249,10 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
       secureCookies: false,
       now: () => currentNow,
       storage: {
-        read: async () => new Uint8Array([1, 2, 3, 4]),
+        read: async () => {
+          const body = new Uint8Array([1, 2, 3, 4]);
+          return { body, size: body.byteLength };
+        },
       },
     });
 

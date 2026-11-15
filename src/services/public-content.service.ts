@@ -71,17 +71,17 @@ export const INVALID_REQUEST_BODY = Object.freeze({
   error: 'Invalid request',
 }) as { error: string };
 
-const notFoundJson = (): PublicContentJsonResult<never> => ({
+export const notFoundJson = (): PublicContentJsonResult<never> => ({
   status: 404,
   body: NOT_FOUND_BODY,
 });
 
-const badRequestJson = (): PublicContentJsonResult<never> => ({
+export const badRequestJson = (): PublicContentJsonResult<never> => ({
   status: 400,
   body: INVALID_REQUEST_BODY,
 });
 
-function validatePublicResponse<T>(
+export function validatePublicResponse<T>(
   schema: z.ZodType<T>,
   payload: unknown
 ): PublicContentJsonResult<T> {
@@ -97,7 +97,9 @@ function iso(value: Date): string {
   return value.toISOString();
 }
 
-function projectPlaceSummary(row: PublicPlaceRecord): PublicPlaceSummary {
+export function projectPlaceSummary(
+  row: PublicPlaceRecord
+): PublicPlaceSummary {
   return {
     id: row.id,
     name: row.name,
@@ -111,12 +113,14 @@ function projectPlaceSummary(row: PublicPlaceRecord): PublicPlaceSummary {
   };
 }
 
-function projectSpeakerSummary(
+export function projectSpeakerSummary(
   row: PublicSpeakerRecord,
   slug: string,
   origin: string,
   birthplacesById: Map<number, PublicPlaceRecord>,
-  photosBySpeakerId: Map<number, string>
+  photosBySpeakerId: Map<number, string>,
+  mediaUrlFor: (fileId: string) => string = (fileId) =>
+    publicMediaUrl(origin, slug, fileId)
 ): PublicSpeakerSummary {
   const birthplaceRow =
     row.birthplaceId !== null
@@ -133,7 +137,7 @@ function projectSpeakerSummary(
     photo: photoFileId
       ? {
           fileId: photoFileId,
-          url: publicMediaUrl(origin, slug, photoFileId),
+          url: mediaUrlFor(photoFileId),
         }
       : null,
     createdAt: iso(row.createdAt),
@@ -141,10 +145,12 @@ function projectSpeakerSummary(
   };
 }
 
-function projectStoryAttachment(
+export function projectStoryAttachment(
   row: PublicStoryAttachmentRecord,
   slug: string,
-  origin: string
+  origin: string,
+  mediaUrlFor: (fileId: string) => string = (fileId) =>
+    publicMediaUrl(origin, slug, fileId)
 ): PublicStoryAttachment {
   return {
     id: row.id,
@@ -154,11 +160,11 @@ function projectStoryAttachment(
     mimeType: row.mimeType,
     byteSize: row.byteSize,
     originalName: row.originalName,
-    url: publicMediaUrl(origin, slug, row.fileId),
+    url: mediaUrlFor(row.fileId),
   };
 }
 
-function projectExternalMediaLink(
+export function projectExternalMediaLink(
   row: PublicExternalMediaLinkRecord
 ): PublicExternalMediaLink | null {
   if (
@@ -762,14 +768,26 @@ export class PublicContentService {
       if (!stored) {
         return null;
       }
+      if (!Number.isSafeInteger(stored.size) || stored.size !== totalLength) {
+        if (stored.body instanceof ReadableStream) {
+          await stored.body.cancel().catch(() => {});
+        }
+        return new Response(JSON.stringify(INTERNAL_ERROR_BODY), {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
       const contentLength = range.end - range.start + 1;
-      return new Response(toResponseBody(stored), {
+      return new Response(toResponseBody(stored.body), {
         status: 206,
         headers: {
           ...baseHeaders,
           'Content-Type': file.mimeType,
           'Content-Disposition': 'attachment',
-          'Content-Range': `bytes ${range.start}-${range.end}/${totalLength}`,
+          'Content-Range': `bytes ${range.start}-${range.end}/${stored.size}`,
           'Content-Length': String(contentLength),
         },
       });
@@ -779,14 +797,26 @@ export class PublicContentService {
     if (!stored) {
       return null;
     }
+    if (!Number.isSafeInteger(stored.size) || stored.size !== totalLength) {
+      if (stored.body instanceof ReadableStream) {
+        await stored.body.cancel().catch(() => {});
+      }
+      return new Response(JSON.stringify(INTERNAL_ERROR_BODY), {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
 
-    return new Response(toResponseBody(stored), {
+    return new Response(toResponseBody(stored.body), {
       status: 200,
       headers: {
         ...baseHeaders,
         'Content-Type': file.mimeType,
         'Content-Disposition': 'attachment',
-        'Content-Length': String(totalLength),
+        'Content-Length': String(stored.size),
       },
     });
   }

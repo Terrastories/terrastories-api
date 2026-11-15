@@ -21,13 +21,15 @@ import {
   type ExplorePlaceRow,
   type ExploreSpeakerRow,
 } from './explore-adapter.repository.js';
+import type { ReadRuleViewer } from '../policy/read-rules.js';
 import {
   PUBLIC_BRANDING_MEDIA_ALLOWED,
+  activeCommunityCondition,
   activeUnrestrictedFileCondition,
   publicCommunityCondition,
-  publicStoryCondition,
-  readablePlaceCondition,
-  readableSpeakerCondition,
+  readablePlaceConditionForViewer,
+  readableSpeakerConditionForViewer,
+  storyConditionForViewer,
   validPointCoordinatesCondition,
 } from './public-visibility.js';
 
@@ -173,17 +175,50 @@ export class PublicCommunitiesRepository {
     return this.explore.publicCommunityBySlug(slug);
   }
 
-  async publicStoriesCount(communityId: number): Promise<number> {
+  /** Own active community (public or private) resolved by session communityId (Slice 6). */
+  async activeCommunityById(
+    communityId: number
+  ): Promise<PublicCommunityRow | null> {
+    const { communities } = this.tables;
+    const rows: PublicCommunityRow[] = await this.database
+      .select({
+        id: communities.id,
+        name: communities.name,
+        description: communities.description,
+        slug: communities.slug,
+        locale: communities.locale,
+        country: communities.country,
+        publicStories: communities.publicStories,
+        isActive: communities.isActive,
+        createdAt: communities.createdAt,
+        updatedAt: communities.updatedAt,
+      })
+      .from(communities)
+      .where(
+        and(
+          eq(communities.id, communityId),
+          activeCommunityCondition(communities)
+        )
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async publicStoriesCount(
+    communityId: number,
+    viewer: ReadRuleViewer = 'anonymous-public'
+  ): Promise<number> {
     const { stories } = this.tables;
     const rows = await this.database
       .select({ count: sql<number>`count(*)` })
       .from(stories)
-      .where(publicStoryCondition(stories, communityId));
+      .where(storyConditionForViewer(stories, communityId, viewer));
     return Number(rows[0]?.count ?? 0);
   }
 
   async publicPlacesOfCommunityStories(
-    communityId: number
+    communityId: number,
+    viewer: ReadRuleViewer = 'anonymous-public'
   ): Promise<PublicPlaceRow[]> {
     const { places } = this.tables;
     return this.database
@@ -199,7 +234,12 @@ export class PublicCommunitiesRepository {
       .from(places)
       .where(
         and(
-          readablePlaceCondition(this.database, this.tables, communityId),
+          readablePlaceConditionForViewer(
+            this.database,
+            this.tables,
+            communityId,
+            viewer
+          ),
           validPointCoordinatesCondition(places)
         )
       )
@@ -208,24 +248,40 @@ export class PublicCommunitiesRepository {
   }
 
   filterPlaces(
-    communityId: number
+    communityId: number,
+    viewer: ReadRuleViewer = 'anonymous-public'
   ): Promise<Array<{ id: number; name: string }>> {
     const { places } = this.tables;
     return this.database
       .select({ id: places.id, name: places.name })
       .from(places)
-      .where(readablePlaceCondition(this.database, this.tables, communityId))
+      .where(
+        readablePlaceConditionForViewer(
+          this.database,
+          this.tables,
+          communityId,
+          viewer
+        )
+      )
       .orderBy(asc(places.id));
   }
 
-  async filterRegions(communityId: number): Promise<string[]> {
+  async filterRegions(
+    communityId: number,
+    viewer: ReadRuleViewer = 'anonymous-public'
+  ): Promise<string[]> {
     const { places } = this.tables;
     const rows: Array<{ region: string | null }> = await this.database
       .selectDistinct({ region: places.region })
       .from(places)
       .where(
         and(
-          readablePlaceCondition(this.database, this.tables, communityId),
+          readablePlaceConditionForViewer(
+            this.database,
+            this.tables,
+            communityId,
+            viewer
+          ),
           isNotNull(places.region),
           ne(places.region, '')
         )
@@ -233,14 +289,22 @@ export class PublicCommunitiesRepository {
     return distinctSortedNonEmpty(rows.map((row) => row.region));
   }
 
-  async filterTypesOfPlace(communityId: number): Promise<string[]> {
+  async filterTypesOfPlace(
+    communityId: number,
+    viewer: ReadRuleViewer = 'anonymous-public'
+  ): Promise<string[]> {
     const { places } = this.tables;
     const rows: Array<{ typeOfPlace: string | null }> = await this.database
       .selectDistinct({ typeOfPlace: places.typeOfPlace })
       .from(places)
       .where(
         and(
-          readablePlaceCondition(this.database, this.tables, communityId),
+          readablePlaceConditionForViewer(
+            this.database,
+            this.tables,
+            communityId,
+            viewer
+          ),
           isNotNull(places.typeOfPlace),
           ne(places.typeOfPlace, '')
         )
@@ -248,23 +312,36 @@ export class PublicCommunitiesRepository {
     return distinctSortedNonEmpty(rows.map((row) => row.typeOfPlace));
   }
 
-  filterSpeakers(communityId: number): Promise<PublicSpeakerRow[]> {
+  filterSpeakers(
+    communityId: number,
+    viewer: ReadRuleViewer = 'anonymous-public'
+  ): Promise<PublicSpeakerRow[]> {
     const { speakers } = this.tables;
     return this.database
       .select({ id: speakers.id, name: speakers.name })
       .from(speakers)
-      .where(readableSpeakerCondition(this.database, this.tables, communityId))
+      .where(
+        readableSpeakerConditionForViewer(
+          this.database,
+          this.tables,
+          communityId,
+          viewer
+        )
+      )
       .orderBy(asc(speakers.id));
   }
 
-  async filterTopics(communityId: number): Promise<string[]> {
+  async filterTopics(
+    communityId: number,
+    viewer: ReadRuleViewer = 'anonymous-public'
+  ): Promise<string[]> {
     const { stories } = this.tables;
     const rows: Array<{ topic: string | null }> = await this.database
       .selectDistinct({ topic: stories.topic })
       .from(stories)
       .where(
         and(
-          publicStoryCondition(stories, communityId),
+          storyConditionForViewer(stories, communityId, viewer),
           isNotNull(stories.topic),
           ne(stories.topic, '')
         )
@@ -272,14 +349,17 @@ export class PublicCommunitiesRepository {
     return distinctSortedNonEmpty(rows.map((row) => row.topic));
   }
 
-  async filterLanguages(communityId: number): Promise<string[]> {
+  async filterLanguages(
+    communityId: number,
+    viewer: ReadRuleViewer = 'anonymous-public'
+  ): Promise<string[]> {
     const { stories } = this.tables;
     const rows: Array<{ language: string | null }> = await this.database
       .selectDistinct({ language: stories.language })
       .from(stories)
       .where(
         and(
-          publicStoryCondition(stories, communityId),
+          storyConditionForViewer(stories, communityId, viewer),
           isNotNull(stories.language),
           ne(stories.language, '')
         )
@@ -287,14 +367,22 @@ export class PublicCommunitiesRepository {
     return distinctSortedNonEmpty(rows.map((row) => row.language));
   }
 
-  async filterAffiliations(communityId: number): Promise<string[]> {
+  async filterAffiliations(
+    communityId: number,
+    viewer: ReadRuleViewer = 'anonymous-public'
+  ): Promise<string[]> {
     const { speakers } = this.tables;
     const rows: Array<{ affiliation: string | null }> = await this.database
       .selectDistinct({ affiliation: speakers.affiliation })
       .from(speakers)
       .where(
         and(
-          readableSpeakerCondition(this.database, this.tables, communityId),
+          readableSpeakerConditionForViewer(
+            this.database,
+            this.tables,
+            communityId,
+            viewer
+          ),
           isNotNull(speakers.affiliation),
           ne(speakers.affiliation, '')
         )
@@ -303,9 +391,10 @@ export class PublicCommunitiesRepository {
   }
 
   async communityMapConfig(
-    communityId: number
+    communityId: number,
+    includePrivateIfActive = false
   ): Promise<PublicMapConfigRow | null> {
-    const map = await this.queryMapConfigs(communityId);
+    const map = await this.queryMapConfigs(communityId, includePrivateIfActive);
     return map.get(communityId) ?? null;
   }
 
@@ -314,16 +403,17 @@ export class PublicCommunitiesRepository {
   }
 
   private async queryMapConfigs(
-    communityId?: number
+    communityId?: number,
+    includePrivateIfActive = false
   ): Promise<Map<number, PublicMapConfigRow>> {
     const { communities, communityMapConfigs, files } = this.tables;
+    const communityGate = includePrivateIfActive
+      ? activeCommunityCondition(communities)
+      : publicCommunityCondition(communities);
     const whereClause =
       communityId !== undefined
-        ? and(
-            eq(communityMapConfigs.communityId, communityId),
-            publicCommunityCondition(communities)
-          )
-        : publicCommunityCondition(communities);
+        ? and(eq(communityMapConfigs.communityId, communityId), communityGate)
+        : communityGate;
 
     const rows: RawMapConfigJoinRow[] = await this.database
       .select({
@@ -365,9 +455,10 @@ export class PublicCommunitiesRepository {
   }
 
   async communityBranding(
-    communityId: number
+    communityId: number,
+    includePrivateIfActive = false
   ): Promise<PublicCommunityBrandingRow> {
-    const map = await this.queryBrandings(communityId);
+    const map = await this.queryBrandings(communityId, includePrivateIfActive);
     return map.get(communityId) ?? emptyBranding();
   }
 
@@ -378,19 +469,23 @@ export class PublicCommunitiesRepository {
   }
 
   private async queryBrandings(
-    communityId?: number
+    communityId?: number,
+    includePrivateIfActive = false
   ): Promise<Map<number, PublicCommunityBrandingRow>> {
     if (!PUBLIC_BRANDING_MEDIA_ALLOWED) {
       return new Map();
     }
     const { attachments, communities, files } = this.tables;
     const media = this.communityMedia;
+    const communityGate = includePrivateIfActive
+      ? activeCommunityCondition(communities)
+      : publicCommunityCondition(communities);
 
     const attachmentWhere = and(
       eq(attachments.ownerType, 'community'),
       inArray(attachments.role, [...COMMUNITY_BRANDING_ROLES]),
       activeUnrestrictedFileCondition(files),
-      publicCommunityCondition(communities),
+      communityGate,
       ...(communityId !== undefined ? [eq(communities.id, communityId)] : [])
     );
 
@@ -398,7 +493,7 @@ export class PublicCommunitiesRepository {
       eq(media.kind, 'branding'),
       eq(files.communityId, media.communityId),
       activeUnrestrictedFileCondition(files),
-      publicCommunityCondition(communities),
+      communityGate,
       ...(communityId !== undefined ? [eq(communities.id, communityId)] : [])
     );
 

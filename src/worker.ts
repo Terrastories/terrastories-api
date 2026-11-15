@@ -103,9 +103,9 @@ export function createWorker(
           ) {
             const fixed = new FixedLength(expectedLength);
             void stream.pipeTo(fixed.writable).catch(() => {});
-            return fixed.readable;
+            return { body: fixed.readable, size: object.size };
           }
-          return stream;
+          return { body: stream, size: object.size };
         },
       },
     });

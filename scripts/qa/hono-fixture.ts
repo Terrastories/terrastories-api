@@ -66,6 +66,12 @@ import {
   PublicStoriesListResponseSchema,
   PublicStoryDetailResponseSchema,
 } from '../../src/shared/schemas/public-content.js';
+import {
+  CommunityMapConfigResponseSchema,
+  CommunityReadDetailResponseSchema,
+  CommunityStoriesListResponseSchema,
+  CommunityStoryDetailResponseSchema,
+} from '../../src/shared/schemas/community-reads.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
@@ -166,6 +172,30 @@ export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
   'QA members-only affiliation',
   'QA storyless speaker',
   'QA withdrawn speaker',
+  'QA community story',
+  'QA community story description',
+  'QA community topic',
+  'QA community story place',
+  'QA community story speaker',
+  'QA community affiliation',
+  'QA restricted birthplace speaker',
+  'QA editors story',
+  'QA editors story description',
+  'QA editors story place',
+  'QA editors story speaker',
+  'QA private member story',
+  'QA private member story description',
+  'QA private editors story',
+  'QA private editors story description',
+  'QA private restricted story',
+  'QA private unknown-privacy story',
+  'QA private community-level place',
+  'QA private editors place',
+  'QA private storyless place',
+  'QA private restricted place',
+  'QA private community-level speaker',
+  'QA private editors speaker',
+  'QA private storyless speaker',
   'QA foreign speaker',
   'QA inactive community speaker',
   'QA private community speaker',
@@ -423,6 +453,35 @@ export async function createFixture(
         isActive: true,
       })
       .returning();
+    type CommunityRole = 'viewer' | 'member' | 'editor' | 'admin';
+    const privateCredentials: Record<
+      CommunityRole,
+      { email: string; password: string }
+    > = {
+      viewer: { email: 'qa-hono-priv-viewer@example.test', password },
+      member: { email: 'qa-hono-priv-member@example.test', password },
+      editor: { email: 'qa-hono-priv-editor@example.test', password },
+      admin: { email: 'qa-hono-priv-admin@example.test', password },
+    };
+    let privateCreatorId = creatorId;
+    for (const role of Object.keys(privateCredentials) as CommunityRole[]) {
+      const [privUser] = await db
+        .insert(users)
+        .values({
+          email: privateCredentials[role].email,
+          ...deriveUserIdentityColumns({
+            email: privateCredentials[role].email,
+          }),
+          passwordHash,
+          firstName: 'QA',
+          lastName: `Priv${role}`,
+          role: sql`${role}`,
+          communityId: privateCommunityId,
+          isActive: true,
+        })
+        .returning();
+      if (role === 'admin') privateCreatorId = privUser.id;
+    }
     // Branding media through the injected media store (in-memory adapter for
     // the in-process fixture, the R2 bucket for the Workers build): readable
     // for the public community, withheld by cultural restrictions,
@@ -526,6 +585,25 @@ export async function createFixture(
       threeDimensional: true,
       projection: 'mercator',
       staticMapFileId: readableFileId,
+      createdAt: mapConfigTimestamp,
+      updatedAt: mapConfigTimestamp,
+    });
+    await db.insert(communityMapConfigs).values({
+      communityId: privateCommunityId,
+      styleUrl: 'https://tiles.example.test/private-style.json',
+      basemapStyle: 'satellite',
+      centerLatitude: -3.15,
+      centerLongitude: -60.15,
+      southWestLatitude: -4,
+      southWestLongitude: -61,
+      northEastLatitude: -2,
+      northEastLongitude: -59,
+      zoom: 9,
+      pitch: 0,
+      bearing: 0,
+      threeDimensional: false,
+      projection: 'mercator',
+      staticMapFileId: null,
       createdAt: mapConfigTimestamp,
       updatedAt: mapConfigTimestamp,
     });
@@ -922,6 +1000,247 @@ export async function createFixture(
         speakerId: privateSpeaker.id,
       },
     ]);
+    // Slice 6 authenticated community read fixtures (SPEC-V2 §6.4a, #162):
+    // kept completely disjoint from anonymous-public stories so existing Explore
+    // and /v2/public/* assertions retain their exact counts/points/filters.
+    const [communityPlace, editorsPlace] = await db
+      .insert(places)
+      .values([
+        {
+          name: 'QA community story place',
+          communityId,
+          latitude: -3.05,
+          longitude: -60.05,
+          region: 'Manaus',
+          typeOfPlace: 'village',
+        },
+        {
+          name: 'QA editors story place',
+          communityId,
+          latitude: -3.25,
+          longitude: -60.25,
+          region: 'Negro',
+          typeOfPlace: 'sacred_grove',
+        },
+      ])
+      .returning();
+    const [communitySpeaker, restrictedBirthplaceSpeaker, editorsSpeaker] =
+      await db
+        .insert(speakers)
+        .values([
+          {
+            name: 'QA community story speaker',
+            affiliation: 'QA community affiliation',
+            birthplaceId: communityPlace.id,
+            communityId,
+            isActive: true,
+          },
+          {
+            name: 'QA restricted birthplace speaker',
+            birthplaceId: restrictedPlace.id,
+            communityId,
+            isActive: true,
+          },
+          {
+            name: 'QA editors story speaker',
+            communityId,
+            isActive: true,
+          },
+        ])
+        .returning();
+    const [communityStory, editorsStory] = await db
+      .insert(stories)
+      .values([
+        {
+          title: 'QA community story',
+          slug: 'qa-hono-community',
+          communityId,
+          createdBy: creatorId,
+          privacyLevel: 'members_only',
+          language: 'qa-community-lang',
+          topic: 'QA community topic',
+          topicNormalized: deriveTopicNormalized('QA community topic'),
+          description: 'QA community story description',
+          interviewLocationId: publicPlace.id,
+          interviewerId: speaker.id,
+        },
+        {
+          title: 'QA editors story',
+          slug: 'qa-hono-editors',
+          communityId,
+          createdBy: creatorId,
+          privacyLevel: 'editors',
+          description: 'QA editors story description',
+          interviewLocationId: restrictedPlace.id,
+          interviewerId: withdrawnSpeaker.id,
+        },
+      ])
+      .returning();
+    await db.insert(storyPlaces).values([
+      { communityId, storyId: communityStory.id, placeId: communityPlace.id },
+      { communityId, storyId: editorsStory.id, placeId: editorsPlace.id },
+    ]);
+    await db.insert(storySpeakers).values([
+      {
+        communityId,
+        storyId: communityStory.id,
+        speakerId: communitySpeaker.id,
+      },
+      {
+        communityId,
+        storyId: communityStory.id,
+        speakerId: restrictedBirthplaceSpeaker.id,
+      },
+      { communityId, storyId: editorsStory.id, speakerId: editorsSpeaker.id },
+    ]);
+    const [
+      privCommunityPlace,
+      privEditorsPlace,
+      privStorylessPlace,
+      privRestrictedPlace,
+    ] = await db
+      .insert(places)
+      .values([
+        {
+          name: 'QA private community-level place',
+          communityId: privateCommunityId,
+          latitude: -3.1,
+          longitude: -60.1,
+        },
+        {
+          name: 'QA private editors place',
+          communityId: privateCommunityId,
+          latitude: -3.2,
+          longitude: -60.2,
+        },
+        {
+          name: 'QA private storyless place',
+          communityId: privateCommunityId,
+          latitude: -3.3,
+          longitude: -60.3,
+        },
+        {
+          name: 'QA private restricted place',
+          communityId: privateCommunityId,
+          latitude: -3.4,
+          longitude: -60.4,
+          isRestricted: true,
+        },
+      ])
+      .returning();
+    const [privCommunitySpeaker, privEditorsSpeaker, privStorylessSpeaker] =
+      await db
+        .insert(speakers)
+        .values([
+          {
+            name: 'QA private community-level speaker',
+            birthplaceId: privRestrictedPlace.id,
+            communityId: privateCommunityId,
+            isActive: true,
+          },
+          {
+            name: 'QA private editors speaker',
+            birthplaceId: privCommunityPlace.id,
+            communityId: privateCommunityId,
+            isActive: true,
+          },
+          {
+            name: 'QA private storyless speaker',
+            communityId: privateCommunityId,
+            isActive: true,
+          },
+        ])
+        .returning();
+    const [
+      privCommunityStory,
+      privEditorsStory,
+      privRestrictedStory,
+      privUnknownStory,
+    ] = await db
+      .insert(stories)
+      .values([
+        {
+          title: 'QA private member story',
+          slug: 'qa-hono-priv-community',
+          communityId: privateCommunityId,
+          createdBy: privateCreatorId,
+          privacyLevel: 'members_only',
+          description: 'QA private member story description',
+        },
+        {
+          title: 'QA private editors story',
+          slug: 'qa-hono-priv-editors',
+          communityId: privateCommunityId,
+          createdBy: privateCreatorId,
+          privacyLevel: 'editors',
+          description: 'QA private editors story description',
+        },
+        {
+          title: 'QA private restricted story',
+          slug: 'qa-hono-priv-restricted',
+          communityId: privateCommunityId,
+          createdBy: privateCreatorId,
+          privacyLevel: 'public',
+          isRestricted: true,
+        },
+        {
+          title: 'QA private unknown-privacy story',
+          slug: 'qa-hono-priv-unknown',
+          communityId: privateCommunityId,
+          createdBy: privateCreatorId,
+          privacyLevel: 'unknown',
+        },
+      ])
+      .returning();
+    await db.insert(storyPlaces).values([
+      {
+        communityId: privateCommunityId,
+        storyId: privateStory.id,
+        placeId: privRestrictedPlace.id,
+      },
+      {
+        communityId: privateCommunityId,
+        storyId: privCommunityStory.id,
+        placeId: privCommunityPlace.id,
+      },
+      {
+        communityId: privateCommunityId,
+        storyId: privEditorsStory.id,
+        placeId: privEditorsPlace.id,
+      },
+      {
+        communityId: privateCommunityId,
+        storyId: privRestrictedStory.id,
+        placeId: privatePlace.id,
+      },
+      {
+        communityId: privateCommunityId,
+        storyId: privUnknownStory.id,
+        placeId: privatePlace.id,
+      },
+    ]);
+    await db.insert(storySpeakers).values([
+      {
+        communityId: privateCommunityId,
+        storyId: privCommunityStory.id,
+        speakerId: privCommunitySpeaker.id,
+      },
+      {
+        communityId: privateCommunityId,
+        storyId: privEditorsStory.id,
+        speakerId: privEditorsSpeaker.id,
+      },
+      {
+        communityId: privateCommunityId,
+        storyId: privRestrictedStory.id,
+        speakerId: privateSpeaker.id,
+      },
+      {
+        communityId: privateCommunityId,
+        storyId: privUnknownStory.id,
+        speakerId: privateSpeaker.id,
+      },
+    ]);
     const attachedMediaFile = async (
       ownerType: 'story' | 'place' | 'speaker',
       ownerId: number,
@@ -1085,7 +1404,10 @@ export async function createFixture(
           read: async (key, range) => {
             const bytes = storage.get(key);
             if (!bytes) return null;
-            return range ? bytes.subarray(range.start, range.end + 1) : bytes;
+            return {
+              body: range ? bytes.subarray(range.start, range.end + 1) : bytes,
+              size: bytes.byteLength,
+            };
           },
         },
       });
@@ -2892,6 +3214,752 @@ export async function createFixture(
         check: publicNotFoundCheck,
       },
     ];
+    const forbiddenCheck = (body: unknown): boolean =>
+      keysExactly(body, ['error']) &&
+      (body as { error?: string }).error === 'Forbidden';
+    const communityBaselinePlaceIds = fixtures.places
+      .filter((place) => place.communityId === communityId)
+      .map((place) => place.id);
+    const communityReadsStepsFor = (
+      role: 'viewer' | 'member' | 'editor' | 'admin'
+    ): Step[] => {
+      const canReadCommunity =
+        role === 'member' || role === 'editor' || role === 'admin';
+      const canReadEditors = role === 'editor' || role === 'admin';
+      const expectedStoryIds = canReadEditors
+        ? [
+            communityStory.id,
+            editorsStory.id,
+            publicStory.id,
+            unevidencedStory.id,
+          ]
+        : canReadCommunity
+          ? [communityStory.id, publicStory.id, unevidencedStory.id]
+          : [publicStory.id, unevidencedStory.id];
+      const expectedPointIds = (
+        canReadEditors
+          ? [publicPlace.id, communityPlace.id, editorsPlace.id]
+          : canReadCommunity
+            ? [publicPlace.id, communityPlace.id]
+            : [publicPlace.id]
+      ).sort((a, b) => a - b);
+      const expectedPlaceIds = (
+        canReadEditors
+          ? [
+              ...communityBaselinePlaceIds,
+              publicPlace.id,
+              unassociatedPlace.id,
+              membersPlace.id,
+              communityPlace.id,
+              editorsPlace.id,
+            ]
+          : canReadCommunity
+            ? [publicPlace.id, communityPlace.id]
+            : [publicPlace.id]
+      ).sort((a, b) => a - b);
+      const expectedSpeakerIds = (
+        canReadEditors
+          ? [
+              speaker.id,
+              membersSpeaker.id,
+              storylessSpeaker.id,
+              withdrawnSpeaker.id,
+              communitySpeaker.id,
+              restrictedBirthplaceSpeaker.id,
+              editorsSpeaker.id,
+            ]
+          : canReadCommunity
+            ? [speaker.id, communitySpeaker.id, restrictedBirthplaceSpeaker.id]
+            : [speaker.id]
+      ).sort((a, b) => a - b);
+      const mediaPrefix = '/v2/media/';
+      return [
+        {
+          name: `v2 community detail (${role})`,
+          method: 'GET',
+          path: `/v2/community?communityId=${foreignCommunityId}`,
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const d = parsed.data.data;
+            const topicNames = d.filters
+              .filter((f) => f.category === 'topic')
+              .map((t) => String(t.value));
+            const langs = d.filters
+              .filter((f) => f.category === 'language')
+              .map((l) => String(l.value));
+            const placeFilterIds = d.filters
+              .filter((f) => f.category === 'place')
+              .map((p) => p.value);
+            const filtersText = JSON.stringify(d.filters);
+            return (
+              d.id === communityId &&
+              d.slug === communitySlug &&
+              d.visibility === 'public' &&
+              d.storiesCount === expectedStoryIds.length &&
+              d.points.map((p) => p.id).join(',') ===
+                expectedPlaceIds.join(',') &&
+              d.branding.displayImage?.fileId === readableFileId &&
+              d.branding.displayImage.url.endsWith(
+                `${mediaPrefix}${readableFileId}`
+              ) &&
+              d.mapConfig?.staticMapFileId === readableFileId &&
+              d.mapConfig.staticMapUrl?.endsWith(
+                `${mediaPrefix}${readableFileId}`
+              ) === true &&
+              !placeFilterIds.includes(restrictedPlace.id) &&
+              !topicNames.includes('QA members-only topic') &&
+              !langs.includes('qa-members-lang') &&
+              !filtersText.includes('QA restricted place') &&
+              topicNames.includes('QA community topic') === canReadCommunity &&
+              langs.includes('qa-community-lang') === canReadCommunity
+            );
+          },
+        },
+        {
+          name: `v2 community map-config (${role})`,
+          method: 'GET',
+          path: '/v2/community/map-config',
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityMapConfigResponseSchema.safeParse(body);
+            return (
+              parsed.success &&
+              parsed.data.data !== null &&
+              parsed.data.data.styleUrl ===
+                'https://tiles.example.test/style.json' &&
+              parsed.data.data.staticMapFileId === readableFileId &&
+              parsed.data.data.staticMapUrl?.endsWith(
+                `${mediaPrefix}${readableFileId}`
+              ) === true
+            );
+          },
+        },
+        {
+          name: `v2 stories list (${role})`,
+          method: 'GET',
+          path: '/v2/stories?sort=title_asc',
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const text = JSON.stringify(body) ?? '';
+            return (
+              parsed.data.meta.total === expectedStoryIds.length &&
+              parsed.data.data.stories.map((s) => s.id).join(',') ===
+                expectedStoryIds.join(',') &&
+              parsed.data.data.points.map((p) => p.id).join(',') ===
+                expectedPointIds.join(',') &&
+              !text.includes('QA restricted story') &&
+              !text.includes('QA restricted place') &&
+              !text.includes('QA unknown-privacy') &&
+              !text.includes('QA members-only') &&
+              !text.includes('QA foreign story') &&
+              !text.includes('QA private community story') &&
+              !text.includes('QA inactive community')
+            );
+          },
+        },
+        {
+          name: `v2 stories filter excludes #162 and unauthorized places (${role})`,
+          method: 'GET',
+          path: `/v2/stories?place=${restrictedPlace.id}`,
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+            return (
+              parsed.success &&
+              parsed.data.meta.total === 0 &&
+              parsed.data.data.stories.length === 0 &&
+              parsed.data.data.points.length === 0
+            );
+          },
+        },
+        {
+          name: `v2 story detail public (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${publicStory.id}`,
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityStoryDetailResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const expectedPublicStorySpeakers = (
+              canReadEditors ? [speaker.id, withdrawnSpeaker.id] : [speaker.id]
+            ).sort((a, b) => a - b);
+            return (
+              parsed.data.data.id === publicStory.id &&
+              parsed.data.data.places.map((p) => p.id).join(',') ===
+                String(publicPlace.id) &&
+              parsed.data.data.speakers
+                .map((s) => s.id)
+                .sort((a, b) => a - b)
+                .join(',') === expectedPublicStorySpeakers.join(',') &&
+              parsed.data.data.attachments.some(
+                (att) =>
+                  att.fileId === readableStoryMediaFileId &&
+                  att.url.endsWith(`${mediaPrefix}${readableStoryMediaFileId}`)
+              )
+            );
+          },
+        },
+        {
+          name: `v2 story detail community (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${communityStory.id}`,
+          expected: canReadCommunity ? 200 : 404,
+          check: canReadCommunity
+            ? (body) => {
+                const parsed =
+                  CommunityStoryDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success &&
+                  parsed.data.data.id === communityStory.id &&
+                  parsed.data.data.visibility === 'community' &&
+                  parsed.data.data.interviewLocation?.id === publicPlace.id &&
+                  parsed.data.data.interviewer?.id === speaker.id &&
+                  parsed.data.data.places.map((p) => p.id).join(',') ===
+                    String(communityPlace.id)
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 story detail editors (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${editorsStory.id}`,
+          expected: canReadEditors ? 200 : 404,
+          check: canReadEditors
+            ? (body) => {
+                const parsed =
+                  CommunityStoryDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success &&
+                  parsed.data.data.id === editorsStory.id &&
+                  parsed.data.data.visibility === 'editors' &&
+                  parsed.data.data.interviewLocation === null &&
+                  parsed.data.data.interviewer?.id === withdrawnSpeaker.id &&
+                  parsed.data.data.places.map((p) => p.id).join(',') ===
+                    String(editorsPlace.id)
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 story detail hides #162 restricted (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${restrictedStory.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 story detail hides #162 unknown privacy (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${unknownStory.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 story detail hides #162 legacy members privacy (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${membersStory.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 story detail hides cross-community story (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${foreignStory.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 places list (${role})`,
+          method: 'GET',
+          path: '/v2/places',
+          expected: 200,
+          check: (body) => {
+            const parsed = PublicPlacesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const ids = parsed.data.data.map((p) => p.id);
+            const text = JSON.stringify(body) ?? '';
+            return (
+              parsed.data.meta.total === expectedPlaceIds.length &&
+              ids.join(',') === expectedPlaceIds.join(',') &&
+              !text.includes('QA restricted') &&
+              !text.includes('QA foreign place')
+            );
+          },
+        },
+        {
+          name: `v2 places portable near filter (${role})`,
+          method: 'GET',
+          path: '/v2/places?near=-3.05,-60.05,2',
+          expected: 200,
+          check: (body) => {
+            const parsed = PublicPlacesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const expectedNear = canReadCommunity ? [communityPlace.id] : [];
+            return (
+              parsed.data.meta.total === expectedNear.length &&
+              parsed.data.data.map((p) => p.id).join(',') ===
+                expectedNear.join(',')
+            );
+          },
+        },
+        {
+          name: `v2 place detail public (${role})`,
+          method: 'GET',
+          path: `/v2/places/${publicPlace.id}`,
+          expected: 200,
+          check: (body) => {
+            const parsed = PublicPlaceDetailResponseSchema.safeParse(body);
+            return parsed.success && parsed.data.data.id === publicPlace.id;
+          },
+        },
+        {
+          name: `v2 place detail story-less (${role})`,
+          method: 'GET',
+          path: `/v2/places/${unassociatedPlace.id}`,
+          expected: canReadEditors ? 200 : 404,
+          check: canReadEditors
+            ? (body) => {
+                const parsed = PublicPlaceDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success && parsed.data.data.id === unassociatedPlace.id
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 place detail editors-only (${role})`,
+          method: 'GET',
+          path: `/v2/places/${editorsPlace.id}`,
+          expected: canReadEditors ? 200 : 404,
+          check: canReadEditors
+            ? (body) => {
+                const parsed = PublicPlaceDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success && parsed.data.data.id === editorsPlace.id
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 place detail hides #162 restricted (${role})`,
+          method: 'GET',
+          path: `/v2/places/${restrictedPlace.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 place detail hides cross-community (${role})`,
+          method: 'GET',
+          path: `/v2/places/${foreignPlace.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 speakers list (${role})`,
+          method: 'GET',
+          path: '/v2/speakers',
+          expected: 200,
+          check: (body) => {
+            const parsed = PublicSpeakersListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const rows = parsed.data.data;
+            const restrictedSpk = rows.find(
+              (s) => s.id === restrictedBirthplaceSpeaker.id
+            );
+            const commSpk = rows.find((s) => s.id === communitySpeaker.id);
+            const text = JSON.stringify(body) ?? '';
+            return (
+              parsed.data.meta.total === expectedSpeakerIds.length &&
+              rows.map((s) => s.id).join(',') ===
+                expectedSpeakerIds.join(',') &&
+              !text.includes('QA restricted place') &&
+              !text.includes('QA foreign speaker') &&
+              (!canReadCommunity ||
+                (restrictedSpk?.birthplace === null &&
+                  commSpk?.birthplace?.id === communityPlace.id))
+            );
+          },
+        },
+        {
+          name: `v2 speaker detail active (${role})`,
+          method: 'GET',
+          path: `/v2/speakers/${speaker.id}`,
+          expected: 200,
+          check: (body) => {
+            const parsed = PublicSpeakerDetailResponseSchema.safeParse(body);
+            return parsed.success && parsed.data.data.id === speaker.id;
+          },
+        },
+        {
+          name: `v2 speaker detail restricted birthplace hidden (${role})`,
+          method: 'GET',
+          path: `/v2/speakers/${restrictedBirthplaceSpeaker.id}`,
+          expected: canReadCommunity ? 200 : 404,
+          check: canReadCommunity
+            ? (body) => {
+                const parsed =
+                  PublicSpeakerDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success &&
+                  parsed.data.data.id === restrictedBirthplaceSpeaker.id &&
+                  parsed.data.data.birthplace === null
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 speaker detail story-less (${role})`,
+          method: 'GET',
+          path: `/v2/speakers/${storylessSpeaker.id}`,
+          expected: canReadEditors ? 200 : 404,
+          check: canReadEditors
+            ? (body) => {
+                const parsed =
+                  PublicSpeakerDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success && parsed.data.data.id === storylessSpeaker.id
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 speaker detail withdrawn (${role})`,
+          method: 'GET',
+          path: `/v2/speakers/${withdrawnSpeaker.id}`,
+          expected: canReadEditors ? 200 : 404,
+          check: canReadEditors
+            ? (body) => {
+                const parsed =
+                  PublicSpeakerDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success && parsed.data.data.id === withdrawnSpeaker.id
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 speaker detail hides cross-community (${role})`,
+          method: 'GET',
+          path: `/v2/speakers/${foreignSpeaker.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+      ];
+    };
+    const privateCommunityReadsStepsFor = (
+      role: 'viewer' | 'member' | 'editor' | 'admin'
+    ): Step[] => {
+      const canReadCommunity =
+        role === 'member' || role === 'editor' || role === 'admin';
+      const canReadEditors = role === 'editor' || role === 'admin';
+      const expectedStoryIds = canReadEditors
+        ? [privateStory.id, privEditorsStory.id, privCommunityStory.id]
+        : canReadCommunity
+          ? [privateStory.id, privCommunityStory.id]
+          : [privateStory.id];
+      const expectedPointIds = (
+        canReadEditors
+          ? [privatePlace.id, privCommunityPlace.id, privEditorsPlace.id]
+          : canReadCommunity
+            ? [privatePlace.id, privCommunityPlace.id]
+            : [privatePlace.id]
+      ).sort((a, b) => a - b);
+      const expectedPlaceIds = (
+        canReadEditors
+          ? [
+              privatePlace.id,
+              privCommunityPlace.id,
+              privEditorsPlace.id,
+              privStorylessPlace.id,
+            ]
+          : canReadCommunity
+            ? [privatePlace.id, privCommunityPlace.id]
+            : [privatePlace.id]
+      ).sort((a, b) => a - b);
+      const expectedSpeakerIds = (
+        canReadEditors
+          ? [
+              privateSpeaker.id,
+              privCommunitySpeaker.id,
+              privEditorsSpeaker.id,
+              privStorylessSpeaker.id,
+            ]
+          : canReadCommunity
+            ? [privateSpeaker.id, privCommunitySpeaker.id]
+            : [privateSpeaker.id]
+      ).sort((a, b) => a - b);
+      return [
+        {
+          name: `v2 private community detail (${role})`,
+          method: 'GET',
+          path: '/v2/community',
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+            return (
+              parsed.success &&
+              parsed.data.data.id === privateCommunityId &&
+              parsed.data.data.visibility === 'private' &&
+              parsed.data.data.storiesCount === expectedStoryIds.length &&
+              parsed.data.data.points.map((p) => p.id).join(',') ===
+                expectedPlaceIds.join(',')
+            );
+          },
+        },
+        {
+          name: `v2 private community map-config (${role})`,
+          method: 'GET',
+          path: '/v2/community/map-config',
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityMapConfigResponseSchema.safeParse(body);
+            return (
+              parsed.success &&
+              parsed.data.data?.styleUrl ===
+                'https://tiles.example.test/private-style.json'
+            );
+          },
+        },
+        {
+          name: `v2 private community stories (${role})`,
+          method: 'GET',
+          path: '/v2/stories?sort=title_asc',
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const text = JSON.stringify(body) ?? '';
+            return (
+              parsed.data.meta.total === expectedStoryIds.length &&
+              parsed.data.data.stories.map((s) => s.id).join(',') ===
+                expectedStoryIds.join(',') &&
+              parsed.data.data.points.map((p) => p.id).join(',') ===
+                expectedPointIds.join(',') &&
+              !text.includes('QA private restricted') &&
+              !text.includes('QA private unknown-privacy') &&
+              !text.includes('QA public story')
+            );
+          },
+        },
+        {
+          name: `v2 private story detail public (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${privateStory.id}`,
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityStoryDetailResponseSchema.safeParse(body);
+            return (
+              parsed.success &&
+              parsed.data.data.id === privateStory.id &&
+              parsed.data.data.places.map((p) => p.id).join(',') ===
+                String(privatePlace.id)
+            );
+          },
+        },
+        {
+          name: `v2 private story detail community (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${privCommunityStory.id}`,
+          expected: canReadCommunity ? 200 : 404,
+          check: canReadCommunity
+            ? (body) => {
+                const parsed =
+                  CommunityStoryDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success &&
+                  parsed.data.data.id === privCommunityStory.id
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 private story detail editors (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${privEditorsStory.id}`,
+          expected: canReadEditors ? 200 : 404,
+          check: canReadEditors
+            ? (body) => {
+                const parsed =
+                  CommunityStoryDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success && parsed.data.data.id === privEditorsStory.id
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 private story detail hides #162 restricted (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${privRestrictedStory.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 private story detail hides #162 unknown (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${privUnknownStory.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 private story detail hides cross-community story (${role})`,
+          method: 'GET',
+          path: `/v2/stories/${publicStory.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 private community places (${role})`,
+          method: 'GET',
+          path: '/v2/places',
+          expected: 200,
+          check: (body) => {
+            const parsed = PublicPlacesListResponseSchema.safeParse(body);
+            return (
+              parsed.success &&
+              parsed.data.meta.total === expectedPlaceIds.length &&
+              parsed.data.data.map((p) => p.id).join(',') ===
+                expectedPlaceIds.join(',')
+            );
+          },
+        },
+        {
+          name: `v2 private place detail story-less (${role})`,
+          method: 'GET',
+          path: `/v2/places/${privStorylessPlace.id}`,
+          expected: canReadEditors ? 200 : 404,
+        },
+        {
+          name: `v2 private place detail hides #162 restricted (${role})`,
+          method: 'GET',
+          path: `/v2/places/${privRestrictedPlace.id}`,
+          expected: 404,
+          check: publicNotFoundCheck,
+        },
+        {
+          name: `v2 private community speakers (${role})`,
+          method: 'GET',
+          path: '/v2/speakers',
+          expected: 200,
+          check: (body) => {
+            const parsed = PublicSpeakersListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const restrictedBirthSpk = parsed.data.data.find(
+              (s) => s.id === privCommunitySpeaker.id
+            );
+            return (
+              parsed.data.meta.total === expectedSpeakerIds.length &&
+              parsed.data.data.map((s) => s.id).join(',') ===
+                expectedSpeakerIds.join(',') &&
+              (!canReadCommunity || restrictedBirthSpk?.birthplace === null)
+            );
+          },
+        },
+        {
+          name: `v2 private speaker detail hides restricted birthplace (${role})`,
+          method: 'GET',
+          path: `/v2/speakers/${privCommunitySpeaker.id}`,
+          expected: canReadCommunity ? 200 : 404,
+          check: canReadCommunity
+            ? (body) => {
+                const parsed =
+                  PublicSpeakerDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success &&
+                  parsed.data.data.id === privCommunitySpeaker.id &&
+                  parsed.data.data.birthplace === null
+                );
+              }
+            : publicNotFoundCheck,
+        },
+        {
+          name: `v2 private speaker detail story-less (${role})`,
+          method: 'GET',
+          path: `/v2/speakers/${privStorylessSpeaker.id}`,
+          expected: canReadEditors ? 200 : 404,
+        },
+        {
+          name: `v2 private speaker detail editors (${role})`,
+          method: 'GET',
+          path: `/v2/speakers/${privEditorsSpeaker.id}`,
+          expected: canReadEditors ? 200 : 404,
+          check: canReadEditors
+            ? (body) => {
+                const parsed =
+                  PublicSpeakerDetailResponseSchema.safeParse(body);
+                return (
+                  parsed.success &&
+                  parsed.data.data.id === privEditorsSpeaker.id &&
+                  parsed.data.data.birthplace?.id === privCommunityPlace.id
+                );
+              }
+            : publicNotFoundCheck,
+        },
+      ];
+    };
+    const forbiddenCommunityReadSteps: Step[] = [
+      {
+        name: 'deny v2 community detail',
+        method: 'GET',
+        path: '/v2/community',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny v2 community map-config',
+        method: 'GET',
+        path: '/v2/community/map-config',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny v2 stories list',
+        method: 'GET',
+        path: '/v2/stories',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny v2 story detail',
+        method: 'GET',
+        path: `/v2/stories/${publicStory.id}`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny v2 places list',
+        method: 'GET',
+        path: '/v2/places',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny v2 place detail',
+        method: 'GET',
+        path: `/v2/places/${publicPlace.id}`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny v2 speakers list',
+        method: 'GET',
+        path: '/v2/speakers',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny v2 speaker detail',
+        method: 'GET',
+        path: `/v2/speakers/${speaker.id}`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+    ];
     const journeys: Journey[] = [
       {
         persona: 'anonymous',
@@ -2916,6 +3984,30 @@ export async function createFixture(
             name: 'require authentication',
             method: 'GET',
             path: '/v2/auth/me',
+            expected: 401,
+          },
+          {
+            name: 'require auth on v2 community reads',
+            method: 'GET',
+            path: '/v2/community',
+            expected: 401,
+          },
+          {
+            name: 'require auth on v2 stories reads',
+            method: 'GET',
+            path: '/v2/stories',
+            expected: 401,
+          },
+          {
+            name: 'require auth on v2 places reads',
+            method: 'GET',
+            path: '/v2/places',
+            expected: 401,
+          },
+          {
+            name: 'require auth on v2 speakers reads',
+            method: 'GET',
+            path: '/v2/speakers',
             expected: 401,
           },
           {
@@ -3011,6 +4103,7 @@ export async function createFixture(
           ...(role === 'member' || role === 'editor' || role === 'admin'
             ? [...exploreWithSession, ...publicCommunitiesWithSession]
             : []),
+          ...communityReadsStepsFor(role),
           {
             name: 'read own community media',
             method: 'GET',
@@ -3113,6 +4206,31 @@ export async function createFixture(
           },
         ],
       })),
+      ...(['viewer', 'member', 'editor', 'admin'] as const).map((role) => ({
+        persona: `private_${role}`,
+        steps: [
+          {
+            name: 'login to active private community',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: privateCredentials[role],
+            check: ownUser(
+              privateCredentials[role].email,
+              role,
+              liveSessionCookie,
+              privateCommunityId
+            ),
+          },
+          ...privateCommunityReadsStepsFor(role),
+          {
+            name: 'logout private community user',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ],
+      })),
       {
         persona: 'super_admin',
         steps: [
@@ -3145,6 +4263,7 @@ export async function createFixture(
           // projection; privilege never widens the public surface.
           ...exploreWithSession,
           ...publicCommunitiesWithSession,
+          ...forbiddenCommunityReadSteps,
           {
             // Null-community super_admin cannot read any community branding
             // asset via /v2/media/:id, even an active public community's file.
@@ -3224,6 +4343,7 @@ export async function createFixture(
             path: `/explore/communities/${inactiveCommunity.slug}`,
             expected: 404,
           },
+          ...forbiddenCommunityReadSteps,
           {
             name: 'logout',
             method: 'POST',
@@ -3271,6 +4391,56 @@ export async function createFixture(
             method: 'GET',
             path: `/v2/media/${readableFileId}`,
             expected: 404,
+          },
+          {
+            name: 'v2 community scopes strictly to own foreign community',
+            method: 'GET',
+            path: `/v2/community?communityId=${communityId}`,
+            expected: 200,
+            check: (body) => {
+              const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.id === foreignCommunityId &&
+                parsed.data.data.slug === foreignCommunitySlug
+              );
+            },
+          },
+          {
+            name: 'v2 stories lists only own foreign story',
+            method: 'GET',
+            path: '/v2/stories',
+            expected: 200,
+            check: (body) => {
+              const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.meta.total === 1 &&
+                parsed.data.data.stories.map((s) => s.id).join(',') ===
+                  String(foreignStory.id)
+              );
+            },
+          },
+          {
+            name: 'v2 story detail denies primary community story',
+            method: 'GET',
+            path: `/v2/stories/${publicStory.id}`,
+            expected: 404,
+            check: publicNotFoundCheck,
+          },
+          {
+            name: 'v2 place detail denies primary community place',
+            method: 'GET',
+            path: `/v2/places/${publicPlace.id}`,
+            expected: 404,
+            check: publicNotFoundCheck,
+          },
+          {
+            name: 'v2 speaker detail denies primary community speaker',
+            method: 'GET',
+            path: `/v2/speakers/${speaker.id}`,
+            expected: 404,
+            check: publicNotFoundCheck,
           },
           ...publicCommunitiesWithSession,
         ],

@@ -61,7 +61,8 @@ export async function runHonoFoundationContract(
     storage: {
       read: async (_key: string) => {
         reads++;
-        return new Uint8Array([1, 2, 3]);
+        const body = new Uint8Array([1, 2, 3]);
+        return { body, size: body.byteLength };
       },
     },
   };

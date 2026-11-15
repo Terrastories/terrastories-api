@@ -685,7 +685,10 @@ beforeAll(async () => {
       read: async (key: string, range?: { start: number; end: number }) => {
         const bytes = storageBytes.get(key);
         if (!bytes) return null;
-        return range ? bytes.subarray(range.start, range.end + 1) : bytes;
+        return {
+          body: range ? bytes.subarray(range.start, range.end + 1) : bytes,
+          size: bytes.byteLength,
+        };
       },
     },
   };
@@ -1303,26 +1306,32 @@ describe('PR #243 Slice 5 review fixes', () => {
         calls.push({ key, range });
         if (range) {
           const slice = fullPayload.subarray(range.start, range.end + 1);
-          return new ReadableStream<Uint8Array>({
-            start(controller) {
-              controller.enqueue(slice);
-              controller.close();
-            },
-          });
+          return {
+            body: new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(slice);
+                controller.close();
+              },
+            }),
+            size: fullPayload.byteLength,
+          };
         }
         let sent = 0;
-        return new ReadableStream<Uint8Array>({
-          pull(controller) {
-            chunksPulledOnResponse += 1;
-            if (sent === 0) {
-              controller.enqueue(fullPayload.subarray(0, 8));
-              sent = 1;
-            } else {
-              controller.enqueue(fullPayload.subarray(8));
-              controller.close();
-            }
-          },
-        });
+        return {
+          body: new ReadableStream<Uint8Array>({
+            pull(controller) {
+              chunksPulledOnResponse += 1;
+              if (sent === 0) {
+                controller.enqueue(fullPayload.subarray(0, 8));
+                sent = 1;
+              } else {
+                controller.enqueue(fullPayload.subarray(8));
+                controller.close();
+              }
+            },
+          }),
+          size: fullPayload.byteLength,
+        };
       },
     });
 
@@ -1369,6 +1378,47 @@ describe('PR #243 Slice 5 review fixes', () => {
     expect(res416?.status).toBe(416);
     expect(res416?.headers.get('Content-Range')).toBe('bytes */16');
     expect(calls).toHaveLength(0);
+
+    // Storage size vs DB byteSize mismatch fails closed with content-free 500
+    // on both 200 and 206 and cancels the unread stream without leaking bytes.
+    let cancelledStreams = 0;
+    const mismatchService = new PublicContentService(fakeRepo, {
+      async read() {
+        return {
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('SECRET_BYTES'));
+            },
+            cancel() {
+              cancelledStreams += 1;
+            },
+          }),
+          size: fullPayload.byteLength + 5,
+        };
+      },
+    });
+
+    const mismatch200 = await mismatchService.serveMedia(
+      'alpha',
+      mediaId,
+      undefined
+    );
+    expect(mismatch200?.status).toBe(500);
+    expect(await mismatch200?.json()).toEqual({
+      error: 'Internal server error',
+    });
+    expect(cancelledStreams).toBe(1);
+
+    const mismatch206 = await mismatchService.serveMedia(
+      'alpha',
+      mediaId,
+      'bytes=0-3'
+    );
+    expect(mismatch206?.status).toBe(500);
+    expect(await mismatch206?.json()).toEqual({
+      error: 'Internal server error',
+    });
+    expect(cancelledStreams).toBe(2);
   });
 
   it('omits non-http/https externalMediaLinks and returns 500 without logging content on Zod validation failure', async () => {

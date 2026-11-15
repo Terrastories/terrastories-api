@@ -7,7 +7,11 @@
  */
 
 import type { Context, Hono } from 'hono';
-import { actorOf } from './community-writes.hono.js';
+import {
+  actorOf,
+  jsonBodyLimit,
+  parseJsonRequestBody,
+} from './community-writes.hono.js';
 import type { FoundationStorage } from '../services/hono-foundation.service.js';
 import { MediaWritesRepository } from '../repositories/media-writes.repository.js';
 import {
@@ -77,6 +81,40 @@ export function registerMediaRoutes(
 
   app.delete('/v2/media/:id', async (c) => {
     const result = await service.deleteFile(actorOf(c), c.req.param('id'));
+    return respondMediaResult(c, result);
+  });
+
+  app.post('/v2/attachments', jsonBodyLimit, async (c) => {
+    const parsed = await parseJsonRequestBody(c);
+    if (!parsed.ok) {
+      return c.json({ error: parsed.error }, parsed.status);
+    }
+    const result = await service.createAttachment(
+      actorOf(c),
+      parsed.body,
+      originFor(c)
+    );
+    return c.json(result.body, result.status);
+  });
+
+  app.patch('/v2/attachments/reorder', jsonBodyLimit, async (c) => {
+    const parsed = await parseJsonRequestBody(c);
+    if (!parsed.ok) {
+      return c.json({ error: parsed.error }, parsed.status);
+    }
+    const result = await service.reorderAttachments(
+      actorOf(c),
+      parsed.body,
+      originFor(c)
+    );
+    return c.json(result.body, result.status);
+  });
+
+  app.delete('/v2/attachments/:id', async (c) => {
+    const result = await service.deleteAttachment(
+      actorOf(c),
+      c.req.param('id')
+    );
     return respondMediaResult(c, result);
   });
 }

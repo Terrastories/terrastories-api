@@ -196,18 +196,20 @@ export function createHonoApp(options: FoundationOptions) {
     repository: communityReadsRepository,
     publicOrigin: configuredOrigin,
   });
+  const mediaCleanup =
+    options.mediaCleanup ??
+    new MediaCleanupCoordinator(options.repository.connection, options.storage);
   registerCommunityWriteRoutes(app, {
     repository: new CommunityWritesRepository(options.repository.connection),
     readsRepository: communityReadsRepository,
     publicOrigin: configuredOrigin,
+    mediaCleanup,
   });
-  const mediaCleanup =
-    options.mediaCleanup ??
-    new MediaCleanupCoordinator(options.repository.connection, options.storage);
   registerStoryWriteRoutes(app, {
     repository: new StoryWritesRepository(options.repository.connection),
     readsRepository: communityReadsRepository,
     publicOrigin: configuredOrigin,
+    mediaCleanup,
   });
   registerMediaRoutes(app, {
     repository: new MediaWritesRepository(options.repository.connection),

@@ -35,6 +35,11 @@ import type { V2ErrorResponse } from '../shared/schemas/public-communities.js';
 import { isDatabaseIdString } from '../shared/types/public.js';
 import { deriveDescriptionForWrite } from '../shared/utils/derived-columns.js';
 import { InvalidDescriptionError } from '../shared/utils/safe-description.js';
+import {
+  findOwnerAttachmentFileIds,
+  findUnreferencedFiles,
+  type MediaCleanupCoordinator,
+} from './media-cleanup.service.js';
 
 export type CommunityWriteResult<T> =
   | { status: 200 | 201; body: T }
@@ -84,8 +89,45 @@ export async function authorizeCommunityWriteCaller(
 export class CommunityWritesService {
   constructor(
     private readonly repository: CommunityWritesRepository,
-    private readonly readsService: CommunityReadsService
+    private readonly readsService: CommunityReadsService,
+    private readonly cleanup?: MediaCleanupCoordinator
   ) {}
+
+  private async scheduleOwnerAttachmentCleanup(
+    fileIds: ReadonlyArray<string>
+  ): Promise<void> {
+    if (!this.cleanup || fileIds.length === 0) return;
+    try {
+      const unreferenced = await findUnreferencedFiles(
+        this.repository.connection,
+        this.repository.connection,
+        fileIds,
+        'owner_deleted'
+      );
+      if (unreferenced.length > 0) {
+        await this.cleanup.schedule(unreferenced);
+      }
+    } catch {
+      // The restart-safe sweeper remains the backstop.
+    }
+  }
+
+  private async ownerAttachmentFileIds(
+    communityId: number,
+    ownerType: 'place' | 'speaker',
+    ownerId: number
+  ): Promise<string[]> {
+    try {
+      return await findOwnerAttachmentFileIds(
+        this.repository.connection,
+        communityId,
+        ownerType,
+        ownerId
+      );
+    } catch {
+      return [];
+    }
+  }
 
   private authorizeCaller(
     actor: FoundationUser,
@@ -431,6 +473,12 @@ export class CommunityWritesService {
     }
     const placeId = Number(rawPlaceId);
 
+    const attachmentFileIds = await this.ownerAttachmentFileIds(
+      caller.communityId,
+      'place',
+      placeId
+    );
+
     try {
       const outcome = await this.repository.deletePlace(
         caller.communityId,
@@ -448,6 +496,7 @@ export class CommunityWritesService {
           },
         };
       }
+      await this.scheduleOwnerAttachmentCleanup(attachmentFileIds);
       return { status: 204 };
     } catch {
       return { status: 500, body: INTERNAL_ERROR_BODY };
@@ -618,6 +667,12 @@ export class CommunityWritesService {
     }
     const speakerId = Number(rawSpeakerId);
 
+    const attachmentFileIds = await this.ownerAttachmentFileIds(
+      caller.communityId,
+      'speaker',
+      speakerId
+    );
+
     try {
       const outcome = await this.repository.deleteSpeaker(
         caller.communityId,
@@ -635,6 +690,7 @@ export class CommunityWritesService {
           },
         };
       }
+      await this.scheduleOwnerAttachmentCleanup(attachmentFileIds);
       return { status: 204 };
     } catch {
       return { status: 500, body: INTERNAL_ERROR_BODY };

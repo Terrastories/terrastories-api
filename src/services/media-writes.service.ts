@@ -7,6 +7,10 @@ import { z } from 'zod';
 import {
   MediaUploadResponseSchema,
   MediaMetadataResponseSchema,
+  CreateAttachmentRequestSchema,
+  ReorderAttachmentsRequestSchema,
+  AttachmentResponseSchema,
+  AttachmentListResponseSchema,
   ALLOWED_UPLOAD_FIELDS,
   MAGIC_SNIFF_BYTES,
   MAX_MEDIA_UPLOAD_BYTES,
@@ -46,7 +50,10 @@ import {
   MediaWritesRepository,
   buildMediaAuditEntry,
 } from '../repositories/media-writes.repository.js';
-import type { MediaCleanupCoordinator } from './media-cleanup.service.js';
+import {
+  findUnreferencedFiles,
+  type MediaCleanupCoordinator,
+} from './media-cleanup.service.js';
 
 class UploadCategoryLimitError extends Error {
   constructor(message: string) {
@@ -820,5 +827,206 @@ export class MediaWritesService {
     } catch {
       return { status: 500, body: INTERNAL_ERROR_BODY };
     }
+  }
+
+  async createAttachment(
+    actor: FoundationUser,
+    rawBody: unknown,
+    origin: string
+  ): Promise<
+    | { status: 201; body: z.infer<typeof AttachmentResponseSchema> }
+    | { status: 400 | 403 | 404 | 409 | 500; body: unknown }
+  > {
+    const parsed = CreateAttachmentRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody(
+          parsed.error.issues.map((issue) => ({
+            path: issue.path.join('.'),
+            message: issue.message,
+          }))
+        ),
+      };
+    }
+
+    let outcome;
+    try {
+      outcome = await this.repository.createAttachment({
+        actor,
+        ...parsed.data,
+      });
+    } catch {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+
+    if (outcome.status === 'forbidden') {
+      await this.auditDecision({
+        communityId: actor.communityId,
+        actorId: actor.id,
+        action: 'attachment.create',
+        resourceIds: [parsed.data.fileId, parsed.data.ownerId],
+        outcome: 'denied',
+        kind: 'attachment',
+      });
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (outcome.status === 'not_found') {
+      await this.auditDecision({
+        communityId: actor.communityId,
+        actorId: actor.id,
+        action: 'attachment.create',
+        resourceIds: [parsed.data.fileId, parsed.data.ownerId],
+        outcome: 'denied',
+        kind: 'attachment',
+      });
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+    if (outcome.status !== 'created') {
+      return { status: 400, body: NOT_FOUND_BODY };
+    }
+
+    const checked = AttachmentResponseSchema.safeParse({
+      data: {
+        ...outcome.attachment,
+        url: authenticatedMediaUrl(origin, outcome.attachment.fileId),
+        createdAt: outcome.attachment.createdAt.toISOString(),
+      },
+    });
+    if (!checked.success) {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+    return { status: 201, body: checked.data };
+  }
+
+  async reorderAttachments(
+    actor: FoundationUser,
+    rawBody: unknown,
+    origin: string
+  ): Promise<
+    | { status: 200; body: z.infer<typeof AttachmentListResponseSchema> }
+    | { status: 400 | 403 | 404 | 500; body: unknown }
+  > {
+    const parsed = ReorderAttachmentsRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody(
+          parsed.error.issues.map((issue) => ({
+            path: issue.path.join('.'),
+            message: issue.message,
+          }))
+        ),
+      };
+    }
+
+    let outcome;
+    try {
+      outcome = await this.repository.reorderAttachments({
+        actor,
+        ownerType: parsed.data.ownerType,
+        ownerId: parsed.data.ownerId,
+        role: parsed.data.role,
+        attachmentIds: parsed.data.attachmentIds,
+      });
+    } catch {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+
+    if (outcome.status === 'forbidden') {
+      await this.auditDecision({
+        communityId: actor.communityId,
+        actorId: actor.id,
+        action: 'attachment.reorder',
+        resourceIds: parsed.data.attachmentIds,
+        outcome: 'denied',
+        kind: 'attachment',
+      });
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (outcome.status === 'not_found' || outcome.status === 'invalid_set') {
+      await this.auditDecision({
+        communityId: actor.communityId,
+        actorId: actor.id,
+        action: 'attachment.reorder',
+        resourceIds: parsed.data.attachmentIds,
+        outcome: 'denied',
+        kind: 'attachment',
+      });
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+
+    if (outcome.status !== 'reordered') {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+
+    const checked = AttachmentListResponseSchema.safeParse({
+      data: outcome.attachments.map((attachment) => ({
+        ...attachment,
+        url: authenticatedMediaUrl(origin, attachment.fileId),
+        createdAt: attachment.createdAt.toISOString(),
+      })),
+    });
+    if (!checked.success) {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+    return { status: 200, body: checked.data };
+  }
+
+  async deleteAttachment(
+    actor: FoundationUser,
+    rawAttachmentId: string
+  ): Promise<CommunityWriteResult<never>> {
+    if (!isDatabaseIdString(rawAttachmentId)) {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+    const attachmentId = Number(rawAttachmentId);
+
+    let outcome;
+    try {
+      outcome = await this.repository.deleteAttachment(actor, attachmentId);
+    } catch {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+
+    if (outcome.status === 'forbidden') {
+      await this.auditDecision({
+        communityId: actor.communityId,
+        actorId: actor.id,
+        action: 'attachment.delete',
+        resourceIds: [attachmentId],
+        outcome: 'denied',
+        kind: 'attachment',
+      });
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (outcome.status !== 'deleted') {
+      await this.auditDecision({
+        communityId: actor.communityId,
+        actorId: actor.id,
+        action: 'attachment.delete',
+        resourceIds: [attachmentId],
+        outcome: 'denied',
+        kind: 'attachment',
+      });
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+
+    // Deleting the last relation schedules byte cleanup within 30 days; the
+    // sweeper re-checks NOT EXISTS so a still-referenced file is never swept.
+    try {
+      const unreferenced = await findUnreferencedFiles(
+        this.repository.connection,
+        this.repository.connection,
+        [outcome.fileId],
+        'last_attachment_deleted'
+      );
+      if (unreferenced.length > 0) {
+        await this.cleanup.schedule(unreferenced);
+      }
+    } catch {
+      // Scheduling is best-effort; the restart-safe sweeper remains the backstop.
+    }
+    return { status: 204 };
   }
 }

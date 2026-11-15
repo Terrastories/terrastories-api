@@ -232,6 +232,30 @@ export class MediaCleanupCoordinator {
  * Shared query helper returning `File` metadata for any `fileIds` that currently
  * hold zero references across `attachments`, `community_map_configs`, and `community_media`.
  */
+export async function findOwnerAttachmentFileIds(
+  connection: Database | DrizzleD1Database,
+  communityId: number,
+  ownerType: 'story' | 'place' | 'speaker',
+  ownerId: number
+): Promise<string[]> {
+  const tables = tablesFor(connection);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const db = connection as any;
+  const rows = (await db
+    .select({ fileId: tables.attachments.fileId })
+    .from(tables.attachments)
+    .where(
+      and(
+        eq(tables.attachments.communityId, communityId),
+        eq(tables.attachments.ownerType, ownerType),
+        eq(tables.attachments.ownerId, ownerId)
+      )
+    )) as Array<{ fileId: string | null }>;
+  return rows
+    .map((row) => row.fileId)
+    .filter((id): id is string => typeof id === 'string');
+}
+
 export async function findUnreferencedFiles(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   executor: any,

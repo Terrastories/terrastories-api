@@ -12,6 +12,10 @@ import {
   communityMediaSqlite,
 } from '../db/schema/sessions.js';
 import type { FoundationUser } from './hono-foundation.repository.js';
+import type {
+  AttachmentOwnerType,
+  AttachmentRole,
+} from '../db/schema/attachments.js';
 import {
   activeUnrestrictedFileCondition,
   ownCommunityViewerForRole,
@@ -71,6 +75,37 @@ export type DeleteFileDbOutcome =
   | { status: 'not_found' }
   | { status: 'forbidden' }
   | { status: 'conflict' };
+
+export interface AttachmentRecord {
+  id: number;
+  fileId: string;
+  ownerType: AttachmentOwnerType;
+  ownerId: number;
+  role: AttachmentRole;
+  ordinal: number;
+  mimeType: string;
+  byteSize: number;
+  originalName: string;
+  createdAt: Date;
+}
+
+export type AttachmentWriteOutcome =
+  | { status: 'created'; attachment: AttachmentRecord }
+  | { status: 'reordered'; attachments: AttachmentRecord[] }
+  | {
+      status: 'deleted';
+      fileId: string;
+      storageKey: string;
+      communityId: number | null;
+    }
+  | { status: 'forbidden' }
+  | { status: 'not_found' }
+  | { status: 'invalid_set' };
+
+type AttachmentOwnerResolution =
+  | { status: 'ok'; communityId: number | null }
+  | { status: 'forbidden' }
+  | { status: 'not_found' };
 
 function parseMetadataField(raw: unknown): Record<string, unknown> | null {
   if (raw === null || raw === undefined) return null;
@@ -1486,6 +1521,1041 @@ export class MediaWritesRepository {
       };
     });
   }
+
+  /**
+   * §6.7 attachment change authority. Resolves the owning resource inside one
+   * tenant and fails closed: an owner that exists but is restricted or has
+   * unknown privacy is a 404 (never a 403 existence oracle), while a caller
+   * without the owner's change authority is a 403.
+   */
+  private async authorizeAttachmentOwner(input: {
+    actor: FoundationUser;
+    ownerType: AttachmentOwnerType;
+    ownerId: number;
+    role: AttachmentRole;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor?: any;
+    lock?: 'update' | 'share';
+  }): Promise<AttachmentOwnerResolution> {
+    const ex = input.executor ?? this.db;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const lock = (query: any): any => {
+      if (!input.lock) return query;
+      return input.lock === 'update' ? query.for('update') : query.for('share');
+    };
+    const one = async (query: {
+      all?: () => Promise<unknown[]> | unknown[];
+    }): Promise<boolean> => (await this.fetchAll(query)).length > 0;
+
+    if (input.actor.communityId === null) {
+      // Null-community exception: super_admin's own user_photo only.
+      if (
+        input.actor.role !== 'super_admin' ||
+        input.ownerType !== 'user' ||
+        input.role !== 'user_photo' ||
+        input.ownerId !== input.actor.id
+      ) {
+        return { status: 'forbidden' };
+      }
+      const exists = await one(
+        lock(
+          ex
+            .select({ id: this.tables.users.id })
+            .from(this.tables.users)
+            .where(
+              and(
+                eq(this.tables.users.id, input.actor.id),
+                isNull(this.tables.users.communityId),
+                eq(this.tables.users.role, 'super_admin'),
+                eq(this.tables.users.isActive, true)
+              )
+            )
+        ).limit(1)
+      );
+      return exists
+        ? { status: 'ok', communityId: null }
+        : { status: 'not_found' };
+    }
+
+    const communityId = input.actor.communityId;
+    const active = await this.isCommunityActive(communityId);
+    if (!active) {
+      return { status: 'forbidden' };
+    }
+    const viewer = ownCommunityViewerForRole(input.actor.role);
+    if (!viewer) {
+      return { status: 'forbidden' };
+    }
+    const isEditor = viewer === 'own-editor' || viewer === 'own-admin';
+    const isAdmin = viewer === 'own-admin';
+
+    if (input.ownerType === 'story') {
+      if (!isEditor) return { status: 'forbidden' };
+      if (input.role !== 'story_media') return { status: 'not_found' };
+      const exists = await one(
+        lock(
+          ex
+            .select({ id: this.tables.stories.id })
+            .from(this.tables.stories)
+            .where(
+              and(
+                storyConditionForViewer(
+                  this.tables.stories,
+                  communityId,
+                  viewer
+                ),
+                eq(this.tables.stories.id, input.ownerId)
+              )
+            )
+        ).limit(1)
+      );
+      return exists ? { status: 'ok', communityId } : { status: 'not_found' };
+    }
+
+    if (input.ownerType === 'place') {
+      if (!isEditor) return { status: 'forbidden' };
+      if (input.role !== 'place_photo' && input.role !== 'place_name_audio') {
+        return { status: 'not_found' };
+      }
+      const exists = await one(
+        lock(
+          ex
+            .select({ id: this.tables.places.id })
+            .from(this.tables.places)
+            .where(
+              and(
+                readablePlaceConditionForViewer(
+                  ex,
+                  this.tables,
+                  communityId,
+                  viewer
+                ),
+                eq(this.tables.places.id, input.ownerId)
+              )
+            )
+        ).limit(1)
+      );
+      return exists ? { status: 'ok', communityId } : { status: 'not_found' };
+    }
+
+    if (input.ownerType === 'speaker') {
+      if (!isEditor) return { status: 'forbidden' };
+      if (input.role !== 'speaker_photo') return { status: 'not_found' };
+      const exists = await one(
+        lock(
+          ex
+            .select({ id: this.tables.speakers.id })
+            .from(this.tables.speakers)
+            .where(
+              and(
+                readableSpeakerConditionForViewer(
+                  ex,
+                  this.tables,
+                  communityId,
+                  viewer
+                ),
+                eq(this.tables.speakers.id, input.ownerId)
+              )
+            )
+        ).limit(1)
+      );
+      return exists ? { status: 'ok', communityId } : { status: 'not_found' };
+    }
+
+    if (input.ownerType === 'user') {
+      if (input.role !== 'user_photo') return { status: 'not_found' };
+      // Account owner or same-community admin with user-management authority.
+      if (input.actor.id !== input.ownerId && !isAdmin) {
+        return { status: 'forbidden' };
+      }
+      const exists = await one(
+        lock(
+          ex
+            .select({ id: this.tables.users.id })
+            .from(this.tables.users)
+            .where(
+              and(
+                eq(this.tables.users.id, input.ownerId),
+                eq(this.tables.users.communityId, communityId),
+                eq(this.tables.users.isActive, true)
+              )
+            )
+        ).limit(1)
+      );
+      return exists ? { status: 'ok', communityId } : { status: 'not_found' };
+    }
+
+    if (input.ownerType === 'community') {
+      if (!isAdmin) return { status: 'forbidden' };
+      if (
+        input.role !== 'community_display_image' &&
+        input.role !== 'community_background_image' &&
+        input.role !== 'sponsor_logo'
+      ) {
+        return { status: 'not_found' };
+      }
+      if (input.ownerId !== communityId) return { status: 'not_found' };
+      return { status: 'ok', communityId };
+    }
+
+    // map_config: owner id is the owning community's id.
+    if (!isAdmin) return { status: 'forbidden' };
+    if (input.role !== 'static_map' || input.ownerId !== communityId) {
+      return { status: 'not_found' };
+    }
+    const exists = await one(
+      lock(
+        ex
+          .select({ communityId: this.tables.communityMapConfigs.communityId })
+          .from(this.tables.communityMapConfigs)
+          .where(eq(this.tables.communityMapConfigs.communityId, communityId))
+      ).limit(1)
+    );
+    return exists ? { status: 'ok', communityId } : { status: 'not_found' };
+  }
+
+  private async resolveAttachableFile(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    fileId: string,
+    communityId: number | null
+  ): Promise<StoredFileRecord | null> {
+    const rows = (await this.fetchAll(
+      executor
+        .select({
+          id: this.tables.files.id,
+          communityId: this.tables.files.communityId,
+          storageKey: this.tables.files.storageKey,
+          path: this.tables.files.path,
+          originalName: this.tables.files.originalName,
+          mimeType: this.tables.files.mimeType,
+          byteSize: this.tables.files.byteSize,
+          size: this.tables.files.size,
+          checksum: this.tables.files.checksum,
+          uploadedBy: this.tables.files.uploadedBy,
+          metadata: this.tables.files.metadata,
+          isActive: this.tables.files.isActive,
+          culturalRestrictions: this.tables.files.culturalRestrictions,
+          createdAt: this.tables.files.createdAt,
+        })
+        .from(this.tables.files)
+        .where(eq(this.tables.files.id, fileId))
+        .limit(1)
+    )) as Array<{
+      id: string;
+      communityId: number | null;
+      storageKey: string | null;
+      path: string;
+      originalName: string;
+      mimeType: string;
+      byteSize: number | null;
+      size: number | null;
+      checksum: string | null;
+      uploadedBy: number | null;
+      metadata: unknown;
+      isActive: boolean;
+      culturalRestrictions: unknown;
+      createdAt: Date | number | string;
+    }>;
+    const row = rows[0];
+    if (!row || !row.isActive || row.culturalRestrictions !== null) {
+      return null;
+    }
+    // §6.7 null-community check: a null-community attachment may only
+    // reference a null-community file (super_admin own user_photo).
+    if (row.communityId !== communityId) {
+      return null;
+    }
+    return {
+      id: row.id,
+      communityId: row.communityId,
+      storageKey: row.storageKey ?? row.path,
+      originalName: row.originalName,
+      mimeType: row.mimeType,
+      byteSize: Number(row.byteSize ?? row.size),
+      checksum: row.checksum,
+      uploadedBy: row.uploadedBy,
+      metadata: parseMetadataField(row.metadata),
+      isActive: row.isActive,
+      culturalRestrictions: row.culturalRestrictions,
+      createdAt: toDate(row.createdAt),
+    };
+  }
+
+  private attachmentScope(
+    communityId: number | null,
+    ownerType: AttachmentOwnerType,
+    ownerId: number,
+    role: AttachmentRole
+  ) {
+    return and(
+      communityId === null
+        ? isNull(this.tables.attachments.communityId)
+        : eq(this.tables.attachments.communityId, communityId),
+      eq(this.tables.attachments.ownerType, ownerType),
+      eq(this.tables.attachments.ownerId, ownerId),
+      eq(this.tables.attachments.role, role)
+    );
+  }
+
+  private toAttachmentRecord(
+    file: StoredFileRecord,
+    row: {
+      id: number;
+      ordinal: number | null;
+      createdAt: Date | number | string;
+    },
+    owner?: {
+      ownerType: AttachmentOwnerType;
+      ownerId: number;
+      role: AttachmentRole;
+    }
+  ): AttachmentRecord {
+    return {
+      id: row.id,
+      fileId: file.id,
+      ownerType: owner?.ownerType ?? 'user',
+      ownerId: owner?.ownerId ?? 0,
+      role: owner?.role ?? 'user_photo',
+      ordinal: Number(row.ordinal ?? 0),
+      mimeType: file.mimeType,
+      byteSize: file.byteSize,
+      originalName: file.originalName,
+      createdAt: toDate(row.createdAt),
+    };
+  }
+
+  /** Drizzle's SQLite/D1 builders expose `.all()`; PostgreSQL builders await. */
+  private async fetchAll(query: {
+    all?: () => Promise<unknown[]> | unknown[];
+  }): Promise<unknown[]> {
+    if (typeof query.all === 'function') {
+      return await query.all();
+    }
+    return await (query as Promise<unknown[]>);
+  }
+
+  async createAttachment(input: {
+    actor: FoundationUser;
+    fileId: string;
+    ownerType: AttachmentOwnerType;
+    ownerId: number;
+    role: AttachmentRole;
+    ordinal?: number;
+    now?: Date;
+  }): Promise<AttachmentWriteOutcome> {
+    const now = input.now ?? new Date();
+    const audit = buildMediaAuditEntry({
+      communityId: input.actor.communityId,
+      actorId: input.actor.id,
+      action: 'attachment.create',
+      resourceIds: [input.fileId, input.ownerId],
+      outcome: 'success',
+      kind: 'attachment',
+    });
+
+    if (this.hasD1Batch()) {
+      const authority = await this.authorizeAttachmentOwner({
+        actor: input.actor,
+        ownerType: input.ownerType,
+        ownerId: input.ownerId,
+        role: input.role,
+      });
+      if (authority.status !== 'ok') return authority;
+      const file = await this.resolveAttachableFile(
+        this.db,
+        input.fileId,
+        authority.communityId
+      );
+      if (!file) return { status: 'not_found' };
+
+      const maxRows = await this.db
+        .select({
+          maxOrd: sql<number>`COALESCE(MAX(${this.tables.attachments.ordinal}), -1)`,
+        })
+        .from(this.tables.attachments)
+        .where(
+          this.attachmentScope(
+            authority.communityId,
+            input.ownerType,
+            input.ownerId,
+            input.role
+          )
+        );
+      const ordinal = input.ordinal ?? Number(maxRows[0]?.maxOrd ?? -1) + 1;
+
+      try {
+        const [attRows] = await this.db.batch([
+          this.db
+            .insert(this.tables.attachments)
+            .values({
+              communityId: authority.communityId,
+              fileId: input.fileId,
+              ownerType: input.ownerType,
+              ownerId: input.ownerId,
+              role: input.role,
+              ordinal,
+              createdAt: now,
+            })
+            .returning({
+              id: this.tables.attachments.id,
+              ordinal: this.tables.attachments.ordinal,
+              createdAt: this.tables.attachments.createdAt,
+            }),
+          this.db.insert(this.tables.auditEntries).values({
+            ...audit,
+            createdAt: now,
+          }),
+        ]);
+        const att = Array.isArray(attRows) ? attRows[0] : undefined;
+        if (!att) return { status: 'not_found' };
+        return {
+          status: 'created',
+          attachment: {
+            ...this.toAttachmentRecord(file, att),
+            ownerType: input.ownerType,
+            ownerId: input.ownerId,
+            role: input.role,
+          },
+        };
+      } catch (error) {
+        if (
+          isForeignKeyConstraintError(error) ||
+          isNotNullConstraintError(error)
+        ) {
+          return { status: 'not_found' };
+        }
+        throw error;
+      }
+    }
+
+    if (dialectOf(this.connection) === 'postgresql') {
+      return this.db.transaction(async (tx: typeof this.db) => {
+        const authority = await this.authorizeAttachmentOwner({
+          actor: input.actor,
+          ownerType: input.ownerType,
+          ownerId: input.ownerId,
+          role: input.role,
+          executor: tx,
+          lock: 'update',
+        });
+        if (authority.status !== 'ok') return authority;
+        const file = await this.resolveAttachableFile(
+          tx,
+          input.fileId,
+          authority.communityId
+        );
+        if (!file) return { status: 'not_found' };
+        const maxRows = await tx
+          .select({
+            maxOrd: sql<number>`COALESCE(MAX(${this.tables.attachments.ordinal}), -1)`,
+          })
+          .from(this.tables.attachments)
+          .where(
+            this.attachmentScope(
+              authority.communityId,
+              input.ownerType,
+              input.ownerId,
+              input.role
+            )
+          );
+        const ordinal = input.ordinal ?? Number(maxRows[0]?.maxOrd ?? -1) + 1;
+        try {
+          const [att] = await tx
+            .insert(this.tables.attachments)
+            .values({
+              communityId: authority.communityId,
+              fileId: input.fileId,
+              ownerType: input.ownerType,
+              ownerId: input.ownerId,
+              role: input.role,
+              ordinal,
+              createdAt: now,
+            })
+            .returning({
+              id: this.tables.attachments.id,
+              ordinal: this.tables.attachments.ordinal,
+              createdAt: this.tables.attachments.createdAt,
+            });
+          await tx.insert(this.tables.auditEntries).values({
+            ...audit,
+            createdAt: now,
+          });
+          return {
+            status: 'created',
+            attachment: {
+              ...this.toAttachmentRecord(file, att),
+              ownerType: input.ownerType,
+              ownerId: input.ownerId,
+              role: input.role,
+            },
+          };
+        } catch (error) {
+          if (
+            isForeignKeyConstraintError(error) ||
+            isNotNullConstraintError(error)
+          ) {
+            return { status: 'not_found' };
+          }
+          throw error;
+        }
+      });
+    }
+
+    const authority = await this.authorizeAttachmentOwner({
+      actor: input.actor,
+      ownerType: input.ownerType,
+      ownerId: input.ownerId,
+      role: input.role,
+    });
+    if (authority.status !== 'ok') return authority;
+    const file = await this.resolveAttachableFile(
+      this.db,
+      input.fileId,
+      authority.communityId
+    );
+    if (!file) return { status: 'not_found' };
+
+    return this.db.transaction((tx: typeof this.db) => {
+      const maxRows = tx
+        .select({
+          maxOrd: sql<number>`COALESCE(MAX(${this.tables.attachments.ordinal}), -1)`,
+        })
+        .from(this.tables.attachments)
+        .where(
+          this.attachmentScope(
+            authority.communityId,
+            input.ownerType,
+            input.ownerId,
+            input.role
+          )
+        )
+        .all();
+      const ordinal = input.ordinal ?? Number(maxRows[0]?.maxOrd ?? -1) + 1;
+      try {
+        const att = tx
+          .insert(this.tables.attachments)
+          .values({
+            communityId: authority.communityId,
+            fileId: input.fileId,
+            ownerType: input.ownerType,
+            ownerId: input.ownerId,
+            role: input.role,
+            ordinal,
+            createdAt: now,
+          })
+          .returning({
+            id: this.tables.attachments.id,
+            ordinal: this.tables.attachments.ordinal,
+            createdAt: this.tables.attachments.createdAt,
+          })
+          .get();
+        tx.insert(this.tables.auditEntries)
+          .values({
+            ...audit,
+            createdAt: now,
+          })
+          .run();
+        return {
+          status: 'created',
+          attachment: {
+            ...this.toAttachmentRecord(file, att),
+            ownerType: input.ownerType,
+            ownerId: input.ownerId,
+            role: input.role,
+          },
+        };
+      } catch (error) {
+        if (
+          isForeignKeyConstraintError(error) ||
+          isNotNullConstraintError(error)
+        ) {
+          return { status: 'not_found' };
+        }
+        throw error;
+      }
+    });
+  }
+
+  async reorderAttachments(input: {
+    actor: FoundationUser;
+    ownerType: AttachmentOwnerType;
+    ownerId: number;
+    role: AttachmentRole;
+    attachmentIds: number[];
+    now?: Date;
+  }): Promise<AttachmentWriteOutcome> {
+    const now = input.now ?? new Date();
+    const audit = buildMediaAuditEntry({
+      communityId: input.actor.communityId,
+      actorId: input.actor.id,
+      action: 'attachment.reorder',
+      resourceIds: input.attachmentIds,
+      outcome: 'success',
+      kind: 'attachment',
+    });
+
+    const scope = this.attachmentScope(
+      input.actor.communityId,
+      input.ownerType,
+      input.ownerId,
+      input.role
+    );
+    const scopeFor = (communityId: number | null) =>
+      this.attachmentScope(
+        communityId,
+        input.ownerType,
+        input.ownerId,
+        input.role
+      );
+
+    const validateIds = (
+      rows: Array<{ id: number; fileId: string | null }>
+    ): boolean => {
+      const existing = new Set(
+        rows.filter((row) => row.fileId !== null).map((row) => row.id)
+      );
+      return (
+        existing.size === input.attachmentIds.length &&
+        input.attachmentIds.every((id) => existing.has(id))
+      );
+    };
+
+    const readBack = async (
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      executor: any,
+      communityId: number | null
+    ): Promise<AttachmentRecord[]> => {
+      const rows = (await executor
+        .select({
+          id: this.tables.attachments.id,
+          fileId: this.tables.attachments.fileId,
+          ordinal: this.tables.attachments.ordinal,
+          createdAt: this.tables.attachments.createdAt,
+        })
+        .from(this.tables.attachments)
+        .where(scopeFor(communityId))) as Array<{
+        id: number;
+        fileId: string | null;
+        ordinal: number | null;
+        createdAt: Date | number | string;
+      }>;
+      const fileIds = rows
+        .map((row) => row.fileId)
+        .filter((id): id is string => typeof id === 'string');
+      const fileRows = fileIds.length
+        ? ((await executor
+            .select({
+              id: this.tables.files.id,
+              originalName: this.tables.files.originalName,
+              mimeType: this.tables.files.mimeType,
+              byteSize: this.tables.files.byteSize,
+              size: this.tables.files.size,
+            })
+            .from(this.tables.files)
+            .where(inArray(this.tables.files.id, fileIds))) as Array<{
+            id: string;
+            originalName: string;
+            mimeType: string;
+            byteSize: number | null;
+            size: number | null;
+          }>)
+        : [];
+      const byId = new Map(fileRows.map((row) => [row.id, row]));
+      return rows
+        .map((row) => {
+          const file = row.fileId ? byId.get(row.fileId) : undefined;
+          if (!file) return null;
+          return {
+            id: row.id,
+            fileId: row.fileId as string,
+            ownerType: input.ownerType,
+            ownerId: input.ownerId,
+            role: input.role,
+            ordinal: Number(row.ordinal ?? 0),
+            mimeType: file.mimeType,
+            byteSize: Number(file.byteSize ?? file.size),
+            originalName: file.originalName,
+            createdAt: toDate(row.createdAt),
+          } satisfies AttachmentRecord;
+        })
+        .filter((row): row is AttachmentRecord => row !== null)
+        .sort((a, b) => a.ordinal - b.ordinal || a.id - b.id);
+    };
+
+    if (this.hasD1Batch()) {
+      const authority = await this.authorizeAttachmentOwner({
+        actor: input.actor,
+        ownerType: input.ownerType,
+        ownerId: input.ownerId,
+        role: input.role,
+      });
+      if (authority.status !== 'ok') return authority;
+      const existing = (await this.db
+        .select({
+          id: this.tables.attachments.id,
+          fileId: this.tables.attachments.fileId,
+        })
+        .from(this.tables.attachments)
+        .where(scopeFor(authority.communityId))) as Array<{
+        id: number;
+        fileId: string | null;
+      }>;
+      if (!validateIds(existing)) return { status: 'invalid_set' };
+      // One bounded D1 batch: one UPDATE per attachment (<= 4 bound params
+      // each) plus the content-free audit entry.
+      const statements = input.attachmentIds.map((id, index) =>
+        this.db
+          .update(this.tables.attachments)
+          .set({ ordinal: index })
+          .where(
+            and(
+              eq(this.tables.attachments.id, id),
+              scopeFor(authority.communityId)
+            )
+          )
+      );
+      statements.push(
+        this.db.insert(this.tables.auditEntries).values({
+          ...audit,
+          createdAt: now,
+        })
+      );
+      await this.db.batch(statements);
+      return {
+        status: 'reordered',
+        attachments: await readBack(this.db, authority.communityId),
+      };
+    }
+
+    if (dialectOf(this.connection) === 'postgresql') {
+      return this.db.transaction(async (tx: typeof this.db) => {
+        const authority = await this.authorizeAttachmentOwner({
+          actor: input.actor,
+          ownerType: input.ownerType,
+          ownerId: input.ownerId,
+          role: input.role,
+          executor: tx,
+          lock: 'update',
+        });
+        if (authority.status !== 'ok') return authority;
+        const existing = (await tx
+          .select({
+            id: this.tables.attachments.id,
+            fileId: this.tables.attachments.fileId,
+          })
+          .from(this.tables.attachments)
+          .where(scopeFor(authority.communityId))) as Array<{
+          id: number;
+          fileId: string | null;
+        }>;
+        if (!validateIds(existing)) return { status: 'invalid_set' };
+        for (let index = 0; index < input.attachmentIds.length; index++) {
+          await tx
+            .update(this.tables.attachments)
+            .set({ ordinal: index })
+            .where(
+              and(
+                eq(this.tables.attachments.id, input.attachmentIds[index]!),
+                scopeFor(authority.communityId)
+              )
+            );
+        }
+        await tx.insert(this.tables.auditEntries).values({
+          ...audit,
+          createdAt: now,
+        });
+        return {
+          status: 'reordered',
+          attachments: await readBack(tx, authority.communityId),
+        };
+      });
+    }
+
+    const authority = await this.authorizeAttachmentOwner({
+      actor: input.actor,
+      ownerType: input.ownerType,
+      ownerId: input.ownerId,
+      role: input.role,
+    });
+    if (authority.status !== 'ok') return authority;
+    return this.db.transaction((tx: typeof this.db) => {
+      const existing = tx
+        .select({
+          id: this.tables.attachments.id,
+          fileId: this.tables.attachments.fileId,
+        })
+        .from(this.tables.attachments)
+        .where(scope)
+        .all();
+      if (!validateIds(existing)) return { status: 'invalid_set' };
+      input.attachmentIds.forEach((id, index) => {
+        tx.update(this.tables.attachments)
+          .set({ ordinal: index })
+          .where(and(eq(this.tables.attachments.id, id), scope))
+          .run();
+      });
+      tx.insert(this.tables.auditEntries)
+        .values({
+          ...audit,
+          createdAt: now,
+        })
+        .run();
+      return {
+        status: 'reordered',
+        attachments: readBackSync(tx, {
+          tables: this.tables,
+          communityId: authority.communityId,
+          ownerType: input.ownerType,
+          ownerId: input.ownerId,
+          role: input.role,
+        }),
+      };
+    });
+  }
+
+  async deleteAttachment(
+    actor: FoundationUser,
+    attachmentId: number,
+    now: Date = new Date()
+  ): Promise<AttachmentWriteOutcome> {
+    const rows = (await this.fetchAll(
+      this.db
+        .select({
+          id: this.tables.attachments.id,
+          communityId: this.tables.attachments.communityId,
+          fileId: this.tables.attachments.fileId,
+          ownerType: this.tables.attachments.ownerType,
+          ownerId: this.tables.attachments.ownerId,
+          role: this.tables.attachments.role,
+        })
+        .from(this.tables.attachments)
+        .where(eq(this.tables.attachments.id, attachmentId))
+        .limit(1)
+    )) as Array<{
+      id: number;
+      communityId: number | null;
+      fileId: string | null;
+      ownerType: AttachmentOwnerType | null;
+      ownerId: number | null;
+      role: AttachmentRole | null;
+    }>;
+    const attachment = rows[0];
+    if (
+      !attachment ||
+      !attachment.fileId ||
+      !attachment.ownerType ||
+      !attachment.ownerId ||
+      !attachment.role
+    ) {
+      return { status: 'not_found' };
+    }
+
+    // A null-community attachment is only ever the super_admin own photo.
+    const authority = await this.authorizeAttachmentOwner({
+      actor,
+      ownerType: attachment.ownerType,
+      ownerId: attachment.ownerId,
+      role: attachment.role,
+    });
+    if (authority.status !== 'ok') return authority;
+    if (authority.communityId !== attachment.communityId) {
+      return { status: 'not_found' };
+    }
+
+    const fileId = attachment.fileId;
+    const fileRows = (await this.fetchAll(
+      this.db
+        .select({
+          id: this.tables.files.id,
+          storageKey: this.tables.files.storageKey,
+          path: this.tables.files.path,
+          communityId: this.tables.files.communityId,
+        })
+        .from(this.tables.files)
+        .where(eq(this.tables.files.id, fileId))
+        .limit(1)
+    )) as Array<{
+      id: string;
+      storageKey: string | null;
+      path: string;
+      communityId: number | null;
+    }>;
+    const file = fileRows[0];
+    if (!file) return { status: 'not_found' };
+
+    const audit = buildMediaAuditEntry({
+      communityId: attachment.communityId,
+      actorId: actor.id,
+      action: 'attachment.delete',
+      resourceIds: [attachmentId],
+      outcome: 'success',
+      kind: 'attachment',
+    });
+    const scope = and(
+      eq(this.tables.attachments.id, attachmentId),
+      attachment.communityId === null
+        ? isNull(this.tables.attachments.communityId)
+        : eq(this.tables.attachments.communityId, attachment.communityId)
+    );
+
+    if (this.hasD1Batch()) {
+      const [deletedRows] = await this.db.batch([
+        this.db
+          .delete(this.tables.attachments)
+          .where(scope)
+          .returning({ id: this.tables.attachments.id }),
+        this.db.insert(this.tables.auditEntries).values({
+          ...audit,
+          createdAt: now,
+        }),
+      ]);
+      if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
+        return { status: 'not_found' };
+      }
+      return {
+        status: 'deleted',
+        fileId,
+        storageKey: file.storageKey ?? file.path,
+        communityId: attachment.communityId,
+      };
+    }
+
+    if (dialectOf(this.connection) === 'postgresql') {
+      return this.db.transaction(async (tx: typeof this.db) => {
+        const deleted = await tx
+          .delete(this.tables.attachments)
+          .where(scope)
+          .returning({ id: this.tables.attachments.id });
+        if (deleted.length === 0) return { status: 'not_found' };
+        await tx.insert(this.tables.auditEntries).values({
+          ...audit,
+          createdAt: now,
+        });
+        return {
+          status: 'deleted',
+          fileId,
+          storageKey: file.storageKey ?? file.path,
+          communityId: attachment.communityId,
+        };
+      });
+    }
+
+    return this.db.transaction((tx: typeof this.db) => {
+      const deleted = tx
+        .delete(this.tables.attachments)
+        .where(scope)
+        .returning({ id: this.tables.attachments.id })
+        .all();
+      if (deleted.length === 0) return { status: 'not_found' };
+      tx.insert(this.tables.auditEntries)
+        .values({
+          ...audit,
+          createdAt: now,
+        })
+        .run();
+      return {
+        status: 'deleted',
+        fileId,
+        storageKey: file.storageKey ?? file.path,
+        communityId: attachment.communityId,
+      };
+    });
+  }
+}
+
+/**
+ * Synchronous read-back for the better-sqlite3 transaction path: resolves
+ * attachment rows and their file metadata in one pass without awaiting.
+ */
+function readBackSync(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx: any,
+  input: {
+    tables: DialectTables;
+    communityId: number | null;
+    ownerType: AttachmentOwnerType;
+    ownerId: number;
+    role: AttachmentRole;
+  }
+): AttachmentRecord[] {
+  const { tables } = input;
+  const rows = tx
+    .select({
+      id: tables.attachments.id,
+      fileId: tables.attachments.fileId,
+      ordinal: tables.attachments.ordinal,
+      createdAt: tables.attachments.createdAt,
+    })
+    .from(tables.attachments)
+    .where(
+      and(
+        input.communityId === null
+          ? isNull(tables.attachments.communityId)
+          : eq(tables.attachments.communityId, input.communityId),
+        eq(tables.attachments.ownerType, input.ownerType),
+        eq(tables.attachments.ownerId, input.ownerId),
+        eq(tables.attachments.role, input.role)
+      )
+    )
+    .all();
+  const fileIds = rows
+    .map((row: { fileId: string | null }) => row.fileId)
+    .filter((id: string | null): id is string => typeof id === 'string');
+  const fileRows = fileIds.length
+    ? tx
+        .select({
+          id: tables.files.id,
+          originalName: tables.files.originalName,
+          mimeType: tables.files.mimeType,
+          byteSize: tables.files.byteSize,
+          size: tables.files.size,
+        })
+        .from(tables.files)
+        .where(inArray(tables.files.id, fileIds))
+        .all()
+    : [];
+  const byId = new Map(fileRows.map((row: { id: string }) => [row.id, row]));
+  return rows
+    .map(
+      (row: {
+        id: number;
+        fileId: string | null;
+        ordinal: number | null;
+        createdAt: Date | number | string;
+      }) => {
+        const file = row.fileId
+          ? (byId.get(row.fileId) as
+              | {
+                  originalName: string;
+                  mimeType: string;
+                  byteSize: number | null;
+                  size: number | null;
+                }
+              | undefined)
+          : undefined;
+        if (!file) return null;
+        return {
+          id: row.id,
+          fileId: row.fileId as string,
+          ownerType: input.ownerType,
+          ownerId: input.ownerId,
+          role: input.role,
+          ordinal: Number(row.ordinal ?? 0),
+          mimeType: file.mimeType,
+          byteSize: Number(file.byteSize ?? file.size),
+          originalName: file.originalName,
+          createdAt: toDate(row.createdAt),
+        } satisfies AttachmentRecord;
+      }
+    )
+    .filter(
+      (row: AttachmentRecord | null): row is AttachmentRecord => row !== null
+    )
+    .sort(
+      (a: AttachmentRecord, b: AttachmentRecord) =>
+        a.ordinal - b.ordinal || a.id - b.id
+    );
 }
 
 export { inArray };

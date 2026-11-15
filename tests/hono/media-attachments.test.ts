@@ -13,7 +13,12 @@ import { tablesFor } from '../../src/db/dialect.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { MediaWritesRepository } from '../../src/repositories/media-writes.repository.js';
-import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
+import { StoryWritesRepository } from '../../src/repositories/story-writes.repository.js';
+import { CommunityWritesRepository } from '../../src/repositories/community-writes.repository.js';
+import {
+  MediaCleanupCoordinator,
+  type FileByteCleanup,
+} from '../../src/services/media-cleanup.service.js';
 import type { FoundationStorage } from '../../src/services/hono-foundation.service.js';
 import {
   AttachmentListResponseSchema,
@@ -175,6 +180,106 @@ async function attach(
     },
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * A D1-shaped drizzle client over better-sqlite3: `batch()` runs every
+ * statement in one SQLite transaction and records their SQL/params, so a test
+ * can assert exactly what a Workers D1 batch would execute.
+ */
+type D1BatchDb = ReturnType<typeof drizzle> & {
+  batch: (
+    stmts: Array<{ toSQL: () => { sql: string; params: unknown[] } }>
+  ) => Promise<unknown[]>;
+};
+
+function createD1BatchDb(): {
+  db: D1BatchDb;
+  sqlite: Sqlite.Database;
+  batchCalls: Array<Array<{ sql: string; params: unknown[] }>>;
+} {
+  const sqlite = new Sqlite(':memory:');
+  sqlite.pragma('foreign_keys = ON');
+  const base = drizzle(sqlite);
+  const batchCalls: Array<Array<{ sql: string; params: unknown[] }>> = [];
+  const d1Like = Object.create(base) as D1BatchDb;
+  d1Like.batch = async (stmts) => {
+    const queries = stmts.map((s) => s.toSQL());
+    batchCalls.push(queries);
+    return sqlite.transaction(() =>
+      queries.map(({ sql, params }) => {
+        const stmt = sqlite.prepare(sql);
+        return stmt.reader ? stmt.all(...params) : stmt.run(...params);
+      })
+    )();
+  };
+  return { db: d1Like, sqlite, batchCalls };
+}
+
+/** Seed one community, editor, and public story for D1-batch delete tests. */
+async function seedD1MediaFixture(
+  db: D1BatchDb,
+  now: Date
+): Promise<{
+  communityId: number;
+  actorId: number;
+  email: string;
+  storyId: number;
+}> {
+  const seedTables = tablesFor(db);
+  const [comm] = await db
+    .insert(seedTables.communities)
+    .values({
+      name: 'D1 Media Comm',
+      slug: `d1-media-${crypto.randomUUID()}`,
+      publicStories: true,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+  const email = `d1-media-${crypto.randomUUID()}@example.test`;
+  const derived = deriveUserIdentityColumns({
+    email,
+    firstName: 'D1',
+    lastName: 'Media',
+    communityId: comm!.id,
+  });
+  const [actor] = await db
+    .insert(seedTables.users)
+    .values({
+      email,
+      emailNormalized: derived.emailNormalized,
+      passwordHash: await hash(TEST_PASS, 4),
+      firstName: 'D1',
+      lastName: 'Media',
+      displayNameNormalized: derived.displayNameNormalized,
+      role: 'editor',
+      communityId: comm!.id,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+  const [story] = await db
+    .insert(seedTables.stories)
+    .values({
+      title: 'D1 Media Story',
+      slug: `d1-media-story-${crypto.randomUUID()}`,
+      privacyLevel: 'public',
+      isRestricted: false,
+      communityId: comm!.id,
+      createdBy: actor!.id,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+  return {
+    communityId: comm!.id,
+    actorId: actor!.id,
+    email,
+    storyId: story!.id,
+  };
 }
 
 describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
@@ -764,6 +869,207 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
       for (const statement of batchCalls[0]!) {
         expect(statement.params.length).toBeLessThanOrEqual(100);
       }
+    } finally {
+      batchSqlite.close();
+    }
+  });
+
+  it('records the attachment.delete success audit inside the D1 delete batch', async () => {
+    const { db: batchDb, sqlite: batchSqlite, batchCalls } = createD1BatchDb();
+    try {
+      migrate(batchDb, { migrationsFolder: './src/db/migrations' });
+      const batchTables = tablesFor(batchDb);
+      const now = new Date('2026-06-01T12:00:00.000Z');
+      const seeded = await seedD1MediaFixture(batchDb, now);
+      const fileId = crypto.randomUUID();
+      await batchDb.insert(batchTables.files).values({
+        id: fileId,
+        filename: fileId,
+        originalName: 'd1-audit.png',
+        path: `communities/${seeded.communityId}/media/${fileId}`,
+        storageKey: `communities/${seeded.communityId}/media/${fileId}`,
+        url: `/v2/media/${fileId}`,
+        mimeType: 'image/png',
+        size: PNG_BYTES.byteLength,
+        byteSize: PNG_BYTES.byteLength,
+        checksum: null,
+        communityId: seeded.communityId,
+        uploadedBy: seeded.actorId,
+        culturalRestrictions: null,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const [attachment] = await batchDb
+        .insert(batchTables.attachments)
+        .values({
+          communityId: seeded.communityId,
+          fileId,
+          ownerType: 'story',
+          ownerId: seeded.storyId,
+          role: 'story_media',
+          ordinal: 0,
+          createdAt: now,
+        })
+        .returning();
+
+      const repo = new MediaWritesRepository(batchDb as never);
+      const outcome = await repo.deleteAttachment(
+        {
+          id: seeded.actorId,
+          email: seeded.email,
+          role: 'editor',
+          communityId: seeded.communityId,
+          isActive: true,
+        },
+        attachment!.id,
+        now
+      );
+      expect(outcome.status).toBe('deleted');
+
+      // One atomic batch: relation delete, success audit insert, files delete.
+      expect(batchCalls).toHaveLength(1);
+      expect(
+        batchCalls[0]!.filter((statement) =>
+          statement.sql.includes('"audit_entries"')
+        )
+      ).toHaveLength(1);
+
+      // The relation and the now-unreferenced files row are both gone.
+      expect(await batchDb.select().from(batchTables.attachments)).toHaveLength(
+        0
+      );
+      expect(await batchDb.select().from(batchTables.files)).toHaveLength(0);
+
+      // The success audit row exists and is content-free.
+      const audits = await batchDb.select().from(batchTables.auditEntries);
+      expect(audits).toHaveLength(1);
+      const row = audits[0]!;
+      expect(row.action).toBe('attachment.delete');
+      expect(row.outcome).toBe('success');
+      expect(row.resourceType).toBe('attachment');
+      expect(row.communityId).toBe(seeded.communityId);
+      expect(row.actorId).toBe(seeded.actorId);
+      const parsedIds = (
+        Array.isArray(row.resourceIds)
+          ? row.resourceIds
+          : JSON.parse(String(row.resourceIds))
+      ) as Array<string | number>;
+      expect(parsedIds).toEqual([attachment!.id]);
+      expect(() =>
+        validateContentFreeAuditEntry({
+          communityId: row.communityId,
+          actorId: row.actorId,
+          action: row.action,
+          resourceType: row.resourceType,
+          resourceIds: parsedIds,
+          outcome: row.outcome as 'success' | 'denied',
+          ipAddress: row.ipAddress,
+          userAgent: row.userAgent,
+        })
+      ).not.toThrow();
+      // Content-free: no file name, storage key, or URL in the audit row.
+      const serialized = JSON.stringify(row);
+      expect(serialized).not.toContain('d1-audit.png');
+      expect(serialized).not.toContain(fileId);
+    } finally {
+      batchSqlite.close();
+    }
+  });
+
+  it('removes unreferenced files in the D1 delete batch for story, place, and speaker deletes', async () => {
+    const { db: batchDb, sqlite: batchSqlite } = createD1BatchDb();
+    try {
+      migrate(batchDb, { migrationsFolder: './src/db/migrations' });
+      const batchTables = tablesFor(batchDb);
+      const now = new Date('2026-06-01T12:00:00.000Z');
+      const seeded = await seedD1MediaFixture(batchDb, now);
+      const [place] = await batchDb
+        .insert(batchTables.places)
+        .values({
+          communityId: seeded.communityId,
+          name: 'D1 Place',
+          isRestricted: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const [speaker] = await batchDb
+        .insert(batchTables.speakers)
+        .values({
+          communityId: seeded.communityId,
+          name: 'D1 Speaker',
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      const owners = [
+        ['story', seeded.storyId, 'story_media'],
+        ['place', place!.id, 'place_photo'],
+        ['speaker', speaker!.id, 'speaker_photo'],
+      ] as const;
+      const ownerFileIds: string[] = [];
+      for (const [ownerType, ownerId, role] of owners) {
+        const fileId = crypto.randomUUID();
+        await batchDb.insert(batchTables.files).values({
+          id: fileId,
+          filename: fileId,
+          originalName: `${ownerType}.png`,
+          path: `communities/${seeded.communityId}/media/${fileId}`,
+          storageKey: `communities/${seeded.communityId}/media/${fileId}`,
+          url: `/v2/media/${fileId}`,
+          mimeType: 'image/png',
+          size: PNG_BYTES.byteLength,
+          byteSize: PNG_BYTES.byteLength,
+          checksum: null,
+          communityId: seeded.communityId,
+          uploadedBy: seeded.actorId,
+          culturalRestrictions: null,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        });
+        await batchDb.insert(batchTables.attachments).values({
+          communityId: seeded.communityId,
+          fileId,
+          ownerType,
+          ownerId,
+          role,
+          ordinal: 0,
+          createdAt: now,
+        });
+        ownerFileIds.push(fileId);
+      }
+
+      const storyRepo = new StoryWritesRepository(batchDb as never);
+      const communityRepo = new CommunityWritesRepository(batchDb as never);
+
+      const storyRemoved: FileByteCleanup[] = [];
+      expect(
+        await storyRepo.deleteStory(
+          seeded.communityId,
+          seeded.storyId,
+          storyRemoved
+        )
+      ).toBe(true);
+      expect(storyRemoved.map((file) => file.fileId)).toEqual([
+        ownerFileIds[0],
+      ]);
+
+      expect(
+        await communityRepo.deletePlace(seeded.communityId, place!.id)
+      ).toBe('deleted');
+      expect(
+        await communityRepo.deleteSpeaker(seeded.communityId, speaker!.id)
+      ).toBe('deleted');
+
+      // Every owner's now-unreferenced file row was removed by its own batch,
+      // and no attachments survive either.
+      expect(await batchDb.select().from(batchTables.files)).toHaveLength(0);
+      expect(await batchDb.select().from(batchTables.attachments)).toHaveLength(
+        0
+      );
     } finally {
       batchSqlite.close();
     }

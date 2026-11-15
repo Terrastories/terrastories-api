@@ -2430,20 +2430,26 @@ export class MediaWritesRepository {
     );
 
     if (this.hasD1Batch()) {
-      // Delete the attachment and the now-unreferenced files row in one D1
-      // batch. The files DELETE re-checks NOT EXISTS against attachments so a
-      // concurrent relation added before this batch commits keeps the row.
+      // Delete the attachment, record the success audit entry, and remove the
+      // now-unreferenced files row in one D1 batch. The files DELETE re-checks
+      // NOT EXISTS against attachments so a concurrent relation added before
+      // this batch commits keeps the row.
       const deleteAttachment = this.db
         .delete(this.tables.attachments)
         .where(scope)
         .returning({ id: this.tables.attachments.id });
+      const insertAudit = this.db.insert(this.tables.auditEntries).values({
+        ...audit,
+        createdAt: now,
+      });
       const deleteFiles = buildUnreferencedFilesDelete(
         this.db,
         this.connection,
         [fileId]
       );
-      const [deletedRows, ...fileResults] = await this.db.batch([
+      const [deletedRows, , ...fileResults] = await this.db.batch([
         deleteAttachment,
+        insertAudit,
         ...deleteFiles,
       ]);
       if (!Array.isArray(deletedRows) || deletedRows.length === 0) {

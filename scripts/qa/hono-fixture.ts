@@ -56,6 +56,16 @@ import {
   PublicCommunitiesListResponseSchema,
   PublicCommunityDetailResponseSchema,
 } from '../../src/shared/schemas/public-communities.js';
+import {
+  MAX_PUBLIC_FILTER_VALUES,
+  MAX_PUBLIC_TOTAL_FILTER_VALUES,
+  PublicPlaceDetailResponseSchema,
+  PublicPlacesListResponseSchema,
+  PublicSpeakerDetailResponseSchema,
+  PublicSpeakersListResponseSchema,
+  PublicStoriesListResponseSchema,
+  PublicStoryDetailResponseSchema,
+} from '../../src/shared/schemas/public-content.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
@@ -154,6 +164,8 @@ export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
   'QA hono speaker',
   'QA members-only speaker',
   'QA members-only affiliation',
+  'QA storyless speaker',
+  'QA withdrawn speaker',
   'QA foreign speaker',
   'QA inactive community speaker',
   'QA private community speaker',
@@ -594,6 +606,21 @@ export async function createFixture(
         isActive: true,
       })
       .returning();
+    const [storylessSpeaker, withdrawnSpeaker] = await db
+      .insert(speakers)
+      .values([
+        {
+          name: 'QA storyless speaker',
+          communityId,
+          isActive: true,
+        },
+        {
+          name: 'QA withdrawn speaker',
+          communityId,
+          isActive: false,
+        },
+      ])
+      .returning();
     // #191 fail-closed community gate: a community that is public but
     // DEACTIVATED (publicStories true, isActive false — the schema's names
     // for the SPEC §4/§6.1 publication and lifecycle flags). It owns a fully
@@ -874,6 +901,7 @@ export async function createFixture(
     ]);
     await db.insert(storySpeakers).values([
       { communityId, storyId: publicStory.id, speakerId: speaker.id },
+      { communityId, storyId: publicStory.id, speakerId: withdrawnSpeaker.id },
       { communityId, storyId: restrictedStory.id, speakerId: speaker.id },
       { communityId, storyId: unknownStory.id, speakerId: speaker.id },
       {
@@ -894,6 +922,137 @@ export async function createFixture(
         speakerId: privateSpeaker.id,
       },
     ]);
+    const attachedMediaFile = async (
+      ownerType: 'story' | 'place' | 'speaker',
+      ownerId: number,
+      role:
+        | 'story_media'
+        | 'place_photo'
+        | 'place_name_audio'
+        | 'speaker_photo',
+      mimeType: string
+    ): Promise<string> => {
+      const id = crypto.randomUUID();
+      const ext = mimeType === 'audio/mpeg' ? 'mp3' : 'png';
+      const storagePath = `communities/${communityId}/${id}.${ext}`;
+      await db.insert(files).values({
+        id,
+        filename: `${id}.${ext}`,
+        originalName: `qa-${role}.${ext}`,
+        path: storagePath,
+        storageKey: storagePath,
+        url: `/v2/media/${id}`,
+        mimeType,
+        size: mediaBytes.length,
+        byteSize: mediaBytes.length,
+        uploadedBy: creatorId,
+        communityId,
+        culturalRestrictions: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      await db.insert(attachments).values({
+        communityId,
+        fileId: id,
+        ownerType,
+        ownerId,
+        role,
+        ordinal: 0,
+        createdAt: new Date(),
+      });
+      await putMedia(storagePath, mediaBytes);
+      return id;
+    };
+    const readableStoryMediaFileId = await attachedMediaFile(
+      'story',
+      publicStory.id,
+      'story_media',
+      'audio/mpeg'
+    );
+    const membersStoryMediaFileId = await attachedMediaFile(
+      'story',
+      membersStory.id,
+      'story_media',
+      'audio/mpeg'
+    );
+    const restrictedStoryMediaFileId = await attachedMediaFile(
+      'story',
+      restrictedStory.id,
+      'story_media',
+      'audio/mpeg'
+    );
+    const readablePlacePhotoFileId = await attachedMediaFile(
+      'place',
+      publicPlace.id,
+      'place_photo',
+      'image/png'
+    );
+    const membersPlacePhotoFileId = await attachedMediaFile(
+      'place',
+      membersPlace.id,
+      'place_photo',
+      'image/png'
+    );
+    const storylessPlacePhotoFileId = await attachedMediaFile(
+      'place',
+      unassociatedPlace.id,
+      'place_photo',
+      'image/png'
+    );
+    const restrictedPlacePhotoFileId = await attachedMediaFile(
+      'place',
+      restrictedPlace.id,
+      'place_photo',
+      'image/png'
+    );
+    const readablePlaceAudioFileId = await attachedMediaFile(
+      'place',
+      publicPlace.id,
+      'place_name_audio',
+      'audio/mpeg'
+    );
+    const membersPlaceAudioFileId = await attachedMediaFile(
+      'place',
+      membersPlace.id,
+      'place_name_audio',
+      'audio/mpeg'
+    );
+    const storylessPlaceAudioFileId = await attachedMediaFile(
+      'place',
+      unassociatedPlace.id,
+      'place_name_audio',
+      'audio/mpeg'
+    );
+    const restrictedPlaceAudioFileId = await attachedMediaFile(
+      'place',
+      restrictedPlace.id,
+      'place_name_audio',
+      'audio/mpeg'
+    );
+    const readableSpeakerPhotoFileId = await attachedMediaFile(
+      'speaker',
+      speaker.id,
+      'speaker_photo',
+      'image/png'
+    );
+    const membersSpeakerPhotoFileId = await attachedMediaFile(
+      'speaker',
+      membersSpeaker.id,
+      'speaker_photo',
+      'image/png'
+    );
+    const storylessSpeakerPhotoFileId = await attachedMediaFile(
+      'speaker',
+      storylessSpeaker.id,
+      'speaker_photo',
+      'image/png'
+    );
+    const withdrawnSpeakerPhotoFileId = await attachedMediaFile(
+      'speaker',
+      withdrawnSpeaker.id,
+      'speaker_photo',
+      'image/png'
+    );
     // The runner hands checks the response body only; the handler tracks the
     // live ts_session cookie value (most recent non-empty Set-Cookie) so
     // auth body checks can prove the token itself never leaks into a body.
@@ -922,7 +1081,13 @@ export async function createFixture(
         repository: new HonoFoundationRepository(db),
         verifier: nodePasswordVerifier,
         secureCookies: false,
-        storage: { read: async (key) => storage.get(key) ?? null },
+        storage: {
+          read: async (key, range) => {
+            const bytes = storage.get(key);
+            if (!bytes) return null;
+            return range ? bytes.subarray(range.start, range.end + 1) : bytes;
+          },
+        },
       });
       // Coverage comes from the app this fixture actually serves — the
       // default SQLite run and the in-process PostgreSQL run alike (see
@@ -1863,9 +2028,112 @@ export async function createFixture(
     ];
     let canonicalPublicListJson = '';
     let canonicalPublicDetailJson = '';
+    let canonicalPublicStoriesJson = '';
+    let canonicalPublicStoryDetailJson = '';
+    let canonicalPublicPlacesJson = '';
+    let canonicalPublicPlaceDetailJson = '';
+    let canonicalPublicSpeakersJson = '';
+    let canonicalPublicSpeakerDetailJson = '';
     const publicNotFoundCheck = (body: unknown): boolean =>
       keysExactly(body, ['error']) &&
       (body as { error?: string }).error === 'Not found';
+    const publicMediaHeadersCheck = (headers: Headers): boolean =>
+      headers.get('Content-Disposition') === 'attachment' &&
+      headers.get('Accept-Ranges') === 'bytes' &&
+      headers.get('Cache-Control') === 'no-store' &&
+      headers.get('X-Content-Type-Options') === 'nosniff' &&
+      headers.get('Content-Security-Policy') === "default-src 'none'; sandbox";
+    const publicStoriesListCheck = (body: unknown): boolean => {
+      const parsed = PublicStoriesListResponseSchema.safeParse(body);
+      if (!parsed.success) return false;
+      const text = JSON.stringify(body) ?? '';
+      return (
+        parsed.data.meta.total === 2 &&
+        parsed.data.meta.hasNextPage === false &&
+        parsed.data.data.stories.map((s) => s.id).join(',') ===
+          `${publicStory.id},${unevidencedStory.id}` &&
+        parsed.data.data.stories[0]?.places.map((p) => p.id).join(',') ===
+          String(publicPlace.id) &&
+        parsed.data.data.stories[0]?.speakers.map((s) => s.id).join(',') ===
+          String(speaker.id) &&
+        parsed.data.data.stories[1]?.places.length === 0 &&
+        parsed.data.data.stories[1]?.speakers.length === 0 &&
+        parsed.data.data.points.map((p) => p.id).join(',') ===
+          String(publicPlace.id) &&
+        !text.includes('QA restricted') &&
+        !text.includes('QA unknown-privacy') &&
+        !text.includes('QA members-only') &&
+        !text.includes('qa-members-lang') &&
+        !text.includes('QA foreign')
+      );
+    };
+    const publicFilteredStoriesCheck = (body: unknown): boolean => {
+      const parsed = PublicStoriesListResponseSchema.safeParse(body);
+      if (!parsed.success) return false;
+      return (
+        parsed.data.meta.total === 1 &&
+        parsed.data.meta.hasNextPage === false &&
+        parsed.data.data.stories.map((s) => s.id).join(',') ===
+          String(publicStory.id) &&
+        parsed.data.data.points.map((p) => p.id).join(',') ===
+          String(publicPlace.id)
+      );
+    };
+    const v2PublicStoryDetailCheck = (body: unknown): boolean => {
+      const parsed = PublicStoryDetailResponseSchema.safeParse(body);
+      if (!parsed.success) return false;
+      const text = JSON.stringify(body) ?? '';
+      return (
+        parsed.data.data.id === publicStory.id &&
+        parsed.data.data.places.map((p) => p.id).join(',') ===
+          String(publicPlace.id) &&
+        parsed.data.data.speakers.map((s) => s.id).join(',') ===
+          String(speaker.id) &&
+        parsed.data.data.points.map((p) => p.id).join(',') ===
+          String(publicPlace.id) &&
+        !text.includes('QA restricted') &&
+        !text.includes('QA members-only')
+      );
+    };
+    const publicPlacesListCheck = (body: unknown): boolean => {
+      const parsed = PublicPlacesListResponseSchema.safeParse(body);
+      if (!parsed.success) return false;
+      const text = JSON.stringify(body) ?? '';
+      return (
+        parsed.data.meta.total === 1 &&
+        parsed.data.data.map((p) => p.id).join(',') ===
+          String(publicPlace.id) &&
+        !text.includes('QA restricted') &&
+        !text.includes('QA unassociated') &&
+        !text.includes('QA members-only')
+      );
+    };
+    const publicPlaceDetailCheck = (body: unknown): boolean => {
+      const parsed = PublicPlaceDetailResponseSchema.safeParse(body);
+      return (
+        parsed.success &&
+        parsed.data.data.id === publicPlace.id &&
+        parsed.data.data.name === publicPlace.name
+      );
+    };
+    const publicSpeakersListCheck = (body: unknown): boolean => {
+      const parsed = PublicSpeakersListResponseSchema.safeParse(body);
+      if (!parsed.success) return false;
+      const text = JSON.stringify(body) ?? '';
+      return (
+        parsed.data.meta.total === 1 &&
+        parsed.data.data.map((s) => s.id).join(',') === String(speaker.id) &&
+        !text.includes('QA members-only')
+      );
+    };
+    const publicSpeakerDetailCheck = (body: unknown): boolean => {
+      const parsed = PublicSpeakerDetailResponseSchema.safeParse(body);
+      return (
+        parsed.success &&
+        parsed.data.data.id === speaker.id &&
+        parsed.data.data.name === speaker.name
+      );
+    };
     const checkPublicMapConfig = (
       mapConfig: Record<string, unknown> | null | undefined
     ): boolean => {
@@ -2018,6 +2286,19 @@ export async function createFixture(
       const parsed = PublicCommunitiesListResponseSchema.safeParse(body);
       return parsed.success && parsed.data.data.length === 0;
     };
+    const filterAtCapParams = new URLSearchParams();
+    filterAtCapParams.append('place', String(publicPlace.id));
+    for (let i = 1; i < MAX_PUBLIC_FILTER_VALUES; i++) {
+      filterAtCapParams.append('place', String(990000 + i));
+    }
+    filterAtCapParams.append('speaker', String(speaker.id));
+    for (
+      let i = 1;
+      i < MAX_PUBLIC_TOTAL_FILTER_VALUES - MAX_PUBLIC_FILTER_VALUES;
+      i++
+    ) {
+      filterAtCapParams.append('speaker', String(995000 + i));
+    }
     const publicCommunities: Step[] = [
       {
         name: 'v2 public communities list',
@@ -2101,6 +2382,363 @@ export async function createFixture(
         expected: 404,
         check: publicNotFoundCheck,
       },
+      {
+        name: 'v2 public stories list',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories?sort=title_asc`,
+        expected: 200,
+        check: (body) => {
+          if (!publicStoriesListCheck(body)) return false;
+          canonicalPublicStoriesJson = JSON.stringify(body);
+          return true;
+        },
+      },
+      {
+        name: 'v2 public stories filter by readable place and speaker',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories?place=${publicPlace.id}&speaker=${speaker.id}`,
+        expected: 200,
+        check: publicFilteredStoriesCheck,
+      },
+      {
+        name: 'v2 public stories filter hides members-only place probe',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories?place=${membersPlace.id}`,
+        expected: 200,
+        check: (body) => {
+          const parsed = PublicStoriesListResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.stories.length === 0 &&
+            parsed.data.meta.total === 0
+          );
+        },
+      },
+      {
+        name: 'v2 public stories hides private community',
+        method: 'GET',
+        path: `/v2/public/communities/${privateCommunitySlug}/stories`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public stories hides inactive community',
+        method: 'GET',
+        path: `/v2/public/communities/${inactiveCommunity.slug}/stories`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public story detail',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/${publicStory.id}`,
+        expected: 200,
+        check: (body) => {
+          if (!v2PublicStoryDetailCheck(body)) return false;
+          canonicalPublicStoryDetailJson = JSON.stringify(body);
+          return true;
+        },
+      },
+      {
+        name: 'v2 public story detail hides restricted story',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/${restrictedStory.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public story detail allows edge-less public story',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/${unevidencedStory.id}`,
+        expected: 200,
+        check: (body) => {
+          const parsed = PublicStoryDetailResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.id === unevidencedStory.id &&
+            parsed.data.data.places.length === 0 &&
+            parsed.data.data.speakers.length === 0 &&
+            parsed.data.data.points.length === 0
+          );
+        },
+      },
+      {
+        name: 'v2 public story detail hides unknown-privacy story',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/${unknownStory.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public story detail hides members-only story',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/${membersStory.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public story detail hides foreign story',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/${foreignStory.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public story detail hides private community story',
+        method: 'GET',
+        path: `/v2/public/communities/${privateCommunitySlug}/stories/${privateStory.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public places list (with readable stories)',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/places`,
+        expected: 200,
+        check: (body) => {
+          if (!publicPlacesListCheck(body)) return false;
+          canonicalPublicPlacesJson = JSON.stringify(body);
+          return true;
+        },
+      },
+      {
+        name: 'v2 public place detail',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/places/${publicPlace.id}`,
+        expected: 200,
+        check: (body) => {
+          if (!publicPlaceDetailCheck(body)) return false;
+          canonicalPublicPlaceDetailJson = JSON.stringify(body);
+          return true;
+        },
+      },
+      {
+        name: 'v2 public place detail hides restricted place',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/places/${restrictedPlace.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public place detail hides story-less place',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/places/${unassociatedPlace.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public place detail hides members-only-story place',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/places/${membersPlace.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public speakers list (with readable stories)',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/speakers`,
+        expected: 200,
+        check: (body) => {
+          if (!publicSpeakersListCheck(body)) return false;
+          canonicalPublicSpeakersJson = JSON.stringify(body);
+          return true;
+        },
+      },
+      {
+        name: 'v2 public speaker detail',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/speakers/${speaker.id}`,
+        expected: 200,
+        check: (body) => {
+          if (!publicSpeakerDetailCheck(body)) return false;
+          canonicalPublicSpeakerDetailJson = JSON.stringify(body);
+          return true;
+        },
+      },
+      {
+        name: 'v2 public speaker detail hides members-only-story speaker',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/speakers/${membersSpeaker.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public speaker detail hides foreign speaker',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/speakers/${foreignSpeaker.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media serves authorized public media with safe headers',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${readableFileId}`,
+        expected: 200,
+        checkHeaders: (headers) =>
+          publicMediaHeadersCheck(headers) &&
+          headers.get('Content-Type') === 'image/png',
+      },
+      {
+        name: 'v2 public stories filters at maximum cap without D1 parameter overflow',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories?${filterAtCapParams.toString()}`,
+        expected: 200,
+        check: publicFilteredStoriesCheck,
+      },
+      {
+        name: 'v2 public media supports Range partial content',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${readableFileId}`,
+        headers: { Range: 'bytes=0-0' },
+        expected: 206,
+        checkHeaders: (headers) =>
+          publicMediaHeadersCheck(headers) &&
+          (headers.get('Content-Range') ?? '').startsWith('bytes 0-0/'),
+      },
+      {
+        name: 'v2 public media returns 416 for unsatisfiable Range',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${readableFileId}`,
+        headers: { Range: 'bytes=9999-' },
+        expected: 416,
+        checkHeaders: (headers) =>
+          headers.get('Accept-Ranges') === 'bytes' &&
+          (headers.get('Content-Range') ?? '').startsWith('bytes */'),
+      },
+      {
+        name: 'v2 public media serves readable story_media -> 200',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${readableStoryMediaFileId}`,
+        expected: 200,
+        checkHeaders: (headers) =>
+          publicMediaHeadersCheck(headers) &&
+          headers.get('Content-Type') === 'audio/mpeg',
+      },
+      {
+        name: 'v2 public media serves readable place_photo -> 200',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${readablePlacePhotoFileId}`,
+        expected: 200,
+        checkHeaders: (headers) =>
+          publicMediaHeadersCheck(headers) &&
+          headers.get('Content-Type') === 'image/png',
+      },
+      {
+        name: 'v2 public media serves readable place_name_audio -> 200',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${readablePlaceAudioFileId}`,
+        expected: 200,
+        checkHeaders: (headers) =>
+          publicMediaHeadersCheck(headers) &&
+          headers.get('Content-Type') === 'audio/mpeg',
+      },
+      {
+        name: 'v2 public media serves readable speaker_photo -> 200',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${readableSpeakerPhotoFileId}`,
+        expected: 200,
+        checkHeaders: (headers) =>
+          publicMediaHeadersCheck(headers) &&
+          headers.get('Content-Type') === 'image/png',
+      },
+      {
+        name: 'v2 public media hides story_media of members-only story -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${membersStoryMediaFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides story_media of restricted story -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${restrictedStoryMediaFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides place_photo of members-only place -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${membersPlacePhotoFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides place_photo of story-less place -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${storylessPlacePhotoFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides place_photo of restricted place -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${restrictedPlacePhotoFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides place_name_audio of members-only place -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${membersPlaceAudioFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides place_name_audio of story-less place -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${storylessPlaceAudioFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides place_name_audio of restricted place -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${restrictedPlaceAudioFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides speaker_photo of members-only speaker -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${membersSpeakerPhotoFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides speaker_photo of story-less speaker -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${storylessSpeakerPhotoFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media hides speaker_photo of withdrawn speaker -> 404',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${withdrawnSpeakerPhotoFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media denies restricted community file',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${restrictedFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media denies cross-community file',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${foreignPrivateFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media denies inactive community file',
+        method: 'GET',
+        path: `/v2/public/communities/${inactiveCommunity.slug}/media/${inactiveFileId}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
     ];
     const publicCommunitiesWithSession: Step[] = [
       {
@@ -2148,6 +2786,108 @@ export async function createFixture(
         name: 'v2 public community detail returns 404 for unknown slug while authenticated',
         method: 'GET',
         path: '/v2/public/communities/qa-hono-nonexistent',
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public stories list matches anonymous projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories?sort=title_asc`,
+        expected: 200,
+        check: (body) =>
+          publicStoriesListCheck(body) &&
+          canonicalPublicStoriesJson !== '' &&
+          JSON.stringify(body) === canonicalPublicStoriesJson,
+      },
+      {
+        name: 'v2 public story detail matches anonymous projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/${publicStory.id}`,
+        expected: 200,
+        check: (body) =>
+          v2PublicStoryDetailCheck(body) &&
+          canonicalPublicStoryDetailJson !== '' &&
+          JSON.stringify(body) === canonicalPublicStoryDetailJson,
+      },
+      {
+        name: 'v2 public story detail hides members-only story while authenticated',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/stories/${membersStory.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public story detail hides private community story while authenticated',
+        method: 'GET',
+        path: `/v2/public/communities/${privateCommunitySlug}/stories/${privateStory.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public places list matches anonymous projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/places`,
+        expected: 200,
+        check: (body) =>
+          publicPlacesListCheck(body) &&
+          canonicalPublicPlacesJson !== '' &&
+          JSON.stringify(body) === canonicalPublicPlacesJson,
+      },
+      {
+        name: 'v2 public place detail matches anonymous projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/places/${publicPlace.id}`,
+        expected: 200,
+        check: (body) =>
+          publicPlaceDetailCheck(body) &&
+          canonicalPublicPlaceDetailJson !== '' &&
+          JSON.stringify(body) === canonicalPublicPlaceDetailJson,
+      },
+      {
+        name: 'v2 public place detail hides story-less and members-only place while authenticated',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/places/${unassociatedPlace.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public speakers list matches anonymous projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/speakers`,
+        expected: 200,
+        check: (body) =>
+          publicSpeakersListCheck(body) &&
+          canonicalPublicSpeakersJson !== '' &&
+          JSON.stringify(body) === canonicalPublicSpeakersJson,
+      },
+      {
+        name: 'v2 public speaker detail matches anonymous projection',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/speakers/${speaker.id}`,
+        expected: 200,
+        check: (body) =>
+          publicSpeakerDetailCheck(body) &&
+          canonicalPublicSpeakerDetailJson !== '' &&
+          JSON.stringify(body) === canonicalPublicSpeakerDetailJson,
+      },
+      {
+        name: 'v2 public speaker detail hides members-only speaker while authenticated',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/speakers/${membersSpeaker.id}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'v2 public media serves authorized public media while authenticated',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${readableFileId}`,
+        expected: 200,
+        checkHeaders: publicMediaHeadersCheck,
+      },
+      {
+        name: 'v2 public media denies restricted file while authenticated',
+        method: 'GET',
+        path: `/v2/public/communities/${communitySlug}/media/${restrictedFileId}`,
         expected: 404,
         check: publicNotFoundCheck,
       },

@@ -152,6 +152,7 @@ export function createHonoApp(options: FoundationOptions) {
   // `/v2/*` session gate.
   registerPublicCommunityRoutes(app, {
     repository: new PublicCommunitiesRepository(options.repository.connection),
+    storage: options.storage,
     publicOrigin: configuredOrigin,
   });
   app.use('/v2/*', async (c, next) => {

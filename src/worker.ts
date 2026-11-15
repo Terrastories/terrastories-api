@@ -62,11 +62,18 @@ export function createWorker(
       publicOrigin: runtimeConfig.publicOrigin,
       corsOrigins: runtimeConfig.corsOrigins,
       storage: {
-        async read(key) {
-          const object = await env.MEDIA.get(key);
+        async read(key, range) {
+          const object = range
+            ? await env.MEDIA.get(key, {
+                range: {
+                  offset: range.start,
+                  length: range.end - range.start + 1,
+                },
+              })
+            : await env.MEDIA.get(key);
           if (!object) return null;
           const reader = object.body.getReader();
-          return new ReadableStream({
+          const stream = new ReadableStream<Uint8Array>({
             async pull(controller) {
               const next = await reader.read();
               if (next.done) controller.close();
@@ -74,6 +81,31 @@ export function createWorker(
             },
             cancel: (reason) => reader.cancel(reason),
           });
+          // workerd strips Content-Length on untyped ReadableStreams; FixedLengthStream
+          // preserves exact Content-Length on 200 and 206 without buffering.
+          const FixedLength = (
+            globalThis as {
+              FixedLengthStream?: new (
+                expectedLength: number
+              ) => TransformStream<Uint8Array, Uint8Array>;
+            }
+          ).FixedLengthStream;
+          const expectedLength = range
+            ? Math.min(
+                range.end - range.start + 1,
+                Math.max(0, object.size - range.start)
+              )
+            : object.size;
+          if (
+            FixedLength &&
+            Number.isSafeInteger(expectedLength) &&
+            expectedLength >= 0
+          ) {
+            const fixed = new FixedLength(expectedLength);
+            void stream.pipeTo(fixed.writable).catch(() => {});
+            return fixed.readable;
+          }
+          return stream;
         },
       },
     });

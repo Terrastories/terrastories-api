@@ -8,6 +8,7 @@
  * disabled communities.
  */
 import { communityFromPhysical } from '../policy/canonical-state.js';
+import { sanitizeDescriptionForMigration } from '../shared/utils/safe-description.js';
 import {
   PublicCommunitiesRepository,
   type PublicCommunityBrandingRow,
@@ -31,9 +32,34 @@ import {
 
 export type PublicCommunitiesResult<T> =
   | { status: 200; body: T }
-  | { status: 400 | 404; body: V2ErrorResponse };
+  | { status: 400 | 404 | 500; body: V2ErrorResponse };
 
-const NOT_FOUND_BODY: V2ErrorResponse = Object.freeze({ error: 'Not found' });
+export const NOT_FOUND_BODY: V2ErrorResponse = Object.freeze({
+  error: 'Not found',
+});
+
+export const INTERNAL_ERROR_BODY: V2ErrorResponse = Object.freeze({
+  error: 'Internal server error',
+});
+
+/**
+ * Sanitise a public description string for HTML output (SPEC-V2 §6.9).
+ *
+ * Legacy descriptions exceeding the 20,000 code-point write limit are still
+ * served sanitised here (`sanitizeDescriptionForMigration` applies only the
+ * memory-guard ceiling; the 20,000 code-point cap is a write-path rule).
+ * Raw or sanitised content is never logged on error.
+ */
+export function sanitizePublicDescription(raw: string | null): string | null {
+  if (raw === null) {
+    return null;
+  }
+  try {
+    return sanitizeDescriptionForMigration(raw).html;
+  } catch {
+    return '';
+  }
+}
 // Compared after lowercasing and removing '-' and '_', so accessToken,
 // access-token and access_token all match. Includes signed-URL parameters.
 const CREDENTIAL_PARAM_NAMES = new Set([
@@ -86,7 +112,11 @@ export function sanitizePublicStyleUrl(styleUrl: string | null): string | null {
   return styleUrl;
 }
 
-function publicMediaUrl(origin: string, slug: string, fileId: string): string {
+export function publicMediaUrl(
+  origin: string,
+  slug: string,
+  fileId: string
+): string {
   return `${origin}/v2/public/communities/${encodeURIComponent(slug)}/media/${encodeURIComponent(fileId)}`;
 }
 
@@ -166,7 +196,7 @@ function projectSummary(
     id: community.id,
     slug: community.slug,
     name: community.name,
-    description: community.description,
+    description: sanitizePublicDescription(community.description),
     locale: community.locale,
     country: community.country,
     visibility: canonicalState.visibility,
@@ -178,7 +208,9 @@ function projectSummary(
   };
 }
 
-function projectPointFeature(place: PublicPlaceRow): PublicMapPointFeature {
+export function projectPointFeature(
+  place: PublicPlaceRow
+): PublicMapPointFeature {
   return {
     type: 'Feature',
     id: place.id,
@@ -188,7 +220,7 @@ function projectPointFeature(place: PublicPlaceRow): PublicMapPointFeature {
     },
     properties: {
       name: place.name,
-      description: place.description,
+      description: sanitizePublicDescription(place.description),
       region: place.region,
       typeOfPlace: place.typeOfPlace,
     },
@@ -208,7 +240,7 @@ export class PublicCommunitiesService {
       this.repository.publicCommunityBrandings(),
     ]);
 
-    const body = PublicCommunitiesListResponseSchema.parse({
+    const parsed = PublicCommunitiesListResponseSchema.safeParse({
       data: communities.map((community) =>
         projectSummary(
           community,
@@ -218,8 +250,11 @@ export class PublicCommunitiesService {
         )
       ),
     });
+    if (!parsed.success) {
+      return { status: 500, body: { ...INTERNAL_ERROR_BODY } };
+    }
 
-    return { status: 200, body };
+    return { status: 200, body: parsed.data };
   }
 
   async getCommunityBySlug(
@@ -295,7 +330,7 @@ export class PublicCommunitiesService {
       })),
     ];
 
-    const body = PublicCommunityDetailResponseSchema.parse({
+    const parsed = PublicCommunityDetailResponseSchema.safeParse({
       data: {
         ...projectSummary(community, origin, branding, mapConfig),
         storiesCount,
@@ -304,7 +339,10 @@ export class PublicCommunitiesService {
         filters,
       },
     });
+    if (!parsed.success) {
+      return { status: 500, body: { ...INTERNAL_ERROR_BODY } };
+    }
 
-    return { status: 200, body };
+    return { status: 200, body: parsed.data };
   }
 }

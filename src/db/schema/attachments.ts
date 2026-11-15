@@ -80,7 +80,9 @@ export const attachmentsPg = pgTable(
     ownerIdx: pgIndex('attachments_owner_idx').on(
       table.communityId,
       table.ownerType,
-      table.ownerId
+      table.ownerId,
+      table.role,
+      table.ordinal
     ),
     fileIdx: pgIndex('attachments_file_idx').on(table.fileId),
     fileCommunityFk: pgForeignKey({
@@ -119,7 +121,9 @@ export const attachmentsSqlite = sqliteTable(
     ownerIdx: sqliteIndex('attachments_owner_idx').on(
       table.communityId,
       table.ownerType,
-      table.ownerId
+      table.ownerId,
+      table.role,
+      table.ordinal
     ),
     fileIdx: sqliteIndex('attachments_file_idx').on(table.fileId),
     fileCommunityFk: sqliteForeignKey({

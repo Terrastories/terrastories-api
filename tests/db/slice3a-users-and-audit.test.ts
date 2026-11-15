@@ -31,8 +31,10 @@ import {
 
 const migrationsFolder = path.resolve(process.cwd(), 'src/db/migrations');
 
-function createPre0009Folder(): string {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tsapi-pre0009-'));
+function createSqliteMigrationsFolderThrough(lastTag: string): string {
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'tsapi-sqlite-through-')
+  );
   fs.mkdirSync(path.join(tmpDir, 'meta'), { recursive: true });
   const journal = JSON.parse(
     fs.readFileSync(
@@ -40,12 +42,16 @@ function createPre0009Folder(): string {
       'utf8'
     )
   ) as { version: string; dialect: string; entries: Array<{ tag: string }> };
-  const pre0009 = journal.entries.filter((e) => !e.tag.startsWith('0009_'));
+  const end = journal.entries.findIndex((e) => e.tag === lastTag);
+  if (end < 0) {
+    throw new Error(`Migration tag not found in _journal.json: ${lastTag}`);
+  }
+  const entries = journal.entries.slice(0, end + 1);
   fs.writeFileSync(
     path.join(tmpDir, 'meta', '_journal.json'),
-    JSON.stringify({ ...journal, entries: pre0009 }, null, 2)
+    JSON.stringify({ ...journal, entries }, null, 2)
   );
-  for (const e of pre0009) {
+  for (const e of entries) {
     fs.copyFileSync(
       path.join(migrationsFolder, `${e.tag}.sql`),
       path.join(tmpDir, `${e.tag}.sql`)
@@ -76,9 +82,14 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
   }
 
   it('backfills ASCII email_normalized and display_name in 0009, leaves non-ASCII NULL for idempotent backfillUserIdentity, and preserves sessions', async () => {
-    const preFolder = createPre0009Folder();
-    tempDirs.push(preFolder);
-    const { sqlite, db } = setupDb(preFolder);
+    const through0008 = createSqliteMigrationsFolderThrough(
+      '0008_slice1_content_columns'
+    );
+    const through0009 = createSqliteMigrationsFolderThrough(
+      '0009_users_identity_and_audit_entries'
+    );
+    tempDirs.push(through0008, through0009);
+    const { sqlite, db } = setupDb(through0008);
 
     const now = Date.now();
     const commId = Number(
@@ -108,7 +119,7 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
       )
       .run(asciiId, now + 60_000);
 
-    migrate(db, { migrationsFolder });
+    migrate(db, { migrationsFolder: through0009 });
 
     const asciiRow = sqlite
       .prepare('SELECT email_normalized, display_name FROM users WHERE id = ?')
@@ -146,9 +157,14 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
   });
 
   it('aborts migration 0009 before rename when pre-existing ASCII emails collide case-insensitively', () => {
-    const preFolder = createPre0009Folder();
-    tempDirs.push(preFolder);
-    const { sqlite, db } = setupDb(preFolder);
+    const through0008 = createSqliteMigrationsFolderThrough(
+      '0008_slice1_content_columns'
+    );
+    const through0009 = createSqliteMigrationsFolderThrough(
+      '0009_users_identity_and_audit_entries'
+    );
+    tempDirs.push(through0008, through0009);
+    const { sqlite, db } = setupDb(through0008);
 
     const now = Date.now();
     const commId = Number(
@@ -164,7 +180,7 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
       )
       .run(commId, now, now, commId, now, now);
 
-    expect(() => migrate(db, { migrationsFolder })).toThrow();
+    expect(() => migrate(db, { migrationsFolder: through0009 })).toThrow();
     expect(
       (
         sqlite.prepare('SELECT count(*) AS count FROM users').get() as {
@@ -644,11 +660,16 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
   });
 
   it('preserves sqlite_sequence high-water mark for rebuilt users table in SQLite 0009 and D1 (Miniflare)', async () => {
-    const preFolder = createPre0009Folder();
-    tempDirs.push(preFolder);
+    const through0008 = createSqliteMigrationsFolderThrough(
+      '0008_slice1_content_columns'
+    );
+    const through0009 = createSqliteMigrationsFolderThrough(
+      '0009_users_identity_and_audit_entries'
+    );
+    tempDirs.push(through0008, through0009);
 
     // 1. better-sqlite3: delete max-id row before 0009 -> next insert gets id 4
-    const { sqlite, db } = setupDb(preFolder);
+    const { sqlite, db } = setupDb(through0008);
     const now = Date.now();
     const commId = Number(
       sqlite
@@ -665,7 +686,7 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
         .run(email, commId, now, now);
     }
     sqlite.prepare('DELETE FROM users WHERE id = 3').run();
-    migrate(db, { migrationsFolder });
+    migrate(db, { migrationsFolder: through0009 });
 
     const [insertedAfter] = await db
       .insert(usersSqlite)
@@ -689,7 +710,7 @@ describe('Slice 3a SQLite schema, 0009 migration, identity backfill, triggers, a
     );
     try {
       const d1 = await mf.getD1Database('DB');
-      await applyD1Migrations(d1, preFolder);
+      await applyD1Migrations(d1, through0008);
       await d1.batch([
         d1
           .prepare(

@@ -598,11 +598,25 @@ describe('Slice 2: Canonical File, Attachment, ExternalMediaLink, and CommunityM
         created_at: tB,
       });
 
-      // sqlite_sequence reflects 5
-      const seqRow = sqlite
-        .prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'attachments'`)
-        .get() as { seq: number };
-      expect(seqRow.seq).toBe(5);
+      // sqlite_sequence has exactly one row per name, seq=5 for attachments, and no *_old residue
+      const seqRows = sqlite
+        .prepare(
+          `SELECT name, seq FROM sqlite_sequence WHERE name = 'attachments'`
+        )
+        .all() as Array<{ name: string; seq: number }>;
+      expect(seqRows).toEqual([{ name: 'attachments', seq: 5 }]);
+
+      const duplicateSeqRows = sqlite
+        .prepare(
+          `SELECT name, count(*) AS cnt FROM sqlite_sequence GROUP BY name HAVING count(*) > 1`
+        )
+        .all();
+      expect(duplicateSeqRows).toEqual([]);
+
+      const oldSeqRows = sqlite
+        .prepare(`SELECT name FROM sqlite_sequence WHERE name LIKE '%_old'`)
+        .all();
+      expect(oldSeqRows).toEqual([]);
 
       sqlite.close();
     });
@@ -658,6 +672,26 @@ describe('Slice 2: Canonical File, Attachment, ExternalMediaLink, and CommunityM
         .prepare(`SELECT id, file_id FROM attachments ORDER BY id`)
         .all() as Array<{ id: number; file_id: string }>;
       expect(attRows).toEqual([{ id: 6, file_id: fileA }]);
+
+      const seqRows = sqlite
+        .prepare(
+          `SELECT name, seq FROM sqlite_sequence WHERE name = 'attachments'`
+        )
+        .all() as Array<{ name: string; seq: number }>;
+      expect(seqRows).toEqual([{ name: 'attachments', seq: 6 }]);
+
+      expect(
+        sqlite
+          .prepare(
+            `SELECT name, count(*) AS cnt FROM sqlite_sequence GROUP BY name HAVING count(*) > 1`
+          )
+          .all()
+      ).toEqual([]);
+      expect(
+        sqlite
+          .prepare(`SELECT name FROM sqlite_sequence WHERE name LIKE '%_old'`)
+          .all()
+      ).toEqual([]);
 
       sqlite.close();
     });
@@ -739,6 +773,25 @@ describe('Slice 2: Canonical File, Attachment, ExternalMediaLink, and CommunityM
           { id: 1, file_id: null, role: null },
           { id: 3, file_id: fileId, role: 'community_display_image' },
         ]);
+
+        const seqRows = await d1
+          .prepare(
+            `SELECT name, seq FROM sqlite_sequence WHERE name = 'attachments'`
+          )
+          .all<{ name: string; seq: number }>();
+        expect(seqRows.results).toEqual([{ name: 'attachments', seq: 3 }]);
+
+        const dupSeqRows = await d1
+          .prepare(
+            `SELECT name, count(*) AS cnt FROM sqlite_sequence GROUP BY name HAVING count(*) > 1`
+          )
+          .all();
+        expect(dupSeqRows.results).toEqual([]);
+
+        const oldSeqRows = await d1
+          .prepare(`SELECT name FROM sqlite_sequence WHERE name LIKE '%_old'`)
+          .all();
+        expect(oldSeqRows.results).toEqual([]);
       } finally {
         await mf.dispose();
       }

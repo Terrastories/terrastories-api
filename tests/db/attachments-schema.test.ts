@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { getTableConfig as getPgTableConfig } from 'drizzle-orm/pg-core';
+import { getTableConfig as getSqliteTableConfig } from 'drizzle-orm/sqlite-core';
 import {
   attachmentsPg,
   attachmentsSqlite,
@@ -36,6 +38,37 @@ describe('Attachments Schema', () => {
       expect(columns).toContain('contentType');
       expect(columns).toContain('fileSize');
       expect(columns).toContain('createdAt');
+    });
+
+    it('declares attachments_owner_idx with all 5 snapshot columns on both dialects', () => {
+      const expectedColumns = [
+        'community_id',
+        'owner_type',
+        'owner_id',
+        'role',
+        'ordinal',
+      ];
+      const pgConfig = getPgTableConfig(attachmentsPg);
+      const pgOwnerIdx = pgConfig.indexes.find(
+        (idx) => idx.config.name === 'attachments_owner_idx'
+      );
+      expect(pgOwnerIdx).toBeDefined();
+      expect(
+        pgOwnerIdx?.config.columns.map((col) =>
+          'name' in col ? col.name : undefined
+        )
+      ).toEqual(expectedColumns);
+
+      const sqliteConfig = getSqliteTableConfig(attachmentsSqlite);
+      const sqliteOwnerIdx = sqliteConfig.indexes.find(
+        (idx) => idx.config.name === 'attachments_owner_idx'
+      );
+      expect(sqliteOwnerIdx).toBeDefined();
+      expect(
+        sqliteOwnerIdx?.config.columns.map((col) =>
+          'name' in col ? col.name : undefined
+        )
+      ).toEqual(expectedColumns);
     });
   });
 

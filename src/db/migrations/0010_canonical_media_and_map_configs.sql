@@ -143,18 +143,12 @@ SELECT
 	`created_at`
 FROM `attachments_old`;
 --> statement-breakpoint
-INSERT OR IGNORE INTO `sqlite_sequence` (`name`, `seq`)
+DELETE FROM `sqlite_sequence` WHERE `name` = 'attachments';
+--> statement-breakpoint
+INSERT INTO `sqlite_sequence` (`name`, `seq`)
 SELECT 'attachments', `seq`
 FROM `sqlite_sequence`
 WHERE `name` = 'attachments_old';
---> statement-breakpoint
-UPDATE `sqlite_sequence`
-SET `seq` = MAX(
-	`seq`,
-	(SELECT `seq` FROM `sqlite_sequence` WHERE `name` = 'attachments_old')
-)
-WHERE `name` = 'attachments'
-  AND EXISTS (SELECT 1 FROM `sqlite_sequence` WHERE `name` = 'attachments_old');
 --> statement-breakpoint
 DROP TABLE `attachments_old`;
 --> statement-breakpoint

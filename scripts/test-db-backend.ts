@@ -979,7 +979,11 @@ function verifySqliteStoredMilliseconds(
   }
 }
 
-function verifySqlitePreservation(sqlite: Database.Database): void {
+function verifySqlitePreservation(
+  sqlite: Database.Database,
+  options: { expectSlice2Backfill?: boolean } = {}
+): void {
+  const { expectSlice2Backfill = true } = options;
   const community = sqlite
     .prepare(
       'SELECT id, name, country, beta, created_at, updated_at FROM communities WHERE id = 1'
@@ -1072,10 +1076,21 @@ function verifySqlitePreservation(sqlite: Database.Database): void {
 
   const file = sqlite
     .prepare(
-      'SELECT id, community_id, uploaded_by, metadata, is_active, created_at, updated_at FROM files WHERE id = ?'
+      expectSlice2Backfill
+        ? 'SELECT id, path, storage_key, size, byte_size, checksum, community_id, uploaded_by, metadata, is_active, created_at, updated_at FROM files WHERE id = ?'
+        : 'SELECT id, path, size, community_id, uploaded_by, metadata, is_active, created_at, updated_at FROM files WHERE id = ?'
     )
     .get(fixture.file.id) as any;
   assert.equal(file.id, fixture.file.id);
+  assert.equal(file.path, fixture.file.path);
+  assert.equal(file.size, fixture.file.size);
+  if (expectSlice2Backfill) {
+    assert.equal(file.storage_key, file.path);
+    assert.equal(file.storage_key, fixture.file.path);
+    assert.equal(file.byte_size, file.size);
+    assert.equal(file.byte_size, fixture.file.size);
+    assert.equal(file.checksum, null);
+  }
   assert.equal(file.community_id, fixture.file.communityId);
   assert.equal(file.uploaded_by, fixture.file.uploadedBy);
   assert.deepEqual(JSON.parse(file.metadata), fixture.file.metadata);
@@ -1172,6 +1187,37 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     'places.longitude must be double precision'
   );
 
+  // #140 Slice 2: community_map_configs coordinate/camera columns must also be double precision.
+  const mapConfigCoordinateCols = [
+    'center_latitude',
+    'center_longitude',
+    'south_west_latitude',
+    'south_west_longitude',
+    'north_east_latitude',
+    'north_east_longitude',
+    'zoom',
+    'pitch',
+    'bearing',
+  ] as const;
+  const mapConfigTypes = new Map(
+    columns
+      .filter(
+        (row: any) =>
+          row.table_name === 'community_map_configs' &&
+          (mapConfigCoordinateCols as readonly string[]).includes(
+            String(row.column_name)
+          )
+      )
+      .map((row: any) => [String(row.column_name), String(row.data_type)])
+  );
+  for (const col of mapConfigCoordinateCols) {
+    assert.equal(
+      mapConfigTypes.get(col),
+      'double precision',
+      `community_map_configs.${col} must be double precision`
+    );
+  }
+
   const lastLoginColumn = columns.find(
     (row: any) =>
       row.table_name === 'users' && row.column_name === 'last_login_at'
@@ -1253,20 +1299,47 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     ),
     'stories.created_at must exist at timestamp(3)'
   );
+  for (const [tableName, columnName] of [
+    ['community_map_configs', 'created_at'],
+    ['community_map_configs', 'updated_at'],
+    ['external_media_links', 'created_at'],
+  ] as const) {
+    assert.ok(
+      timestampColumnRows.some(
+        (row: any) =>
+          row.table_name === tableName &&
+          row.column_name === columnName &&
+          Number(row.datetime_precision) === 3
+      ),
+      `${tableName}.${columnName} must exist at timestamp(3)`
+    );
+  }
 
   const indexRows = await client.unsafe(
-    `SELECT indexname FROM pg_indexes WHERE schemaname = 'public'`
+    `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public'`
   );
   const indexes = new Set(indexRows.map((row: any) => String(row.indexname)));
+  const indexDefs = new Map(
+    indexRows.map((row: any) => [String(row.indexname), String(row.indexdef)])
+  );
   for (const indexName of [
     'files_community_idx',
     'files_user_idx',
     'files_mime_type_idx',
     'files_active_idx',
     'files_created_at_idx',
+    'attachments_owner_idx',
+    'attachments_file_idx',
+    'community_map_configs_static_map_file_idx',
+    'external_media_links_story_idx',
   ]) {
     assert.ok(indexes.has(indexName), `missing PostgreSQL index ${indexName}`);
   }
+  assert.match(
+    indexDefs.get('attachments_owner_idx') ?? '',
+    /\(community_id, owner_type, owner_id, role, ordinal\)/,
+    'attachments_owner_idx must cover (community_id, owner_type, owner_id, role, ordinal)'
+  );
 
   const constraintRows = await client.unsafe(
     `SELECT conname, pg_get_constraintdef(oid) AS definition
@@ -1287,13 +1360,20 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     'files_uploaded_by_users_id_fk',
     'themes_community_id_communities_id_fk',
     'community_media_community_id_communities_id_fk',
+    'attachments_file_id_files_id_fk',
+    'community_map_configs_community_id_communities_id_fk',
   ]) {
     assert.ok(
       constraints.has(constraint),
       `missing PostgreSQL FK ${constraint}`
     );
   }
-  // #186: composite (community_id, id) tenant foreign keys must exist on both
+  assert.match(
+    constraints.get('attachments_file_id_files_id_fk') ?? '',
+    /ON DELETE CASCADE/,
+    'attachments_file_id_files_id_fk must cascade delete (for null-community super_admin avatars)'
+  );
+  // #186 + #140: composite (community_id, id) tenant foreign keys must exist on both
   // the fresh schema and the upgraded one, and their definitions must pair
   // community_id with the referenced id column.
   for (const [constraint, expectPair] of [
@@ -1304,6 +1384,12 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     ['story_speakers_story_community_fk', 'story_id'],
     ['story_speakers_speaker_community_fk', 'speaker_id'],
     ['community_media_file_community_fk', 'file_id'],
+    ['attachments_file_community_fk', 'file_id'],
+    [
+      'community_map_configs_static_map_file_community_fk',
+      'static_map_file_id',
+    ],
+    ['external_media_links_story_community_fk', 'story_id'],
   ] as const) {
     const definition = constraints.get(constraint);
     assert.ok(
@@ -1375,7 +1461,7 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     assert.ok(indexes.has(indexName), `missing PostgreSQL index ${indexName}`);
   }
 
-  // #189 Slice 1b + #137 Slice 3a: nullable columns & identity/audit schema.
+  // #189 Slice 1b + #137 Slice 3a + #140 Slice 2: nullable columns & identity/audit/media schema.
   const sliceCols = await client.unsafe(
     `SELECT table_name, column_name, is_nullable
      FROM information_schema.columns
@@ -1386,6 +1472,8 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
          OR (table_name = 'places' AND column_name IN ('latitude', 'longitude', 'type_of_place', 'description_plain'))
          OR (table_name = 'users' AND column_name IN ('community_id', 'username', 'display_name', 'password_verifier', 'password_algorithm', 'password_salt', 'password_params', 'username_normalized', 'email_normalized'))
          OR (table_name = 'audit_entries' AND column_name IN ('community_id', 'actor_id', 'resource_type', 'ip_address', 'user_agent'))
+         OR (table_name = 'files' AND column_name IN ('community_id', 'uploaded_by', 'storage_key', 'byte_size', 'checksum'))
+         OR (table_name = 'attachments' AND column_name IN ('community_id', 'file_id', 'owner_type', 'owner_id', 'role', 'ordinal', 'attachable_id', 'attachable_type', 'url', 'filename'))
        )`
   );
   const nullableMap = new Map(
@@ -1418,6 +1506,21 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
     'audit_entries.resource_type',
     'audit_entries.ip_address',
     'audit_entries.user_agent',
+    'files.community_id',
+    'files.uploaded_by',
+    'files.storage_key',
+    'files.byte_size',
+    'files.checksum',
+    'attachments.community_id',
+    'attachments.file_id',
+    'attachments.owner_type',
+    'attachments.owner_id',
+    'attachments.role',
+    'attachments.ordinal',
+    'attachments.attachable_id',
+    'attachments.attachable_type',
+    'attachments.url',
+    'attachments.filename',
   ]) {
     assert.equal(
       nullableMap.get(expectedNullable),
@@ -1529,9 +1632,16 @@ async function verifyPostgresPreservation(
   );
 
   const [file] = await client.unsafe(
-    `SELECT id, community_id, uploaded_by, metadata, is_active, created_at, updated_at FROM files WHERE id = '${fixture.file.id}'`
+    `SELECT id, path, storage_key, size, byte_size, checksum, community_id, uploaded_by, metadata, is_active, created_at, updated_at FROM files WHERE id = '${fixture.file.id}'`
   );
   assert.equal(file.id, fixture.file.id);
+  assert.equal(file.path, fixture.file.path);
+  assert.equal(file.storage_key, file.path);
+  assert.equal(file.storage_key, fixture.file.path);
+  assert.equal(Number(file.size), fixture.file.size);
+  assert.equal(Number(file.byte_size), Number(file.size));
+  assert.equal(Number(file.byte_size), fixture.file.size);
+  assert.equal(file.checksum, null);
   assert.equal(file.community_id, fixture.file.communityId);
   assert.equal(file.uploaded_by, fixture.file.uploadedBy);
   assert.deepEqual(file.metadata, fixture.file.metadata);
@@ -2026,6 +2136,120 @@ async function verifyPostgresTransactionAndForeignKey(
       throw new Error('slice3a_pg_probe_rollback');
     }),
     /slice3a_pg_probe_rollback/
+  );
+
+  // #140 Slice 2: attachments, community_map_configs, external_media_links FKs & cascades in PG.
+  await assert.rejects(
+    client.begin(async (tx) => {
+      const [{ id: commA }] = await tx`
+        INSERT INTO communities (name, slug) VALUES ('PG Slice2 A', 'pg-slice2-a') RETURNING id
+      `;
+      const [{ id: commB }] = await tx`
+        INSERT INTO communities (name, slug) VALUES ('PG Slice2 B', 'pg-slice2-b') RETURNING id
+      `;
+      const [{ id: userA }] = await tx`
+        INSERT INTO users (email, email_normalized, password_hash, first_name, last_name, role, community_id)
+        VALUES ('s2a@example.org', 's2a@example.org', 'h', 'S2', 'A', 'editor', ${commA})
+        RETURNING id
+      `;
+      const [{ id: saId }] = await tx`
+        INSERT INTO users (email, email_normalized, password_hash, first_name, last_name, role, community_id)
+        VALUES ('s2sa@example.org', 's2sa@example.org', 'h', 'S2', 'SA', 'super_admin', NULL)
+        RETURNING id
+      `;
+      const [{ id: storyA }] = await tx`
+        INSERT INTO stories (title, slug, community_id, created_by)
+        VALUES ('S2 Story A', 's2-story-a', ${commA}, ${userA})
+        RETURNING id
+      `;
+
+      const fileA = '11111111-1111-4111-8111-111111111112';
+      const fileB = '22222222-2222-4222-8222-222222222222';
+      const saFile = '33333333-3333-4333-8333-333333333333';
+      await tx`
+        INSERT INTO files (id, filename, original_name, path, storage_key, url, mime_type, size, byte_size, community_id, uploaded_by, created_at, updated_at)
+        VALUES
+          (${fileA}, 'a.png', 'a.png', 'uploads/a.png', 'uploads/a.png', '/v2/media/a', 'image/png', 100, 100, ${commA}, ${userA}, now(), now()),
+          (${fileB}, 'b.png', 'b.png', 'uploads/b.png', 'uploads/b.png', '/v2/media/b', 'image/png', 200, 200, ${commB}, ${userA}, now(), now()),
+          (${saFile}, 'sa.png', 'sa.png', 'uploads/sa.png', 'uploads/sa.png', '/v2/media/sa', 'image/png', 300, 300, NULL, ${saId}, now(), now())
+      `;
+
+      // Cross-community attachment must fail (attachments_file_community_fk)
+      await assert.rejects(
+        tx.savepoint(
+          async (sp) => sp`
+            INSERT INTO attachments (community_id, file_id, owner_type, owner_id, role, ordinal)
+            VALUES (${commA}, ${fileB}, 'story', ${storyA}, 'story_media', 0)
+          `
+        )
+      );
+      // Attachment claiming a community cannot reference a null-community file
+      await assert.rejects(
+        tx.savepoint(
+          async (sp) => sp`
+            INSERT INTO attachments (community_id, file_id, owner_type, owner_id, role, ordinal)
+            VALUES (${commA}, ${saFile}, 'story', ${storyA}, 'story_media', 0)
+          `
+        )
+      );
+
+      // Null-community super_admin avatar succeeds and cascades on file delete (attachments_file_id_files_id_fk)
+      const [{ id: saAttId }] = await tx`
+        INSERT INTO attachments (community_id, file_id, owner_type, owner_id, role, ordinal)
+        VALUES (NULL, ${saFile}, 'user', ${saId}, 'user_photo', 0)
+        RETURNING id
+      `;
+      await tx`DELETE FROM files WHERE id = ${saFile}`;
+      const [{ saAttCount }] = await tx`
+        SELECT count(*)::int AS "saAttCount" FROM attachments WHERE id = ${saAttId}
+      `;
+      assert.equal(
+        saAttCount,
+        0,
+        'deleting null-community file must cascade-delete its super_admin avatar attachment'
+      );
+
+      // community_map_configs accepts own-community static_map_file_id and rejects cross-community file
+      await tx`
+        INSERT INTO community_map_configs (community_id, center_latitude, center_longitude, zoom, static_map_file_id)
+        VALUES (${commA}, -1.4558123456789, -48.4902123456789, 12.5, ${fileA})
+      `;
+      await assert.rejects(
+        tx.savepoint(
+          async (sp) => sp`
+            INSERT INTO community_map_configs (community_id, static_map_file_id)
+            VALUES (${commB}, ${fileA})
+          `
+        )
+      );
+
+      // external_media_links rejects cross-community story and cascades on story delete
+      await assert.rejects(
+        tx.savepoint(
+          async (sp) => sp`
+            INSERT INTO external_media_links (community_id, story_id, url, ordinal)
+            VALUES (${commB}, ${storyA}, 'https://example.org/watch', 0)
+          `
+        )
+      );
+      const [{ id: extLinkId }] = await tx`
+        INSERT INTO external_media_links (community_id, story_id, url, ordinal)
+        VALUES (${commA}, ${storyA}, 'https://example.org/watch', 0)
+        RETURNING id
+      `;
+      await tx`DELETE FROM stories WHERE id = ${storyA}`;
+      const [{ extLinkCount }] = await tx`
+        SELECT count(*)::int AS "extLinkCount" FROM external_media_links WHERE id = ${extLinkId}
+      `;
+      assert.equal(
+        extLinkCount,
+        0,
+        'deleting story must cascade-delete its external_media_links'
+      );
+
+      throw new Error('slice2_pg_probe_rollback');
+    }),
+    /slice2_pg_probe_rollback/
   );
 }
 
@@ -2850,7 +3074,7 @@ async function runSqliteGate(): Promise<void> {
     0,
     'the 0006 done-marker table is dropped at the end'
   );
-  verifySqlitePreservation(partialSqlite);
+  verifySqlitePreservation(partialSqlite, { expectSlice2Backfill: false });
   partialSqlite.close();
 
   console.log('  3/5 deliberate dialect incompatibility rejection');

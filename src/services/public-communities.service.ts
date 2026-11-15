@@ -38,6 +38,14 @@ export const NOT_FOUND_BODY: V2ErrorResponse = Object.freeze({
   error: 'Not found',
 });
 
+export const FORBIDDEN_BODY: V2ErrorResponse = Object.freeze({
+  error: 'Forbidden',
+});
+
+export const BAD_REQUEST_BODY: V2ErrorResponse = Object.freeze({
+  error: 'Invalid request',
+});
+
 export const INTERNAL_ERROR_BODY: V2ErrorResponse = Object.freeze({
   error: 'Internal server error',
 });
@@ -120,36 +128,44 @@ export function publicMediaUrl(
   return `${origin}/v2/public/communities/${encodeURIComponent(slug)}/media/${encodeURIComponent(fileId)}`;
 }
 
-function projectBranding(
+export function authenticatedMediaUrl(origin: string, fileId: string): string {
+  return `${origin}/v2/media/${encodeURIComponent(fileId)}`;
+}
+
+export function projectBranding(
   slug: string,
   origin: string,
-  row: PublicCommunityBrandingRow | undefined
+  row: PublicCommunityBrandingRow | undefined,
+  mediaUrlFor: (fileId: string) => string = (fileId) =>
+    publicMediaUrl(origin, slug, fileId)
 ): PublicCommunityBranding {
   return {
     displayImage: row?.displayImageFileId
       ? {
           fileId: row.displayImageFileId,
-          url: publicMediaUrl(origin, slug, row.displayImageFileId),
+          url: mediaUrlFor(row.displayImageFileId),
         }
       : null,
     backgroundImage: row?.backgroundImageFileId
       ? {
           fileId: row.backgroundImageFileId,
-          url: publicMediaUrl(origin, slug, row.backgroundImageFileId),
+          url: mediaUrlFor(row.backgroundImageFileId),
         }
       : null,
     sponsorLogos: (row?.sponsorLogos ?? []).map((logo) => ({
       fileId: logo.fileId,
       ordinal: logo.ordinal,
-      url: publicMediaUrl(origin, slug, logo.fileId),
+      url: mediaUrlFor(logo.fileId),
     })),
   };
 }
 
-function projectMapConfig(
+export function projectMapConfig(
   slug: string,
   origin: string,
-  row: PublicMapConfigRow | undefined | null
+  row: PublicMapConfigRow | undefined | null,
+  mediaUrlFor: (fileId: string) => string = (fileId) =>
+    publicMediaUrl(origin, slug, fileId)
 ): PublicCommunityMapConfig | null {
   if (!row) return null;
   const staticMapFileId = row.staticMapFileId;
@@ -168,9 +184,7 @@ function projectMapConfig(
     threeDimensional: row.threeDimensional,
     projection: row.projection,
     staticMapFileId,
-    staticMapUrl: staticMapFileId
-      ? publicMediaUrl(origin, slug, staticMapFileId)
-      : null,
+    staticMapUrl: staticMapFileId ? mediaUrlFor(staticMapFileId) : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

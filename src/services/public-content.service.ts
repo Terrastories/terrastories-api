@@ -71,17 +71,17 @@ export const INVALID_REQUEST_BODY = Object.freeze({
   error: 'Invalid request',
 }) as { error: string };
 
-const notFoundJson = (): PublicContentJsonResult<never> => ({
+export const notFoundJson = (): PublicContentJsonResult<never> => ({
   status: 404,
   body: NOT_FOUND_BODY,
 });
 
-const badRequestJson = (): PublicContentJsonResult<never> => ({
+export const badRequestJson = (): PublicContentJsonResult<never> => ({
   status: 400,
   body: INVALID_REQUEST_BODY,
 });
 
-function validatePublicResponse<T>(
+export function validatePublicResponse<T>(
   schema: z.ZodType<T>,
   payload: unknown
 ): PublicContentJsonResult<T> {
@@ -97,7 +97,9 @@ function iso(value: Date): string {
   return value.toISOString();
 }
 
-function projectPlaceSummary(row: PublicPlaceRecord): PublicPlaceSummary {
+export function projectPlaceSummary(
+  row: PublicPlaceRecord
+): PublicPlaceSummary {
   return {
     id: row.id,
     name: row.name,
@@ -111,12 +113,14 @@ function projectPlaceSummary(row: PublicPlaceRecord): PublicPlaceSummary {
   };
 }
 
-function projectSpeakerSummary(
+export function projectSpeakerSummary(
   row: PublicSpeakerRecord,
   slug: string,
   origin: string,
   birthplacesById: Map<number, PublicPlaceRecord>,
-  photosBySpeakerId: Map<number, string>
+  photosBySpeakerId: Map<number, string>,
+  mediaUrlFor: (fileId: string) => string = (fileId) =>
+    publicMediaUrl(origin, slug, fileId)
 ): PublicSpeakerSummary {
   const birthplaceRow =
     row.birthplaceId !== null
@@ -133,7 +137,7 @@ function projectSpeakerSummary(
     photo: photoFileId
       ? {
           fileId: photoFileId,
-          url: publicMediaUrl(origin, slug, photoFileId),
+          url: mediaUrlFor(photoFileId),
         }
       : null,
     createdAt: iso(row.createdAt),
@@ -141,10 +145,12 @@ function projectSpeakerSummary(
   };
 }
 
-function projectStoryAttachment(
+export function projectStoryAttachment(
   row: PublicStoryAttachmentRecord,
   slug: string,
-  origin: string
+  origin: string,
+  mediaUrlFor: (fileId: string) => string = (fileId) =>
+    publicMediaUrl(origin, slug, fileId)
 ): PublicStoryAttachment {
   return {
     id: row.id,
@@ -154,11 +160,11 @@ function projectStoryAttachment(
     mimeType: row.mimeType,
     byteSize: row.byteSize,
     originalName: row.originalName,
-    url: publicMediaUrl(origin, slug, row.fileId),
+    url: mediaUrlFor(row.fileId),
   };
 }
 
-function projectExternalMediaLink(
+export function projectExternalMediaLink(
   row: PublicExternalMediaLinkRecord
 ): PublicExternalMediaLink | null {
   if (

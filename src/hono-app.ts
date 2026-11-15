@@ -1,7 +1,9 @@
 import { sessionLifetime } from './shared/session-policy.js';
 import { registerExploreAdapter } from './explore-adapter.js';
 import { ExploreAdapterRepository } from './repositories/explore-adapter.repository.js';
+import { CommunityReadsRepository } from './repositories/community-reads.repository.js';
 import { PublicCommunitiesRepository } from './repositories/public-communities.repository.js';
+import { registerCommunityReadRoutes } from './routes/community-reads.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
@@ -178,6 +180,10 @@ export function createHonoApp(options: FoundationOptions) {
     await options.repository.revokeUserSessions(c.get('actor').id);
     deleteCookie(c, 'ts_session', cookie);
     return c.body(null, 204);
+  });
+  registerCommunityReadRoutes(app, {
+    repository: new CommunityReadsRepository(options.repository.connection),
+    publicOrigin: configuredOrigin,
   });
   app.get('/v2/media/:id', async (c) => {
     const id = z.string().uuid().safeParse(c.req.param('id'));

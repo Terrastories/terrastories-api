@@ -21,7 +21,9 @@ import {
   desc,
   eq,
   exists,
+  gte,
   inArray,
+  lte,
   or,
   sql,
   type SQL,
@@ -39,7 +41,22 @@ import {
   communityMediaPg,
   communityMediaSqlite,
 } from '../db/schema/sessions.js';
+import type { ReadRuleViewer } from '../policy/read-rules.js';
 import { deriveTopicNormalized } from '../shared/utils/derived-columns.js';
+import {
+  descriptionPlainText,
+  sanitizeDescriptionForMigration,
+} from '../shared/utils/safe-description.js';
+import {
+  containsNormalizedKey,
+  normalizeSearchText,
+} from '../shared/utils/search-normalize.js';
+import { SpatialUtils } from '../shared/utils/spatial.js';
+import type {
+  CommunityBoundingBox,
+  CommunityPlacesQuery,
+  CommunityStoriesQuery,
+} from '../shared/schemas/community-reads.js';
 import type {
   PublicPaginationQuery,
   PublicStoriesQuery,
@@ -54,22 +71,24 @@ import {
   type PublicCommunityRow,
 } from './public-communities.repository.js';
 import {
-  PLACE_ASSOCIATED_ALLOWED,
   PUBLIC_ASSOCIATED_MEDIA_ALLOWED,
   PUBLIC_BRANDING_MEDIA_ALLOWED,
   PUBLIC_STORY_MEDIA_ALLOWED,
-  SPEAKER_ASSOCIATED_ALLOWED,
   activeUnrestrictedFileCondition,
+  associatedMediaAllowedForViewer,
   isValidCoordinates,
-  publicPlaceBaseCondition,
-  publicSpeakerBaseCondition,
+  placeBaseConditionForViewer,
   publicStoryCondition,
-  readablePlaceCondition,
-  readableSpeakerCondition,
+  readablePlaceConditionForViewer,
+  readableSpeakerConditionForViewer,
+  speakerBaseConditionForViewer,
+  storyConditionForViewer,
+  storyMediaAllowedForViewer,
   validPointCoordinatesCondition,
 } from './public-visibility.js';
 
 const IN_CHUNK_SIZE = 80;
+const ANON_PUBLIC: ReadRuleViewer = 'anonymous-public';
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -78,6 +97,7 @@ export interface PublicStoryRecord {
   communityId: number;
   title: string;
   description: string | null;
+  descriptionPlain?: string | null;
   topic: string | null;
   language: string;
   privacyLevel: string;
@@ -220,6 +240,64 @@ function chunkValues<T>(values: readonly T[], size = IN_CHUNK_SIZE): T[][] {
   return chunks;
 }
 
+function sanitizePlainTextForSearch(raw: string | null): string {
+  if (raw === null) {
+    return '';
+  }
+  try {
+    return descriptionPlainText(sanitizeDescriptionForMigration(raw).html);
+  } catch {
+    return '';
+  }
+}
+
+function storyMatchesNeedle(
+  row: PublicStoryRecord,
+  needleKey: string
+): boolean {
+  if (containsNormalizedKey(row.title, needleKey)) {
+    return true;
+  }
+  const plain =
+    row.descriptionPlain !== null && row.descriptionPlain !== undefined
+      ? row.descriptionPlain
+      : sanitizePlainTextForSearch(row.description);
+  if (plain !== '' && containsNormalizedKey(plain, needleKey)) {
+    return true;
+  }
+  if (row.topic !== null && containsNormalizedKey(row.topic, needleKey)) {
+    return true;
+  }
+  return false;
+}
+
+function boundingBoxClauses(
+  places: DialectTables['places'],
+  bounds: CommunityBoundingBox
+): SQL[] {
+  const clauses: SQL[] = [
+    validPointCoordinatesCondition(places),
+    gte(places.latitude, bounds.south),
+    lte(places.latitude, bounds.north),
+  ];
+  if (bounds.west > bounds.east) {
+    clauses.push(
+      or(
+        gte(places.longitude, bounds.west),
+        lte(places.longitude, bounds.east)
+      )!
+    );
+  } else {
+    clauses.push(
+      and(
+        gte(places.longitude, bounds.west),
+        lte(places.longitude, bounds.east)
+      )!
+    );
+  }
+  return clauses;
+}
+
 export class PublicContentRepository {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly database: any;
@@ -252,28 +330,32 @@ export class PublicContentRepository {
    */
   private placeReadableConditions(
     communityId: number,
+    viewer: ReadRuleViewer = ANON_PUBLIC,
     placeTable: DialectTables['places'] = this.tables.places
   ): SQL {
-    return readablePlaceCondition(
+    return readablePlaceConditionForViewer(
       this.database,
       this.tables,
       communityId,
+      viewer,
       placeTable
     );
   }
 
   /**
    * Speaker predicate matching §6.4a `with readable stories`:
-   * delegates to shared `readableSpeakerCondition` in `public-visibility.ts`.
+   * delegates to shared `readableSpeakerConditionForViewer` in `public-visibility.ts`.
    */
   private speakerReadableConditions(
     communityId: number,
+    viewer: ReadRuleViewer = ANON_PUBLIC,
     speakerTable: DialectTables['speakers'] = this.tables.speakers
   ): SQL {
-    return readableSpeakerCondition(
+    return readableSpeakerConditionForViewer(
       this.database,
       this.tables,
       communityId,
+      viewer,
       speakerTable
     );
   }
@@ -288,10 +370,11 @@ export class PublicContentRepository {
    */
   private buildStoryConditions(
     communityId: number,
-    query: PublicStoriesQuery
+    query: PublicStoriesQuery,
+    viewer: ReadRuleViewer = ANON_PUBLIC
   ): SQL {
     const conditions: SQL[] = [
-      publicStoryCondition(this.tables.stories, communityId),
+      storyConditionForViewer(this.tables.stories, communityId, viewer),
     ];
     const filterPlaces = aliasedTable(this.tables.places, 'story_filter_place');
     const filterSpeakers = aliasedTable(
@@ -318,7 +401,7 @@ export class PublicContentRepository {
           .from(filterPlaces)
           .where(
             and(
-              publicPlaceBaseCondition(filterPlaces, communityId),
+              placeBaseConditionForViewer(filterPlaces, communityId, viewer),
               placeClause,
               or(
                 eq(filterPlaces.id, this.tables.stories.interviewLocationId),
@@ -348,7 +431,11 @@ export class PublicContentRepository {
           .from(filterSpeakers)
           .where(
             and(
-              publicSpeakerBaseCondition(filterSpeakers, communityId),
+              speakerBaseConditionForViewer(
+                filterSpeakers,
+                communityId,
+                viewer
+              ),
               speakerClause,
               or(
                 eq(filterSpeakers.id, this.tables.stories.interviewerId),
@@ -424,121 +511,242 @@ export class PublicContentRepository {
     if (!community) {
       return null;
     }
+    return this.listStoriesInCommunity(community, query, ANON_PUBLIC);
+  }
 
-    const whereClause = this.buildStoryConditions(community.id, query);
-    // Materialise the filtered readable story IDs once per query so D1 never
-    // exceeds its 100 bound-parameter cap even when every filter is full.
-    const filteredStories = this.database.$with('filtered_stories').as(
-      this.database
+  async listStoriesInCommunity(
+    community: PublicCommunityRow,
+    query: CommunityStoriesQuery,
+    viewer: ReadRuleViewer = ANON_PUBLIC
+  ): Promise<PublicStoriesPageResult> {
+    const whereClause = this.buildStoryConditions(community.id, query, viewer);
+    const needleKey =
+      query.search && query.search.trim().length > 0
+        ? normalizeSearchText(query.search.trim())
+        : null;
+
+    let total: number;
+    let stories: PublicStoryRecord[];
+    let points: ExplorePlaceRow[];
+
+    if (needleKey === null) {
+      // Materialise the filtered readable story IDs once per query so D1 never
+      // exceeds its 100 bound-parameter cap even when every filter is full.
+      const filteredStories = this.database.$with('filtered_stories').as(
+        this.database
+          .select({
+            id: this.tables.stories.id,
+            interviewLocationId: this.tables.stories.interviewLocationId,
+          })
+          .from(this.tables.stories)
+          .where(whereClause)
+      );
+
+      const [totalRow] = await this.database
+        .with(filteredStories)
+        .select({ total: count() })
+        .from(filteredStories);
+      total = Number(totalRow?.total ?? 0);
+
+      stories = await this.database
+        .with(filteredStories)
         .select({
           id: this.tables.stories.id,
+          communityId: this.tables.stories.communityId,
+          title: this.tables.stories.title,
+          description: this.tables.stories.description,
+          descriptionPlain: this.tables.stories.descriptionPlain,
+          topic: this.tables.stories.topic,
+          language: this.tables.stories.language,
+          privacyLevel: this.tables.stories.privacyLevel,
+          isRestricted: this.tables.stories.isRestricted,
+          dateInterviewed: this.tables.stories.dateInterviewed,
           interviewLocationId: this.tables.stories.interviewLocationId,
+          interviewerId: this.tables.stories.interviewerId,
+          createdAt: this.tables.stories.createdAt,
+          updatedAt: this.tables.stories.updatedAt,
+        })
+        .from(this.tables.stories)
+        .innerJoin(
+          filteredStories,
+          eq(this.tables.stories.id, filteredStories.id)
+        )
+        .orderBy(...this.storyOrderClauses(query.sort))
+        .limit(query.limit)
+        .offset(query.offset);
+
+      const pointPlace = aliasedTable(this.tables.places, 'story_list_point');
+      const pointViaEdge = exists(
+        this.database
+          .select({ one: sql`1` })
+          .from(this.tables.storyPlaces)
+          .innerJoin(
+            filteredStories,
+            eq(this.tables.storyPlaces.storyId, filteredStories.id)
+          )
+          .where(
+            and(
+              eq(this.tables.storyPlaces.communityId, community.id),
+              eq(this.tables.storyPlaces.placeId, pointPlace.id)
+            )
+          )
+      );
+      const pointViaInterview = exists(
+        this.database
+          .select({ one: sql`1` })
+          .from(filteredStories)
+          .where(eq(filteredStories.interviewLocationId, pointPlace.id))
+      );
+
+      const rawPoints: Array<{
+        id: number;
+        name: string;
+        typeOfPlace: string | null;
+        description: string | null;
+        region: string | null;
+        latitude: number | null;
+        longitude: number | null;
+      }> =
+        total === 0
+          ? []
+          : await this.database
+              .with(filteredStories)
+              .select({
+                id: pointPlace.id,
+                name: pointPlace.name,
+                typeOfPlace: pointPlace.typeOfPlace,
+                description: pointPlace.description,
+                region: pointPlace.region,
+                latitude: pointPlace.latitude,
+                longitude: pointPlace.longitude,
+              })
+              .from(pointPlace)
+              .where(
+                and(
+                  placeBaseConditionForViewer(pointPlace, community.id, viewer),
+                  validPointCoordinatesCondition(pointPlace),
+                  or(pointViaEdge, pointViaInterview)
+                )
+              )
+              .orderBy(asc(pointPlace.id))
+              .limit(MAX_POINTS);
+
+      points = rawPoints.filter((row): row is ExplorePlaceRow =>
+        isValidCoordinates(row.latitude, row.longitude)
+      );
+    } else {
+      const candidates: PublicStoryRecord[] = await this.database
+        .select({
+          id: this.tables.stories.id,
+          communityId: this.tables.stories.communityId,
+          title: this.tables.stories.title,
+          description: this.tables.stories.description,
+          descriptionPlain: this.tables.stories.descriptionPlain,
+          topic: this.tables.stories.topic,
+          language: this.tables.stories.language,
+          privacyLevel: this.tables.stories.privacyLevel,
+          isRestricted: this.tables.stories.isRestricted,
+          dateInterviewed: this.tables.stories.dateInterviewed,
+          interviewLocationId: this.tables.stories.interviewLocationId,
+          interviewerId: this.tables.stories.interviewerId,
+          createdAt: this.tables.stories.createdAt,
+          updatedAt: this.tables.stories.updatedAt,
         })
         .from(this.tables.stories)
         .where(whereClause)
-    );
+        .orderBy(...this.storyOrderClauses(query.sort));
 
-    const [totalRow] = await this.database
-      .with(filteredStories)
-      .select({ total: count() })
-      .from(filteredStories);
-    const total = Number(totalRow?.total ?? 0);
+      const matched = candidates.filter((row) =>
+        storyMatchesNeedle(row, needleKey)
+      );
+      total = matched.length;
+      stories = matched.slice(query.offset, query.offset + query.limit);
 
-    const stories: PublicStoryRecord[] = await this.database
-      .with(filteredStories)
-      .select({
-        id: this.tables.stories.id,
-        communityId: this.tables.stories.communityId,
-        title: this.tables.stories.title,
-        description: this.tables.stories.description,
-        topic: this.tables.stories.topic,
-        language: this.tables.stories.language,
-        privacyLevel: this.tables.stories.privacyLevel,
-        isRestricted: this.tables.stories.isRestricted,
-        dateInterviewed: this.tables.stories.dateInterviewed,
-        interviewLocationId: this.tables.stories.interviewLocationId,
-        interviewerId: this.tables.stories.interviewerId,
-        createdAt: this.tables.stories.createdAt,
-        updatedAt: this.tables.stories.updatedAt,
-      })
-      .from(this.tables.stories)
-      .innerJoin(
-        filteredStories,
-        eq(this.tables.stories.id, filteredStories.id)
-      )
-      .orderBy(...this.storyOrderClauses(query.sort))
-      .limit(query.limit)
-      .offset(query.offset);
-
-    const pointPlace = aliasedTable(this.tables.places, 'story_list_point');
-    const pointViaEdge = exists(
-      this.database
-        .select({ one: sql`1` })
-        .from(this.tables.storyPlaces)
-        .innerJoin(
-          filteredStories,
-          eq(this.tables.storyPlaces.storyId, filteredStories.id)
-        )
-        .where(
-          and(
-            eq(this.tables.storyPlaces.communityId, community.id),
-            eq(this.tables.storyPlaces.placeId, pointPlace.id)
-          )
-        )
-    );
-    const pointViaInterview = exists(
-      this.database
-        .select({ one: sql`1` })
-        .from(filteredStories)
-        .where(eq(filteredStories.interviewLocationId, pointPlace.id))
-    );
-
-    const rawPoints: Array<{
-      id: number;
-      name: string;
-      typeOfPlace: string | null;
-      description: string | null;
-      region: string | null;
-      latitude: number | null;
-      longitude: number | null;
-    }> =
-      total === 0
-        ? []
-        : await this.database
-            .with(filteredStories)
-            .select({
-              id: pointPlace.id,
-              name: pointPlace.name,
-              typeOfPlace: pointPlace.typeOfPlace,
-              description: pointPlace.description,
-              region: pointPlace.region,
-              latitude: pointPlace.latitude,
-              longitude: pointPlace.longitude,
-            })
-            .from(pointPlace)
+      if (total === 0) {
+        points = [];
+      } else {
+        const matchedIds = matched.map((row) => row.id);
+        const pointPlaceIds = new Set<number>();
+        for (const row of matched) {
+          if (row.interviewLocationId !== null) {
+            pointPlaceIds.add(row.interviewLocationId);
+          }
+        }
+        for (const chunk of chunkValues(matchedIds)) {
+          const edgeRows: Array<{ placeId: number }> = await this.database
+            .select({ placeId: this.tables.storyPlaces.placeId })
+            .from(this.tables.storyPlaces)
             .where(
               and(
-                publicPlaceBaseCondition(pointPlace, community.id),
-                validPointCoordinatesCondition(pointPlace),
-                or(pointViaEdge, pointViaInterview)
+                eq(this.tables.storyPlaces.communityId, community.id),
+                inArray(this.tables.storyPlaces.storyId, chunk)
               )
-            )
-            .orderBy(asc(pointPlace.id))
-            .limit(MAX_POINTS);
-
-    const points: ExplorePlaceRow[] = rawPoints.filter(
-      (row): row is ExplorePlaceRow =>
-        isValidCoordinates(row.latitude, row.longitude)
-    );
+            );
+          for (const edge of edgeRows) {
+            pointPlaceIds.add(edge.placeId);
+          }
+        }
+        const collectedPoints: ExplorePlaceRow[] = [];
+        for (const chunk of chunkValues(Array.from(pointPlaceIds))) {
+          const rows: Array<{
+            id: number;
+            name: string;
+            typeOfPlace: string | null;
+            description: string | null;
+            region: string | null;
+            latitude: number | null;
+            longitude: number | null;
+          }> = await this.database
+            .select({
+              id: this.tables.places.id,
+              name: this.tables.places.name,
+              typeOfPlace: this.tables.places.typeOfPlace,
+              description: this.tables.places.description,
+              region: this.tables.places.region,
+              latitude: this.tables.places.latitude,
+              longitude: this.tables.places.longitude,
+            })
+            .from(this.tables.places)
+            .where(
+              and(
+                placeBaseConditionForViewer(
+                  this.tables.places,
+                  community.id,
+                  viewer
+                ),
+                validPointCoordinatesCondition(this.tables.places),
+                inArray(this.tables.places.id, chunk)
+              )
+            );
+          for (const row of rows) {
+            if (isValidCoordinates(row.latitude, row.longitude)) {
+              collectedPoints.push({
+                id: row.id,
+                name: row.name,
+                typeOfPlace: row.typeOfPlace,
+                description: row.description,
+                region: row.region,
+                latitude: row.latitude,
+                longitude: row.longitude!,
+              });
+            }
+          }
+        }
+        collectedPoints.sort((a, b) => a.id - b.id);
+        points = collectedPoints.slice(0, MAX_POINTS);
+      }
+    }
 
     const storyIds = stories.map((story) => story.id);
     const placesByStoryId = await this.loadStoryPlacesMap(
       community.id,
-      storyIds
+      storyIds,
+      viewer
     );
     const speakersByStoryId = await this.loadStorySpeakersMap(
       community.id,
-      storyIds
+      storyIds,
+      viewer
     );
 
     const interviewLocationIds = Array.from(
@@ -550,7 +758,8 @@ export class PublicContentRepository {
     );
     const interviewLocationsById = await this.loadVisiblePlacesById(
       community.id,
-      interviewLocationIds
+      interviewLocationIds,
+      viewer
     );
 
     const interviewerIds = Array.from(
@@ -562,7 +771,8 @@ export class PublicContentRepository {
     );
     const interviewersById = await this.loadActiveSpeakersById(
       community.id,
-      interviewerIds
+      interviewerIds,
+      viewer
     );
 
     const allSpeakers: PublicSpeakerRecord[] = [
@@ -571,15 +781,18 @@ export class PublicContentRepository {
     ];
     const birthplacesById = await this.loadReadableBirthplacesMap(
       community.id,
-      allSpeakers
+      allSpeakers,
+      viewer
     );
     const speakerPhotosBySpeakerId = await this.loadSpeakerPhotosMap(
       community.id,
-      allSpeakers.map((s) => s.id)
+      allSpeakers.map((s) => s.id),
+      viewer
     );
     const attachmentsByStoryId = await this.loadStoryAttachmentsMap(
       community.id,
-      storyIds
+      storyIds,
+      viewer
     );
     const externalLinksByStoryId = await this.loadStoryExternalLinksMap(
       community.id,
@@ -610,13 +823,21 @@ export class PublicContentRepository {
     if (!community) {
       return null;
     }
+    return this.getStoryByIdInCommunity(community, storyId, ANON_PUBLIC);
+  }
 
+  async getStoryByIdInCommunity(
+    community: PublicCommunityRow,
+    storyId: number,
+    viewer: ReadRuleViewer = ANON_PUBLIC
+  ): Promise<PublicStoryDetailResult | null> {
     const [story] = await this.database
       .select({
         id: this.tables.stories.id,
         communityId: this.tables.stories.communityId,
         title: this.tables.stories.title,
         description: this.tables.stories.description,
+        descriptionPlain: this.tables.stories.descriptionPlain,
         topic: this.tables.stories.topic,
         language: this.tables.stories.language,
         privacyLevel: this.tables.stories.privacyLevel,
@@ -630,7 +851,7 @@ export class PublicContentRepository {
       .from(this.tables.stories)
       .where(
         and(
-          publicStoryCondition(this.tables.stories, community.id),
+          storyConditionForViewer(this.tables.stories, community.id, viewer),
           eq(this.tables.stories.id, storyId)
         )
       )
@@ -640,19 +861,27 @@ export class PublicContentRepository {
       return null;
     }
 
-    const placesMap = await this.loadStoryPlacesMap(community.id, [story.id]);
+    const placesMap = await this.loadStoryPlacesMap(
+      community.id,
+      [story.id],
+      viewer
+    );
     const places = placesMap.get(story.id) ?? [];
 
-    const speakersMap = await this.loadStorySpeakersMap(community.id, [
-      story.id,
-    ]);
+    const speakersMap = await this.loadStorySpeakersMap(
+      community.id,
+      [story.id],
+      viewer
+    );
     const speakers = speakersMap.get(story.id) ?? [];
 
     const interviewLocationsById =
       story.interviewLocationId !== null
-        ? await this.loadVisiblePlacesById(community.id, [
-            story.interviewLocationId,
-          ])
+        ? await this.loadVisiblePlacesById(
+            community.id,
+            [story.interviewLocationId],
+            viewer
+          )
         : new Map<number, PublicPlaceRecord>();
     const interviewLocation =
       story.interviewLocationId !== null
@@ -661,7 +890,11 @@ export class PublicContentRepository {
 
     const interviewersById =
       story.interviewerId !== null
-        ? await this.loadActiveSpeakersById(community.id, [story.interviewerId])
+        ? await this.loadActiveSpeakersById(
+            community.id,
+            [story.interviewerId],
+            viewer
+          )
         : new Map<number, PublicSpeakerRecord>();
     const interviewer =
       story.interviewerId !== null
@@ -671,16 +904,20 @@ export class PublicContentRepository {
     const allSpeakers = interviewer ? [...speakers, interviewer] : speakers;
     const birthplacesById = await this.loadReadableBirthplacesMap(
       community.id,
-      allSpeakers
+      allSpeakers,
+      viewer
     );
     const speakerPhotosBySpeakerId = await this.loadSpeakerPhotosMap(
       community.id,
-      allSpeakers.map((s) => s.id)
+      allSpeakers.map((s) => s.id),
+      viewer
     );
 
-    const attachmentsMap = await this.loadStoryAttachmentsMap(community.id, [
-      story.id,
-    ]);
+    const attachmentsMap = await this.loadStoryAttachmentsMap(
+      community.id,
+      [story.id],
+      viewer
+    );
     const externalLinksMap = await this.loadStoryExternalLinksMap(
       community.id,
       [story.id]
@@ -728,37 +965,110 @@ export class PublicContentRepository {
     if (!community) {
       return null;
     }
+    return this.listPlacesInCommunity(community, pagination, ANON_PUBLIC);
+  }
 
-    const whereClause = this.placeReadableConditions(community.id);
-    const [totalRow] = await this.database
-      .select({ total: count() })
-      .from(this.tables.places)
-      .where(whereClause);
-    const total = Number(totalRow?.total ?? 0);
+  async listPlacesInCommunity(
+    community: PublicCommunityRow,
+    query: CommunityPlacesQuery,
+    viewer: ReadRuleViewer = ANON_PUBLIC
+  ): Promise<PublicPlacesPageResult> {
+    const clauses: SQL[] = [this.placeReadableConditions(community.id, viewer)];
+    if (query.bbox) {
+      clauses.push(...boundingBoxClauses(this.tables.places, query.bbox));
+    }
+    if (query.near) {
+      const box = SpatialUtils.calculateBoundingBox(
+        query.near.latitude,
+        query.near.longitude,
+        query.near.radiusKm
+      );
+      clauses.push(validPointCoordinatesCondition(this.tables.places));
+      clauses.push(gte(this.tables.places.latitude, box.south));
+      clauses.push(lte(this.tables.places.latitude, box.north));
+      if (!box.includesAllLongitudes) {
+        clauses.push(
+          box.crossesAntimeridian
+            ? or(
+                gte(this.tables.places.longitude, box.west),
+                lte(this.tables.places.longitude, box.east)
+              )!
+            : and(
+                gte(this.tables.places.longitude, box.west),
+                lte(this.tables.places.longitude, box.east)
+              )!
+        );
+      }
+    }
 
-    const places: PublicPlaceRecord[] = await this.database
-      .select({
-        id: this.tables.places.id,
-        communityId: this.tables.places.communityId,
-        name: this.tables.places.name,
-        description: this.tables.places.description,
-        typeOfPlace: this.tables.places.typeOfPlace,
-        region: this.tables.places.region,
-        latitude: this.tables.places.latitude,
-        longitude: this.tables.places.longitude,
-        createdAt: this.tables.places.createdAt,
-        updatedAt: this.tables.places.updatedAt,
-      })
-      .from(this.tables.places)
-      .where(whereClause)
-      .orderBy(asc(this.tables.places.id))
-      .limit(pagination.limit)
-      .offset(pagination.offset);
+    const whereClause = and(...clauses)!;
+    let total: number;
+    let places: PublicPlaceRecord[];
+
+    if (query.near) {
+      const { latitude, longitude, radiusKm } = query.near;
+      const radiusMeters = radiusKm * 1000;
+      const candidates: PublicPlaceRecord[] = await this.database
+        .select({
+          id: this.tables.places.id,
+          communityId: this.tables.places.communityId,
+          name: this.tables.places.name,
+          description: this.tables.places.description,
+          typeOfPlace: this.tables.places.typeOfPlace,
+          region: this.tables.places.region,
+          latitude: this.tables.places.latitude,
+          longitude: this.tables.places.longitude,
+          createdAt: this.tables.places.createdAt,
+          updatedAt: this.tables.places.updatedAt,
+        })
+        .from(this.tables.places)
+        .where(whereClause)
+        .orderBy(asc(this.tables.places.id));
+
+      const matched = candidates.filter(
+        (place) =>
+          isValidCoordinates(place.latitude, place.longitude) &&
+          SpatialUtils.calculateDistance(
+            latitude,
+            longitude,
+            place.latitude,
+            place.longitude!
+          ) <= radiusMeters
+      );
+      total = matched.length;
+      places = matched.slice(query.offset, query.offset + query.limit);
+    } else {
+      const [totalRow] = await this.database
+        .select({ total: count() })
+        .from(this.tables.places)
+        .where(whereClause);
+      total = Number(totalRow?.total ?? 0);
+
+      places = await this.database
+        .select({
+          id: this.tables.places.id,
+          communityId: this.tables.places.communityId,
+          name: this.tables.places.name,
+          description: this.tables.places.description,
+          typeOfPlace: this.tables.places.typeOfPlace,
+          region: this.tables.places.region,
+          latitude: this.tables.places.latitude,
+          longitude: this.tables.places.longitude,
+          createdAt: this.tables.places.createdAt,
+          updatedAt: this.tables.places.updatedAt,
+        })
+        .from(this.tables.places)
+        .where(whereClause)
+        .orderBy(asc(this.tables.places.id))
+        .limit(query.limit)
+        .offset(query.offset);
+    }
 
     const { photosByPlaceId, placenameAudioByPlaceId } =
       await this.loadPlaceMediaMaps(
         community.id,
-        places.map((p) => p.id)
+        places.map((p) => p.id),
+        viewer
       );
 
     return {
@@ -778,7 +1088,14 @@ export class PublicContentRepository {
     if (!community) {
       return null;
     }
+    return this.getPlaceByIdInCommunity(community, placeId, ANON_PUBLIC);
+  }
 
+  async getPlaceByIdInCommunity(
+    community: PublicCommunityRow,
+    placeId: number,
+    viewer: ReadRuleViewer = ANON_PUBLIC
+  ): Promise<PublicPlaceDetailResult | null> {
     const [place] = await this.database
       .select({
         id: this.tables.places.id,
@@ -795,7 +1112,7 @@ export class PublicContentRepository {
       .from(this.tables.places)
       .where(
         and(
-          this.placeReadableConditions(community.id),
+          this.placeReadableConditions(community.id, viewer),
           eq(this.tables.places.id, placeId)
         )
       )
@@ -806,7 +1123,7 @@ export class PublicContentRepository {
     }
 
     const { photosByPlaceId, placenameAudioByPlaceId } =
-      await this.loadPlaceMediaMaps(community.id, [place.id]);
+      await this.loadPlaceMediaMaps(community.id, [place.id], viewer);
 
     return {
       community,
@@ -824,8 +1141,15 @@ export class PublicContentRepository {
     if (!community) {
       return null;
     }
+    return this.listSpeakersInCommunity(community, pagination, ANON_PUBLIC);
+  }
 
-    const whereClause = this.speakerReadableConditions(community.id);
+  async listSpeakersInCommunity(
+    community: PublicCommunityRow,
+    pagination: PublicPaginationQuery,
+    viewer: ReadRuleViewer = ANON_PUBLIC
+  ): Promise<PublicSpeakersPageResult> {
+    const whereClause = this.speakerReadableConditions(community.id, viewer);
     const [totalRow] = await this.database
       .select({ total: count() })
       .from(this.tables.speakers)
@@ -851,11 +1175,13 @@ export class PublicContentRepository {
 
     const birthplacesById = await this.loadReadableBirthplacesMap(
       community.id,
-      speakers
+      speakers,
+      viewer
     );
     const photosBySpeakerId = await this.loadSpeakerPhotosMap(
       community.id,
-      speakers.map((s) => s.id)
+      speakers.map((s) => s.id),
+      viewer
     );
 
     return {
@@ -875,7 +1201,14 @@ export class PublicContentRepository {
     if (!community) {
       return null;
     }
+    return this.getSpeakerByIdInCommunity(community, speakerId, ANON_PUBLIC);
+  }
 
+  async getSpeakerByIdInCommunity(
+    community: PublicCommunityRow,
+    speakerId: number,
+    viewer: ReadRuleViewer = ANON_PUBLIC
+  ): Promise<PublicSpeakerDetailResult | null> {
     const [speaker] = await this.database
       .select({
         id: this.tables.speakers.id,
@@ -890,7 +1223,7 @@ export class PublicContentRepository {
       .from(this.tables.speakers)
       .where(
         and(
-          this.speakerReadableConditions(community.id),
+          this.speakerReadableConditions(community.id, viewer),
           eq(this.tables.speakers.id, speakerId)
         )
       )
@@ -902,11 +1235,14 @@ export class PublicContentRepository {
 
     const birthplacesById = await this.loadReadableBirthplacesMap(
       community.id,
-      [speaker]
+      [speaker],
+      viewer
     );
-    const photosBySpeakerId = await this.loadSpeakerPhotosMap(community.id, [
-      speaker.id,
-    ]);
+    const photosBySpeakerId = await this.loadSpeakerPhotosMap(
+      community.id,
+      [speaker.id],
+      viewer
+    );
 
     return {
       community,
@@ -1090,7 +1426,8 @@ export class PublicContentRepository {
 
   private async loadStoryPlacesMap(
     communityId: number,
-    storyIds: number[]
+    storyIds: number[],
+    viewer: ReadRuleViewer = ANON_PUBLIC
   ): Promise<Map<number, PublicPlaceRecord[]>> {
     const result = new Map<number, PublicPlaceRecord[]>();
     if (storyIds.length === 0) {
@@ -1120,7 +1457,11 @@ export class PublicContentRepository {
         .where(
           and(
             eq(this.tables.storyPlaces.communityId, communityId),
-            publicPlaceBaseCondition(this.tables.places, communityId),
+            placeBaseConditionForViewer(
+              this.tables.places,
+              communityId,
+              viewer
+            ),
             inArray(this.tables.storyPlaces.storyId, chunk)
           )
         )
@@ -1153,7 +1494,8 @@ export class PublicContentRepository {
 
   private async loadStorySpeakersMap(
     communityId: number,
-    storyIds: number[]
+    storyIds: number[],
+    viewer: ReadRuleViewer = ANON_PUBLIC
   ): Promise<Map<number, PublicSpeakerRecord[]>> {
     const result = new Map<number, PublicSpeakerRecord[]>();
     if (storyIds.length === 0) {
@@ -1181,7 +1523,11 @@ export class PublicContentRepository {
         .where(
           and(
             eq(this.tables.storySpeakers.communityId, communityId),
-            publicSpeakerBaseCondition(this.tables.speakers, communityId),
+            speakerBaseConditionForViewer(
+              this.tables.speakers,
+              communityId,
+              viewer
+            ),
             inArray(this.tables.storySpeakers.storyId, chunk)
           )
         )
@@ -1212,10 +1558,11 @@ export class PublicContentRepository {
 
   private async loadVisiblePlacesById(
     communityId: number,
-    placeIds: number[]
+    placeIds: number[],
+    viewer: ReadRuleViewer = ANON_PUBLIC
   ): Promise<Map<number, PublicPlaceRecord>> {
     const result = new Map<number, PublicPlaceRecord>();
-    if (!PLACE_ASSOCIATED_ALLOWED || placeIds.length === 0) {
+    if (placeIds.length === 0) {
       return result;
     }
 
@@ -1236,7 +1583,11 @@ export class PublicContentRepository {
         .from(this.tables.places)
         .where(
           and(
-            publicPlaceBaseCondition(this.tables.places, communityId),
+            placeBaseConditionForViewer(
+              this.tables.places,
+              communityId,
+              viewer
+            ),
             inArray(this.tables.places.id, chunk)
           )
         );
@@ -1250,7 +1601,8 @@ export class PublicContentRepository {
 
   private async loadReadableBirthplacesMap(
     communityId: number,
-    speakers: PublicSpeakerRecord[]
+    speakers: PublicSpeakerRecord[],
+    viewer: ReadRuleViewer = ANON_PUBLIC
   ): Promise<Map<number, PublicPlaceRecord>> {
     const birthplaceIds = Array.from(
       new Set(
@@ -1281,7 +1633,7 @@ export class PublicContentRepository {
         .from(this.tables.places)
         .where(
           and(
-            this.placeReadableConditions(communityId),
+            this.placeReadableConditions(communityId, viewer),
             inArray(this.tables.places.id, chunk)
           )
         );
@@ -1295,10 +1647,11 @@ export class PublicContentRepository {
 
   private async loadActiveSpeakersById(
     communityId: number,
-    speakerIds: number[]
+    speakerIds: number[],
+    viewer: ReadRuleViewer = ANON_PUBLIC
   ): Promise<Map<number, PublicSpeakerRecord>> {
     const result = new Map<number, PublicSpeakerRecord>();
-    if (!SPEAKER_ASSOCIATED_ALLOWED || speakerIds.length === 0) {
+    if (speakerIds.length === 0) {
       return result;
     }
 
@@ -1317,7 +1670,11 @@ export class PublicContentRepository {
         .from(this.tables.speakers)
         .where(
           and(
-            publicSpeakerBaseCondition(this.tables.speakers, communityId),
+            speakerBaseConditionForViewer(
+              this.tables.speakers,
+              communityId,
+              viewer
+            ),
             inArray(this.tables.speakers.id, chunk)
           )
         );
@@ -1331,10 +1688,11 @@ export class PublicContentRepository {
 
   private async loadStoryAttachmentsMap(
     communityId: number,
-    storyIds: number[]
+    storyIds: number[],
+    viewer: ReadRuleViewer = ANON_PUBLIC
   ): Promise<Map<number, PublicStoryAttachmentRecord[]>> {
     const result = new Map<number, PublicStoryAttachmentRecord[]>();
-    if (!PUBLIC_STORY_MEDIA_ALLOWED || storyIds.length === 0) {
+    if (!storyMediaAllowedForViewer(viewer) || storyIds.length === 0) {
       return result;
     }
 
@@ -1431,14 +1789,15 @@ export class PublicContentRepository {
 
   private async loadPlaceMediaMaps(
     communityId: number,
-    placeIds: number[]
+    placeIds: number[],
+    viewer: ReadRuleViewer = ANON_PUBLIC
   ): Promise<{
     photosByPlaceId: Map<number, string[]>;
     placenameAudioByPlaceId: Map<number, string>;
   }> {
     const photosByPlaceId = new Map<number, string[]>();
     const placenameAudioByPlaceId = new Map<number, string>();
-    if (!PUBLIC_ASSOCIATED_MEDIA_ALLOWED || placeIds.length === 0) {
+    if (!associatedMediaAllowedForViewer(viewer) || placeIds.length === 0) {
       return { photosByPlaceId, placenameAudioByPlaceId };
     }
 
@@ -1492,10 +1851,11 @@ export class PublicContentRepository {
 
   private async loadSpeakerPhotosMap(
     communityId: number,
-    speakerIds: number[]
+    speakerIds: number[],
+    viewer: ReadRuleViewer = ANON_PUBLIC
   ): Promise<Map<number, string>> {
     const result = new Map<number, string>();
-    if (!PUBLIC_ASSOCIATED_MEDIA_ALLOWED || speakerIds.length === 0) {
+    if (!associatedMediaAllowedForViewer(viewer) || speakerIds.length === 0) {
       return result;
     }
 

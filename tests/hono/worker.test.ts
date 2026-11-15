@@ -5,6 +5,10 @@ import {
   bundleWorkerModule,
   startWorkerRuntime,
 } from '../helpers/worker-runtime.js';
+import {
+  MAX_PUBLIC_FILTER_VALUES,
+  MAX_PUBLIC_TOTAL_FILTER_VALUES,
+} from '../../src/shared/schemas/public-content.js';
 it('serves the foundation through workerd D1/R2 without Node compatibility', async () => {
   // bundleWorkerModule fails the test when the bundle keeps any runtime import.
   const mf = startWorkerRuntime(
@@ -106,6 +110,121 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
       204
     );
     expect((await asCookie('/v2/auth/me', newCookie)).status).toBe(401);
+
+    // Public D1 max-cap filters (<= 100 bound params) and R2 range streaming (#145 PR #243)
+    const pubMedia = '00000000-0000-4000-8000-000000000003';
+    await db.batch([
+      db.prepare(
+        "INSERT INTO communities(id,name,slug,public_stories,is_active,created_at,updated_at) VALUES(3,'Pub','pub',1,1,0,0)"
+      ),
+      db.prepare(
+        "INSERT INTO places(id,name,region,type_of_place,community_id,latitude,longitude,is_restricted,created_at,updated_at) VALUES(10,'River','North','Water',3,10.5,-20.5,0,0,0)"
+      ),
+      db.prepare(
+        "INSERT INTO speakers(id,name,affiliation,community_id,is_active,created_at,updated_at) VALUES(20,'Marina','Guild',3,1,0,0)"
+      ),
+      db.prepare(
+        "INSERT INTO stories(id,title,slug,language,topic,topic_normalized,privacy_level,is_restricted,community_id,created_at,updated_at) VALUES(30,'Public Story','public-story','en','Water','water','public',0,3,0,0)"
+      ),
+      db.prepare(
+        'INSERT INTO story_places(community_id,story_id,place_id,created_at,updated_at) VALUES(3,30,10,0,0)'
+      ),
+      db.prepare(
+        'INSERT INTO story_speakers(community_id,story_id,speaker_id,created_at,updated_at) VALUES(3,30,20,0,0)'
+      ),
+      db
+        .prepare(
+          "INSERT INTO files(id,filename,original_name,path,storage_key,url,mime_type,size,byte_size,community_id,uploaded_by,is_active,created_at,updated_at) VALUES(?,'clip.mp3','clip.mp3','communities/3/clip.mp3','communities/3/clip.mp3','https://ignored.invalid','audio/mpeg',16,16,3,1,1,0,0)"
+        )
+        .bind(pubMedia),
+      db
+        .prepare(
+          "INSERT INTO attachments(community_id,owner_type,owner_id,file_id,role,ordinal,created_at) VALUES(3,'story',30,?,'story_media',0,0)"
+        )
+        .bind(pubMedia),
+    ]);
+    await bucket.put('communities/3/clip.mp3', '0123456789ABCDEF');
+
+    const capParams = new URLSearchParams();
+    capParams.append('place', '10');
+    for (let i = 1; i < MAX_PUBLIC_FILTER_VALUES; i++) {
+      capParams.append('place', String(10000 + i));
+    }
+    capParams.append('speaker', '20');
+    for (
+      let i = 1;
+      i < MAX_PUBLIC_TOTAL_FILTER_VALUES - MAX_PUBLIC_FILTER_VALUES;
+      i++
+    ) {
+      capParams.append('speaker', String(20000 + i));
+    }
+    const maxCapRes = await request(
+      `/v2/public/communities/pub/stories?${capParams.toString()}`,
+      'GET',
+      false
+    );
+    expect(maxCapRes.status).toBe(200);
+    const maxCapJson = (await maxCapRes.json()) as {
+      data: { stories: Array<{ id: number }>; points: Array<{ id: number }> };
+      meta: { total: number };
+    };
+    expect(maxCapJson.meta.total).toBe(1);
+    expect(maxCapJson.data.stories.map((s) => s.id)).toEqual([30]);
+    expect(maxCapJson.data.points.map((p) => p.id)).toEqual([10]);
+
+    const sevenCatParams = new URLSearchParams();
+    for (let i = 0; i < 10; i++) {
+      sevenCatParams.append('place', String(i === 0 ? 10 : 30000 + i));
+      sevenCatParams.append('region', i === 0 ? 'North' : `Region${i}`);
+      sevenCatParams.append('typeOfPlace', i === 0 ? 'Water' : `Type${i}`);
+      sevenCatParams.append('topic', i === 0 ? 'Water' : `Topic${i}`);
+      sevenCatParams.append('language', i === 0 ? 'en' : `lang${i}`);
+    }
+    for (let i = 0; i < 5; i++) {
+      sevenCatParams.append('speaker', String(i === 0 ? 20 : 40000 + i));
+      sevenCatParams.append(
+        'affiliation',
+        i === 0 ? 'Guild' : `Affiliation${i}`
+      );
+    }
+    const sevenCatRes = await request(
+      `/v2/public/communities/pub/stories?${sevenCatParams.toString()}`,
+      'GET',
+      false
+    );
+    expect(sevenCatRes.status).toBe(200);
+
+    const mediaFull = await request(
+      `/v2/public/communities/pub/media/${pubMedia}`,
+      'GET',
+      false
+    );
+    expect(mediaFull.status).toBe(200);
+    expect(await mediaFull.text()).toBe('0123456789ABCDEF');
+
+    const mediaRange = await mf.dispatchFetch(
+      `https://worker.test/v2/public/communities/pub/media/${pubMedia}`,
+      { headers: { Range: 'bytes=2-5' } }
+    );
+    expect(mediaRange.status).toBe(206);
+    expect(mediaRange.headers.get('Content-Range')).toBe('bytes 2-5/16');
+    expect(mediaRange.headers.get('Content-Length')).toBe('4');
+    expect(await mediaRange.text()).toBe('2345');
+
+    const mediaMulti = await mf.dispatchFetch(
+      `https://worker.test/v2/public/communities/pub/media/${pubMedia}`,
+      { headers: { Range: 'bytes=0-1,4-5' } }
+    );
+    expect(mediaMulti.status).toBe(200);
+    expect(mediaMulti.headers.get('Content-Length')).toBe('16');
+    expect(await mediaMulti.text()).toBe('0123456789ABCDEF');
+
+    const media416 = await mf.dispatchFetch(
+      `https://worker.test/v2/public/communities/pub/media/${pubMedia}`,
+      { headers: { Range: 'bytes=99-' } }
+    );
+    expect(media416.status).toBe(416);
+    expect(media416.headers.get('Content-Range')).toBe('bytes */16');
   } finally {
     await mf.dispose();
   }

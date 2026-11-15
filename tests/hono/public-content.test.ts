@@ -9,7 +9,7 @@
  * - `/v2/public/communities/:slug/speakers/:speakerId`
  * - `/v2/public/communities/:slug/media/:fileId`
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -20,8 +20,17 @@ import { tablesFor } from '../../src/db/dialect.js';
 import { communityMediaSqlite } from '../../src/db/schema/sessions.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
-import { V2ErrorResponseSchema } from '../../src/shared/schemas/public-communities.js';
+import { PublicContentRepository } from '../../src/repositories/public-content.repository.js';
+import { PublicCommunitiesService } from '../../src/services/public-communities.service.js';
+import { PublicContentService } from '../../src/services/public-content.service.js';
 import {
+  PublicCommunityDetailResponseSchema,
+  V2ErrorResponseSchema,
+} from '../../src/shared/schemas/public-communities.js';
+import {
+  MAX_PUBLIC_FILTER_VALUES,
+  MAX_PUBLIC_TOTAL_FILTER_VALUES,
+  PublicExternalMediaLinkSchema,
   PublicPlaceDetailResponseSchema,
   PublicPlacesListResponseSchema,
   PublicSpeakerDetailResponseSchema,
@@ -1174,6 +1183,728 @@ describe('V2 public story, place, speaker, and media endpoints (#145 Slice 5)', 
         expect(authed.status).toBe(baseline.status);
         expect(authed.json).toEqual(baseline.json);
       }
+    }
+  });
+});
+
+describe('PR #243 Slice 5 review fixes', () => {
+  it('bounds SQL parameters at <= 100 per query under MAX_PUBLIC_FILTER_VALUES and MAX_PUBLIC_TOTAL_FILTER_VALUES', async () => {
+    const paramCounts: Array<{ sql: string; count: number }> = [];
+    const origPrepare = sqlite.prepare.bind(sqlite);
+    sqlite.prepare = ((source: string) => {
+      const stmt = origPrepare(source);
+      const wrap =
+        <T extends (...args: unknown[]) => unknown>(fn: T) =>
+        (...args: unknown[]) => {
+          const count = args.reduce<number>(
+            (acc, arg) => acc + (Array.isArray(arg) ? arg.length : 1),
+            0
+          );
+          paramCounts.push({ sql: source, count });
+          return fn.apply(stmt, args);
+        };
+      for (const method of ['all', 'get', 'run', 'values'] as const) {
+        if (typeof stmt[method] === 'function') {
+          stmt[method] = wrap(
+            stmt[method].bind(stmt) as (...args: unknown[]) => unknown
+          ) as never;
+        }
+      }
+      return stmt;
+    }) as typeof sqlite.prepare;
+
+    try {
+      // 1) 50 places + 10 speakers = 60 total
+      const capParams = new URLSearchParams();
+      capParams.append('place', String(ids.pRiver));
+      for (let i = 1; i < MAX_PUBLIC_FILTER_VALUES; i++) {
+        capParams.append('place', String(900000 + i));
+      }
+      capParams.append('speaker', String(ids.spMarina));
+      for (
+        let i = 1;
+        i < MAX_PUBLIC_TOTAL_FILTER_VALUES - MAX_PUBLIC_FILTER_VALUES;
+        i++
+      ) {
+        capParams.append('speaker', String(950000 + i));
+      }
+
+      const capRes = await fetchJson(
+        app,
+        `/v2/public/communities/public-alpha/stories?${capParams.toString()}`
+      );
+      expect(capRes.status).toBe(200);
+      const capParsed = PublicStoriesListResponseSchema.parse(capRes.json);
+      expect(capParsed.data.stories.map((s) => s.id)).toEqual([ids.stA]);
+
+      // 2) All 7 filter categories populated up to MAX_PUBLIC_TOTAL_FILTER_VALUES (60)
+      const sevenParams = new URLSearchParams();
+      for (let i = 0; i < 10; i++) {
+        sevenParams.append('place', String(i === 0 ? ids.pRiver : 910000 + i));
+        sevenParams.append('region', i === 0 ? 'South' : `OtherRegion${i}`);
+      }
+      for (let i = 0; i < 8; i++) {
+        sevenParams.append(
+          'typeOfPlace',
+          i === 0 ? 'Clearing' : `OtherType${i}`
+        );
+        sevenParams.append('topic', i === 0 ? 'Fishing' : `OtherTopic${i}`);
+        sevenParams.append('language', i === 0 ? 'Portuguese' : `lang${i}`);
+        sevenParams.append(
+          'speaker',
+          String(i === 0 ? ids.spMarina : 960000 + i)
+        );
+        sevenParams.append(
+          'affiliation',
+          i === 0 ? 'River Council' : `OtherAff${i}`
+        );
+      }
+      const sevenRes = await fetchJson(
+        app,
+        `/v2/public/communities/public-alpha/stories?${sevenParams.toString()}`
+      );
+      expect(sevenRes.status).toBe(200);
+      const sevenParsed = PublicStoriesListResponseSchema.parse(sevenRes.json);
+      expect(sevenParsed.meta.total).toBe(1);
+      expect(sevenParsed.data.stories[0]?.id).toBe(ids.stA);
+
+      expect(paramCounts.length).toBeGreaterThan(0);
+      const maxObserved = Math.max(...paramCounts.map((entry) => entry.count));
+      expect(maxObserved).toBeLessThanOrEqual(100);
+    } finally {
+      sqlite.prepare = origPrepare;
+    }
+  });
+
+  it('streams 200 without whole-object buffering, uses ranged read for 206, 200 for multi-range, and 416 without storage reads', async () => {
+    const mediaId = '11111111-1111-4111-8111-111111111111';
+    const fullPayload = new TextEncoder().encode('0123456789ABCDEF');
+    const calls: Array<{
+      key: string;
+      range: { start: number; end: number } | undefined;
+    }> = [];
+    let chunksPulledOnResponse = 0;
+
+    const fakeRepo = {
+      async getAuthorizedPublicMediaFile() {
+        return {
+          id: mediaId,
+          communityId: 1,
+          storageKey: 'communities/1/streamed.bin',
+          mimeType: 'application/octet-stream',
+          byteSize: fullPayload.byteLength,
+          originalName: 'streamed.bin',
+        };
+      },
+    } as unknown as PublicContentRepository;
+
+    const service = new PublicContentService(fakeRepo, {
+      async read(key, range) {
+        calls.push({ key, range });
+        if (range) {
+          const slice = fullPayload.subarray(range.start, range.end + 1);
+          return new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(slice);
+              controller.close();
+            },
+          });
+        }
+        let sent = 0;
+        return new ReadableStream<Uint8Array>({
+          pull(controller) {
+            chunksPulledOnResponse += 1;
+            if (sent === 0) {
+              controller.enqueue(fullPayload.subarray(0, 8));
+              sent = 1;
+            } else {
+              controller.enqueue(fullPayload.subarray(8));
+              controller.close();
+            }
+          },
+        });
+      },
+    });
+
+    // 200 full stream: response returns before full stream is drained
+    const res200 = await service.serveMedia('alpha', mediaId, undefined);
+    expect(res200?.status).toBe(200);
+    expect(res200?.headers.get('Content-Length')).toBe('16');
+    expect(chunksPulledOnResponse).toBeLessThanOrEqual(1);
+    expect(calls[0]).toEqual({
+      key: 'communities/1/streamed.bin',
+      range: undefined,
+    });
+    expect(await res200?.text()).toBe('0123456789ABCDEF');
+    expect(chunksPulledOnResponse).toBeGreaterThanOrEqual(2);
+
+    // 206 single range: forwards exact inclusive { start, end } to storage.read
+    calls.length = 0;
+    const res206 = await service.serveMedia('alpha', mediaId, 'bytes=2-5');
+    expect(res206?.status).toBe(206);
+    expect(res206?.headers.get('Content-Length')).toBe('4');
+    expect(res206?.headers.get('Content-Range')).toBe('bytes 2-5/16');
+    expect(calls).toEqual([
+      { key: 'communities/1/streamed.bin', range: { start: 2, end: 5 } },
+    ]);
+    expect(await res206?.text()).toBe('2345');
+
+    // Multi-range returns 200 full response (RFC 9110 §14.2 may-ignore), not 416
+    calls.length = 0;
+    const resMulti = await service.serveMedia(
+      'alpha',
+      mediaId,
+      'bytes=0-1,4-5'
+    );
+    expect(resMulti?.status).toBe(200);
+    expect(resMulti?.headers.get('Content-Length')).toBe('16');
+    expect(calls).toEqual([
+      { key: 'communities/1/streamed.bin', range: undefined },
+    ]);
+    expect(await resMulti?.text()).toBe('0123456789ABCDEF');
+
+    // 416 unsatisfiable returns before touching storage
+    calls.length = 0;
+    const res416 = await service.serveMedia('alpha', mediaId, 'bytes=99-');
+    expect(res416?.status).toBe(416);
+    expect(res416?.headers.get('Content-Range')).toBe('bytes */16');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('omits non-http/https externalMediaLinks and returns 500 without logging content on Zod validation failure', async () => {
+    expect(
+      PublicExternalMediaLinkSchema.safeParse({
+        id: 1,
+        url: 'javascript:alert(1)',
+        ordinal: 0,
+        createdAt: T0.toISOString(),
+      }).success
+    ).toBe(false);
+    expect(
+      PublicExternalMediaLinkSchema.safeParse({
+        id: 1,
+        url: 'ftp://files.example.test/clip.mp4',
+        ordinal: 0,
+        createdAt: T0.toISOString(),
+      }).success
+    ).toBe(false);
+    expect(
+      PublicExternalMediaLinkSchema.safeParse({
+        id: 1,
+        url: 'https://watch.example.test/clip',
+        ordinal: 0,
+        createdAt: T0.toISOString(),
+      }).success
+    ).toBe(true);
+
+    const secretTitle = 'SENSITIVE_ZOD_FAILURE_TITLE_NEVER_LOG';
+    const secretDesc = 'SENSITIVE_ZOD_FAILURE_DESC_NEVER_LOG';
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      // 1) Non-http/https external links omitted; valid http/https passes Zod
+      const filteredService = new PublicContentService(
+        {
+          async getStoryById() {
+            return {
+              community: {
+                id: 1,
+                name: 'Alpha',
+                description: null,
+                slug: 'alpha',
+                locale: 'en',
+                country: null,
+                publicStories: true,
+                isActive: true,
+                createdAt: T0,
+                updatedAt: T0,
+              },
+              story: {
+                id: 1,
+                communityId: 1,
+                title: 'Valid Story',
+                description: '<p>Clean</p>',
+                topic: null,
+                language: 'en',
+                privacyLevel: 'public',
+                isRestricted: false,
+                dateInterviewed: null,
+                interviewLocationId: null,
+                interviewerId: null,
+                createdAt: T0,
+                updatedAt: T0,
+              },
+              places: [],
+              points: [],
+              speakers: [],
+              interviewLocation: null,
+              interviewer: null,
+              birthplacesById: new Map(),
+              speakerPhotosBySpeakerId: new Map(),
+              attachments: [],
+              externalLinks: [
+                {
+                  id: 1,
+                  storyId: 1,
+                  url: 'javascript:alert(1)',
+                  ordinal: 0,
+                  createdAt: T0,
+                },
+                {
+                  id: 2,
+                  storyId: 1,
+                  url: 'ftp://example.com/clip.mp4',
+                  ordinal: 1,
+                  createdAt: T0,
+                },
+                {
+                  id: 3,
+                  storyId: 1,
+                  url: '/relative/path',
+                  ordinal: 2,
+                  createdAt: T0,
+                },
+                {
+                  id: 4,
+                  storyId: 1,
+                  url: 'https://watch.example.test/valid',
+                  ordinal: 3,
+                  createdAt: T0,
+                },
+              ],
+            };
+          },
+        } as unknown as PublicContentRepository,
+        {
+          async read() {
+            return null;
+          },
+        }
+      );
+      const validOut = await filteredService.getStoryById(
+        'alpha',
+        '1',
+        'http://localhost'
+      );
+      expect(validOut.status).toBe(200);
+      if (validOut.status === 200) {
+        expect(validOut.body.data.externalMediaLinks).toEqual([
+          {
+            id: 4,
+            url: 'https://watch.example.test/valid',
+            ordinal: 3,
+            createdAt: T0.toISOString(),
+          },
+        ]);
+      }
+
+      // 2) Malformed row failing Zod schema -> 500 with zero logged content
+      const invalidService = new PublicContentService(
+        {
+          async getStoryById() {
+            return {
+              community: {
+                id: 1,
+                name: 'Alpha',
+                description: null,
+                slug: 'alpha',
+                locale: 'en',
+                country: null,
+                publicStories: true,
+                isActive: true,
+                createdAt: T0,
+                updatedAt: T0,
+              },
+              story: {
+                id: -1, // violates positive() in PublicStorySummarySchema
+                communityId: 1,
+                title: secretTitle,
+                description: secretDesc,
+                topic: null,
+                language: 'en',
+                privacyLevel: 'public',
+                isRestricted: false,
+                dateInterviewed: null,
+                interviewLocationId: null,
+                interviewerId: null,
+                createdAt: T0,
+                updatedAt: T0,
+              },
+              places: [],
+              points: [],
+              speakers: [],
+              interviewLocation: null,
+              interviewer: null,
+              birthplacesById: new Map(),
+              speakerPhotosBySpeakerId: new Map(),
+              attachments: [],
+              externalLinks: [],
+            };
+          },
+        } as unknown as PublicContentRepository,
+        {
+          async read() {
+            return null;
+          },
+        }
+      );
+
+      const errRes = await invalidService.getStoryById(
+        'alpha',
+        '1',
+        'http://localhost'
+      );
+      expect(errRes).toEqual({
+        status: 500,
+        body: { error: 'Internal server error' },
+      });
+
+      const commService = new PublicCommunitiesService({
+        async publicCommunities() {
+          return [
+            {
+              id: 1,
+              name: secretTitle,
+              description: secretDesc,
+              slug: '', // violates min(1) in PublicCommunitySummarySchema
+              locale: 'en',
+              country: null,
+              publicStories: true,
+              isActive: true,
+              createdAt: T0,
+              updatedAt: T0,
+            },
+          ];
+        },
+        async publicCommunityMapConfigs() {
+          return new Map();
+        },
+        async publicCommunityBrandings() {
+          return new Map();
+        },
+      } as never);
+      const commErr = await commService.listCommunities(
+        undefined,
+        'http://localhost'
+      );
+      expect(commErr).toEqual({
+        status: 500,
+        body: { error: 'Internal server error' },
+      });
+
+      for (const spy of [errSpy, warnSpy, logSpy]) {
+        const logged = JSON.stringify(spy.mock.calls);
+        expect(logged).not.toContain(secretTitle);
+        expect(logged).not.toContain(secretDesc);
+      }
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  it('derives story visibility from canonical-state.ts rather than hardcoding public', async () => {
+    const nonPublicService = new PublicContentService(
+      {
+        async getStoryById() {
+          return {
+            community: {
+              id: 1,
+              name: 'Alpha',
+              description: null,
+              slug: 'alpha',
+              locale: 'en',
+              country: null,
+              publicStories: true,
+              isActive: true,
+              createdAt: T0,
+              updatedAt: T0,
+            },
+            story: {
+              id: 1,
+              communityId: 1,
+              title: 'Hidden',
+              description: null,
+              topic: null,
+              language: 'en',
+              privacyLevel: 'members_only',
+              isRestricted: false,
+              dateInterviewed: null,
+              interviewLocationId: null,
+              interviewerId: null,
+              createdAt: T0,
+              updatedAt: T0,
+            },
+            places: [],
+            points: [],
+            speakers: [],
+            interviewLocation: null,
+            interviewer: null,
+            birthplacesById: new Map(),
+            speakerPhotosBySpeakerId: new Map(),
+            attachments: [],
+            externalLinks: [],
+          };
+        },
+      } as unknown as PublicContentRepository,
+      {
+        async read() {
+          return null;
+        },
+      }
+    );
+    await expect(
+      nonPublicService.getStoryById('alpha', '1', 'http://localhost')
+    ).rejects.toThrow('Non-public story reached public summary');
+  });
+
+  it('preserves edge multiplicity in (sortOrder, id) order, shares Slice 4/5 visibility, and serves >20k sanitised legacy descriptions cleanly', async () => {
+    const isoSqlite = new Sqlite(':memory:');
+    isoSqlite.pragma('foreign_keys=ON');
+    const isoDb = drizzle(isoSqlite);
+    const isoTables = tablesFor(isoDb);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      migrate(isoDb, { migrationsFolder: 'src/db/migrations' });
+      const longPrefix = 'Z'.repeat(20_500);
+      const longDesc = `${longPrefix}<p>Safe tail</p><script>alert(1)</script>`;
+
+      const [comm] = await isoDb
+        .insert(isoTables.communities)
+        .values({
+          name: 'Parity Village',
+          description: longDesc,
+          slug: 'parity-village',
+          locale: 'en',
+          publicStories: true,
+          isActive: true,
+          createdAt: T0,
+          updatedAt: T0,
+        })
+        .returning();
+
+      const [placeA, placeB, interviewOnlyPlace] = await isoDb
+        .insert(isoTables.places)
+        .values([
+          {
+            name: 'First Place',
+            latitude: 1,
+            longitude: 2,
+            communityId: comm!.id,
+            isRestricted: false,
+            createdAt: T0,
+            updatedAt: T0,
+          },
+          {
+            name: 'Second Place',
+            latitude: 3,
+            longitude: 4,
+            communityId: comm!.id,
+            isRestricted: false,
+            createdAt: T0,
+            updatedAt: T0,
+          },
+          {
+            name: 'Interview Only Place',
+            region: 'Interview Valley',
+            typeOfPlace: 'Clearing',
+            latitude: 5,
+            longitude: 6,
+            communityId: comm!.id,
+            isRestricted: false,
+            createdAt: T0,
+            updatedAt: T0,
+          },
+        ])
+        .returning();
+
+      const [speakerA, speakerB, interviewerOnly] = await isoDb
+        .insert(isoTables.speakers)
+        .values([
+          {
+            name: 'Speaker One',
+            affiliation: 'Guild One',
+            communityId: comm!.id,
+            isActive: true,
+            createdAt: T0,
+            updatedAt: T0,
+          },
+          {
+            name: 'Speaker Two',
+            communityId: comm!.id,
+            isActive: true,
+            createdAt: T0,
+            updatedAt: T0,
+          },
+          {
+            name: 'Interviewer Only',
+            affiliation: 'Interviewer Guild',
+            communityId: comm!.id,
+            isActive: true,
+            createdAt: T0,
+            updatedAt: T0,
+          },
+        ])
+        .returning();
+
+      const [story] = await isoDb
+        .insert(isoTables.stories)
+        .values({
+          title: 'Multi Edge Story',
+          slug: 'multi-edge-story',
+          description: longDesc,
+          language: 'en',
+          privacyLevel: 'public',
+          isRestricted: false,
+          interviewLocationId: interviewOnlyPlace!.id,
+          interviewerId: interviewerOnly!.id,
+          communityId: comm!.id,
+          createdAt: T0,
+          updatedAt: T0,
+        })
+        .returning();
+
+      // Insert duplicated edges out of placeId/speakerId order to test (sortOrder, id)
+      await isoDb.insert(isoTables.storyPlaces).values([
+        {
+          communityId: comm!.id,
+          storyId: story!.id,
+          placeId: placeA!.id,
+          sortOrder: 2,
+        },
+        {
+          communityId: comm!.id,
+          storyId: story!.id,
+          placeId: placeB!.id,
+          sortOrder: 1,
+        },
+        {
+          communityId: comm!.id,
+          storyId: story!.id,
+          placeId: placeA!.id,
+          sortOrder: 0,
+        },
+      ]);
+      await isoDb.insert(isoTables.storySpeakers).values([
+        {
+          communityId: comm!.id,
+          storyId: story!.id,
+          speakerId: speakerA!.id,
+          sortOrder: 2,
+        },
+        {
+          communityId: comm!.id,
+          storyId: story!.id,
+          speakerId: speakerB!.id,
+          sortOrder: 1,
+        },
+        {
+          communityId: comm!.id,
+          storyId: story!.id,
+          speakerId: speakerA!.id,
+          sortOrder: 0,
+        },
+      ]);
+
+      const isoApp = createHonoApp({
+        repository: new HonoFoundationRepository(isoDb),
+        verifier: nodePasswordVerifier,
+        secureCookies: false,
+        storage: {
+          async read() {
+            return null;
+          },
+        },
+      });
+
+      // 1) Duplicated edges preserved in (sortOrder, id) order + >20k description served sanitised
+      const detail = await fetchJson(
+        isoApp,
+        `/v2/public/communities/parity-village/stories/${story!.id}`
+      );
+      expect(detail.status).toBe(200);
+      const parsedDetail = PublicStoryDetailResponseSchema.parse(detail.json);
+      expect(parsedDetail.data.places.map((p) => p.id)).toEqual([
+        placeA!.id,
+        placeB!.id,
+        placeA!.id,
+      ]);
+      expect(parsedDetail.data.speakers.map((s) => s.id)).toEqual([
+        speakerA!.id,
+        speakerB!.id,
+        speakerA!.id,
+      ]);
+      expect(parsedDetail.data.description).toBe(
+        `${longPrefix}<p>Safe tail</p>`
+      );
+      expect(detail.text).not.toContain('alert(1)');
+
+      const list = await fetchJson(
+        isoApp,
+        '/v2/public/communities/parity-village/stories'
+      );
+      expect(list.status).toBe(200);
+      const parsedList = PublicStoriesListResponseSchema.parse(list.json);
+      expect(parsedList.data.stories[0]?.places.map((p) => p.id)).toEqual([
+        placeA!.id,
+        placeB!.id,
+        placeA!.id,
+      ]);
+      expect(parsedList.data.stories[0]?.speakers.map((s) => s.id)).toEqual([
+        speakerA!.id,
+        speakerB!.id,
+        speakerA!.id,
+      ]);
+
+      // 2) Slice 4 detail and Slice 5 share identical place/speaker visibility
+      //    (including interviewLocationId & interviewerId) + sanitised >20k community desc
+      const commDetail = await fetchJson(
+        isoApp,
+        '/v2/public/communities/parity-village'
+      );
+      expect(commDetail.status).toBe(200);
+      const parsedComm = PublicCommunityDetailResponseSchema.parse(
+        commDetail.json
+      );
+      expect(parsedComm.data.description).toBe(`${longPrefix}<p>Safe tail</p>`);
+      expect(parsedComm.data.points.map((p) => p.id)).toEqual([
+        placeA!.id,
+        placeB!.id,
+        interviewOnlyPlace!.id,
+      ]);
+      expect(
+        parsedComm.data.filters
+          .filter((f) => f.category === 'place')
+          .map((f) => f.value)
+      ).toEqual([placeA!.id, placeB!.id, interviewOnlyPlace!.id]);
+      expect(
+        parsedComm.data.filters
+          .filter((f) => f.category === 'speaker')
+          .map((f) => f.value)
+      ).toEqual([speakerA!.id, speakerB!.id, interviewerOnly!.id]);
+      expect(parsedList.data.points.map((p) => p.id)).toEqual([
+        placeA!.id,
+        placeB!.id,
+        interviewOnlyPlace!.id,
+      ]);
+
+      const allLogs = JSON.stringify([
+        ...errSpy.mock.calls,
+        ...warnSpy.mock.calls,
+        ...logSpy.mock.calls,
+      ]);
+      expect(allLogs).not.toContain(longPrefix);
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+      isoSqlite.close();
     }
   });
 });

@@ -13,6 +13,7 @@ export interface Step extends Endpoint {
   prepare?: () => Promise<void>;
   headers?: Record<string, string>;
   check?: (body: unknown) => boolean;
+  checkHeaders?: (headers: Headers) => boolean;
   /** Save the cookie sent by this step, before response Set-Cookie changes it. */
   saveCookieAs?: string;
   /** Replay a previously saved cookie even after logout cleared the cookie jar. */
@@ -239,6 +240,10 @@ export async function runJourneys(options: {
                 : sessionCookies[0];
           pass = actual === step.expected;
           if (!pass) failure = 'status-mismatch';
+          if (step.checkHeaders && !step.checkHeaders(response.headers)) {
+            pass = false;
+            failure ??= 'body-mismatch';
+          }
           if (step.check || step.captureId) {
             stage = 'Reading response JSON';
             // Retain ownership of the reader so timeout can cancel a hanging body.

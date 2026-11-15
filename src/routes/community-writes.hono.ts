@@ -18,12 +18,12 @@ export interface CommunityWriteRoutesOptions {
 
 const MAX_WRITE_JSON_BYTES = 256 * 1024; // Accommodates DESCRIPTION_MAX_RAW_LENGTH (80k UTF-16 chars)
 
-const jsonBodyLimit = bodyLimit({
+export const jsonBodyLimit = bodyLimit({
   maxSize: MAX_WRITE_JSON_BYTES,
   onError: (c) => c.json({ error: 'Request too large' }, 413),
 });
 
-async function parseJsonRequestBody(
+export async function parseJsonRequestBody(
   c: Context
 ): Promise<
   { ok: true; body: unknown } | { ok: false; status: 400 | 415; error: string }
@@ -44,18 +44,23 @@ async function parseJsonRequestBody(
   }
 }
 
-function actorOf(c: Context): FoundationUser {
+export function actorOf(c: Context): FoundationUser {
   return (
     c as unknown as Context<{ Variables: { actor: FoundationUser } }>
   ).get('actor');
 }
 
-function respond<T>(c: Context, result: CommunityWriteResult<T>) {
+export function respondWriteResult<T>(
+  c: Context,
+  result: CommunityWriteResult<T>
+) {
   if (result.status === 204) {
     return c.body(null, 204);
   }
   return c.json(result.body, result.status);
 }
+
+const respond = respondWriteResult;
 
 export function registerCommunityWriteRoutes(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -125,7 +125,7 @@ const LocaleSchema = z
   .max(35, 'Locale must be at most 35 characters')
   .regex(/^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/, 'Invalid locale format');
 
-const NullableTrimmedText = (fieldLabel: string, maxLength: number) =>
+export const NullableTrimmedText = (fieldLabel: string, maxLength: number) =>
   z.union([
     z
       .string()
@@ -134,6 +134,13 @@ const NullableTrimmedText = (fieldLabel: string, maxLength: number) =>
       .transform((v) => (v.length === 0 ? null : v)),
     z.null(),
   ]);
+
+export const makeDatabaseIdSchema = (fieldLabel: string) =>
+  z
+    .number()
+    .int(`${fieldLabel} must be an integer`)
+    .min(1, `${fieldLabel} must be a positive integer`)
+    .max(MAX_DATABASE_ID, `${fieldLabel} must be at most ${MAX_DATABASE_ID}`);
 
 export const PatchCommunityRequestSchema = z
   .object({

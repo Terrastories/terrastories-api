@@ -54,38 +54,44 @@ export interface AuthorizedWriteCaller {
   role: 'editor' | 'admin';
 }
 
+export async function authorizeCommunityWriteCaller(
+  repository: Pick<CommunityWritesRepository, 'activeCommunityExists'>,
+  actor: FoundationUser,
+  allowedRoles: ReadonlyArray<'editor' | 'admin'>
+): Promise<AuthorizedWriteCaller | null> {
+  if (actor.role === 'super_admin' || actor.communityId === null) {
+    return null;
+  }
+  const resolvedRole = parseV2Role(actor.role);
+  if (
+    !resolvedRole ||
+    (resolvedRole !== 'editor' && resolvedRole !== 'admin') ||
+    !allowedRoles.includes(resolvedRole)
+  ) {
+    return null;
+  }
+  const active = await repository.activeCommunityExists(actor.communityId);
+  if (!active) {
+    return null;
+  }
+  return {
+    actorId: actor.id,
+    communityId: actor.communityId,
+    role: resolvedRole,
+  };
+}
+
 export class CommunityWritesService {
   constructor(
     private readonly repository: CommunityWritesRepository,
     private readonly readsService: CommunityReadsService
   ) {}
 
-  private async authorizeCaller(
+  private authorizeCaller(
     actor: FoundationUser,
     allowedRoles: ReadonlyArray<'editor' | 'admin'>
   ): Promise<AuthorizedWriteCaller | null> {
-    if (actor.role === 'super_admin' || actor.communityId === null) {
-      return null;
-    }
-    const resolvedRole = parseV2Role(actor.role);
-    if (
-      !resolvedRole ||
-      (resolvedRole !== 'editor' && resolvedRole !== 'admin') ||
-      !allowedRoles.includes(resolvedRole)
-    ) {
-      return null;
-    }
-    const active = await this.repository.activeCommunityExists(
-      actor.communityId
-    );
-    if (!active) {
-      return null;
-    }
-    return {
-      actorId: actor.id,
-      communityId: actor.communityId,
-      role: resolvedRole,
-    };
+    return authorizeCommunityWriteCaller(this.repository, actor, allowedRoles);
   }
 
   async updateCommunity(

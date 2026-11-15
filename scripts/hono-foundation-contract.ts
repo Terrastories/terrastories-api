@@ -999,7 +999,7 @@ export async function runHonoFoundationContract(
           title: 'PG Race Story',
           slug: `pg-race-${tag}`,
           language: 'en',
-          privacyLevel: 'editors_only',
+          privacyLevel: 'editors',
           isRestricted: false,
         })
         .returning();
@@ -1117,8 +1117,8 @@ export async function runHonoFoundationContract(
       );
 
       const [st1, st2] = await Promise.all([
-        patchRaceStory({ visibility: 'members_only' }),
-        patchRaceStory({ visibility: 'members_only' }),
+        patchRaceStory({ visibility: 'community' }),
+        patchRaceStory({ visibility: 'community' }),
       ]);
       assert.equal(st1.status, 200);
       assert.equal(st2.status, 200);
@@ -1134,7 +1134,7 @@ export async function runHonoFoundationContract(
         .orderBy(asc(tables.auditEntries.id));
       assert.deepEqual(
         storyAuditsAfterBurst.map((row: any) => row.action),
-        ['story.visibility.members_only']
+        ['story.visibility.community']
       );
 
       // PostgreSQL FOR SHARE target lock race (PR #246): concurrent story

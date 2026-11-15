@@ -13,8 +13,18 @@ export const validStorageKey = (key: string) =>
   !key.includes('\\') &&
   !key.split('/').some((part) => invalidParts.has(part));
 
+export interface StorageReadRange {
+  /** Inclusive 0-based byte offset. */
+  start: number;
+  /** Inclusive 0-based byte offset. */
+  end: number;
+}
+
 export interface FoundationStorage {
-  read(key: string): Promise<Uint8Array | ReadableStream<Uint8Array> | null>;
+  read(
+    key: string,
+    range?: StorageReadRange
+  ): Promise<Uint8Array | ReadableStream<Uint8Array> | null>;
 }
 
 import { sessionLifetime } from '../shared/session-policy.js';

@@ -137,9 +137,20 @@ export const PublicStoryAttachmentSchema = z.object({
 
 export type PublicStoryAttachment = z.infer<typeof PublicStoryAttachmentSchema>;
 
+export function isSafeExternalMediaUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export const PublicExternalMediaLinkSchema = z.object({
   id: z.number().int().positive().max(MAX_DATABASE_ID),
-  url: z.string().url(),
+  url: z.string().url().refine(isSafeExternalMediaUrl, {
+    message: 'External media URL must use http: or https:',
+  }),
   ordinal: z.number().int().min(0),
   createdAt: z.string().datetime(),
 });

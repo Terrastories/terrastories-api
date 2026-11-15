@@ -8,6 +8,8 @@
  * - §6.9 runtime-safe sanitised HTML descriptions on output
  * - §6.7 storage-key scoping, safe download headers, and HTTP `Range` serving
  */
+import { z } from 'zod';
+import { storyVisibilityFromPhysical } from '../policy/canonical-state.js';
 import {
   validStorageKey,
   type FoundationStorage,
@@ -18,6 +20,14 @@ import {
   MAX_PUBLIC_PAGE_LIMIT,
   MAX_PUBLIC_TOTAL_FILTER_VALUES,
   PUBLIC_STORY_SORTS,
+  PublicExternalMediaLinkSchema,
+  PublicPlaceDetailResponseSchema,
+  PublicPlacesListResponseSchema,
+  PublicSpeakerDetailResponseSchema,
+  PublicSpeakersListResponseSchema,
+  PublicStoriesListResponseSchema,
+  PublicStoryDetailResponseSchema,
+  isSafeExternalMediaUrl,
   type PublicExternalMediaLink,
   type PublicPaginationQuery,
   type PublicPlaceDetail,
@@ -35,11 +45,12 @@ import {
   type PublicStorySummary,
 } from '../shared/schemas/public-content.js';
 import { isDatabaseIdString, MAX_DATABASE_ID } from '../shared/types/public.js';
-import { sanitizeDescriptionForMigration } from '../shared/utils/safe-description.js';
 import {
+  INTERNAL_ERROR_BODY,
   NOT_FOUND_BODY,
   projectPointFeature,
   publicMediaUrl,
+  sanitizePublicDescription,
 } from './public-communities.service.js';
 import {
   PublicContentRepository,
@@ -53,7 +64,8 @@ import {
 export type PublicContentJsonResult<T = unknown> =
   | { status: 200; body: T }
   | { status: 400; body: { error: string } }
-  | { status: 404; body: { error: string } };
+  | { status: 404; body: { error: string } }
+  | { status: 500; body: { error: string } };
 
 export const INVALID_REQUEST_BODY = Object.freeze({
   error: 'Invalid request',
@@ -69,19 +81,20 @@ const badRequestJson = (): PublicContentJsonResult<never> => ({
   body: INVALID_REQUEST_BODY,
 });
 
-function iso(value: Date): string {
-  return value.toISOString();
+function validatePublicResponse<T>(
+  schema: z.ZodType<T>,
+  payload: unknown
+): PublicContentJsonResult<T> {
+  const parsed = schema.safeParse(payload);
+  if (!parsed.success) {
+    // Fail closed without logging candidate payloads or cultural content (SPEC-V2 §6.9).
+    return { status: 500, body: { ...INTERNAL_ERROR_BODY } };
+  }
+  return { status: 200, body: parsed.data };
 }
 
-function sanitizePublicDescription(raw: string | null): string | null {
-  if (raw === null) {
-    return null;
-  }
-  try {
-    return sanitizeDescriptionForMigration(raw).html;
-  } catch {
-    return '';
-  }
+function iso(value: Date): string {
+  return value.toISOString();
 }
 
 function projectPlaceSummary(row: PublicPlaceRecord): PublicPlaceSummary {
@@ -147,7 +160,13 @@ function projectStoryAttachment(
 
 function projectExternalMediaLink(
   row: PublicExternalMediaLinkRecord
-): PublicExternalMediaLink {
+): PublicExternalMediaLink | null {
+  if (
+    !isSafeExternalMediaUrl(row.url) ||
+    !PublicExternalMediaLinkSchema.shape.url.safeParse(row.url).success
+  ) {
+    return null;
+  }
   return {
     id: row.id,
     url: row.url,
@@ -289,38 +308,12 @@ export function parsePublicStoriesQuery(
   };
 }
 
-async function readAllBytes(
-  data: Uint8Array | ReadableStream<Uint8Array>
-): Promise<Uint8Array> {
-  if (data instanceof Uint8Array) {
-    return data;
-  }
-  const reader = data.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      total += value.byteLength;
-    }
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
-}
-
 type ParsedByteRange =
   | { kind: 'none' }
   | { kind: 'unsatisfiable' }
   | { kind: 'slice'; start: number; end: number };
 
-function parseSingleByteRange(
+function parseByteRange(
   rangeHeader: string | undefined,
   totalLength: number
 ): ParsedByteRange {
@@ -335,7 +328,18 @@ function parseSingleByteRange(
     return { kind: 'none' };
   }
   const spec = trimmed.slice('bytes='.length).trim();
-  const match = /^(\d*)-(\d*)$/.exec(spec);
+  if (!spec) {
+    return { kind: 'unsatisfiable' };
+  }
+  const parts = spec.split(',').map((part) => part.trim());
+  if (parts.length > 1) {
+    // RFC 9110 §14.2: server MAY ignore multi-range requests and return 200 full representation.
+    const looksLikeMultiRange = parts.every((part) =>
+      /^(\d+-\d*|-\d+)$/.test(part)
+    );
+    return looksLikeMultiRange ? { kind: 'none' } : { kind: 'unsatisfiable' };
+  }
+  const match = /^(\d*)-(\d*)$/.exec(parts[0] ?? '');
   if (!match) {
     return { kind: 'unsatisfiable' };
   }
@@ -377,6 +381,15 @@ function parseSingleByteRange(
   };
 }
 
+function toResponseBody(
+  data: Uint8Array | ReadableStream<Uint8Array>
+): ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer> {
+  if (data instanceof ReadableStream) {
+    return data;
+  }
+  return data as Uint8Array<ArrayBuffer>;
+}
+
 export class PublicContentService {
   constructor(
     private readonly repository: PublicContentRepository,
@@ -398,11 +411,19 @@ export class PublicContentService {
       externalLinks: PublicExternalMediaLinkRecord[];
     }
   ): PublicStorySummary {
+    const visibility = storyVisibilityFromPhysical(
+      story.privacyLevel,
+      story.isRestricted
+    );
+    if (visibility !== 'public') {
+      throw new Error('Non-public story reached public summary');
+    }
+
     return {
       id: story.id,
       title: story.title,
       description: sanitizePublicDescription(story.description),
-      visibility: 'public',
+      visibility,
       topic: story.topic,
       language: story.language,
       dateInterviewed: story.dateInterviewed
@@ -433,7 +454,9 @@ export class PublicContentService {
       attachments: deps.attachments.map((att) =>
         projectStoryAttachment(att, slug, origin)
       ),
-      externalMediaLinks: deps.externalLinks.map(projectExternalMediaLink),
+      externalMediaLinks: deps.externalLinks
+        .map(projectExternalMediaLink)
+        .filter((link): link is PublicExternalMediaLink => link !== null),
       createdAt: iso(story.createdAt),
       updatedAt: iso(story.updatedAt),
     };
@@ -474,28 +497,20 @@ export class PublicContentService {
       })
     );
 
-    const points = page.points.map((point) =>
-      projectPointFeature({
-        ...point,
-        description: sanitizePublicDescription(point.description),
-      })
-    );
+    const points = page.points.map((point) => projectPointFeature(point));
 
-    return {
-      status: 200,
-      body: {
-        data: {
-          points,
-          stories,
-        },
-        meta: {
-          total: page.total,
-          limit: query.limit,
-          offset: query.offset,
-          hasNextPage: query.offset + stories.length < page.total,
-        },
+    return validatePublicResponse(PublicStoriesListResponseSchema, {
+      data: {
+        points,
+        stories,
       },
-    };
+      meta: {
+        total: page.total,
+        limit: query.limit,
+        offset: query.offset,
+        hasNextPage: query.offset + stories.length < page.total,
+      },
+    });
   }
 
   async getStoryById(
@@ -528,22 +543,14 @@ export class PublicContentService {
       }
     );
 
-    const points = detail.points.map((point) =>
-      projectPointFeature({
-        ...point,
-        description: sanitizePublicDescription(point.description),
-      })
-    );
+    const points = detail.points.map((point) => projectPointFeature(point));
 
-    return {
-      status: 200,
-      body: {
-        data: {
-          ...summary,
-          points,
-        },
+    return validatePublicResponse(PublicStoryDetailResponseSchema, {
+      data: {
+        ...summary,
+        points,
       },
-    };
+    });
   }
 
   async listPlaces(
@@ -579,18 +586,15 @@ export class PublicContentService {
       };
     });
 
-    return {
-      status: 200,
-      body: {
-        data,
-        meta: {
-          total: page.total,
-          limit: pagination.limit,
-          offset: pagination.offset,
-          hasNextPage: pagination.offset + data.length < page.total,
-        },
+    return validatePublicResponse(PublicPlacesListResponseSchema, {
+      data,
+      meta: {
+        total: page.total,
+        limit: pagination.limit,
+        offset: pagination.offset,
+        hasNextPage: pagination.offset + data.length < page.total,
       },
-    };
+    });
   }
 
   async getPlaceById(
@@ -607,28 +611,25 @@ export class PublicContentService {
       return notFoundJson();
     }
 
-    return {
-      status: 200,
-      body: {
-        data: {
-          ...projectPlaceSummary(detail.place),
-          photos: detail.photos.map((fileId) => ({
-            fileId,
-            url: publicMediaUrl(origin, detail.community.slug, fileId),
-          })),
-          placenameAudio: detail.placenameAudioFileId
-            ? {
-                fileId: detail.placenameAudioFileId,
-                url: publicMediaUrl(
-                  origin,
-                  detail.community.slug,
-                  detail.placenameAudioFileId
-                ),
-              }
-            : null,
-        },
+    return validatePublicResponse(PublicPlaceDetailResponseSchema, {
+      data: {
+        ...projectPlaceSummary(detail.place),
+        photos: detail.photos.map((fileId) => ({
+          fileId,
+          url: publicMediaUrl(origin, detail.community.slug, fileId),
+        })),
+        placenameAudio: detail.placenameAudioFileId
+          ? {
+              fileId: detail.placenameAudioFileId,
+              url: publicMediaUrl(
+                origin,
+                detail.community.slug,
+                detail.placenameAudioFileId
+              ),
+            }
+          : null,
       },
-    };
+    });
   }
 
   async listSpeakers(
@@ -656,18 +657,15 @@ export class PublicContentService {
       )
     );
 
-    return {
-      status: 200,
-      body: {
-        data,
-        meta: {
-          total: page.total,
-          limit: pagination.limit,
-          offset: pagination.offset,
-          hasNextPage: pagination.offset + data.length < page.total,
-        },
+    return validatePublicResponse(PublicSpeakersListResponseSchema, {
+      data,
+      meta: {
+        total: page.total,
+        limit: pagination.limit,
+        offset: pagination.offset,
+        hasNextPage: pagination.offset + data.length < page.total,
       },
-    };
+    });
   }
 
   async getSpeakerById(
@@ -687,32 +685,29 @@ export class PublicContentService {
       return notFoundJson();
     }
 
-    return {
-      status: 200,
-      body: {
-        data: {
-          id: detail.speaker.id,
-          name: detail.speaker.name,
-          birthDate: detail.speaker.birthDate,
-          birthplace: detail.birthplace
-            ? projectPlaceSummary(detail.birthplace)
-            : null,
-          affiliation: detail.speaker.affiliation,
-          photo: detail.photoFileId
-            ? {
-                fileId: detail.photoFileId,
-                url: publicMediaUrl(
-                  origin,
-                  detail.community.slug,
-                  detail.photoFileId
-                ),
-              }
-            : null,
-          createdAt: iso(detail.speaker.createdAt),
-          updatedAt: iso(detail.speaker.updatedAt),
-        },
+    return validatePublicResponse(PublicSpeakerDetailResponseSchema, {
+      data: {
+        id: detail.speaker.id,
+        name: detail.speaker.name,
+        birthDate: detail.speaker.birthDate,
+        birthplace: detail.birthplace
+          ? projectPlaceSummary(detail.birthplace)
+          : null,
+        affiliation: detail.speaker.affiliation,
+        photo: detail.photoFileId
+          ? {
+              fileId: detail.photoFileId,
+              url: publicMediaUrl(
+                origin,
+                detail.community.slug,
+                detail.photoFileId
+              ),
+            }
+          : null,
+        createdAt: iso(detail.speaker.createdAt),
+        updatedAt: iso(detail.speaker.updatedAt),
       },
-    };
+    });
   }
 
   async serveMedia(
@@ -735,14 +730,12 @@ export class PublicContentService {
       return null;
     }
 
-    const stored = await this.storage.read(file.storageKey);
-    if (!stored) {
+    const totalLength = file.byteSize;
+    if (!Number.isSafeInteger(totalLength) || totalLength < 0) {
       return null;
     }
 
-    const fullBytes = await readAllBytes(stored);
-    const totalLength = fullBytes.byteLength;
-    const range = parseSingleByteRange(rangeHeader, totalLength);
+    const range = parseByteRange(rangeHeader, totalLength);
 
     const baseHeaders = {
       'Accept-Ranges': 'bytes',
@@ -762,20 +755,32 @@ export class PublicContentService {
     }
 
     if (range.kind === 'slice') {
-      const slice = fullBytes.slice(range.start, range.end + 1);
-      return new Response(slice, {
+      const stored = await this.storage.read(file.storageKey, {
+        start: range.start,
+        end: range.end,
+      });
+      if (!stored) {
+        return null;
+      }
+      const contentLength = range.end - range.start + 1;
+      return new Response(toResponseBody(stored), {
         status: 206,
         headers: {
           ...baseHeaders,
           'Content-Type': file.mimeType,
           'Content-Disposition': 'attachment',
           'Content-Range': `bytes ${range.start}-${range.end}/${totalLength}`,
-          'Content-Length': String(slice.byteLength),
+          'Content-Length': String(contentLength),
         },
       });
     }
 
-    return new Response(new Uint8Array(fullBytes), {
+    const stored = await this.storage.read(file.storageKey);
+    if (!stored) {
+      return null;
+    }
+
+    return new Response(toResponseBody(stored), {
       status: 200,
       headers: {
         ...baseHeaders,

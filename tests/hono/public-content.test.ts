@@ -673,7 +673,11 @@ beforeAll(async () => {
     verifier: nodePasswordVerifier,
     secureCookies: false,
     storage: {
-      read: async (key: string) => storageBytes.get(key) ?? null,
+      read: async (key: string, range?: { start: number; end: number }) => {
+        const bytes = storageBytes.get(key);
+        if (!bytes) return null;
+        return range ? bytes.subarray(range.start, range.end + 1) : bytes;
+      },
     },
   };
   app = createHonoApp(options);

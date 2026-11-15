@@ -62,8 +62,15 @@ export function createWorker(
       publicOrigin: runtimeConfig.publicOrigin,
       corsOrigins: runtimeConfig.corsOrigins,
       storage: {
-        async read(key) {
-          const object = await env.MEDIA.get(key);
+        async read(key, range) {
+          const object = range
+            ? await env.MEDIA.get(key, {
+                range: {
+                  offset: range.start,
+                  length: range.end - range.start + 1,
+                },
+              })
+            : await env.MEDIA.get(key);
           if (!object) return null;
           const reader = object.body.getReader();
           return new ReadableStream({

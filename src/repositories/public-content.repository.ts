@@ -21,11 +21,7 @@ import {
   desc,
   eq,
   exists,
-  gte,
   inArray,
-  isNotNull,
-  isNull,
-  lte,
   or,
   sql,
   type SQL,
@@ -57,6 +53,19 @@ import {
   PublicCommunitiesRepository,
   type PublicCommunityRow,
 } from './public-communities.repository.js';
+import {
+  PUBLIC_ASSOCIATED_MEDIA_ALLOWED,
+  PUBLIC_BRANDING_MEDIA_ALLOWED,
+  PUBLIC_STORY_MEDIA_ALLOWED,
+  activeUnrestrictedFileCondition,
+  isValidCoordinates,
+  publicPlaceBaseCondition,
+  publicSpeakerBaseCondition,
+  publicStoryCondition,
+  readablePlaceCondition,
+  readableSpeakerCondition,
+  validPointCoordinatesCondition,
+} from './public-visibility.js';
 
 const IN_CHUNK_SIZE = 80;
 const UUID_PATTERN =
@@ -69,6 +78,8 @@ export interface PublicStoryRecord {
   description: string | null;
   topic: string | null;
   language: string;
+  privacyLevel: string;
+  isRestricted: boolean;
   dateInterviewed: Date | null;
   interviewLocationId: number | null;
   interviewerId: number | null;
@@ -207,22 +218,6 @@ function chunkValues<T>(values: readonly T[], size = IN_CHUNK_SIZE): T[][] {
   return chunks;
 }
 
-function isValidCoordinates(
-  latitude: number | null,
-  longitude: number | null
-): latitude is number {
-  return (
-    latitude !== null &&
-    longitude !== null &&
-    Number.isFinite(latitude) &&
-    Number.isFinite(longitude) &&
-    latitude >= -90 &&
-    latitude <= 90 &&
-    longitude >= -180 &&
-    longitude <= 180
-  );
-}
-
 export class PublicContentRepository {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly database: any;
@@ -251,103 +246,51 @@ export class PublicContentRepository {
 
   /**
    * Place predicate matching §6.4a `with readable stories`:
-   * same community, unrestricted, and referenced by >= 1 publicly readable
-   * story via `story_places` OR `stories.interview_location_id`.
+   * delegates to shared `readablePlaceCondition` in `public-visibility.ts`.
    */
   private placeReadableConditions(
     communityId: number,
     placeTable: DialectTables['places'] = this.tables.places
   ): SQL {
-    const publicStory = this.explore.publicStoryGate(communityId);
-    const viaEdge = exists(
-      this.database
-        .select({ one: sql`1` })
-        .from(this.tables.storyPlaces)
-        .innerJoin(
-          this.tables.stories,
-          eq(this.tables.storyPlaces.storyId, this.tables.stories.id)
-        )
-        .where(
-          and(
-            eq(this.tables.storyPlaces.communityId, communityId),
-            eq(this.tables.storyPlaces.placeId, placeTable.id),
-            publicStory
-          )
-        )
+    return readablePlaceCondition(
+      this.database,
+      this.tables,
+      communityId,
+      placeTable
     );
-    const viaInterviewLocation = exists(
-      this.database
-        .select({ one: sql`1` })
-        .from(this.tables.stories)
-        .where(
-          and(
-            eq(this.tables.stories.interviewLocationId, placeTable.id),
-            publicStory
-          )
-        )
-    );
-    return and(
-      eq(placeTable.communityId, communityId),
-      eq(placeTable.isRestricted, false),
-      or(viaEdge, viaInterviewLocation)
-    )!;
   }
 
   /**
    * Speaker predicate matching §6.4a `with readable stories`:
-   * same community, active (`is_active = true`), and referenced by >= 1
-   * publicly readable story via `story_speakers` OR `stories.interviewer_id`.
+   * delegates to shared `readableSpeakerCondition` in `public-visibility.ts`.
    */
   private speakerReadableConditions(
     communityId: number,
     speakerTable: DialectTables['speakers'] = this.tables.speakers
   ): SQL {
-    const publicStory = this.explore.publicStoryGate(communityId);
-    const viaEdge = exists(
-      this.database
-        .select({ one: sql`1` })
-        .from(this.tables.storySpeakers)
-        .innerJoin(
-          this.tables.stories,
-          eq(this.tables.storySpeakers.storyId, this.tables.stories.id)
-        )
-        .where(
-          and(
-            eq(this.tables.storySpeakers.communityId, communityId),
-            eq(this.tables.storySpeakers.speakerId, speakerTable.id),
-            publicStory
-          )
-        )
+    return readableSpeakerCondition(
+      this.database,
+      this.tables,
+      communityId,
+      speakerTable
     );
-    const viaInterviewer = exists(
-      this.database
-        .select({ one: sql`1` })
-        .from(this.tables.stories)
-        .where(
-          and(
-            eq(this.tables.stories.interviewerId, speakerTable.id),
-            publicStory
-          )
-        )
-    );
-    return and(
-      eq(speakerTable.communityId, communityId),
-      eq(speakerTable.isActive, true),
-      or(viaEdge, viaInterviewer)
-    )!;
   }
 
   /**
    * Build story filter WHERE clauses.
    *
    * Uses aliased `places` / `speakers` tables inside EXISTS subqueries so outer
-   * queries on `places` (e.g. map points) cannot suffer table-name shadowing.
+   * queries on `places` (e.g. map points) cannot suffer table-name shadowing, and
+   * binds every filter value ONCE per clause to stay well below D1's 100-param
+   * limit.
    */
   private buildStoryConditions(
     communityId: number,
     query: PublicStoriesQuery
   ): SQL {
-    const conditions: SQL[] = [this.explore.publicStoryGate(communityId)!];
+    const conditions: SQL[] = [
+      publicStoryCondition(this.tables.stories, communityId),
+    ];
     const filterPlaces = aliasedTable(this.tables.places, 'story_filter_place');
     const filterSpeakers = aliasedTable(
       this.tables.speakers,
@@ -359,37 +302,29 @@ export class PublicContentRepository {
         this.database
           .select({ one: sql`1` })
           .from(this.tables.storyPlaces)
-          .innerJoin(
-            filterPlaces,
-            eq(this.tables.storyPlaces.placeId, filterPlaces.id)
-          )
           .where(
             and(
               eq(this.tables.storyPlaces.communityId, communityId),
               eq(this.tables.storyPlaces.storyId, this.tables.stories.id),
-              eq(filterPlaces.communityId, communityId),
-              eq(filterPlaces.isRestricted, false),
-              placeClause
+              eq(this.tables.storyPlaces.placeId, filterPlaces.id)
             )
           )
       );
-      const viaInterviewLocation = and(
-        isNotNull(this.tables.stories.interviewLocationId),
-        exists(
-          this.database
-            .select({ one: sql`1` })
-            .from(filterPlaces)
-            .where(
-              and(
+      return exists(
+        this.database
+          .select({ one: sql`1` })
+          .from(filterPlaces)
+          .where(
+            and(
+              publicPlaceBaseCondition(filterPlaces, communityId),
+              placeClause,
+              or(
                 eq(filterPlaces.id, this.tables.stories.interviewLocationId),
-                eq(filterPlaces.communityId, communityId),
-                eq(filterPlaces.isRestricted, false),
-                placeClause
+                viaEdge
               )
             )
-        )
-      )!;
-      return or(viaEdge, viaInterviewLocation)!;
+          )
+      );
     };
 
     const speakerPred = (speakerClause: SQL): SQL => {
@@ -397,37 +332,29 @@ export class PublicContentRepository {
         this.database
           .select({ one: sql`1` })
           .from(this.tables.storySpeakers)
-          .innerJoin(
-            filterSpeakers,
-            eq(this.tables.storySpeakers.speakerId, filterSpeakers.id)
-          )
           .where(
             and(
               eq(this.tables.storySpeakers.communityId, communityId),
               eq(this.tables.storySpeakers.storyId, this.tables.stories.id),
-              eq(filterSpeakers.communityId, communityId),
-              eq(filterSpeakers.isActive, true),
-              speakerClause
+              eq(this.tables.storySpeakers.speakerId, filterSpeakers.id)
             )
           )
       );
-      const viaInterviewer = and(
-        isNotNull(this.tables.stories.interviewerId),
-        exists(
-          this.database
-            .select({ one: sql`1` })
-            .from(filterSpeakers)
-            .where(
-              and(
+      return exists(
+        this.database
+          .select({ one: sql`1` })
+          .from(filterSpeakers)
+          .where(
+            and(
+              publicSpeakerBaseCondition(filterSpeakers, communityId),
+              speakerClause,
+              or(
                 eq(filterSpeakers.id, this.tables.stories.interviewerId),
-                eq(filterSpeakers.communityId, communityId),
-                eq(filterSpeakers.isActive, true),
-                speakerClause
+                viaEdge
               )
             )
-        )
-      )!;
-      return or(viaEdge, viaInterviewer)!;
+          )
+      );
     };
 
     if (query.place?.length) {
@@ -497,14 +424,26 @@ export class PublicContentRepository {
     }
 
     const whereClause = this.buildStoryConditions(community.id, query);
+    // Materialise the filtered readable story IDs once per query so D1 never
+    // exceeds its 100 bound-parameter cap even when every filter is full.
+    const filteredStories = this.database.$with('filtered_stories').as(
+      this.database
+        .select({
+          id: this.tables.stories.id,
+          interviewLocationId: this.tables.stories.interviewLocationId,
+        })
+        .from(this.tables.stories)
+        .where(whereClause)
+    );
 
     const [totalRow] = await this.database
+      .with(filteredStories)
       .select({ total: count() })
-      .from(this.tables.stories)
-      .where(whereClause);
+      .from(filteredStories);
     const total = Number(totalRow?.total ?? 0);
 
     const stories: PublicStoryRecord[] = await this.database
+      .with(filteredStories)
       .select({
         id: this.tables.stories.id,
         communityId: this.tables.stories.communityId,
@@ -512,6 +451,8 @@ export class PublicContentRepository {
         description: this.tables.stories.description,
         topic: this.tables.stories.topic,
         language: this.tables.stories.language,
+        privacyLevel: this.tables.stories.privacyLevel,
+        isRestricted: this.tables.stories.isRestricted,
         dateInterviewed: this.tables.stories.dateInterviewed,
         interviewLocationId: this.tables.stories.interviewLocationId,
         interviewerId: this.tables.stories.interviewerId,
@@ -519,7 +460,10 @@ export class PublicContentRepository {
         updatedAt: this.tables.stories.updatedAt,
       })
       .from(this.tables.stories)
-      .where(whereClause)
+      .innerJoin(
+        filteredStories,
+        eq(this.tables.stories.id, filteredStories.id)
+      )
       .orderBy(...this.storyOrderClauses(query.sort))
       .limit(query.limit)
       .offset(query.offset);
@@ -530,27 +474,21 @@ export class PublicContentRepository {
         .select({ one: sql`1` })
         .from(this.tables.storyPlaces)
         .innerJoin(
-          this.tables.stories,
-          eq(this.tables.storyPlaces.storyId, this.tables.stories.id)
+          filteredStories,
+          eq(this.tables.storyPlaces.storyId, filteredStories.id)
         )
         .where(
           and(
             eq(this.tables.storyPlaces.communityId, community.id),
-            eq(this.tables.storyPlaces.placeId, pointPlace.id),
-            whereClause
+            eq(this.tables.storyPlaces.placeId, pointPlace.id)
           )
         )
     );
     const pointViaInterview = exists(
       this.database
         .select({ one: sql`1` })
-        .from(this.tables.stories)
-        .where(
-          and(
-            eq(this.tables.stories.interviewLocationId, pointPlace.id),
-            whereClause
-          )
-        )
+        .from(filteredStories)
+        .where(eq(filteredStories.interviewLocationId, pointPlace.id))
     );
 
     const rawPoints: Array<{
@@ -565,6 +503,7 @@ export class PublicContentRepository {
       total === 0
         ? []
         : await this.database
+            .with(filteredStories)
             .select({
               id: pointPlace.id,
               name: pointPlace.name,
@@ -577,12 +516,8 @@ export class PublicContentRepository {
             .from(pointPlace)
             .where(
               and(
-                eq(pointPlace.communityId, community.id),
-                eq(pointPlace.isRestricted, false),
-                gte(pointPlace.latitude, -90),
-                lte(pointPlace.latitude, 90),
-                gte(pointPlace.longitude, -180),
-                lte(pointPlace.longitude, 180),
+                publicPlaceBaseCondition(pointPlace, community.id),
+                validPointCoordinatesCondition(pointPlace),
                 or(pointViaEdge, pointViaInterview)
               )
             )
@@ -682,6 +617,8 @@ export class PublicContentRepository {
         description: this.tables.stories.description,
         topic: this.tables.stories.topic,
         language: this.tables.stories.language,
+        privacyLevel: this.tables.stories.privacyLevel,
+        isRestricted: this.tables.stories.isRestricted,
         dateInterviewed: this.tables.stories.dateInterviewed,
         interviewLocationId: this.tables.stories.interviewLocationId,
         interviewerId: this.tables.stories.interviewerId,
@@ -691,7 +628,7 @@ export class PublicContentRepository {
       .from(this.tables.stories)
       .where(
         and(
-          this.explore.publicStoryGate(community.id),
+          publicStoryCondition(this.tables.stories, community.id),
           eq(this.tables.stories.id, storyId)
         )
       )
@@ -1007,9 +944,7 @@ export class PublicContentRepository {
       .where(
         and(
           eq(this.tables.files.id, fileId),
-          eq(this.tables.files.communityId, community.id),
-          eq(this.tables.files.isActive, true),
-          isNull(this.tables.files.culturalRestrictions)
+          activeUnrestrictedFileCondition(this.tables.files, community.id)
         )
       )
       .limit(1);
@@ -1058,6 +993,7 @@ export class PublicContentRepository {
 
     for (const att of attachmentRows) {
       if (
+        PUBLIC_BRANDING_MEDIA_ALLOWED &&
         att.ownerType === 'community' &&
         att.ownerId === community.id &&
         (att.role === 'community_display_image' ||
@@ -1068,6 +1004,7 @@ export class PublicContentRepository {
       }
 
       if (
+        PUBLIC_STORY_MEDIA_ALLOWED &&
         att.ownerType === 'story' &&
         att.role === 'story_media' &&
         att.ownerId !== null
@@ -1077,7 +1014,7 @@ export class PublicContentRepository {
           .from(this.tables.stories)
           .where(
             and(
-              this.explore.publicStoryGate(community.id),
+              publicStoryCondition(this.tables.stories, community.id),
               eq(this.tables.stories.id, att.ownerId)
             )
           )
@@ -1088,6 +1025,7 @@ export class PublicContentRepository {
       }
 
       if (
+        PUBLIC_ASSOCIATED_MEDIA_ALLOWED &&
         att.ownerType === 'place' &&
         (att.role === 'place_photo' || att.role === 'place_name_audio') &&
         att.ownerId !== null
@@ -1108,6 +1046,7 @@ export class PublicContentRepository {
       }
 
       if (
+        PUBLIC_ASSOCIATED_MEDIA_ALLOWED &&
         att.ownerType === 'speaker' &&
         att.role === 'speaker_photo' &&
         att.ownerId !== null
@@ -1126,6 +1065,10 @@ export class PublicContentRepository {
           return resolved;
         }
       }
+    }
+
+    if (!PUBLIC_BRANDING_MEDIA_ALLOWED) {
+      return null;
     }
 
     const [brandingFallback] = await this.database
@@ -1175,30 +1118,31 @@ export class PublicContentRepository {
         .where(
           and(
             eq(this.tables.storyPlaces.communityId, communityId),
-            eq(this.tables.places.communityId, communityId),
-            eq(this.tables.places.isRestricted, false),
+            publicPlaceBaseCondition(this.tables.places, communityId),
             inArray(this.tables.storyPlaces.storyId, chunk)
           )
         )
-        .orderBy(asc(this.tables.places.id));
+        .orderBy(
+          asc(sql`COALESCE(${this.tables.storyPlaces.sortOrder}, 0)`),
+          asc(this.tables.storyPlaces.id)
+        );
 
+      // Preserve edge multiplicity and deterministic (sortOrder, id) order (SPEC-V2 §6.3).
       for (const row of rows) {
         const list = result.get(row.storyId) ?? [];
-        if (!list.some((existing) => existing.id === row.id)) {
-          list.push({
-            id: row.id,
-            communityId: row.communityId,
-            name: row.name,
-            description: row.description,
-            typeOfPlace: row.typeOfPlace,
-            region: row.region,
-            latitude: row.latitude,
-            longitude: row.longitude,
-            createdAt: row.createdAt,
-            updatedAt: row.updatedAt,
-          });
-          result.set(row.storyId, list);
-        }
+        list.push({
+          id: row.id,
+          communityId: row.communityId,
+          name: row.name,
+          description: row.description,
+          typeOfPlace: row.typeOfPlace,
+          region: row.region,
+          latitude: row.latitude,
+          longitude: row.longitude,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        });
+        result.set(row.storyId, list);
       }
     }
 
@@ -1235,28 +1179,29 @@ export class PublicContentRepository {
         .where(
           and(
             eq(this.tables.storySpeakers.communityId, communityId),
-            eq(this.tables.speakers.communityId, communityId),
-            eq(this.tables.speakers.isActive, true),
+            publicSpeakerBaseCondition(this.tables.speakers, communityId),
             inArray(this.tables.storySpeakers.storyId, chunk)
           )
         )
-        .orderBy(asc(this.tables.speakers.id));
+        .orderBy(
+          asc(sql`COALESCE(${this.tables.storySpeakers.sortOrder}, 0)`),
+          asc(this.tables.storySpeakers.id)
+        );
 
+      // Preserve edge multiplicity and deterministic (sortOrder, id) order (SPEC-V2 §6.3).
       for (const row of rows) {
         const list = result.get(row.storyId) ?? [];
-        if (!list.some((existing) => existing.id === row.id)) {
-          list.push({
-            id: row.id,
-            communityId: row.communityId,
-            name: row.name,
-            birthDate: row.birthDate,
-            birthplaceId: row.birthplaceId,
-            affiliation: row.affiliation,
-            createdAt: row.createdAt,
-            updatedAt: row.updatedAt,
-          });
-          result.set(row.storyId, list);
-        }
+        list.push({
+          id: row.id,
+          communityId: row.communityId,
+          name: row.name,
+          birthDate: row.birthDate,
+          birthplaceId: row.birthplaceId,
+          affiliation: row.affiliation,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        });
+        result.set(row.storyId, list);
       }
     }
 
@@ -1289,8 +1234,7 @@ export class PublicContentRepository {
         .from(this.tables.places)
         .where(
           and(
-            eq(this.tables.places.communityId, communityId),
-            eq(this.tables.places.isRestricted, false),
+            publicPlaceBaseCondition(this.tables.places, communityId),
             inArray(this.tables.places.id, chunk)
           )
         );
@@ -1352,7 +1296,7 @@ export class PublicContentRepository {
     speakerIds: number[]
   ): Promise<Map<number, PublicSpeakerRecord>> {
     const result = new Map<number, PublicSpeakerRecord>();
-    if (speakerIds.length === 0) {
+    if (!PUBLIC_ASSOCIATED_MEDIA_ALLOWED || speakerIds.length === 0) {
       return result;
     }
 
@@ -1371,8 +1315,7 @@ export class PublicContentRepository {
         .from(this.tables.speakers)
         .where(
           and(
-            eq(this.tables.speakers.communityId, communityId),
-            eq(this.tables.speakers.isActive, true),
+            publicSpeakerBaseCondition(this.tables.speakers, communityId),
             inArray(this.tables.speakers.id, chunk)
           )
         );
@@ -1389,7 +1332,7 @@ export class PublicContentRepository {
     storyIds: number[]
   ): Promise<Map<number, PublicStoryAttachmentRecord[]>> {
     const result = new Map<number, PublicStoryAttachmentRecord[]>();
-    if (storyIds.length === 0) {
+    if (!PUBLIC_STORY_MEDIA_ALLOWED || storyIds.length === 0) {
       return result;
     }
 
@@ -1415,9 +1358,7 @@ export class PublicContentRepository {
             eq(this.tables.attachments.communityId, communityId),
             eq(this.tables.attachments.ownerType, 'story'),
             eq(this.tables.attachments.role, 'story_media'),
-            eq(this.tables.files.communityId, communityId),
-            eq(this.tables.files.isActive, true),
-            isNull(this.tables.files.culturalRestrictions),
+            activeUnrestrictedFileCondition(this.tables.files, communityId),
             inArray(this.tables.attachments.ownerId, chunk)
           )
         )
@@ -1495,7 +1436,7 @@ export class PublicContentRepository {
   }> {
     const photosByPlaceId = new Map<number, string[]>();
     const placenameAudioByPlaceId = new Map<number, string>();
-    if (placeIds.length === 0) {
+    if (!PUBLIC_ASSOCIATED_MEDIA_ALLOWED || placeIds.length === 0) {
       return { photosByPlaceId, placenameAudioByPlaceId };
     }
 
@@ -1520,9 +1461,7 @@ export class PublicContentRepository {
               'place_photo',
               'place_name_audio',
             ]),
-            eq(this.tables.files.communityId, communityId),
-            eq(this.tables.files.isActive, true),
-            isNull(this.tables.files.culturalRestrictions),
+            activeUnrestrictedFileCondition(this.tables.files, communityId),
             inArray(this.tables.attachments.ownerId, chunk)
           )
         )
@@ -1554,7 +1493,7 @@ export class PublicContentRepository {
     speakerIds: number[]
   ): Promise<Map<number, string>> {
     const result = new Map<number, string>();
-    if (speakerIds.length === 0) {
+    if (!PUBLIC_ASSOCIATED_MEDIA_ALLOWED || speakerIds.length === 0) {
       return result;
     }
 
@@ -1574,9 +1513,7 @@ export class PublicContentRepository {
             eq(this.tables.attachments.communityId, communityId),
             eq(this.tables.attachments.ownerType, 'speaker'),
             eq(this.tables.attachments.role, 'speaker_photo'),
-            eq(this.tables.files.communityId, communityId),
-            eq(this.tables.files.isActive, true),
-            isNull(this.tables.files.culturalRestrictions),
+            activeUnrestrictedFileCondition(this.tables.files, communityId),
             inArray(this.tables.attachments.ownerId, chunk)
           )
         )

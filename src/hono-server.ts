@@ -7,6 +7,7 @@ import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
 import { scheduleOrphanSweep } from './services/orphan-sweep-scheduler.js';
+import { envFlagEnabled } from './services/hono-foundation.service.js';
 import {
   validateNodeV2Runtime,
   v2RuntimeModeNotice,

@@ -78,6 +78,13 @@
       "when": 1795003200000,
       "tag": "0010_canonical_media_and_map_configs",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1795089600000,
+      "tag": "0011_files_storage_key_path_indexes",
+      "breakpoints": true
     }
   ]
 }

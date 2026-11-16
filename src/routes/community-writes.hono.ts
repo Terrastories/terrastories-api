@@ -2,6 +2,7 @@ import type { Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { FoundationUser } from '../repositories/hono-foundation.repository.js';
 import type { CommunityReadsRepository } from '../repositories/community-reads.repository.js';
+import type { MediaCleanupCoordinator } from '../services/media-cleanup.service.js';
 import type { CommunityWritesRepository } from '../repositories/community-writes.repository.js';
 import { CommunityReadsService } from '../services/community-reads.service.js';
 import {
@@ -14,6 +15,7 @@ export interface CommunityWriteRoutesOptions {
   repository: CommunityWritesRepository;
   readsRepository: CommunityReadsRepository;
   publicOrigin?: string;
+  mediaCleanup?: MediaCleanupCoordinator;
 }
 
 const MAX_WRITE_JSON_BYTES = 256 * 1024; // Accommodates DESCRIPTION_MAX_RAW_LENGTH (80k UTF-16 chars)
@@ -68,7 +70,11 @@ export function registerCommunityWriteRoutes(
   options: CommunityWriteRoutesOptions
 ): void {
   const readsService = new CommunityReadsService(options.readsRepository);
-  const service = new CommunityWritesService(options.repository, readsService);
+  const service = new CommunityWritesService(
+    options.repository,
+    readsService,
+    options.mediaCleanup
+  );
   const originFor = (c: Context) =>
     options.publicOrigin ?? new URL(c.req.url).origin;
 

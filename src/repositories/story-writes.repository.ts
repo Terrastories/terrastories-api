@@ -8,6 +8,13 @@ import {
   type StoryVisibility,
 } from '../policy/canonical-state.js';
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
+import {
+  buildOwnerUnreferencedFilesDelete,
+  buildUnreferencedFilesDelete,
+  lockFileRowsForCleanup,
+  toFileByteCleanups,
+  type FileByteCleanup,
+} from '../services/media-cleanup.service.js';
 
 /**
  * Maximum IDs passed to a single SQLite/D1 `IN (...)` target validation query,
@@ -213,9 +220,10 @@ export class StoryWritesRepository {
     communityId: number,
     placeId: number,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: any = this.db
+    executor: any = this.db,
+    lockShare = false
   ): Promise<{ id: number } | null> {
-    const rows = await executor
+    const query = executor
       .select({ id: this.tables.places.id })
       .from(this.tables.places)
       .where(
@@ -226,6 +234,10 @@ export class StoryWritesRepository {
         )
       )
       .limit(1);
+    const rows =
+      lockShare && dialectOf(this.connection) === 'postgresql'
+        ? await query.for('share')
+        : await query;
     return rows[0] ?? null;
   }
 
@@ -233,9 +245,10 @@ export class StoryWritesRepository {
     communityId: number,
     speakerId: number,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: any = this.db
+    executor: any = this.db,
+    lockShare = false
   ): Promise<{ id: number } | null> {
-    const rows = await executor
+    const query = executor
       .select({ id: this.tables.speakers.id })
       .from(this.tables.speakers)
       .where(
@@ -245,6 +258,10 @@ export class StoryWritesRepository {
         )
       )
       .limit(1);
+    const rows =
+      lockShare && dialectOf(this.connection) === 'postgresql'
+        ? await query.for('share')
+        : await query;
     return rows[0] ?? null;
   }
 
@@ -252,12 +269,15 @@ export class StoryWritesRepository {
     communityId: number,
     placeIds: ReadonlyArray<number>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: any = this.db
+    executor: any = this.db,
+    lockShare = false
   ): Promise<Set<number>> {
     const uniqueIds = Array.from(new Set(placeIds));
     const found = new Set<number>();
+    const useLockShare =
+      lockShare && dialectOf(this.connection) === 'postgresql';
     for (const chunk of chunkArray(uniqueIds, D1_IN_CLAUSE_CHUNK_SIZE)) {
-      const rows = await executor
+      const query = executor
         .select({ id: this.tables.places.id })
         .from(this.tables.places)
         .where(
@@ -267,6 +287,7 @@ export class StoryWritesRepository {
             inArray(this.tables.places.id, chunk)
           )
         );
+      const rows = useLockShare ? await query.for('share') : await query;
       for (const row of rows as Array<{ id: number }>) {
         found.add(row.id);
       }
@@ -278,12 +299,15 @@ export class StoryWritesRepository {
     communityId: number,
     speakerIds: ReadonlyArray<number>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: any = this.db
+    executor: any = this.db,
+    lockShare = false
   ): Promise<Set<number>> {
     const uniqueIds = Array.from(new Set(speakerIds));
     const found = new Set<number>();
+    const useLockShare =
+      lockShare && dialectOf(this.connection) === 'postgresql';
     for (const chunk of chunkArray(uniqueIds, D1_IN_CLAUSE_CHUNK_SIZE)) {
-      const rows = await executor
+      const query = executor
         .select({ id: this.tables.speakers.id })
         .from(this.tables.speakers)
         .where(
@@ -292,6 +316,7 @@ export class StoryWritesRepository {
             inArray(this.tables.speakers.id, chunk)
           )
         );
+      const rows = useLockShare ? await query.for('share') : await query;
       for (const row of rows as Array<{ id: number }>) {
         found.add(row.id);
       }
@@ -387,14 +412,14 @@ export class StoryWritesRepository {
         ...this.buildD1EdgeInsertStatements(
           'places',
           communityId,
-          { slug },
+          { slug, createdBy: actorId, createdAtMs: nowMs },
           input.placeIds,
           nowMs
         ),
         ...this.buildD1EdgeInsertStatements(
           'speakers',
           communityId,
-          { slug },
+          { slug, createdBy: actorId, createdAtMs: nowMs },
           input.speakerIds,
           nowMs
         ),
@@ -423,7 +448,9 @@ export class StoryWritesRepository {
               .where(
                 and(
                   eq(this.tables.stories.communityId, communityId),
-                  eq(this.tables.stories.slug, slug)
+                  eq(this.tables.stories.slug, slug),
+                  eq(this.tables.stories.createdBy, actorId),
+                  eq(this.tables.stories.createdAt, now)
                 )
               )
           )
@@ -474,12 +501,14 @@ export class StoryWritesRepository {
         return true;
       }
 
+      const lockShare = dialectOf(this.connection) === 'postgresql';
       return (async () => {
         if (input.interviewLocationId !== null) {
           const place = await this.findCommunityUnrestrictedPlace(
             communityId,
             input.interviewLocationId,
-            tx
+            tx,
+            lockShare
           );
           if (!place) return false;
         }
@@ -487,7 +516,8 @@ export class StoryWritesRepository {
           const speaker = await this.findCommunitySpeaker(
             communityId,
             input.interviewerId,
-            tx
+            tx,
+            lockShare
           );
           if (!speaker) return false;
         }
@@ -505,7 +535,8 @@ export class StoryWritesRepository {
           const foundPlaces = await this.findExistingUnrestrictedPlaceIds(
             communityId,
             input.placeIds,
-            tx
+            tx,
+            true
           );
           if (input.placeIds.some((id) => !foundPlaces.has(id))) {
             return { status: 'invalid_reference' };
@@ -515,7 +546,8 @@ export class StoryWritesRepository {
           const foundSpeakers = await this.findExistingSpeakerIds(
             communityId,
             input.speakerIds,
-            tx
+            tx,
+            true
           );
           if (input.speakerIds.some((id) => !foundSpeakers.has(id))) {
             return { status: 'invalid_reference' };
@@ -900,7 +932,8 @@ export class StoryWritesRepository {
           const place = await this.findCommunityUnrestrictedPlace(
             communityId,
             input.interviewLocationId,
-            tx
+            tx,
+            true
           );
           if (!place) {
             return 'invalid_reference';
@@ -910,7 +943,8 @@ export class StoryWritesRepository {
           const speaker = await this.findCommunitySpeaker(
             communityId,
             input.interviewerId,
-            tx
+            tx,
+            true
           );
           if (!speaker) {
             return 'invalid_reference';
@@ -1014,40 +1048,92 @@ export class StoryWritesRepository {
     });
   }
 
-  async deleteStory(communityId: number, storyId: number): Promise<boolean> {
+  async deleteStory(
+    communityId: number,
+    storyId: number,
+    removedFiles?: FileByteCleanup[]
+  ): Promise<boolean> {
     const readableScope = this.readableStoryScope(communityId, storyId);
     const physicalScope = this.physicalStoryScope(communityId, storyId);
+
+    const collectFiles = (rows: unknown) => {
+      if (removedFiles) removedFiles.push(...toFileByteCleanups(rows as never));
+    };
+
+    // Candidates for byte cleanup are the attachments actually deleted in
+    // this transaction/batch (DELETE ... RETURNING file_id), so a relation
+    // inserted and cascaded away within this very operation is included.
 
     const buildDeleteAttachments = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       executor: any
     ) =>
-      executor.delete(this.tables.attachments).where(
-        and(
-          eq(this.tables.attachments.communityId, communityId),
-          eq(this.tables.attachments.ownerType, 'story'),
-          eq(this.tables.attachments.ownerId, storyId),
-          notExists(
-            executor
-              .select({ one: sql`1` })
-              .from(this.tables.stories)
-              .where(physicalScope)
+      executor
+        .delete(this.tables.attachments)
+        .where(
+          and(
+            eq(this.tables.attachments.communityId, communityId),
+            eq(this.tables.attachments.ownerType, 'story'),
+            eq(this.tables.attachments.ownerId, storyId),
+            notExists(
+              executor
+                .select({ one: sql`1` })
+                .from(this.tables.stories)
+                .where(physicalScope)
+            )
           )
         )
-      );
+        .returning({ fileId: this.tables.attachments.fileId });
+
+    // Candidates for byte cleanup are the attachments actually deleted in
+    // this transaction/batch (DELETE ... RETURNING file_id), so a relation
+    // inserted and cascaded away within this very operation is included.
+    // Row keys arrive drizzle-mapped in production drivers; the D1-like
+    // batch harness returns raw column names, so accept both spellings.
+    const fileIdsOf = (rows: unknown): string[] =>
+      (Array.isArray(rows)
+        ? (rows as Array<{
+            fileId?: string | null;
+            file_id?: string | null;
+          }>)
+        : []
+      )
+        .map((row) => row.fileId ?? row.file_id ?? null)
+        .filter((id): id is string => typeof id === 'string');
 
     if (this.hasD1Batch()) {
+      // One atomic batch for the relational delete *and* the files purge:
+      // owner row remove, attachments removed (cascade-safe guard), unreferenced
+      // files removed first from the still-present attachment rows. A crash
+      // between statements rolls back the whole batch, so a failure can never
+      // leave rows behind for the story, or bytes claimed with no relation:
+      // the storage objects stay listed by the orphan sweeper either way.
+      const ownerDeleteGuard = exists(
+        this.db
+          .select({ one: sql`1` })
+          .from(this.tables.stories)
+          .where(readableScope)
+      );
       const deleteStoryQuery = this.db
         .delete(this.tables.stories)
         .where(readableScope)
         .returning({ id: this.tables.stories.id });
       const deleteAttachmentsQuery = buildDeleteAttachments(this.db);
-
-      const [deletedRows] = await this.db.batch([
+      const [purgeRows, deletedRows] = await this.db.batch([
+        ...buildOwnerUnreferencedFilesDelete(
+          this.db,
+          this.connection,
+          { communityId, ownerType: 'story', ownerId: storyId },
+          ownerDeleteGuard
+        ),
         deleteStoryQuery,
         deleteAttachmentsQuery,
       ]);
-      return Array.isArray(deletedRows) && deletedRows.length > 0;
+      if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
+        return false;
+      }
+      collectFiles(Array.isArray(purgeRows) ? (purgeRows as never) : []);
+      return true;
     }
 
     if (dialectOf(this.connection) === 'postgresql') {
@@ -1059,7 +1145,23 @@ export class StoryWritesRepository {
         if (deleted.length === 0) {
           return false;
         }
-        await buildDeleteAttachments(tx);
+        const deletedAttachments = await buildDeleteAttachments(tx);
+        const fileIds = fileIdsOf(deletedAttachments);
+        // Lock the candidate rows before the guarded delete so an attach that
+        // is still uncommitted cannot have its relation cascaded away (see
+        // lockFileRowsForCleanup).
+        const lockedFileIds = await lockFileRowsForCleanup(
+          tx,
+          this.connection,
+          fileIds
+        );
+        collectFiles(
+          (
+            await Promise.all(
+              buildUnreferencedFilesDelete(tx, this.connection, lockedFileIds)
+            )
+          ).flat()
+        );
         return true;
       });
     }
@@ -1074,7 +1176,14 @@ export class StoryWritesRepository {
       if (deleted.length === 0) {
         return false;
       }
-      buildDeleteAttachments(tx).run();
+      const deletedAttachments = buildDeleteAttachments(tx).all();
+      const fileIds = fileIdsOf(deletedAttachments);
+      collectFiles(
+        buildUnreferencedFilesDelete(tx, this.connection, fileIds).flatMap(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (statement: any) => statement.returning().all()
+        )
+      );
       return true;
     });
   }
@@ -1082,7 +1191,9 @@ export class StoryWritesRepository {
   private buildD1EdgeInsertStatements(
     edgeKind: 'places' | 'speakers',
     communityId: number,
-    storyRef: { slug: string } | { storyId: number },
+    storyRef:
+      | { slug: string; createdBy: number; createdAtMs: number }
+      | { storyId: number },
     targetIds: ReadonlyArray<number>,
     nowMs: number
   ) {
@@ -1095,7 +1206,7 @@ export class StoryWritesRepository {
     }));
     const storyFilter =
       'slug' in storyRef
-        ? sql`s.community_id = ${communityId} AND s.slug = ${storyRef.slug} AND s.is_restricted = 0 AND s.privacy_level IN ('public', 'members_only', 'editors')`
+        ? sql`s.community_id = ${communityId} AND s.slug = ${storyRef.slug} AND s.created_by = ${storyRef.createdBy} AND s.created_at = ${storyRef.createdAtMs} AND s.is_restricted = 0 AND s.privacy_level IN ('public', 'members_only', 'editors')`
         : sql`s.id = ${storyRef.storyId} AND s.community_id = ${communityId} AND s.is_restricted = 0 AND s.privacy_level IN ('public', 'members_only', 'editors')`;
 
     return chunkArray(entries, D1_EDGE_INSERT_CHUNK_SIZE).map((chunk) => {
@@ -1203,9 +1314,15 @@ export class StoryWritesRepository {
               ? await this.findExistingUnrestrictedPlaceIds(
                   communityId,
                   targetIds,
-                  tx
+                  tx,
+                  true
                 )
-              : await this.findExistingSpeakerIds(communityId, targetIds, tx);
+              : await this.findExistingSpeakerIds(
+                  communityId,
+                  targetIds,
+                  tx,
+                  true
+                );
           if (targetIds.some((id) => !found.has(id))) {
             return 'invalid_reference';
           }

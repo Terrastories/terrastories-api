@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from 'node:assert/strict';
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { serve } from '@hono/node-server';
 import { EventEmitter, once } from 'node:events';
@@ -33,6 +33,28 @@ const failsClosed = async (response: Promise<Response>, detail: string) => {
   assert.equal(result.status, 503);
   assert.ok(!(await result.text()).includes(detail));
 };
+/** Fail fast instead of hanging a CI gate forever if the app stalls. */
+const withDeadline = <T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} exceeded ${ms}ms deadline`)),
+      ms
+    );
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 export async function runHonoFoundationContract(
   database: Database
 ): Promise<void> {
@@ -54,6 +76,9 @@ export async function runHonoFoundationContract(
   let instant = new Date('2026-11-11T12:00:00Z');
   let reads = 0;
   const repository = new HonoFoundationRepository(database);
+  // Content-free record of every storage delete the media cleanup performs, so
+  // the inline-delete race below can assert that live bytes survive.
+  const deletedStorageKeys: string[] = [];
   const options = {
     repository,
     verifier: nodePasswordVerifier,
@@ -64,6 +89,9 @@ export async function runHonoFoundationContract(
         reads++;
         const body = new Uint8Array([1, 2, 3]);
         return { body, size: body.byteLength };
+      },
+      delete: async (key: string) => {
+        deletedStorageKeys.push(key);
       },
     },
   };
@@ -131,6 +159,7 @@ export async function runHonoFoundationContract(
     const viewerEmail = `viewer-${tag}@example.test`;
     const credentials = { email: viewerEmail, password };
     const adminEmail = `admin-${tag}@example.test`;
+    const editorEmail = `editor-${tag}@example.test`;
     const systemEmail = `system-${tag}@example.test`;
     const duplicateEmail = `duplicate-${tag}@example.test`;
     const userDefaults = {
@@ -141,6 +170,7 @@ export async function runHonoFoundationContract(
     for (const [email, role, communityId] of [
       [viewerEmail, 'viewer', communityA],
       [adminEmail, 'admin', communityA],
+      [editorEmail, 'editor', communityA],
       [systemEmail, 'super_admin', communityA],
       [duplicateEmail, 'viewer', communityA],
       [duplicateEmail, 'viewer', communityB],
@@ -882,7 +912,12 @@ export async function runHonoFoundationContract(
     const communityAudits = await db
       .select()
       .from(tables.auditEntries)
-      .where(eq(tables.auditEntries.communityId, communityA))
+      .where(
+        and(
+          eq(tables.auditEntries.communityId, communityA),
+          eq(tables.auditEntries.resourceType, 'community')
+        )
+      )
       .orderBy(asc(tables.auditEntries.id));
     assert.deepEqual(
       communityAudits.map((row: any) => row.action),
@@ -941,7 +976,12 @@ export async function runHonoFoundationContract(
       const auditsAfterLock = await db
         .select()
         .from(tables.auditEntries)
-        .where(eq(tables.auditEntries.communityId, communityA))
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            eq(tables.auditEntries.resourceType, 'community')
+          )
+        )
         .orderBy(asc(tables.auditEntries.id));
       assert.equal(
         auditsAfterLock.length,
@@ -959,7 +999,12 @@ export async function runHonoFoundationContract(
       const auditsAfterBurst = await db
         .select()
         .from(tables.auditEntries)
-        .where(eq(tables.auditEntries.communityId, communityA))
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            eq(tables.auditEntries.resourceType, 'community')
+          )
+        )
         .orderBy(asc(tables.auditEntries.id));
       assert.deepEqual(
         auditsAfterBurst.map((row: any) => row.action),
@@ -984,7 +1029,7 @@ export async function runHonoFoundationContract(
           title: 'PG Race Story',
           slug: `pg-race-${tag}`,
           language: 'en',
-          privacyLevel: 'editors_only',
+          privacyLevel: 'editors',
           isRestricted: false,
         })
         .returning();
@@ -1050,6 +1095,662 @@ export async function runHonoFoundationContract(
         ).length,
         1
       );
+
+      // PostgreSQL SELECT ... FOR UPDATE race (PR #246): concurrent story
+      // visibility toggle waiting behind an uncommitted visibility change must
+      // observe the committed visibility and emit zero duplicate audit entries.
+      const patchRaceStory = (body: unknown) =>
+        send(app, `/v2/stories/${raceStory.id}`, {
+          method: 'PATCH',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify(body),
+        });
+      let storyToggleDone = false;
+      let pendingStoryToggle!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.stories)
+          .set({ privacyLevel: 'public' })
+          .where(eq(tables.stories.id, raceStory.id));
+        pendingStoryToggle = patchRaceStory({ visibility: 'public' });
+        void pendingStoryToggle.finally(() => {
+          storyToggleDone = true;
+        });
+        const deadline = Date.now() + 2000;
+        while (!storyToggleDone && Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      });
+      assert.equal((await pendingStoryToggle).status, 200);
+      const storyAuditsAfterLock = await db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            eq(tables.auditEntries.resourceType, 'story')
+          )
+        )
+        .orderBy(asc(tables.auditEntries.id));
+      assert.equal(
+        storyAuditsAfterLock.length,
+        0,
+        'concurrent public story toggle blocked behind committed public transition must not emit duplicate audit'
+      );
+
+      const [st1, st2] = await Promise.all([
+        patchRaceStory({ visibility: 'community' }),
+        patchRaceStory({ visibility: 'community' }),
+      ]);
+      assert.equal(st1.status, 200);
+      assert.equal(st2.status, 200);
+      const storyAuditsAfterBurst = await db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            eq(tables.auditEntries.resourceType, 'story')
+          )
+        )
+        .orderBy(asc(tables.auditEntries.id));
+      assert.deepEqual(
+        storyAuditsAfterBurst.map((row: any) => row.action),
+        ['story.visibility.community']
+      );
+
+      // PostgreSQL FOR SHARE target lock race (PR #246): concurrent story
+      // creation referencing a place that is being restricted in another
+      // transaction must wait and fail closed with 400 invalid_reference.
+      const [restrictRacePlace] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'PG Lock Share Place' })
+        .returning();
+      let createStoryDone = false;
+      let pendingStoryCreate!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.places)
+          .set({ isRestricted: true })
+          .where(eq(tables.places.id, restrictRacePlace.id));
+        pendingStoryCreate = send(app, '/v2/stories', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify({
+            title: 'Blocked Target Story',
+            placeIds: [restrictRacePlace.id],
+          }),
+        });
+        void pendingStoryCreate.finally(() => {
+          createStoryDone = true;
+        });
+        const deadline = Date.now() + 2000;
+        while (!createStoryDone && Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      });
+      assert.equal(
+        (await pendingStoryCreate).status,
+        400,
+        'POST /v2/stories waiting behind FOR SHARE on a newly restricted place must reject with 400'
+      );
+
+      // PostgreSQL inline unreferenced-file delete vs concurrent attach (#140):
+      // an attach that commits after the detach began must keep the files row
+      // and its bytes; the detach may never cascade the new relation away.
+      // The delete path takes FOR UPDATE on the candidate files row before
+      // its guarded DELETE, which conflicts with the FOR KEY SHARE the attach
+      // takes, so the two serialize.
+      const waitForLockWaiter = async (tx: any, waitMs = 3000) => {
+        const deadline = Date.now() + waitMs;
+        while (Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pid <> pg_backend_pid() and wait_event_type = 'Lock' limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) return;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      };
+      const [raceFile] = await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, fileIds[2]));
+      const raceFileKey = String(raceFile.storageKey ?? raceFile.path);
+      const [detachOwner] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'PG File Detach Place' })
+        .returning();
+      const [attachOwner] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'PG File Attach Place' })
+        .returning();
+      const [detachAttachment] = await db
+        .insert(tables.attachments)
+        .values({
+          communityId: communityA,
+          fileId: fileIds[2],
+          ownerType: 'place',
+          ownerId: detachOwner.id,
+          role: 'place_photo',
+          ordinal: 0,
+          createdAt: instant,
+        })
+        .returning();
+
+      let fileDetachDone = false;
+      let pendingFileDetach!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        // Session B: an attach that has inserted its relation but not
+        // committed, exactly as POST /v2/attachments leaves the row before
+        // COMMIT.
+        await tx.insert(tables.attachments).values({
+          communityId: communityA,
+          fileId: fileIds[2],
+          ownerType: 'place',
+          ownerId: attachOwner.id,
+          role: 'place_photo',
+          ordinal: 0,
+          createdAt: instant,
+        });
+        pendingFileDetach = send(
+          app,
+          `/v2/attachments/${detachAttachment.id}`,
+          {
+            method: 'DELETE',
+            headers: { cookie: slice7AdminCookie },
+          }
+        );
+        void pendingFileDetach.finally(() => {
+          fileDetachDone = true;
+        });
+        await waitForLockWaiter(tx);
+      });
+      assert.equal(
+        fileDetachDone,
+        false,
+        'DELETE /v2/attachments must still be waiting while the racing attach holds its row lock'
+      );
+      assert.equal(
+        (await pendingFileDetach).status,
+        204,
+        'DELETE /v2/attachments must complete once the racing attach commits'
+      );
+      assert.equal(
+        (
+          await db
+            .select({ id: tables.files.id })
+            .from(tables.files)
+            .where(eq(tables.files.id, fileIds[2]))
+        ).length,
+        1,
+        'the files row must survive because the racing attach committed first'
+      );
+      const survivingAttachments = await db
+        .select()
+        .from(tables.attachments)
+        .where(eq(tables.attachments.fileId, fileIds[2]));
+      assert.equal(
+        survivingAttachments.length,
+        1,
+        'exactly the racing attach may remain; the detach may not cascade it'
+      );
+      assert.equal(survivingAttachments[0].ownerId, attachOwner.id);
+      assert.ok(
+        !deletedStorageKeys.includes(raceFileKey),
+        'the bytes of a still-referenced file must never be deleted'
+      );
+
+      // Mirror order: an uncommitted file delete must make POST
+      // /v2/attachments fail closed instead of inserting a relation that the
+      // delete then cascades away.
+      const vanishFileId = crypto.randomUUID();
+      await db.insert(tables.files).values({
+        id: vanishFileId,
+        filename: 'vanish.png',
+        originalName: 'vanish.png',
+        path: `communities/${communityA}/${vanishFileId}`,
+        url: `https://ignored.invalid/${vanishFileId}`,
+        mimeType: 'image/png',
+        size: 3,
+        communityId: communityA,
+        uploadedBy: null,
+        createdAt: instant,
+        updatedAt: instant,
+      });
+      fileIds.push(vanishFileId);
+      const [attachOwnerAlone] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'PG File Vanish Place' })
+        .returning();
+      let attachDone = false;
+      let pendingAttach!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx.delete(tables.files).where(eq(tables.files.id, vanishFileId));
+        pendingAttach = send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify({
+            fileId: vanishFileId,
+            ownerType: 'place',
+            ownerId: attachOwnerAlone.id,
+            role: 'place_photo',
+          }),
+        });
+        void pendingAttach.finally(() => {
+          attachDone = true;
+        });
+        await waitForLockWaiter(tx);
+      });
+      assert.equal(
+        attachDone,
+        false,
+        'POST /v2/attachments must still be waiting behind the uncommitted file delete'
+      );
+      assert.equal(
+        (await pendingAttach).status,
+        404,
+        'POST /v2/attachments must fail closed with 404 once the file row is gone'
+      );
+      assert.equal(
+        (
+          await db
+            .select()
+            .from(tables.attachments)
+            .where(eq(tables.attachments.fileId, vanishFileId))
+        ).length,
+        0,
+        'a 404 attach must leave no relation behind'
+      );
+
+      // Cross-attach deadlock (#140): two attachments of the same file to
+      // each other's owner must pass through the canonical-ordered owner
+      // locks in an identical order, so neither can hold one owner while
+      // waiting on the other's — the previous target-then-source ordering
+      // could deadlock the pair (40P01 -> 500).
+      const [crossStory] = await db
+        .insert(tables.stories)
+        .values({
+          communityId: communityA,
+          title: 'Cross Attach Story',
+          slug: `cross-attach-story-${tag}`,
+          language: 'en',
+          privacyLevel: 'editors',
+          isRestricted: false,
+        })
+        .returning();
+      const [crossPlace] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'Cross Attach Place' })
+        .returning();
+      await db.insert(tables.attachments).values([
+        {
+          communityId: communityA,
+          fileId: fileIds[0],
+          ownerType: 'story',
+          ownerId: crossStory.id,
+          role: 'story_media',
+          ordinal: 0,
+          createdAt: instant,
+        },
+        {
+          communityId: communityA,
+          fileId: fileIds[0],
+          ownerType: 'place',
+          ownerId: crossPlace.id,
+          role: 'place_photo',
+          ordinal: 0,
+          createdAt: instant,
+        },
+      ]);
+      const crossAttach = (
+        ownerType: 'story' | 'place',
+        ownerId: number,
+        role: 'story_media' | 'place_photo'
+      ) =>
+        send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify({
+            fileId: fileIds[0],
+            ownerType,
+            ownerId,
+            role,
+          }),
+        });
+      // Fire both sides of the triangle at once: under the canonical owner
+      // order the loser waits for the winner and then completes. Bounded by
+      // a deadline so a regression fails fast instead of hanging the gate.
+      const [placeSide, storySide] = await Promise.all([
+        withDeadline(
+          crossAttach('place', crossPlace.id, 'place_photo'),
+          10_000,
+          'cross-attach place-target'
+        ),
+        withDeadline(
+          crossAttach('story', crossStory.id, 'story_media'),
+          10_000,
+          'cross-attach story-target'
+        ),
+      ]);
+      for (const [label, response] of [
+        ['place-target', placeSide],
+        ['story-target', storySide],
+      ] as const) {
+        assert.equal(
+          response.status,
+          201,
+          `cross-attach ${label} must succeed (${await response.text()})`
+        );
+      }
+
+      // Interposed relation between the pre-lock read and the files lock
+      // (#140): an attach blocked on the files FOR UPDATE but already
+      // holding its owner locks must not acquire an owner lock after the
+      // file lock when its post-lock re-check sees a relation commit in
+      // between. Taking that lock after files could deadlock against a
+      // concurrent attach that holds the new owner and waits on the file
+      // (40P01 -> 500).
+      const interposedFileId = crypto.randomUUID();
+      await db.insert(tables.files).values({
+        id: interposedFileId,
+        filename: 'interposed.png',
+        originalName: 'interposed.png',
+        path: `communities/${communityA}/${interposedFileId}`,
+        url: `https://ignored.invalid/${interposedFileId}`,
+        mimeType: 'image/png',
+        size: 3,
+        communityId: communityA,
+        uploadedBy: null,
+        createdAt: instant,
+        updatedAt: instant,
+      });
+      fileIds.push(interposedFileId);
+      const [interposedExistingStory] = await db
+        .insert(tables.stories)
+        .values({
+          communityId: communityA,
+          title: 'Interposed Existing Story',
+          slug: `interposed-existing-${tag}`,
+          language: 'en',
+          privacyLevel: 'editors',
+          isRestricted: false,
+          createdAt: instant,
+          updatedAt: instant,
+        })
+        .returning();
+      const [interposedNewStory] = await db
+        .insert(tables.stories)
+        .values({
+          communityId: communityA,
+          title: 'Interposed New Story',
+          slug: `interposed-new-${tag}`,
+          language: 'en',
+          privacyLevel: 'editors',
+          isRestricted: false,
+          createdAt: instant,
+          updatedAt: instant,
+        })
+        .returning();
+      const [interposedPlace] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'Interposed Place' })
+        .returning();
+      await db.insert(tables.attachments).values({
+        communityId: communityA,
+        fileId: interposedFileId,
+        ownerType: 'story',
+        ownerId: interposedExistingStory.id,
+        role: 'story_media',
+        ordinal: 0,
+        createdAt: instant,
+      });
+      const interposedAttach = (
+        ownerType: 'story' | 'place',
+        ownerId: number,
+        role: 'story_media' | 'place_photo'
+      ) =>
+        send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify({
+            fileId: interposedFileId,
+            ownerType,
+            ownerId,
+            role,
+          }),
+        });
+      let pendingPlace!: Promise<Response>;
+      let pendingStory!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        // Take the files row first: the place-target attach runs inside it,
+        // reads the pre-seeded relation, takes owner locks, and then blocks
+        // on the files lock — exactly the window where a relation may be
+        // committed before its post-lock re-check.
+        await tx
+          .select({ id: tables.files.id })
+          .from(tables.files)
+          .where(eq(tables.files.id, interposedFileId))
+          .for('update');
+        pendingPlace = interposedAttach(
+          'place',
+          interposedPlace.id,
+          'place_photo'
+        );
+        void pendingPlace.finally(() => {});
+        await waitForLockWaiter(tx);
+        // Interpose the new relation (committed only when this tx ends), and
+        // race a story-target attach on the same file that holds that new
+        // owner FOR UPDATE and waits on the files lock as well.
+        await tx.insert(tables.attachments).values({
+          communityId: communityA,
+          fileId: interposedFileId,
+          ownerType: 'story',
+          ownerId: interposedNewStory.id,
+          role: 'story_media',
+          ordinal: 0,
+          createdAt: instant,
+        });
+        pendingStory = interposedAttach(
+          'story',
+          interposedNewStory.id,
+          'story_media'
+        );
+        void pendingStory.finally(() => {});
+        await waitForLockWaiter(tx);
+      });
+      const [interposedPlaceRes, interposedStoryRes] = await Promise.all([
+        withDeadline(pendingPlace, 10_000, 'interposed place-target attach'),
+        withDeadline(pendingStory, 10_000, 'interposed story-target attach'),
+      ]);
+      for (const [label, response] of [
+        ['place-target', interposedPlaceRes],
+        ['story-target', interposedStoryRes],
+      ] as const) {
+        assert.ok(
+          [201, 404].includes(response.status),
+          `interposed ${label} attach must settle with 201 or 404, never 5xx (got ${
+            response.status
+          }: ${await response.text()})`
+        );
+      }
+
+      // Deactivated community (#140): an existing-relation owner that
+      // sorts before the target (place < story) must not collapse a
+      // forbidden verdict into 404 — PG must answer 403 exactly as
+      // D1/SQLite (and the target-first pre-fix order) do. Sessions
+      // are revoked on disable, so log in fresh while disabled to reach
+      // the repository.
+      try {
+        await updateCommunity(communityA, { isActive: false });
+        const disabledAdminCookie = await login(adminEmail);
+        const inactiveAttach = await send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: disabledAdminCookie,
+          },
+          body: JSON.stringify({
+            fileId: fileIds[0],
+            ownerType: 'story',
+            ownerId: crossStory.id,
+            role: 'story_media',
+          }),
+        });
+        assert.equal(
+          inactiveAttach.status,
+          403,
+          `a deactivated community must answer 403, uniformly with D1/SQLite (${await inactiveAttach.text()})`
+        );
+      } finally {
+        await updateCommunity(communityA, { isActive: true });
+      }
+
+      // Non-target owner without authority over it (#140): a file already
+      // attached as community branding or as another user's user_photo may
+      // not be reused by an editor onto a story they can edit — the
+      // non-target owner is not theirs to authorize, and 403 would disclose
+      // the protected relation. D1/SQLite answers 404, so PG must as well.
+      const editorCookie = await login(editorEmail);
+      // The disabled-community case above revoked every community session, so
+      // the admin signs in again before adopting the staging files.
+      const reuseAdminCookie = await login(adminEmail);
+      const nonTargetFiles = [crypto.randomUUID(), crypto.randomUUID()];
+      for (const id of nonTargetFiles) fileIds.push(id);
+      await db.insert(tables.files).values([
+        {
+          id: nonTargetFiles[0],
+          filename: 'branding-reuse.png',
+          originalName: 'branding-reuse.png',
+          path: `communities/${communityA}/${nonTargetFiles[0]}`,
+          url: `https://ignored.invalid/${nonTargetFiles[0]}`,
+          mimeType: 'image/png',
+          size: 3,
+          communityId: communityA,
+          uploadedBy: adminId,
+          createdAt: instant,
+          updatedAt: instant,
+        },
+        {
+          id: nonTargetFiles[1],
+          filename: 'user-photo-reuse.png',
+          originalName: 'user-photo-reuse.png',
+          path: `communities/${communityA}/${nonTargetFiles[1]}`,
+          url: `https://ignored.invalid/${nonTargetFiles[1]}`,
+          mimeType: 'image/png',
+          size: 3,
+          communityId: communityA,
+          uploadedBy: adminId,
+          createdAt: instant,
+          updatedAt: instant,
+        },
+      ]);
+      const brandingAttach = await send(app, '/v2/attachments', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: reuseAdminCookie,
+        },
+        body: JSON.stringify({
+          fileId: nonTargetFiles[0],
+          ownerType: 'community',
+          ownerId: communityA,
+          role: 'community_display_image',
+        }),
+      });
+      assert.equal(
+        brandingAttach.status,
+        201,
+        `the admin must be able to adopt the staging file as community branding (${await brandingAttach.text()})`
+      );
+      const userPhotoAttach = await send(app, '/v2/attachments', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: reuseAdminCookie,
+        },
+        body: JSON.stringify({
+          fileId: nonTargetFiles[1],
+          ownerType: 'user',
+          ownerId: viewerId,
+          role: 'user_photo',
+        }),
+      });
+      assert.equal(
+        userPhotoAttach.status,
+        201,
+        `the admin must be able to adopt the staging file as a user's user_photo (${await userPhotoAttach.text()})`
+      );
+      for (const [label, fileId] of [
+        ['community-branding', nonTargetFiles[0]],
+        ['user user_photo', nonTargetFiles[1]],
+      ] as const) {
+        const reuse = await send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: editorCookie,
+          },
+          body: JSON.stringify({
+            fileId,
+            ownerType: 'story',
+            ownerId: crossStory.id,
+            role: 'story_media',
+          }),
+        });
+        assert.equal(
+          reuse.status,
+          404,
+          `an editor reusing a ${label}-attached file onto a story they can edit must answer 404 (a 403 would disclose the protected relation), uniformly with D1/SQLite (${await reuse.text()})`
+        );
+      }
+      // The target owner's verdict decides first on every dialect: a viewer
+      // has no story authority, so the attach answers 403 even though the
+      // file's non-target branding owner sorts before the story (#140).
+      const viewerCookie = await login(viewerEmail);
+      const viewerReuse = await send(app, '/v2/attachments', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: viewerCookie,
+        },
+        body: JSON.stringify({
+          fileId: nonTargetFiles[0],
+          ownerType: 'story',
+          ownerId: crossStory.id,
+          role: 'story_media',
+        }),
+      });
+      assert.equal(
+        viewerReuse.status,
+        403,
+        `a viewer attaching onto a story answers the target verdict 403 on PG as on D1/SQLite (${await viewerReuse.text()})`
+      );
     }
   } finally {
     for (const id of communityIds) {
@@ -1070,6 +1771,9 @@ export async function runHonoFoundationContract(
       await db.delete(tables.files).where(eq(tables.files.id, id));
     }
     for (const id of userIds) {
+      await db
+        .delete(tables.auditEntries)
+        .where(eq(tables.auditEntries.actorId, id));
       await db.delete(sessions).where(eq(sessions.userId, id));
       await db.delete(tables.users).where(eq(tables.users.id, id));
     }

@@ -202,6 +202,36 @@ export async function runJourneys(options: {
             if (!outgoingCookie) throw new Error('No session cookie to save');
             savedCookies[step.saveCookieAs] = outgoingCookie;
           }
+          // Captured ids may be referenced in JSON bodies as `{name}` (a
+          // whole-string placeholder keeps its original value type so numeric
+          // id schemas accept it).
+          const substituteIds = (value: unknown): unknown => {
+            if (typeof value === 'string') {
+              const exact = /^\{(\w+)\}$/.exec(value);
+              if (exact) {
+                const captured = ids[exact[1]!];
+                if (!captured)
+                  throw new Error(`Missing captured id: ${exact[1]}`);
+                return captured;
+              }
+              return value.replace(/\{(\w+)\}/g, (_, name: string) => {
+                const captured = ids[name];
+                if (!captured) throw new Error(`Missing captured id: ${name}`);
+                return String(captured);
+              });
+            }
+            if (Array.isArray(value)) return value.map(substituteIds);
+            if (value && typeof value === 'object') {
+              return Object.fromEntries(
+                Object.entries(value).map(([key, entry]) => [
+                  key,
+                  substituteIds(entry),
+                ])
+              );
+            }
+            return value;
+          };
+          const body = substituteIds(step.body);
           if (step.body !== undefined)
             headers.set('content-type', 'application/json');
           stage = 'Sending request';
@@ -214,9 +244,7 @@ export async function runJourneys(options: {
                 (step.rawBody instanceof Uint8Array
                   ? Uint8Array.from(step.rawBody).buffer
                   : step.rawBody) ??
-                (step.body === undefined
-                  ? undefined
-                  : JSON.stringify(step.body)),
+                (body === undefined ? undefined : JSON.stringify(body)),
             })
           );
           if (controller.signal.aborted) {

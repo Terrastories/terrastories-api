@@ -45,11 +45,16 @@ import {
   deriveTopicColumns,
 } from '../shared/utils/derived-columns.js';
 import { InvalidDescriptionError } from '../shared/utils/safe-description.js';
+import {
+  type FileByteCleanup,
+  type MediaCleanupCoordinator,
+} from './media-cleanup.service.js';
 
 export class StoryWritesService {
   constructor(
     private readonly repository: StoryWritesRepository,
-    private readonly readsService: CommunityReadsService
+    private readonly readsService: CommunityReadsService,
+    private readonly cleanup?: MediaCleanupCoordinator
   ) {}
 
   async createStory(
@@ -420,13 +425,22 @@ export class StoryWritesService {
     }
     const storyId = Number(rawStoryId);
 
+    const removedFiles: FileByteCleanup[] = [];
+
     try {
       const deleted = await this.repository.deleteStory(
         caller.communityId,
-        storyId
+        storyId,
+        removedFiles
       );
       if (!deleted) {
         return { status: 404, body: NOT_FOUND_BODY };
+      }
+      if (this.cleanup && removedFiles.length > 0) {
+        // The files rows for now-unreferenced attachments were removed in the
+        // same transaction; drop their bytes best-effort. Any leftover is
+        // removed by the restart-safe orphan sweeper.
+        await this.cleanup.deleteFilesBestEffort(removedFiles);
       }
       return { status: 204 };
     } catch {

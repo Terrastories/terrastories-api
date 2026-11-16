@@ -1,5 +1,6 @@
 import type { Context, Hono } from 'hono';
 import type { CommunityReadsRepository } from '../repositories/community-reads.repository.js';
+import type { MediaCleanupCoordinator } from '../services/media-cleanup.service.js';
 import type { StoryWritesRepository } from '../repositories/story-writes.repository.js';
 import { CommunityReadsService } from '../services/community-reads.service.js';
 import { StoryWritesService } from '../services/story-writes.service.js';
@@ -14,6 +15,7 @@ export interface StoryWriteRoutesOptions {
   repository: StoryWritesRepository;
   readsRepository: CommunityReadsRepository;
   publicOrigin?: string;
+  mediaCleanup?: MediaCleanupCoordinator;
 }
 
 const respond = respondWriteResult;
@@ -24,7 +26,11 @@ export function registerStoryWriteRoutes(
   options: StoryWriteRoutesOptions
 ): void {
   const readsService = new CommunityReadsService(options.readsRepository);
-  const service = new StoryWritesService(options.repository, readsService);
+  const service = new StoryWritesService(
+    options.repository,
+    readsService,
+    options.mediaCleanup
+  );
   const originFor = (c: Context) =>
     options.publicOrigin ?? new URL(c.req.url).origin;
 

@@ -863,6 +863,21 @@ describe('Slice 8 story CRUD routes', () => {
         )
     ).toEqual([]);
 
+    // The files row whose only reference was the deleted attachment is gone.
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, fileIds.ownStoryFile))
+    ).toHaveLength(0);
+    // A still-referenced files row (the restricted story's file) is kept.
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, fileIds.restrictedStoryFile))
+    ).toHaveLength(1);
+
     // Referenced places & speakers still exist
     expect(
       await db
@@ -1489,6 +1504,8 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
       ) => Promise<unknown[]>;
     };
     let beforeNextBatch: (() => void) | null = null;
+    const recordedBatches: Array<Array<{ sql: string; params: unknown[] }>> =
+      [];
     d1Like.batch = async (stmts) => {
       if (beforeNextBatch) {
         const hook = beforeNextBatch;
@@ -1496,6 +1513,7 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
         hook();
       }
       const queries = stmts.map((s) => s.toSQL());
+      recordedBatches.push(queries);
       return batchSqlite.transaction(() =>
         queries.map(({ sql: querySql, params }) => {
           const stmt = batchSqlite.prepare(querySql);
@@ -1529,6 +1547,15 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
       );
       expect(ok.status).toBe('created');
       if (ok.status !== 'created') return;
+      const createQueries = recordedBatches[0]!;
+      expect(createQueries[1]!.sql).toContain('s.created_by =');
+      expect(createQueries[1]!.sql).toContain('s.created_at =');
+      expect(createQueries[1]!.params).toContain(actor!.id);
+      expect(createQueries[1]!.params).toContain(T0.getTime());
+      expect(createQueries[2]!.sql).toContain('"created_by" =');
+      expect(createQueries[2]!.sql).toContain('"created_at" =');
+      expect(createQueries[2]!.params).toContain(actor!.id);
+      expect(createQueries[2]!.params).toContain(T0.getTime());
 
       expect(await batchDb.select().from(batchTables.storyPlaces)).toHaveLength(
         2
@@ -1692,6 +1719,290 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
       expect(await batchDb.select().from(batchTables.stories)).toHaveLength(1);
     } finally {
       batchSqlite.close();
+    }
+  });
+});
+
+describe('Slice 9 D1 owner-delete files purge (#140)', () => {
+  async function seedDeleteFixture(
+    purgeDb: ReturnType<typeof drizzle>,
+    t: ReturnType<typeof tablesFor>,
+    slug: string
+  ) {
+    const now = T0;
+    const [comm] = await purgeDb
+      .insert(t.communities)
+      .values({
+        name: 'Purge Nation',
+        slug: `purge-${slug}`,
+        publicStories: true,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const passwordHash = await hash(TEST_PASS, 4);
+    const email = `purge-editor-${slug}@example.test`;
+    const username = email;
+    const [actor] = await purgeDb
+      .insert(t.users)
+      .values({
+        email,
+        username,
+        ...deriveUserIdentityColumns({ email, username }),
+        passwordHash,
+        firstName: 'Purge',
+        lastName: 'Editor',
+        role: 'editor',
+        communityId: comm!.id,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const makeFile = async (name: string, storageKey: string) => {
+      const fileId = crypto.randomUUID();
+      await purgeDb.insert(t.files).values({
+        id: fileId,
+        filename: fileId,
+        originalName: name,
+        path: storageKey,
+        storageKey,
+        url: `https://storage.invalid/${name}`,
+        mimeType: 'image/png',
+        size: 1,
+        byteSize: 1,
+        communityId: comm!.id,
+        uploadedBy: actor!.id,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return fileId;
+    };
+    const makeStory = async (name: string) => {
+      const [story] = await purgeDb
+        .insert(t.stories)
+        .values({
+          communityId: comm!.id,
+          title: `Purge Story ${name}`,
+          slug: `purge-story-${name}-${crypto.randomUUID().slice(0, 8)}`,
+          language: 'en',
+          privacyLevel: 'public',
+          isRestricted: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      return story!.id;
+    };
+    const makeAttachment = async (
+      storyId: number,
+      fileId: string,
+      ordinal = 0
+    ) => {
+      const [att] = await purgeDb
+        .insert(t.attachments)
+        .values({
+          communityId: comm!.id,
+          ownerType: 'story',
+          ownerId: storyId,
+          fileId,
+          role: 'story_media',
+          ordinal,
+          createdAt: now,
+        })
+        .returning();
+      return att!.id;
+    };
+    return { comm, actor, email, makeFile, makeStory, makeAttachment };
+  }
+
+  function d1LikeWith(
+    purgeSqlite: Sqlite.Database,
+    purgeDb: ReturnType<typeof drizzle>,
+    recorded?: Array<Array<{ sql: string; params: unknown[] }>>,
+    failFilesDelete = false
+  ): typeof purgeDb & {
+    batch: (
+      stmts: Array<{ toSQL: () => { sql: string; params: unknown[] } }>
+    ) => Promise<unknown[]>;
+  } {
+    const d1Like = Object.create(purgeDb) as typeof purgeDb & {
+      batch: (
+        stmts: Array<{ toSQL: () => { sql: string; params: unknown[] } }>
+      ) => Promise<unknown[]>;
+    };
+    d1Like.batch = async (stmts) => {
+      const queries = stmts.map((s) => s.toSQL());
+      recorded?.push(queries);
+      return purgeSqlite.transaction(() =>
+        queries.map(({ sql: querySql, params }) => {
+          if (failFilesDelete && /delete\s+from\s+"files"/i.test(querySql)) {
+            throw new Error(
+              'simulated D1 failure in the files purge statement'
+            );
+          }
+          const stmt = purgeSqlite.prepare(querySql);
+          return stmt.reader ? stmt.all(...params) : stmt.run(...params);
+        })
+      )();
+    };
+    return d1Like;
+  }
+
+  async function deleteThroughHttp(
+    d1Like: unknown,
+    email: string,
+    commId: number,
+    storyId: number
+  ) {
+    const d1App = createHonoApp({
+      repository: new HonoFoundationRepository(d1Like as never),
+      verifier: nodePasswordVerifier,
+      secureCookies: false,
+      publicOrigin: API_ORIGIN,
+      corsOrigins: [CLIENT_ORIGIN],
+      storage: { read: async () => null },
+    });
+    const loginRes = await d1App.request(`${API_ORIGIN}/v2/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password: TEST_PASS, communityId: commId }),
+    });
+    expect(loginRes.status).toBe(200);
+    const cookie = (loginRes.headers.get('set-cookie') ?? '').split(';')[0]!;
+    return d1App.request(`${API_ORIGIN}/v2/stories/${storyId}`, {
+      method: 'DELETE',
+      headers: { cookie },
+    });
+  }
+
+  it('purges the story media in one batch alongside the owner delete, then answers 204', async () => {
+    const purgeSqlite = new Sqlite(':memory:');
+    purgeSqlite.pragma('foreign_keys = ON');
+    const purgeDb = drizzle(purgeSqlite);
+    migrate(purgeDb, { migrationsFolder: './src/db/migrations' });
+    const t = tablesFor(purgeDb);
+    try {
+      const { comm, actor, email, makeFile, makeStory, makeAttachment } =
+        await seedDeleteFixture(purgeDb, t, 'one-batch');
+      const fileId = await makeFile(
+        'purge-one-batch.png',
+        `communities/${comm!.id}/media/purge-one-batch`
+      );
+      const storyId = await makeStory('one-batch');
+      await makeAttachment(storyId, fileId);
+      const recorded: Array<Array<{ sql: string; params: unknown[] }>> = [];
+      const d1Like = d1LikeWith(purgeSqlite, purgeDb, recorded);
+      const delRes = await deleteThroughHttp(d1Like, email, comm!.id, storyId);
+      expect(delRes.status).toBe(204);
+      expect(recorded).toHaveLength(1);
+      expect(
+        await purgeDb.select().from(t.stories).where(eq(t.stories.id, storyId))
+      ).toHaveLength(0);
+      expect(
+        await purgeDb
+          .select()
+          .from(t.attachments)
+          .where(eq(t.attachments.ownerId, storyId))
+      ).toHaveLength(0);
+      // The files row for this story's media is gone in the same batch.
+      expect(
+        await purgeDb.select().from(t.files).where(eq(t.files.id, fileId))
+      ).toHaveLength(0);
+    } finally {
+      purgeSqlite.close();
+    }
+  });
+
+  it('keeps files still attached to another owner while purging the ones only this delete orphans', async () => {
+    const purgeSqlite = new Sqlite(':memory:');
+    purgeSqlite.pragma('foreign_keys = ON');
+    const purgeDb = drizzle(purgeSqlite);
+    migrate(purgeDb, { migrationsFolder: './src/db/migrations' });
+    const t = tablesFor(purgeDb);
+    try {
+      const { comm, email, makeFile, makeStory, makeAttachment } =
+        await seedDeleteFixture(purgeDb, t, 'shared-files');
+      // File A: attached only to the doomed story — must be purged.
+      // File B: attached to the doomed story AND to a surviving story — must stay.
+      const fileA = await makeFile(
+        'purge-only.png',
+        `communities/${comm!.id}/media/purge-only`
+      );
+      const fileB = await makeFile(
+        'purge-shared.png',
+        `communities/${comm!.id}/media/purge-shared`
+      );
+      const doomed = await makeStory('shared-doomed');
+      const surviving = await makeStory('shared-surviving');
+      await makeAttachment(doomed, fileA, 0);
+      await makeAttachment(doomed, fileB, 1);
+      await makeAttachment(surviving, fileB, 0);
+      const d1Like = d1LikeWith(purgeSqlite, purgeDb);
+      const delRes = await deleteThroughHttp(d1Like, email, comm!.id, doomed);
+      expect(delRes.status).toBe(204);
+      // The orphaned attachment was removed; the shared one kept:
+      expect(
+        await purgeDb
+          .select()
+          .from(t.attachments)
+          .where(eq(t.attachments.ownerId, doomed))
+      ).toHaveLength(0);
+      // File A purged, File B kept.
+      expect(
+        await purgeDb.select().from(t.files).where(eq(t.files.id, fileA))
+      ).toHaveLength(0);
+      expect(
+        await purgeDb.select().from(t.files).where(eq(t.files.id, fileB))
+      ).toHaveLength(1);
+      // The surviving story is untouched.
+      expect(
+        await purgeDb
+          .select()
+          .from(t.stories)
+          .where(eq(t.stories.id, surviving))
+      ).toHaveLength(1);
+    } finally {
+      purgeSqlite.close();
+    }
+  });
+
+  it('rolls the whole delete back when the files purge statement fails, instead of losing the owner alone', async () => {
+    const purgeSqlite = new Sqlite(':memory:');
+    purgeSqlite.pragma('foreign_keys = ON');
+    const purgeDb = drizzle(purgeSqlite);
+    migrate(purgeDb, { migrationsFolder: './src/db/migrations' });
+    const t = tablesFor(purgeDb);
+    try {
+      const { comm, email, makeFile, makeStory, makeAttachment } =
+        await seedDeleteFixture(purgeDb, t, 'rollback');
+      const fileId = await makeFile(
+        'purge-rollback.png',
+        `communities/${comm!.id}/media/purge-rollback`
+      );
+      const storyId = await makeStory('rollback');
+      await makeAttachment(storyId, fileId);
+      // The purge statement itself throws inside the batch: nothing may
+      // commit, so the story, the attachments and the files row all remain.
+      const d1Like = d1LikeWith(purgeSqlite, purgeDb, undefined, true);
+      const delRes = await deleteThroughHttp(d1Like, email, comm!.id, storyId);
+      expect(delRes.status).toBe(500);
+      expect(
+        await purgeDb.select().from(t.stories).where(eq(t.stories.id, storyId))
+      ).toHaveLength(1);
+      expect(
+        await purgeDb
+          .select()
+          .from(t.attachments)
+          .where(eq(t.attachments.ownerId, storyId))
+      ).toHaveLength(1);
+      expect(
+        await purgeDb.select().from(t.files).where(eq(t.files.id, fileId))
+      ).toHaveLength(1);
+    } finally {
+      purgeSqlite.close();
     }
   });
 });

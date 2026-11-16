@@ -322,22 +322,20 @@ export class HonoAuthRepository {
   }
 
   /**
-   * Complete a verified login: when the caller passes a `verifier`, store it
-   * first — the wrapped Rails-bcrypt upgrade saves verifier, salt, params and
-   * algorithm in one atomic write (SPEC-V2 §7 step 4). A plain Argon2id login
-   * passes `verifier: null` and writes nothing: the session write below is
-   * itself authority-gated (the INSERT…SELECT re-reads the account), so a
-   * no-op verifier re-write would only spend a D1 row write and risk
-   * flipping a NULL salt to `''`.
-   *
-   * The verifier write is authority-guarded by the re-read `password_hash`,
-   * so a concurrent reset makes it return `false` and no session is created.
-   * On success the `users_revoke_sessions` trigger has already revoked the
-   * account's other sessions, exactly as for a password change (§6.8).
+   * Complete a verified login. When the caller passes a `verifier` (the
+   * wrapped Rails-bcrypt upgrade, or a password change), the verifier write
+   * and the session insert are coupled in one unit — `db.batch` on D1, one
+   * transaction on SQLite/PostgreSQL — so a lost authority race leaves both
+   * writes undone and a `null` result is truthful (§7 step 4, finding 7). A
+   * plain Argon2id login passes `verifier: null` and writes only the session:
+   * that write is itself authority-gated (the INSERT…SELECT re-reads the
+   * account), so a no-op verifier re-write would only spend a D1 row write.
    *
    * `previousToken`, when presented and well-formed, rotates the presented
    * same-user session row in place; a presented cookie belonging to another
    * user is revoked and this login gets a fresh row (#188).
+   *
+   * Returns `verifierWritten` so the caller audits only what actually landed.
    */
   async establishLogin(input: {
     repository: HonoFoundationRepository;
@@ -347,29 +345,37 @@ export class HonoAuthRepository {
     kind: SessionKind;
     now: Date;
     previousToken?: string | undefined;
-  }): Promise<{ token: string } | null> {
-    const { repository, account, user, verifier, kind, now } = input;
-    if (verifier !== null)
-      if (!(await this.writeVerifierAtomically(account, verifier))) return null;
+  }): Promise<{ token: string; verifierWritten: boolean } | null> {
+    const { repository, user, verifier, kind, now } = input;
     const token = Array.from(
       crypto.getRandomValues(new Uint8Array(32)),
       (byte) => byte.toString(16).padStart(2, '0')
     ).join('');
     const lifetimes = sessionLifetimesFor(kind, now.getTime());
+    const tokenHash = await sha256Hex(token);
     const previousHash =
       input.previousToken === undefined
         ? undefined
         : await sha256Hex(input.previousToken);
-    const created = await repository.createSession({
-      tokenHash: await sha256Hex(token),
+    const sessionWrite = {
+      tokenHash,
       user,
       kind,
       createdAt: now,
       idleExpiresAt: new Date(lifetimes.idleExpiresAt),
       absoluteExpiresAt: new Date(lifetimes.absoluteExpiresAt),
       previousHash,
-    });
-    return created ? { token } : null;
+    };
+    if (verifier !== null) {
+      const result = await repository.createSessionWithVerifier({
+        ...sessionWrite,
+        verifier,
+      });
+      if (!result.established) return null;
+      return { token, verifierWritten: result.verifierWritten };
+    }
+    const created = await repository.createSession(sessionWrite);
+    return created ? { token, verifierWritten: false } : null;
   }
 
   // -------------------------------------------------------------------------

@@ -300,7 +300,7 @@ export class HonoAuthService {
       ipAddress: clientIp,
       userAgent,
     });
-    if (verification.write !== null)
+    if (established.verifierWritten)
       // A wrapped Rails-bcrypt verifier was replaced by the Argon2id
       // material in the same atomic write (§7 step 4).
       await this.auditAuthEvent({
@@ -521,16 +521,35 @@ export class HonoAuthService {
     const established = await this.repository.establishLogin({
       repository: this.foundation,
       account,
-      user,
+      // The session write and the verifier write must share one authority
+      // anchor, so a coupled write cannot create a session while the verifier
+      // update misses on a stale `password_hash` (finding 7).
+      user: { ...user, passwordHash: account.passwordHash },
       verifier: write,
       kind,
       now,
       previousToken: sessionTokenDigestInput(presentedToken) ?? undefined,
     });
     // The authority gate lost the race (a concurrent reset changed the row):
-    // the new verifier is not stored and no session is issued. Audited as a
-    // rejected attempt; it reveals nothing beyond the rejection itself.
+    // the coupled write is all-or-nothing, so the new verifier is not stored
+    // and no session is issued. Audited as a rejected attempt; it reveals
+    // nothing beyond the rejection itself.
     if (!established) {
+      await this.auditAuthEvent({
+        communityId: account.communityId,
+        actorId: account.id,
+        action: 'auth.password.change',
+        outcome: 'failure',
+        resourceIds: [account.id],
+        ipAddress: clientIp,
+        userAgent,
+      });
+      return null;
+    }
+    if (!established.verifierWritten) {
+      // Defensive: the session landed but the verifier update did not. The
+      // password did not change, so report the failure truthfully rather than
+      // a success the caller did not achieve.
       await this.auditAuthEvent({
         communityId: account.communityId,
         actorId: account.id,

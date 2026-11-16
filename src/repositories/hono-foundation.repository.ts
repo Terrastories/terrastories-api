@@ -45,6 +45,26 @@ interface RawFoundationUser {
   communityId: number | null;
 }
 
+/**
+ * Internal rollback signal for the coupled verifier/session write: the session
+ * gate lost the race, so the transaction rolls back and the caller answers
+ * `false` without an error. It never escapes the repository.
+ */
+class SessionGateLost extends Error {
+  constructor() {
+    super('session authority gate lost');
+    this.name = 'SessionGateLost';
+  }
+}
+
+// Drizzle's per-dialect executors (better-sqlite3, postgres.js, D1) share one
+// runtime shape but expose incompatible TypeScript overloads, so the coupled
+// write builders are typed through one deliberately loose pair of aliases.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Executor = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Statement = any;
+
 export class HonoFoundationRepository {
   private readonly tables;
   private readonly sessions;
@@ -107,6 +127,38 @@ export class HonoFoundationRepository {
     );
   }
 
+  /**
+   * The same authority gate as {@link allowedAuthConditions}, expressed without
+   * a `communities` join so it can guard a bare `UPDATE users` (the coupled
+   * verifier write has no join to hang `communities.is_active` on).
+   */
+  private verifierAuthorityConditions() {
+    const { users, communities } = this.tables;
+    // Subqueries rather than a raw `sql` fragment: the community flag is a
+    // boolean column, and a raw interpolation would bind a bare boolean that
+    // SQLite rejects. A query-builder subquery maps it like any other read.
+    const activeCommunities = this.database
+      .select({ id: communities.id })
+      .from(communities)
+      .where(eq(communities.isActive, communityStatusToPhysical('active')));
+    const disabledCommunities = this.database
+      .select({ id: communities.id })
+      .from(communities)
+      .where(eq(communities.isActive, communityStatusToPhysical('disabled')));
+    return and(
+      eq(users.isActive, userStatusToPhysical('active').isActive),
+      inArray(users.role, [...V2_COMMUNITY_ROLES]),
+      or(
+        and(isNull(users.communityId), eq(users.role, 'super_admin')),
+        inArray(users.communityId, activeCommunities),
+        and(
+          eq(users.role, 'admin'),
+          inArray(users.communityId, disabledCommunities)
+        )
+      )
+    );
+  }
+
   private toFoundationUser(row: RawFoundationUser): FoundationUser | null {
     const role = parseV2Role(row.role);
     if (!role) return null;
@@ -153,20 +205,8 @@ export class HonoFoundationRepository {
     return user ? [user] : [];
   }
 
-  /**
-   * Establish a session row for a verified login (SPEC-V2 §6.8, §7
-   * "Sessions").
-   *
-   * The caller supplies the authoritative row contents: `tokenHash` plus the
-   * `kind`, `createdAt`, `idleExpiresAt` and `absoluteExpiresAt` the policy
-   * computed, and — for a same-user rotation — the `previousHash` whose row is
-   * rewritten in place. The authority gate is re-checked inside the write on
-   * both dialects: the INSERT…SELECT only produces a row while the account is
-   * still authenticable, and the PostgreSQL `FOR SHARE` lock makes a
-   * concurrent reset/disable either change that selection or wait and revoke
-   * the new session.
-   */
-  async createSession(input: {
+  /** The parsed session write, as builders bound to an executor. */
+  private sessionWritePlan(input: {
     tokenHash: string;
     user: FoundationUser;
     kind: SessionKind;
@@ -177,15 +217,20 @@ export class HonoFoundationRepository {
     /** Explicit device-session revocation metadata (admin revoke, §6.8). */
     revokedAt?: Date;
     revokedBy?: number;
-  }): Promise<boolean> {
+  }): {
+    tokenHash: string;
+    userId: number;
+    previousHash: string | undefined;
+    verifiedInsert: (database: Executor) => Statement;
+    revokePresented: (hash: string) => Statement;
+  } | null {
     const { tokenHash, user } = input;
     const now = input.createdAt;
     const role = parseV2Role(user.role);
-    if (!role) return false;
-    if (user.communityId === null && role !== 'super_admin') return false;
+    if (!role) return null;
+    if (user.communityId === null && role !== 'super_admin') return null;
     const sessions = this.sessions;
     const { users, communities } = this.tables;
-    const db = this.database;
     const kind = input.kind;
     const expiresAt = input.idleExpiresAt;
     const createdAt = input.createdAt.getTime();
@@ -212,7 +257,7 @@ export class HonoFoundationRepository {
       revokedAt: revokedAt === null ? sql`null` : sql`${revokedAt}`,
       revokedBy: revokedBy === null ? sql`null` : sql`${revokedBy}`,
     };
-    const verifiedInsert = (database: typeof db) => {
+    const verifiedInsert = (database: Executor) => {
       const base = database
         .select({
           // Only an unexpired same-user row is rotated in place; an expired
@@ -262,44 +307,202 @@ export class HonoFoundationRepository {
     };
     const revokePresented = (hash: string) =>
       and(eq(sessions.tokenHash, hash), ne(sessions.userId, user.id));
-    const previousHash = input.previousHash;
-    if (previousHash === undefined) {
-      const rows = await verifiedInsert(db);
+    return {
+      tokenHash,
+      userId: user.id,
+      previousHash: input.previousHash,
+      verifiedInsert,
+      revokePresented,
+    };
+  }
+
+  /**
+   * Establish a session row for a verified login (SPEC-V2 §6.8, §7
+   * "Sessions").
+   *
+   * The caller supplies the authoritative row contents: `tokenHash` plus the
+   * `kind`, `createdAt`, `idleExpiresAt` and `absoluteExpiresAt` the policy
+   * computed, and — for a same-user rotation — the `previousHash` whose row is
+   * rewritten in place. The authority gate is re-checked inside the write on
+   * both dialects: the INSERT…SELECT only produces a row while the account is
+   * still authenticable, and the PostgreSQL `FOR SHARE` lock makes a
+   * concurrent reset/disable either change that selection or wait and revoke
+   * the new session.
+   */
+  async createSession(input: {
+    tokenHash: string;
+    user: FoundationUser;
+    kind: SessionKind;
+    createdAt: Date;
+    idleExpiresAt: Date;
+    absoluteExpiresAt: Date;
+    previousHash?: string;
+    /** Explicit device-session revocation metadata (admin revoke, §6.8). */
+    revokedAt?: Date;
+    revokedBy?: number;
+  }): Promise<boolean> {
+    const plan = this.sessionWritePlan(input);
+    if (!plan) return false;
+    const db = this.database;
+    const sessions = this.sessions;
+    if (plan.previousHash === undefined) {
+      const rows = await plan.verifiedInsert(db);
       return rows.length > 0;
     }
+    const revokeConditional = (database: Executor) =>
+      database
+        .delete(sessions)
+        .where(
+          and(
+            plan.revokePresented(plan.previousHash!),
+            sql`exists (select 1 from ${sessions} where ${sessions.tokenHash} = ${plan.tokenHash} and ${sessions.userId} = ${plan.userId})`
+          )
+        );
     // Workers/D1 has no interactive transactions: one atomic batch couples
     // the revocation to the insert, whose committed row the delete's exists
     // guard requires — a failed gate inserts nothing, so nothing is revoked.
     if (typeof db.batch === 'function') {
       const [rows] = await db.batch([
-        verifiedInsert(db),
-        db
-          .delete(sessions)
-          .where(
-            and(
-              revokePresented(previousHash),
-              sql`exists (select 1 from ${sessions} where ${sessions.tokenHash} = ${tokenHash} and ${sessions.userId} = ${user.id})`
-            )
-          ),
+        plan.verifiedInsert(db),
+        revokeConditional(db),
       ]);
       return rows.length > 0;
     }
     if (dialectOf(db) === 'postgresql') {
       return db.transaction(async (tx: typeof db) => {
-        const rows = await verifiedInsert(tx);
+        const rows = await plan.verifiedInsert(tx);
         if (rows.length > 0)
-          await tx.delete(sessions).where(revokePresented(previousHash));
+          await tx
+            .delete(sessions)
+            .where(plan.revokePresented(plan.previousHash!));
         return rows.length > 0;
       });
     }
     // better-sqlite3 (drizzle "sync" mode) exposes only synchronous
     // transactions; the insert and the coupled revocation run in one.
     return db.transaction((tx: typeof db) => {
-      const rows = verifiedInsert(tx).all();
+      const rows = plan.verifiedInsert(tx).all();
       if (rows.length > 0)
-        tx.delete(sessions).where(revokePresented(previousHash)).run();
+        tx.delete(sessions)
+          .where(plan.revokePresented(plan.previousHash!))
+          .run();
       return rows.length > 0;
     });
+  }
+
+  /**
+   * Couple a verifier write to the session insert in one unit — the
+   * password-change path's atomicity guarantee (§7 step 4, finding 7).
+   *
+   * The verifier UPDATE runs *first*, so the `users_revoke_sessions` trigger
+   * revokes the account's other sessions before the fresh row is inserted
+   * (reversing the two would let the trigger delete the session it was meant
+   * to preserve). Both statements carry the *same* authority gate — id,
+   * `password_hash`, role, community and `allowedAuthConditions()` — so a lost
+   * race makes them fail together: `db.batch` on D1 runs them in one atomic
+   * unit, and SQLite/PostgreSQL run them in one transaction that rolls back
+   * when the insert establishes no row. The verifier write and the session
+   * therefore can no longer diverge, and a `Conflict` answer is truthful.
+   */
+  async createSessionWithVerifier(input: {
+    tokenHash: string;
+    user: FoundationUser;
+    kind: SessionKind;
+    createdAt: Date;
+    idleExpiresAt: Date;
+    absoluteExpiresAt: Date;
+    previousHash?: string;
+    verifier: {
+      passwordHash: string;
+      passwordVerifier: string;
+      passwordAlgorithm: string;
+      passwordSalt: string;
+      passwordParams: string;
+    };
+  }): Promise<{ established: boolean; verifierWritten: boolean }> {
+    const plan = this.sessionWritePlan(input);
+    if (!plan) return { established: false, verifierWritten: false };
+    const role = parseV2Role(input.user.role);
+    if (!role) return { established: false, verifierWritten: false };
+    const db = this.database;
+    const { users } = this.tables;
+    const sessions = this.sessions;
+    // The verifier write and the session insert share one authority anchor, so
+    // either both land or neither does.
+    const verifierUpdate = (database: Executor) =>
+      database
+        .update(users)
+        .set({
+          passwordHash: input.verifier.passwordHash,
+          passwordVerifier: input.verifier.passwordVerifier,
+          passwordAlgorithm: input.verifier.passwordAlgorithm,
+          passwordSalt: input.verifier.passwordSalt,
+          passwordParams: input.verifier.passwordParams,
+        })
+        .where(
+          and(
+            eq(users.id, input.user.id),
+            eq(users.passwordHash, input.verifier.passwordHash),
+            eq(users.role, role),
+            input.user.communityId === null
+              ? isNull(users.communityId)
+              : eq(users.communityId, input.user.communityId),
+            this.verifierAuthorityConditions()
+          )
+        )
+        .returning({ id: users.id });
+    const revokePresentedConditional = (database: Executor) =>
+      database
+        .delete(sessions)
+        .where(
+          and(
+            plan.revokePresented(plan.previousHash!),
+            sql`exists (select 1 from ${sessions} where ${sessions.tokenHash} = ${plan.tokenHash} and ${sessions.userId} = ${plan.userId})`
+          )
+        );
+    // Workers/D1 has no interactive transactions: one atomic batch runs the
+    // verifier write, the session insert and the coupled revocation. SQLite
+    // serializes the batch, so the two authority-checked statements agree.
+    if (typeof db.batch === 'function') {
+      const list = [verifierUpdate(db), plan.verifiedInsert(db)];
+      if (plan.previousHash !== undefined)
+        list.push(revokePresentedConditional(db));
+      const [updated, inserted] = await db.batch(list);
+      return {
+        established: inserted.length > 0,
+        verifierWritten: updated.length > 0,
+      };
+    }
+    // SQLite/PostgreSQL: one transaction, and a lost session gate rolls the
+    // verifier write back so the pair stays all-or-nothing.
+    try {
+      if (dialectOf(db) === 'postgresql') {
+        return db.transaction(async (tx: Executor) => {
+          const updated = await verifierUpdate(tx);
+          const inserted = await plan.verifiedInsert(tx);
+          if (inserted.length === 0) throw new SessionGateLost();
+          if (plan.previousHash !== undefined)
+            await tx
+              .delete(sessions)
+              .where(plan.revokePresented(plan.previousHash));
+          return { established: true, verifierWritten: updated.length > 0 };
+        });
+      }
+      return db.transaction((tx: Executor) => {
+        const updated = verifierUpdate(tx).all();
+        const inserted = plan.verifiedInsert(tx).all();
+        if (inserted.length === 0) throw new SessionGateLost();
+        if (plan.previousHash !== undefined)
+          tx.delete(sessions)
+            .where(plan.revokePresented(plan.previousHash))
+            .run();
+        return { established: true, verifierWritten: updated.length > 0 };
+      });
+    } catch (error) {
+      if (error instanceof SessionGateLost)
+        return { established: false, verifierWritten: false };
+      throw error;
+    }
   }
 
   /**

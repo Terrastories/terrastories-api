@@ -21,7 +21,7 @@ import {
   BCRYPT_RAILS_COSTS,
   MIN_SALT_BYTES,
   RAILS_BCRYPT_ALGORITHM,
-  isCanonicalBcryptCost,
+  isStoredBcryptCost,
   type Argon2idParams,
   type PasswordAlgorithm,
 } from './auth-policy.js';
@@ -61,18 +61,50 @@ function bcryptSalt(digest: Uint8Array): string {
   return salt + last;
 }
 
+export type WeightedBcryptCost = { cost: number; count: number };
+export type WeightedArgon2Params = Argon2idParams & { count: number };
+
+/** The deployment-wide prelogin population (unweighted identifier mix). */
+export interface PreloginMix {
+  upgraded: number;
+  total: number;
+  /** Observed distinct migrated costs, sorted ascending (display/test view). */
+  costs?: readonly number[] | undefined;
+  /** Observed cost weights, so the fake draws in proportion to the real population. */
+  costCounts?: ReadonlyArray<WeightedBcryptCost> | undefined;
+  /** Observed Argon2id parameter combos with their weights. */
+  params?: ReadonlyArray<WeightedArgon2Params> | undefined;
+}
+
+/** Deterministic weighted pick by digest bytes, `weights` must be non-empty. */
+function deterministicPick<T extends { count: number }>(
+  digest: Uint8Array,
+  offset: number,
+  weights: ReadonlyArray<T>
+): T {
+  const total = weights.reduce((sum, weight) => sum + weight.count, 0);
+  if (total <= 0) return weights[0]!;
+  let point = readUint32(digest, offset) % total;
+  for (const weight of weights) {
+    if (point < weight.count) return weight;
+    point -= weight.count;
+  }
+  return weights[weights.length - 1]!;
+}
+
 /**
  * Deterministic fake. `mix` is the deployment-wide upgraded/total account
- * ratio; `total === 0` means the new-password mix. `bcryptCosts` is the
- * deployment's observed Rails cost distribution, so a fake draws from the
- * same set a migrated row carries (never a cost real rows do not use). The
+ * ratio; `total === 0` means the new-password mix. Both branches draw from
+ * the observed population distribution — the Argon2id params combos and the
+ * migrated bcrypt costs, in proportion to their observed counts — so a fake
+ * is indistinguishable from a real row in shape *and* frequency. The
  * identifier is already normalized by the caller, and nothing the request
  * controls beyond it (in particular no `communitySlug`) enters the digest.
  */
 export async function deterministicPreloginFake(
   serverSecret: string,
   normalizedIdentifier: string,
-  mix: { upgraded: number; total: number },
+  mix: PreloginMix,
   bcryptCosts: readonly number[] = BCRYPT_RAILS_COSTS
 ): Promise<PreloginResponse> {
   const digestHex = await hmacSha256Hex(
@@ -84,22 +116,33 @@ export async function deterministicPreloginFake(
   const upgradedShare =
     mix.total === 0 ? 1000 : Math.round((mix.upgraded * 1000) / mix.total);
   if (bucket < upgradedShare) {
+    const paramWeights: ReadonlyArray<WeightedArgon2Params> =
+      mix.params && mix.params.length > 0
+        ? mix.params
+        : [{ ...ARGON2ID_PARAMS, count: 1 }];
+    const picked = deterministicPick(digest, 8, paramWeights);
     return {
       algorithm: ARGON2ID_ALGORITHM,
       // 16 bytes: the one salt length every canonical verifier uses, so the
       // fake is shape-identical to a real Argon2id row (finding 4).
       salt: toBase64(digest.slice(4, 4 + MIN_SALT_BYTES)),
       params: {
-        memoryKiB: ARGON2ID_PARAMS.memoryKiB,
-        iterations: ARGON2ID_PARAMS.iterations,
-        parallelism: ARGON2ID_PARAMS.parallelism,
+        memoryKiB: picked.memoryKiB,
+        iterations: picked.iterations,
+        parallelism: picked.parallelism,
       },
     };
   }
-  // Prefer the deployment's actual costs; fall back to the Rails 10/12 set
-  // when no migrated row exists yet. The pick is deterministic per digest.
-  const costs = bcryptCosts.length > 0 ? bcryptCosts : BCRYPT_RAILS_COSTS;
-  const cost = costs[digest[4]! % costs.length] ?? 12;
+  // Prefer the deployment's actual cost distribution, weighted by migrated
+  // frequency; fall back to the equal Rails 10/12 set when no migrated row
+  // exists yet. The pick is deterministic per digest.
+  const costWeights: ReadonlyArray<WeightedBcryptCost> =
+    mix.costCounts && mix.costCounts.length > 0
+      ? mix.costCounts
+      : (bcryptCosts.length > 0 ? bcryptCosts : BCRYPT_RAILS_COSTS).map(
+          (cost) => ({ cost, count: 1 })
+        );
+  const cost = deterministicPick(digest, 8, costWeights).cost;
   return {
     algorithm: RAILS_BCRYPT_ALGORITHM,
     salt: bcryptSalt(digest.slice(5)),
@@ -140,10 +183,11 @@ export function parseStoredPasswordParams(
     return { memoryKiB, iterations, parallelism };
   }
   const { cost } = parsed as Record<string, unknown>;
+  // Existing Rails rows keep whatever cost they were written with (4..14).
   if (
     typeof cost !== 'number' ||
     !Number.isInteger(cost) ||
-    !isCanonicalBcryptCost(cost)
+    !isStoredBcryptCost(cost)
   )
     return null;
   return { cost };

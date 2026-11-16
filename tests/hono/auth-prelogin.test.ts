@@ -3,7 +3,7 @@ import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { hash } from 'bcrypt';
-import { count } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import {
@@ -314,6 +314,113 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     expect(BCRYPT_RAILS_COSTS as readonly number[]).toContain(
       (fallback.params as { cost: number }).cost
     );
+  });
+
+  it('weights the fake bcrypt cost pick by the observed migrated cost distribution', async () => {
+    // A 9:1 migrated population at cost 10/12 must draw cost 12 about as often
+    // as it occurs, not half the time (item 6).
+    const mix = {
+      upgraded: 0,
+      total: 100,
+      costCounts: [
+        { cost: 10, count: 90 },
+        { cost: 12, count: 10 },
+      ],
+    };
+    const counts = new Map<number, number>();
+    const SAMPLES = 400;
+    for (let index = 0; index < SAMPLES; index += 1) {
+      const fake = await deterministicPreloginFake(
+        'test-secret',
+        `weighted-${index}@prelogin.test`,
+        mix
+      );
+      counts.set(
+        (fake.params as { cost: number }).cost,
+        (counts.get((fake.params as { cost: number }).cost) ?? 0) + 1
+      );
+    }
+    // Deterministic per identifier, so allow a wide margin: 12 must be
+    // roughly 1/10th, never near half.
+    expect(counts.get(12) ?? 0).toBeGreaterThan(0);
+    expect(counts.get(12) ?? 0).toBeLessThan(SAMPLES * 0.3);
+    expect(counts.get(10) ?? 0).toBeGreaterThan(SAMPLES * 0.7);
+  });
+
+  it('weights the fake argon2id params pick by the observed parameter distribution', async () => {
+    const mix = {
+      upgraded: 100,
+      total: 100,
+      params: [
+        { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1, count: 90 },
+        { memoryKiB: 64 * 1024, iterations: 3, parallelism: 2, count: 10 },
+      ],
+    };
+    const counts = new Map<string, number>();
+    const SAMPLES = 400;
+    for (let index = 0; index < SAMPLES; index += 1) {
+      const fake = await deterministicPreloginFake(
+        'test-secret',
+        `params-${index}@prelogin.test`,
+        mix
+      );
+      const params = fake.params as {
+        memoryKiB: number;
+        iterations: number;
+        parallelism: number;
+      };
+      const key = `${params.memoryKiB}:${params.iterations}:${params.parallelism}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    expect(counts.get(`${64 * 1024}:3:2`) ?? 0).toBeLessThan(SAMPLES * 0.3);
+    expect(counts.get(`${19 * 1024}:2:1`) ?? 0).toBeGreaterThan(SAMPLES * 0.7);
+  });
+
+  it('answers an above-policy existing row with its stored shape (§7)', async () => {
+    const { app, db } = await setup();
+    const passwordSalt = base64(32);
+    const passwordParams = JSON.stringify({
+      memoryKiB: ARGON2ID_PARAMS.memoryKiB * 2,
+      iterations: ARGON2ID_PARAMS.iterations + 1,
+      parallelism: ARGON2ID_PARAMS.parallelism,
+    });
+    await db.insert(usersSqlite).values({
+      passwordHash: (await hash('AbovePolicyPrelogin123!', 4)).replace(
+        '$2b$',
+        '$2a$'
+      ),
+      firstName: 'Above',
+      lastName: 'Policy',
+      isActive: true as const,
+      email: 'above-policy@prelogin.test',
+      username: 'above_policy_alpha',
+      emailNormalized: normalizeSearchText('above-policy@prelogin.test'),
+      usernameNormalized: normalizeSearchText('above_policy_alpha'),
+      role: 'member',
+      communityId: (
+        await db
+          .select({ id: communitiesSqlite.id })
+          .from(communitiesSqlite)
+          .where(eq(communitiesSqlite.slug, 'prelogin-alpha'))
+      )[0]!.id,
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordSalt,
+      passwordParams,
+      passwordVerifier: base64(32),
+    });
+    // The row must answer with its own shape, not a fake.
+    const response = await postPrelogin(app, {
+      identifier: 'above-policy@prelogin.test',
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      algorithm: string;
+      salt: string;
+      params: { memoryKiB: number; iterations: number; parallelism: number };
+    };
+    expect(body.algorithm).toBe(ARGON2ID_ALGORITHM);
+    expect(body.salt).toBe(passwordSalt);
+    expect(body.params).toEqual(JSON.parse(passwordParams));
   });
 
   it('gives every fake bcrypt salt a Rails-shaped 22nd character', async () => {

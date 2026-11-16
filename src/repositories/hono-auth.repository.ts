@@ -32,7 +32,10 @@ import {
   type SessionKind,
 } from '../shared/auth-policy.js';
 import { sha256Hex } from '../shared/auth-crypto.js';
-import { parseStoredPasswordParams } from '../shared/prelogin.js';
+import {
+  parseStoredPasswordParams,
+  type PreloginMix,
+} from '../shared/prelogin.js';
 
 /** The account columns login, upgrade and password change need. */
 export interface AuthAccount {
@@ -136,7 +139,7 @@ export class HonoAuthRepository {
   /** TTL cache for the prelogin population mix (finding C). */
   private mixCache: {
     at: number;
-    mix: { upgraded: number; total: number; costs: number[] };
+    mix: PreloginMix;
   } | null = null;
 
   constructor(readonly connection: Database | DrizzleD1Database) {
@@ -284,7 +287,7 @@ export class HonoAuthRepository {
    * Rails 10/12 set when no migrated row exists yet.
    */
   async bcryptCostMix(): Promise<number[]> {
-    return (await this.preloginMix()).costs;
+    return [...((await this.preloginMix()).costs ?? BCRYPT_RAILS_COSTS)];
   }
 
   /**
@@ -294,9 +297,7 @@ export class HonoAuthRepository {
    * cache, so the mix computation runs — or is served — uniformly and never
    * full-scans `users` per request (finding C).
    */
-  async preloginMix(
-    now: number = Date.now()
-  ): Promise<{ upgraded: number; total: number; costs: number[] }> {
+  async preloginMix(now: number = Date.now()): Promise<PreloginMix> {
     const cached = this.mixCache;
     if (cached !== null && now - cached.at < AUTH_PRELOGIN_MIX_TTL_MS)
       return cached.mix;
@@ -316,26 +317,57 @@ export class HonoAuthRepository {
     let upgraded = 0;
     let total = 0;
     const costCounts = new Map<number, number>();
+    const paramsCounts = new Map<
+      string,
+      {
+        memoryKiB: number;
+        iterations: number;
+        parallelism: number;
+        count: number;
+      }
+    >();
     for (const row of rows) {
       const count = Number(row.total);
       total += count;
-      if (row.algorithm === ARGON2ID_ALGORITHM) {
+      const params = parseStoredPasswordParams(
+        row.algorithm ?? null,
+        row.passwordParams
+      );
+      if (
+        row.algorithm === ARGON2ID_ALGORITHM &&
+        params !== null &&
+        'memoryKiB' in params
+      ) {
         upgraded += count;
-      } else if (row.algorithm === RAILS_BCRYPT_ALGORITHM) {
-        const params = parseStoredPasswordParams(
-          row.algorithm,
-          row.passwordParams
-        );
-        const cost = (params as { cost?: number } | null)?.cost;
-        if (typeof cost === 'number')
-          costCounts.set(cost, (costCounts.get(cost) ?? 0) + count);
+        const key = `${params.memoryKiB}:${params.iterations}:${params.parallelism}`;
+        const existing = paramsCounts.get(key);
+        if (existing) existing.count += count;
+        else
+          paramsCounts.set(key, {
+            memoryKiB: params.memoryKiB,
+            iterations: params.iterations,
+            parallelism: params.parallelism,
+            count,
+          });
+      } else if (
+        row.algorithm === RAILS_BCRYPT_ALGORITHM &&
+        params !== null &&
+        'cost' in params
+      ) {
+        costCounts.set(params.cost, (costCounts.get(params.cost) ?? 0) + count);
       }
     }
     const observed = [...costCounts.keys()].sort((a, b) => a - b);
-    const mix = {
+    const costCountsArr = [...costCounts.entries()]
+      .map(([cost, count]) => ({ cost, count }))
+      .sort((a, b) => a.cost - b.cost);
+    const params = [...paramsCounts.values()].sort((a, b) => b.count - a.count);
+    const mix: PreloginMix = {
       upgraded,
       total,
       costs: observed.length > 0 ? observed : [...BCRYPT_RAILS_COSTS],
+      costCounts: costCountsArr,
+      params,
     };
     this.mixCache = { at: now, mix };
     return mix;

@@ -37,7 +37,7 @@ import {
   STANDARD_SESSION_IDLE_MS,
   authThrottleBackoffMs,
 } from '../../src/shared/auth-policy.js';
-import { sha256Hex } from '../../src/shared/auth-crypto.js';
+import { sha256Hex, toHex } from '../../src/shared/auth-crypto.js';
 import { HonoAuthService } from '../../src/services/hono-auth.service.js';
 import {
   argon2Seed,
@@ -1216,6 +1216,149 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(
       (await db.select({ value: count() }).from(sessionsSqlite))[0]?.value
     ).toBe(1);
+  });
+
+  it('logs in and upgrades a migrated account whose bcrypt cost is 11', async () => {
+    const { postLogin, db } = await setup();
+    const password = 'Cost11AnchorPassword!';
+    const stretchedKey = await hash(password, 11);
+    const alpha = await db
+      .select({ id: communitiesSqlite.id })
+      .from(communitiesSqlite)
+      .where(eq(communitiesSqlite.slug, 'login-alpha'));
+    const cost = Number(stretchedKey.slice(4, 6));
+    const [account] = await db
+      .insert(usersSqlite)
+      .values({
+        passwordHash: await hash(
+          toHex(crypto.getRandomValues(new Uint8Array(16))),
+          4
+        ),
+        firstName: 'Cost11',
+        lastName: 'Migrated',
+        isActive: true as const,
+        email: 'cost11@login.example.test',
+        username: 'cost11_alpha',
+        emailNormalized: normalizeSearchText('cost11@login.example.test'),
+        usernameNormalized: normalizeSearchText('cost11_alpha'),
+        role: 'member',
+        communityId: alpha[0]!.id,
+        passwordAlgorithm: RAILS_BCRYPT_ALGORITHM,
+        passwordSalt: stretchedKey.slice(7, 29),
+        passwordParams: JSON.stringify({ cost }),
+        passwordVerifier: await sha256Hex(stretchedKey),
+      })
+      .returning();
+    const response = await postLogin({
+      identifier: 'cost11@login.example.test',
+      derivedKey: stretchedKey,
+      upgrade: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+        derivedKey: makeDerivedKey(),
+      },
+    });
+    expect(response.status).toBe(200);
+    const [row] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.id, account!.id));
+    expect(row?.passwordAlgorithm).toBe(ARGON2ID_ALGORITHM);
+  });
+
+  it('logs in and upgrades a migrated account whose bcrypt cost is 13', async () => {
+    const { postLogin, db } = await setup();
+    const password = 'Cost13AnchorPassword!';
+    const stretchedKey = await hash(password, 13);
+    const alpha = await db
+      .select({ id: communitiesSqlite.id })
+      .from(communitiesSqlite)
+      .where(eq(communitiesSqlite.slug, 'login-alpha'));
+    const cost = Number(stretchedKey.slice(4, 6));
+    const [account] = await db
+      .insert(usersSqlite)
+      .values({
+        passwordHash: await hash(
+          toHex(crypto.getRandomValues(new Uint8Array(16))),
+          4
+        ),
+        firstName: 'Cost13',
+        lastName: 'Migrated',
+        isActive: true as const,
+        email: 'cost13@login.example.test',
+        username: 'cost13_alpha',
+        emailNormalized: normalizeSearchText('cost13@login.example.test'),
+        usernameNormalized: normalizeSearchText('cost13_alpha'),
+        role: 'member',
+        communityId: alpha[0]!.id,
+        passwordAlgorithm: RAILS_BCRYPT_ALGORITHM,
+        passwordSalt: stretchedKey.slice(7, 29),
+        passwordParams: JSON.stringify({ cost }),
+        passwordVerifier: await sha256Hex(stretchedKey),
+      })
+      .returning();
+    const response = await postLogin({
+      identifier: 'cost13@login.example.test',
+      derivedKey: stretchedKey,
+      upgrade: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+        derivedKey: makeDerivedKey(),
+      },
+    });
+    expect(response.status).toBe(200);
+    const [row] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.id, account!.id));
+    expect(row?.passwordAlgorithm).toBe(ARGON2ID_ALGORITHM);
+  });
+
+  it('logs in a row whose Argon2id params are at or above policy (existing rows)', async () => {
+    const { postLogin, db } = await setup();
+    const stretchedKey = makeDerivedKey();
+    const params = { memoryKiB: 65536, iterations: 3, parallelism: 2 };
+    const customSalt = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(32))
+    ).toString('base64');
+    const alpha = await db
+      .select({ id: communitiesSqlite.id })
+      .from(communitiesSqlite)
+      .where(eq(communitiesSqlite.slug, 'login-alpha'));
+    const [account] = await db
+      .insert(usersSqlite)
+      .values({
+        passwordHash: await hash(
+          toHex(crypto.getRandomValues(new Uint8Array(16))),
+          4
+        ),
+        firstName: 'Above',
+        lastName: 'Policy',
+        isActive: true as const,
+        email: 'above-policy@login.example.test',
+        username: 'above_policy_alpha',
+        emailNormalized: normalizeSearchText('above-policy@login.example.test'),
+        usernameNormalized: normalizeSearchText('above_policy_alpha'),
+        role: 'member',
+        communityId: alpha[0]!.id,
+        passwordAlgorithm: ARGON2ID_ALGORITHM,
+        passwordSalt: customSalt,
+        passwordParams: JSON.stringify(params),
+        passwordVerifier: await sha256Hex(stretchedKey),
+      })
+      .returning();
+    const response = await postLogin({
+      identifier: 'above-policy@login.example.test',
+      derivedKey: stretchedKey,
+    });
+    expect(response.status).toBe(200);
+    const [row] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.id, account!.id));
+    expect(row?.passwordAlgorithm).toBe(ARGON2ID_ALGORITHM);
   });
 
   it('pins the session gate: a session write with a stale anchor creates no row', async () => {

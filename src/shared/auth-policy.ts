@@ -120,7 +120,23 @@ export function isCanonicalBcryptSalt(salt: string): boolean {
   return BCRYPT_SALT_PATTERN.test(salt);
 }
 
-/** Whether a bcrypt cost is one a migrated Rails row actually carries. */
+/** Cost bounds of a bcrypt verifier as stored by Rails, not of policy writes. */
+export const BCRYPT_STORED_MIN_COST = 4;
+
+/**
+ * Whether a bcrypt cost is one a stored Rails row can carry. Existing rows
+ * may hold any cost from 4 to 14; new writes never use them (only the
+ * migrated-account read path and the prelogin fake must tolerate them).
+ */
+export function isStoredBcryptCost(cost: number): boolean {
+  return (
+    Number.isInteger(cost) &&
+    cost >= BCRYPT_STORED_MIN_COST &&
+    cost <= BCRYPT_MAX_COST
+  );
+}
+
+/** Whether a bcrypt cost is one a migrated Rails row typically carries. */
 export function isCanonicalBcryptCost(cost: number): boolean {
   return (BCRYPT_RAILS_COSTS as readonly number[]).includes(cost);
 }

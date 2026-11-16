@@ -32,10 +32,12 @@ import {
   DERIVED_KEY_PATTERN,
   RAILS_BCRYPT_ALGORITHM,
   AuthLoginRejected,
+  argon2idParamsSatisfyPolicy,
   isCanonicalArgon2idParams,
-  isCanonicalBcryptCost,
   isCanonicalBcryptSalt,
   isCanonicalVerifierSalt,
+  isStoredBcryptCost,
+  isUsableVerifierSalt,
   sessionTokenDigestInput,
   type PasswordAlgorithm,
   type SessionKind,
@@ -143,7 +145,7 @@ export class HonoAuthService {
     // only by the normalized identifier: no request-controlled value (least of
     // all the community slug) may shift it, or a real slug could be told from
     // a fake one and private/disabled communities enumerated (finding 5).
-    return deterministicPreloginFake(secret, normalized, mix, mix.costs);
+    return deterministicPreloginFake(secret, normalized, mix);
   }
 
   /**
@@ -155,15 +157,19 @@ export class HonoAuthService {
     account: { passwordAlgorithm: string; passwordSalt: string },
     params: PreloginParams
   ): boolean {
+    // Existing rows keep whatever shape they were written with (a Rails
+    // cost, policy params or better, any usable salt); refusing them would
+    // both lock out valid accounts and widen the existence oracle. New
+    // writes are still canonical (§7 "Verifier registry").
     if (account.passwordAlgorithm === ARGON2ID_ALGORITHM)
       return (
-        isCanonicalVerifierSalt(account.passwordSalt) &&
-        isCanonicalArgon2idParams(params)
+        isUsableVerifierSalt(account.passwordSalt) &&
+        argon2idParamsSatisfyPolicy(params)
       );
     if (account.passwordAlgorithm === RAILS_BCRYPT_ALGORITHM)
       return (
         isCanonicalBcryptSalt(account.passwordSalt) &&
-        isCanonicalBcryptCost((params as { cost: number }).cost)
+        isStoredBcryptCost((params as { cost: number }).cost)
       );
     return false;
   }

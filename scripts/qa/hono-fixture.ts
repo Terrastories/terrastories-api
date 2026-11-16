@@ -5057,12 +5057,12 @@ export async function createFixture(
     // journeys pin. It has its own editor/admin/viewer/member accounts.
     const mediaCredentials: Record<
       'viewer' | 'member' | 'editor' | 'admin',
-      { email: string; password: string }
+      { email: string }
     > = {
-      viewer: { email: 'qa-media-viewer@example.test', password },
-      member: { email: 'qa-media-member@example.test', password },
-      editor: { email: 'qa-media-editor@example.test', password },
-      admin: { email: 'qa-media-admin@example.test', password },
+      viewer: { email: 'qa-media-viewer@example.test' },
+      member: { email: 'qa-media-member@example.test' },
+      editor: { email: 'qa-media-editor@example.test' },
+      admin: { email: 'qa-media-admin@example.test' },
     };
     const [mediaCommunity] = await db
       .insert(communities)
@@ -5084,7 +5084,7 @@ export async function createFixture(
           ...deriveUserIdentityColumns({
             email: mediaCredentials[role].email,
           }),
-          passwordHash,
+          ...verifier,
           firstName: 'QA',
           lastName: `Media${role}`,
           role: sql`${role}`,
@@ -6172,7 +6172,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: mediaCredentials.editor,
+            body: loginBody(mediaCredentials.editor.email),
             check: ownUser(
               mediaCredentials.editor.email,
               'editor',
@@ -6506,7 +6506,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: mediaCredentials.admin,
+            body: loginBody(mediaCredentials.admin.email),
             check: ownUser(
               mediaCredentials.admin.email,
               'admin',
@@ -6609,7 +6609,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: mediaCredentials.viewer,
+            body: loginBody(mediaCredentials.viewer.email),
             check: ownUser(
               mediaCredentials.viewer.email,
               'viewer',
@@ -6691,7 +6691,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: mediaCredentials.member,
+            body: loginBody(mediaCredentials.member.email),
             check: ownUser(
               mediaCredentials.member.email,
               'member',
@@ -6765,7 +6765,12 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: credentials.super_admin,
+            // The super_admin persona changed this account's key earlier in
+            // the journeys; log in with the replacement key.
+            body: {
+              identifier: credentials.super_admin.email,
+              derivedKey: superAdminNewKey,
+            },
             check: ownUser(
               credentials.super_admin.email,
               'super_admin',

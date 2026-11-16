@@ -223,7 +223,12 @@ function createD1BatchDb(): {
  * express everything the hosted Workers D1 accepts (e.g. it tolerates SQL the
  * D1 driver rejects), so D1-specific bugs need this harness.
  */
-function createRealD1Db(): {
+function createRealD1Db(
+  hooks: {
+    /** Invoked inside the D1 batch, before any statement executes. */
+    beforeBatch?: () => void | Promise<void>;
+  } = {}
+): {
   db: ReturnType<typeof drizzleD1>;
   sqlite: Sqlite.Database;
 } {
@@ -269,6 +274,7 @@ function createRealD1Db(): {
       return stmt;
     },
     async batch(stmts: Array<{ _exec: () => unknown }>) {
+      if (hooks.beforeBatch) await hooks.beforeBatch();
       return d1Sqlite.transaction(() => stmts.map((s) => s._exec()))();
     },
   };
@@ -1625,6 +1631,359 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
         role: 'place_photo',
       });
       expect(created.status).toBe('created');
+    } finally {
+      d1Sqlite.close();
+    }
+  });
+
+  // TOCTOU: the owner vanishes between the authorize-time reads and the D1
+  // batch (story deleted in between). The guarded statements in the batch
+  // must produce nothing — no orphan attachment, no reordered rows, no
+  // deleted relation — and the service must answer 404.
+  it('returns 404 and inserts no attachment when the owner is deleted between check and D1 batch', async () => {
+    const seedState: { storyId?: number } = {};
+    const { db: d1Db, sqlite: d1Sqlite } = createRealD1Db({
+      beforeBatch: () => {
+        d1Sqlite
+          .prepare('DELETE FROM stories WHERE id = ?')
+          .run(seedState.storyId);
+      },
+    });
+    try {
+      const seed = drizzle(d1Sqlite);
+      const seedTables = tablesFor(seed);
+      const now = new Date();
+      const [comm] = await seed
+        .insert(seedTables.communities)
+        .values({
+          name: 'TOCTOU Comm',
+          slug: `toctou-${crypto.randomUUID().slice(0, 8)}`,
+          publicStories: true,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const email = `toctou-${crypto.randomUUID().slice(0, 8)}@example.test`;
+      const derived = deriveUserIdentityColumns({
+        email,
+        firstName: 'TOCTOU',
+        lastName: 'Editor',
+        communityId: comm!.id,
+      });
+      const [actor] = await seed
+        .insert(seedTables.users)
+        .values({
+          email,
+          emailNormalized: derived.emailNormalized,
+          passwordHash: await hash(TEST_PASS, 4),
+          firstName: 'TOCTOU',
+          lastName: 'Editor',
+          displayNameNormalized: derived.displayNameNormalized,
+          role: 'editor',
+          communityId: comm!.id,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const [story] = await seed
+        .insert(seedTables.stories)
+        .values({
+          title: 'TOCTOU Story',
+          slug: `toctou-story-${crypto.randomUUID().slice(0, 8)}`,
+          privacyLevel: 'public',
+          isRestricted: false,
+          communityId: comm!.id,
+          createdBy: actor!.id,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      seedState.storyId = story!.id;
+      const fileId = crypto.randomUUID();
+      await seed.insert(seedTables.files).values({
+        id: fileId,
+        filename: fileId,
+        originalName: 'toctou.png',
+        path: `communities/${comm!.id}/media/${fileId}`,
+        storageKey: `communities/${comm!.id}/media/${fileId}`,
+        url: `/v2/media/${fileId}`,
+        mimeType: 'image/png',
+        size: PNG_BYTES.byteLength,
+        byteSize: PNG_BYTES.byteLength,
+        checksum: null,
+        communityId: comm!.id,
+        uploadedBy: actor!.id,
+        culturalRestrictions: null,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const repo = new MediaWritesRepository(d1Db as never);
+      const created = await repo.createAttachment({
+        actor: {
+          id: actor!.id,
+          email,
+          role: 'editor',
+          communityId: comm!.id,
+          isActive: true,
+        },
+        fileId,
+        ownerType: 'story',
+        ownerId: story!.id,
+        role: 'story_media',
+      });
+      expect(created.status).toBe('not_found');
+      expect(
+        await seed
+          .select({ id: seedTables.attachments.id })
+          .from(seedTables.attachments)
+      ).toHaveLength(0);
+    } finally {
+      d1Sqlite.close();
+    }
+  });
+
+  it('returns 404 and leaves ordinals untouched on reorder when the owner is deleted between check and D1 batch', async () => {
+    const seedState: { storyId?: number } = {};
+    const { db: d1Db, sqlite: d1Sqlite } = createRealD1Db({
+      beforeBatch: () => {
+        d1Sqlite
+          .prepare('DELETE FROM stories WHERE id = ?')
+          .run(seedState.storyId);
+      },
+    });
+    try {
+      const seed = drizzle(d1Sqlite);
+      const seedTables = tablesFor(seed);
+      const now = new Date();
+      const [comm] = await seed
+        .insert(seedTables.communities)
+        .values({
+          name: 'TOCTOU Reorder Comm',
+          slug: `toctou-reorder-${crypto.randomUUID().slice(0, 8)}`,
+          publicStories: true,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const email = `toctou-reorder-${crypto.randomUUID().slice(0, 8)}@example.test`;
+      const derived = deriveUserIdentityColumns({
+        email,
+        firstName: 'TOCTOU',
+        lastName: 'Editor',
+        communityId: comm!.id,
+      });
+      const [actor] = await seed
+        .insert(seedTables.users)
+        .values({
+          email,
+          emailNormalized: derived.emailNormalized,
+          passwordHash: await hash(TEST_PASS, 4),
+          firstName: 'TOCTOU',
+          lastName: 'Editor',
+          displayNameNormalized: derived.displayNameNormalized,
+          role: 'editor',
+          communityId: comm!.id,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const [story] = await seed
+        .insert(seedTables.stories)
+        .values({
+          title: 'TOCTOU Reorder Story',
+          slug: `toctou-reorder-${crypto.randomUUID().slice(0, 8)}`,
+          privacyLevel: 'public',
+          isRestricted: false,
+          communityId: comm!.id,
+          createdBy: actor!.id,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      seedState.storyId = story!.id;
+      const attachmentIds: number[] = [];
+      for (let i = 0; i < 2; i += 1) {
+        const fileId = crypto.randomUUID();
+        await seed.insert(seedTables.files).values({
+          id: fileId,
+          filename: fileId,
+          originalName: `toctou-${i}.png`,
+          path: `communities/${comm!.id}/media/${fileId}`,
+          storageKey: `communities/${comm!.id}/media/${fileId}`,
+          url: `/v2/media/${fileId}`,
+          mimeType: 'image/png',
+          size: PNG_BYTES.byteLength,
+          byteSize: PNG_BYTES.byteLength,
+          checksum: null,
+          communityId: comm!.id,
+          uploadedBy: actor!.id,
+          culturalRestrictions: null,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        });
+        const [att] = await seed
+          .insert(seedTables.attachments)
+          .values({
+            communityId: comm!.id,
+            fileId,
+            ownerType: 'story',
+            ownerId: story!.id,
+            role: 'story_media',
+            ordinal: i,
+            createdAt: now,
+          })
+          .returning();
+        attachmentIds.push(att!.id);
+      }
+      const repo = new MediaWritesRepository(d1Db as never);
+      const result = await repo.reorderAttachments({
+        actor: {
+          id: actor!.id,
+          email,
+          role: 'editor',
+          communityId: comm!.id,
+          isActive: true,
+        },
+        ownerType: 'story',
+        ownerId: story!.id,
+        role: 'story_media',
+        attachmentIds: [attachmentIds[1]!, attachmentIds[0]!],
+      });
+      expect(result.status).toBe('not_found');
+      const rows = await seed
+        .select({
+          id: seedTables.attachments.id,
+          ordinal: seedTables.attachments.ordinal,
+        })
+        .from(seedTables.attachments);
+      const byId = new Map(rows.map((row) => [row.id, row.ordinal]));
+      expect(byId.get(attachmentIds[0]!)).toBe(0);
+      expect(byId.get(attachmentIds[1]!)).toBe(1);
+    } finally {
+      d1Sqlite.close();
+    }
+  });
+
+  it('returns 404 and keeps the attachment when the owner is deleted between check and D1 batch on delete', async () => {
+    const seedState: { storyId?: number } = {};
+    const { db: d1Db, sqlite: d1Sqlite } = createRealD1Db({
+      beforeBatch: () => {
+        d1Sqlite
+          .prepare('DELETE FROM stories WHERE id = ?')
+          .run(seedState.storyId);
+      },
+    });
+    try {
+      const seed = drizzle(d1Sqlite);
+      const seedTables = tablesFor(seed);
+      const now = new Date();
+      const [comm] = await seed
+        .insert(seedTables.communities)
+        .values({
+          name: 'TOCTOU Delete Comm',
+          slug: `toctou-delete-${crypto.randomUUID().slice(0, 8)}`,
+          publicStories: true,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const email = `toctou-delete-${crypto.randomUUID().slice(0, 8)}@example.test`;
+      const derived = deriveUserIdentityColumns({
+        email,
+        firstName: 'TOCTOU',
+        lastName: 'Editor',
+        communityId: comm!.id,
+      });
+      const [actor] = await seed
+        .insert(seedTables.users)
+        .values({
+          email,
+          emailNormalized: derived.emailNormalized,
+          passwordHash: await hash(TEST_PASS, 4),
+          firstName: 'TOCTOU',
+          lastName: 'Editor',
+          displayNameNormalized: derived.displayNameNormalized,
+          role: 'editor',
+          communityId: comm!.id,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const [story] = await seed
+        .insert(seedTables.stories)
+        .values({
+          title: 'TOCTOU Delete Story',
+          slug: `toctou-delete-${crypto.randomUUID().slice(0, 8)}`,
+          privacyLevel: 'public',
+          isRestricted: false,
+          communityId: comm!.id,
+          createdBy: actor!.id,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      seedState.storyId = story!.id;
+      const fileId = crypto.randomUUID();
+      await seed.insert(seedTables.files).values({
+        id: fileId,
+        filename: fileId,
+        originalName: 'toctou-delete.png',
+        path: `communities/${comm!.id}/media/${fileId}`,
+        storageKey: `communities/${comm!.id}/media/${fileId}`,
+        url: `/v2/media/${fileId}`,
+        mimeType: 'image/png',
+        size: PNG_BYTES.byteLength,
+        byteSize: PNG_BYTES.byteLength,
+        checksum: null,
+        communityId: comm!.id,
+        uploadedBy: actor!.id,
+        culturalRestrictions: null,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const [att] = await seed
+        .insert(seedTables.attachments)
+        .values({
+          communityId: comm!.id,
+          fileId,
+          ownerType: 'story',
+          ownerId: story!.id,
+          role: 'story_media',
+          ordinal: 0,
+          createdAt: now,
+        })
+        .returning();
+
+      const repo = new MediaWritesRepository(d1Db as never);
+      const result = await repo.deleteAttachment(
+        {
+          id: actor!.id,
+          email,
+          role: 'editor',
+          communityId: comm!.id,
+          isActive: true,
+        },
+        att!.id
+      );
+      expect(result.status).toBe('not_found');
+      expect(
+        await seed
+          .select({ id: seedTables.attachments.id })
+          .from(seedTables.attachments)
+      ).toHaveLength(1);
+      expect(
+        await seed.select({ id: seedTables.files.id }).from(seedTables.files)
+      ).toHaveLength(1);
     } finally {
       d1Sqlite.close();
     }

@@ -3,7 +3,7 @@
  * file deletion, and content-free file-authorization audit entries (§6.4a, §6.7, §7).
  */
 
-import { and, eq, inArray, isNull, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, inArray, isNull, notExists, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor, type DialectTables } from '../db/dialect.js';
@@ -1878,6 +1878,141 @@ export class MediaWritesRepository {
     return { ok: true };
   }
 
+  /**
+   * Owner-row existence guard for D1 writes. The owner check and the write
+   * run in separate statements, so an owner deleted between them would
+   * otherwise let a write match nothing / a placeholder attach with no
+   * owner. Every guarded D1 statement carries an EXISTS (or sources rows
+   * from this select) straight inside its own SQL. Mirrors the readability
+   * verdicts in `authorizeAttachmentOwner`: same community, same owner type,
+   * same read gate. Anything unexpected fails closed (`1 = 0`).
+   */
+  private ownerSource(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    input: {
+      ownerType: AttachmentOwnerType;
+      ownerId: number;
+      role: AttachmentRole;
+      communityId: number | null;
+      viewer: ReadRuleViewer | null;
+    }
+  ): { table: any; where: any } {
+    const t = this.tables;
+    const cid = input.communityId;
+    const closed: { table: any; where: any } = {
+      table: t.stories,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      where: sql`1 = 0` as any,
+    };
+
+    if (input.ownerType === 'story') {
+      if (cid === null || !input.viewer) return closed;
+      return {
+        table: t.stories,
+        where: and(
+          eq(t.stories.id, input.ownerId),
+          storyConditionForViewer(t.stories, cid, input.viewer)
+        ),
+      };
+    }
+    if (input.ownerType === 'place') {
+      if (cid === null || !input.viewer) return closed;
+      return {
+        table: t.places,
+        where: and(
+          eq(t.places.id, input.ownerId),
+          readablePlaceConditionForViewer(
+            executor,
+            this.tables,
+            cid,
+            input.viewer
+          )
+        ),
+      };
+    }
+    if (input.ownerType === 'speaker') {
+      if (cid === null || !input.viewer) return closed;
+      return {
+        table: t.speakers,
+        where: and(
+          eq(t.speakers.id, input.ownerId),
+          readableSpeakerConditionForViewer(
+            executor,
+            this.tables,
+            cid,
+            input.viewer
+          )
+        ),
+      };
+    }
+    if (input.ownerType === 'user') {
+      if (cid !== null) {
+        return {
+          table: t.users,
+          where: and(
+            eq(t.users.id, input.ownerId),
+            eq(t.users.communityId, cid),
+            eq(t.users.isActive, true)
+          ),
+        };
+      }
+      return {
+        table: t.users,
+        where: and(
+          eq(t.users.id, input.ownerId),
+          isNull(t.users.communityId),
+          eq(t.users.role, 'super_admin'),
+          eq(t.users.isActive, true)
+        ),
+      };
+    }
+    if (input.ownerType === 'community') {
+      if (cid === null) return closed;
+      return {
+        table: t.communities,
+        where: and(
+          eq(t.communities.id, input.ownerId),
+          eq(t.communities.id, cid),
+          eq(t.communities.isActive, true)
+        ),
+      };
+    }
+    // map_config: the owner row IS the map-config row for the community.
+    if (cid === null) return closed;
+    return {
+      table: t.communityMapConfigs,
+      where: and(
+        eq(t.communityMapConfigs.communityId, cid),
+        eq(t.communityMapConfigs.communityId, input.ownerId)
+      ),
+    };
+  }
+
+  /**
+   * `EXISTS (owner still present, same community, still readable)` as a
+   * condition to splice into a guarded UPDATE/DELETE WHERE clause.
+   */
+  private ownerExistsCondition(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    input: {
+      ownerType: AttachmentOwnerType;
+      ownerId: number;
+      role: AttachmentRole;
+      communityId: number | null;
+      viewer: ReadRuleViewer | null;
+    }
+  ): any {
+    const source = this.ownerSource(executor, input);
+    return exists(
+      executor
+        .select({ one: sql`1` })
+        .from(source.table)
+        .where(source.where)
+    );
+  }
+
   private async resolveAttachableFile(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     executor: any,
@@ -2069,29 +2204,73 @@ export class MediaWritesRepository {
         );
       const ordinal = input.ordinal ?? Number(maxRows[0]?.maxOrd ?? -1) + 1;
 
-      try {
-        const [attRows] = await this.db.batch([
+      // INSERT ... SELECT with the owner still present in the same
+      // statement, so an owner deleted between `authorizeAttachmentOwner` and
+      // this batch makes the statement produce no row (mapped to 404) — a
+      // missing owner can never leave an orphaned attachment behind. The
+      // audit write carries the same guard.
+      const ownerSource = this.ownerSource(this.db, {
+        ownerType: input.ownerType,
+        ownerId: input.ownerId,
+        role: input.role,
+        communityId: authority.communityId,
+        viewer: ownCommunityViewerForRole(input.actor.role),
+      });
+      const insertAttachment = this.db
+        .insert(this.tables.attachments)
+        .select(
           this.db
-            .insert(this.tables.attachments)
-            .values({
-              communityId: authority.communityId,
-              fileId: input.fileId,
-              ownerType: input.ownerType,
-              ownerId: input.ownerId,
-              role: input.role,
-              ordinal,
-              createdAt: now,
+            .select({
+              id: sql`NULL`.as('id'),
+              communityId:
+                authority.communityId === null
+                  ? sql`NULL`.as('community_id')
+                  : sql`${authority.communityId}`.as('community_id'),
+              fileId: sql`${input.fileId}`.as('file_id'),
+              ownerType: sql`${input.ownerType}`.as('owner_type'),
+              ownerId: sql`${input.ownerId}`.as('owner_id'),
+              role: sql`${input.role}`.as('role'),
+              ordinal: sql`${ordinal}`.as('ordinal'),
+              attachableId: sql`NULL`.as('attachable_id'),
+              attachableType: sql`NULL`.as('attachable_type'),
+              url: sql`NULL`.as('url'),
+              filename: sql`NULL`.as('filename'),
+              contentType: sql`NULL`.as('content_type'),
+              fileSize: sql`NULL`.as('file_size'),
+              createdAt: sql`${now.getTime()}`.as('created_at'),
             })
-            .returning({
-              id: this.tables.attachments.id,
-              ordinal: this.tables.attachments.ordinal,
-              createdAt: this.tables.attachments.createdAt,
-            }),
-          this.db.insert(this.tables.auditEntries).values({
-            ...audit,
-            createdAt: now,
-          }),
-        ]);
+            .from(ownerSource.table)
+            .where(ownerSource.where)
+        )
+        .returning({
+          id: this.tables.attachments.id,
+          ordinal: this.tables.attachments.ordinal,
+          createdAt: this.tables.attachments.createdAt,
+        });
+      const insertAudit = this.db.insert(this.tables.auditEntries).select(
+        this.db
+          .select({
+            id: sql`NULL`.as('id'),
+            communityId:
+              authority.communityId === null
+                ? sql`NULL`.as('community_id')
+                : sql`${authority.communityId}`.as('community_id'),
+            actorId: sql`${audit.actorId}`.as('actor_id'),
+            action: sql`${audit.action}`.as('action'),
+            resourceType: sql`${audit.resourceType}`.as('resource_type'),
+            resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+              'resource_ids'
+            ),
+            outcome: sql`${audit.outcome}`.as('outcome'),
+            ipAddress: sql`NULL`.as('ip_address'),
+            userAgent: sql`NULL`.as('user_agent'),
+            createdAt: sql`${now.getTime()}`.as('created_at'),
+          })
+          .from(ownerSource.table)
+          .where(ownerSource.where)
+      );
+      try {
+        const [attRows] = await this.db.batch([insertAttachment, insertAudit]);
         const att = Array.isArray(attRows) ? attRows[0] : undefined;
         if (!att) return { status: 'not_found' };
         return {
@@ -2522,9 +2701,44 @@ export class MediaWritesRepository {
         id: number;
         fileId: string | null;
       }>;
-      if (!validateIds(existing)) return { status: 'invalid_set' };
+      if (!validateIds(existing)) {
+        // Distinguish an invalid set from an owner deleted between the
+        // authority check and this read.
+        const ownerSource = this.ownerSource(this.db, {
+          ownerType: input.ownerType,
+          ownerId: input.ownerId,
+          role: input.role,
+          communityId: authority.communityId,
+          viewer: ownCommunityViewerForRole(input.actor.role),
+        });
+        const ownerRows = await this.db
+          .select({ one: sql`1` })
+          .from(ownerSource.table)
+          .where(ownerSource.where)
+          .limit(1);
+        return Array.isArray(ownerRows) && ownerRows.length > 0
+          ? { status: 'invalid_set' }
+          : { status: 'not_found' };
+      }
+      const ownerExists = this.ownerExistsCondition(this.db, {
+        ownerType: input.ownerType,
+        ownerId: input.ownerId,
+        role: input.role,
+        communityId: authority.communityId,
+        viewer: ownCommunityViewerForRole(input.actor.role),
+      });
+      const ownerSource = this.ownerSource(this.db, {
+        ownerType: input.ownerType,
+        ownerId: input.ownerId,
+        role: input.role,
+        communityId: authority.communityId,
+        viewer: ownCommunityViewerForRole(input.actor.role),
+      });
       // One bounded D1 batch: one UPDATE per attachment (<= 4 bound params
-      // each) plus the content-free audit entry.
+      // each) plus the content-free audit entry. Every statement re-checks
+      // the owner (same transaction's snapshot), so an owner deleted
+      // between `authorizeAttachmentOwner` and this batch makes the writes
+      // no-ops and the delete verdict 404 — never a reordered orphan set.
       const statements = input.attachmentIds.map((id, index) =>
         this.db
           .update(this.tables.attachments)
@@ -2532,17 +2746,47 @@ export class MediaWritesRepository {
           .where(
             and(
               eq(this.tables.attachments.id, id),
-              scopeFor(authority.communityId)
+              scopeFor(authority.communityId),
+              ownerExists
             )
           )
       );
       statements.push(
-        this.db.insert(this.tables.auditEntries).values({
-          ...audit,
-          createdAt: now,
-        })
+        this.db.insert(this.tables.auditEntries).select(
+          this.db
+            .select({
+              id: sql`NULL`.as('id'),
+              communityId:
+                authority.communityId === null
+                  ? sql`NULL`.as('community_id')
+                  : sql`${authority.communityId}`.as('community_id'),
+              actorId: sql`${audit.actorId}`.as('actor_id'),
+              action: sql`${audit.action}`.as('action'),
+              resourceType: sql`${audit.resourceType}`.as('resource_type'),
+              resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+                'resource_ids'
+              ),
+              outcome: sql`${audit.outcome}`.as('outcome'),
+              ipAddress: sql`NULL`.as('ip_address'),
+              userAgent: sql`NULL`.as('user_agent'),
+              createdAt: sql`${now.getTime()}`.as('created_at'),
+            })
+            .from(ownerSource.table)
+            .where(ownerSource.where)
+        )
       );
-      await this.db.batch(statements);
+      statements.push(
+        this.db
+          .select({ one: sql`1` })
+          .from(ownerSource.table)
+          .where(ownerSource.where)
+          .limit(1)
+      );
+      const batchResults = await this.db.batch(statements);
+      const ownerCheckRows = batchResults[batchResults.length - 1];
+      if (!Array.isArray(ownerCheckRows) || ownerCheckRows.length === 0) {
+        return { status: 'not_found' };
+      }
       return {
         status: 'reordered',
         attachments: await readBack(this.db, authority.communityId),
@@ -2729,6 +2973,23 @@ export class MediaWritesRepository {
       // writes no success audit. The files DELETE re-checks NOT EXISTS against
       // attachments so a concurrent relation added before this batch commits
       // keeps the row.
+      // Owner still present in the same statement: the owner check ran
+      // before the batch, so an owner deleted between it and this DELETE
+      // makes the DELETE a no-op (404) instead of destroying the relation
+      // after its owner vanished leaving an orphan.
+      const d1Scope = and(
+        eq(this.tables.attachments.id, attachmentId),
+        attachment.communityId === null
+          ? isNull(this.tables.attachments.communityId)
+          : eq(this.tables.attachments.communityId, attachment.communityId),
+        this.ownerExistsCondition(this.db, {
+          ownerType: attachment.ownerType!,
+          ownerId: attachment.ownerId!,
+          role: attachment.role!,
+          communityId: authority.communityId,
+          viewer: ownCommunityViewerForRole(actor.role),
+        })
+      );
       const insertAudit = this.db.insert(this.tables.auditEntries).select(
         this.db
           .select({
@@ -2749,11 +3010,11 @@ export class MediaWritesRepository {
             createdAt: sql`${now.getTime()}`.as('created_at'),
           })
           .from(this.tables.attachments)
-          .where(scope)
+          .where(d1Scope)
       );
       const deleteAttachment = this.db
         .delete(this.tables.attachments)
-        .where(scope)
+        .where(d1Scope)
         .returning({ id: this.tables.attachments.id });
       const deleteFiles = buildUnreferencedFilesDelete(
         this.db,

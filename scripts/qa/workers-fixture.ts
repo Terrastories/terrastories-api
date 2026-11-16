@@ -9,11 +9,9 @@
  * Node-only behaviour can hide a sovereignty leak from the hosted Workers
  * Free profile.
  *
- * Passwords: client-stretched login (SPEC-V2 §7) — the fixture computes the
- * same stretched key the browser would and the journeys present it directly;
- * no password KDF runs inside workerd. (Interim state during the Slice 10
- * auth rollout: seeds and journeys migrate to the client-stretched protocol
- * here as the login route lands.)
+ * Passwords: client-stretched login (SPEC-V2 §7) — the fixture seeds the
+ * same Argon2id verifier every backend seeds and the journeys present the
+ * derived key directly; no password KDF runs inside workerd.
  */
 import { drizzle } from 'drizzle-orm/d1';
 import {
@@ -24,48 +22,22 @@ import {
 import {
   createFixture as createHonoPersonaFixture,
   honoPersonaRouteTable,
-  HONO_PERSONA_PASSWORD,
+  HONO_PERSONA_DERIVED_KEY,
   type HonoQaBackend,
 } from './hono-fixture.js';
 import { seedPersonaBaseline } from './qa-database.js';
-
-/** A deliberate, production-plausible PBKDF2 cost for every login. */
-const PBKDF2_ITERATIONS = 100_000;
-
-const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-
-/** Encode a hash Node and workerd verify identically through WebCrypto. */
-async function pbkdf2Encoded(password: string): Promise<string> {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const material = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(password),
-    'PBKDF2',
-    false,
-    ['deriveBits']
-  );
-  const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: PBKDF2_ITERATIONS },
-    material,
-    256
-  );
-  return [
-    'pbkdf2',
-    'sha256',
-    String(PBKDF2_ITERATIONS),
-    base64(salt),
-    base64(new Uint8Array(bits)),
-  ].join('$');
-}
+import {
+  ARGON2ID_ALGORITHM,
+  ARGON2ID_PARAMS_JSON,
+} from '../../src/shared/auth-policy.js';
+import { sha256Hex, toHex } from '../../src/shared/auth-crypto.js';
 
 /**
  * The worker gateway: adds no routes of its own, so every dispatched request
- * is served by the worker's own Hono app over the D1/R2 bindings. Client-
- * stretched login runs inside that app (SPEC-V2 §7); there is no auth method
- * to inject here. That app's route table cannot be read from Node, so the
- * backend below states honoPersonaRouteTable() — derived from
- * `createHonoApp`, which `createWorker` composes — rather than the bundled
- * worker's own table.
+ * is served by the worker's own Hono app over the D1/R2 bindings. That app's
+ * route table cannot be read from Node, so the backend below states
+ * honoPersonaRouteTable() — derived from `createHonoApp`, which
+ * `createWorker` composes — rather than the bundled worker's own table.
  */
 export const WORKER_GATEWAY = `import worker from './src/worker.js';
 export default worker;
@@ -76,17 +48,30 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     throw new Error(
       'The Workers fixture supports isolated in-process workerd runs only'
     );
-  const mf = startWorkerRuntime(await bundleWorkerModule(WORKER_GATEWAY));
+  const mf = startWorkerRuntime(await bundleWorkerModule(WORKER_GATEWAY), {
+    ENVIRONMENT: 'test',
+    AUTH_SERVER_SECRET: toHex(crypto.getRandomValues(new Uint8Array(24))),
+  });
   let backend: HonoQaBackend;
   try {
     const d1 = await mf.getD1Database('DB');
     await applyD1Migrations(d1);
     const bucket = await mf.getR2Bucket('MEDIA');
     const db = drizzle(d1);
+    // The Argon2id verifier every journey's derivedKey verifies against.
+    const verifierSalt = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
     backend = {
       db,
       seedBaseline: () => seedPersonaBaseline(db),
-      passwordHash: await pbkdf2Encoded(HONO_PERSONA_PASSWORD),
+      // Client-stretched: no KDF here. The legacy `password_hash` anchor
+      // only re-reads authority; it is never verified.
+      passwordHash: '',
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordSalt: verifierSalt,
+      passwordParams: ARGON2ID_PARAMS_JSON,
+      passwordVerifier: await sha256Hex(HONO_PERSONA_DERIVED_KEY),
       putMedia: (key, bytes) => bucket.put(key, bytes),
       handler: (observeResponseCookies) => async (request) => {
         // dispatchFetch parses Miniflare's own undici types, and a

@@ -172,7 +172,9 @@ export class HonoAuthService {
       });
     } catch {
       // Content-free operational marker: the action and outcome only, never
-      // identifiers, keys or content.
+      // identifiers, keys or content. The audit sink failing must never
+      // change the authentication decision.
+      // eslint-disable-next-line no-console -- the auth service has no logging seam; this is the content-free fallback
       console.error('auth audit write failed', {
         action: input.action,
         outcome: input.outcome,

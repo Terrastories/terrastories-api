@@ -28,6 +28,7 @@ import {
   RAILS_BCRYPT_ALGORITHM,
   authThrottleBackoffMs,
   sessionLifetimesFor,
+  ipThrottleBucket,
   MIN_SALT_BYTES,
   MAX_SALT_BYTES,
   type PasswordAlgorithm,
@@ -548,9 +549,16 @@ export class HonoAuthRepository {
     return this.throttleKey(`${AUTH_THROTTLE_KEY_ACCOUNT}${accountId}`, secret);
   }
 
-  /** Per-IP throttle key (keyed hash of the client IP alone, §6.8). */
+  /**
+   * Per-IP throttle key (keyed hash of the client IP alone, §6.8). IPv6 is
+   * keyed on its /64 prefix so rotating within a /64 does not mint fresh
+   * buckets; IPv4 is keyed verbatim.
+   */
   ipThrottleKey(clientIp: string, secret: string): Promise<string> {
-    return this.throttleKey(`${AUTH_THROTTLE_KEY_IP}${clientIp}`, secret);
+    return this.throttleKey(
+      `${AUTH_THROTTLE_KEY_IP}${ipThrottleBucket(clientIp)}`,
+      secret
+    );
   }
 
   /**

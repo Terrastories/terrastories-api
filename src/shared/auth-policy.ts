@@ -332,6 +332,72 @@ function isValidIpv6(value: string): boolean {
   return left.length === 8 - tailLength;
 }
 
+/**
+ * Parse a syntactically valid IPv6 address into its eight 16-bit groups.
+ * Accepts `::` compression, an embedded IPv4 tail and case-insensitive hex;
+ * rejects zones and anything `usableIp` would not accept. Returns `null`
+ * for an invalid address.
+ */
+function parseIpv6Groups(value: string): number[] | null {
+  let input = value.toLowerCase();
+  // Embedded IPv4 (::ffff:192.0.2.1, ::1.2.3.4): rewrite the dotted tail to
+  // its two hex groups, keeping the preceding separator colon in place, then
+  // parse as a pure hex address.
+  if (input.includes('.')) {
+    const lastColon = input.lastIndexOf(':');
+    const embedded = input.slice(lastColon + 1);
+    if (!isValidIpv4(embedded)) return null;
+    const parts = embedded.split('.').map((part) => Number(part));
+    const hi = (((parts[0] ?? 0) << 8) | (parts[1] ?? 0)).toString(16);
+    const lo = (((parts[2] ?? 0) << 8) | (parts[3] ?? 0)).toString(16);
+    input = `${input.slice(0, lastColon + 1)}${hi}:${lo}`;
+  }
+  const sides = input.split('::');
+  if (sides.length > 2) return null;
+  const parseSide = (side: string): number[] | null => {
+    if (side === '') return [];
+    const groups: number[] = [];
+    for (const group of side.split(':')) {
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+      groups.push(parseInt(group, 16));
+    }
+    return groups;
+  };
+  const left = parseSide(sides[0]!);
+  const right = sides.length === 2 ? parseSide(sides[1]!) : [];
+  if (left === null || right === null) return null;
+  if (sides.length === 2) {
+    const rightGroups = right ?? [];
+    const missing = 8 - left.length - rightGroups.length;
+    if (missing < 1) return null;
+    return [
+      ...left,
+      ...Array.from({ length: missing }, () => 0),
+      ...rightGroups,
+    ];
+  }
+  if (left.length !== 8) return null;
+  return left;
+}
+
+/**
+ * The bucket the per-IP throttle keys on. IPv4 is keyed verbatim — the same
+ * address always maps to the same bucket. IPv6 is keyed on its /64 prefix
+ * with the low 64 bits zeroed: a /64 is the subscriber allocation span an
+ * attacker controls, and rotating addresses inside it must not mint fresh
+ * throttle buckets (§6.8). Non-IPv6 strings (the `unknown` bucket, or an
+ * address that fails parsing) pass through unchanged.
+ */
+export function ipThrottleBucket(clientIp: string): string {
+  if (!clientIp.includes(':')) return clientIp;
+  const groups = parseIpv6Groups(clientIp);
+  if (groups === null || groups.length !== 8) return clientIp;
+  return `${groups
+    .slice(0, 4)
+    .map((group) => group.toString(16))
+    .join(':')}::/64`;
+}
+
 function usableIp(value: string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   const trimmed = value.trim();

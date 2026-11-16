@@ -254,8 +254,11 @@ export async function createLocalStorage(
       const entries = await Promise.all(
         page.map(async (key) => ({
           key,
+          // A filesystem restore can recreate bytes with a young mtime; ctime
+          // catches both clocks, so recently restored bytes are never
+          // mistaken for garbage.
           uploaded: await stat(path.join(root, key))
-            .then((s) => s.mtime)
+            .then((s) => (s.ctime > s.mtime ? s.ctime : s.mtime))
             .catch(() => new Date(0)),
         }))
       );

@@ -3,7 +3,7 @@
  * restart-safe orphan sweeper depends on (§6.7).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, utimes, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createLocalStorage } from '../../src/node-storage.js';
@@ -90,5 +90,26 @@ describe('createLocalStorage().list', () => {
     const page = await storage.list!({ prefix: 'communities/9/' });
     expect(page.entries).toEqual([]);
     expect(page.truncated).toBe(false);
+  });
+
+  it('ages objects by max(mtime, ctime) so a restored file is never treated as old', async () => {
+    const restoreKey = 'communities/1/media/restore-me.png';
+    await putBytes(storage, restoreKey);
+    const absolute = path.join(root, restoreKey);
+    // Pin mtime to the past; the filesystem stamps ctime=now, so mtime <
+    // ctime — exactly what a filesystem restore produces.
+    const ancientMtime = new Date('2020-01-01T00:00:00.000Z');
+    await utimes(absolute, ancientMtime, ancientMtime);
+    const listed = await storage.list!({ prefix: 'communities/1/' });
+    const entry = listed.entries.find((item) => item.key === restoreKey);
+    const st = await stat(absolute);
+    expect(entry).toBeDefined();
+    expect(entry!.uploaded.getTime()).toBe(
+      Math.max(st.mtime.getTime(), st.ctime.getTime())
+    );
+    expect(
+      entry!.uploaded.getTime(),
+      'the restore clock (ctime) wins over the pinned mtime'
+    ).toBeGreaterThan(ancientMtime.getTime());
   });
 });

@@ -98,6 +98,45 @@ function createListableStorage(): {
 const OLD = new Date('2026-01-01T00:00:00.000Z');
 const NOW = new Date('2026-06-01T12:00:00.000Z');
 
+/**
+ * Seed one unrelated files row. The sweeper refuses to run on an empty files
+ * table (a restore can recreate storage bytes before the table catches up),
+ * so tests that exercise sweeping need the table to be non-empty. The sentinel
+ * references no stored object, so it never keeps anything alive.
+ */
+async function seedSentinelFileRow() {
+  const [comm] = await db
+    .insert(tables.communities)
+    .values({
+      name: `Sentinel ${crypto.randomUUID().slice(0, 8)}`,
+      slug: `sentinel-${crypto.randomUUID().slice(0, 8)}`,
+      publicStories: true,
+      isActive: true,
+      createdAt: OLD,
+      updatedAt: OLD,
+    })
+    .returning();
+  const id = crypto.randomUUID();
+  await db.insert(tables.files).values({
+    id,
+    filename: id,
+    originalName: 'sentinel.png',
+    path: `sentinel/${id}/bytes`,
+    storageKey: null,
+    url: `/v2/media/${id}`,
+    mimeType: 'image/png',
+    size: 1,
+    byteSize: 1,
+    checksum: null,
+    communityId: comm!.id,
+    uploadedBy: null,
+    culturalRestrictions: null,
+    isActive: true,
+    createdAt: OLD,
+    updatedAt: OLD,
+  });
+}
+
 describe('Slice 9 orphan-object sweeper (#140)', () => {
   beforeAll(() => {
     migrate(db, { migrationsFolder: './src/db/migrations' });
@@ -178,6 +217,7 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
   });
 
   it('uses the grace window by default so fresh in-flight uploads are never swept', async () => {
+    await seedSentinelFileRow();
     const now = new Date('2026-06-01T12:00:00.000Z');
     const { store, storage } = createListableStorage();
     const freshKey = 'communities/1/media/in-flight';
@@ -250,6 +290,7 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
   });
 
   it('keeps sweeping after a storage delete fails and logs content-free warnings', async () => {
+    await seedSentinelFileRow();
     const now = new Date('2026-06-01T12:00:00.000Z');
     const { store, storage } = createListableStorage();
     const staleA = 'communities/1/media/stale-a';
@@ -286,6 +327,7 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
   });
 
   it('bounds a run by the per-run cap and resumes after the cap on the next run', async () => {
+    await seedSentinelFileRow();
     const now = new Date('2026-06-01T12:00:00.000Z');
     const { store, storage } = createListableStorage();
     const uploaded = new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000);
@@ -364,7 +406,39 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     }
   });
 
+  it('skips the sweep entirely when the files table has zero rows', async () => {
+    // A fresh, empty database: a restore can recreate storage bytes before
+    // the files rows exist, so nothing may be trusted as garbage.
+    const emptySqlite = new Sqlite(':memory:');
+    emptySqlite.pragma('foreign_keys = ON');
+    const emptyDb = drizzle(emptySqlite);
+    migrate(emptyDb, { migrationsFolder: './src/db/migrations' });
+
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { store, storage } = createListableStorage();
+    const staleKey = 'communities/1/media/stale';
+    store.set(staleKey, {
+      bytes: Uint8Array.from([1]),
+      uploaded: new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000),
+    });
+
+    const logs: string[] = [];
+    const cleanup = new MediaCleanupCoordinator(emptyDb, storage, {
+      now: () => now,
+      log: (line) => logs.push(line),
+    });
+    const result = await cleanup.sweepOrphanObjects();
+    expect(result).toEqual({ deletedCount: 0, failedCount: 0, scanned: 0 });
+    expect(
+      store.has(staleKey),
+      'no bytes are swept on an empty files table'
+    ).toBe(true);
+    expect(logs.some((line) => line.includes('empty'))).toBe(true);
+    emptySqlite.close();
+  });
+
   it('walks into the users/ prefix and wraps the cursor back to communities/', async () => {
+    await seedSentinelFileRow();
     const now = new Date('2026-06-01T12:00:00.000Z');
     const { store, storage } = createListableStorage();
     const uploaded = new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000);

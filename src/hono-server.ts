@@ -6,13 +6,11 @@ import { getDb } from './db/index.js';
 import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
+import { scheduleOrphanSweep } from './services/orphan-sweep-scheduler.js';
 import {
   validateNodeV2Runtime,
   v2RuntimeModeNotice,
 } from './config/v2-runtime.js';
-
-/** Named interval between restart-safe orphan sweeps on the Node server. */
-const ORPHAN_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 // #150: refuse to start on insecure/default production configuration before
 // any adapter or database is opened. Messages name settings, never values.
@@ -48,10 +46,12 @@ const server = serve({
   port: runtimeConfig.port,
 });
 
-// Restart-safe orphan sweeper: run once at startup, then on an unref'd
-// interval so a long-lived Node server eventually removes bytes whose `files`
-// row is gone. Unref'd so it never holds the process open. A failed sweep is
-// reported content-free instead of being swallowed.
+// Restart-safe orphan sweeper: the first sweep runs after a named delay, then
+// on an unref'd interval so a long-lived Node server eventually removes bytes
+// whose `files` row is gone. No sweep happens at startup: a Node process that
+// just restored its storage before the files table finished restoring must not
+// treat missing rows as garbage. A failed sweep is reported content-free
+// instead of being swallowed.
 const cleanup = new MediaCleanupCoordinator(db, storage);
 const sweepOrphanObjects = () => {
   void cleanup.sweepOrphanObjects().catch(() => {
@@ -59,15 +59,14 @@ const sweepOrphanObjects = () => {
     console.warn('media cleanup: orphan sweep failed');
   });
 };
-sweepOrphanObjects();
-const sweepTimer = setInterval(sweepOrphanObjects, ORPHAN_SWEEP_INTERVAL_MS);
-sweepTimer.unref();
+const orphanSweepTimers = scheduleOrphanSweep(sweepOrphanObjects);
 
 let shuttingDown = false;
 const shutdown = () => {
   if (shuttingDown) return;
   shuttingDown = true;
-  clearInterval(sweepTimer);
+  clearTimeout(orphanSweepTimers.first);
+  clearInterval(orphanSweepTimers.interval);
   server.close(() => process.exit(0));
 };
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

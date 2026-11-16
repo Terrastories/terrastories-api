@@ -413,6 +413,13 @@ export class MediaCleanupCoordinator {
     if (!this.storage.list || !this.storage.delete) {
       return { deletedCount: 0, failedCount: 0, scanned: 0 };
     }
+    if (!(await this.hasAnyFilesRow())) {
+      // A filesystem/database restore can recreate storage bytes before the
+      // files table knows them; with no file row anywhere, nothing here may
+      // be trusted as garbage, so the sweep is skipped entirely.
+      this.log('media cleanup: files table is empty; sweep skipped');
+      return { deletedCount: 0, failedCount: 0, scanned: 0 };
+    }
     const now = this.options.now ?? (() => new Date());
     const cutoff =
       opts.olderThan ?? new Date(now().getTime() - ORPHAN_SWEEP_GRACE_MS);
@@ -638,6 +645,27 @@ export class MediaCleanupCoordinator {
     } catch {
       // Content-free: the next run simply resumes from the previous position.
       this.log('media cleanup: sweep cursor write failed');
+    }
+  }
+
+  /**
+   * True when the files table holds at least one row. An empty table is the
+   * restore-in-progress state; sweeping then would delete bytes that are
+   * about to become referenced again. An unreadable table is treated as
+   * empty on purpose: keeping bytes is always safe.
+   */
+  private async hasAnyFilesRow(): Promise<boolean> {
+    const tables = tablesFor(this.connection);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = this.connection as any;
+    try {
+      const rows = await db
+        .select({ id: tables.files.id })
+        .from(tables.files)
+        .limit(1);
+      return Array.isArray(rows) && rows.length > 0;
+    } catch {
+      return false;
     }
   }
 

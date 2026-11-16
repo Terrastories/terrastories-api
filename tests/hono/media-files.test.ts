@@ -699,6 +699,58 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
     expect(admin.status).toBe(404);
   });
 
+  it('prefix guard: a user_photo attached to A whose bytes live under users/B/ is 404 for A', async () => {
+    // The own-account user_photo exception authorizes the attachment owner,
+    // but the serving prefix guard is independent: bytes under another
+    // account's `users/<id>/` prefix can never be served through them.
+    const at = new Date('2026-06-01T12:00:00.000Z');
+    const fileId = crypto.randomUUID();
+    const storageKey = `users/${ids.superAdminB}/media/${fileId}`;
+    await db.insert(tables.files).values({
+      id: fileId,
+      filename: fileId,
+      originalName: 'foreign-prefix.png',
+      path: storageKey,
+      storageKey,
+      url: `/v2/media/${fileId}`,
+      mimeType: 'image/png',
+      size: PNG_BYTES.byteLength,
+      byteSize: PNG_BYTES.byteLength,
+      checksum: null,
+      communityId: null,
+      uploadedBy: null,
+      culturalRestrictions: null,
+      isActive: true,
+      createdAt: at,
+      updatedAt: at,
+    });
+    await db.insert(tables.attachments).values({
+      fileId,
+      communityId: null,
+      ownerType: 'user',
+      ownerId: ids.superAdminA,
+      role: 'user_photo',
+      ordinal: 0,
+      createdAt: at,
+    });
+    memStore.set(storageKey, {
+      bytes: PNG_BYTES,
+      contentType: 'image/png',
+    });
+
+    // The authorized owner A still gets 404: the key is outside users/<A>/.
+    const asA = await app.request(`${API_ORIGIN}/v2/media/${fileId}`, {
+      headers: { cookie: cookies.superAdminA },
+    });
+    expect(asA.status).toBe(404);
+
+    // And B cannot read it either: B is not the attachment owner.
+    const asB = await app.request(`${API_ORIGIN}/v2/media/${fileId}`, {
+      headers: { cookie: cookies.superAdminB },
+    });
+    expect(asB.status).toBe(404);
+  });
+
   it('rejects SVG/HTML payloads, magic-byte/extension mismatches, oversize Content-Length, and CSRF origin mismatches', async () => {
     const before = memStore.size;
 

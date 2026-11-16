@@ -6,6 +6,10 @@ import {
   startWorkerRuntime,
 } from '../helpers/worker-runtime.js';
 import {
+  ORPHAN_SWEEP_REFERENCE_CHUNK,
+  WORKER_SWEEP_SUBREQUEST_BUDGET,
+} from '../../src/services/media-cleanup.service.js';
+import {
   MAX_PUBLIC_FILTER_VALUES,
   MAX_PUBLIC_TOTAL_FILTER_VALUES,
 } from '../../src/shared/schemas/public-content.js';
@@ -680,11 +684,21 @@ it('resumes the scheduled R2 sweep past live objects across multiple runs', asyn
       .run();
 
     // More live (files-row-backed) objects than one scheduled run's
-    // subrequest budget can scan (a full page of 200 live keys costs 1 list +
-    // 5 reference queries ≈ 6 subrequests, so the Workers sweep budget pages
-    // through ~1,200 keys per run). Their keys sort before the orphan, so
-    // only a cursor-resuming second run reaches it.
-    const liveCount = 1300;
+    // subrequest budget can scan. The sweep pages 200 keys at a time; each
+    // full live page costs 1 list + ceil(200/45) reference queries. The
+    // bound below is derived from the budget constants, so it stays valid if
+    // either constant changes — the orphan must be reached within it.
+    const pageSize = 200;
+    const refQueriesPerFullPage = Math.ceil(
+      pageSize / ORPHAN_SWEEP_REFERENCE_CHUNK
+    ); // ≤ 45 keys per query
+    const subrequestsPerFullLivePage = 1 + refQueriesPerFullPage;
+    const livePagesPerRun = Math.floor(
+      WORKER_SWEEP_SUBREQUEST_BUDGET / subrequestsPerFullLivePage
+    );
+    const liveCount = 1300; // strictly more than one run can scan: ≥ 2 runs required
+    const computedBound =
+      Math.ceil(Math.ceil(liveCount / pageSize) / livePagesPerRun) + 1;
     const inserts: ReturnType<typeof db.prepare>[] = [];
     for (let i = 0; i < liveCount; i += 1) {
       const suffix = String(i).padStart(4, '0');
@@ -712,21 +726,33 @@ it('resumes the scheduled R2 sweep past live objects across multiple runs', asyn
         { method: 'POST' }
       );
 
-    const first = await dispatch();
-    expect(first.status).toBe(200);
-    // The run stopped inside communities/ after spending its subrequest
-    // budget on the live objects, so the orphan is still there and the
-    // resumed position is stored in R2.
-    expect(await bucket.get('communities/1/media/zz-orphan')).not.toBeNull();
-    const resumed = await bucket.get('system/orphan-sweep-cursor.json');
-    expect(resumed).not.toBeNull();
-
-    // A second run resumes after the budget-consuming live objects and
-    // reaches the orphan.
-    const second = await dispatch();
-    expect(second.status).toBe(200);
-    expect(await bucket.get('communities/1/media/zz-orphan')).toBeNull();
-    // Every live object survived both runs.
+    // Dispatch until the orphan is reached, within the computed bound.
+    // The first run must stop inside communities/ (liveCount exceeds one
+    // run's scan capacity), so reaching the orphan proves the cursor
+    // resume mechanism rather than a lucky single run.
+    let runs = 0;
+    let orphanDeleted = false;
+    while (runs < computedBound && !orphanDeleted) {
+      const res = await dispatch();
+      expect(res.status).toBe(200);
+      runs += 1;
+      orphanDeleted =
+        (await bucket.get('communities/1/media/zz-orphan')) === null;
+      if (runs === 1 && !orphanDeleted) {
+        // The first run stopped on budget; the resume position is stored.
+        const resumed = await bucket.get('system/orphan-sweep-cursor.json');
+        expect(resumed).not.toBeNull();
+      }
+    }
+    expect(
+      orphanDeleted,
+      `orphan must be reached within ${computedBound} run(s) derived from the budget constants`
+    ).toBe(true);
+    expect(
+      runs,
+      'a single run cannot scan this many live objects'
+    ).toBeGreaterThanOrEqual(2);
+    // Every live object survived every run.
     for (let i = 0; i < liveCount; i += 1) {
       const suffix = String(i).padStart(4, '0');
       expect(

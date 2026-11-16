@@ -10,7 +10,6 @@ import {
   MAX_PUBLIC_TOTAL_FILTER_VALUES,
 } from '../../src/shared/schemas/public-content.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
-import { WORKER_ORPHAN_SWEEP_LIMIT } from '../../src/services/media-cleanup.service.js';
 it('serves the foundation through workerd D1/R2 without Node compatibility', async () => {
   // bundleWorkerModule fails the test when the bundle keeps any runtime import.
   const mf = startWorkerRuntime(
@@ -645,7 +644,7 @@ it('runs the orphan sweep from the scheduled() cron handler', async () => {
     // the orphan is swept and the referenced object is kept.
     const scheduledTime = Date.now() + 48 * 60 * 60 * 1000;
     const res = await mf.dispatchFetch(
-      `http://localhost/cdn-cgi/handler/scheduled?cron=0+3+*+*+*&time=${scheduledTime}`,
+      `http://localhost/cdn-cgi/handler/scheduled?cron=0+*+*+*+*&time=${scheduledTime}`,
       { method: 'POST' }
     );
     expect(res.status).toBe(200);
@@ -680,12 +679,15 @@ it('resumes the scheduled R2 sweep past live objects across multiple runs', asyn
       )
       .run();
 
-    // WORKER_ORPHAN_SWEEP_LIMIT + 5 live objects, keys sorting before the
-    // orphan, each backed by a files row under their canonical storage key.
-    const liveCount = WORKER_ORPHAN_SWEEP_LIMIT + 5;
+    // More live (files-row-backed) objects than one scheduled run's
+    // subrequest budget can scan (a full page of 200 live keys costs 1 list +
+    // 5 reference queries ≈ 6 subrequests, so the Workers sweep budget pages
+    // through ~1,200 keys per run). Their keys sort before the orphan, so
+    // only a cursor-resuming second run reaches it.
+    const liveCount = 1300;
     const inserts: ReturnType<typeof db.prepare>[] = [];
     for (let i = 0; i < liveCount; i += 1) {
-      const suffix = String(i).padStart(2, '0');
+      const suffix = String(i).padStart(4, '0');
       const key = `communities/1/media/live-${suffix}`;
       inserts.push(
         db.prepare(
@@ -693,9 +695,11 @@ it('resumes the scheduled R2 sweep past live objects across multiple runs', asyn
         )
       );
     }
-    await db.batch(inserts);
+    for (let i = 0; i < inserts.length; i += 500) {
+      await db.batch(inserts.slice(i, i + 500));
+    }
     for (let i = 0; i < liveCount; i += 1) {
-      const suffix = String(i).padStart(2, '0');
+      const suffix = String(i).padStart(4, '0');
       await bucket.put(`communities/1/media/live-${suffix}`, 'live');
     }
     await bucket.put('communities/1/media/zz-orphan', 'orphan');
@@ -704,27 +708,27 @@ it('resumes the scheduled R2 sweep past live objects across multiple runs', asyn
     const scheduledTime = Date.now() + 48 * 60 * 60 * 1000;
     const dispatch = () =>
       mf.dispatchFetch(
-        `http://localhost/cdn-cgi/handler/scheduled?cron=0+3+*+*+*&time=${scheduledTime}`,
+        `http://localhost/cdn-cgi/handler/scheduled?cron=0+*+*+*+*&time=${scheduledTime}`,
         { method: 'POST' }
       );
 
     const first = await dispatch();
     expect(first.status).toBe(200);
-    // The run stopped inside communities/ after spending its per-run budget on
-    // the live objects, so the orphan is still there and the resumed position
-    // is stored in R2.
+    // The run stopped inside communities/ after spending its subrequest
+    // budget on the live objects, so the orphan is still there and the
+    // resumed position is stored in R2.
     expect(await bucket.get('communities/1/media/zz-orphan')).not.toBeNull();
     const resumed = await bucket.get('system/orphan-sweep-cursor.json');
     expect(resumed).not.toBeNull();
 
-    // A second run resumes after the budget-bearing live objects and reaches
-    // the orphan.
+    // A second run resumes after the budget-consuming live objects and
+    // reaches the orphan.
     const second = await dispatch();
     expect(second.status).toBe(200);
     expect(await bucket.get('communities/1/media/zz-orphan')).toBeNull();
     // Every live object survived both runs.
     for (let i = 0; i < liveCount; i += 1) {
-      const suffix = String(i).padStart(2, '0');
+      const suffix = String(i).padStart(4, '0');
       expect(
         await bucket.get(`communities/1/media/live-${suffix}`)
       ).not.toBeNull();

@@ -17,8 +17,7 @@ import {
 } from './services/hono-foundation.service.js';
 import {
   MediaCleanupCoordinator,
-  WORKER_ORPHAN_SWEEP_LIMIT,
-  WORKER_ORPHAN_SWEEP_MAX_PAGES,
+  WORKER_SWEEP_SUBREQUEST_BUDGET,
 } from './services/media-cleanup.service.js';
 import {
   validateWorkerV2Runtime,
@@ -270,10 +269,18 @@ export function createWorker(
       }
     },
     /**
-     * Daily cron trigger: run the restart-safe orphan sweeper so bytes whose
+     * Hourly cron trigger: run the restart-safe orphan sweeper so bytes whose
      * `files` row is gone (failed storage delete, crash between commit and
-     * delete) are eventually removed. The per-run cap keeps the sweep inside
-     * the Workers Free subrequest budget, and a failure is logged content-free
+     * delete) are eventually removed. The run is bounded by subrequests —
+     * WORKER_SWEEP_SUBREQUEST_BUDGET, sized under the Workers Free 50 — so a
+     * full keyspace pass takes several hourly runs, tracked by the cursor.
+     * Referenced/fresh objects consume only their share of reference-query
+     * subrequests, never a delete.
+     *
+     * Throughput math: one hourly run scans ~6 list pages (~1,200 keys) with
+     * zero orphans — ~28,800 keys/day, i.e. even a 100k-key keyspace cycles
+     * in under 4 days, inside the 30-day §6.7 bound; an all-orphan backlog
+     * clears at ~34 deletes/run (~800/day). A failure is logged content-free
      * rather than swallowed.
      */
     scheduled: async (
@@ -296,16 +303,15 @@ export function createWorker(
             createR2Storage(env.MEDIA),
             {
               now: () => new Date(_controller.scheduledTime || Date.now()),
-              maxPages: WORKER_ORPHAN_SWEEP_MAX_PAGES,
-              // Explicit restore hold; the sweeper itself also honours a
-              // `system/orphan-sweep-hold` storage marker.
+              // Subrequest-budgeted run; the sweeper also honours an
+              // ORPHAN_SWEEP_PAUSED binding / `system/orphan-sweep-hold`
+              // marker for the restore hold.
+              subrequestBudget: WORKER_SWEEP_SUBREQUEST_BUDGET,
               sweepPaused: env.ORPHAN_SWEEP_PAUSED === 'true',
             }
           );
           try {
-            await cleanup.sweepOrphanObjects({
-              limit: WORKER_ORPHAN_SWEEP_LIMIT,
-            });
+            await cleanup.sweepOrphanObjects();
           } catch {
             // eslint-disable-next-line no-console -- workerd's only operator channel
             console.warn('media cleanup: scheduled orphan sweep failed');

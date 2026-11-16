@@ -14,6 +14,7 @@ import { tablesFor } from '../../src/db/dialect.js';
 import {
   MediaCleanupCoordinator,
   ORPHAN_SWEEP_GRACE_MS,
+  WORKER_SWEEP_SUBREQUEST_BUDGET,
 } from '../../src/services/media-cleanup.service.js';
 import {
   ORPHAN_SWEEP_CURSOR_KEY,
@@ -332,7 +333,7 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     }
   });
 
-  it('bounds a run by the per-run cap and resumes after the cap on the next run', async () => {
+  it('bounds a run by the subrequest budget and resumes after it on the next run', async () => {
     await seedSentinelFileRow();
     const now = new Date('2026-06-01T12:00:00.000Z');
     const { store, storage } = createListableStorage();
@@ -347,29 +348,34 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
       now: () => now,
       log: () => {},
     });
-    const first = await cleanup.sweepOrphanObjects({ limit: 2 });
+    // One list page (1) + one reference query (1) + two deletes (2) = 4
+    // subrequests: exactly two objects swept per run.
+    const first = await cleanup.sweepOrphanObjects({ subrequestBudget: 4 });
     expect(first.scanned).toBe(2);
     expect(first.deletedCount).toBe(2);
+    expect(first.subrequests).toBe(4);
     expect(store.size).toBe(4);
 
     // The cursor persisted inside the storage adapter resumes after the two
-    // objects the first run already walked.
-    const second = await cleanup.sweepOrphanObjects({ limit: 2 });
+    // objects the first run already deleted.
+    const second = await cleanup.sweepOrphanObjects({ subrequestBudget: 4 });
     expect(second.scanned).toBe(2);
     expect(second.deletedCount).toBe(2);
+    expect(second.subrequests).toBe(4);
     expect(store.size).toBe(2);
   });
 
-  it('reaches an orphan behind more live objects than the per-run cap within a few runs', async () => {
+  it('traverses > 1000 live objects ahead of an orphan across a bounded number of runs, within the Workers subrequest budget', async () => {
+    // Worst-case keyspace: more live (files-row-backed) objects ahead of the
+    // orphan than one scheduled run can afford to scan. Live objects consume
+    // only their share of reference-query subrequests, never a delete.
+    const liveCount = 1400;
     const now = new Date('2026-06-01T12:00:00.000Z');
     const { store, storage } = createListableStorage();
     const uploaded = new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000);
 
-    // Live bytes: each has a `files` row, so the sweep must keep them but still
-    // spend its small per-run cap walking past them. There are more live
-    // objects than the per-run cap (3 > 2), ahead of the orphan.
-    for (let i = 0; i < 3; i++) {
-      const key = `communities/1/media/live-${i}`;
+    for (let i = 0; i < liveCount; i += 1) {
+      const key = `communities/1/media/live-${String(i).padStart(4, '0')}`;
       const id = crypto.randomUUID();
       await db.insert(tables.files).values({
         id,
@@ -389,7 +395,7 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
         createdAt: OLD,
         updatedAt: OLD,
       });
-      store.set(key, { bytes: Uint8Array.from([i]), uploaded });
+      store.set(key, { bytes: Uint8Array.from([i % 256]), uploaded });
     }
     // The orphan sorts after every live object.
     const orphanKey = 'communities/1/media/zz-orphan';
@@ -399,25 +405,36 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
       now: () => now,
       log: () => {},
     });
-    const runs = 3;
-    for (let i = 0; i < runs && store.has(orphanKey); i++) {
-      await cleanup.sweepOrphanObjects({ limit: 2 });
+    let runs = 0;
+    let orphanDeleted = false;
+    for (let i = 0; i < 4 && !orphanDeleted; i += 1) {
+      const result = await cleanup.sweepOrphanObjects({
+        subrequestBudget: WORKER_SWEEP_SUBREQUEST_BUDGET,
+      });
+      runs += 1;
+      expect(
+        result.subrequests,
+        `run ${runs} must stay within the Workers Free subrequest budget`
+      ).toBeLessThanOrEqual(WORKER_SWEEP_SUBREQUEST_BUDGET);
+      orphanDeleted = !store.has(orphanKey);
     }
-    expect(store.has(orphanKey), 'orphan reached within 2-3 capped runs').toBe(
-      false
+    expect(orphanDeleted, `orphan reached within ${runs} bounded run(s)`).toBe(
+      true
     );
-    // Every live object survived.
-    for (let i = 0; i < 3; i++) {
-      expect(store.has(`communities/1/media/live-${i}`)).toBe(true);
+    expect(runs).toBeGreaterThanOrEqual(2);
+    // No live object was deleted by any run.
+    for (let i = 0; i < liveCount; i += 1) {
+      const key = `communities/1/media/live-${String(i).padStart(4, '0')}`;
+      expect(store.has(key)).toBe(true);
     }
   });
 
-  it('bounds one run to maxPages and resumes the cursor on the next run', async () => {
+  it('bounds one run to the subrequest budget on fresh-object pages and resumes the cursor on the next run', async () => {
     await seedSentinelFileRow();
     const now = new Date('2026-06-01T12:00:00.000Z');
     const { store, storage } = createListableStorage();
-    // Fresh objects spend the per-object budget on nothing, so only a page
-    // cap can stop the run after a few pages of a large keyspace.
+    // Fresh objects spend no reference/delete budget, so only list-page
+    // subrequests can bound a run walking a large keyspace of fresh bytes.
     const freshKey = (i: number) =>
       `communities/1/media/live-${String(i).padStart(3, '0')}`;
     const freshUntil = 450;
@@ -440,14 +457,17 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     const cleanup = new MediaCleanupCoordinator(db, countingStorage, {
       now: () => now,
       log: () => {},
-      maxPages: 2,
+      // Each full page costs 1 subrequest; budget 3 stops the run after
+      // walking 3 pages instead of the whole prefix.
+      subrequestBudget: 3,
     });
     const first = await cleanup.sweepOrphanObjects();
     expect(first.deletedCount).toBe(0);
+    expect(first.subrequests).toBe(3);
     expect(
       listCalls,
-      'stops after maxPages pages instead of walking the prefix'
-    ).toBe(2);
+      'stops after the budget is spent instead of walking the prefix'
+    ).toBe(3);
     expect(
       store.has(orphanKey),
       'orphan still ahead after the bounded run'
@@ -456,6 +476,7 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     // The persisted cursor resumes after the page the first run stopped at.
     const second = await cleanup.sweepOrphanObjects();
     expect(second.deletedCount).toBe(1);
+    expect(second.subrequests).toBe(3);
     expect(store.has(orphanKey), 'orphan reached by the resumed run').toBe(
       false
     );
@@ -505,7 +526,12 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
       sweepPaused: true,
     });
     const result = await cleanup.sweepOrphanObjects();
-    expect(result).toEqual({ deletedCount: 0, failedCount: 0, scanned: 0 });
+    expect(result).toEqual({
+      deletedCount: 0,
+      failedCount: 0,
+      scanned: 0,
+      subrequests: 0,
+    });
     expect(store.has(staleKey)).toBe(true);
     expect(logs.some((line) => line.includes('hold'))).toBe(true);
   });
@@ -531,7 +557,12 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
       log: (line) => logs.push(line),
     });
     const result = await cleanup.sweepOrphanObjects();
-    expect(result).toEqual({ deletedCount: 0, failedCount: 0, scanned: 0 });
+    expect(result).toEqual({
+      deletedCount: 0,
+      failedCount: 0,
+      scanned: 0,
+      subrequests: 0,
+    });
     expect(store.has(staleKey)).toBe(true);
     // The marker is outside the swept prefixes and is never deleted itself.
     expect(store.has(ORPHAN_SWEEP_HOLD_KEY)).toBe(true);
@@ -562,10 +593,12 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
       now: () => now,
       log: () => {},
     });
-    // One object per run: the first run clears communities/, the second reaches
-    // users/ and then wraps the cursor back to the start.
-    const first = await cleanup.sweepOrphanObjects({ limit: 1 });
+    // One delete per run: exactly list (1) + reference query (1) + delete (1)
+    // subrequests each run. The first run clears communities/, the second
+    // reaches users/ and then wraps the cursor back to the start.
+    const first = await cleanup.sweepOrphanObjects({ subrequestBudget: 3 });
     expect(first.deletedCount).toBe(1);
+    expect(first.subrequests).toBe(3);
     expect(store.has(communityOrphan)).toBe(false);
     expect(store.has(userOrphan), 'users/ prefix still pending').toBe(true);
     // communities/ is fully walked within the run; the budget ran out on
@@ -575,8 +608,9 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     ) as { prefix?: string; startAfter?: string };
     expect(cursorAfterFirst.prefix).toBe('users/');
 
-    const second = await cleanup.sweepOrphanObjects({ limit: 1 });
+    const second = await cleanup.sweepOrphanObjects({ subrequestBudget: 3 });
     expect(second.deletedCount).toBe(1);
+    expect(second.subrequests).toBe(3);
     expect(store.has(userOrphan)).toBe(false);
     // Both prefixes are done: the cursor wraps to the start.
     const cursorAfterSecond = JSON.parse(
@@ -699,9 +733,9 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
       const cutoff = new Date(OLD.getTime() + 1);
       const result = await cleanup.sweepOrphanObjects({
         olderThan: cutoff,
-        limit: 500,
       });
       expect(result.deletedCount).toBe(120);
+      expect(result.subrequests).toBeLessThanOrEqual(2000);
       // Only the system sweep-cursor object may remain in storage.
       expect([...store.keys()]).toEqual([ORPHAN_SWEEP_CURSOR_KEY]);
       expect(boundParams.length).toBeGreaterThan(0);

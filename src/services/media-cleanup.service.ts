@@ -287,32 +287,29 @@ export async function lockFileRowsForCleanup(
 export const ORPHAN_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Named per-run bound so a sweep never enumerates an unbounded keyspace.
- * Sized for a long-lived Node process; Workers pass WORKER_ORPHAN_SWEEP_LIMIT.
+ * Named per-run bound for the Node sweeper, sized for a long-lived process:
+ * subrequests, not objects — each list page costs 1, each batched reference
+ * query (<= ORPHAN_SWEEP_REFERENCE_CHUNK keys) costs 1, each delete costs 1,
+ * so a run bounded by this budget still encounters no platform subrequest
+ * limit while remaining bounded against a pathological keyspace.
  */
-export const ORPHAN_SWEEP_LIMIT = 500;
+export const ORPHAN_SWEEP_SUBREQUEST_BUDGET = 2000;
 
 /**
- * Workers Free allows 50 subrequests per invocation. One swept object costs at
- * most one reference SELECT plus one delete, and each prefix costs one list
- * page, so 20 objects keep a whole scheduled run at <= 42 subrequests.
+ * Workers Free allows 50 subrequests per invocation. The sweeper budgets 40:
+ * one list page (<= 200 keys) = 1, one reference query (<= 45 keys, the D1
+ * parameter bound) = 1, one delete = 1. Referenced and fresh objects consume
+ * no delete subrequests, so they burn only their reference-share (~1 per 45
+ * keys) and list pages — a pure live-object scan walks ~6 pages (~1,200
+ * keys) per hourly run, ~28,800 keys/day, cycling even a 100k-key keyspace
+ * inside 4 days; an all-orphan backlog clears at ~34 deletes/run (~800/day).
+ * Both are far inside the 30-day §6.7 bound (an erased object's bytes may
+ * not linger past the profile's backup window). The fixed per-run overhead
+ * outside this budget is at most one hold check plus one cursor read and
+ * write (system objects), keeping the whole invocation at <= 43, under the
+ * Free 50.
  */
-export const WORKER_ORPHAN_SWEEP_LIMIT = 20;
-
-/**
- * Named per-run cap on listed pages (200 keys per page) for Workers: even a
- * page that holds zero sweep candidates costs one subrequest, so the run
- * walks at most this many pages per prefix before persisting its cursor and
- * yielding.
- */
-export const WORKER_ORPHAN_SWEEP_MAX_PAGES = 5;
-
-/**
- * Same bound for the Node sweeper, sized for a long-lived process: 50 pages
- * walk 10,000 keys per run, still bounded against a huge or pathological
- * keyspace.
- */
-export const ORPHAN_SWEEP_MAX_PAGES = 50;
+export const WORKER_SWEEP_SUBREQUEST_BUDGET = 40;
 
 /** Storage prefixes that can hold community/system bytes. */
 export const ORPHAN_SWEEP_PREFIXES = ['communities/', 'users/'] as const;
@@ -329,6 +326,12 @@ export interface SweepResult {
   deletedCount: number;
   failedCount: number;
   scanned: number;
+  /**
+   * Subrequests this run spent on list pages, reference queries and deletes.
+   * Held objects (hold, cursor) are not counted; the Workers scheduled path
+   * keeps the total invocation under the Workers Free 50.
+   */
+  subrequests: number;
 }
 
 export interface MediaCleanupCoordinatorOptions {
@@ -336,10 +339,11 @@ export interface MediaCleanupCoordinatorOptions {
   log?: (line: string) => void;
   now?: () => Date;
   /**
-   * Named cap on listed pages per run (200 keys per page). Defaults to
-   * ORPHAN_SWEEP_MAX_PAGES; Workers pass WORKER_ORPHAN_SWEEP_MAX_PAGES.
+   * Named cap on subrequests per run (1 per list page, 1 per reference
+   * query, 1 per delete). Defaults to ORPHAN_SWEEP_SUBREQUEST_BUDGET; the
+   * Workers scheduled path passes WORKER_SWEEP_SUBREQUEST_BUDGET.
    */
-  maxPages?: number;
+  subrequestBudget?: number;
   /**
    * Explicit restore hold (`ORPHAN_SWEEP_PAUSED=true` in the Node/Worker
    * environment). While set, the orphan sweep deletes nothing; entrypoints
@@ -552,11 +556,12 @@ export class MediaCleanupCoordinator {
    * never deletes it). Operators set the hold before a filesystem/database
    * restore and clear it once the restored state is verified.
    *
-   * The per-run cap counts only objects past the grace window, so a long run of
-   * live objects never starves garbage collection. A separate per-run cap on
-   * listed pages (`maxPages`) bounds total subrequests, so a page full of
-   * fresh objects cannot walk the whole prefix within one invocation.
-   * Progress is a small cursor
+   * The run is bounded by subrequests, not objects: each list page (<= 200
+   * keys) costs 1, each batched reference query (<= 45 keys, the D1
+   * parameter bound) costs 1, and each delete costs 1. Referenced and fresh
+   * objects consume no delete budget, so a keyspace full of live objects
+   * never starves garbage collection and never burns a delete it does not
+   * need. Progress is a small cursor
    * object in the storage adapter (`system/orphan-sweep-cursor.json`, outside
    * the swept prefixes): each run resumes after `{prefix, startAfter}`, walks
    * `communities/` then `users/`, and wraps to the start once both are done.
@@ -566,10 +571,10 @@ export class MediaCleanupCoordinator {
    * stop garbage collection for the rest of the keyspace.
    */
   async sweepOrphanObjects(
-    opts: { olderThan?: Date; limit?: number } = {}
+    opts: { olderThan?: Date; subrequestBudget?: number } = {}
   ): Promise<SweepResult> {
     if (!this.storage.list || !this.storage.delete) {
-      return { deletedCount: 0, failedCount: 0, scanned: 0 };
+      return { deletedCount: 0, failedCount: 0, scanned: 0, subrequests: 0 };
     }
     if (await this.orphanSweepPaused()) {
       // Explicit restore hold: ORPHAN_SWEEP_PAUSED=true or a storage
@@ -577,13 +582,16 @@ export class MediaCleanupCoordinator {
       // bytes before the `files` table knows them; sweeping then would delete
       // bytes that are about to become referenced again.
       this.log('media cleanup: orphan sweep hold; sweep skipped');
-      return { deletedCount: 0, failedCount: 0, scanned: 0 };
+      return { deletedCount: 0, failedCount: 0, scanned: 0, subrequests: 0 };
     }
     const now = this.options.now ?? (() => new Date());
     const cutoff =
       opts.olderThan ?? new Date(now().getTime() - ORPHAN_SWEEP_GRACE_MS);
-    const limit = opts.limit ?? ORPHAN_SWEEP_LIMIT;
-    const maxPages = this.options.maxPages ?? ORPHAN_SWEEP_MAX_PAGES;
+    const initialBudget =
+      opts.subrequestBudget ??
+      this.options.subrequestBudget ??
+      ORPHAN_SWEEP_SUBREQUEST_BUDGET;
+    const budget = { remaining: initialBudget };
     const resumable = Boolean(
       this.storage.getSystemObject && this.storage.putSystemObject
     );
@@ -592,7 +600,6 @@ export class MediaCleanupCoordinator {
     let scanned = 0;
     let deletedCount = 0;
     let failedCount = 0;
-    const budget = { remaining: limit };
 
     // Resume prefix order: the cursor's prefix, then the rest, wrapping to the
     // start once every prefix is done.
@@ -615,10 +622,8 @@ export class MediaCleanupCoordinator {
         startAfter,
         cutoff,
         budget,
-        maxPages,
         onScanned: () => {
           scanned++;
-          budget.remaining--;
         },
         onDeleted: () => {
           deletedCount++;
@@ -656,37 +661,41 @@ export class MediaCleanupCoordinator {
       next = null;
     }
 
+    const subrequests = () => initialBudget - budget.remaining;
     if (stop) {
       await this.writeSweepCursor(stop);
-      return { deletedCount, failedCount, scanned };
+      return { deletedCount, failedCount, scanned, subrequests: subrequests() };
     }
     if (wrapped || next === null) {
       // Both prefixes were walked to the end: the cursor wraps to the start.
       await this.writeSweepCursor(null);
-      return { deletedCount, failedCount, scanned };
+      return { deletedCount, failedCount, scanned, subrequests: subrequests() };
     }
     await this.writeSweepCursor(next);
 
-    return { deletedCount, failedCount, scanned };
+    return { deletedCount, failedCount, scanned, subrequests: subrequests() };
   }
 
   /**
-   * Walk one prefix from `startAfter` (exclusive) until the run budget is spent
-   * or the prefix is exhausted. Returns `{kind:'done'}` when the prefix is
-   * exhausted, `{kind:'budget', startAfter}` when the budget ran out after
-   * `startAfter`, and `{kind:'list_failed'}` when the prefix could not be
+   * Walk one prefix from `startAfter` (exclusive) until the run's subrequest
+   * budget is spent or the prefix is exhausted. Returns `{kind:'done'}` when
+   * the prefix is exhausted, `{kind:'budget', startAfter}` when the budget
+   * ran out, and `{kind:'list_failed'}` when the prefix could not be
    * listed.
    *
-   * Pagination is key-based (`startAfter`), identical to the storage
-   * adapter contract, so resumption works the same on R2 and filesystem.
+   * One subrequest is charged per list page, per reference query (<= 45
+   * keys, so 2 * ORPHAN_SWEEP_REFERENCE_CHUNK <= 90 bound parameters), and
+   * per storage delete. Referenced and fresh objects consume no delete
+   * budget, and a fresh-only page costs only its list-page subrequest.
+   * Resume is always strictly after the last object the run fully processed
+   * (the incoming cursor when nothing was), never before it and never
+   * skipping an unscanned object.
    */
   private async sweepPrefix(input: {
     prefix: string;
     startAfter: string | undefined;
     cutoff: Date;
     budget: { remaining: number };
-    /** Named cap on listed pages within this prefix for this run. */
-    maxPages: number;
     onScanned: () => void;
     onDeleted: () => void;
     onFailed: () => void;
@@ -696,8 +705,15 @@ export class MediaCleanupCoordinator {
     | { kind: 'list_failed' }
   > {
     let startAfter = input.startAfter;
-    let pages = 0;
+    // Key after which the run resumes when the budget runs out: the last
+    // object the run fully processed. When nothing was processed, the
+    // incoming cursor leaves the page for a fresh-budget retry next run.
+    let lastProcessed: string | undefined;
     for (;;) {
+      if (input.budget.remaining <= 0) {
+        return { kind: 'budget', startAfter: lastProcessed ?? startAfter };
+      }
+      input.budget.remaining -= 1; // one list page = one subrequest
       let page;
       try {
         page = await this.storage.list!({
@@ -705,87 +721,74 @@ export class MediaCleanupCoordinator {
           startAfter,
           limit: 200,
         });
-        pages += 1;
       } catch {
         // Content-free: no key, no URL, no error text.
         this.log('media cleanup: storage list failed; prefix skipped');
         return { kind: 'list_failed' };
       }
 
-      // Consult the run budget *before* building any reference query: a
-      // chunk is capped to the remaining budget, so the query never binds
-      // more keys than the run can consume. Each key binds twice
-      // (storage_key and path), so a chunk stays at
-      // 2 * ORPHAN_SWEEP_REFERENCE_CHUNK <= 90 bound parameters.
-      let lastWalked: string | undefined;
       const candidates = page.entries.filter(
         (entry) => entry.uploaded.getTime() < input.cutoff.getTime()
       );
       let walkIndex = 0;
-      while (walkIndex < candidates.length && input.budget.remaining > 0) {
+      while (walkIndex < candidates.length) {
+        if (input.budget.remaining <= 0) {
+          // Unscanned past-grace objects remain on this page; resume
+          // strictly after the last object fully processed.
+          return { kind: 'budget', startAfter: lastProcessed ?? startAfter };
+        }
         const chunk = candidates.slice(
           walkIndex,
           walkIndex + ORPHAN_SWEEP_REFERENCE_CHUNK
         );
-        const applicable =
-          input.budget.remaining >= chunk.length
-            ? chunk
-            : chunk.slice(0, input.budget.remaining);
-        if (applicable.length === 0) break;
-        walkIndex += applicable.length;
+        walkIndex += chunk.length;
+        // One reference query per <= 45 keys (D1 binds each key twice).
+        input.budget.remaining -= 1;
         let referenced: Set<string>;
         try {
           referenced = await this.findReferencedKeys(
-            applicable.map((entry) => entry.key)
+            chunk.map((entry) => entry.key)
           );
         } catch {
           // Content-free: an unreadable candidate set is left for the next
-          // run; it does not count against the per-run budget.
+          // run; the failed query was still sent, so it stays charged.
           input.onFailed();
           continue;
         }
-        for (const entry of applicable) {
+        for (const entry of chunk) {
+          if (referenced.has(entry.key)) {
+            input.onScanned();
+            lastProcessed = entry.key;
+            continue;
+          }
+          if (input.budget.remaining <= 0) {
+            return {
+              kind: 'budget',
+              startAfter: lastProcessed ?? startAfter,
+            };
+          }
+          input.budget.remaining -= 1; // one storage delete
           input.onScanned();
-          lastWalked = entry.key;
-          if (referenced.has(entry.key)) continue;
           const ok = await this.deleteStorageBestEffort(
             entry.key,
             'owner_deleted'
           );
           if (ok) input.onDeleted();
           else input.onFailed();
+          lastProcessed = entry.key;
         }
-      }
-      // The walk stopped early — budget ran out with unscanned
-      // past-grace objects left on this page. Resume strictly after the
-      // last object scanned (the incoming cursor if none was scanned),
-      // never before it and never skipping an unscanned one.
-      if (walkIndex < candidates.length) {
-        return { kind: 'budget', startAfter: lastWalked ?? startAfter };
       }
       // The page is fully walked. If the prefix is exhausted it is done —
       // even when the budget ran out on its last object — so the run moves on
       // (or wraps) instead of pinning the cursor on a gone prefix. Nothing
-      // was skipped by the budget cap here: every past-grace object on this
-      // page was processed.
+      // was skipped here: every past-grace object on this page was processed.
       if (!page.truncated || !page.nextStartAfter) return { kind: 'done' };
       // Budget spent on this page: resume exactly after the last object
-      // scanned (the incoming cursor if none), never before it.
+      // processed (the incoming cursor if none), never before it.
       if (input.budget.remaining <= 0) {
-        return { kind: 'budget', startAfter: lastWalked ?? startAfter };
+        return { kind: 'budget', startAfter: lastProcessed ?? startAfter };
       }
-      // Listing cap reached: stop even though no budget was spent, so a run
-      // of fresh objects cannot walk the whole prefix within one invocation.
-      // Persist where this prefix stopped and resume there next time.
-      if (pages >= input.maxPages && page.truncated && page.nextStartAfter) {
-        const resumeAfter =
-          page.entries.length > 0
-            ? page.entries[page.entries.length - 1]!.key
-            : startAfter;
-        return { kind: 'budget', startAfter: resumeAfter };
-      }
-      // No budget was spent (every entry was inside the grace window); keep
-      // walking, but never spin on a non-advancing startAfter.
+      // Never spin on a non-advancing startAfter.
       if (page.nextStartAfter === startAfter) return { kind: 'done' };
       startAfter = page.nextStartAfter;
     }

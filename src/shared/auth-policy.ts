@@ -230,6 +230,15 @@ export const SESSION_LAST_SEEN_WRITE_INTERVAL_MS = 60 * 1000;
 /** Scheduled sweep of expired session rows. */
 export const SESSION_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
+/** Bytes of CSPRNG entropy in every issued code/token (§6.8: >= 100 bits). */
+export const LOGIN_CODE_ENTROPY_BYTES = 16;
+/**
+ * Maximum lifetime of an admin_issued LoginCode: 72 hours (§6.8: "at most
+ * 72 hours, configurably less per deployment"). Named constant; a deployment
+ * that wants less may shrink it here, never grow it past 72h.
+ */
+export const ADMIN_ISSUED_CODE_TTL_MS = 72 * 60 * 60 * 1000;
+
 export type SessionKind = 'standard' | 'device';
 
 export interface SessionLifetimes {

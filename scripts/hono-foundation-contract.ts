@@ -13,6 +13,7 @@ import {
   sessionsSqlite,
 } from '../src/db/schema/sessions.js';
 import { HonoFoundationRepository } from '../src/repositories/hono-foundation.repository.js';
+import { HonoAuthRepository } from '../src/repositories/hono-auth.repository.js';
 import { createHonoApp } from '../src/hono-app.js';
 import {
   ARGON2ID_ALGORITHM,
@@ -58,6 +59,9 @@ export async function runHonoFoundationContract(
   const passwordHash = (await hash(password, 4)).replace('$2b$', '$2a$');
   const stretchedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
   const wrongKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const wrappedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const makeDerivedKey = () =>
+    toHex(crypto.getRandomValues(new Uint8Array(32)));
   const stretchedVerifier = await sha256Hex(stretchedKey);
   const stretchedSalt = Buffer.from(
     crypto.getRandomValues(new Uint8Array(16))
@@ -1101,6 +1105,123 @@ export async function runHonoFoundationContract(
         ).length,
         1
       );
+
+      // Slice 10 (#137): concurrent failed logins on one account must not
+      // lose a counter update. `recordLoginFailure` writes the per-account and
+      // per-IP rows in one transaction; two simultaneous attempts must both
+      // land, and the counter must equal the attempt count (no lost update).
+      const authThrottle = tables.authThrottle;
+      const accountKey = await new HonoAuthRepository(
+        database as Database
+      ).accountThrottleKey(viewerId, serverSecret);
+      const ipKey = await new HonoAuthRepository(
+        database as Database
+      ).ipThrottleKey('203.0.113.250', serverSecret);
+      await db
+        .delete(authThrottle)
+        .where(inArray(authThrottle.key, [accountKey, ipKey]));
+      const burst = await Promise.all(
+        [0, 1, 2, 3].map(() =>
+          postLogin(app, { identifier: viewerEmail, derivedKey: wrongKey })
+        )
+      );
+      assert.ok(
+        burst.every((response) => response.status === 401),
+        'every concurrent wrong-key attempt must answer the uniform 401'
+      );
+      const throttleRows = await db
+        .select()
+        .from(authThrottle)
+        .where(eq(authThrottle.key, accountKey));
+      assert.equal(
+        throttleRows.length,
+        1,
+        'concurrent failures must update one per-account row, not fork it'
+      );
+      assert.equal(
+        throttleRows[0].failures,
+        4,
+        'concurrent failed logins must not lose a counter update'
+      );
+      const ipRows = await db
+        .select()
+        .from(authThrottle)
+        .where(eq(authThrottle.key, ipKey));
+      assert.equal(ipRows[0].failures, 4);
+
+      // Slice 10: a wrapped-bcrypt upgrade is atomic — verifier, salt, params
+      // and algorithm land together, guarded by the re-read `password_hash`.
+      // A concurrent verifier change between the read and the write makes the
+      // login fail closed with the row unchanged.
+      const [wrappedAccount] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: `wrapped-pg-${tag}@example.test`,
+          username: `wrapped_pg_${tag}`,
+          role: 'member',
+          communityId: communityA,
+          passwordAlgorithm: 'client-bcrypt-rails+sha256',
+          passwordSalt: 'c2FsdA==',
+          passwordParams: JSON.stringify({ cost: 12 }),
+          passwordVerifier: sha256Hex(wrappedKey),
+        })
+        .returning();
+      userIds.push(wrappedAccount.id);
+      const [wrappedBefore] = await db
+        .select()
+        .from(tables.users)
+        .where(eq(tables.users.id, wrappedAccount.id));
+      // A concurrent reset while the upgrade is in flight must win: the
+      // login is rejected and the verifier row is unchanged.
+      let upgradeDone = false;
+      let pendingUpgrade!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        pendingUpgrade = postLogin(app, {
+          identifier: `wrapped-pg-${tag}@example.test`,
+          derivedKey: wrappedKey,
+          upgrade: {
+            algorithm: 'client-argon2id+sha256',
+            salt: 'dXBkYXRlLXNhbHQ=',
+            params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+            derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+          },
+        });
+        void pendingUpgrade.finally(() => {
+          upgradeDone = true;
+        });
+        // The verifier write is blocked behind the UPDATE lock while the
+        // uncommitted reset changes the authority row.
+        await tx
+          .update(tables.users)
+          .set({ passwordVerifier: 'reset-during-upgrade' })
+          .where(eq(tables.users.id, wrappedAccount.id));
+        const deadline = Date.now() + 2000;
+        while (!upgradeDone && Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      });
+      const upgradeResponse = await pendingUpgrade;
+      assert.equal(
+        upgradeResponse.status,
+        401,
+        'a concurrent reset must win the upgrade race'
+      );
+      const [wrappedAfter] = await db
+        .select()
+        .from(tables.users)
+        .where(eq(tables.users.id, wrappedAccount.id));
+      assert.equal(
+        wrappedAfter.passwordVerifier,
+        'reset-during-upgrade',
+        'a rejected upgrade must leave the verifier row unchanged'
+      );
+      void wrappedBefore;
     }
   } finally {
     for (const id of communityIds) {

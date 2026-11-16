@@ -18,6 +18,7 @@ import {
 import {
   MediaCleanupCoordinator,
   WORKER_ORPHAN_SWEEP_LIMIT,
+  WORKER_ORPHAN_SWEEP_MAX_PAGES,
 } from './services/media-cleanup.service.js';
 import {
   validateWorkerV2Runtime,
@@ -289,6 +290,7 @@ export function createWorker(
             createR2Storage(env.MEDIA),
             {
               now: () => new Date(_controller.scheduledTime || Date.now()),
+              maxPages: WORKER_ORPHAN_SWEEP_MAX_PAGES,
             }
           );
           try {

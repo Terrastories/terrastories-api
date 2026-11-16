@@ -188,6 +188,21 @@ export const ORPHAN_SWEEP_LIMIT = 500;
  */
 export const WORKER_ORPHAN_SWEEP_LIMIT = 20;
 
+/**
+ * Named per-run cap on listed pages (200 keys per page) for Workers: even a
+ * page that holds zero sweep candidates costs one subrequest, so the run
+ * walks at most this many pages per prefix before persisting its cursor and
+ * yielding.
+ */
+export const WORKER_ORPHAN_SWEEP_MAX_PAGES = 5;
+
+/**
+ * Same bound for the Node sweeper, sized for a long-lived process: 50 pages
+ * walk 10,000 keys per run, still bounded against a huge or pathological
+ * keyspace.
+ */
+export const ORPHAN_SWEEP_MAX_PAGES = 50;
+
 /** Storage prefixes that can hold community/system bytes. */
 export const ORPHAN_SWEEP_PREFIXES = ['communities/', 'users/'] as const;
 
@@ -204,6 +219,11 @@ export interface MediaCleanupCoordinatorOptions {
   /** Content-free operator channel; never receives content or URLs. */
   log?: (line: string) => void;
   now?: () => Date;
+  /**
+   * Named cap on listed pages per run (200 keys per page). Defaults to
+   * ORPHAN_SWEEP_MAX_PAGES; Workers pass WORKER_ORPHAN_SWEEP_MAX_PAGES.
+   */
+  maxPages?: number;
 }
 
 export class MediaCleanupCoordinator {
@@ -404,7 +424,10 @@ export class MediaCleanupCoordinator {
    * referenced object or a fresh in-flight upload is always kept.
    *
    * The per-run cap counts only objects past the grace window, so a long run of
-   * live objects never starves garbage collection. Progress is a small cursor
+   * live objects never starves garbage collection. A separate per-run cap on
+   * listed pages (`maxPages`) bounds total subrequests, so a page full of
+   * fresh objects cannot walk the whole prefix within one invocation.
+   * Progress is a small cursor
    * object in the storage adapter (`system/orphan-sweep-cursor.json`, outside
    * the swept prefixes): each run resumes after `{prefix, startAfter}`, walks
    * `communities/` then `users/`, and wraps to the start once both are done.
@@ -430,6 +453,7 @@ export class MediaCleanupCoordinator {
     const cutoff =
       opts.olderThan ?? new Date(now().getTime() - ORPHAN_SWEEP_GRACE_MS);
     const limit = opts.limit ?? ORPHAN_SWEEP_LIMIT;
+    const maxPages = this.options.maxPages ?? ORPHAN_SWEEP_MAX_PAGES;
     const resumable = Boolean(
       this.storage.getSystemObject && this.storage.putSystemObject
     );
@@ -461,6 +485,7 @@ export class MediaCleanupCoordinator {
         startAfter,
         cutoff,
         budget,
+        maxPages,
         onScanned: () => {
           scanned++;
           budget.remaining--;
@@ -530,6 +555,8 @@ export class MediaCleanupCoordinator {
     startAfter: string | undefined;
     cutoff: Date;
     budget: { remaining: number };
+    /** Named cap on listed pages within this prefix for this run. */
+    maxPages: number;
     onScanned: () => void;
     onDeleted: () => void;
     onFailed: () => void;
@@ -539,6 +566,7 @@ export class MediaCleanupCoordinator {
     | { kind: 'list_failed' }
   > {
     let startAfter = input.startAfter;
+    let pages = 0;
     for (;;) {
       let page;
       try {
@@ -547,6 +575,7 @@ export class MediaCleanupCoordinator {
           startAfter,
           limit: 200,
         });
+        pages += 1;
       } catch {
         // Content-free: no key, no URL, no error text.
         this.log('media cleanup: storage list failed; prefix skipped');
@@ -602,6 +631,16 @@ export class MediaCleanupCoordinator {
       if (!page.truncated || !page.nextStartAfter) return { kind: 'done' };
       if (input.budget.remaining <= 0) {
         const resumeAfter = page.entries[page.entries.length - 1]!.key;
+        return { kind: 'budget', startAfter: resumeAfter };
+      }
+      // Listing cap reached: stop even though no budget was spent, so a run
+      // of fresh objects cannot walk the whole prefix within one invocation.
+      // Persist where this prefix stopped and resume there next time.
+      if (pages >= input.maxPages && page.truncated && page.nextStartAfter) {
+        const resumeAfter =
+          page.entries.length > 0
+            ? page.entries[page.entries.length - 1]!.key
+            : startAfter;
         return { kind: 'budget', startAfter: resumeAfter };
       }
       // No budget was spent (every entry was inside the grace window); keep

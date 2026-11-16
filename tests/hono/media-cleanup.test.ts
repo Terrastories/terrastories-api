@@ -408,6 +408,55 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     }
   });
 
+  it('bounds one run to maxPages and resumes the cursor on the next run', async () => {
+    await seedSentinelFileRow();
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { store, storage } = createListableStorage();
+    // Fresh objects spend the per-object budget on nothing, so only a page
+    // cap can stop the run after a few pages of a large keyspace.
+    const freshKey = (i: number) =>
+      `communities/1/media/live-${String(i).padStart(3, '0')}`;
+    const freshUntil = 450;
+    for (let i = 0; i <= freshUntil; i += 1) {
+      store.set(freshKey(i), { bytes: Uint8Array.from([1]), uploaded: now });
+    }
+    const orphanKey = 'communities/1/media/zz-orphan';
+    store.set(orphanKey, {
+      bytes: Uint8Array.from([9]),
+      uploaded: new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000),
+    });
+    let listCalls = 0;
+    const countingStorage: FoundationStorage = {
+      ...storage,
+      list: async (options) => {
+        listCalls += 1;
+        return storage.list!(options);
+      },
+    };
+    const cleanup = new MediaCleanupCoordinator(db, countingStorage, {
+      now: () => now,
+      log: () => {},
+      maxPages: 2,
+    });
+    const first = await cleanup.sweepOrphanObjects();
+    expect(first.deletedCount).toBe(0);
+    expect(
+      listCalls,
+      'stops after maxPages pages instead of walking the prefix'
+    ).toBe(2);
+    expect(
+      store.has(orphanKey),
+      'orphan still ahead after the bounded run'
+    ).toBe(true);
+
+    // The persisted cursor resumes after the page the first run stopped at.
+    const second = await cleanup.sweepOrphanObjects();
+    expect(second.deletedCount).toBe(1);
+    expect(store.has(orphanKey), 'orphan reached by the resumed run').toBe(
+      false
+    );
+  });
+
   it('skips the sweep entirely when the files table has zero rows', async () => {
     // A fresh, empty database: a restore can recreate storage bytes before
     // the files rows exist, so nothing may be trusted as garbage.

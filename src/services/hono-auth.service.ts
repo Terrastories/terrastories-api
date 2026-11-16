@@ -283,9 +283,15 @@ export class HonoAuthService {
       await this.repository.accountThrottleKey(account.id, secret),
       now.getTime()
     );
-    if (accountBlocked.blocked)
-      // A blocked account writes nothing either (finding B).
+    if (accountBlocked.blocked) {
+      // A blocked account must not be distinguishable from an unresolved
+      // identifier by the time the server spends on it: burn the same dummy
+      // account read and the same SHA-256/constant-time compare. A blocked
+      // attempt writes nothing, so it cannot amplify into audit or throttle
+      // rows (item 7).
+      await this.burnUnresolvedWork(input.derivedKey, secret, now);
       throw new AuthLoginRejected();
+    }
     const verification = await this.verifierFor(account, input);
     if (!verification.ok)
       return this.reject(account, clientIp, userAgent, now, secret);

@@ -430,9 +430,12 @@ export class HonoFoundationRepository {
    * The account's other sessions are also revoked explicitly: when the new
    * material produces the same stored verifier the trigger does not fire,
    * and every verifier change must revoke the account's other sessions
-   * (SPEC-V2 §7). The D1 batch executes the revoke unconditionally, so it is
-   * gated on the new verifier actually being stored — a lost coupled write
-   * deletes no sessions, exactly as the rolling-back SQLite/PostgreSQL paths.
+   * (SPEC-V2 §7). The D1 batch executes the revoke without an interactive
+   * transaction, so it is gated on the new verifier actually being stored —
+   * a lost coupled write deletes nothing, exactly as the rolling-back
+   * SQLite/PostgreSQL paths. The one hole in that gate is an identical-material
+   * write (requested verifier reproduces the stored one) racing a concurrent
+   * authority change: see the note on the revoke below.
    */
   async createSessionWithVerifier(input: {
     tokenHash: string;
@@ -503,6 +506,22 @@ export class HonoFoundationRepository {
             sql`exists (select 1 from ${sessions} where ${sessions.tokenHash} = ${plan.tokenHash} and ${sessions.userId} = ${plan.userId})`
           )
         );
+    // D1 note — the gate proves "stored == requested", not "this batch
+    // stored it". One hole remains: when the requested verifier reproduces
+    // the already-stored one (identical salt + derivedKey) the verifier
+    // update changes no row, so the batch reports established:false and no
+    // session is inserted — yet a concurrent authority change (role,
+    // community, password material or is_active changed in the same window)
+    // leaves the stored value equal to the requested one, and this delete
+    // fires on a failing coupled write. It cannot be distinguished without
+    // a connection-scoped changes(), which the D1 batch gives us no handle
+    // on across statements and which does not port to PostgreSQL; and the
+    // alternative gate "stored == requested AND requested <> previous" was
+    // rejected because it would also block the identical-material SUCCESS
+    // case, where §7 still requires the other sessions to die. In practice
+    // the residual costs nothing: losing the authority gate means one of
+    // those columns did change, and that change revokes the sessions
+    // through users_revoke_sessions / communities_revoke_sessions anyway.
     const revokeAllSessions = (database: Executor) =>
       database.delete(sessions).where(
         and(

@@ -32,6 +32,12 @@ import {
 import { themesPg, themesSqlite } from './schema/themes.js';
 import { usersPg, usersSqlite } from './schema/users.js';
 import {
+  loginCodesPg,
+  loginCodesSqlite,
+  claimTokensPg,
+  claimTokensSqlite,
+} from './schema/login_codes.js';
+import {
   authThrottlePg,
   authThrottleSqlite,
   sessionsPg,
@@ -44,6 +50,8 @@ const sqliteTables = {
   attachments: attachmentsSqlite,
   auditEntries: auditEntriesSqlite,
   authThrottle: authThrottleSqlite,
+  claimTokens: claimTokensSqlite,
+  loginCodes: loginCodesSqlite,
   communities: communitiesSqlite,
   communityMapConfigs: communityMapConfigsSqlite,
   externalMediaLinks: externalMediaLinksSqlite,
@@ -62,6 +70,8 @@ const postgresTables = {
   attachments: attachmentsPg,
   auditEntries: auditEntriesPg,
   authThrottle: authThrottlePg,
+  claimTokens: claimTokensPg,
+  loginCodes: loginCodesPg,
   communities: communitiesPg,
   communityMapConfigs: communityMapConfigsPg,
   externalMediaLinks: externalMediaLinksPg,

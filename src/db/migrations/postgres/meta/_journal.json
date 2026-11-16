@@ -85,6 +85,13 @@
       "when": 1795176000000,
       "tag": "0011_auth_throttle_and_session_lifetimes",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1795262400000,
+      "tag": "0012_login_codes_and_claim_tokens",
+      "breakpoints": true
     }
   ]
 }

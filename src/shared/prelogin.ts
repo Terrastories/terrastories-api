@@ -49,16 +49,13 @@ const BCRYPT_SALT_LAST = BCRYPT_ALPHABET.split('')
  * characters use the full bcrypt alphabet, and the 22nd is one of `.Oeu`
  * because bcrypt's base64 only emits 4 meaningful bits there (finding C).
  */
-function bcryptSalt(digest: Uint8Array): string {
+function bcryptSalt(bytes: Uint8Array): string {
   let salt = '';
   for (let index = 0; index < 21; index += 1) {
-    salt += BCRYPT_ALPHABET[(digest[index % digest.length] ?? 0) % 64];
+    salt += BCRYPT_ALPHABET[(bytes[index] ?? 0) % 64];
   }
-  const last =
-    BCRYPT_SALT_LAST[
-      (digest[21 % digest.length] ?? 0) % BCRYPT_SALT_LAST.length
-    ];
-  return salt + last;
+  const last = BCRYPT_SALT_LAST[(bytes[21] ?? 0) % BCRYPT_SALT_LAST.length];
+  return salt + last!;
 }
 
 /**
@@ -181,9 +178,13 @@ export async function deterministicPreloginFake(
           (cost) => ({ cost, count: 1 })
         );
   const cost = deterministicPick(digest, 24, costWeights).cost;
+  // The bcrypt salt is a salt, not a derived tag: draw it from the same
+  // counter-mode key stream the Argon2id fake uses, so no digest byte is
+  // shared with the cost pick at bytes 24..27 (item 3).
+  const saltBytes = await keyStream(digestHex, 22);
   return {
     algorithm: RAILS_BCRYPT_ALGORITHM,
-    salt: bcryptSalt(digest.slice(5)),
+    salt: bcryptSalt(saltBytes),
     params: { cost: Math.min(cost, BCRYPT_MAX_COST) },
   };
 }

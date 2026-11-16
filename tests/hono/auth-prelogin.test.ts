@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -771,5 +771,41 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     expect(text).not.toContain('upgraded@prelogin.test');
     expect(text).not.toContain('upgraded_alpha');
     expect(text).not.toContain('password_verifier');
+  });
+
+  it('executes the same repository calls for an unknown slug as for a known slug with an unknown identifier (item 8)', async () => {
+    const { app } = await setup();
+    const accountSpy = vi.spyOn(
+      HonoAuthRepository.prototype,
+      'preloginAccount'
+    );
+    const slugSpy = vi.spyOn(HonoAuthRepository.prototype, 'communityIdBySlug');
+    const mixSpy = vi.spyOn(HonoAuthRepository.prototype, 'preloginMix');
+    try {
+      await postPrelogin(app, {
+        identifier: 'nobody@prelogin.test',
+        communitySlug: 'prelogin-alpha',
+      });
+      const known = {
+        account: accountSpy.mock.calls.length,
+        slug: slugSpy.mock.calls.length,
+        mix: mixSpy.mock.calls.length,
+      };
+      vi.clearAllMocks();
+      const response = await postPrelogin(app, {
+        identifier: 'nobody@prelogin.test',
+        communitySlug: 'nope-never-a-slug-zz',
+      });
+      expect(response.status).toBe(200);
+      expect({
+        account: accountSpy.mock.calls.length,
+        slug: slugSpy.mock.calls.length,
+        mix: mixSpy.mock.calls.length,
+      }).toEqual(known);
+    } finally {
+      accountSpy.mockRestore();
+      slugSpy.mockRestore();
+      mixSpy.mockRestore();
+    }
   });
 });

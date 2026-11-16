@@ -8,7 +8,7 @@
  * token digest at rest. bcrypt hashes, stretched keys and secrets are built
  * at runtime; nothing credential-shaped is a literal.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -1388,5 +1388,52 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(
       (await db.select({ value: count() }).from(sessionsSqlite))[0]?.value
     ).toBe(0);
+  });
+
+  it('executes the same repository calls for an unknown slug as for a known slug with an unknown identifier (item 8)', async () => {
+    const { app, postLogin, stretchedKey } = await setup();
+    const candidates = vi.spyOn(
+      HonoAuthRepository.prototype,
+      'loginCandidates'
+    );
+    const slugLookup = vi.spyOn(
+      HonoAuthRepository.prototype,
+      'communityIdBySlug'
+    );
+    const throttle = vi.spyOn(HonoAuthRepository.prototype, 'throttleState');
+    try {
+      await postLogin(
+        {
+          identifier: 'nobody@login.example.test',
+          communitySlug: 'login-alpha',
+          derivedKey: stretchedKey,
+        },
+        { 'x-forwarded-for': '203.0.113.210' }
+      );
+      const known = {
+        candidates: candidates.mock.calls.length,
+        slug: slugLookup.mock.calls.length,
+        throttle: throttle.mock.calls.length,
+      };
+      vi.clearAllMocks();
+      const response = await postLogin(
+        {
+          identifier: 'nobody@login.example.test',
+          communitySlug: 'nope-never-a-slug-zz',
+          derivedKey: stretchedKey,
+        },
+        { 'x-forwarded-for': '203.0.113.211' }
+      );
+      expect(response.status).toBe(401);
+      expect({
+        candidates: candidates.mock.calls.length,
+        slug: slugLookup.mock.calls.length,
+        throttle: throttle.mock.calls.length,
+      }).toEqual(known);
+    } finally {
+      candidates.mockRestore();
+      slugLookup.mockRestore();
+      throttle.mockRestore();
+    }
   });
 });

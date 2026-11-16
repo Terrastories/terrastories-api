@@ -115,15 +115,15 @@ export class HonoAuthService {
       input.communitySlug === undefined
         ? undefined
         : await this.repository.communityIdBySlug(input.communitySlug);
-    // A slug that names no community cannot resolve an account; the fake path
-    // answers instead, exactly as for an unknown identifier.
-    const account =
-      input.communitySlug !== undefined && communityId === null
-        ? null
-        : await this.repository.preloginAccount(
-            normalized,
-            communityId ?? undefined
-          );
+    // Even for an unknown slug the account lookup runs, against an
+    // impossible community id (-1 matches no row): it must cost the same as
+    // a known slug with an unknown identifier (item 8).
+    const account = await this.repository.preloginAccount(
+      normalized,
+      communityId === null
+        ? HonoAuthService.IMPOSSIBLE_COMMUNITY_ID
+        : (communityId ?? undefined)
+    );
     if (account !== null) {
       const params = parseStoredPasswordParams(
         account.passwordAlgorithm,
@@ -257,9 +257,18 @@ export class HonoAuthService {
       input.communitySlug === undefined
         ? undefined
         : await this.repository.communityIdBySlug(input.communitySlug);
-    // An unknown slug is a uniform failure, exactly like an unknown identifier.
-    if (input.communitySlug !== undefined && communityId === null)
+    // An unknown slug must cost the same as a known slug with an unknown
+    // identifier: the same lookup against an impossible community id and the
+    // same dummy work, so the slug is not distinguishable by cost (item 8).
+    if (input.communitySlug !== undefined && communityId === null) {
+      await this.repository.loginCandidates(
+        input.identifier,
+        normalized,
+        HonoAuthService.IMPOSSIBLE_COMMUNITY_ID
+      );
+      await this.burnUnresolvedWork(input.derivedKey, secret, now);
       return this.reject(null, clientIp, userAgent, now, secret);
+    }
     const candidates = await this.repository.loginCandidates(
       input.identifier,
       normalized,
@@ -439,6 +448,8 @@ export class HonoAuthService {
    */
   private static readonly DUMMY_ACCOUNT_ID = 0;
   private static readonly DUMMY_VERIFIER = '0'.repeat(64);
+  /** No community may carry id -1; used so an unknown-slug lookup matches nothing. */
+  private static readonly IMPOSSIBLE_COMMUNITY_ID = -1;
 
   private async burnUnresolvedWork(
     derivedKey: string,

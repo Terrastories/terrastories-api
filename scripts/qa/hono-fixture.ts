@@ -861,59 +861,71 @@ export async function createFixture(
     const disabledEditorCredentials = {
       email: 'qa-hono-disabled-editor@example.test',
     };
-    await db.insert(users).values([
-      {
-        email: disabledAdminCredentials.email,
-        username: 'qa_hono_disabled_admin',
-        displayName: 'QA Disabled Admin',
-        ...deriveUserIdentityColumns({
+    const [
+      disabledSeededAdmin,
+      disabledSeededViewer,
+      disabledSeededMember,
+      disabledSeededEditor,
+    ] = await db
+      .insert(users)
+      .values([
+        {
           email: disabledAdminCredentials.email,
           username: 'qa_hono_disabled_admin',
-        }),
-        ...verifier,
-        firstName: 'QA',
-        lastName: 'DisabledAdmin',
-        role: 'admin',
-        communityId: inactiveCommunity.id,
-        isActive: true,
-      },
-      {
-        email: disabledViewerCredentials.email,
-        ...deriveUserIdentityColumns({
+          displayName: 'QA Disabled Admin',
+          ...deriveUserIdentityColumns({
+            email: disabledAdminCredentials.email,
+            username: 'qa_hono_disabled_admin',
+          }),
+          ...verifier,
+          firstName: 'QA',
+          lastName: 'DisabledAdmin',
+          role: 'admin',
+          communityId: inactiveCommunity.id,
+          isActive: true,
+        },
+        {
           email: disabledViewerCredentials.email,
-        }),
-        ...verifier,
-        firstName: 'QA',
-        lastName: 'DisabledViewer',
-        role: 'viewer',
-        communityId: inactiveCommunity.id,
-        isActive: true,
-      },
-      {
-        email: disabledMemberCredentials.email,
-        ...deriveUserIdentityColumns({
+          ...deriveUserIdentityColumns({
+            email: disabledViewerCredentials.email,
+          }),
+          ...verifier,
+          firstName: 'QA',
+          lastName: 'DisabledViewer',
+          role: 'viewer',
+          communityId: inactiveCommunity.id,
+          isActive: true,
+        },
+        {
           email: disabledMemberCredentials.email,
-        }),
-        ...verifier,
-        firstName: 'QA',
-        lastName: 'DisabledMember',
-        role: 'member',
-        communityId: inactiveCommunity.id,
-        isActive: true,
-      },
-      {
-        email: disabledEditorCredentials.email,
-        ...deriveUserIdentityColumns({
+          ...deriveUserIdentityColumns({
+            email: disabledMemberCredentials.email,
+          }),
+          ...verifier,
+          firstName: 'QA',
+          lastName: 'DisabledMember',
+          role: 'member',
+          communityId: inactiveCommunity.id,
+          isActive: true,
+        },
+        {
           email: disabledEditorCredentials.email,
-        }),
-        ...verifier,
-        firstName: 'QA',
-        lastName: 'DisabledEditor',
-        role: 'editor',
-        communityId: inactiveCommunity.id,
-        isActive: true,
-      },
-    ]);
+          ...deriveUserIdentityColumns({
+            email: disabledEditorCredentials.email,
+          }),
+          ...verifier,
+          firstName: 'QA',
+          lastName: 'DisabledEditor',
+          role: 'editor',
+          communityId: inactiveCommunity.id,
+          isActive: true,
+        },
+      ])
+      .returning();
+    void disabledSeededAdmin;
+    void disabledSeededViewer;
+    void disabledSeededEditor;
+    const disabledMemberId = disabledSeededMember!.id;
     // #192: one more public ACTIVE community whose name carries composed
     // diacritics, exercising the Unicode-correct Explore name search on the
     // persona gates: SQLite/D1 lower() folds ASCII only, so only the
@@ -5168,6 +5180,60 @@ export async function createFixture(
       .returning();
     const mediaGuardedBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
     const mediaGuardedFileId = crypto.randomUUID();
+    // Slice 11a user-management community (#188): a private, active community
+    // with its own accounts, so the user-management journeys can pin exact
+    // list contents without disturbing the shared fixtures. Private like the
+    // media community: no public-surface counts may move.
+    const [userCommunity] = await db
+      .insert(communities)
+      .values({
+        name: 'QA user community',
+        slug: 'qa-user-management-community',
+        publicStories: false,
+        isActive: true,
+      })
+      .returning();
+    const userCommunityCredentials = {
+      admin: { email: 'qa-users-admin@example.test' },
+      member: { email: 'qa-users-member@example.test' },
+      viewer: { email: 'qa-users-viewer@example.test' },
+    } as const;
+    const userCommunityIds: Record<string, number> = {};
+    for (const role of ['admin', 'member', 'viewer'] as const) {
+      const qaUsername = `qa_users_${role}`;
+      const [qaUser] = await db
+        .insert(users)
+        .values({
+          email: userCommunityCredentials[role].email,
+          username: qaUsername,
+          ...deriveUserIdentityColumns({
+            email: userCommunityCredentials[role].email,
+            username: qaUsername,
+          }),
+          ...verifier,
+          firstName: 'QA',
+          lastName: `Users${role}`,
+          role: sql`${role}`,
+          communityId: userCommunity.id,
+          isActive: true,
+        })
+        .returning();
+      userCommunityIds[role] = qaUser.id;
+    }
+    // The verifier material for the account created through POST /v2/users,
+    // so that account can log in with a device session in the journeys.
+    const qaManagedDerivedKey = toHex(
+      crypto.getRandomValues(new Uint8Array(32))
+    );
+    const qaManagedSalt = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    // A second material for the disabled-community recovery steps; built at
+    // runtime like every other QA credential.
+    const qaResetDerivedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const qaResetSalt = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
     const mediaGuardedPath = `communities/${mediaCommunity.id}/media/${mediaGuardedFileId}`;
     await db.insert(files).values({
       id: mediaGuardedFileId,
@@ -5273,6 +5339,8 @@ export async function createFixture(
     };
     const mediaMetadataCheck = (body: unknown): boolean =>
       MediaMetadataResponseSchema.safeParse(body).success;
+    let qaManagedUserId = 0;
+    let userManagedSessionId = '';
     let qaStageFileId = '';
     let qaStageFile2Id = '';
     let qaAudioFileId = '';
@@ -5285,6 +5353,429 @@ export async function createFixture(
     let qaMemberFileId = '';
     let qaSuperPhotoId = '';
 
+    // Slice 11a (#188): the device-session revoke path is only known once
+    // the list step ran, so `prepare` returns it for this run (the runner
+    // honours a string return and cloned steps keep their own copy).
+    const qaManagedRevokeStep: Step = {
+      name: 'revoke managed account device session',
+      method: 'DELETE',
+      path: '/v2/users/pending',
+      expected: 204,
+      useSavedCookie: 'qaAdminCookie',
+      prepare: () =>
+        `/v2/users/${qaManagedUserId}/sessions/${userManagedSessionId}`,
+    };
+    // Cross-community negatives for a private-community admin (#188).
+    const privateAdminUserManagementSteps: Step[] = [
+      {
+        name: 'deny cross-community user detail',
+        method: 'GET',
+        path: `/v2/users/${userCommunityIds.admin}`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+      {
+        name: 'deny cross-community device session revoke',
+        method: 'DELETE',
+        path: `/v2/users/${userCommunityIds.admin}/sessions/abc123def456`,
+        expected: 404,
+        check: publicNotFoundCheck,
+      },
+    ];
+    // Non-admin negatives on the whole user-management surface (#188).
+    const userViewerForbiddenSteps: Step[] = [
+      {
+        name: 'deny user list',
+        method: 'GET',
+        path: '/v2/users',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny user detail',
+        method: 'GET',
+        path: `/v2/users/${userCommunityIds.admin}`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny user create',
+        method: 'POST',
+        path: '/v2/users',
+        expected: 403,
+        body: {
+          username: 'qa_viewer_denied',
+          email: 'qa-viewer-denied@example.test',
+          role: 'viewer',
+        },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny user update',
+        method: 'PATCH',
+        path: `/v2/users/${userCommunityIds.admin}`,
+        expected: 403,
+        body: { displayName: 'Denied' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny assisted password reset',
+        method: 'POST',
+        path: `/v2/users/${userCommunityIds.admin}/password-reset`,
+        expected: 403,
+        body: {
+          algorithm: 'client-argon2id+sha256',
+          salt: qaResetSalt,
+          params: JSON.parse(ARGON2ID_PARAMS_JSON),
+          derivedKey: qaResetDerivedKey,
+        },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin-issued login code',
+        method: 'POST',
+        path: `/v2/users/${userCommunityIds.admin}/login-codes`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny device session list',
+        method: 'GET',
+        path: `/v2/users/${userCommunityIds.admin}/sessions`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny device session revoke',
+        method: 'DELETE',
+        path: `/v2/users/${userCommunityIds.admin}/sessions/abc123def456`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+    ];
+    const userAdminSteps: Step[] = [
+      {
+        name: 'login',
+        method: 'POST',
+        path: '/v2/auth/login',
+        expected: 200,
+        body: loginBody(userCommunityCredentials.admin.email),
+        check: ownUser(
+          userCommunityCredentials.admin.email,
+          'admin',
+          liveSessionCookie,
+          userCommunity.id
+        ),
+      },
+      {
+        name: 'list community users without credentials',
+        method: 'GET',
+        path: '/v2/users',
+        expected: 200,
+        saveCookieAs: 'qaAdminCookie',
+        check: (body) => {
+          const parsed = body as {
+            data?: Array<Record<string, unknown>>;
+            meta?: { total?: number };
+          };
+          if (!Array.isArray(parsed?.data) || parsed.meta?.total !== 3)
+            return false;
+          const idsSeen = parsed.data
+            .map((row) => Number(row.id))
+            .sort((a, b) => a - b);
+          const expectedIds = [
+            userCommunityIds.admin,
+            userCommunityIds.member,
+            userCommunityIds.viewer,
+          ].sort((a, b) => a - b);
+          return (
+            idsSeen.join(',') === expectedIds.join(',') &&
+            parsed.data.every(
+              (row) =>
+                !('passwordVerifier' in row) &&
+                !('passwordHash' in row) &&
+                !('tokenHash' in row) &&
+                !('passwordSalt' in row)
+            )
+          );
+        },
+      },
+      {
+        name: 'create community account',
+        method: 'POST',
+        path: '/v2/users',
+        expected: 201,
+        captureId: 'qaManagedUser',
+        body: {
+          username: 'qa_managed_user',
+          email: 'qa-managed@example.test',
+          displayName: 'QA Managed',
+          role: 'member',
+          password: {
+            algorithm: 'client-argon2id+sha256',
+            salt: qaManagedSalt,
+            params: JSON.parse(ARGON2ID_PARAMS_JSON),
+            derivedKey: qaManagedDerivedKey,
+          },
+        },
+        check: (body) => {
+          const data = (body as { data?: Record<string, unknown> })?.data;
+          if (
+            !data ||
+            typeof data.id !== 'number' ||
+            !Number.isSafeInteger(data.id)
+          )
+            return false;
+          qaManagedUserId = data.id;
+          return !('passwordVerifier' in data) && !('passwordHash' in data);
+        },
+      },
+      {
+        name: 'reject duplicate username',
+        method: 'POST',
+        path: '/v2/users',
+        expected: 409,
+        body: {
+          username: 'qa_managed_user',
+          email: 'qa-managed-dup@example.test',
+          role: 'viewer',
+        },
+      },
+      {
+        name: 'reject community email duplicate',
+        method: 'POST',
+        path: '/v2/users',
+        expected: 409,
+        body: {
+          username: 'qa_users_dup',
+          email: 'qa-users-member@example.test',
+          role: 'viewer',
+        },
+      },
+      {
+        name: 'reject email shared with null-community account',
+        method: 'POST',
+        path: '/v2/users',
+        expected: 409,
+        body: {
+          username: 'qa_users_nullshare',
+          email: 'qa-hono-super@example.test',
+          role: 'viewer',
+        },
+      },
+      {
+        name: 'reject username matching another account email',
+        method: 'POST',
+        path: '/v2/users',
+        expected: 409,
+        body: {
+          username: 'qa-users-admin@example.test',
+          email: 'qa-users-username-email@example.test',
+          role: 'viewer',
+        },
+      },
+      {
+        name: 'reject super_admin role',
+        method: 'POST',
+        path: '/v2/users',
+        expected: 400,
+        body: {
+          username: 'qa_users_super',
+          email: 'qa-users-super@example.test',
+          role: 'super_admin',
+        },
+      },
+      {
+        name: 'list users after create',
+        method: 'GET',
+        path: '/v2/users',
+        expected: 200,
+        check: (body) => {
+          const parsed = body as {
+            data?: Array<{ id?: number }>;
+            meta?: { total?: number };
+          };
+          return (
+            parsed?.meta?.total === 4 &&
+            Array.isArray(parsed?.data) &&
+            parsed.data.length === 4 &&
+            parsed.data.some((row) => row.id === qaManagedUserId)
+          );
+        },
+      },
+      {
+        name: 'read managed account without credentials',
+        method: 'GET',
+        path: '/v2/users/{qaManagedUser}',
+        expected: 200,
+        check: (body) => {
+          const data = (body as { data?: Record<string, unknown> })?.data;
+          return (
+            !!data &&
+            data.id === qaManagedUserId &&
+            data.role === 'member' &&
+            !('passwordVerifier' in data) &&
+            !('passwordHash' in data)
+          );
+        },
+      },
+      {
+        name: 'promote managed account to editor',
+        method: 'PATCH',
+        path: '/v2/users/{qaManagedUser}',
+        expected: 200,
+        body: { role: 'editor' },
+        check: (body) =>
+          (body as { data?: { role?: unknown } })?.data?.role === 'editor',
+      },
+      {
+        name: 'refuse login code issuance for own account',
+        method: 'POST',
+        path: `/v2/users/${userCommunityIds.admin}/login-codes`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'refuse assisted password reset for own account',
+        method: 'POST',
+        path: `/v2/users/${userCommunityIds.admin}/password-reset`,
+        expected: 403,
+        body: {
+          algorithm: 'client-argon2id+sha256',
+          salt: qaResetSalt,
+          params: JSON.parse(ARGON2ID_PARAMS_JSON),
+          derivedKey: qaResetDerivedKey,
+        },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'issue admin_issued login code',
+        method: 'POST',
+        path: '/v2/users/{qaManagedUser}/login-codes',
+        expected: 201,
+        check: (body) => {
+          const data = (
+            body as {
+              data?: { code?: unknown; purpose?: unknown; expiresAt?: unknown };
+            }
+          )?.data;
+          const code = data?.code;
+          return (
+            typeof code === 'string' &&
+            /^[A-Za-z0-9_-]{20,64}$/.test(code) &&
+            data?.purpose === 'admin_issued' &&
+            typeof data?.expiresAt === 'string'
+          );
+        },
+      },
+      {
+        name: 'reset managed account password',
+        method: 'POST',
+        path: '/v2/users/{qaManagedUser}/password-reset',
+        expected: 204,
+        body: {
+          algorithm: 'client-argon2id+sha256',
+          salt: qaManagedSalt,
+          params: JSON.parse(ARGON2ID_PARAMS_JSON),
+          derivedKey: qaManagedDerivedKey,
+        },
+      },
+      {
+        name: 'managed account logs in with reset key and device session',
+        method: 'POST',
+        path: '/v2/auth/login',
+        expected: 200,
+        // An empty presented cookie: a cross-user login with the admin
+        // cookie present would revoke that admin session (shared-browser
+        // rule) and break the admin steps that follow.
+        headers: { cookie: 'ts_session=' },
+        body: {
+          identifier: 'qa-managed@example.test',
+          derivedKey: qaManagedDerivedKey,
+          communitySlug: 'qa-user-management-community',
+          deviceSession: true,
+        },
+        check: ownUser(
+          'qa-managed@example.test',
+          'editor',
+          liveSessionCookie,
+          userCommunity.id
+        ),
+      },
+      {
+        // The jar now carries the managed account's device session; save it
+        // here so the post-revocation step can replay it.
+        name: 'managed account reads own profile',
+        method: 'GET',
+        path: '/v2/auth/me',
+        expected: 200,
+        saveCookieAs: 'qaManagedCookie',
+        check: ownUser(
+          'qa-managed@example.test',
+          'editor',
+          liveSessionCookie,
+          userCommunity.id
+        ),
+      },
+      {
+        name: 'list managed account device sessions as admin',
+        method: 'GET',
+        path: '/v2/users/{qaManagedUser}/sessions',
+        expected: 200,
+        useSavedCookie: 'qaAdminCookie',
+        check: (body) => {
+          const rows = (
+            body as {
+              data?: Array<{
+                id?: unknown;
+                kind?: unknown;
+                tokenHash?: unknown;
+              }>;
+            }
+          )?.data;
+          if (!Array.isArray(rows) || rows.length !== 1) return false;
+          const session = rows[0]!;
+          if (session.kind !== 'device') return false;
+          if (typeof session.id !== 'string' || session.id.length === 0)
+            return false;
+          if ('tokenHash' in session) return false;
+          userManagedSessionId = session.id;
+          return true;
+        },
+      },
+      qaManagedRevokeStep,
+      {
+        name: 'list managed account device sessions as admin after revoke',
+        method: 'GET',
+        path: '/v2/users/{qaManagedUser}/sessions',
+        expected: 200,
+        useSavedCookie: 'qaAdminCookie',
+        check: (body) => {
+          const rows = (body as { data?: unknown[] })?.data;
+          return Array.isArray(rows) && rows.length === 0;
+        },
+      },
+      {
+        name: 'revoked device session no longer authenticates',
+        method: 'GET',
+        path: '/v2/auth/me',
+        expected: 401,
+        useSavedCookie: 'qaManagedCookie',
+      },
+      {
+        name: 'login again as user-management admin',
+        method: 'POST',
+        path: '/v2/auth/login',
+        expected: 200,
+        body: loginBody(userCommunityCredentials.admin.email),
+      },
+      {
+        name: 'logout',
+        method: 'POST',
+        path: '/v2/auth/logout',
+        expected: 204,
+      },
+    ];
     const journeys: Journey[] = [
       {
         persona: 'anonymous',
@@ -5819,7 +6310,12 @@ export async function createFixture(
             ),
           },
           ...privateCommunityReadsStepsFor(role),
-          ...(role === 'admin' ? privateAdminCommunityWriteSteps : []),
+          ...(role === 'admin'
+            ? [
+                ...privateAdminCommunityWriteSteps,
+                ...privateAdminUserManagementSteps,
+              ]
+            : []),
           {
             name: 'logout private community user',
             method: 'POST',
@@ -6052,6 +6548,45 @@ export async function createFixture(
             method: 'GET',
             path: `/v2/media/${readableFileId}`,
             expected: 404,
+          },
+          {
+            // #188: assisted recovery is the authentication surface, so it
+            // stays available while the community is disabled.
+            name: 'reset disabled community member password',
+            method: 'POST',
+            path: `/v2/users/${disabledMemberId}/password-reset`,
+            expected: 204,
+            body: {
+              algorithm: 'client-argon2id+sha256',
+              salt: qaResetSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: qaResetDerivedKey,
+            },
+          },
+          {
+            name: 'issue admin_issued code for disabled community member',
+            method: 'POST',
+            path: `/v2/users/${disabledMemberId}/login-codes`,
+            expected: 201,
+            check: (body) => {
+              const data = (
+                body as {
+                  data?: { code?: unknown; purpose?: unknown };
+                }
+              )?.data;
+              return (
+                data?.purpose === 'admin_issued' &&
+                typeof data?.code === 'string' &&
+                /^[A-Za-z0-9_-]{20,64}$/.test(data.code)
+              );
+            },
+          },
+          {
+            name: 'deny user list while community is disabled',
+            method: 'GET',
+            path: '/v2/users',
+            expected: 403,
+            check: forbiddenCheck,
           },
           {
             name: 'hide inactive community detail while authenticated',
@@ -6850,6 +7385,40 @@ export async function createFixture(
             path: '/v2/media/{qaSuperPhoto}',
             expected: 200,
           },
+          {
+            name: 'logout',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ],
+      },
+      {
+        // Slice 11a user-management journey (#188): the admin of the private
+        // user-management community drives user CRUD, identity-collision
+        // rejection, assisted recovery and device-session list/revoke end to
+        // end on the same shared SQLite/PostgreSQL/Workers app.
+        persona: 'user_admin',
+        steps: userAdminSteps,
+      },
+      {
+        // Non-admin negatives on the user-management surface (#188).
+        persona: 'user_viewer',
+        steps: [
+          {
+            name: 'login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: loginBody(userCommunityCredentials.viewer.email),
+            check: ownUser(
+              userCommunityCredentials.viewer.email,
+              'viewer',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          ...userViewerForbiddenSteps,
           {
             name: 'logout',
             method: 'POST',

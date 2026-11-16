@@ -159,6 +159,7 @@ export async function runHonoFoundationContract(
     const viewerEmail = `viewer-${tag}@example.test`;
     const credentials = { email: viewerEmail, password };
     const adminEmail = `admin-${tag}@example.test`;
+    const editorEmail = `editor-${tag}@example.test`;
     const systemEmail = `system-${tag}@example.test`;
     const duplicateEmail = `duplicate-${tag}@example.test`;
     const userDefaults = {
@@ -169,6 +170,7 @@ export async function runHonoFoundationContract(
     for (const [email, role, communityId] of [
       [viewerEmail, 'viewer', communityA],
       [adminEmail, 'admin', communityA],
+      [editorEmail, 'editor', communityA],
       [systemEmail, 'super_admin', communityA],
       [duplicateEmail, 'viewer', communityA],
       [duplicateEmail, 'viewer', communityB],
@@ -1627,6 +1629,102 @@ export async function runHonoFoundationContract(
         );
       } finally {
         await updateCommunity(communityA, { isActive: true });
+      }
+
+      // Non-target owner without authority over it (#140): a file already
+      // attached as community branding or as another user's user_photo may
+      // not be reused by an editor onto a story they can edit — the
+      // non-target owner is not theirs to authorize, and 403 would disclose
+      // the protected relation. D1/SQLite answers 404, so PG must as well.
+      const editorCookie = await login(editorEmail);
+      const nonTargetFiles = [crypto.randomUUID(), crypto.randomUUID()];
+      for (const id of nonTargetFiles) fileIds.push(id);
+      await db.insert(tables.files).values([
+        {
+          id: nonTargetFiles[0],
+          filename: 'branding-reuse.png',
+          originalName: 'branding-reuse.png',
+          path: `communities/${communityA}/${nonTargetFiles[0]}`,
+          url: `https://ignored.invalid/${nonTargetFiles[0]}`,
+          mimeType: 'image/png',
+          size: 3,
+          communityId: communityA,
+          uploadedBy: adminId,
+          createdAt: instant,
+          updatedAt: instant,
+        },
+        {
+          id: nonTargetFiles[1],
+          filename: 'user-photo-reuse.png',
+          originalName: 'user-photo-reuse.png',
+          path: `communities/${communityA}/${nonTargetFiles[1]}`,
+          url: `https://ignored.invalid/${nonTargetFiles[1]}`,
+          mimeType: 'image/png',
+          size: 3,
+          communityId: communityA,
+          uploadedBy: adminId,
+          createdAt: instant,
+          updatedAt: instant,
+        },
+      ]);
+      const brandingAttach = await send(app, '/v2/attachments', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: slice7AdminCookie,
+        },
+        body: JSON.stringify({
+          fileId: nonTargetFiles[0],
+          ownerType: 'community',
+          ownerId: communityA,
+          role: 'community_display_image',
+        }),
+      });
+      assert.equal(
+        brandingAttach.status,
+        201,
+        `the admin must be able to adopt the staging file as community branding (${await brandingAttach.text()})`
+      );
+      const userPhotoAttach = await send(app, '/v2/attachments', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: slice7AdminCookie,
+        },
+        body: JSON.stringify({
+          fileId: nonTargetFiles[1],
+          ownerType: 'user',
+          ownerId: viewerId,
+          role: 'user_photo',
+        }),
+      });
+      assert.equal(
+        userPhotoAttach.status,
+        201,
+        `the admin must be able to adopt the staging file as a user's user_photo (${await userPhotoAttach.text()})`
+      );
+      for (const [label, fileId] of [
+        ['community-branding', nonTargetFiles[0]],
+        ['user user_photo', nonTargetFiles[1]],
+      ] as const) {
+        const reuse = await send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: editorCookie,
+          },
+          body: JSON.stringify({
+            fileId,
+            ownerType: 'story',
+            ownerId: crossStory.id,
+            role: 'story_media',
+          }),
+        });
+        assert.equal(
+          reuse.status,
+          404,
+          `an editor reusing a ${label}-attached file onto a story they can edit must answer 404 (a 403 would disclose the protected relation), uniformly with D1/SQLite (${await reuse.text()})`
+        );
       }
     }
   } finally {

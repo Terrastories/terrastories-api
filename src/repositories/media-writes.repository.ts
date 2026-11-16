@@ -2116,6 +2116,16 @@ export class MediaWritesRepository {
 
     if (dialectOf(this.connection) === 'postgresql') {
       return this.db.transaction(async (tx: typeof this.db) => {
+        // A disabled community is forbidden for every owner check (§6.5):
+        // answer 403 uniformly before any lock or verdict runs — matching
+        // D1/SQLite, whose target-first authority check yields the same 403 —
+        // instead of leaking which non-target owners the actor may see.
+        if (
+          input.actor.communityId !== null &&
+          !(await this.isCommunityActive(input.actor.communityId, tx))
+        ) {
+          return { status: 'forbidden' };
+        }
         // §6.7: lock *every* owner involved in this attach in canonical
         // (ownerType, ownerId) order before anything else. The mutation target
         // locks FOR UPDATE as before; owners of the file's existing relations
@@ -2196,14 +2206,11 @@ export class MediaWritesRepository {
             authority = resolved;
             continue;
           }
-          // An existing relation whose owner is restricted, unreadable or not
-          // publishable by this actor widens nothing: 404, uniform with
-          // absence. A `forbidden` verdict must pass through unchanged: an
-          // inactive community is forbidden for every owner-check verdict,
-          // so collapsing it to 404 would answer 404 on PG where D1/SQLite
-          // (and the old target-first order) answer 403 (#140).
-          if (resolved.status === 'not_found') return { status: 'not_found' };
-          if (resolved.status !== 'ok') return resolved;
+          // An existing relation whose owner is restricted, unreadable, not
+          // publishable by this actor — or simply not this actor's to authorise —
+          // widens nothing (§6.7): 404, uniform with absence. A disabled
+          // community was already answered 403 once, above the loop.
+          if (resolved.status !== 'ok') return { status: 'not_found' };
         }
         if (!authority || authority.status !== 'ok') {
           return { status: 'not_found' };

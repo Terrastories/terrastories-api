@@ -701,6 +701,69 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
     ).toBe(403);
   });
 
+  it('answers 404 (not 403) for an unauthorized non-target owner', async () => {
+    const storyId = await insertRow(tables.stories, {
+      title: 'Non-target authority story',
+      slug: 'non-target-authority-story',
+      privacyLevel: 'public',
+      isRestricted: false,
+      communityId: ids.community,
+      createdBy: ids.editor,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // A file already attached as community branding: the community owner is
+    // not this editor's to authorize, so the reuse is rejected as 404 (a 403
+    // would disclose the protected relation).
+    const brandingFile = await upload({ cookie: cookies.admin });
+    const brandingFileId = brandingFile.fileId!;
+    expect(
+      (
+        await attach(cookies.admin, {
+          fileId: brandingFileId,
+          ownerType: 'community',
+          ownerId: ids.community,
+          role: 'community_display_image',
+        })
+      ).status
+    ).toBe(201);
+    expect(
+      (
+        await attach(cookies.editor, {
+          fileId: brandingFileId,
+          ownerType: 'story',
+          ownerId: storyId,
+          role: 'story_media',
+        })
+      ).status
+    ).toBe(404);
+
+    // ...and likewise for a file already attached as another user's user_photo.
+    const userFile = await upload({ cookie: cookies.admin });
+    const userFileId = userFile.fileId!;
+    expect(
+      (
+        await attach(cookies.admin, {
+          fileId: userFileId,
+          ownerType: 'user',
+          ownerId: ids.member,
+          role: 'user_photo',
+        })
+      ).status
+    ).toBe(201);
+    expect(
+      (
+        await attach(cookies.editor, {
+          fileId: userFileId,
+          ownerType: 'story',
+          ownerId: storyId,
+          role: 'story_media',
+        })
+      ).status
+    ).toBe(404);
+  });
+
   it('rejects §6.7 reuse that broadens the bytes audience and allows the uploader/admin to attach staging', async () => {
     const publicStory = await insertRow(tables.stories, {
       title: 'Reuse Story',

@@ -54,10 +54,24 @@ export function argon2idParamsSatisfyPolicy(params: unknown): boolean {
 }
 
 /**
- * Whether stored Argon2id parameters are merely *well formed*, independent
- * of policy: positive integers in the expected units. The read path
- * (prelogin) accepts them for existing rows — a future policy raise must not
- * turn today's below-policy rows into fakes and lock them out. New verifier
+ * Sane bounds for *stored* Argon2id parameters. Anything below the floor is
+ * unsafe (a tampered row claiming near-zero work), anything above the caps is
+ * absurd (a tampered row would strand the KDF for hours) and must fail closed
+ * instead of being served with a straight face. The floor deliberately
+ * admits below-policy-but-serious rows (a future policy raise must not lock
+ * them out of prelogin); new verifier writes still require the named policy.
+ */
+export const ARGON2ID_MIN_STORED_MEMORY_KIB = 8192;
+/** 4 GiB: beyond this the stretch never finishes on any client. */
+export const ARGON2ID_MAX_STORED_MEMORY_KIB = 4 * 1024 * 1024;
+export const ARGON2ID_MAX_STORED_ITERATIONS = 32;
+export const ARGON2ID_MAX_STORED_PARALLELISM = 16;
+
+/**
+ * Whether stored Argon2id parameters are well formed, independent of policy:
+ * bounded positive integers in the expected units. The read path (prelogin)
+ * accepts them for existing rows — a future policy raise must not turn
+ * today's below-policy rows into fakes and lock them out. New verifier
  * writes still require `argon2idParamsSatisfyPolicy`.
  */
 export function isWellFormedArgon2idParams(params: unknown): boolean {
@@ -69,13 +83,16 @@ export function isWellFormedArgon2idParams(params: unknown): boolean {
   return (
     typeof memoryKiB === 'number' &&
     Number.isInteger(memoryKiB) &&
-    memoryKiB >= 1 &&
+    memoryKiB >= ARGON2ID_MIN_STORED_MEMORY_KIB &&
+    memoryKiB <= ARGON2ID_MAX_STORED_MEMORY_KIB &&
     typeof iterations === 'number' &&
     Number.isInteger(iterations) &&
     iterations >= 1 &&
+    iterations <= ARGON2ID_MAX_STORED_ITERATIONS &&
     typeof parallelism === 'number' &&
     Number.isInteger(parallelism) &&
-    parallelism >= 1
+    parallelism >= 1 &&
+    parallelism <= ARGON2ID_MAX_STORED_PARALLELISM
   );
 }
 

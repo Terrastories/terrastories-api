@@ -696,7 +696,9 @@ it('resumes the scheduled R2 sweep past live objects across multiple runs', asyn
     const livePagesPerRun = Math.floor(
       WORKER_SWEEP_SUBREQUEST_BUDGET / subrequestsPerFullLivePage
     );
-    const liveCount = 1300; // strictly more than one run can scan: ≥ 2 runs required
+    // One full page more than a single run can walk, so the orphan (sorted
+    // after every live key) is unreachable in run 1 whatever the budget is.
+    const liveCount = (livePagesPerRun + 1) * pageSize;
     const computedBound =
       Math.ceil(Math.ceil(liveCount / pageSize) / livePagesPerRun) + 1;
     const inserts: ReturnType<typeof db.prepare>[] = [];

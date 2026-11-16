@@ -96,7 +96,7 @@ and roadmap Phase 9; this document does not declare a release ready.
    - Workers binding: `ORPHAN_SWEEP_PAUSED=true` (re-enable only after the
      restored D1 and R2 agree), or
    - `system/orphan-sweep-hold` object in the MEDIA bucket
-     (`npx wrangler r2 object put <bucket>/system/orphan-sweep-hold --remote`);
+     (`npx wrangler r2 object put <bucket>/system/orphan-sweep-hold --file /dev/null --remote`; wrangler requires a body, so pass the empty file);
      remove it with
      `npx wrangler r2 object delete <bucket>/system/orphan-sweep-hold --remote`
      once they do;

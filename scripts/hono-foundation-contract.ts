@@ -1357,6 +1357,81 @@ export async function runHonoFoundationContract(
         0,
         'a 404 attach must leave no relation behind'
       );
+
+      // Cross-attach deadlock (#140): two attachments of the same file to
+      // each other's owner must pass through the canonical-ordered owner
+      // locks in an identical order, so neither can hold one owner while
+      // waiting on the other's — the previous target-then-source ordering
+      // could deadlock the pair (40P01 -> 500).
+      const [crossStory] = await db
+        .insert(tables.stories)
+        .values({
+          communityId: communityA,
+          title: 'Cross Attach Story',
+          slug: `cross-attach-story-${tag}`,
+          language: 'en',
+          privacyLevel: 'editors',
+          isRestricted: false,
+        })
+        .returning();
+      const [crossPlace] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'Cross Attach Place' })
+        .returning();
+      await db.insert(tables.attachments).values([
+        {
+          communityId: communityA,
+          fileId: fileIds[0],
+          ownerType: 'story',
+          ownerId: crossStory.id,
+          role: 'story_media',
+          ordinal: 0,
+          createdAt: instant,
+        },
+        {
+          communityId: communityA,
+          fileId: fileIds[0],
+          ownerType: 'place',
+          ownerId: crossPlace.id,
+          role: 'place_photo',
+          ordinal: 0,
+          createdAt: instant,
+        },
+      ]);
+      const crossAttach = (
+        ownerType: 'story' | 'place',
+        ownerId: number,
+        role: 'story_media' | 'place_photo'
+      ) =>
+        send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify({
+            fileId: fileIds[0],
+            ownerType,
+            ownerId,
+            role,
+          }),
+        });
+      // Fire both sides of the triangle at once: under the canonical owner
+      // order the loser waits for the winner and then completes.
+      const [placeSide, storySide] = await Promise.all([
+        crossAttach('place', crossPlace.id, 'place_photo'),
+        crossAttach('story', crossStory.id, 'story_media'),
+      ]);
+      for (const [label, response] of [
+        ['place-target', placeSide],
+        ['story-target', storySide],
+      ] as const) {
+        assert.equal(
+          response.status,
+          201,
+          `cross-attach ${label} must succeed (${await response.text()})`
+        );
+      }
     }
   } finally {
     for (const id of communityIds) {

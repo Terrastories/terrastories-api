@@ -2093,15 +2093,94 @@ export class MediaWritesRepository {
 
     if (dialectOf(this.connection) === 'postgresql') {
       return this.db.transaction(async (tx: typeof this.db) => {
-        const authority = await this.authorizeAttachmentOwner({
-          actor: input.actor,
+        // §6.7: lock *every* owner involved in this attach in canonical
+        // (ownerType, ownerId) order before anything else. The mutation target
+        // locks FOR UPDATE as before; owners of the file's existing relations
+        // lock FOR KEY SHARE (which only conflicts with UPDATE/DELETE) and are
+        // taken in the same canonical order, so two cross-attaches of one file
+        // walk the shared lock graph in an identical order and cannot deadlock
+        // against each other.
+        const actorCommunity = input.actor.communityId;
+        const attachmentScope =
+          actorCommunity === null
+            ? isNull(this.tables.attachments.communityId)
+            : eq(this.tables.attachments.communityId, actorCommunity);
+        const existingRows = (await this.fetchAll(
+          tx
+            .select({
+              ownerType: this.tables.attachments.ownerType,
+              ownerId: this.tables.attachments.ownerId,
+              role: this.tables.attachments.role,
+            })
+            .from(this.tables.attachments)
+            .where(
+              and(
+                eq(this.tables.attachments.fileId, input.fileId),
+                attachmentScope
+              )
+            )
+        )) as Array<{
+          ownerType: AttachmentOwnerType | null;
+          ownerId: number | null;
+          role: AttachmentRole | null;
+        }>;
+        const involved = new Map<
+          string,
+          {
+            ownerType: AttachmentOwnerType;
+            ownerId: number;
+            role: AttachmentRole;
+            isTarget: boolean;
+          }
+        >();
+        involved.set(`${input.ownerType}:${input.ownerId}`, {
           ownerType: input.ownerType,
           ownerId: input.ownerId,
           role: input.role,
-          executor: tx,
-          lock: 'update',
+          isTarget: true,
         });
-        if (authority.status !== 'ok') return authority;
+        for (const row of existingRows) {
+          // Unreadable-shape relation: widens nothing (§6.7); fail closed.
+          if (!row.ownerType || row.ownerId === null || !row.role) {
+            return { status: 'not_found' };
+          }
+          const key = `${row.ownerType}:${row.ownerId}`;
+          if (involved.has(key)) continue;
+          involved.set(key, {
+            ownerType: row.ownerType,
+            ownerId: row.ownerId,
+            role: row.role,
+            isTarget: false,
+          });
+        }
+        const owners = [...involved.values()].sort((a, b) =>
+          a.ownerType === b.ownerType
+            ? a.ownerId - b.ownerId
+            : a.ownerType.localeCompare(b.ownerType)
+        );
+        let authority: AttachmentOwnerResolution | undefined;
+        for (const owner of owners) {
+          const resolved = await this.authorizeAttachmentOwner({
+            actor: input.actor,
+            ownerType: owner.ownerType,
+            ownerId: owner.ownerId,
+            role: owner.role,
+            executor: tx,
+            lock: owner.isTarget ? 'update' : 'key share',
+          });
+          if (owner.isTarget) {
+            if (resolved.status !== 'ok') return resolved;
+            authority = resolved;
+            continue;
+          }
+          // An existing relation whose owner is restricted, unreadable or not
+          // publishable by this actor widens nothing: 404, uniform with
+          // absence.
+          if (resolved.status !== 'ok') return { status: 'not_found' };
+        }
+        if (!authority || authority.status !== 'ok') {
+          return { status: 'not_found' };
+        }
         const file = await this.resolveAttachableFile(
           tx,
           input.fileId,

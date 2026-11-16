@@ -225,12 +225,14 @@ describe('PATCH /v2/auth/me and POST /v2/auth/password (#137 item 4)', () => {
     expect(response.headers.get('set-cookie')).toContain('Max-Age=43200');
   });
 
-  it('renews the cookie without Max-Age for device sessions', async () => {
+  it('renews the cookie with the device idle lifetime for device sessions', async () => {
     const { patchMe, loginCookie } = await setup();
     const cookie = await loginCookie(true);
     const response = await patchMe({ displayName: 'device me' }, cookie);
     expect(response.status).toBe(200);
-    expect(response.headers.get('set-cookie')).not.toContain('Max-Age=');
+    // A device cookie must survive a browser restart, so it carries the 60-day
+    // idle Max-Age; the session row stays the enforcement point.
+    expect(response.headers.get('set-cookie')).toContain('Max-Age=5184000');
   });
 
   it('changes the password, revokes other sessions and rotates this one', async () => {
@@ -392,7 +394,7 @@ describe('PATCH /v2/auth/me and POST /v2/auth/password (#137 item 4)', () => {
       cookie
     );
     expect(response.status).toBe(200);
-    expect(response.headers.get('set-cookie')).not.toContain('Max-Age=');
+    expect(response.headers.get('set-cookie')).toContain('Max-Age=5184000');
     const rows = await db.select().from(sessionsSqlite);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.kind).toBe('device');

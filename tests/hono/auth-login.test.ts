@@ -27,25 +27,22 @@ import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS,
   ARGON2ID_PARAMS_JSON,
+  AUTH_THROTTLE_MAX_FAILURES,
+  AuthLoginRejected,
   DEVICE_SESSION_ABSOLUTE_MS,
+  DEVICE_SESSION_IDLE_MS,
   RAILS_BCRYPT_ALGORITHM,
   STANDARD_SESSION_IDLE_MS,
+  authThrottleBackoffMs,
 } from '../../src/shared/auth-policy.js';
 import { sha256Hex } from '../../src/shared/auth-crypto.js';
+import { HonoAuthService } from '../../src/services/hono-auth.service.js';
 import {
   argon2Seed,
   makeDerivedKey,
   makeVerifierSalt,
 } from './auth-test-utils.js';
 import { normalizeSearchText } from '../../src/shared/utils/search-normalize.js';
-
-const BCRYPT_ALPHABET =
-  './ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-const bcryptSalt = (): string => {
-  const bytes = new Uint8Array(22);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => BCRYPT_ALPHABET[byte % 64]).join('');
-};
 
 describe('POST /v2/auth/login (#137 item 3)', () => {
   const openDbs: Sqlite.Database[] = [];
@@ -54,7 +51,9 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     while (openDbs.length > 0) openDbs.pop()?.close();
   });
 
-  async function setup(options: { serverSecret?: string | undefined } = {}) {
+  async function setup(
+    options: { serverSecret?: string | undefined; now?: Date } = {}
+  ) {
     const sqlite = new Sqlite(':memory:');
     sqlite.pragma('foreign_keys = ON');
     openDbs.push(sqlite);
@@ -83,10 +82,14 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
 
     const stretchedKey = makeDerivedKey();
     const upgradedSeed = await argon2Seed(stretchedKey);
-    // A wrapped Rails-bcrypt account: the stored verifier is SHA-256 of the
-    // bcrypt hash string, which plays the role of the client's `derivedKey`.
-    const wrappedKey = makeDerivedKey();
+    // A wrapped Rails-bcrypt account: the client recomputes bcrypt with the
+    // stored salt and cost and sends the resulting hash string as
+    // `derivedKey` (SPEC-V2 §7 step 4), so the stored verifier is SHA-256 of a
+    // real bcrypt hash — never of a synthetic 64-hex string.
+    const wrappedKey = await hash('WrappedRailsPassword!', 10);
     const wrappedVerifier = await sha256Hex(wrappedKey);
+    const wrappedSalt = wrappedKey.slice(7, 29);
+    const wrappedCost = Number(wrappedKey.slice(4, 6));
     const sharedEmail = 'shared@login.example.test';
     const base = {
       passwordHash,
@@ -114,8 +117,8 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
         role: 'member',
         communityId: alpha.id,
         passwordAlgorithm: RAILS_BCRYPT_ALGORITHM,
-        passwordSalt: bcryptSalt(),
-        passwordParams: JSON.stringify({ cost: 12 }),
+        passwordSalt: wrappedSalt,
+        passwordParams: JSON.stringify({ cost: wrappedCost }),
         passwordVerifier: wrappedVerifier,
       },
       {
@@ -156,6 +159,7 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
       storage: { read: async () => null },
       serverSecret: secret,
       secureCookies: false,
+      ...(options.now === undefined ? {} : { now: () => options.now as Date }),
     });
     const postLogin = (body: unknown, headers: Record<string, string> = {}) =>
       app.request('http://test/v2/auth/login', {
@@ -171,6 +175,7 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
       secret,
       stretchedKey,
       wrappedKey,
+      wrappedSalt,
       sharedEmail,
       postLogin,
     };
@@ -285,7 +290,7 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(await response.json()).toEqual({ error: 'Invalid credentials' });
   });
 
-  it('establishes a device session with no Max-Age and a 60-day absolute window', async () => {
+  it('establishes a device session with a Max-Age covering its idle window', async () => {
     const { postLogin, stretchedKey, db } = await setup();
     const before = Date.now();
     const response = await postLogin({
@@ -294,8 +299,13 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
       deviceSession: true,
     });
     expect(response.status).toBe(200);
+    // A device login must survive a browser restart: the cookie carries the
+    // 60-day idle Max-Age, and the session row is still the enforcement point.
     const setCookie = response.headers.get('set-cookie') ?? '';
-    expect(setCookie).not.toContain('Max-Age=');
+    expect(setCookie).toContain(`Max-Age=${DEVICE_SESSION_IDLE_MS / 1000}`);
+    expect(setCookie).not.toContain(
+      `Max-Age=${STANDARD_SESSION_IDLE_MS / 1000}`
+    );
     const [row] = await db.select().from(sessionsSqlite);
     expect(row?.kind).toBe('device');
     expect(
@@ -406,6 +416,81 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(sessions[0]?.tokenHash).not.toBe('c'.repeat(64));
   });
 
+  it('authenticates a wrapped account with the real bcrypt hash string it was seeded with', async () => {
+    const { postLogin, wrappedKey, wrappedSalt, db } = await setup();
+    // The regression this pins: the wire key is a bcrypt hash string, not a
+    // 64-hex digest, and the schema must accept it (finding 1).
+    expect(wrappedKey).toMatch(
+      /^\$2[aby]\$(0[4-9]|1[0-4])\$[./A-Za-z0-9]{53}$/
+    );
+    const upgradedKey = makeDerivedKey();
+    const login = await postLogin({
+      identifier: 'wrapped@login.example.test',
+      derivedKey: wrappedKey,
+      upgrade: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { ...ARGON2ID_PARAMS },
+        derivedKey: upgradedKey,
+      },
+    });
+    expect(login.status).toBe(200);
+    const [row] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'wrapped@login.example.test'));
+    // Atomic upgrade: verifier, algorithm, salt and params land together, and
+    // the bcrypt hash string itself is never what is stored.
+    expect(row?.passwordAlgorithm).toBe(ARGON2ID_ALGORITHM);
+    expect(row?.passwordVerifier).toBe(await sha256Hex(upgradedKey));
+    expect(row?.passwordVerifier).not.toBe(wrappedKey);
+    expect(row?.passwordSalt).not.toBe(wrappedSalt);
+  });
+
+  it('answers a bcrypt-shaped key sent to an Argon2id account with the uniform 401', async () => {
+    const { postLogin, wrappedKey } = await setup();
+    // The wire shape is not the algorithm selector: a valid bcrypt-shaped key
+    // presented to an Argon2id account is an ordinary rejected credential,
+    // never a 400 that would reveal the account's algorithm (finding 1).
+    const response = await postLogin({
+      identifier: 'upgraded@login.example.test',
+      derivedKey: wrappedKey,
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: 'Invalid credentials' });
+  });
+
+  it('answers a 64-hex key sent to a wrapped account with the uniform 401', async () => {
+    const { postLogin } = await setup();
+    const response = await postLogin({
+      identifier: 'wrapped@login.example.test',
+      derivedKey: makeDerivedKey(),
+      upgrade: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { ...ARGON2ID_PARAMS },
+        derivedKey: makeDerivedKey(),
+      },
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: 'Invalid credentials' });
+  });
+
+  it('rejects a derivedKey that is neither shape with a 400 before resolution', async () => {
+    const { postLogin } = await setup();
+    // The 400 is a wire-shape failure and must not depend on the account: the
+    // same malformed value is rejected before any lookup for a real and for an
+    // unknown identifier alike.
+    for (const identifier of [
+      'upgraded@login.example.test',
+      'nobody@login.example.test',
+    ]) {
+      const response = await postLogin({ identifier, derivedKey: 'zz' });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Invalid request' });
+    }
+  });
+
   it('rejects a below-policy upgrade and leaves the wrapped row unchanged', async () => {
     const { postLogin, wrappedKey, db } = await setup();
     const [before] = await db
@@ -475,8 +560,9 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
       expect(response.status).toBe(401);
       expect(await response.json()).toEqual({ error: 'Invalid credentials' });
     }
-    // A wire-shape violation (derivedKey not 64 hex) is a 400 before the
-    // service runs; the 401 registry checks happen on valid shapes.
+    // The upgrade material is always the Argon2id digest, so a non-hex
+    // `upgrade.derivedKey` is a wire-shape 400 before the service runs; the
+    // 401 registry checks happen on valid shapes.
     const malformed = await postLogin({
       identifier: 'wrapped@login.example.test',
       derivedKey: wrappedKey,
@@ -527,6 +613,142 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(ok.status).toBe(200);
     const after = await db.select({ value: count() }).from(authThrottleSqlite);
     expect(after[0]?.value).toBe(0);
+  });
+
+  it('blocks the per-account counter at the backoff threshold and refuses the correct key', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { postLogin, stretchedKey, db, secret } = await setup({ now });
+    const [account] = await db
+      .select({ id: usersSqlite.id })
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'upgraded@login.example.test'));
+    for (let attempt = 0; attempt < AUTH_THROTTLE_MAX_FAILURES; attempt += 1) {
+      const response = await postLogin({
+        identifier: 'upgraded@login.example.test',
+        derivedKey: makeDerivedKey(),
+      });
+      expect(response.status).toBe(401);
+    }
+    const repository = new HonoAuthRepository(db);
+    const state = await repository.throttleState(
+      await repository.accountThrottleKey(account!.id, secret),
+      now.getTime()
+    );
+    expect(state.failures).toBe(AUTH_THROTTLE_MAX_FAILURES);
+    expect(state.blocked).toBe(true);
+    expect(state.blockedUntil).toBe(
+      now.getTime() + authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES)
+    );
+    // The correct key is now refused with the uniform 401, and no session is
+    // established by the blocked attempt.
+    const blocked = await postLogin({
+      identifier: 'upgraded@login.example.test',
+      derivedKey: stretchedKey,
+    });
+    expect(blocked.status).toBe(401);
+    expect(await blocked.json()).toEqual({ error: 'Invalid credentials' });
+    expect(
+      (await db.select({ value: count() }).from(sessionsSqlite))[0]?.value
+    ).toBe(0);
+  });
+
+  it('blocks the per-IP counter for unknown identifiers and refuses a correct key from that address', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { postLogin, stretchedKey, db, secret } = await setup({ now });
+    const clientIp = '198.51.100.10';
+    for (let attempt = 0; attempt < AUTH_THROTTLE_MAX_FAILURES; attempt += 1) {
+      const response = await postLogin(
+        {
+          // Every attempt is unresolved: the per-IP row is the only one that
+          // may be written, and it must still bound the guessing.
+          identifier: `nobody-${attempt}@login.example.test`,
+          derivedKey: makeDerivedKey(),
+        },
+        { 'cf-connecting-ip': clientIp }
+      );
+      expect(response.status).toBe(401);
+    }
+    const repository = new HonoAuthRepository(db);
+    const state = await repository.throttleState(
+      await repository.ipThrottleKey(clientIp, secret),
+      now.getTime()
+    );
+    expect(state.failures).toBe(AUTH_THROTTLE_MAX_FAILURES);
+    expect(state.blocked).toBe(true);
+    expect(state.blockedUntil).toBe(
+      now.getTime() + authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES)
+    );
+    // Exactly one row: unresolved attempts never touch an account row.
+    const rows = await db.select().from(authThrottleSqlite);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe('ip');
+    // The blocked address cannot authenticate even with a real account and
+    // the correct key.
+    const blocked = await postLogin(
+      {
+        identifier: 'upgraded@login.example.test',
+        derivedKey: stretchedKey,
+      },
+      { 'cf-connecting-ip': clientIp }
+    );
+    expect(blocked.status).toBe(401);
+    expect(await blocked.json()).toEqual({ error: 'Invalid credentials' });
+  });
+
+  it('reads the per-IP throttle before resolving the identifier', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { db, secret } = await setup({ now });
+    const order: string[] = [];
+    const ipKey = 'ip-throttle-key';
+    const stub = {
+      connection: db,
+      ipThrottleKey: async () => {
+        order.push('ipKey');
+        return ipKey;
+      },
+      accountThrottleKey: async () => {
+        order.push('accountKey');
+        return 'account-throttle-key';
+      },
+      throttleState: async (key: string) => {
+        order.push(`throttle:${key}`);
+        return key === ipKey
+          ? { blocked: true, failures: 10, blockedUntil: now.getTime() + 1 }
+          : { blocked: false, failures: 0, blockedUntil: null };
+      },
+      communityIdBySlug: async () => {
+        order.push('slug');
+        return null;
+      },
+      loginCandidates: async () => {
+        order.push('candidates');
+        return [];
+      },
+      recordLoginFailure: async () => {
+        order.push('record');
+      },
+    };
+    const service = new HonoAuthService(
+      stub as unknown as HonoAuthRepository,
+      new HonoFoundationRepository(db),
+      secret
+    );
+    await expect(
+      service.login(
+        {
+          identifier: 'nobody@login.example.test',
+          derivedKey: makeDerivedKey(),
+        },
+        '203.0.113.7',
+        now
+      )
+    ).rejects.toBeInstanceOf(AuthLoginRejected);
+    // The per-IP state is read first; a blocked address never reaches
+    // resolution, so no account can be attributed to the attempt.
+    expect(order.slice(0, 2)).toEqual(['ipKey', `throttle:${ipKey}`]);
+    expect(order).not.toContain('candidates');
+    expect(order).not.toContain('slug');
+    expect(order).toContain('record');
   });
 
   it('fails closed with 503 when the server secret is not configured', async () => {

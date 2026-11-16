@@ -24,6 +24,7 @@ import type {
 import {
   deterministicPreloginFake,
   parseStoredPasswordParams,
+  type PreloginParams,
   type PreloginResponse,
 } from '../shared/prelogin.js';
 import {
@@ -31,8 +32,10 @@ import {
   DERIVED_KEY_PATTERN,
   RAILS_BCRYPT_ALGORITHM,
   AuthLoginRejected,
-  argon2idParamsSatisfyPolicy,
-  isUsableVerifierSalt,
+  isCanonicalArgon2idParams,
+  isCanonicalBcryptCost,
+  isCanonicalBcryptSalt,
+  isCanonicalVerifierSalt,
   sessionTokenDigestInput,
   type PasswordAlgorithm,
   type SessionKind,
@@ -106,8 +109,8 @@ export class HonoAuthService {
       input.communitySlug === undefined
         ? undefined
         : await this.repository.communityIdBySlug(input.communitySlug);
-    // A slug that names no community cannot resolve an account, and consulting
-    // a mix for it is impossible; the deployment-wide mix hides it instead.
+    // A slug that names no community cannot resolve an account; the fake path
+    // answers instead, exactly as for an unknown identifier.
     const account =
       input.communitySlug !== undefined && communityId === null
         ? null
@@ -120,26 +123,49 @@ export class HonoAuthService {
         account.passwordAlgorithm,
         account.passwordParams
       );
-      // A verifier row the client could not use (unsupported algorithm or
-      // malformed params) fails closed into the fake path, never into a shape
-      // that reveals which check failed (SPEC-V2 §7 "Verifier registry").
-      if (params !== null)
+      // A verifier row the client could not use, or one whose shape is not the
+      // canonical one every V2 write produces, fails closed into the fake path.
+      // Canonicalising the stored shape is what keeps a real row and a fake
+      // indistinguishable — a legacy salt length or cost would otherwise be an
+      // existence oracle (SPEC-V2 §7 "Verifier registry", findings 4–5).
+      if (params !== null && HonoAuthService.isCanonicalShape(account, params))
         return {
           algorithm: account.passwordAlgorithm as PasswordAlgorithm,
-          salt: account.passwordSalt,
+          salt: account.passwordSalt as string,
           params,
         };
     }
-    const mix =
-      communityId === null || communityId === undefined
-        ? await this.repository.globalAlgorithmMix()
-        : await this.repository.communityAlgorithmMix(communityId);
+    // The fake's mix is the deployment-wide one and the fake itself is keyed
+    // only by the normalized identifier: no request-controlled value (least of
+    // all the community slug) may shift it, or a real slug could be told from
+    // a fake one and private/disabled communities enumerated (finding 5).
     return deterministicPreloginFake(
       secret,
       normalized,
-      input.communitySlug,
-      mix
+      await this.repository.globalAlgorithmMix()
     );
+  }
+
+  /**
+   * Whether a stored verifier row carries the canonical shape the fake mirrors
+   * (SPEC-V2 §7 step 1): the one Argon2id salt length and params, or the
+   * 22-character bcrypt salt with a cost a Rails row actually carries.
+   */
+  private static isCanonicalShape(
+    account: { passwordAlgorithm: string; passwordSalt: string },
+    params: PreloginParams
+  ): boolean {
+    if (account.passwordAlgorithm === ARGON2ID_ALGORITHM)
+      return (
+        isCanonicalVerifierSalt(account.passwordSalt) &&
+        isCanonicalArgon2idParams(params)
+      );
+    if (account.passwordAlgorithm === RAILS_BCRYPT_ALGORITHM)
+      return (
+        isCanonicalBcryptSalt(account.passwordSalt) &&
+        isCanonicalBcryptCost((params as { cost: number }).cost)
+      );
+    return false;
   }
 
   /**
@@ -205,6 +231,19 @@ export class HonoAuthService {
     // same uniform failure: a deployment that cannot key its throttle must not
     // answer differently from any other rejected credential.
     if (secret === undefined || secret === '') throw new AuthLoginRejected();
+    // The per-IP brake is read *before* any resolution: an unresolved guess
+    // costs the server almost nothing, so the attacker's own per-IP backoff is
+    // the only bound on identifier guessing (SPEC-V2 §6.8, §7 step 6). Reading
+    // it here — not only on the resolved path — is what makes that bound real
+    // (finding 2).
+    const ipBlocked = await this.repository.throttleState(
+      await this.repository.ipThrottleKey(clientIp, secret),
+      now.getTime()
+    );
+    if (ipBlocked.blocked)
+      // Unresolved on purpose: no account is known yet, so only the per-IP row
+      // is written (row accounting stays ≤2 rows, 1 when unresolved).
+      return this.reject(null, clientIp, userAgent, now, secret);
     const normalized = normalizeSearchText(input.identifier);
     const communityId =
       input.communitySlug === undefined
@@ -224,18 +263,13 @@ export class HonoAuthService {
     if (candidate === undefined || !HonoAuthService.allowed(candidate))
       return this.reject(candidate ?? null, clientIp, userAgent, now, secret);
     const account = candidate as AuthAccount;
-    // A throttled account or IP is the same uniform failure (§6.8).
-    const [accountBlocked, ipBlocked] = await Promise.all([
-      this.repository.throttleState(
-        await this.repository.accountThrottleKey(account.id, secret),
-        now.getTime()
-      ),
-      this.repository.throttleState(
-        await this.repository.ipThrottleKey(clientIp, secret),
-        now.getTime()
-      ),
-    ]);
-    if (accountBlocked.blocked || ipBlocked.blocked)
+    // The per-account counter is read only once exactly one account resolved:
+    // an unresolved attempt must not write (or read) an account row.
+    const accountBlocked = await this.repository.throttleState(
+      await this.repository.accountThrottleKey(account.id, secret),
+      now.getTime()
+    );
+    if (accountBlocked.blocked)
       return this.reject(account, clientIp, userAgent, now, secret);
     const verification = await this.verifierFor(account, input);
     if (!verification.ok)
@@ -318,13 +352,13 @@ export class HonoAuthService {
       const upgrade = input.upgrade;
       if (upgrade === undefined) return { ok: false };
       if (upgrade.algorithm !== ARGON2ID_ALGORITHM) return { ok: false };
-      if (!argon2idParamsSatisfyPolicy(upgrade.params)) return { ok: false };
-      if (!isUsableVerifierSalt(upgrade.salt)) return { ok: false };
+      // The upgraded material must be the one canonical shape every V2 write
+      // produces (16-byte salt, named policy params); anything weaker — or any
+      // other shape — is refused without revealing the policy (findings 4–5).
+      if (!isCanonicalArgon2idParams(upgrade.params)) return { ok: false };
+      if (!isCanonicalVerifierSalt(upgrade.salt)) return { ok: false };
       if (!DERIVED_KEY_PATTERN.test(upgrade.derivedKey)) return { ok: false };
-      const { memoryKiB, iterations, parallelism } = upgrade.params as Record<
-        string,
-        number
-      >;
+      const { memoryKiB, iterations, parallelism } = upgrade.params;
       return {
         ok: true,
         write: {
@@ -471,14 +505,12 @@ export class HonoAuthService {
     )
       return rejectChange();
     if (!constantTimeEqual(digest, stored)) return rejectChange();
-    // New material must satisfy the current Argon2id policy (named constants,
-    // §7 step 4); anything weaker is refused without revealing the policy.
-    if (!argon2idParamsSatisfyPolicy(input.params)) return rejectChange();
-    if (!isUsableVerifierSalt(input.salt)) return rejectChange();
-    const { memoryKiB, iterations, parallelism } = input.params as Record<
-      string,
-      number
-    >;
+    // New material must be the one canonical Argon2id shape every V2 write
+    // produces (16-byte salt, named policy params); anything weaker — or any
+    // other shape — is refused without revealing the policy.
+    if (!isCanonicalArgon2idParams(input.params)) return rejectChange();
+    if (!isCanonicalVerifierSalt(input.salt)) return rejectChange();
+    const { memoryKiB, iterations, parallelism } = input.params;
     const write: VerifierWrite = {
       passwordHash: account.passwordHash,
       passwordVerifier: await sha256Hex(input.derivedKey),

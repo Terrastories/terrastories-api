@@ -18,6 +18,8 @@ import { createHonoApp } from '../src/hono-app.js';
 import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS_JSON,
+  AUTH_THROTTLE_MAX_FAILURES,
+  authThrottleBackoffMs,
 } from '../src/shared/auth-policy.js';
 import { sha256Hex, toHex } from '../src/shared/auth-crypto.js';
 import {
@@ -184,6 +186,19 @@ export async function runHonoFoundationContract(
       userIds.push(row.id);
     }
     const viewerId = userIds[0];
+    // A dedicated account for the throttle-backoff case (finding 3), so the
+    // failures never block an account another case logs in with.
+    const backoffEmail = `backoff-${tag}@example.test`;
+    const [backoffUser] = await db
+      .insert(tables.users)
+      .values({
+        ...userDefaults,
+        email: backoffEmail,
+        role: 'viewer',
+        communityId: communityA,
+      })
+      .returning();
+    userIds.push(backoffUser.id);
     for (const communityId of [communityA, communityB, communityA]) {
       const id = crypto.randomUUID();
       await db.insert(tables.files).values({
@@ -1155,6 +1170,130 @@ export async function runHonoFoundationContract(
         .from(authThrottle)
         .where(eq(authThrottle.key, ipKey));
       assert.equal(ipRows[0].failures, 4);
+
+      // Slice 10 (finding 3): the backoff branch must actually execute on
+      // every backend. `AUTH_THROTTLE_MAX_FAILURES` failures block the account
+      // for exactly `now + authThrottleBackoffMs(...)`, and the next attempt
+      // with the *correct* key is still the uniform 401. On PostgreSQL this is
+      // also what exercises the `bigint` cast on `blocked_until`: an inferred
+      // int4 parameter would overflow on a millisecond value (22003), so a
+      // green assertion here is the evidence the last commit's fix works.
+      const throttleNow = new Date('2026-11-11T15:00:00Z');
+      const previousInstant = instant;
+      instant = throttleNow;
+      const authRepository = new HonoAuthRepository(database as Database);
+      const backoffAccountKey = await authRepository.accountThrottleKey(
+        backoffUser.id,
+        serverSecret
+      );
+      const unknownIp = '198.51.100.77';
+      const unknownIpKey = await authRepository.ipThrottleKey(
+        unknownIp,
+        serverSecret
+      );
+      // The account failures use one address and the correct-key attempt a
+      // different one, so only the per-account brake can reject it.
+      const accountIp = '198.51.100.10';
+      const freshIp = '198.51.100.11';
+      const accountIpKey = await authRepository.ipThrottleKey(
+        accountIp,
+        serverSecret
+      );
+      await db
+        .delete(authThrottle)
+        .where(
+          inArray(authThrottle.key, [
+            backoffAccountKey,
+            unknownIpKey,
+            accountIpKey,
+          ])
+        );
+      for (
+        let attempt = 0;
+        attempt < AUTH_THROTTLE_MAX_FAILURES;
+        attempt += 1
+      ) {
+        await status(
+          postLogin(
+            app,
+            { identifier: backoffEmail, derivedKey: wrongKey },
+            { 'cf-connecting-ip': accountIp }
+          ),
+          401,
+          'a failed login must answer the uniform 401'
+        );
+      }
+      const backoffState = await authRepository.throttleState(
+        backoffAccountKey,
+        throttleNow.getTime()
+      );
+      assert.equal(backoffState.failures, AUTH_THROTTLE_MAX_FAILURES);
+      assert.equal(backoffState.blocked, true);
+      assert.equal(
+        backoffState.blockedUntil,
+        throttleNow.getTime() +
+          authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES),
+        'blocked_until must be now + the policy backoff'
+      );
+      await status(
+        postLogin(
+          app,
+          { identifier: backoffEmail, derivedKey: stretchedKey },
+          { 'cf-connecting-ip': freshIp }
+        ),
+        401,
+        'the correct key must still be refused while the account is blocked'
+      );
+      // The same backoff on the per-IP counter, driven only by unresolved
+      // identifiers (finding 2: the per-IP brake must bound guessing).
+      for (
+        let attempt = 0;
+        attempt < AUTH_THROTTLE_MAX_FAILURES;
+        attempt += 1
+      ) {
+        await status(
+          postLogin(
+            app,
+            {
+              identifier: `nobody-${tag}-${attempt}@example.test`,
+              derivedKey: wrongKey,
+            },
+            { 'cf-connecting-ip': unknownIp }
+          ),
+          401,
+          'an unknown identifier must answer the uniform 401'
+        );
+      }
+      const unknownIpState = await authRepository.throttleState(
+        unknownIpKey,
+        throttleNow.getTime()
+      );
+      assert.equal(unknownIpState.failures, AUTH_THROTTLE_MAX_FAILURES);
+      assert.equal(
+        unknownIpState.blockedUntil,
+        throttleNow.getTime() +
+          authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES),
+        'the per-IP backoff must be enforced on unresolved attempts'
+      );
+      await status(
+        postLogin(
+          app,
+          { identifier: backoffEmail, derivedKey: stretchedKey },
+          { 'cf-connecting-ip': unknownIp }
+        ),
+        401,
+        'a blocked address must not authenticate even with the correct key'
+      );
+      await db
+        .delete(authThrottle)
+        .where(
+          inArray(authThrottle.key, [
+            backoffAccountKey,
+            unknownIpKey,
+            accountIpKey,
+          ])
+        );
+      instant = previousInstant;
 
       // Slice 10: a wrapped-bcrypt upgrade is atomic — verifier, salt, params
       // and algorithm land together, guarded by the re-read `password_hash`.

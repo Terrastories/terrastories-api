@@ -19,9 +19,10 @@ import {
   DERIVED_KEY_PATTERN,
   ARGON2ID_ALGORITHM,
   AuthLoginRejected,
-  argon2idParamsSatisfyPolicy,
   clientIpOf,
-  isUsableVerifierSalt,
+  isCanonicalArgon2idParams,
+  isCanonicalVerifierSalt,
+  isDerivedKeyOrBcryptHash,
   sessionCookieMaxAge,
   type SessionKind,
 } from './shared/auth-policy.js';
@@ -58,16 +59,30 @@ const preloginSchema = z
     communitySlug: z.string().min(1).max(255).optional(),
   })
   .strict();
+/**
+ * A client-derived key as the wire carries it: a 64-hex Argon2id digest, or
+ * the bcrypt hash string a wrapped Rails account sends (SPEC-V2 §7 step 4).
+ * The wire shape is not the algorithm selector — the stored account decides —
+ * so a shape that does not match the account is an ordinary uniform 401 from
+ * the service, never a 400 that would reveal the account's algorithm. A value
+ * that is neither shape is malformed input and fails here, before resolution,
+ * independently of any account.
+ */
+const derivedKeyWire = z
+  .string()
+  .refine(isDerivedKeyOrBcryptHash, { message: 'Invalid derived key' });
 const loginSchema = z
   .object({
     identifier: z.string().min(1).max(254),
     communitySlug: z.string().min(1).max(255).optional(),
-    derivedKey: z.string().regex(DERIVED_KEY_PATTERN),
+    derivedKey: derivedKeyWire,
     upgrade: z
       .object({
         algorithm: z.string().min(1).max(64),
         salt: z.string().min(1).max(128),
         params: z.record(z.string(), z.unknown()),
+        // The upgrade material is always the Argon2id digest; the wrapped
+        // bcrypt string is the login's own `derivedKey`, never this field.
         derivedKey: z.string().regex(DERIVED_KEY_PATTERN),
       })
       .strict()
@@ -82,7 +97,9 @@ const mePatchSchema = z
   .strict();
 const passwordChangeSchema = z
   .object({
-    currentDerivedKey: z.string().regex(DERIVED_KEY_PATTERN),
+    // A still-wrapped account verifies its bcrypt hash string as the current
+    // key; the new material below is always the Argon2id digest.
+    currentDerivedKey: derivedKeyWire,
     algorithm: z.literal(ARGON2ID_ALGORITHM),
     salt: z.string().min(1).max(128),
     params: z.record(z.string(), z.unknown()),
@@ -144,20 +161,14 @@ export function createHonoApp(options: FoundationOptions) {
     path: '/',
     maxAge: sessionLifetime / 1000,
   };
-  // The renewal/issue cookie of a live session: `standard` sessions carry the
-  // idle Max-Age; `device` sessions get no Max-Age — their absolute bound is
-  // enforced by the session row (§7 "Sessions").
-  const sessionCookie = (kind: SessionKind) => {
-    const maxAge = sessionCookieMaxAge(kind);
-    return maxAge === null
-      ? {
-          httpOnly: true,
-          secure: options.secureCookies ?? true,
-          sameSite: 'Strict' as const,
-          path: '/',
-        }
-      : { ...cookie, maxAge };
-  };
+  // The renewal/issue cookie of a live session. Every kind carries a Max-Age
+  // (`standard`: the 12-hour idle window; `device`: the 60-day idle window), so
+  // a browser restart cannot silently shorten a "remember this device" login;
+  // the session row still enforces the idle and absolute bounds (§7 "Sessions").
+  const sessionCookie = (kind: SessionKind) => ({
+    ...cookie,
+    maxAge: sessionCookieMaxAge(kind),
+  });
   app.use('*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');
@@ -346,8 +357,8 @@ export function createHonoApp(options: FoundationOptions) {
     if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);
     const params = parsed.data.params;
     if (
-      !argon2idParamsSatisfyPolicy(params) ||
-      !isUsableVerifierSalt(parsed.data.salt)
+      !isCanonicalArgon2idParams(params) ||
+      !isCanonicalVerifierSalt(parsed.data.salt)
     )
       return c.json({ error: 'Password does not meet requirements' }, 400);
     const { memoryKiB, iterations, parallelism } = params as Record<

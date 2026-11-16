@@ -53,21 +53,100 @@ export function argon2idParamsSatisfyPolicy(params: unknown): boolean {
   );
 }
 
+/**
+ * The one Argon2id parameter set every new verifier V2 writes must use: the
+ * named policy constants, exactly. A real row and a prelogin fake therefore
+ * share one params shape, so the response is not an existence oracle
+ * (SPEC-V2 §7 step 1); anything else is refused without revealing the policy.
+ */
+export function isCanonicalArgon2idParams(
+  params: unknown
+): params is Argon2idParams {
+  if (!argon2idParamsSatisfyPolicy(params)) return false;
+  const { memoryKiB, iterations, parallelism } = params as Argon2idParams;
+  return (
+    memoryKiB === ARGON2ID_PARAMS.memoryKiB &&
+    iterations === ARGON2ID_PARAMS.iterations &&
+    parallelism === ARGON2ID_PARAMS.parallelism
+  );
+}
+
 /** Rails bcrypt cost bounds (§7 step 4: cost 10 and 12 both occur). */
 export const BCRYPT_MIN_COST = 10;
 export const BCRYPT_MAX_COST = 14;
+/**
+ * The bcrypt costs real Rails rows carry (§7 step 4: cost 10 and 12 both
+ * occur). Prelogin fakes draw from this set only, so a fake bcrypt answer
+ * cannot be told apart from a migrated row by its cost.
+ */
+export const BCRYPT_RAILS_COSTS = [10, 12] as const;
 
-/** A client-generated verifier salt must be base64, at least 128 bits. */
+/** A 22-character bcrypt salt string (the shape a Rails row carries). */
+export const BCRYPT_SALT_PATTERN = /^[./A-Za-z0-9]{22}$/;
+
+/**
+ * A client-generated verifier salt must be base64 and decode to 16..64 bytes
+ * (SPEC-V2 §7 step 2).
+ */
 export function isUsableVerifierSalt(salt: string): boolean {
   if (!SALT_BASE64_PATTERN.test(salt)) return false;
+  const bytes = verifierSaltBytes(salt);
+  return bytes >= MIN_SALT_BYTES && bytes <= MAX_SALT_BYTES;
+}
+
+/**
+ * Decoded byte length of a base64 salt, without atob's leniency: the caller
+ * has already checked the alphabet.
+ */
+export function verifierSaltBytes(salt: string): number {
   const padding = salt.endsWith('==') ? 2 : salt.endsWith('=') ? 1 : 0;
-  // floor(length * 3 / 4) - padding, without accepting atob's leniency.
-  const bytes = Math.floor((salt.length * 3) / 4) - padding;
-  return bytes >= MIN_SALT_BYTES;
+  return Math.floor((salt.length * 3) / 4) - padding;
+}
+
+/**
+ * The one salt length every verifier V2 writes — upgrade or password change —
+ * must use (16 bytes). Canonicalising at write time keeps a real Argon2id row
+ * and a prelogin fake byte-shape identical, so the response is not an
+ * existence oracle (SPEC-V2 §7 step 1).
+ */
+export function isCanonicalVerifierSalt(salt: string): boolean {
+  return (
+    SALT_BASE64_PATTERN.test(salt) && verifierSaltBytes(salt) === MIN_SALT_BYTES
+  );
+}
+
+/** The canonical bcrypt salt shape a migrated row and a fake share. */
+export function isCanonicalBcryptSalt(salt: string): boolean {
+  return BCRYPT_SALT_PATTERN.test(salt);
+}
+
+/** Whether a bcrypt cost is one a migrated Rails row actually carries. */
+export function isCanonicalBcryptCost(cost: number): boolean {
+  return (BCRYPT_RAILS_COSTS as readonly number[]).includes(cost);
 }
 
 /** A client-derived key is a lowercase SHA-256 digest in hex. */
 export const DERIVED_KEY_PATTERN = /^[a-f0-9]{64}$/;
+
+/**
+ * A wrapped Rails-bcrypt hash string, the other wire form a client sends as
+ * `derivedKey` (SPEC-V2 §7 step 4: "sends the hash string as `derivedKey`").
+ * `$2a$`/`$2b$`/`$2y$` are the prefixes Rails and bcrypt-ruby emit, and
+ * 04..14 are the bcrypt cost bounds.
+ */
+export const BCRYPT_HASH_PATTERN =
+  /^\$2[aby]\$(0[4-9]|1[0-4])\$[./A-Za-z0-9]{53}$/;
+
+/**
+ * The wire shape of a client-derived key: a 64-hex Argon2id digest or a
+ * wrapped Rails-bcrypt hash string. Which one applies is decided by the
+ * stored account, never by the wire shape, so a bcrypt-shaped key sent to an
+ * Argon2id account (or a digest sent to a wrapped account) is an ordinary
+ * uniform 401 — never a 400 that would reveal the account's algorithm.
+ */
+export function isDerivedKeyOrBcryptHash(value: string): boolean {
+  return DERIVED_KEY_PATTERN.test(value) || BCRYPT_HASH_PATTERN.test(value);
+}
 
 /** Salt: at least 128 bits, stored as base64 (§7 step 2). */
 export const MIN_SALT_BYTES = 16;
@@ -119,12 +198,14 @@ export function sessionIdleWindowMs(kind: SessionKind): number {
 }
 
 /**
- * The `ts_session` cookie lifetime. `null` means a browser-session cookie:
- * a `device` session may outlive any fixed `Max-Age`, and its absolute bound
- * is enforced by the session row (§7 "Sessions").
+ * The `ts_session` cookie lifetime. Both kinds carry a Max-Age — a browser
+ * restart must not destroy a `device` session before its idle window, which is
+ * the whole point of the opt-in (§7 "Sessions"). The session row remains the
+ * enforcement point: its idle/absolute windows can only shorten the cookie's
+ * nominal life, never extend it.
  */
-export function sessionCookieMaxAge(kind: SessionKind): number | null {
-  return kind === 'device' ? null : STANDARD_SESSION_IDLE_MS / 1000;
+export function sessionCookieMaxAge(kind: SessionKind): number {
+  return sessionIdleWindowMs(kind) / 1000;
 }
 
 /** Digest of a presented session token, or `null` when it is not one. */

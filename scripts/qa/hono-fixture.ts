@@ -500,6 +500,35 @@ export async function createFixture(
     // must refuse to pick one: without a `communitySlug` the answer is the
     // uniform 401, and with the locator it resolves the named community's
     // account (SPEC-V2 §6.2).
+    // #137 Slice 10 (finding 1): a wrapped Rails-bcrypt account. The client
+    // recomputes bcrypt with the stored salt and cost and sends the hash
+    // string as `derivedKey`; the stored verifier is SHA-256 of that real
+    // hash, and the first successful login upgrades it to Argon2id atomically.
+    const wrappedPasswordHash = await hash(
+      toHex(crypto.getRandomValues(new Uint8Array(24))),
+      10
+    );
+    const wrappedCredentials = { email: 'qa-hono-wrapped@example.test' };
+    await db.insert(users).values({
+      email: wrappedCredentials.email,
+      username: 'qa_hono_wrapped',
+      ...deriveUserIdentityColumns({
+        email: wrappedCredentials.email,
+        username: 'qa_hono_wrapped',
+      }),
+      firstName: 'QA',
+      lastName: 'Wrapped',
+      role: 'viewer',
+      communityId,
+      isActive: true,
+      passwordAlgorithm: RAILS_BCRYPT_ALGORITHM,
+      passwordSalt: wrappedPasswordHash.slice(7, 29),
+      passwordParams: JSON.stringify({
+        cost: Number(wrappedPasswordHash.slice(4, 6)),
+      }),
+      passwordVerifier: await sha256Hex(wrappedPasswordHash),
+      passwordHash,
+    });
     const qaSharedEmail = 'qa-hono-shared@example.test';
     await db.insert(users).values([
       {
@@ -5086,6 +5115,42 @@ export async function createFixture(
             ),
           },
           {
+            // #137 Slice 10 (finding 1): a wrapped Rails-bcrypt account sends
+            // the real bcrypt hash string as `derivedKey` and upgrades to
+            // Argon2id atomically in the same request (SPEC-V2 §7 step 4).
+            name: 'wrapped Rails-bcrypt account logs in with the hash string and upgrades',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: {
+              identifier: wrappedCredentials.email,
+              derivedKey: wrappedPasswordHash,
+              upgrade: {
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: verifierSalt,
+                params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+              },
+            },
+            check: ownUser(
+              wrappedCredentials.email,
+              'viewer',
+              liveSessionCookie,
+              communityId
+            ),
+          },
+          {
+            name: 'the upgraded account no longer accepts the bcrypt hash string',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            body: {
+              identifier: wrappedCredentials.email,
+              derivedKey: wrappedPasswordHash,
+            },
+            check: invalidCredentials,
+          },
+          {
             name: 'prelogin returns the stored verifier shape for a real account',
             method: 'POST',
             path: '/v2/auth/prelogin',
@@ -5174,7 +5239,7 @@ export async function createFixture(
             // #137 Slice 10: the device-session opt-in is recorded as a
             // `device` session — the response carries no Max-Age (the
             // absolute bound is enforced by the session row).
-            name: 'device session opt-in is issued without a cookie Max-Age',
+            name: 'device session opt-in is issued with the idle-window Max-Age',
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
@@ -5192,9 +5257,12 @@ export async function createFixture(
               )(body),
             checkHeaders: (headers) => {
               const setCookie = headers.get('set-cookie') ?? '';
+              // A device login must survive a browser restart, so the cookie
+              // carries the 60-day idle Max-Age; the session row is still the
+              // enforcement point.
               return (
                 setCookie.includes('ts_session=') &&
-                !/Max-Age=/i.test(setCookie)
+                /Max-Age=5184000/i.test(setCookie)
               );
             },
           },

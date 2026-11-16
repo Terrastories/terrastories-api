@@ -15,9 +15,14 @@ import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
 import {
   ARGON2ID_ALGORITHM,
+  ARGON2ID_PARAMS,
   ARGON2ID_PARAMS_JSON,
+  BCRYPT_RAILS_COSTS,
   RAILS_BCRYPT_ALGORITHM,
+  isCanonicalArgon2idParams,
+  isCanonicalVerifierSalt,
 } from '../../src/shared/auth-policy.js';
+import { deterministicPreloginFake } from '../../src/shared/prelogin.js';
 import { normalizeSearchText } from '../../src/shared/utils/search-normalize.js';
 
 const BCRYPT_ALPHABET =
@@ -222,16 +227,70 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     const a = await first.json();
     const b = await second.json();
     expect(a).toEqual(b);
-    // An account-free community must answer with the new-password mix only.
+    // The fake is slug-independent: an account-free community, a real
+    // community and an unknown slug all answer an unknown identifier with the
+    // same deployment-wide-mix shape. The old per-community mix let a real
+    // slug answer differently from a fake one and enumerate slugs (finding 5).
     const gamma = await (
       await postPrelogin(app, {
         identifier: 'deterministic@prelogin.test',
         communitySlug: 'prelogin-gamma',
       })
     ).json();
-    expect(gamma.algorithm).toBe(ARGON2ID_ALGORITHM);
-    expect(gamma.params).toEqual(JSON.parse(ARGON2ID_PARAMS_JSON));
-    expect(Buffer.from(gamma.salt, 'base64').length).toBeGreaterThanOrEqual(16);
+    expect(gamma).toEqual(a);
+    const alpha = await (
+      await postPrelogin(app, {
+        identifier: 'deterministic@prelogin.test',
+        communitySlug: 'prelogin-alpha',
+      })
+    ).json();
+    expect(alpha).toEqual(a);
+    const unknownSlug = await (
+      await postPrelogin(app, {
+        identifier: 'deterministic@prelogin.test',
+        communitySlug: 'no-such-community',
+      })
+    ).json();
+    expect(unknownSlug).toEqual(a);
+  });
+
+  it('gives the fake and a real Argon2id account the same canonical shape', async () => {
+    const { app } = await setup();
+    const real = await (
+      await postPrelogin(app, { identifier: 'upgraded@prelogin.test' })
+    ).json();
+    // The all-upgraded mix forces the Argon2id branch of the fake.
+    const fake = await deterministicPreloginFake(
+      'test-secret',
+      'nobody@prelogin.test',
+      { upgraded: 1000, total: 1000 }
+    );
+    // Shape parity on values, not just keys: one salt length and the named
+    // policy params on both sides (finding 4).
+    expect(fake.algorithm).toBe(ARGON2ID_ALGORITHM);
+    expect(Buffer.from(fake.salt, 'base64').length).toBe(16);
+    expect(isCanonicalVerifierSalt(fake.salt)).toBe(true);
+    expect(isCanonicalArgon2idParams(fake.params)).toBe(true);
+    expect(Buffer.from(String(real.salt), 'base64').length).toBe(16);
+    expect(isCanonicalVerifierSalt(String(real.salt))).toBe(true);
+    expect(real.params).toEqual(JSON.parse(ARGON2ID_PARAMS_JSON));
+    expect(real.params).toEqual(ARGON2ID_PARAMS);
+    expect(fake.params).toEqual(real.params);
+  });
+
+  it('gives the fake and a migrated row the same canonical bcrypt shape', async () => {
+    // The all-migrated mix forces the bcrypt branch of the fake.
+    const fake = await deterministicPreloginFake(
+      'test-secret',
+      'nobody@prelogin.test',
+      { upgraded: 0, total: 1000 }
+    );
+    expect(fake.algorithm).toBe(RAILS_BCRYPT_ALGORITHM);
+    // 22-character bcrypt salt, byte-exact with a Rails row, and a cost drawn
+    // only from the set real Rails rows carry (finding 4).
+    expect(fake.salt).toMatch(/^[./A-Za-z0-9]{22}$/);
+    const params = fake.params as { cost: number };
+    expect(BCRYPT_RAILS_COSTS as readonly number[]).toContain(params.cost);
   });
 
   it('does not reveal an ambiguous email without a locator, and resolves with one', async () => {

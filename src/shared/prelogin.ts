@@ -4,25 +4,28 @@
  * An identifier that resolves to no single account must answer with the same
  * `{algorithm, salt, params}` shape a real account returns, so the response is
  * never an existence oracle. The fake is deterministic per
- * `HMAC(serverSecret, normalizedIdentifier [+ communitySlug])`, and its
- * algorithm follows the community's migrated-vs-upgraded mix so a population
- * of fakes mirrors the population of real accounts.
+ * `HMAC(serverSecret, normalizedIdentifier)` and its algorithm follows the
+ * deployment-wide migrated-vs-upgraded mix.
+ *
+ * The fake is a function of the identifier alone: the request's
+ * `communitySlug` is deliberately not an input. A slug that names no
+ * community (or an account that is not there) must not be able to shift the
+ * answer into a community-specific mix, which would enumerate private or
+ * disabled community slugs (finding 5). The mix is the deployment-wide one for
+ * the same reason.
  */
 import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS,
   BCRYPT_MAX_COST,
-  BCRYPT_MIN_COST,
+  BCRYPT_RAILS_COSTS,
   MIN_SALT_BYTES,
   RAILS_BCRYPT_ALGORITHM,
+  isCanonicalBcryptCost,
   type Argon2idParams,
   type PasswordAlgorithm,
 } from './auth-policy.js';
 import { fromHex, hmacSha256Hex, readUint32, toBase64 } from './auth-crypto.js';
-
-/** The bcrypt base64 alphabet, byte-exact with Rails/bcrypt. */
-const BCRYPT_ALPHABET =
-  './ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
 export type PreloginParams = Argon2idParams | { cost: number };
 
@@ -31,6 +34,10 @@ export interface PreloginResponse {
   salt: string;
   params: PreloginParams;
 }
+
+/** The bcrypt base64 alphabet, byte-exact with Rails/bcrypt. */
+const BCRYPT_ALPHABET =
+  './ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
 /** 22-character bcrypt salt string (the shape a Rails row carries). */
 function bcryptSalt(digest: Uint8Array): string {
@@ -42,19 +49,19 @@ function bcryptSalt(digest: Uint8Array): string {
 }
 
 /**
- * Deterministic fake. `mix` is the community's (or, with no community, the
- * deployment's) upgraded/total account ratio; `total === 0` means the new
- * password mix. The identifier is already normalized by the caller.
+ * Deterministic fake. `mix` is the deployment-wide upgraded/total account
+ * ratio; `total === 0` means the new-password mix. The identifier is already
+ * normalized by the caller, and nothing the request controls beyond it (in
+ * particular no `communitySlug`) enters the digest.
  */
 export async function deterministicPreloginFake(
   serverSecret: string,
   normalizedIdentifier: string,
-  communitySlug: string | undefined,
   mix: { upgraded: number; total: number }
 ): Promise<PreloginResponse> {
   const digestHex = await hmacSha256Hex(
     serverSecret,
-    `prelogin:${communitySlug ?? ''}:${normalizedIdentifier}`
+    `prelogin:${normalizedIdentifier}`
   );
   const digest = fromHex(digestHex);
   const bucket = readUint32(digest, 0) % 1000;
@@ -63,6 +70,8 @@ export async function deterministicPreloginFake(
   if (bucket < upgradedShare) {
     return {
       algorithm: ARGON2ID_ALGORITHM,
+      // 16 bytes: the one salt length every canonical verifier uses, so the
+      // fake is shape-identical to a real Argon2id row (finding 4).
       salt: toBase64(digest.slice(4, 4 + MIN_SALT_BYTES)),
       params: {
         memoryKiB: ARGON2ID_PARAMS.memoryKiB,
@@ -71,8 +80,9 @@ export async function deterministicPreloginFake(
       },
     };
   }
-  // Cost 10 or 12 both occur in Rails rows; the fake stays inside that range.
-  const cost = BCRYPT_MIN_COST + ((digest[4] ?? 0) % 3);
+  // Cost 10 or 12 both occur in Rails rows; the fake stays inside that set so
+  // its cost is drawn from the same distribution a migrated row carries.
+  const cost = BCRYPT_RAILS_COSTS[digest[4]! % BCRYPT_RAILS_COSTS.length] ?? 12;
   return {
     algorithm: RAILS_BCRYPT_ALGORITHM,
     salt: bcryptSalt(digest.slice(5)),
@@ -116,8 +126,7 @@ export function parseStoredPasswordParams(
   if (
     typeof cost !== 'number' ||
     !Number.isInteger(cost) ||
-    cost < BCRYPT_MIN_COST ||
-    cost > BCRYPT_MAX_COST
+    !isCanonicalBcryptCost(cost)
   )
     return null;
   return { cost };

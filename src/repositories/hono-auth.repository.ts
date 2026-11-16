@@ -189,35 +189,6 @@ export class HonoAuthRepository {
   }
 
   /**
-   * The verifier row of an account that passed the authority gate, re-read at
-   * write time. `null` means the account's authority changed (or it vanished)
-   * between candidate resolution and verification, so the login must fail.
-   */
-  async verifiedAccount(
-    account: Pick<AuthAccount, 'id' | 'passwordHash'>
-  ): Promise<AuthAccount | null> {
-    const { users, communities } = this.tables;
-    const rows: RawAuthAccount[] = await this.db
-      .select(AUTH_COLUMNS(this.tables))
-      .from(users)
-      .leftJoin(communities, eq(users.communityId, communities.id))
-      .where(
-        and(
-          eq(users.id, account.id),
-          eq(users.passwordHash, account.passwordHash)
-        )
-      )
-      .limit(1);
-    const row = rows[0];
-    if (!row) return null;
-    return {
-      ...row,
-      isActive: toFlag(row.isActive) === true,
-      communityIsActive: toFlag(row.communityIsActive),
-    };
-  }
-
-  /**
    * The account row of an authenticated user, re-read for a verifier-changing
    * operation (password change). `null` means the account vanished between
    * the session re-read and the write, which is fail-closed.
@@ -297,30 +268,15 @@ export class HonoAuthRepository {
   }
 
   /**
-   * Migrated-vs-upgraded mix of a community's accounts, for prelogin fakes
-   * (SPEC-V2 §7 step 1: fakes mimic the mix so the response does not reveal
-   * whether an account exists or was migrated). A community with no accounts
-   * yet reports the new-password mix.
-   */
-  async communityAlgorithmMix(
-    communityId: number
-  ): Promise<{ upgraded: number; total: number }> {
-    const { users } = this.tables;
-    const rows = await this.db
-      .select({
-        algorithm: users.passwordAlgorithm,
-        total: sql<number>`count(*)`,
-      })
-      .from(users)
-      .where(eq(users.communityId, communityId))
-      .groupBy(users.passwordAlgorithm);
-    return mixOf(rows);
-  }
-
-  /**
-   * The same mix for the whole deployment, used when prelogin has no
-   * resolvable community (no slug sent, or a slug that names no community):
-   * the fake must still mirror the population it is hiding in.
+   * The deployment-wide migrated-vs-upgraded mix of all accounts, for prelogin
+   * fakes (SPEC-V2 §7 step 1: fakes mimic the mix so the response does not
+   * reveal whether an account exists or was migrated).
+   *
+   * The mix is deliberately deployment-wide and not per community: a
+   * community-scoped mix made a real slug answer with that community's
+   * algorithm while an unknown slug fell back to the global mix, which
+   * enumerated private or disabled community slugs (finding 5). The fake is
+   * also keyed only by the normalized identifier, never by the slug.
    */
   async globalAlgorithmMix(): Promise<{ upgraded: number; total: number }> {
     const { users } = this.tables;
@@ -581,7 +537,14 @@ export class HonoAuthRepository {
     await this.db.delete(throttle).where(inArray(throttle.key, keys));
   }
 
-  /** Delete expired session rows (scheduled sweep, §7 "Sessions"). */
+  /**
+   * Delete expired session rows, for the scheduled sweep (§7 "Sessions").
+   *
+   * TODO(slice-9): call this from the scheduled handler added in PR #247
+   * (`worker.ts` `scheduled` + `wrangler.jsonc` cron). Slice 10 deliberately
+   * does not add a scheduled handler here; until it lands, expired rows are
+   * filtered out on read by `sessionWindowCondition` and simply accumulate.
+   */
   async sweepExpiredSessions(now: number): Promise<number> {
     const sessions = this.tables.sessions;
     const deleted = await this.db

@@ -30,6 +30,7 @@ import {
   ARGON2ID_PARAMS_JSON,
   AUTH_THROTTLE_BACKOFF_MAX_MS,
   AUTH_THROTTLE_MAX_FAILURES,
+  AUTH_THROTTLE_WINDOW_MS,
   AuthLoginRejected,
   DEVICE_SESSION_ABSOLUTE_MS,
   RAILS_BCRYPT_ALGORITHM,
@@ -744,10 +745,29 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(
       authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES + 1)
     ).toBeGreaterThan(authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES));
-    // Once the block lapses *and* the window is spent, the counter resets.
+    // Merely lapsing the block does not reset the ladder: the counter only
+    // decays after a full quiet window *past the last block* (item 3).
     await db
       .update(authThrottleSqlite)
       .set({ blockedUntil: t0 - 1 })
+      .where(eq(authThrottleSqlite.key, key));
+    await repository.recordLoginFailure(
+      {
+        account: { id: account!.id, communityId: account!.communityId },
+        clientIp: '198.51.100.99',
+        now: t0,
+      },
+      secret
+    );
+    const [stillGrowing] = await db
+      .select()
+      .from(authThrottleSqlite)
+      .where(eq(authThrottleSqlite.key, key));
+    expect(stillGrowing?.failures).toBe(AUTH_THROTTLE_MAX_FAILURES + 2);
+    // A full quiet window after the block lapses lets the counter decay.
+    await db
+      .update(authThrottleSqlite)
+      .set({ blockedUntil: t0 - AUTH_THROTTLE_WINDOW_MS - 1 })
       .where(eq(authThrottleSqlite.key, key));
     await repository.recordLoginFailure(
       {
@@ -822,6 +842,55 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
       AUTH_THROTTLE_BACKOFF_MAX_MS
     );
     expect(authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES + 20)).toBe(
+      AUTH_THROTTLE_BACKOFF_MAX_MS
+    );
+  });
+
+  it('escalates the backoff to the 60-minute cap when each attempt arrives right after the block lapses', async () => {
+    const start = new Date('2026-06-01T12:00:00.000Z');
+    const { db, secret } = await setup({ now: start });
+    const repository = new HonoAuthRepository(db);
+    const [account] = await db
+      .select({ id: usersSqlite.id, communityId: usersSqlite.communityId })
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'upgraded@login.example.test'));
+    const key = await repository.accountThrottleKey(account!.id, secret);
+    const t0 = start.getTime();
+    // A block that has just lapsed in a fresh window: on the realistic
+    // timeline (each attempt right after the previous block ends) the
+    // ladder must climb instead of resetting itself.
+    await db.insert(authThrottleSqlite).values({
+      key,
+      kind: 'account',
+      communityId: account!.communityId,
+      failures: AUTH_THROTTLE_MAX_FAILURES,
+      windowStartedAt: t0,
+      blockedUntil: t0 - 1,
+    });
+    let at = t0;
+    for (
+      let rung = AUTH_THROTTLE_MAX_FAILURES + 1;
+      rung <= AUTH_THROTTLE_MAX_FAILURES + 5;
+      rung += 1
+    ) {
+      await repository.recordLoginFailure(
+        {
+          account: { id: account!.id, communityId: account!.communityId },
+          clientIp: '203.0.113.177',
+          now: at,
+        },
+        secret
+      );
+      const [row] = await db
+        .select()
+        .from(authThrottleSqlite)
+        .where(eq(authThrottleSqlite.key, key));
+      expect(row?.failures).toBe(rung);
+      const backoff = authThrottleBackoffMs(rung);
+      expect(row?.blockedUntil).toBe(at + backoff);
+      at += backoff + 1;
+    }
+    expect(authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES + 5)).toBe(
       AUTH_THROTTLE_BACKOFF_MAX_MS
     );
   });

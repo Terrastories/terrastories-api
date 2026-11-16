@@ -487,11 +487,14 @@ export class HonoAuthRepository {
     now: number
   ) {
     const throttle = this.tables.authThrottle;
-    // The failure window is only spent when it is old *and* no block is
-    // active: a new failure while blocked must keep growing the counter (and
-    // therefore the backoff) instead of resetting it to 1 and clearing the
-    // block (finding A).
-    const windowExpired = sql`${throttle.windowStartedAt} <= ${now - AUTH_THROTTLE_WINDOW_MS} and (${throttle.blockedUntil} is null or ${throttle.blockedUntil} <= ${now})`;
+    // The counter decays only after a full quiet window *past the last block*,
+    // not from when the counter started: `coalesce(blocked_until,
+    // window_started_at)` anchors both branches, so an active or only just
+    // lapsed block does not reset the ladder and the backoff escalates on
+    // the realistic timeline (each attempt right after its predecessor's
+    // block lapses). Decaying mid-block silently caps the ladder at the
+    // first rung (finding A).
+    const windowExpired = sql`coalesce(${throttle.blockedUntil}, ${throttle.windowStartedAt}) <= ${now - AUTH_THROTTLE_WINDOW_MS}`;
     // The successor of the failure count after this write, computed once so the
     // blocked_until branch cannot drift from the counter branch.
     const nextFailures = sql`(case when ${windowExpired} then 1 else ${throttle.failures} + 1 end)`;

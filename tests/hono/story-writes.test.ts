@@ -1707,3 +1707,147 @@ describe('Slice 8 D1 batch atomicity and race safety', () => {
     }
   });
 });
+
+describe('Slice 9 D1 owner-delete follow-up purge failure (#140)', () => {
+  it('still yields 204 when the files purge batch throws after the delete committed', async () => {
+    const purgeSqlite = new Sqlite(':memory:');
+    purgeSqlite.pragma('foreign_keys = ON');
+    const purgeDb = drizzle(purgeSqlite);
+    migrate(purgeDb, { migrationsFolder: './src/db/migrations' });
+    const t = tablesFor(purgeDb);
+    const now = T0;
+    const [comm] = await purgeDb
+      .insert(t.communities)
+      .values({
+        name: 'Purge Nation',
+        slug: 'purge-nation',
+        publicStories: true,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const passwordHash = await hash(TEST_PASS, 4);
+    const email = 'purge-editor@example.test';
+    const username = 'purge-editor';
+    const [actor] = await purgeDb
+      .insert(t.users)
+      .values({
+        email,
+        username,
+        ...deriveUserIdentityColumns({ email, username }),
+        passwordHash,
+        firstName: 'Purge',
+        lastName: 'Editor',
+        role: 'editor',
+        communityId: comm!.id,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const fileId = crypto.randomUUID();
+    await purgeDb.insert(t.files).values({
+      id: fileId,
+      filename: fileId,
+      originalName: 'purge.png',
+      path: `communities/${comm!.id}/media/${fileId}`,
+      storageKey: `communities/${comm!.id}/media/${fileId}`,
+      url: 'https://storage.invalid/purge.png',
+      mimeType: 'image/png',
+      size: 1,
+      byteSize: 1,
+      communityId: comm!.id,
+      uploadedBy: actor!.id,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const [story] = await purgeDb
+      .insert(t.stories)
+      .values({
+        communityId: comm!.id,
+        title: 'Purge Story',
+        slug: 'purge-story',
+        language: 'en',
+        privacyLevel: 'public',
+        isRestricted: false,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    await purgeDb.insert(t.attachments).values({
+      communityId: comm!.id,
+      ownerType: 'story',
+      ownerId: story!.id,
+      fileId,
+      role: 'story_media',
+      ordinal: 0,
+      createdAt: now,
+    });
+
+    // D1-like connection whose `.batch` throws when a statement deletes from
+    // files; every other batch behaves like the D1 driver.
+    const d1Like = Object.create(purgeDb) as typeof purgeDb & {
+      batch: (
+        stmts: Array<{ toSQL: () => { sql: string; params: unknown[] } }>
+      ) => Promise<unknown[]>;
+    };
+    d1Like.batch = async (stmts) => {
+      const queries = stmts.map((s) => s.toSQL());
+      if (queries.some(({ sql }) => /delete\s+from\s+"files"/i.test(sql))) {
+        throw new Error('simulated D1 failure in the files purge batch');
+      }
+      return purgeSqlite.transaction(() =>
+        queries.map(({ sql: querySql, params }) => {
+          const stmt = purgeSqlite.prepare(querySql);
+          return stmt.reader ? stmt.all(...params) : stmt.run(...params);
+        })
+      )();
+    };
+
+    const d1App = createHonoApp({
+      repository: new HonoFoundationRepository(d1Like as never),
+      verifier: nodePasswordVerifier,
+      secureCookies: false,
+      publicOrigin: API_ORIGIN,
+      corsOrigins: [CLIENT_ORIGIN],
+      storage: { read: async () => null },
+    });
+    const loginRes = await d1App.request(`${API_ORIGIN}/v2/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email,
+        password: TEST_PASS,
+        communityId: comm!.id,
+      }),
+    });
+    expect(loginRes.status).toBe(200);
+    const cookie = (loginRes.headers.get('set-cookie') ?? '').split(';')[0]!;
+    const delRes = await d1App.request(
+      `${API_ORIGIN}/v2/stories/${story!.id}`,
+      {
+        method: 'DELETE',
+        headers: { cookie },
+      }
+    );
+    expect(delRes.status).toBe(204);
+    // The story and its attachments are gone — only the purge failed.
+    expect(
+      await purgeDb.select().from(t.stories).where(eq(t.stories.id, story!.id))
+    ).toHaveLength(0);
+    expect(
+      await purgeDb
+        .select()
+        .from(t.attachments)
+        .where(eq(t.attachments.ownerId, story!.id))
+    ).toHaveLength(0);
+    // The leftover files row keeps the key referenced: no reclaim by the
+    // orphan sweeper, consistent with the 204 committed delete.
+    expect(
+      await purgeDb.select().from(t.files).where(eq(t.files.id, fileId))
+    ).toHaveLength(1);
+    purgeSqlite.close();
+  });
+});

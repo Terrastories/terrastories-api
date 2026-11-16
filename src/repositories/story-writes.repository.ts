@@ -1122,9 +1122,21 @@ export class StoryWritesRepository {
       if (fileIds.length === 0) {
         return true;
       }
-      const fileResults = await this.db.batch(
-        buildUnreferencedFilesDelete(this.db, this.connection, fileIds)
-      );
+      // The relational delete already committed in its own batch; a failing
+      // files purge must not turn a completed delete into an error response.
+      // The leftover files row keeps the key referenced, so nothing is
+      // reclaimed silently; nothing here reveals existence either.
+      let fileResults: unknown[] = [];
+      try {
+        fileResults = await this.db.batch(
+          buildUnreferencedFilesDelete(this.db, this.connection, fileIds)
+        );
+      } catch {
+        // Content-free: no key, no file id, no error text.
+        // eslint-disable-next-line no-console -- operator channel; content-free
+        console.warn('media cleanup: owner-deleted files purge batch failed');
+        return true;
+      }
       collectFiles(
         fileResults.flatMap((rows: unknown) =>
           Array.isArray(rows) ? rows : []

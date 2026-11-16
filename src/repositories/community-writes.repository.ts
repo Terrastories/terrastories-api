@@ -679,9 +679,21 @@ export class CommunityWritesRepository {
         if (fileIds.length === 0) {
           return 'deleted';
         }
-        const fileResults = await this.db.batch(
-          buildUnreferencedFilesDelete(this.db, this.connection, fileIds)
-        );
+        // The relational delete already committed in its own batch; a failing
+        // files purge must not turn a completed delete into an error response.
+        // The leftover files row keeps the key referenced, so nothing is
+        // reclaimed silently.
+        let fileResults: unknown[] = [];
+        try {
+          fileResults = await this.db.batch(
+            buildUnreferencedFilesDelete(this.db, this.connection, fileIds)
+          );
+        } catch {
+          // Content-free: no key, no file id, no error text.
+          // eslint-disable-next-line no-console -- operator channel; content-free
+          console.warn('media cleanup: owner-deleted files purge batch failed');
+          return 'deleted';
+        }
         collectFiles(
           fileResults.flatMap((rows: unknown) =>
             Array.isArray(rows) ? rows : []

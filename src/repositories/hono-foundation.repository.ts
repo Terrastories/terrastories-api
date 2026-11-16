@@ -217,6 +217,13 @@ export class HonoFoundationRepository {
     /** Explicit device-session revocation metadata (admin revoke, §6.8). */
     revokedAt?: Date;
     revokedBy?: number;
+    /**
+     * The verifier the session row must see committed before it may consume
+     * the login: the verifier the plain path verified against, or the new one
+     * just written by the coupled path (§7 step 4). `undefined` disables the
+     * extra condition (legacy tests only); `null` anchors to a NULL verifier.
+     */
+    expectedVerifier?: string | null;
   }): {
     tokenHash: string;
     userId: number;
@@ -239,6 +246,20 @@ export class HonoFoundationRepository {
     const absoluteExpiresAt = input.absoluteExpiresAt.getTime();
     const revokedAt = input.revokedAt ? input.revokedAt.getTime() : null;
     const revokedBy = input.revokedAt ? (input.revokedBy ?? user.id) : null;
+    // Anchor the session to the verifier the request verified against — or
+    // the one the coupled write just committed — so a lost verifier race
+    // yields no session and, in the coupled path, rolls the account back to
+    // its pre-write state (§7 step 4). password_hash never changes in V2, so
+    // a password_hash-only anchor would consume logins after the verifier
+    // moved; only the verifier tells the truth about whose credentials were
+    // accepted.
+    const expectedVerifier = input.expectedVerifier;
+    const verifierCondition =
+      expectedVerifier === undefined
+        ? sql`1 = 1`
+        : expectedVerifier === null
+          ? isNull(users.passwordVerifier)
+          : eq(users.passwordVerifier, expectedVerifier);
     // A presented session belonging to a different user is never rotated
     // onto the new login: it is revoked, and the authenticating user always
     // gets a row of their own (#188 — shared-browser login). The revocation
@@ -279,7 +300,8 @@ export class HonoFoundationRepository {
           user.communityId === null
             ? isNull(users.communityId)
             : eq(users.communityId, user.communityId),
-          this.allowedAuthConditions()
+          this.allowedAuthConditions(),
+          verifierCondition
         )
       );
       // PostgreSQL locks current authority through the write; a concurrent
@@ -340,6 +362,8 @@ export class HonoFoundationRepository {
     /** Explicit device-session revocation metadata (admin revoke, §6.8). */
     revokedAt?: Date;
     revokedBy?: number;
+    /** Verifier anchor for the session write (§7 step 4). */
+    expectedVerifier?: string | null;
   }): Promise<boolean> {
     const plan = this.sessionWritePlan(input);
     if (!plan) return false;
@@ -422,7 +446,12 @@ export class HonoFoundationRepository {
     /** The verifier read before this write; a stale one loses the race. */
     previousVerifier?: string | null;
   }): Promise<{ established: boolean; verifierWritten: boolean }> {
-    const plan = this.sessionWritePlan(input);
+    const plan = this.sessionWritePlan({
+      ...input,
+      // The coupled write commits its own verifier; the session row must
+      // anchor to exactly that value, or the two writes would disagree.
+      expectedVerifier: input.verifier.passwordVerifier,
+    });
     if (!plan) return { established: false, verifierWritten: false };
     const role = parseV2Role(input.user.role);
     if (!role) return { established: false, verifierWritten: false };
@@ -491,6 +520,7 @@ export class HonoFoundationRepository {
       if (dialectOf(db) === 'postgresql') {
         return await db.transaction(async (tx: Executor) => {
           const updated = await verifierUpdate(tx);
+          if (updated.length === 0) throw new SessionGateLost();
           const inserted = await plan.verifiedInsert(tx);
           if (inserted.length === 0) throw new SessionGateLost();
           if (plan.previousHash !== undefined)
@@ -502,6 +532,7 @@ export class HonoFoundationRepository {
       }
       return await db.transaction((tx: Executor) => {
         const updated = verifierUpdate(tx).all();
+        if (updated.length === 0) throw new SessionGateLost();
         const inserted = plan.verifiedInsert(tx).all();
         if (inserted.length === 0) throw new SessionGateLost();
         if (plan.previousHash !== undefined)

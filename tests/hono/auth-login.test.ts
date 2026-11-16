@@ -1053,6 +1053,103 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     ).toBe(1);
   });
 
+  it('couples the verifier write and the session insert: a stale verifier anchor leaves both undone', async () => {
+    const { db } = await setup();
+    const foundation = new HonoFoundationRepository(db);
+    const [user] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'upgraded@login.example.test'));
+    const won = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'upgraded@login.example.test'));
+    const storedVerifier = won[0]!.passwordVerifier!;
+    const base = {
+      tokenHash: 'a'.repeat(64),
+      user: {
+        id: user!.id,
+        email: user!.email,
+        username: user!.username,
+        displayName: user!.displayName,
+        passwordHash: user!.passwordHash,
+        role: 'member',
+        communityId: user!.communityId,
+      },
+      kind: 'standard' as const,
+      createdAt: new Date('2026-06-01T12:00:00.000Z'),
+      idleExpiresAt: new Date('2026-06-01T20:00:00.000Z'),
+      absoluteExpiresAt: new Date('2026-07-01T12:00:00.000Z'),
+      verifier: {
+        passwordHash: user!.passwordHash,
+        passwordVerifier: 'e'.repeat(64),
+        passwordAlgorithm: ARGON2ID_ALGORITHM,
+        passwordSalt: makeVerifierSalt(),
+        passwordParams: ARGON2ID_PARAMS_JSON,
+      },
+    };
+    // A stale verifier (the account's verifier moved between the read and the
+    // write) must make the pair roll back together — no session, no verifier
+    // change — or a concurrent reset could hand the caller a session for
+    // credentials that no longer verify.
+    const lost = await foundation.createSessionWithVerifier({
+      ...base,
+      previousVerifier: 'stale-verifier',
+    });
+    expect(lost).toEqual({ established: false, verifierWritten: false });
+    const [afterLoss] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'upgraded@login.example.test'));
+    expect(afterLoss?.passwordVerifier).toBe(storedVerifier);
+    expect(
+      (await db.select({ value: count() }).from(sessionsSqlite))[0]?.value
+    ).toBe(0);
+  });
+
+  it('pins the plain-login anchor: a session gated on a moved verifier creates no row', async () => {
+    const { db } = await setup();
+    const foundation = new HonoFoundationRepository(db);
+    const [user] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'upgraded@login.example.test'));
+    const base = {
+      tokenHash: 'c'.repeat(64),
+      user: {
+        id: user!.id,
+        email: user!.email,
+        username: user!.username,
+        displayName: user!.displayName,
+        passwordHash: user!.passwordHash,
+        role: 'member',
+        communityId: user!.communityId,
+      },
+      kind: 'standard' as const,
+      createdAt: new Date('2026-06-01T12:00:00.000Z'),
+      idleExpiresAt: new Date('2026-06-01T20:00:00.000Z'),
+      absoluteExpiresAt: new Date('2026-07-01T12:00:00.000Z'),
+    };
+    // The plain Argon2id path anchors on the verifier it verified, so a
+    // concurrent reset between read and write yields no session (§7 step 4).
+    const stale = await foundation.createSession({
+      ...base,
+      expectedVerifier: 'stale-verifier',
+    });
+    expect(stale).toBe(false);
+    expect(
+      (await db.select({ value: count() }).from(sessionsSqlite))[0]?.value
+    ).toBe(0);
+    const created = await foundation.createSession({
+      ...base,
+      expectedVerifier: user!.passwordVerifier,
+    });
+    expect(created).toBe(true);
+    expect(
+      (await db.select({ value: count() }).from(sessionsSqlite))[0]?.value
+    ).toBe(1);
+  });
+
   it('pins the session gate: a session write with a stale anchor creates no row', async () => {
     const { db } = await setup();
     const foundation = new HonoFoundationRepository(db);

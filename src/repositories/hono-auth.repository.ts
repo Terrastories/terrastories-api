@@ -432,7 +432,13 @@ export class HonoAuthRepository {
       if (!result.established) return null;
       return { token, verifierWritten: result.verifierWritten };
     }
-    const created = await repository.createSession(sessionWrite);
+    const created = await repository.createSession({
+      ...sessionWrite,
+      // Plain Argon2id logins anchor to the verifier they just verified
+      // against (§7 step 4). Concurrent verifier replacement then yields no
+      // session instead of a valid session for stale credentials.
+      expectedVerifier: account.passwordVerifier ?? null,
+    });
     return created ? { token, verifierWritten: false } : null;
   }
 

@@ -610,54 +610,27 @@ export class CommunityWritesRepository {
     referenceGuards: (executor: any) => any[],
     removedFiles?: FileByteCleanup[]
   ): Promise<PlaceDeleteOutcome> {
-    // Capture the owner's attachment file ids before the delete so any files
-    // that become unreferenced are removed in the same transaction/batch.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const collectFiles = (rows: any) => {
       if (removedFiles) removedFiles.push(...toFileByteCleanups(rows));
     };
-    const attachmentFileIds = async (
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      executor: any
-    ): Promise<string[]> => {
-      const result = await executor
-        .select({ fileId: this.tables.attachments.fileId })
-        .from(this.tables.attachments)
-        .where(
-          and(
-            eq(this.tables.attachments.communityId, communityId),
-            eq(this.tables.attachments.ownerType, ownerType),
-            eq(this.tables.attachments.ownerId, ownerId)
-          )
-        );
-      const rows = (Array.isArray(result) ? result : []) as Array<{
-        fileId: string | null;
-      }>;
-      return rows
-        .map((row) => row.fileId)
+    // Candidates for byte cleanup are the attachments actually deleted in
+    // this transaction/batch (DELETE ... RETURNING file_id), so a relation
+    // inserted and cascaded away within this very operation is included.
+    // Row keys arrive drizzle-mapped in production drivers; the D1-like
+    // batch harness returns raw column names, so accept both spellings.
+    const fileIdsOf = (rows: unknown): string[] =>
+      (Array.isArray(rows)
+        ? (rows as Array<{
+            fileId?: string | null;
+            file_id?: string | null;
+          }>)
+        : []
+      )
+        .map((row) => row.fileId ?? row.file_id ?? null)
         .filter((id): id is string => typeof id === 'string');
-    };
-    // better-sqlite3 query builders resolve synchronously.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const attachmentFileIdsSync = (executor: any): string[] => {
-      const rows = executor
-        .select({ fileId: this.tables.attachments.fileId })
-        .from(this.tables.attachments)
-        .where(
-          and(
-            eq(this.tables.attachments.communityId, communityId),
-            eq(this.tables.attachments.ownerType, ownerType),
-            eq(this.tables.attachments.ownerId, ownerId)
-          )
-        )
-        .all() as Array<{ fileId: string | null }>;
-      return rows
-        .map((row) => row.fileId)
-        .filter((id): id is string => typeof id === 'string');
-    };
     try {
       if (this.hasD1Batch()) {
-        const fileIds = await attachmentFileIds(this.db);
         // Put NOT EXISTS reference guards inside DELETE itself so a concurrent
         // story_places/story_speakers insert never silently cascades, and gate
         // attachment cleanup on the owner row actually being gone afterward.
@@ -678,7 +651,7 @@ export class CommunityWritesRepository {
           ownerType,
           ownerId,
           ownerGoneGuard
-        );
+        ).returning({ fileId: this.tables.attachments.fileId });
 
         const existingOwnerCheck = this.db
           .select({ id: table.id })
@@ -686,30 +659,39 @@ export class CommunityWritesRepository {
           .where(readableScope)
           .limit(1);
 
-        const [deletedRows, , existingRows, ...fileResults] =
+        // One atomic batch for the relational delete: owner, attachments with
+        // RETURNING (file-cleanup candidates come from the rows actually
+        // deleted), owner-exists check. The files purge runs in a follow-up
+        // batch keyed off those RETURNING ids.
+        const [deletedRows, deletedAttachments, existingRows] =
           await this.db.batch([
             deleteOwner,
             deleteAttachments,
             existingOwnerCheck,
-            ...buildUnreferencedFilesDelete(this.db, this.connection, fileIds),
           ]);
 
-        if (Array.isArray(deletedRows) && deletedRows.length > 0) {
-          collectFiles(
-            fileResults.flatMap((rows: unknown) =>
-              Array.isArray(rows) ? rows : []
-            )
-          );
+        if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
+          return Array.isArray(existingRows) && existingRows.length > 0
+            ? 'conflict'
+            : 'not_found';
+        }
+        const fileIds = fileIdsOf(deletedAttachments);
+        if (fileIds.length === 0) {
           return 'deleted';
         }
-        return Array.isArray(existingRows) && existingRows.length > 0
-          ? 'conflict'
-          : 'not_found';
+        const fileResults = await this.db.batch(
+          buildUnreferencedFilesDelete(this.db, this.connection, fileIds)
+        );
+        collectFiles(
+          fileResults.flatMap((rows: unknown) =>
+            Array.isArray(rows) ? rows : []
+          )
+        );
+        return 'deleted';
       }
 
       if (dialectOf(this.connection) === 'postgresql') {
         return await this.db.transaction(async (tx: typeof this.db) => {
-          const fileIds = await attachmentFileIds(tx);
           const existingRows = await tx
             .select({ id: table.id })
             .from(table)
@@ -729,12 +711,13 @@ export class CommunityWritesRepository {
             return 'conflict';
           }
 
-          await this.deleteOwnerAttachmentsQuery(
+          const deletedAttachments = await this.deleteOwnerAttachmentsQuery(
             tx,
             communityId,
             ownerType,
             ownerId
-          );
+          ).returning({ fileId: this.tables.attachments.fileId });
+          const fileIds = fileIdsOf(deletedAttachments);
           // Lock the candidate rows before the guarded delete so an attach that
           // is still uncommitted cannot have its relation cascaded away (see
           // lockFileRowsForCleanup).
@@ -756,7 +739,6 @@ export class CommunityWritesRepository {
 
       // better-sqlite3 synchronous transaction
       return this.db.transaction((tx: typeof this.db) => {
-        const fileIds = attachmentFileIdsSync(tx);
         const deleted = tx
           .delete(table)
           .where(and(readableScope, ...referenceGuards(tx)))
@@ -764,12 +746,15 @@ export class CommunityWritesRepository {
           .all();
 
         if (deleted.length > 0) {
-          this.deleteOwnerAttachmentsQuery(
+          const deletedAttachments = this.deleteOwnerAttachmentsQuery(
             tx,
             communityId,
             ownerType,
             ownerId
-          ).run();
+          )
+            .returning({ fileId: this.tables.attachments.fileId })
+            .all();
+          const fileIds = fileIdsOf(deletedAttachments);
           collectFiles(
             buildUnreferencedFilesDelete(tx, this.connection, fileIds).flatMap(
               // eslint-disable-next-line @typescript-eslint/no-explicit-any

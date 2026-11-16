@@ -36,7 +36,6 @@ import { isDatabaseIdString } from '../shared/types/public.js';
 import { deriveDescriptionForWrite } from '../shared/utils/derived-columns.js';
 import { InvalidDescriptionError } from '../shared/utils/safe-description.js';
 import {
-  findOwnerAttachmentFileIds,
   type FileByteCleanup,
   type MediaCleanupCoordinator,
 } from './media-cleanup.service.js';
@@ -94,32 +93,14 @@ export class CommunityWritesService {
   ) {}
 
   private async scheduleOwnerAttachmentCleanup(
-    fileIds: ReadonlyArray<string>,
     removedFiles?: FileByteCleanup[]
   ): Promise<void> {
-    if (!this.cleanup || fileIds.length === 0) return;
+    if (!this.cleanup) return;
     // The repository removes now-unreferenced files rows inside the owner
     // delete transaction and reports them here; delete their bytes
     // best-effort. Any leftover is removed by the restart-safe orphan sweeper.
     if (removedFiles && removedFiles.length > 0) {
       await this.cleanup.deleteFilesBestEffort(removedFiles);
-    }
-  }
-
-  private async ownerAttachmentFileIds(
-    communityId: number,
-    ownerType: 'place' | 'speaker',
-    ownerId: number
-  ): Promise<string[]> {
-    try {
-      return await findOwnerAttachmentFileIds(
-        this.repository.connection,
-        communityId,
-        ownerType,
-        ownerId
-      );
-    } catch {
-      return [];
     }
   }
 
@@ -467,11 +448,6 @@ export class CommunityWritesService {
     }
     const placeId = Number(rawPlaceId);
 
-    const attachmentFileIds = await this.ownerAttachmentFileIds(
-      caller.communityId,
-      'place',
-      placeId
-    );
     const removedFiles: FileByteCleanup[] = [];
 
     try {
@@ -492,10 +468,7 @@ export class CommunityWritesService {
           },
         };
       }
-      await this.scheduleOwnerAttachmentCleanup(
-        attachmentFileIds,
-        removedFiles
-      );
+      await this.scheduleOwnerAttachmentCleanup(removedFiles);
       return { status: 204 };
     } catch {
       return { status: 500, body: INTERNAL_ERROR_BODY };
@@ -666,11 +639,6 @@ export class CommunityWritesService {
     }
     const speakerId = Number(rawSpeakerId);
 
-    const attachmentFileIds = await this.ownerAttachmentFileIds(
-      caller.communityId,
-      'speaker',
-      speakerId
-    );
     const removedFiles: FileByteCleanup[] = [];
 
     try {
@@ -691,10 +659,7 @@ export class CommunityWritesService {
           },
         };
       }
-      await this.scheduleOwnerAttachmentCleanup(
-        attachmentFileIds,
-        removedFiles
-      );
+      await this.scheduleOwnerAttachmentCleanup(removedFiles);
       return { status: 204 };
     } catch {
       return { status: 500, body: INTERNAL_ERROR_BODY };

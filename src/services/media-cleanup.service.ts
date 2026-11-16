@@ -114,11 +114,17 @@ export function buildUnreferencedFilesDelete(
 
 /** Normalize deleted-file rows into byte-cleanup descriptors. */
 export function toFileByteCleanups(
-  rows: ReadonlyArray<{ id: string; storageKey: string | null; path: string }>
+  rows: ReadonlyArray<{
+    id: string;
+    storageKey?: string | null;
+    /** Raw-column spelling returned by batch harnesses that skip mapping. */
+    storage_key?: string | null;
+    path: string;
+  }>
 ): FileByteCleanup[] {
   return rows.map((row) => ({
     fileId: row.id,
-    storageKey: row.storageKey ?? row.path,
+    storageKey: row.storageKey ?? row.storage_key ?? row.path,
   }));
 }
 
@@ -702,32 +708,4 @@ export class MediaCleanupCoordinator {
     }
     return referenced;
   }
-}
-
-/**
- * Shared query helper returning `File` metadata for any `fileIds` that currently
- * hold zero references across `attachments`, `community_map_configs`, or `community_media`.
- */
-export async function findOwnerAttachmentFileIds(
-  connection: Database | DrizzleD1Database,
-  communityId: number,
-  ownerType: 'story' | 'place' | 'speaker',
-  ownerId: number
-): Promise<string[]> {
-  const tables = tablesFor(connection);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const db = connection as any;
-  const rows = (await db
-    .select({ fileId: tables.attachments.fileId })
-    .from(tables.attachments)
-    .where(
-      and(
-        eq(tables.attachments.communityId, communityId),
-        eq(tables.attachments.ownerType, ownerType),
-        eq(tables.attachments.ownerId, ownerId)
-      )
-    )) as Array<{ fileId: string | null }>;
-  return rows
-    .map((row) => row.fileId)
-    .filter((id): id is string => typeof id === 'string');
 }

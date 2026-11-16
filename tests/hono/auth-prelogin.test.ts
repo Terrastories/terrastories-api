@@ -681,7 +681,7 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
   it('answers an unknown community slug with a fake, never an error', async () => {
     const { app } = await setup();
     const response = await postPrelogin(app, {
-      identifier: 'upgraded@prelogin.test',
+      identifier: 'nobody@prelogin.test',
       communitySlug: 'no-such-community',
     });
     expect(response.status).toBe(200);
@@ -838,39 +838,52 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     );
   });
 
-  it('executes the same repository calls for an unknown slug as for a known slug with an unknown identifier (item 8)', async () => {
+  it('executes the same repository calls for an unknown slug as for a known slug (item 8)', async () => {
+    // The resolution order is identifier-first: (1) mix, (2) unfiltered
+    // identifier lookup, (3) the slug lookup, (4) the scoped lookup, run for
+    // every slug-carrying request. Known, unknown and wrong slugs all pay the
+    // same calls — for an unknown identifier and for a uniquely resolved one
+    // alike (a uniquely resolved identifier is answered with its real
+    // parameters regardless of the locator).
     const { app } = await setup();
-    const accountSpy = vi.spyOn(
-      HonoAuthRepository.prototype,
-      'preloginAccount'
-    );
-    const slugSpy = vi.spyOn(HonoAuthRepository.prototype, 'communityIdBySlug');
-    const mixSpy = vi.spyOn(HonoAuthRepository.prototype, 'preloginMix');
-    try {
-      await postPrelogin(app, {
-        identifier: 'nobody@prelogin.test',
-        communitySlug: 'prelogin-alpha',
-      });
-      const known = {
-        account: accountSpy.mock.calls.length,
-        slug: slugSpy.mock.calls.length,
-        mix: mixSpy.mock.calls.length,
-      };
-      vi.clearAllMocks();
-      const response = await postPrelogin(app, {
-        identifier: 'nobody@prelogin.test',
-        communitySlug: 'nope-never-a-slug-zz',
-      });
-      expect(response.status).toBe(200);
-      expect({
-        account: accountSpy.mock.calls.length,
-        slug: slugSpy.mock.calls.length,
-        mix: mixSpy.mock.calls.length,
-      }).toEqual(known);
-    } finally {
-      accountSpy.mockRestore();
-      slugSpy.mockRestore();
-      mixSpy.mockRestore();
-    }
+    const assertSameCalls = async (identifier: string) => {
+      const accountSpy = vi.spyOn(
+        HonoAuthRepository.prototype,
+        'preloginAccount'
+      );
+      const slugSpy = vi.spyOn(
+        HonoAuthRepository.prototype,
+        'communityIdBySlug'
+      );
+      const mixSpy = vi.spyOn(HonoAuthRepository.prototype, 'preloginMix');
+      try {
+        await postPrelogin(app, {
+          identifier,
+          communitySlug: 'prelogin-alpha',
+        });
+        const known = {
+          account: accountSpy.mock.calls.length,
+          slug: slugSpy.mock.calls.length,
+          mix: mixSpy.mock.calls.length,
+        };
+        vi.clearAllMocks();
+        const response = await postPrelogin(app, {
+          identifier,
+          communitySlug: 'nope-never-a-slug-zz',
+        });
+        expect(response.status).toBe(200);
+        expect({
+          account: accountSpy.mock.calls.length,
+          slug: slugSpy.mock.calls.length,
+          mix: mixSpy.mock.calls.length,
+        }).toEqual(known);
+      } finally {
+        accountSpy.mockRestore();
+        slugSpy.mockRestore();
+        mixSpy.mockRestore();
+      }
+    };
+    await assertSameCalls('nobody@prelogin.test');
+    await assertSameCalls('upgraded@prelogin.test');
   });
 });

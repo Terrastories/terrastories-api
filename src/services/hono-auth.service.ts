@@ -119,6 +119,18 @@ export class HonoAuthService {
    * An unknown slug, an unknown identifier and an ambiguous email all take the
    * fake path with the same shape and status, so neither accounts nor
    * communities can be enumerated through prelogin (SPEC-V2 §6.2, §7).
+   *
+   * The locator only disambiguates, and authenticates nothing (SPEC-V2
+   * §6.2, §7 step 1): prelogin returns only the inputs the client's KDF
+   * needs. An identifier that resolves to exactly one account answers with
+   * that account's real {algorithm, salt, params} WHATEVER communitySlug is
+   * sent (known, unknown, wrong, or none) — otherwise the locator itself
+   * would tell a real account from a fake and a live community from a dead
+   * one (Codex P1). Only an identifier matching several accounts (a shared
+   * email or username) is narrowed by the slug; an unknown identifier keeps
+   * the deployment-wide, slug-independent fake. Login is unchanged — an
+   * unknown slug fails uniformly at login — and prelogin authenticates
+   * nothing.
    */
   async prelogin(input: PreloginInput): Promise<PreloginResponse | null> {
     const secret = this.serverSecret;
@@ -128,19 +140,29 @@ export class HonoAuthService {
     // served from the same short-TTL cache (finding C). Computing it only on
     // the fake path would make the real path measurably cheaper.
     const mix = await this.repository.preloginMix();
-    const communityId =
-      input.communitySlug === undefined
-        ? undefined
-        : await this.repository.communityIdBySlug(input.communitySlug);
-    // Even for an unknown slug the account lookup runs, against an
-    // impossible community id (-1 matches no row): it must cost the same as
-    // a known slug with an unknown identifier (item 8).
-    const account = await this.repository.preloginAccount(
-      normalized,
-      communityId === null
-        ? HonoAuthService.IMPOSSIBLE_COMMUNITY_ID
-        : (communityId ?? undefined)
-    );
+    // Resolve by identifier first. `communitySlug` is used only to
+    // disambiguate an identifier that matches several accounts; it never
+    // changes the answer for a uniquely resolved one (SPEC-V2 §7 step 1).
+    const base = await this.repository.preloginAccount(normalized);
+    let account = base.account;
+    if (input.communitySlug !== undefined) {
+      // The locator lookup runs on every slug-carrying request, and the
+      // scoped lookup runs even for a uniquely resolved or unknown identifier
+      // — against an impossible community id — so known/unknown/wrong slugs
+      // all cost the same repository work and return the same answer.
+      const communityId = await this.repository.communityIdBySlug(
+        input.communitySlug
+      );
+      const scopedCommunityId =
+        base.kind === 'many' && communityId !== null
+          ? communityId
+          : HonoAuthService.IMPOSSIBLE_COMMUNITY_ID;
+      const scoped = await this.repository.preloginAccount(
+        normalized,
+        scopedCommunityId
+      );
+      account = base.kind === 'many' ? scoped.account : base.account;
+    }
     if (account !== null) {
       const params = parseStoredPasswordParams(
         account.passwordAlgorithm,

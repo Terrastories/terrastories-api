@@ -224,18 +224,33 @@ export class HonoAuthRepository {
   }
 
   /**
-   * Prelogin verifier shape of one account (SPEC-V2 §7 step 1): the stored
-   * algorithm, salt and params of a real account, or `null` when no single
-   * account resolves (unknown identifier, ambiguous email without a locator).
+   * Prelogin verifier shape of one account (SPEC-V2 §7 step 1), resolved
+   * identifier-first: `communityId` narrows only an identifier that matches
+   * more than one account, never a uniquely resolved one — a locator that
+   * flipped a unique answer to the fake would enumerate accounts and
+   * communities (paired-request oracle). Returns a tri-state so every caller
+   * can reproduce the same resolution without ever trusting the slug:
+   *
+   *  - `one`: exactly one account matches the identifier
+   *  - `many`: several accounts match (an email shared across communities, a
+   *    username likewise) — the slug then disambiguates
+   *  - `none`: no account matches
+   *
+   * `account` is the single match for `one`, and `null` otherwise (a row with
+   * no verifier material must not present a shape the client cannot use — the
+   * fake path answers instead).
    */
   async preloginAccount(
     normalizedIdentifier: string,
     communityId?: number
   ): Promise<{
-    passwordAlgorithm: string;
-    passwordSalt: string;
-    passwordParams: string;
-  } | null> {
+    kind: 'none' | 'one' | 'many';
+    account: {
+      passwordAlgorithm: string;
+      passwordSalt: string;
+      passwordParams: string;
+    } | null;
+  }> {
     const { users } = this.tables;
     const rows = await this.db
       .select({
@@ -256,16 +271,20 @@ export class HonoAuthRepository {
         )
       )
       .limit(2);
-    const row = rows.length === 1 ? rows[0] : null;
-    if (!row) return null;
+    if (rows.length > 1) return { kind: 'many', account: null };
+    const row = rows[0] ?? null;
+    if (!row) return { kind: 'none', account: null };
     // A row with no verifier (code-only account) must not present a shape the
     // client cannot use: the fake path answers instead (§7 step 1).
     if (row.passwordAlgorithm === null || row.passwordSalt === null)
-      return null;
+      return { kind: 'none', account: null };
     return {
-      passwordAlgorithm: row.passwordAlgorithm,
-      passwordSalt: row.passwordSalt,
-      passwordParams: row.passwordParams ?? '',
+      kind: 'one',
+      account: {
+        passwordAlgorithm: row.passwordAlgorithm,
+        passwordSalt: row.passwordSalt,
+        passwordParams: row.passwordParams ?? '',
+      },
     };
   }
 

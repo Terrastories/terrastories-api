@@ -15,6 +15,12 @@ import {
 const runtimeConfig = validateNodeV2Runtime(process.env);
 // PR #229 review: a relaxed mode must never be silent on a deployed host —
 // one content-free startup line naming the mode.
+/** Only the one explicit, case-insensitive header name enables X-Real-IP trust. */
+function isTrustedProxyHeader(
+  value: string | undefined
+): 'x-real-ip' | undefined {
+  return /^\s*x-real-ip\s*$/i.test(value ?? '') ? 'x-real-ip' : undefined;
+}
 const modeNotice = v2RuntimeModeNotice(runtimeConfig);
 if (modeNotice) {
   // eslint-disable-next-line no-console -- startup marker, content-free
@@ -32,11 +38,14 @@ const app = createHonoApp({
   storage: await createLocalStorage(
     process.env.HONO_STORAGE_ROOT ?? './uploads'
   ),
-  // Only a configured reverse proxy makes forwarded headers trustworthy. The
+  // Only a configured reverse proxy makes forwarded headers trustworthy: the
   // per-IP throttle then keys on the rightmost X-Forwarded-For entry — the
-  // one the trusted proxy appended — or X-Real-IP when the proxy sets it;
-  // without TRUSTED_PROXY the socket peer address is the limit (finding E).
+  // one the trusted proxy appended. X-Real-IP is honoured only when the
+  // operator explicitly names it as the proxy's client-address header; set it
+  // only when the proxy overwrites (or strips) X-Real-IP. Without TRUSTED_PROXY
+  // the socket peer address is the limit (finding E).
   trustProxy: /^(1|true|yes)$/i.test(process.env.TRUSTED_PROXY ?? ''),
+  trustedProxyHeader: isTrustedProxyHeader(process.env.TRUSTED_PROXY_HEADER),
   clientAddress: (c) => getConnInfo(c).remote.address ?? null,
 });
 const server = serve({

@@ -262,6 +262,14 @@ export interface ClientIpOptions {
   isWorkers?: boolean;
   /** A trusted reverse proxy is configured, so `x-forwarded-for` is usable. */
   trustProxy?: boolean;
+  /**
+   * Explicit name of the header the trusted proxy overwrites with the client
+   * address (`TRUSTED_PROXY_HEADER=x-real-ip`). Only that single header is
+   * honoured, and only when the operator names it — a header a client can
+   * set themselves (or a mixed chain that passes it through) must never win
+   * over the proxy-appended `x-forwarded-for` entry by default.
+   */
+  trustedProxyHeader?: 'x-real-ip' | undefined;
   /** The transport's observed peer address (Node socket), when available. */
   remoteAddress?: string | null;
 }
@@ -278,13 +286,17 @@ function usableIp(value: string | null | undefined): string | null {
  * client IP alone).
  *
  * Trust is explicit (finding E): `cf-connecting-ip` is honoured only on
- * Workers, where the platform sets it and a client cannot forge it;
- * `x-real-ip` when the trusted proxy sets it, or the rightmost entry of
- * `x-forwarded-for` — the only entry the trusted proxy itself appended (a
- * leftmost entry is caller-controlled under any proxy that passes mixed
- * chains); otherwise the transport's own peer address. Anything unusable
- * becomes the `unknown` bucket, so a request without a usable address still
- * feeds exactly one per-IP counter.
+ * Workers, where the platform sets it and a client cannot forge it; the
+ * rightmost entry of `x-forwarded-for` — the only entry the trusted proxy
+ * itself appended (a leftmost entry is caller-controlled under any proxy that
+ * passes mixed chains) — is the only throttle key a trusted proxy vouches
+ * for. `x-real-ip` is honoured only when the operator explicitly names it as
+ * the proxy's client-address header (`trustedProxyHeader: 'x-real-ip'`;
+ * `TRUSTED_PROXY_HEADER=x-real-ip`), and otherwise ignored entirely: a proxy
+ * that merely passes a caller-set `X-Real-IP` through must not hand the
+ * caller its own per-IP bucket. Anything unusable becomes the `unknown`
+ * bucket, so a request without a usable address still feeds exactly one
+ * per-IP counter.
  */
 export function clientIpOf(
   headers: Headers,
@@ -298,12 +310,12 @@ export function clientIpOf(
     // The proxy appends the peer address to the END of the chain — the
     // rightmost entry is the only one the trusted proxy vouches for. Taking
     // the leftmost instead would let every caller steer its own per-IP
-    // bucket, and X-Real-IP, when a proxy sets it, is the proxy's own view
-    // of the client and wins over X-Forwarded-For.
-    const real = headers.get('x-real-ip');
-    if (real !== null) {
-      const value = usableIp(real);
-      if (value !== null) return value;
+    // bucket. X-Real-IP is consulted only when the operator explicitly names
+    // it as the proxy's client-address header; left at the default it is
+    // caller-controlled and never wins.
+    if (options.trustedProxyHeader === 'x-real-ip') {
+      const real = usableIp(headers.get('x-real-ip'));
+      if (real !== null) return real;
     }
     const raw = headers.get('x-forwarded-for');
     if (raw !== null) {

@@ -56,6 +56,12 @@ export interface FoundationOptions {
   isWorkers?: boolean;
   /** A trusted reverse proxy is configured, so `x-forwarded-for` is usable. */
   trustProxy?: boolean;
+  /**
+   * Explicit name of the header the trusted proxy overwrites with the client
+   * address (`TRUSTED_PROXY_HEADER=x-real-ip`). Passed through verbatim; see
+   * ClientIpOptions.trustedProxyHeader.
+   */
+  trustedProxyHeader?: 'x-real-ip' | undefined;
   /** The transport's observed peer address, when it can be read (Node socket). */
   clientAddress?: (c: Context) => string | null;
 }
@@ -185,6 +191,7 @@ export function createHonoApp(options: FoundationOptions) {
     clientIpOf(c.req.raw.headers, {
       isWorkers: options.isWorkers,
       trustProxy: options.trustProxy,
+      trustedProxyHeader: options.trustedProxyHeader,
       remoteAddress: options.clientAddress ? options.clientAddress(c) : null,
     });
   app.use('*', async (c, next) => {

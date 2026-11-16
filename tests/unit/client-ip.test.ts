@@ -5,8 +5,10 @@ import { clientIpOf } from '../../src/shared/auth-policy.js';
  * The per-IP throttle keys on one client address per request. Under
  * TRUSTED_PROXY, only the rightmost X-Forwarded-For entry — the one the
  * trusted proxy appended — is usable in a multi-hop chain; a leftmost entry is
- * caller-controlled noise. x-real-ip, when a proxy sets it, is the proxy's
- * own view of the client and wins over the chain.
+ * caller-controlled noise. x-real-ip is ignored entirely unless the operator
+ * explicitly names it as the proxy's client-address header
+ * (`TRUSTED_PROXY_HEADER=x-real-ip`), because a client can set that header
+ * itself (or pass through a proxy that merely forwards it).
  */
 describe('clientIpOf', () => {
   const h = (entries: string[]) => {
@@ -29,10 +31,42 @@ describe('clientIpOf', () => {
     ).toBe('198.51.100.77');
   });
 
-  it('wins x-real-ip over the chain when the proxy sets it', () => {
+  it('ignores x-real-ip by default: a spoofable header must not win', () => {
+    const headers = h(['198.51.100.1', '203.0.113.2']);
+    headers.set('x-real-ip', '203.0.113.66');
+    expect(clientIpOf(headers, { trustProxy: true })).toBe('203.0.113.2');
+    // An unusable default-world X-Real-IP must not outrank the chain either.
+    headers.set('x-real-ip', 'not-an-ip');
+    expect(clientIpOf(headers, { trustProxy: true })).toBe('203.0.113.2');
+  });
+
+  it('honours x-real-ip only with the explicit setting', () => {
     const headers = h(['198.51.100.1', '203.0.113.2']);
     headers.set('x-real-ip', '203.0.113.9');
-    expect(clientIpOf(headers, { trustProxy: true })).toBe('203.0.113.9');
+    expect(
+      clientIpOf(headers, {
+        trustProxy: true,
+        trustedProxyHeader: 'x-real-ip',
+      })
+    ).toBe('203.0.113.9');
+  });
+
+  it('falls back to the chain when the explicitly named proxy header is unusable', () => {
+    const headers = h(['198.51.100.1', '203.0.113.2']);
+    headers.set('x-real-ip', 'x'.repeat(65));
+    expect(
+      clientIpOf(headers, {
+        trustProxy: true,
+        trustedProxyHeader: 'x-real-ip',
+      })
+    ).toBe('203.0.113.2');
+    headers.delete('x-real-ip');
+    expect(
+      clientIpOf(headers, {
+        trustProxy: true,
+        trustedProxyHeader: 'x-real-ip',
+      })
+    ).toBe('203.0.113.2');
   });
 
   it('falls back to the socket peer when the proxy sends nothing usable', () => {

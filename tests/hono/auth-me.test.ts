@@ -318,6 +318,33 @@ describe('PATCH /v2/auth/me and POST /v2/auth/password (#137 item 4)', () => {
     expect(JSON.parse(row?.passwordParams ?? '{}')).toEqual(ARGON2ID_PARAMS);
   });
 
+  it('revokes other sessions even when the password change produces the identical verifier', async () => {
+    const { db, stretchedKey, loginCookie, getMe, postPassword } =
+      await setup();
+    const cookieA = await loginCookie();
+    const cookieB = await loginCookie();
+    // Same derivedKey ⇒ the same stored verifier is written, so the
+    // users_revoke_sessions trigger does not fire; the account's other
+    // sessions must still die (§7). The freshly rotated session survives.
+    const response = await postPassword(
+      {
+        currentDerivedKey: stretchedKey,
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { ...ARGON2ID_PARAMS },
+        derivedKey: stretchedKey,
+      },
+      cookieA
+    );
+    expect(response.status).toBe(200);
+    const newCookie = (response.headers.get('set-cookie') ?? '').split(';')[0];
+    expect(newCookie).toContain('ts_session=');
+    expect((await getMe(cookieA)).status).toBe(401);
+    expect((await getMe(cookieB)).status).toBe(401);
+    expect((await getMe(newCookie!)).status).toBe(200);
+    expect((await db.select().from(sessionsSqlite)).length).toBe(1);
+  });
+
   it('rejects a wrong current key and leaves the row untouched', async () => {
     const { db, loginCookie, postPassword } = await setup();
     const cookie = await loginCookie();

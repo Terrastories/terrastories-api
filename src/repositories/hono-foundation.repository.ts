@@ -427,6 +427,10 @@ export class HonoFoundationRepository {
    * unit, and SQLite/PostgreSQL run them in one transaction that rolls back
    * when the insert establishes no row. The verifier write and the session
    * therefore can no longer diverge, and a `Conflict` answer is truthful.
+   * The account's other sessions are also revoked explicitly: when the new
+   * material produces the same stored verifier the trigger does not fire,
+   * and every verifier change must revoke the account's other sessions
+   * (SPEC-V2 §7).
    */
   async createSessionWithVerifier(input: {
     tokenHash: string;
@@ -497,14 +501,21 @@ export class HonoFoundationRepository {
             sql`exists (select 1 from ${sessions} where ${sessions.tokenHash} = ${plan.tokenHash} and ${sessions.userId} = ${plan.userId})`
           )
         );
+    const revokeAllSessions = (database: Executor) =>
+      database.delete(sessions).where(eq(sessions.userId, input.user.id));
     // Workers/D1 has no interactive transactions: one atomic batch runs the
-    // verifier write, the session insert and the coupled revocation. SQLite
-    // serializes the batch, so the two authority-checked statements agree.
+    // verifier write, the session revocation, the session insert and the
+    // coupled revocation. SQLite serializes the batch, so the authority
+    // checked statements agree.
     if (typeof db.batch === 'function') {
-      const list = [verifierUpdate(db), plan.verifiedInsert(db)];
+      const list = [
+        verifierUpdate(db),
+        revokeAllSessions(db),
+        plan.verifiedInsert(db),
+      ];
       if (plan.previousHash !== undefined)
         list.push(revokePresentedConditional(db));
-      const [updated, inserted] = await db.batch(list);
+      const [updated, , inserted] = await db.batch(list);
       return {
         established: inserted.length > 0,
         verifierWritten: updated.length > 0,
@@ -521,6 +532,9 @@ export class HonoFoundationRepository {
         return await db.transaction(async (tx: Executor) => {
           const updated = await verifierUpdate(tx);
           if (updated.length === 0) throw new SessionGateLost();
+          // Explicit revocation: a same-verifier write never fires the
+          // trigger, yet §7 requires the other sessions to die.
+          await revokeAllSessions(tx);
           const inserted = await plan.verifiedInsert(tx);
           if (inserted.length === 0) throw new SessionGateLost();
           if (plan.previousHash !== undefined)
@@ -533,6 +547,9 @@ export class HonoFoundationRepository {
       return await db.transaction((tx: Executor) => {
         const updated = verifierUpdate(tx).all();
         if (updated.length === 0) throw new SessionGateLost();
+        // Explicit revocation: a same-verifier write never fires the
+        // trigger, yet §7 requires the other sessions to die.
+        revokeAllSessions(tx).run();
         const inserted = plan.verifiedInsert(tx).all();
         if (inserted.length === 0) throw new SessionGateLost();
         if (plan.previousHash !== undefined)

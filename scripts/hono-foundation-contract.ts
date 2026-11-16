@@ -1525,6 +1525,11 @@ export async function runHonoFoundationContract(
       // runs, rolling the pair back and answering 409.
       if (dialectOf(database) === 'postgresql') {
         const deactivationEmail = `deactivation-pg-${tag}@example.test`;
+        const [deactivationCommunity] = await db
+          .insert(tables.communities)
+          .values({ name: 'Deactivation Race', slug: `hono-${tag}-c` })
+          .returning();
+        communityIds.push(deactivationCommunity.id);
         const [deactivationAccount] = await db
           .insert(tables.users)
           .values({
@@ -1532,7 +1537,7 @@ export async function runHonoFoundationContract(
             email: deactivationEmail,
             username: `deactivation_pg_${tag}`,
             role: 'viewer',
-            communityId: communityA,
+            communityId: deactivationCommunity.id,
           })
           .returning();
         userIds.push(deactivationAccount.id);
@@ -1545,7 +1550,7 @@ export async function runHonoFoundationContract(
           await tx
             .update(tables.communities)
             .set({ isActive: false })
-            .where(eq(tables.communities.id, communityA));
+            .where(eq(tables.communities.id, deactivationCommunity.id));
           pendingDeactivationChange = send(app, '/v2/auth/password', {
             method: 'POST',
             headers: {
@@ -1594,7 +1599,7 @@ export async function runHonoFoundationContract(
           stretchedVerifier,
           'the losing coupled write must roll back, leaving the stored verifier unchanged'
         );
-        await updateCommunity(communityA, { isActive: true });
+        await updateCommunity(deactivationCommunity.id, { isActive: true });
         await status(
           me(deactivationCookie),
           401,

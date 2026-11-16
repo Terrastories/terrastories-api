@@ -238,19 +238,9 @@ export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
 export interface HonoQaBackend {
   db: WidenedQaDatabase;
   seedBaseline: () => Promise<TestFixtures>;
-  passwordHash: string;
   /**
-   * The verifier columns seeded into every persona account. SQLite and
-   * PostgreSQL use the runtime Argon2id verifier; the Workers build seeds
-   * the same columns through its own pinned key.
-   */
-  passwordAlgorithm?: string;
-  passwordSalt?: string;
-  passwordParams?: string;
-  passwordVerifier?: string;
-  /**
-   * Runtime HMAC key for prelogin/login throttling (AUTH_SERVER_SECRET), shared
-   * with the served app. Every backend builds its own; never a literal.
+   * Runtime HMAC key for prelogin/login throttling (AUTH_SERVER_SECRET),
+   * shared with the served app. Every backend builds its own; never a literal.
    */
   serverSecret: string;
   putMedia: (key: string, bytes: Uint8Array) => Promise<void>;
@@ -414,9 +404,10 @@ export async function createFixture(
     // key ever crosses the wire. `password_hash` stays as the NOT NULL legacy
     // anchor the session write re-reads for authority; it is never verified,
     // so a runtime bcrypt hash of a random value is enough.
-    const passwordHash =
-      backend?.passwordHash ??
-      (await hash(toHex(crypto.getRandomValues(new Uint8Array(16))), 4));
+    const passwordHash = await hash(
+      toHex(crypto.getRandomValues(new Uint8Array(16))),
+      4
+    );
     const derivedKey = HONO_PERSONA_DERIVED_KEY;
     // The replacement verifier material for the password-change steps:
     // generated at runtime and shared by the change request and the follow-up

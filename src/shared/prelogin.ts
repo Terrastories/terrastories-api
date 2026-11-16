@@ -39,25 +39,41 @@ export interface PreloginResponse {
 const BCRYPT_ALPHABET =
   './ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
-/** 22-character bcrypt salt string (the shape a Rails row carries). */
+/** The only 22nd characters a real bcrypt salt can end with (`.Oeu`). */
+const BCRYPT_SALT_LAST = BCRYPT_ALPHABET.split('')
+  .filter((_, index) => index % 16 === 0)
+  .join('');
+
+/**
+ * 22-character bcrypt salt string, byte-shaped like a Rails row: the first 21
+ * characters use the full bcrypt alphabet, and the 22nd is one of `.Oeu`
+ * because bcrypt's base64 only emits 4 meaningful bits there (finding C).
+ */
 function bcryptSalt(digest: Uint8Array): string {
   let salt = '';
-  for (let index = 0; index < 22; index += 1) {
+  for (let index = 0; index < 21; index += 1) {
     salt += BCRYPT_ALPHABET[(digest[index % digest.length] ?? 0) % 64];
   }
-  return salt;
+  const last =
+    BCRYPT_SALT_LAST[
+      (digest[21 % digest.length] ?? 0) % BCRYPT_SALT_LAST.length
+    ];
+  return salt + last;
 }
 
 /**
  * Deterministic fake. `mix` is the deployment-wide upgraded/total account
- * ratio; `total === 0` means the new-password mix. The identifier is already
- * normalized by the caller, and nothing the request controls beyond it (in
- * particular no `communitySlug`) enters the digest.
+ * ratio; `total === 0` means the new-password mix. `bcryptCosts` is the
+ * deployment's observed Rails cost distribution, so a fake draws from the
+ * same set a migrated row carries (never a cost real rows do not use). The
+ * identifier is already normalized by the caller, and nothing the request
+ * controls beyond it (in particular no `communitySlug`) enters the digest.
  */
 export async function deterministicPreloginFake(
   serverSecret: string,
   normalizedIdentifier: string,
-  mix: { upgraded: number; total: number }
+  mix: { upgraded: number; total: number },
+  bcryptCosts: readonly number[] = BCRYPT_RAILS_COSTS
 ): Promise<PreloginResponse> {
   const digestHex = await hmacSha256Hex(
     serverSecret,
@@ -80,9 +96,10 @@ export async function deterministicPreloginFake(
       },
     };
   }
-  // Cost 10 or 12 both occur in Rails rows; the fake stays inside that set so
-  // its cost is drawn from the same distribution a migrated row carries.
-  const cost = BCRYPT_RAILS_COSTS[digest[4]! % BCRYPT_RAILS_COSTS.length] ?? 12;
+  // Prefer the deployment's actual costs; fall back to the Rails 10/12 set
+  // when no migrated row exists yet. The pick is deterministic per digest.
+  const costs = bcryptCosts.length > 0 ? bcryptCosts : BCRYPT_RAILS_COSTS;
+  const cost = costs[digest[4]! % costs.length] ?? 12;
   return {
     algorithm: RAILS_BCRYPT_ALGORITHM,
     salt: bcryptSalt(digest.slice(5)),

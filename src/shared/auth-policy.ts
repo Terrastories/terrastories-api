@@ -198,14 +198,25 @@ export function sessionIdleWindowMs(kind: SessionKind): number {
 }
 
 /**
- * The `ts_session` cookie lifetime. Both kinds carry a Max-Age — a browser
- * restart must not destroy a `device` session before its idle window, which is
- * the whole point of the opt-in (§7 "Sessions"). The session row remains the
- * enforcement point: its idle/absolute windows can only shorten the cookie's
- * nominal life, never extend it.
+ * The `ts_session` cookie lifetime in seconds.
+ *
+ * `standard` sessions carry the 12-hour idle window. A `device` session
+ * carries its *remaining absolute lifetime* — the 60-day absolute window at
+ * creation, shrinking on renewal — so the cookie never outlives the row that
+ * enforces it and a browser restart cannot silently shorten the opt-in
+ * (§7 "Sessions", finding 6/F).
  */
-export function sessionCookieMaxAge(kind: SessionKind): number {
-  return sessionIdleWindowMs(kind) / 1000;
+export function sessionCookieMaxAge(
+  kind: SessionKind,
+  absoluteExpiresAt?: number,
+  now?: number
+): number {
+  if (kind === 'device') {
+    if (absoluteExpiresAt !== undefined && now !== undefined)
+      return Math.max(0, Math.floor((absoluteExpiresAt - now) / 1000));
+    return DEVICE_SESSION_ABSOLUTE_MS / 1000;
+  }
+  return STANDARD_SESSION_IDLE_MS / 1000;
 }
 
 /** Digest of a presented session token, or `null` when it is not one. */
@@ -226,26 +237,56 @@ export const AUTH_CLIENT_IP_HEADERS = [
   'x-real-ip',
 ] as const;
 
-/** The per-IP bucket for a request with no usable client IP header. */
+/** The per-IP bucket for a request with no usable client IP. */
 export const AUTH_UNKNOWN_CLIENT_IP = 'unknown';
+
+/** How the app learned the request's origin, so only real signals are trusted. */
+export interface ClientIpOptions {
+  /** Cloudflare Workers: `cf-connecting-ip` is set by the platform. */
+  isWorkers?: boolean;
+  /** A trusted reverse proxy is configured, so `x-forwarded-for` is usable. */
+  trustProxy?: boolean;
+  /** The transport's observed peer address (Node socket), when available. */
+  remoteAddress?: string | null;
+}
+
+function usableIp(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  if (trimmed === '' || trimmed.length > AUTH_CLIENT_IP_MAX_LENGTH) return null;
+  return trimmed;
+}
 
 /**
  * The client IP for the per-IP throttle counter (§6.8: a keyed hash of the
- * client IP alone). `cf-connecting-ip` wins because Cloudflare sets it and a
- * client cannot forge it; a proxy chain's first hop is the original client.
- * An absent or oversized value becomes the `unknown` bucket, so a request
- * without a usable IP still feeds exactly one per-IP counter.
+ * client IP alone).
+ *
+ * Trust is explicit (finding E): `cf-connecting-ip` is honoured only on
+ * Workers, where the platform sets it and a client cannot forge it;
+ * `x-forwarded-for` only when a trusted proxy is configured; otherwise the
+ * transport's own peer address. Anything unusable becomes the `unknown`
+ * bucket, so a request without a usable address still feeds exactly one
+ * per-IP counter.
  */
-export function clientIpOf(headers: Headers): string {
-  for (const name of AUTH_CLIENT_IP_HEADERS) {
-    const raw = headers.get(name);
-    if (raw === null || raw.trim() === '') continue;
-    const first = name === 'x-forwarded-for' ? raw.split(',')[0] : raw;
-    const value = first?.trim() ?? '';
-    if (value === '' || value.length > AUTH_CLIENT_IP_MAX_LENGTH)
-      return AUTH_UNKNOWN_CLIENT_IP;
-    return value;
+export function clientIpOf(
+  headers: Headers,
+  options: ClientIpOptions = {}
+): string {
+  if (options.isWorkers === true) {
+    const fromCf = usableIp(headers.get('cf-connecting-ip'));
+    if (fromCf !== null) return fromCf;
   }
+  if (options.trustProxy === true) {
+    for (const name of ['x-forwarded-for', 'x-real-ip'] as const) {
+      const raw = headers.get(name);
+      if (raw === null) continue;
+      const first = name === 'x-forwarded-for' ? raw.split(',')[0] : raw;
+      const value = usableIp(first);
+      if (value !== null) return value;
+    }
+  }
+  const peer = usableIp(options.remoteAddress);
+  if (peer !== null) return peer;
   return AUTH_UNKNOWN_CLIENT_IP;
 }
 
@@ -285,6 +326,14 @@ export const AUTH_THROTTLE_BACKOFF_MAX_MS = 60 * 60 * 1000;
 /** Keys are keyed hashes; the input prefix keeps kinds from colliding. */
 export const AUTH_THROTTLE_KEY_ACCOUNT = 'account:';
 export const AUTH_THROTTLE_KEY_IP = 'ip:';
+
+/**
+ * How long a computed prelogin population mix (upgraded/total and the
+ * observed bcrypt costs) may be reused. The mix changes slowly while requests
+ * do not, so a short TTL keeps prelogin off a full `users` scan per request
+ * without making a fresh account invisible for long (finding C).
+ */
+export const AUTH_PRELOGIN_MIX_TTL_MS = 60 * 1000;
 
 export function authThrottleBackoffMs(failures: number): number {
   const exponent = Math.max(

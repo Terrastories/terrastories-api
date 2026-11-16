@@ -419,6 +419,8 @@ export class HonoFoundationRepository {
       passwordSalt: string;
       passwordParams: string;
     };
+    /** The verifier read before this write; a stale one loses the race. */
+    previousVerifier?: string | null;
   }): Promise<{ established: boolean; verifierWritten: boolean }> {
     const plan = this.sessionWritePlan(input);
     if (!plan) return { established: false, verifierWritten: false };
@@ -443,6 +445,12 @@ export class HonoFoundationRepository {
           and(
             eq(users.id, input.user.id),
             eq(users.passwordHash, input.verifier.passwordHash),
+            // A stale verifier loses the race (finding G).
+            input.previousVerifier === null
+              ? isNull(users.passwordVerifier)
+              : input.previousVerifier === undefined
+                ? sql`1 = 1`
+                : eq(users.passwordVerifier, input.previousVerifier),
             eq(users.role, role),
             input.user.communityId === null
               ? isNull(users.communityId)
@@ -521,6 +529,8 @@ export class HonoFoundationRepository {
   ): Promise<{
     user: FoundationUser;
     kind: SessionKind;
+    /** The row's absolute expiry, so a device cookie can carry the remainder. */
+    absoluteExpiresAt: number | null;
   } | null> {
     const { users, communities } = this.tables;
     const sessions = this.sessions;
@@ -568,7 +578,8 @@ export class HonoFoundationRepository {
       renew &&
       nowMs >=
         idleExpiresAt - sessionIdleWindowMs(kind) + sessionRenewalInterval;
-    if (!staleLastSeen && !renewWindow) return { user, kind };
+    if (!staleLastSeen && !renewWindow)
+      return { user, kind, absoluteExpiresAt: row.absoluteExpiresAt };
     const patch: Record<string, unknown> = { lastSeenAt: nowMs };
     if (renewWindow) {
       const next = sessionLifetimesFor(kind, nowMs);
@@ -590,7 +601,7 @@ export class HonoFoundationRepository {
     // A lost renewal race must re-read authority, never resurrect a revoked row.
     if (!touched.length && renewWindow)
       return this.sessionContext(tokenHash, now, false);
-    return { user, kind };
+    return { user, kind, absoluteExpiresAt: row.absoluteExpiresAt };
   }
 
   async session(

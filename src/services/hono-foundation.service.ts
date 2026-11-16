@@ -56,7 +56,11 @@ export class HonoFoundationService {
   async actor(
     token: string | undefined,
     now: Date
-  ): Promise<{ user: FoundationUser; kind: SessionKind } | null> {
+  ): Promise<{
+    user: FoundationUser;
+    kind: SessionKind;
+    absoluteExpiresAt: number | null;
+  } | null> {
     if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
     const context = await this.repository.sessionContext(
       await tokenDigest(token),

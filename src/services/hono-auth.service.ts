@@ -105,6 +105,10 @@ export class HonoAuthService {
     const secret = this.serverSecret;
     if (secret === undefined || secret === '') return null;
     const normalized = normalizeSearchText(input.identifier);
+    // The population mix is read on *every* prelogin path, real or fake, and
+    // served from the same short-TTL cache (finding C). Computing it only on
+    // the fake path would make the real path measurably cheaper.
+    const mix = await this.repository.preloginMix();
     const communityId =
       input.communitySlug === undefined
         ? undefined
@@ -139,11 +143,7 @@ export class HonoAuthService {
     // only by the normalized identifier: no request-controlled value (least of
     // all the community slug) may shift it, or a real slug could be told from
     // a fake one and private/disabled communities enumerated (finding 5).
-    return deterministicPreloginFake(
-      secret,
-      normalized,
-      await this.repository.globalAlgorithmMix()
-    );
+    return deterministicPreloginFake(secret, normalized, mix, mix.costs);
   }
 
   /**
@@ -217,8 +217,9 @@ export class HonoAuthService {
    * rejected attempt also feeds the per-IP counter and, when the identifier
    * resolved to exactly one account, that account's counter.
    *
-   * A successful attempt resets both counters, writes the verifier when the
-   * account upgrades, and establishes the session.
+   * A successful attempt resets the per-account counter (the per-IP counter
+   * survives so a shared address keeps its guessing record), writes the
+   * verifier when the account upgrades, and establishes the session.
    */
   async login(
     input: LoginInput,
@@ -241,9 +242,9 @@ export class HonoAuthService {
       now.getTime()
     );
     if (ipBlocked.blocked)
-      // Unresolved on purpose: no account is known yet, so only the per-IP row
-      // is written (row accounting stays ≤2 rows, 1 when unresolved).
-      return this.reject(null, clientIp, userAgent, now, secret);
+      // A blocked address writes nothing (finding B): no throttle row and no
+      // audit row, so a block cannot be used to amplify writes.
+      throw new AuthLoginRejected();
     const normalized = normalizeSearchText(input.identifier);
     const communityId =
       input.communitySlug === undefined
@@ -260,8 +261,15 @@ export class HonoAuthService {
     // Never the first match: exactly one row may resolve, and only when it
     // passes the authority gate (§6.2, HonoFoundationRepository).
     const candidate = candidates.length === 1 ? candidates[0] : undefined;
-    if (candidate === undefined || !HonoAuthService.allowed(candidate))
-      return this.reject(candidate ?? null, clientIp, userAgent, now, secret);
+    if (candidate === undefined) {
+      // Unknown identifier and ambiguous email must cost the same as a
+      // resolved one: a dummy account throttle read plus the same SHA-256 and
+      // constant-time compare (finding D).
+      await this.burnUnresolvedWork(input.derivedKey, secret, now);
+      return this.reject(null, clientIp, userAgent, now, secret);
+    }
+    if (!HonoAuthService.allowed(candidate))
+      return this.reject(candidate, clientIp, userAgent, now, secret);
     const account = candidate as AuthAccount;
     // The per-account counter is read only once exactly one account resolved:
     // an unresolved attempt must not write (or read) an account row.
@@ -270,7 +278,8 @@ export class HonoAuthService {
       now.getTime()
     );
     if (accountBlocked.blocked)
-      return this.reject(account, clientIp, userAgent, now, secret);
+      // A blocked account writes nothing either (finding B).
+      throw new AuthLoginRejected();
     const verification = await this.verifierFor(account, input);
     if (!verification.ok)
       return this.reject(account, clientIp, userAgent, now, secret);
@@ -290,7 +299,7 @@ export class HonoAuthService {
     // row between the read and the write): a uniform failure and no session.
     if (!established)
       return this.reject(account, clientIp, userAgent, now, secret);
-    await this.repository.resetThrottle(account.id, clientIp, secret);
+    await this.repository.resetAccountThrottle(account.id, secret);
     await this.auditAuthEvent({
       communityId: account.communityId,
       actorId: account.id,
@@ -410,6 +419,31 @@ export class HonoAuthService {
   }
 
   /**
+   * A fixed non-account throttle key and verifier so an unresolved login runs
+   * the same work as a resolved one: one account throttle read plus the same
+   * SHA-256 and constant-time compare (finding D). The verifier is a constant
+   * 64-hex digest, never credential-shaped.
+   */
+  private static readonly DUMMY_ACCOUNT_ID = 0;
+  private static readonly DUMMY_VERIFIER = '0'.repeat(64);
+
+  private async burnUnresolvedWork(
+    derivedKey: string,
+    secret: string,
+    now: Date
+  ): Promise<void> {
+    await this.repository.throttleState(
+      await this.repository.accountThrottleKey(
+        HonoAuthService.DUMMY_ACCOUNT_ID,
+        secret
+      ),
+      now.getTime()
+    );
+    const digest = await sha256Hex(derivedKey);
+    constantTimeEqual(digest, HonoAuthService.DUMMY_VERIFIER);
+  }
+
+  /**
    * Record one rejected attempt and raise the uniform failure. */
   private async reject(
     account: AuthAccount | null,
@@ -482,9 +516,27 @@ export class HonoAuthService {
       return null;
     }
     const secret = this.serverSecret;
-    // Any rejected attempt is the same uniform failure, and it is audited
-    // (SPEC-V2 §7 "failed verification").
+    // A blocked account cannot change its password, and the attempt writes
+    // nothing (finding G/B): the uniform 401 is all the caller learns.
+    if (secret !== undefined && secret !== '') {
+      const blocked = await this.repository.throttleState(
+        await this.repository.accountThrottleKey(account.id, secret),
+        now.getTime()
+      );
+      if (blocked.blocked) throw new AuthLoginRejected();
+    }
+    // Any rejected attempt feeds the per-account counter, is audited, and is
+    // the same uniform failure (SPEC-V2 §7 "failed verification"; finding G).
     const rejectChange = async (): Promise<never> => {
+      if (secret !== undefined && secret !== '')
+        await this.repository.recordLoginFailure(
+          {
+            account: { id: account.id, communityId: account.communityId },
+            clientIp,
+            now: now.getTime(),
+          },
+          secret
+        );
       await this.auditAuthEvent({
         communityId: account.communityId,
         actorId: account.id,
@@ -562,7 +614,7 @@ export class HonoAuthService {
       return null;
     }
     if (secret !== undefined && secret !== '')
-      await this.repository.resetThrottle(account.id, clientIp, secret);
+      await this.repository.resetAccountThrottle(account.id, secret);
     await this.auditAuthEvent({
       communityId: account.communityId,
       actorId: account.id,

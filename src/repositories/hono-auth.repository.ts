@@ -8,7 +8,7 @@
  * fakes, audit rows — lives in one reviewable place. It is transport-agnostic:
  * SQLite/D1, PostgreSQL and the Workers D1 batch share the same methods.
  */
-import { and, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, eq, isNull, or, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -17,18 +17,22 @@ import type {
   HonoFoundationRepository,
 } from './hono-foundation.repository.js';
 import {
+  AUTH_PRELOGIN_MIX_TTL_MS,
   AUTH_THROTTLE_BACKOFF_MAX_MS,
   AUTH_THROTTLE_KEY_ACCOUNT,
   AUTH_THROTTLE_KEY_IP,
   AUTH_THROTTLE_MAX_FAILURES,
   AUTH_THROTTLE_WINDOW_MS,
   ARGON2ID_ALGORITHM,
+  BCRYPT_RAILS_COSTS,
+  RAILS_BCRYPT_ALGORITHM,
   authThrottleBackoffMs,
   sessionLifetimesFor,
   type PasswordAlgorithm,
   type SessionKind,
 } from '../shared/auth-policy.js';
 import { sha256Hex } from '../shared/auth-crypto.js';
+import { parseStoredPasswordParams } from '../shared/prelogin.js';
 
 /** The account columns login, upgrade and password change need. */
 export interface AuthAccount {
@@ -87,20 +91,6 @@ export interface VerifierWrite {
 const toFlag = (value: number | boolean | null): boolean | null =>
   value === null ? null : value === true || value === 1;
 
-/** Sum a per-algorithm `count(*)` grouping into the prelogin mix (§7 step 1). */
-function mixOf(
-  rows: ReadonlyArray<{ algorithm: string | null; total: number | string }>
-): { upgraded: number; total: number } {
-  let upgraded = 0;
-  let total = 0;
-  for (const row of rows) {
-    const count = Number(row.total);
-    total += count;
-    if (row.algorithm === ARGON2ID_ALGORITHM) upgraded += count;
-  }
-  return { upgraded, total };
-}
-
 const AUTH_COLUMNS = (tables: ReturnType<typeof tablesFor>) => ({
   id: tables.users.id,
   communityId: tables.users.communityId,
@@ -143,6 +133,11 @@ export class HonoAuthRepository {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly db: any;
   private readonly tables;
+  /** TTL cache for the prelogin population mix (finding C). */
+  private mixCache: {
+    at: number;
+    mix: { upgraded: number; total: number; costs: number[] };
+  } | null = null;
 
   constructor(readonly connection: Database | DrizzleD1Database) {
     this.db = connection;
@@ -279,15 +274,71 @@ export class HonoAuthRepository {
    * also keyed only by the normalized identifier, never by the slug.
    */
   async globalAlgorithmMix(): Promise<{ upgraded: number; total: number }> {
+    const mix = await this.preloginMix();
+    return { upgraded: mix.upgraded, total: mix.total };
+  }
+
+  /**
+   * The bcrypt costs migrated Rails rows actually carry, so a prelogin fake
+   * draws from the same distribution (finding C). Falls back to the canonical
+   * Rails 10/12 set when no migrated row exists yet.
+   */
+  async bcryptCostMix(): Promise<number[]> {
+    return (await this.preloginMix()).costs;
+  }
+
+  /**
+   * The deployment-wide prelogin population, cached for
+   * `AUTH_PRELOGIN_MIX_TTL_MS`: the upgraded/total ratio plus the observed
+   * bcrypt costs. Every prelogin path (real account or fake) reads this same
+   * cache, so the mix computation runs — or is served — uniformly and never
+   * full-scans `users` per request (finding C).
+   */
+  async preloginMix(
+    now: number = Date.now()
+  ): Promise<{ upgraded: number; total: number; costs: number[] }> {
+    const cached = this.mixCache;
+    if (cached !== null && now - cached.at < AUTH_PRELOGIN_MIX_TTL_MS)
+      return cached.mix;
     const { users } = this.tables;
-    const rows = await this.db
+    const rows: Array<{
+      algorithm: string | null;
+      passwordParams: string | null;
+      total: number | string;
+    }> = await this.db
       .select({
         algorithm: users.passwordAlgorithm,
+        passwordParams: users.passwordParams,
         total: sql<number>`count(*)`,
       })
       .from(users)
-      .groupBy(users.passwordAlgorithm);
-    return mixOf(rows);
+      .groupBy(users.passwordAlgorithm, users.passwordParams);
+    let upgraded = 0;
+    let total = 0;
+    const costCounts = new Map<number, number>();
+    for (const row of rows) {
+      const count = Number(row.total);
+      total += count;
+      if (row.algorithm === ARGON2ID_ALGORITHM) {
+        upgraded += count;
+      } else if (row.algorithm === RAILS_BCRYPT_ALGORITHM) {
+        const params = parseStoredPasswordParams(
+          row.algorithm,
+          row.passwordParams
+        );
+        const cost = (params as { cost?: number } | null)?.cost;
+        if (typeof cost === 'number')
+          costCounts.set(cost, (costCounts.get(cost) ?? 0) + count);
+      }
+    }
+    const observed = [...costCounts.keys()].sort((a, b) => a - b);
+    const mix = {
+      upgraded,
+      total,
+      costs: observed.length > 0 ? observed : [...BCRYPT_RAILS_COSTS],
+    };
+    this.mixCache = { at: now, mix };
+    return mix;
   }
 
   /**
@@ -298,7 +349,7 @@ export class HonoAuthRepository {
    * consequence of the change (§6.8), so no extra delete is issued here.
    */
   async writeVerifierAtomically(
-    account: Pick<AuthAccount, 'id' | 'passwordHash'>,
+    account: Pick<AuthAccount, 'id' | 'passwordHash' | 'passwordVerifier'>,
     verifier: VerifierWrite
   ): Promise<boolean> {
     const { users } = this.tables;
@@ -314,7 +365,13 @@ export class HonoAuthRepository {
       .where(
         and(
           eq(users.id, account.id),
-          eq(users.passwordHash, account.passwordHash)
+          eq(users.passwordHash, account.passwordHash),
+          // A stale verifier (the account changed between the read and the
+          // write) must lose the race rather than overwrite the new one
+          // (finding G).
+          account.passwordVerifier === null
+            ? isNull(users.passwordVerifier)
+            : eq(users.passwordVerifier, account.passwordVerifier)
         )
       )
       .returning({ id: users.id });
@@ -346,7 +403,7 @@ export class HonoAuthRepository {
     now: Date;
     previousToken?: string | undefined;
   }): Promise<{ token: string; verifierWritten: boolean } | null> {
-    const { repository, user, verifier, kind, now } = input;
+    const { repository, account, user, verifier, kind, now } = input;
     const token = Array.from(
       crypto.getRandomValues(new Uint8Array(32)),
       (byte) => byte.toString(16).padStart(2, '0')
@@ -370,6 +427,7 @@ export class HonoAuthRepository {
       const result = await repository.createSessionWithVerifier({
         ...sessionWrite,
         verifier,
+        previousVerifier: account.passwordVerifier,
       });
       if (!result.established) return null;
       return { token, verifierWritten: result.verifierWritten };
@@ -423,7 +481,11 @@ export class HonoAuthRepository {
     now: number
   ) {
     const throttle = this.tables.authThrottle;
-    const windowExpired = sql`${throttle.windowStartedAt} <= ${now - AUTH_THROTTLE_WINDOW_MS}`;
+    // The failure window is only spent when it is old *and* no block is
+    // active: a new failure while blocked must keep growing the counter (and
+    // therefore the backoff) instead of resetting it to 1 and clearing the
+    // block (finding A).
+    const windowExpired = sql`${throttle.windowStartedAt} <= ${now - AUTH_THROTTLE_WINDOW_MS} and (${throttle.blockedUntil} is null or ${throttle.blockedUntil} <= ${now})`;
     // The successor of the failure count after this write, computed once so the
     // blocked_until branch cannot drift from the counter branch.
     const nextFailures = sql`(case when ${windowExpired} then 1 else ${throttle.failures} + 1 end)`;
@@ -530,17 +592,45 @@ export class HonoAuthRepository {
     };
   }
 
-  /** Clear an account's and IP's counters on a successful login (§6.8). */
-  async resetThrottle(
-    accountId: number | null,
-    clientIp: string,
-    secret: string
-  ): Promise<void> {
+  /**
+   * Clear one account's failure counter after a successful login (§6.8).
+   *
+   * The per-IP counter is deliberately left alone (finding E): a shared NAT or
+   * proxy address carries many accounts, so one successful login must not
+   * wipe the per-IP record of the guesses that preceded it.
+   */
+  async resetAccountThrottle(accountId: number, secret: string): Promise<void> {
     const throttle = this.tables.authThrottle;
-    const keys = [await this.ipThrottleKey(clientIp, secret)];
-    if (accountId !== null)
-      keys.push(await this.accountThrottleKey(accountId, secret));
-    await this.db.delete(throttle).where(inArray(throttle.key, keys));
+    await this.db
+      .delete(throttle)
+      .where(
+        eq(throttle.key, await this.accountThrottleKey(accountId, secret))
+      );
+  }
+
+  /**
+   * Delete throttle rows whose window is spent and that are not currently
+   * blocking, for the scheduled sweep (§6.8).
+   *
+   * TODO(slice-9): call this from the scheduled handler added in PR #247
+   * (`worker.ts` `scheduled` + `wrangler.jsonc` cron), alongside
+   * `sweepExpiredSessions`. Slice 10 deliberately adds no scheduled handler.
+   */
+  async sweepAuthThrottle(now: number): Promise<number> {
+    const throttle = this.tables.authThrottle;
+    const deleted = await this.db
+      .delete(throttle)
+      .where(
+        and(
+          sql`${throttle.windowStartedAt} <= ${now - AUTH_THROTTLE_WINDOW_MS}`,
+          or(
+            isNull(throttle.blockedUntil),
+            sql`${throttle.blockedUntil} <= ${now}`
+          )
+        )
+      )
+      .returning({ key: throttle.key });
+    return Array.isArray(deleted) ? deleted.length : 0;
   }
 
   /**

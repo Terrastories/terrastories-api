@@ -63,6 +63,8 @@ export function createWorker() {
       serverSecret: runtimeConfig.serverSecret,
       publicOrigin: runtimeConfig.publicOrigin,
       corsOrigins: runtimeConfig.corsOrigins,
+      // workerd sets `cf-connecting-ip` and a client cannot forge it (finding E).
+      isWorkers: true,
       storage: {
         async read(key, range) {
           const object = range

@@ -9,7 +9,7 @@ import { registerCommunityReadRoutes } from './routes/community-reads.hono.js';
 import { registerCommunityWriteRoutes } from './routes/community-writes.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
 import { bodyLimit } from 'hono/body-limit';
@@ -52,6 +52,12 @@ export interface FoundationOptions {
   publicOrigin?: string;
   corsOrigins?: string[];
   now?: () => Date;
+  /** Cloudflare Workers: `cf-connecting-ip` is set by the platform (finding E). */
+  isWorkers?: boolean;
+  /** A trusted reverse proxy is configured, so `x-forwarded-for` is usable. */
+  trustProxy?: boolean;
+  /** The transport's observed peer address, when it can be read (Node socket). */
+  clientAddress?: (c: Context) => string | null;
 }
 const preloginSchema = z
   .object({
@@ -161,14 +167,26 @@ export function createHonoApp(options: FoundationOptions) {
     path: '/',
     maxAge: sessionLifetime / 1000,
   };
-  // The renewal/issue cookie of a live session. Every kind carries a Max-Age
-  // (`standard`: the 12-hour idle window; `device`: the 60-day idle window), so
-  // a browser restart cannot silently shorten a "remember this device" login;
-  // the session row still enforces the idle and absolute bounds (§7 "Sessions").
-  const sessionCookie = (kind: SessionKind) => ({
+  // The renewal/issue cookie of a live session. `standard` carries the
+  // 12-hour idle window; `device` carries its remaining absolute lifetime, so a
+  // browser restart cannot silently shorten the opt-in and the cookie never
+  // outlives the row that enforces it (§7 "Sessions", finding F).
+  const sessionCookie = (
+    kind: SessionKind,
+    absoluteExpiresAt?: number | null,
+    at?: number
+  ) => ({
     ...cookie,
-    maxAge: sessionCookieMaxAge(kind),
+    maxAge: sessionCookieMaxAge(kind, absoluteExpiresAt ?? undefined, at),
   });
+  // The client address for the per-IP throttle: only real signals are trusted
+  // (finding E).
+  const ipFor = (c: Context): string =>
+    clientIpOf(c.req.raw.headers, {
+      isWorkers: options.isWorkers,
+      trustProxy: options.trustProxy,
+      remoteAddress: options.clientAddress ? options.clientAddress(c) : null,
+    });
   app.use('*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');
@@ -255,7 +273,7 @@ export function createHonoApp(options: FoundationOptions) {
             ...parsed.data,
             previousToken: getCookie(c, 'ts_session'),
           },
-          clientIpOf(c.req.raw.headers),
+          ipFor(c),
           now(),
           c.req.header('user-agent')
         );
@@ -292,7 +310,7 @@ export function createHonoApp(options: FoundationOptions) {
         c,
         'ts_session',
         getCookie(c, 'ts_session')!,
-        sessionCookie(session.kind)
+        sessionCookie(session.kind, session.absoluteExpiresAt, now().getTime())
       );
   });
   app.get('/v2/auth/me', (c) => c.json({ user: publicUser(c.get('actor')) }));
@@ -308,7 +326,7 @@ export function createHonoApp(options: FoundationOptions) {
       outcome: 'success',
       resourceType: 'session',
       resourceIds: [],
-      ipAddress: clientIpOf(c.req.raw.headers),
+      ipAddress: ipFor(c),
       userAgent: c.req.header('user-agent'),
     });
     deleteCookie(c, 'ts_session', cookie);
@@ -382,7 +400,7 @@ export function createHonoApp(options: FoundationOptions) {
         },
         c.get('sessionKind'),
         getCookie(c, 'ts_session'),
-        clientIpOf(c.req.raw.headers),
+        ipFor(c),
         now(),
         c.req.header('user-agent')
       );
@@ -412,7 +430,7 @@ export function createHonoApp(options: FoundationOptions) {
       outcome: 'success',
       resourceType: 'session',
       resourceIds: [],
-      ipAddress: clientIpOf(c.req.raw.headers),
+      ipAddress: ipFor(c),
       userAgent: c.req.header('user-agent'),
     });
     deleteCookie(c, 'ts_session', cookie);

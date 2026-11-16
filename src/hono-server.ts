@@ -1,5 +1,6 @@
 /** Opt-in Node coexistence listener; never imported by the Fastify entrypoint. */
 import { serve } from '@hono/node-server';
+import { getConnInfo } from '@hono/node-server/conninfo';
 import { createLocalStorage } from './node-storage.js';
 import { getDb } from './db/index.js';
 import { createHonoApp } from './hono-app.js';
@@ -31,6 +32,10 @@ const app = createHonoApp({
   storage: await createLocalStorage(
     process.env.HONO_STORAGE_ROOT ?? './uploads'
   ),
+  // Only a configured reverse proxy makes forwarded headers trustworthy; the
+  // socket peer address is the fallback (finding E).
+  trustProxy: /^(1|true|yes)$/i.test(process.env.TRUSTED_PROXY ?? ''),
+  clientAddress: (c) => getConnInfo(c).remote.address ?? null,
 });
 const server = serve({
   fetch: app.fetch,

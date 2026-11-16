@@ -90,7 +90,13 @@ const orphanSweepTimers = scheduleOrphanSweep(sweepOrphanObjects);
 // try/catch with content-free logging; one failing job never blocks the
 // others. First run after a named delay; unref'd interval.
 const maintenanceSweepTimers = scheduleMaintenanceSweeps(() => {
-  void runMaintenanceSweeps(db);
+  // Each job already catches its own failure; this catch keeps any
+  // unexpected throw from becoming an unhandled rejection that ends the
+  // process.
+  runMaintenanceSweeps(db).catch(() => {
+    // eslint-disable-next-line no-console -- operator channel; content-free
+    console.warn('maintenance sweeps: run failed');
+  });
 });
 
 let shuttingDown = false;

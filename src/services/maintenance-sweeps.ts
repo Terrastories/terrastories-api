@@ -15,7 +15,9 @@ import { scrubExpiredAuditNetworkMetadata } from '../repositories/audit-entry.re
 import { HonoAuthRepository } from '../repositories/hono-auth.repository.js';
 
 /** Named delay before the first maintenance sweep after a Node boot. */
-export const MAINTENANCE_SWEEP_FIRST_DELAY_MS = 60 * 60 * 1000; // 1 h
+// Offset from the interval so the one-shot and the first interval tick never
+// fire together and double one hour's row cap.
+export const MAINTENANCE_SWEEP_FIRST_DELAY_MS = 30 * 60 * 1000; // 30 min
 
 /** Named interval between maintenance sweeps on the Node server. */
 export const MAINTENANCE_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1 h

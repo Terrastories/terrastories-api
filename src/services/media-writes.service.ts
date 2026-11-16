@@ -528,11 +528,21 @@ export class MediaWritesService {
             );
           }
 
-          const headerBytes = new Uint8Array(initialLen);
+          // Sniff from a copy bounded by MAGIC_SNIFF_BYTES; the original
+          // chunks are streamed through unchanged, so a large first chunk is
+          // never duplicated in memory (§5 Workers limits).
+          const headerBytes = new Uint8Array(
+            Math.min(initialLen, MAGIC_SNIFF_BYTES)
+          );
           let copyPos = 0;
           for (const chunk of initialChunks) {
-            headerBytes.set(chunk, copyPos);
-            copyPos += chunk.byteLength;
+            if (copyPos >= headerBytes.byteLength) break;
+            const take = Math.min(
+              chunk.byteLength,
+              headerBytes.byteLength - copyPos
+            );
+            headerBytes.set(chunk.subarray(0, take), copyPos);
+            copyPos += take;
           }
 
           const headerCheck = await validateMediaHeaderBytes({
@@ -567,15 +577,16 @@ export class MediaWritesService {
           partialStorageKey = storageKey;
 
           const hasher = new StreamingSha256();
-          let byteSize = headerBytes.byteLength;
-          hasher.update(headerBytes);
-          let sentInitial = false;
+          let byteSize = initialLen;
+          for (const chunk of initialChunks) hasher.update(chunk);
+          let initialIndex = 0;
 
           const hashedStream = new ReadableStream<Uint8Array>({
             async pull(controller) {
-              if (!sentInitial) {
-                sentInitial = true;
-                controller.enqueue(headerBytes);
+              if (initialIndex < initialChunks.length) {
+                controller.enqueue(initialChunks[initialIndex]!);
+                initialChunks[initialIndex] = new Uint8Array(0);
+                initialIndex += 1;
                 return;
               }
               try {

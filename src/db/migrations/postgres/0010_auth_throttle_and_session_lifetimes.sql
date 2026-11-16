@@ -3,7 +3,9 @@
 --
 -- PostgreSQL adds the columns and constraints in place (no table rebuild).
 -- Existing rows keep their absolute expires_at; the backfill derives the new
--- idle/absolute pair from it. The kind column must be backfilled for every row
+-- idle expiry from it and renews absolute = created_at + the standard absolute
+-- lifetime (DEVICE_SESSION_ABSOLUTE_MS), never earlier than idle, so active
+-- legacy sessions are not signed out at the legacy deadline. The kind column must be backfilled for every row
 -- before SET NOT NULL, so the UPDATE is unconditional: it never writes the
 -- user_id key column, and PostgreSQL only re-checks a foreign key when its key
 -- columns change, so a legacy row whose user_id names no user (the orphan shape
@@ -37,7 +39,11 @@ SET
 	"created_at" = GREATEST("expires_at" - 43200000, 0),
 	"last_seen_at" = GREATEST("expires_at" - 43200000, 0),
 	"idle_expires_at" = "expires_at",
-	"absolute_expires_at" = GREATEST("expires_at" - 43200000, 0) + 43200000,
+	-- absolute_expires_at = created_at + DEVICE_SESSION_ABSOLUTE_MS from
+	-- src/shared/auth-policy.ts (5184000000 ms); migration files carry the
+	-- literal because they cannot import the constant. Never earlier than
+	-- idle_expires_at (= expires_at for legacy rows).
+	"absolute_expires_at" = GREATEST(GREATEST("expires_at" - 43200000, 0) + 5184000000, "expires_at"),
 	"revoked_at" = NULL,
 	"revoked_by" = NULL
 WHERE "kind" IS NULL;

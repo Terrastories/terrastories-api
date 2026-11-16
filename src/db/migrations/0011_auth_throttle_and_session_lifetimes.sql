@@ -6,8 +6,11 @@
 -- `kind` gets its enum check. `revoked_by` stays a plain nullable integer with
 -- no foreign key: a revoked session row may outlive the revoking account, and
 -- the both-or-neither CHECK is the only invariant that must hold.
--- Existing rows keep their absolute `expires_at` and are backfilled so the
--- new idle/absolute columns agree with the legacy value: a live row is a
+-- Existing rows are backfilled so the new idle/absolute columns keep a live
+-- session renewing: idle = the legacy expires_at, and absolute = created_at +
+-- the standard absolute lifetime (DEVICE_SESSION_ABSOLUTE_MS), never earlier
+-- than idle — so an active legacy session is not signed out at its old
+-- deadline once renewal slides the idle expiry. a live row is a
 -- `standard` session created and last seen no earlier than the row's own
 -- expiry minus one idle window.
 -- No PRAGMA statements (D1 forbids them); `sqlite_sequence` is not touched
@@ -58,7 +61,11 @@ SELECT
 	MAX(`expires_at` - 43200000, 0),
 	MAX(`expires_at` - 43200000, 0),
 	`expires_at`,
-	MAX(`expires_at` - 43200000, 0) + 43200000,
+	-- absolute_expires_at = created_at + DEVICE_SESSION_ABSOLUTE_MS from
+	-- src/shared/auth-policy.ts (5184000000 ms); migration files carry the
+	-- literal because they cannot import the constant. Never earlier than
+	-- idle_expires_at (= expires_at for legacy rows).
+	MAX(MAX(`expires_at` - 43200000, 0) + 5184000000, `expires_at`),
 	NULL,
 	NULL
 FROM `sessions_old`;

@@ -1785,8 +1785,18 @@ export class MediaWritesRepository {
    * may be reused only when the actor resolves `authorizeAttachmentOwner` on
    * every existing owner; a restricted, unknown-privacy or unreadable owner
    * fails closed as 404, uniformly with not-found. The caller must already
-   * hold change authority on the target owner. On PostgreSQL this runs before
-   * the files KEY SHARE lock, so lock order stays attachments-then-files.
+   * hold change authority on the target owner.
+   *
+   * PostgreSQL: the caller takes FOR UPDATE on the `files` row first and
+   * re-runs this check under that lock, so concurrent attaches of the same
+   * file serialize and authority is judged against the post-lock relation set.
+   * D1/SQLite: no FOR UPDATE exists in those drivers, so this is a
+   * check-then-act pair that cannot be made atomic with the insert — the
+   * residual race is bounded: an interposed relation may only be added by an
+   * actor who independently resolves their own attach authority over its
+   * owner, and the staging branch only admits the uploader (or a
+   * same-community admin), so the bytes never widen their audience beyond the
+   * uploader's own choice.
    */
   async authorizeAttachReuse(input: {
     actor: FoundationUser;
@@ -2187,6 +2197,28 @@ export class MediaWritesRepository {
           authority.communityId
         );
         if (!file) return { status: 'not_found' };
+        if (!this.attachmentTypeMatches(input.role, file.mimeType)) {
+          return { status: 'type_mismatch' };
+        }
+        // Serialize concurrent attaches of this file against its own row and
+        // against an in-flight unreferenced-file delete, which also takes
+        // FOR UPDATE before its guarded delete. The attach inserts a brand-new
+        // attachments row that never waits on the detach's guarded delete, and
+        // both paths order owner locks before the files lock, so there is no
+        // lock cycle between attach and detach. Whichever transaction gets the
+        // files row first wins: a delete that commits first makes this attach
+        // fail closed with 404 instead of inserting a relation that would be
+        // cascaded away.
+        const lockedFiles = await tx
+          .select({ id: this.tables.files.id })
+          .from(this.tables.files)
+          .where(eq(this.tables.files.id, input.fileId))
+          .for('update');
+        if (lockedFiles.length === 0) return { status: 'not_found' };
+        // Re-run the reuse check under the files row lock: any relation whose
+        // attach committed before this statement's snapshot is visible now, so
+        // §6.7 authority is judged against the post-lock state rather than a
+        // stale pre-lock read.
         const reuse = await this.authorizeAttachReuse({
           actor: input.actor,
           communityId: authority.communityId,
@@ -2195,21 +2227,6 @@ export class MediaWritesRepository {
           lock: 'key share',
         });
         if (!reuse.ok) return { status: reuse.outcome };
-        if (!this.attachmentTypeMatches(input.role, file.mimeType)) {
-          return { status: 'type_mismatch' };
-        }
-        // Serialize against an in-flight unreferenced-file delete: that path
-        // takes FOR UPDATE on the row before its guarded delete, which
-        // conflicts with the FOR KEY SHARE taken here (and by the foreign-key
-        // check on the insert below). Whichever transaction gets the row first
-        // wins: a delete that commits first makes this attach fail closed with
-        // 404 instead of inserting a relation that would be cascaded away.
-        const lockedFiles = await tx
-          .select({ id: this.tables.files.id })
-          .from(this.tables.files)
-          .where(eq(this.tables.files.id, input.fileId))
-          .for('key share');
-        if (lockedFiles.length === 0) return { status: 'not_found' };
         const maxRows = await tx
           .select({
             maxOrd: sql<number>`COALESCE(MAX(${this.tables.attachments.ordinal}), -1)`,

@@ -1637,6 +1637,9 @@ export async function runHonoFoundationContract(
       // non-target owner is not theirs to authorize, and 403 would disclose
       // the protected relation. D1/SQLite answers 404, so PG must as well.
       const editorCookie = await login(editorEmail);
+      // The disabled-community case above revoked every community session, so
+      // the admin signs in again before adopting the staging files.
+      const reuseAdminCookie = await login(adminEmail);
       const nonTargetFiles = [crypto.randomUUID(), crypto.randomUUID()];
       for (const id of nonTargetFiles) fileIds.push(id);
       await db.insert(tables.files).values([
@@ -1671,7 +1674,7 @@ export async function runHonoFoundationContract(
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          cookie: slice7AdminCookie,
+          cookie: reuseAdminCookie,
         },
         body: JSON.stringify({
           fileId: nonTargetFiles[0],
@@ -1689,7 +1692,7 @@ export async function runHonoFoundationContract(
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          cookie: slice7AdminCookie,
+          cookie: reuseAdminCookie,
         },
         body: JSON.stringify({
           fileId: nonTargetFiles[1],

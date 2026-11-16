@@ -724,10 +724,12 @@ export class HonoAuthRepository {
     limit: number = MAINTENANCE_SWEEP_ROW_LIMIT
   ): Promise<number> {
     const throttle = this.tables.authThrottle;
-    const eligible = and(
-      sql`${throttle.windowStartedAt} <= ${now - AUTH_THROTTLE_WINDOW_MS}`,
-      or(isNull(throttle.blockedUntil), sql`${throttle.blockedUntil} <= ${now}`)
-    );
+    // Same anchor as the increment path's decay: a row is spent only after a
+    // full quiet window past its block (or its window start when never
+    // blocked). Anchoring on window_started_at alone deleted a just-lapsed
+    // escalated block and reset the backoff ladder on the next cron tick.
+    // This also keeps every currently-blocked row.
+    const eligible = sql`coalesce(${throttle.blockedUntil}, ${throttle.windowStartedAt}) <= ${now - AUTH_THROTTLE_WINDOW_MS}`;
     const deleted = await this.db
       .delete(throttle)
       .where(

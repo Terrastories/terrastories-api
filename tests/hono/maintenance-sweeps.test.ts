@@ -24,7 +24,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 describe('scheduleMaintenanceSweeps', () => {
   it('names first-delay and interval constants on the hourly cadence', () => {
-    expect(MAINTENANCE_SWEEP_FIRST_DELAY_MS).toBe(60 * 60 * 1000);
+    expect(MAINTENANCE_SWEEP_FIRST_DELAY_MS).toBe(30 * 60 * 1000);
+    // Offset from the interval so the first run never coincides with a tick.
+    expect(MAINTENANCE_SWEEP_FIRST_DELAY_MS).toBeLessThan(
+      MAINTENANCE_SWEEP_INTERVAL_MS
+    );
     expect(MAINTENANCE_SWEEP_INTERVAL_MS).toBe(60 * 60 * 1000);
   });
 
@@ -200,6 +204,34 @@ describe('runMaintenanceSweeps', () => {
       }>
     ).map((row) => row.key);
     expect(throttleKeys).toEqual(['throttle-blocked']);
+  });
+
+  it('keeps a just-lapsed escalated block so the sweep never resets the backoff ladder', async () => {
+    const { sqlite, nowMs } = seed();
+    // Escalated for longer than one window: window_started_at is old, but the
+    // block only lapsed a minute ago. The increment path still treats it as
+    // live (quiet window not yet elapsed past the block), so the sweep must too.
+    seedThrottle(
+      sqlite,
+      'throttle-escalated',
+      nowMs - 3 * AUTH_THROTTLE_WINDOW_MS,
+      nowMs - 60_000
+    );
+    // Quiet for a full window past its block: spent.
+    seedThrottle(
+      sqlite,
+      'throttle-quiet',
+      nowMs - 5 * AUTH_THROTTLE_WINDOW_MS,
+      nowMs - AUTH_THROTTLE_WINDOW_MS - 60_000
+    );
+    const auth = new HonoAuthRepository(drizzle(sqlite));
+    expect(await auth.sweepAuthThrottle(nowMs)).toBe(1);
+    const keys = (
+      sqlite.prepare('SELECT key FROM auth_throttle').all() as Array<{
+        key: string;
+      }>
+    ).map((row) => row.key);
+    expect(keys).toEqual(['throttle-escalated']);
   });
 
   it('caps each statement at the row limit; rows beyond the cap wait for the next tick', async () => {

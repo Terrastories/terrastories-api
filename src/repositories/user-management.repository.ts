@@ -14,7 +14,18 @@
  * order on PostgreSQL (matching HonoFoundationRepository.createSessionWithVerifier)
  * so a concurrent role/is_active change and an assisted reset cannot deadlock.
  */
-import { and, asc, count, eq, gt, isNull, ne, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  eq,
+  gt,
+  isNull,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { userStatusToPhysical } from '../policy/canonical-state.js';
 import type { Database } from '../db/index.js';
@@ -230,14 +241,17 @@ export class UserManagementRepository {
   /**
    * Whether `create`/`update` would violate any SPEC-V2 §6.2 identity rule.
    * One round trip; no rule names are leaked to the caller — any hit is a
-   * uniform 409.
+   * uniform 409. May run against a transaction executor (PostgreSQL).
    */
-  async hasIdentityCollision(input: {
-    communityId: number;
-    emailNormalized?: string;
-    usernameNormalized?: string | null;
-    excludeUserId?: number;
-  }): Promise<boolean> {
+  async hasIdentityCollision(
+    input: {
+      communityId: number;
+      emailNormalized?: string;
+      usernameNormalized?: string | null;
+      excludeUserId?: number;
+    },
+    database: Executor = this.database
+  ): Promise<boolean> {
     const { users } = this.tables;
     const { emailNormalized, usernameNormalized, excludeUserId } = input;
     if (emailNormalized === undefined && !usernameNormalized) return false;
@@ -268,7 +282,7 @@ export class UserManagementRepository {
       clauses.push(eq(users.usernameNormalized, emailNormalized));
     }
     if (clauses.length === 0) return false;
-    const rows = await this.database
+    const rows = await database
       .select({ id: users.id })
       .from(users)
       .where(
@@ -281,6 +295,80 @@ export class UserManagementRepository {
     return rows.length > 0;
   }
 
+  /**
+   * The cross-rule identity predicates as raw `x.<column>` fragments for the
+   * guarded INSERT ... SELECT / UPDATE ... WHERE NOT EXISTS statements. The
+   * unique indexes back the primary uniqueness rules; these fragments carry
+   * the cross-kind rules (username == email, email == username, email shared
+   * with a null-community account) which no index enforces.
+   */
+  private identityCollisionWhereSql(input: {
+    communityId: number;
+    emailNormalized?: string;
+    usernameNormalized?: string | null;
+    excludeUserId?: number;
+  }): SQL | undefined {
+    const { emailNormalized, usernameNormalized, excludeUserId } = input;
+    const clauses: SQL[] = [];
+    if (usernameNormalized) {
+      clauses.push(sql`x.username_normalized = ${usernameNormalized}`);
+      clauses.push(sql`x.email_normalized = ${usernameNormalized}`);
+    }
+    if (emailNormalized !== undefined) {
+      clauses.push(
+        sql`x.community_id = ${input.communityId} and x.email_normalized = ${emailNormalized}`
+      );
+      clauses.push(
+        sql`x.community_id is null and x.email_normalized = ${emailNormalized}`
+      );
+      clauses.push(sql`x.username_normalized = ${emailNormalized}`);
+    }
+    if (clauses.length === 0) return undefined;
+    const inner = or(...clauses);
+    const scoped =
+      excludeUserId === undefined
+        ? sql`(${inner})`
+        : sql`x.id <> ${excludeUserId} and (${inner})`;
+    return sql`not exists (select 1 from users x where ${scoped})`;
+  }
+
+  /**
+   * Normalized identifiers involved in an identity write, de-duplicated and
+   * sorted so concurrent writers take the PostgreSQL advisory locks in one
+   * total order and cannot deadlock.
+   */
+  private advisoryLockIdentifiers(input: {
+    emailNormalized?: string;
+    usernameNormalized?: string | null;
+  }): string[] {
+    const identifiers = [
+      input.emailNormalized,
+      input.usernameNormalized,
+    ].filter(
+      (value): value is string => typeof value === 'string' && value.length > 0
+    );
+    return [...new Set(identifiers)].sort();
+  }
+
+  private async takeIdentityAdvisoryLocks(
+    tx: Executor,
+    input: { emailNormalized?: string; usernameNormalized?: string | null }
+  ): Promise<void> {
+    for (const identifier of this.advisoryLockIdentifiers(input)) {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext('identity:' || ${identifier}))`
+      );
+    }
+  }
+
+  /**
+   * Guarded account creation. `ok: false` means an identity rule was hit —
+   * the caller answers the uniform 409, never naming the rule. The guard and
+   * the insert are one atomic unit: a single `INSERT ... SELECT ... WHERE NOT
+   * EXISTS` statement on SQLite/D1, or a transaction taking advisory locks on
+   * every normalized identifier involved (sorted) before checking and writing
+   * on PostgreSQL — never a racing check-then-insert.
+   */
   async createCommunityUser(input: {
     communityId: number;
     username: string;
@@ -297,33 +385,77 @@ export class UserManagementRepository {
       passwordParams: string;
     } | null;
     createdAt: Date;
-  }): Promise<{ id: number }> {
+  }): Promise<{ ok: true; id: number } | { ok: false }> {
     const { users } = this.tables;
-    const [row] = await this.database
-      .insert(users)
-      .values({
-        email: input.email,
-        username: input.username,
-        displayName: input.displayName,
-        emailNormalized: input.emailNormalized,
-        usernameNormalized: input.usernameNormalized,
-        passwordHash: input.passwordHash,
-        passwordVerifier: input.verifier?.passwordVerifier ?? null,
-        passwordAlgorithm: input.verifier?.passwordAlgorithm ?? null,
-        passwordSalt: input.verifier?.passwordSalt ?? null,
-        passwordParams: input.verifier?.passwordParams ?? null,
-        // The V1 physical columns are NOT NULL; V2 manages displayName, so
-        // the legacy pair stays blank (never synthesized).
-        firstName: '',
-        lastName: '',
-        role: input.role,
-        communityId: input.communityId,
-        isActive: true,
-        createdAt: input.createdAt,
-        updatedAt: input.createdAt,
-      })
-      .returning({ id: users.id });
-    return { id: Number(row.id) };
+    const createdMs = input.createdAt.getTime();
+    const values = {
+      email: input.email,
+      username: input.username,
+      displayName: input.displayName,
+      emailNormalized: input.emailNormalized,
+      usernameNormalized: input.usernameNormalized,
+      passwordHash: input.passwordHash,
+      passwordVerifier: input.verifier?.passwordVerifier ?? null,
+      passwordAlgorithm: input.verifier?.passwordAlgorithm ?? null,
+      passwordSalt: input.verifier?.passwordSalt ?? null,
+      passwordParams: input.verifier?.passwordParams ?? null,
+      // The V1 physical columns are NOT NULL; V2 manages displayName, so
+      // the legacy pair stays blank (never synthesized).
+      firstName: '',
+      lastName: '',
+      role: input.role,
+      communityId: input.communityId,
+      isActive: true,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+    };
+    if (dialectOf(this.database) === 'postgresql') {
+      return (this.database as Executor).transaction(async (tx: Executor) => {
+        await this.takeIdentityAdvisoryLocks(tx, input);
+        const collided = await this.hasIdentityCollision(
+          {
+            communityId: input.communityId,
+            emailNormalized: input.emailNormalized,
+            usernameNormalized: input.usernameNormalized,
+          },
+          tx
+        );
+        if (collided) return { ok: false };
+        const [row] = await tx
+          .insert(users)
+          .values(values)
+          .returning({ id: users.id });
+        return { ok: true, id: Number(row.id) };
+      });
+    }
+
+    const collision = this.identityCollisionWhereSql({
+      communityId: input.communityId,
+      emailNormalized: input.emailNormalized,
+      usernameNormalized: input.usernameNormalized,
+    });
+    const insertable = sql`insert into users (
+      email, username, display_name, email_normalized, username_normalized,
+      password_hash, password_verifier, password_algorithm, password_salt,
+      password_params, first_name, last_name, role, community_id, is_active,
+      created_at, updated_at
+    ) select
+      ${input.email}, ${input.username}, ${input.displayName},
+      ${input.emailNormalized}, ${input.usernameNormalized},
+      ${input.passwordHash}, ${input.verifier?.passwordVerifier ?? null},
+      ${input.verifier?.passwordAlgorithm ?? null},
+      ${input.verifier?.passwordSalt ?? null},
+      ${input.verifier?.passwordParams ?? null},
+      ${''}, ${''},
+      ${input.role}, ${input.communityId}, 1,
+      ${createdMs}, ${createdMs}
+    where ${collision ?? sql`1 = 1`}
+    returning id`;
+    const inserted = (await this.database.all(insertable)) as Array<{
+      id: number | string;
+    }>;
+    if (inserted.length === 0) return { ok: false };
+    return { ok: true, id: Number(inserted[0]!.id) };
   }
 
   /**
@@ -342,10 +474,25 @@ export class UserManagementRepository {
     usernameNormalized?: string | null;
     email?: string;
     emailNormalized?: string;
+    /**
+     * The identity fields whose normalized values actually changed — only
+     * those need the collision guard (and it must hold at write time, not
+     * just at pre-check time).
+     */
+    collision?: {
+      emailNormalized?: string;
+      usernameNormalized?: string | null;
+    };
     role?: 'viewer' | 'member' | 'editor' | 'admin';
     isActive?: boolean;
     updatedAt: Date;
-  }): Promise<'updated' | 'not_found' | 'authority_lost' | 'last_admin'> {
+  }): Promise<
+    | 'updated'
+    | 'not_found'
+    | 'authority_lost'
+    | 'last_admin'
+    | 'identity_conflict'
+  > {
     const { users, communities } = this.tables;
     const patch: Record<string, unknown> = { updatedAt: input.updatedAt };
     if (input.displayName !== undefined) patch.displayName = input.displayName;
@@ -394,6 +541,18 @@ export class UserManagementRepository {
           )
           .limit(1);
         if (!actorRow) return 'authority_lost';
+        if (input.collision) {
+          await this.takeIdentityAdvisoryLocks(tx, input.collision);
+          const collided = await this.hasIdentityCollision(
+            {
+              ...input.collision,
+              communityId: input.communityId,
+              excludeUserId: input.id,
+            },
+            tx
+          );
+          if (collided) return 'identity_conflict';
+        }
         if (!keepActiveAdmin) {
           const [countRow] = await tx
             .select({ total: count() })
@@ -428,6 +587,13 @@ export class UserManagementRepository {
     const adminGuard = keepActiveAdmin
       ? undefined
       : sql`(select count(*) from users o where o.community_id = ${input.communityId} and o.role = 'admin' and o.is_active = 1 and o.id <> ${input.id}) >= 1`;
+    const collisionGuard = input.collision
+      ? this.identityCollisionWhereSql({
+          ...input.collision,
+          communityId: input.communityId,
+          excludeUserId: input.id,
+        })
+      : undefined;
     const updated = await this.database
       .update(users)
       .set(patch)
@@ -436,7 +602,8 @@ export class UserManagementRepository {
           eq(users.id, input.id),
           eq(users.communityId, input.communityId),
           sql`exists (select 1 from users a where a.id = ${input.actorId} and a.community_id = ${input.communityId} and a.role = 'admin' and a.is_active = 1)`,
-          adminGuard
+          adminGuard,
+          collisionGuard
         )
       )
       .returning({ id: users.id });
@@ -459,6 +626,14 @@ export class UserManagementRepository {
       )
       .limit(1);
     if (!actorRow) return 'authority_lost';
+    if (input.collision) {
+      const collided = await this.hasIdentityCollision({
+        ...input.collision,
+        communityId: input.communityId,
+        excludeUserId: input.id,
+      });
+      if (collided) return 'identity_conflict';
+    }
     if (!keepActiveAdmin) {
       const [countRow] = await this.database
         .select({ total: count() })

@@ -328,7 +328,7 @@ export class UserManagementService {
     // a credential.
     const passwordHash = toHex(crypto.getRandomValues(new Uint8Array(32)));
     try {
-      const { id } = await this.repository.createCommunityUser({
+      const created = await this.repository.createCommunityUser({
         communityId: caller.communityId,
         username: input.username,
         usernameNormalized,
@@ -340,19 +340,28 @@ export class UserManagementService {
         verifier,
         createdAt: new Date(),
       });
-      const created = await this.repository.findCommunityUser(
+      if (!created.ok) {
+        await this.audit(actor, {
+          action: 'user.create',
+          resourceType: 'user',
+          resourceIds: [],
+          outcome: 'failure',
+        });
+        return { status: 409, body: CONFLICT_BODY };
+      }
+      const createdRow = await this.repository.findCommunityUser(
         caller.communityId,
-        id
+        created.id
       );
       await this.audit(actor, {
         action: 'user.create',
         resourceType: 'user',
-        resourceIds: [id],
+        resourceIds: [created.id],
         outcome: 'success',
       });
       return {
         status: 201,
-        body: { data: this.toManagedUser(created as ManagedUserRow) },
+        body: { data: this.toManagedUser(createdRow as ManagedUserRow) },
       };
     } catch (error) {
       // Unique-index backstop for the check-then-insert race (§6.2).
@@ -434,7 +443,12 @@ export class UserManagementService {
     // community-locked transaction on PostgreSQL): the actor is re-read as an
     // active admin inside the write, so a concurrent role change cannot slip
     // a lockout in behind a pre-check.
-    let outcome: 'updated' | 'not_found' | 'authority_lost' | 'last_admin';
+    let outcome:
+      | 'updated'
+      | 'not_found'
+      | 'authority_lost'
+      | 'last_admin'
+      | 'identity_conflict';
     try {
       outcome = await this.repository.updateCommunityUser({
         id: target.id,
@@ -452,6 +466,12 @@ export class UserManagementService {
         ...(body.email !== undefined
           ? { email: body.email, emailNormalized: identity.emailNormalized }
           : {}),
+        // The identity rules hold at write time too, not only at pre-check
+        // time (§6.2); the guarded write re-checks them atomically.
+        collision: {
+          emailNormalized: identity.emailNormalized as string,
+          usernameNormalized: identity.usernameNormalized ?? null,
+        },
         ...(body.role !== undefined ? { role: body.role } : {}),
         ...(body.status !== undefined
           ? { isActive: body.status === 'active' }
@@ -472,6 +492,15 @@ export class UserManagementService {
     }
     if (outcome === 'not_found') {
       return { status: 404, body: NOT_FOUND_BODY };
+    }
+    if (outcome === 'identity_conflict') {
+      await this.audit(actor, {
+        action: 'user.update',
+        resourceType: 'user',
+        resourceIds: [target.id],
+        outcome: 'failure',
+      });
+      return { status: 409, body: CONFLICT_BODY };
     }
     if (outcome === 'authority_lost') {
       return { status: 403, body: FORBIDDEN_BODY };

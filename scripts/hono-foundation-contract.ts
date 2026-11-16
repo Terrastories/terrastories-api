@@ -1218,6 +1218,56 @@ export async function runHonoFoundationContract(
         .where(eq(tables.users.id, refused.id));
       assert.equal(refusedRow[0]?.role, 'admin');
       assert.equal(refusedRow[0]?.isActive, true);
+
+      // PostgreSQL cross-rule identity race (#188): two concurrent creates
+      // whose identities cross-collide with each other (one account's
+      // username is the other's email, both ways). The advisory locks
+      // serialize the writers in a total order; exactly one insert lands,
+      // the loser answers the uniform 409.
+      const raceCrossCreateAdminCookie = await login(adminEmail);
+      const crossEmailA = `cross-a-${tag}@example.test`;
+      const crossEmailB = `cross-b-${tag}@example.test`;
+      const crossCreate = (username: string, email: string) =>
+        send(app, '/v2/users', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: raceCrossCreateAdminCookie,
+          },
+          body: JSON.stringify({
+            username,
+            email,
+            role: 'viewer',
+          }),
+        });
+      const [crossCreateA, crossCreateB] = await Promise.allSettled([
+        crossCreate(crossEmailA, crossEmailB),
+        crossCreate(crossEmailB, crossEmailA),
+      ]);
+      const crossCreateStatuses = [crossCreateA, crossCreateB]
+        .map((result) =>
+          result.status === 'fulfilled' ? result.value.status : 500
+        )
+        .sort((left, right) => left - right);
+      assert.deepEqual(
+        crossCreateStatuses,
+        [201, 409],
+        'concurrent cross-rule creates must yield exactly one 201 and one 409'
+      );
+      const crossSurvivors = await db
+        .select({ id: tables.users.id })
+        .from(tables.users)
+        .where(
+          inArray(tables.users.usernameNormalized, [crossEmailA, crossEmailB])
+        );
+      assert.equal(
+        crossSurvivors.length,
+        1,
+        'exactly one account may survive a cross-rule create race'
+      );
+      // Registered for the cleanup phase: its community is deleted there and
+      // users.community_id is NO ACTION on PostgreSQL.
+      userIds.push(crossSurvivors[0]!.id);
     }
 
     // Concurrent duplicate-identity create (#188, both dialects): two

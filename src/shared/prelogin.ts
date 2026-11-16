@@ -120,7 +120,9 @@ export async function deterministicPreloginFake(
       mix.params && mix.params.length > 0
         ? mix.params
         : [{ ...ARGON2ID_PARAMS, count: 1 }];
-    const picked = deterministicPick(digest, 8, paramWeights);
+    // Bytes 24..27: free of the Argon2id salt's digest bytes 4..19, so the
+    // params draw is independent of the salt bytes (item 4).
+    const picked = deterministicPick(digest, 24, paramWeights);
     return {
       algorithm: ARGON2ID_ALGORITHM,
       // 16 bytes: the one salt length every canonical verifier uses, so the
@@ -142,7 +144,7 @@ export async function deterministicPreloginFake(
       : (bcryptCosts.length > 0 ? bcryptCosts : BCRYPT_RAILS_COSTS).map(
           (cost) => ({ cost, count: 1 })
         );
-  const cost = deterministicPick(digest, 8, costWeights).cost;
+  const cost = deterministicPick(digest, 24, costWeights).cost;
   return {
     algorithm: RAILS_BCRYPT_ALGORITHM,
     salt: bcryptSalt(digest.slice(5)),

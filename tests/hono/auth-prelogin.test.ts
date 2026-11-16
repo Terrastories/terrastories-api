@@ -376,6 +376,56 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     expect(counts.get(`${19 * 1024}:2:1`) ?? 0).toBeGreaterThan(SAMPLES * 0.7);
   });
 
+  it('draws the fake deterministically from digest bytes 24..27, independent of the salt', async () => {
+    // Repeated calls with the same identifier produce the identical fake,
+    // and the params pick at digest bytes 24..27 no longer shares bytes
+    // with the Argon2id salt (4..19).
+    const paramMix = {
+      upgraded: 100,
+      total: 100,
+      params: [
+        { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1, count: 5 },
+        { memoryKiB: 64 * 1024, iterations: 3, parallelism: 2, count: 1 },
+      ],
+    };
+    const bcryptMix = {
+      upgraded: 0,
+      total: 100,
+      costCounts: [
+        { cost: 10, count: 3 },
+        { cost: 12, count: 1 },
+      ],
+    };
+    const a1 = await deterministicPreloginFake(
+      'test-secret',
+      'ident-a@prelogin.test',
+      paramMix
+    );
+    expect(
+      await deterministicPreloginFake(
+        'test-secret',
+        'ident-a@prelogin.test',
+        paramMix
+      )
+    ).toEqual(a1);
+    expect(a1.algorithm).toBe(ARGON2ID_ALGORITHM);
+    expect(Buffer.from(a1.salt, 'base64').length).toBe(16);
+    const b1 = await deterministicPreloginFake(
+      'test-secret',
+      'ident-b@prelogin.test',
+      bcryptMix
+    );
+    expect(
+      await deterministicPreloginFake(
+        'test-secret',
+        'ident-b@prelogin.test',
+        bcryptMix
+      )
+    ).toEqual(b1);
+    expect(b1.algorithm).toBe(RAILS_BCRYPT_ALGORITHM);
+    expect(b1.salt).toHaveLength(22);
+  });
+
   it('answers an above-policy existing row with its stored shape (§7)', async () => {
     const { app, db } = await setup();
     const passwordSalt = base64(32);

@@ -1597,6 +1597,37 @@ export async function runHonoFoundationContract(
           }: ${await response.text()})`
         );
       }
+
+      // Deactivated community (#140): an existing-relation owner that
+      // sorts before the target (place < story) must not collapse a
+      // forbidden verdict into 404 — PG must answer 403 exactly as
+      // D1/SQLite (and the target-first pre-fix order) do. Sessions
+      // are revoked on disable, so log in fresh while disabled to reach
+      // the repository.
+      try {
+        await updateCommunity(communityA, { isActive: false });
+        const disabledAdminCookie = await login(adminEmail);
+        const inactiveAttach = await send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: disabledAdminCookie,
+          },
+          body: JSON.stringify({
+            fileId: fileIds[0],
+            ownerType: 'story',
+            ownerId: crossStory.id,
+            role: 'story_media',
+          }),
+        });
+        assert.equal(
+          inactiveAttach.status,
+          403,
+          `a deactivated community must answer 403, uniformly with D1/SQLite (${await inactiveAttach.text()})`
+        );
+      } finally {
+        await updateCommunity(communityA, { isActive: true });
+      }
     }
   } finally {
     for (const id of communityIds) {

@@ -2198,8 +2198,12 @@ export class MediaWritesRepository {
           }
           // An existing relation whose owner is restricted, unreadable or not
           // publishable by this actor widens nothing: 404, uniform with
-          // absence.
-          if (resolved.status !== 'ok') return { status: 'not_found' };
+          // absence. A `forbidden` verdict must pass through unchanged: an
+          // inactive community is forbidden for every owner-check verdict,
+          // so collapsing it to 404 would answer 404 on PG where D1/SQLite
+          // (and the old target-first order) answer 403 (#140).
+          if (resolved.status === 'not_found') return { status: 'not_found' };
+          if (resolved.status !== 'ok') return resolved;
         }
         if (!authority || authority.status !== 'ok') {
           return { status: 'not_found' };

@@ -637,6 +637,70 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
     ).toBe(403);
   });
 
+  it('answers 403 (not 404) for a disabled community', async () => {
+    // Dedicated community: sessions are revoked when a community is
+    // disabled, so toggling the shared fixture would invalidate the other
+    // tests' cookies.
+    const now = new Date();
+    const disabledCommId = await insertRow(tables.communities, {
+      name: 'Disabled Attach Nation',
+      slug: 'disabled-attach-nation',
+      publicStories: true,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const derived = deriveUserIdentityColumns({
+      email: 'admin@disabled-attach.test',
+      firstName: 'QA',
+      lastName: 'Disabled',
+      communityId: disabledCommId,
+    });
+    await insertRow(tables.users, {
+      email: 'admin@disabled-attach.test',
+      emailNormalized: derived.emailNormalized,
+      passwordHash: await hash(TEST_PASS, 4),
+      firstName: 'QA',
+      lastName: 'Disabled',
+      displayNameNormalized: derived.displayNameNormalized,
+      role: 'admin',
+      communityId: disabledCommId,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const activeCookie = await loginAs('admin@disabled-attach.test');
+    const uploadRes = await upload({ cookie: activeCookie });
+    expect(uploadRes.res.status).toBe(201);
+    const stagedId = uploadRes.fileId!;
+    const storyId = await insertRow(tables.stories, {
+      title: 'Disabled Community Story',
+      slug: 'disabled-community-story',
+      privacyLevel: 'public',
+      isRestricted: false,
+      communityId: disabledCommId,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db
+      .update(tables.communities)
+      .set({ isActive: false })
+      .where(eq(tables.communities.id, disabledCommId));
+    // Sessions are revoked on disable; a fresh admin login on the disabled
+    // community reaches the repository.
+    const disabledCookie = await loginAs('admin@disabled-attach.test');
+    expect(
+      (
+        await attach(disabledCookie, {
+          fileId: stagedId,
+          ownerType: 'story',
+          ownerId: storyId,
+          role: 'story_media',
+        })
+      ).status
+    ).toBe(403);
+  });
+
   it('rejects §6.7 reuse that broadens the bytes audience and allows the uploader/admin to attach staging', async () => {
     const publicStory = await insertRow(tables.stories, {
       title: 'Reuse Story',

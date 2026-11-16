@@ -376,6 +376,53 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     expect(counts.get(`${19 * 1024}:2:1`) ?? 0).toBeGreaterThan(SAMPLES * 0.7);
   });
 
+  it('draws the fake Argon2id salt length from the observed distribution', async () => {
+    // The migration writes 16-byte salts today but a deployment may carry a
+    // population with longer ones; the fake must match the stored mix, not
+    // always 16 bytes (item 5).
+    const mix = {
+      upgraded: 100,
+      total: 100,
+      params: [
+        { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1, count: 100 },
+      ],
+      saltLengths: [
+        { length: 16, count: 1 },
+        { length: 32, count: 19 },
+      ],
+    };
+    const counts = new Map<number, number>();
+    const SAMPLES = 400;
+    for (let index = 0; index < SAMPLES; index += 1) {
+      const fake = await deterministicPreloginFake(
+        'test-secret',
+        `saltlen-${index}@prelogin.test`,
+        mix
+      );
+      counts.set(
+        Buffer.from(fake.salt, 'base64').length,
+        (counts.get(Buffer.from(fake.salt, 'base64').length) ?? 0) + 1
+      );
+    }
+    expect(counts.get(32) ?? 0).toBeGreaterThan(SAMPLES * 0.7);
+    expect(counts.get(16) ?? 0).toBeGreaterThan(0);
+    expect(counts.get(16) ?? 0).toBeLessThan(SAMPLES * 0.3);
+    // deterministic per identifier
+    expect(
+      await deterministicPreloginFake(
+        'test-secret',
+        'saltlen-fixed@prelogin.test',
+        mix
+      )
+    ).toEqual(
+      await deterministicPreloginFake(
+        'test-secret',
+        'saltlen-fixed@prelogin.test',
+        mix
+      )
+    );
+  });
+
   it('draws the fake deterministically from digest bytes 24..27, independent of the salt', async () => {
     // Repeated calls with the same identifier produce the identical fake,
     // and the params pick at digest bytes 24..27 no longer shares bytes

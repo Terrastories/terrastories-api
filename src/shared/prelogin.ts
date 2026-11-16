@@ -61,6 +61,30 @@ function bcryptSalt(digest: Uint8Array): string {
   return salt + last;
 }
 
+/**
+ * Expand a SHA-256-based counter-mode key stream deterministically. Used for
+ * the fake salt: the digest is HMAC output (32 bytes), not enough for salts
+ * up to 64 bytes, so the stream extends it byte-for-byte.
+ */
+const streamEncoder = new TextEncoder();
+async function keyStream(seed: string, length: number): Promise<Uint8Array> {
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (let counter = 0; offset < length; counter += 1) {
+    const block = new Uint8Array(
+      await crypto.subtle.digest(
+        'SHA-256',
+        streamEncoder.encode(`${seed}:${counter}`)
+      )
+    );
+    for (let index = 0; index < block.length && offset < length; index += 1) {
+      out[offset] = block[index]!;
+      offset += 1;
+    }
+  }
+  return out;
+}
+
 export type WeightedBcryptCost = { cost: number; count: number };
 export type WeightedArgon2Params = Argon2idParams & { count: number };
 
@@ -74,7 +98,12 @@ export interface PreloginMix {
   costCounts?: ReadonlyArray<WeightedBcryptCost> | undefined;
   /** Observed Argon2id parameter combos with their weights. */
   params?: ReadonlyArray<WeightedArgon2Params> | undefined;
+  /** Observed Argon2id salt byte lengths with their weights. */
+  saltLengths?: ReadonlyArray<WeightedSaltLength> | undefined;
 }
+
+/** A weighted salt byte length from the stored population. */
+export type WeightedSaltLength = { length: number; count: number };
 
 /** Deterministic weighted pick by digest bytes, `weights` must be non-empty. */
 function deterministicPick<T extends { count: number }>(
@@ -120,14 +149,21 @@ export async function deterministicPreloginFake(
       mix.params && mix.params.length > 0
         ? mix.params
         : [{ ...ARGON2ID_PARAMS, count: 1 }];
-    // Bytes 24..27: free of the Argon2id salt's digest bytes 4..19, so the
+    // Params pick at digest bytes 24..27: free of the salt (4..19), so the
     // params draw is independent of the salt bytes (item 4).
     const picked = deterministicPick(digest, 24, paramWeights);
+    const saltLenWeights: ReadonlyArray<WeightedSaltLength> =
+      mix.saltLengths && mix.saltLengths.length > 0
+        ? mix.saltLengths
+        : [{ length: MIN_SALT_BYTES, count: 1 }];
+    // Bytes 28..31: free of the Argon2id salt (4..19) and the params pick
+    // (24..27). The salt bytes come from their own counter-mode stream off
+    // the HMAC digest, so the fake salt can match any stored length.
+    const saltLength = deterministicPick(digest, 28, saltLenWeights).length;
+    const saltBytes = await keyStream(digestHex, saltLength);
     return {
       algorithm: ARGON2ID_ALGORITHM,
-      // 16 bytes: the one salt length every canonical verifier uses, so the
-      // fake is shape-identical to a real Argon2id row (finding 4).
-      salt: toBase64(digest.slice(4, 4 + MIN_SALT_BYTES)),
+      salt: toBase64(saltBytes),
       params: {
         memoryKiB: picked.memoryKiB,
         iterations: picked.iterations,

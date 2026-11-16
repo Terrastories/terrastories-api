@@ -28,6 +28,7 @@ import {
   RAILS_BCRYPT_ALGORITHM,
   authThrottleBackoffMs,
   sessionLifetimesFor,
+  verifierSaltBytes,
   type PasswordAlgorithm,
   type SessionKind,
 } from '../shared/auth-policy.js';
@@ -293,7 +294,7 @@ export class HonoAuthRepository {
   /**
    * The deployment-wide prelogin population, cached for
    * `AUTH_PRELOGIN_MIX_TTL_MS`: the upgraded/total ratio plus the observed
-   * bcrypt costs. Every prelogin path (real account or fake) reads this same
+   * bcrypt costs, Argon2id parameter combos and salt byte lengths. Every prelogin path (real account or fake) reads this same
    * cache, so the mix computation runs — or is served — uniformly and never
    * full-scans `users` per request (finding C).
    */
@@ -305,15 +306,21 @@ export class HonoAuthRepository {
     const rows: Array<{
       algorithm: string | null;
       passwordParams: string | null;
+      passwordSalt: string | null;
       total: number | string;
     }> = await this.db
       .select({
         algorithm: users.passwordAlgorithm,
         passwordParams: users.passwordParams,
+        passwordSalt: users.passwordSalt,
         total: sql<number>`count(*)`,
       })
       .from(users)
-      .groupBy(users.passwordAlgorithm, users.passwordParams);
+      .groupBy(
+        users.passwordAlgorithm,
+        users.passwordParams,
+        users.passwordSalt
+      );
     let upgraded = 0;
     let total = 0;
     const costCounts = new Map<number, number>();
@@ -326,6 +333,7 @@ export class HonoAuthRepository {
         count: number;
       }
     >();
+    const saltLengthCounts = new Map<number, number>();
     for (const row of rows) {
       const count = Number(row.total);
       total += count;
@@ -349,6 +357,14 @@ export class HonoAuthRepository {
             parallelism: params.parallelism,
             count,
           });
+        const saltBytes = row.passwordSalt
+          ? verifierSaltBytes(row.passwordSalt)
+          : -1;
+        if (saltBytes >= 1 && saltBytes <= 64)
+          saltLengthCounts.set(
+            saltBytes,
+            (saltLengthCounts.get(saltBytes) ?? 0) + count
+          );
       } else if (
         row.algorithm === RAILS_BCRYPT_ALGORITHM &&
         params !== null &&
@@ -362,12 +378,16 @@ export class HonoAuthRepository {
       .map(([cost, count]) => ({ cost, count }))
       .sort((a, b) => a.cost - b.cost);
     const params = [...paramsCounts.values()].sort((a, b) => b.count - a.count);
+    const saltLengths = [...saltLengthCounts.entries()]
+      .map(([length, count]) => ({ length, count }))
+      .sort((a, b) => a.length - b.length);
     const mix: PreloginMix = {
       upgraded,
       total,
       costs: observed.length > 0 ? observed : [...BCRYPT_RAILS_COSTS],
       costCounts: costCountsArr,
       params,
+      saltLengths,
     };
     this.mixCache = { at: now, mix };
     return mix;

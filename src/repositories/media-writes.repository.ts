@@ -2215,13 +2215,10 @@ export class MediaWritesRepository {
         }
         // Serialize concurrent attaches of this file against its own row and
         // against an in-flight unreferenced-file delete, which also takes
-        // FOR UPDATE before its guarded delete. The attach inserts a brand-new
-        // attachments row that never waits on the detach's guarded delete, and
-        // both paths order owner locks before the files lock, so there is no
-        // lock cycle between attach and detach. Whichever transaction gets the
-        // files row first wins: a delete that commits first makes this attach
-        // fail closed with 404 instead of inserting a relation that would be
-        // cascaded away.
+        // FOR UPDATE before its guarded delete. Whichever transaction gets
+        // the files row first wins: a delete that commits first makes this
+        // attach fail closed with 404 instead of inserting a relation that
+        // would be cascaded away.
         const lockedFiles = await tx
           .select({ id: this.tables.files.id })
           .from(this.tables.files)
@@ -2231,13 +2228,17 @@ export class MediaWritesRepository {
         // Re-run the reuse check under the files row lock: any relation whose
         // attach committed before this statement's snapshot is visible now, so
         // §6.7 authority is judged against the post-lock state rather than a
-        // stale pre-lock read.
+        // stale pre-lock read. No owner lock is taken here: every PG attach
+        // insert and every files delete already holds this files row FOR
+        // UPDATE, so the relation set cannot grow while this transaction runs,
+        // and acquiring an owner lock after the files lock would invert the
+        // canonical owner-before-file order and could deadlock a concurrent
+        // attach that holds that owner (#140).
         const reuse = await this.authorizeAttachReuse({
           actor: input.actor,
           communityId: authority.communityId,
           file,
           executor: tx,
-          lock: 'key share',
         });
         if (!reuse.ok) return { status: reuse.outcome };
         const maxRows = await tx

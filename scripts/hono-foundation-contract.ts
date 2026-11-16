@@ -1463,6 +1463,140 @@ export async function runHonoFoundationContract(
           `cross-attach ${label} must succeed (${await response.text()})`
         );
       }
+
+      // Interposed relation between the pre-lock read and the files lock
+      // (#140): an attach blocked on the files FOR UPDATE but already
+      // holding its owner locks must not acquire an owner lock after the
+      // file lock when its post-lock re-check sees a relation commit in
+      // between. Taking that lock after files could deadlock against a
+      // concurrent attach that holds the new owner and waits on the file
+      // (40P01 -> 500).
+      const interposedFileId = crypto.randomUUID();
+      await db.insert(tables.files).values({
+        id: interposedFileId,
+        filename: 'interposed.png',
+        originalName: 'interposed.png',
+        path: `communities/${communityA}/${interposedFileId}`,
+        url: `https://ignored.invalid/${interposedFileId}`,
+        mimeType: 'image/png',
+        size: 3,
+        communityId: communityA,
+        uploadedBy: null,
+        createdAt: instant,
+        updatedAt: instant,
+      });
+      fileIds.push(interposedFileId);
+      const [interposedExistingStory] = await db
+        .insert(tables.stories)
+        .values({
+          communityId: communityA,
+          title: 'Interposed Existing Story',
+          slug: `interposed-existing-${tag}`,
+          language: 'en',
+          privacyLevel: 'editors',
+          isRestricted: false,
+          createdAt: instant,
+          updatedAt: instant,
+        })
+        .returning();
+      const [interposedNewStory] = await db
+        .insert(tables.stories)
+        .values({
+          communityId: communityA,
+          title: 'Interposed New Story',
+          slug: `interposed-new-${tag}`,
+          language: 'en',
+          privacyLevel: 'editors',
+          isRestricted: false,
+          createdAt: instant,
+          updatedAt: instant,
+        })
+        .returning();
+      const [interposedPlace] = await db
+        .insert(tables.places)
+        .values({ communityId: communityA, name: 'Interposed Place' })
+        .returning();
+      await db.insert(tables.attachments).values({
+        communityId: communityA,
+        fileId: interposedFileId,
+        ownerType: 'story',
+        ownerId: interposedExistingStory.id,
+        role: 'story_media',
+        ordinal: 0,
+        createdAt: instant,
+      });
+      const interposedAttach = (
+        ownerType: 'story' | 'place',
+        ownerId: number,
+        role: 'story_media' | 'place_photo'
+      ) =>
+        send(app, '/v2/attachments', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: slice7AdminCookie,
+          },
+          body: JSON.stringify({
+            fileId: interposedFileId,
+            ownerType,
+            ownerId,
+            role,
+          }),
+        });
+      let pendingPlace!: Promise<Response>;
+      let pendingStory!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        // Take the files row first: the place-target attach runs inside it,
+        // reads the pre-seeded relation, takes owner locks, and then blocks
+        // on the files lock — exactly the window where a relation may be
+        // committed before its post-lock re-check.
+        await tx
+          .select({ id: tables.files.id })
+          .from(tables.files)
+          .where(eq(tables.files.id, interposedFileId))
+          .for('update');
+        pendingPlace = interposedAttach(
+          'place',
+          interposedPlace.id,
+          'place_photo'
+        );
+        void pendingPlace.finally(() => {});
+        await waitForLockWaiter(tx);
+        // Interpose the new relation (committed only when this tx ends), and
+        // race a story-target attach on the same file that holds that new
+        // owner FOR UPDATE and waits on the files lock as well.
+        await tx.insert(tables.attachments).values({
+          communityId: communityA,
+          fileId: interposedFileId,
+          ownerType: 'story',
+          ownerId: interposedNewStory.id,
+          role: 'story_media',
+          ordinal: 0,
+          createdAt: instant,
+        });
+        pendingStory = interposedAttach(
+          'story',
+          interposedNewStory.id,
+          'story_media'
+        );
+        void pendingStory.finally(() => {});
+        await waitForLockWaiter(tx);
+      });
+      const [interposedPlaceRes, interposedStoryRes] = await Promise.all([
+        withDeadline(pendingPlace, 10_000, 'interposed place-target attach'),
+        withDeadline(pendingStory, 10_000, 'interposed story-target attach'),
+      ]);
+      for (const [label, response] of [
+        ['place-target', interposedPlaceRes],
+        ['story-target', interposedStoryRes],
+      ] as const) {
+        assert.ok(
+          [201, 404].includes(response.status),
+          `interposed ${label} attach must settle with 201 or 404, never 5xx (got ${
+            response.status
+          }: ${await response.text()})`
+        );
+      }
     }
   } finally {
     for (const id of communityIds) {

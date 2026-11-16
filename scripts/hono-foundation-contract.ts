@@ -22,6 +22,7 @@ import {
   authThrottleBackoffMs,
 } from '../src/shared/auth-policy.js';
 import { sha256Hex, toHex } from '../src/shared/auth-crypto.js';
+import { normalizeSearchText } from '../src/shared/utils/search-normalize.js';
 import {
   sessionLifetime,
   sessionRenewalInterval,
@@ -972,7 +973,126 @@ export async function runHonoFoundationContract(
         0,
         'no session row may revive after re-enable'
       );
+
+      // PostgreSQL role-change lock race (#188): a concurrent role change
+      // (editor -> viewer) must hold the same community -> users -> sessions
+      // lock order as the session write, so the raced login either blocks and
+      // then loses the authority gate (zero rows from the INSERT...SELECT's
+      // role re-read) or was established before the change. Never a 5xx,
+      // never a surviving pre-change session.
+      const raceTargetEmail = `race-role-${tag}@example.test`;
+      const [raceTarget] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: raceTargetEmail,
+          role: 'editor',
+          communityId: communityA,
+        })
+        .returning();
+      const raceTargetId = raceTarget.id;
+      // Registered for the cleanup phase: its community is deleted there and
+      // users.community_id is NO ACTION on PostgreSQL.
+      userIds.push(raceTargetId);
+      await db.delete(sessions).where(eq(sessions.userId, raceTargetId));
+      const raceTargetCredentials = {
+        identifier: raceTargetEmail,
+        derivedKey: stretchedKey,
+      };
+      let pendingRoleRaceLogin!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.users)
+          .set({ role: 'viewer' })
+          .where(eq(tables.users.id, raceTargetId));
+        pendingRoleRaceLogin = postLogin(app, raceTargetCredentials, {
+          'x-forwarded-for': '198.51.100.221',
+        });
+        void pendingRoleRaceLogin.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'role-change race never materialised: the login never blocked behind the role change'
+          );
+      });
+      const roleRaceResponse = await pendingRoleRaceLogin;
+      assert.notEqual(
+        roleRaceResponse.status,
+        500,
+        'a concurrent role change must never produce a 5xx'
+      );
+      const roleRaceCookie = roleRaceResponse.headers
+        .get('set-cookie')
+        ?.split(';')[0];
+      // The INSERT...SELECT re-reads the role inside the write; the committed
+      // change (editor -> viewer) no longer matches the read role, so the
+      // gate yields zero rows and the attempt is the uniform 401.
+      assert.equal(
+        roleRaceResponse.status,
+        401,
+        'raced login must lose the authority gate, not survive the role change'
+      );
+      assert.equal(roleRaceCookie, undefined);
+      const roleRaceRows = await db
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(eq(sessions.userId, raceTargetId));
+      assert.equal(
+        roleRaceRows.length,
+        0,
+        'no session may survive a concurrent role change'
+      );
     }
+
+    // Concurrent duplicate-identity create (#188, both dialects): two
+    // same-community creates racing the same normalized identifier — the
+    // unique indexes decide the loser. Exactly one 201 and one 409, never a
+    // 5xx, and exactly one row lands.
+    const raceCreateAdminCookie = await login(adminEmail);
+    const raceCreateEmail = `race-create-${tag}@example.test`;
+    const raceCreateUsername = `racecreate${tag.replace(/-/g, '').slice(0, 12)}`;
+    const createRace = () =>
+      send(app, '/v2/users', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: raceCreateAdminCookie,
+        },
+        body: JSON.stringify({
+          username: raceCreateUsername,
+          email: raceCreateEmail,
+          role: 'viewer',
+        }),
+      });
+    const [createA, createB] = await Promise.allSettled([
+      createRace(),
+      createRace(),
+    ]);
+    const createStatuses = [createA, createB]
+      .map((result) =>
+        result.status === 'fulfilled' ? result.value.status : 500
+      )
+      .sort((left, right) => left - right);
+    assert.deepEqual(
+      createStatuses,
+      [201, 409],
+      'concurrent same-identifier creates must yield exactly one 201 and one 409'
+    );
+    const raceCreated = await db
+      .select({ id: tables.users.id })
+      .from(tables.users)
+      .where(
+        eq(tables.users.emailNormalized, normalizeSearchText(raceCreateEmail))
+      );
+    assert.equal(
+      raceCreated.length,
+      1,
+      'exactly one account may survive a duplicate-identity race'
+    );
+    // The cleanup phase deletes seeded users before their communities; the
+    // raced account must be registered there or the final community delete
+    // violates users.community_id NO ACTION.
+    userIds.push(raceCreated[0]!.id);
 
     // Slice 7 audit existence & content-freedom contract on both SQLite and PostgreSQL (#145)
     const slice7AdminCookie = await login(adminEmail);

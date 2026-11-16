@@ -483,9 +483,13 @@ export class HonoFoundationRepository {
     }
     // SQLite/PostgreSQL: one transaction, and a lost session gate rolls the
     // verifier write back so the pair stays all-or-nothing.
+    // `await` is load-bearing on both dialects: the PostgreSQL transaction is
+    // async, so a bare `return` propagates a `SessionGateLost` rejection past
+    // the `catch` below as an unhandled error — the answer is a 500, not the
+    // truthful `established: false` (§6.8, §7 step 4).
     try {
       if (dialectOf(db) === 'postgresql') {
-        return db.transaction(async (tx: Executor) => {
+        return await db.transaction(async (tx: Executor) => {
           const updated = await verifierUpdate(tx);
           const inserted = await plan.verifiedInsert(tx);
           if (inserted.length === 0) throw new SessionGateLost();
@@ -496,7 +500,7 @@ export class HonoFoundationRepository {
           return { established: true, verifierWritten: updated.length > 0 };
         });
       }
-      return db.transaction((tx: Executor) => {
+      return await db.transaction((tx: Executor) => {
         const updated = verifierUpdate(tx).all();
         const inserted = plan.verifiedInsert(tx).all();
         if (inserted.length === 0) throw new SessionGateLost();

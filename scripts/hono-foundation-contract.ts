@@ -1321,6 +1321,112 @@ export async function runHonoFoundationContract(
         })
         .returning();
       userIds.push(wrappedAccount.id);
+      // Slice 10 (#137): a login and a password change issued while a
+      // concurrent reset holds the users row must both resolve to the
+      // authority gate — the login to the uniform 401, the password change to
+      // 409 — never a 5xx. The reset's uncommitted row is invisible to the
+      // readers; only the coupled writes can see it, through the lock.
+      const coupledEmail = `coupled-pg-${tag}@example.test`;
+      const [coupledAccount] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: coupledEmail,
+          username: `coupled_pg_${tag}`,
+          role: 'viewer',
+          communityId: communityA,
+        })
+        .returning();
+      userIds.push(coupledAccount.id);
+      const coupledCookie = await login(coupledEmail);
+      const newSalt = Buffer.from(
+        crypto.getRandomValues(new Uint8Array(16))
+      ).toString('base64');
+      let loginDone = false;
+      let changeDone = false;
+      let pendingLogin!: Promise<Response>;
+      let pendingChange!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.users)
+          .set({ passwordVerifier: 'reset-during-coupled-write' })
+          .where(eq(tables.users.id, coupledAccount.id));
+        pendingLogin = postLogin(
+          app,
+          { identifier: coupledEmail, derivedKey: stretchedKey },
+          { 'x-forwarded-for': '198.51.100.210' }
+        );
+        void pendingLogin.finally(() => {
+          loginDone = true;
+        });
+        pendingChange = send(app, '/v2/auth/password', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: coupledCookie,
+            'x-forwarded-for': '198.51.100.211',
+          },
+          body: JSON.stringify({
+            currentDerivedKey: stretchedKey,
+            algorithm: ARGON2ID_ALGORITHM,
+            salt: newSalt,
+            params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+            derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+          }),
+        });
+        void pendingChange.finally(() => {
+          changeDone = true;
+        });
+        const deadline = Date.now() + 2000;
+        while ((!loginDone || !changeDone) && Date.now() < deadline) {
+          const blocked = await tx.execute(
+            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+          );
+          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
+          if (blockedRows.length > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            continue;
+          }
+          break;
+        }
+      });
+      const [loginResponse, changeResponse] = await Promise.all([
+        pendingLogin,
+        pendingChange,
+      ]);
+      assert.equal(
+        loginResponse.status,
+        401,
+        'a login racing a coupled password change must answer the uniform 401, never a 5xx'
+      );
+      assert.equal(
+        loginResponse.headers.get('set-cookie'),
+        null,
+        'the raced login must not issue a session cookie'
+      );
+      assert.equal(
+        changeResponse.status,
+        409,
+        'a password change that loses the coupled write must answer 409, never a 5xx'
+      );
+      const coupledAfter = await db
+        .select()
+        .from(tables.users)
+        .where(eq(tables.users.id, coupledAccount.id));
+      assert.equal(
+        coupledAfter[0]!.passwordVerifier,
+        'reset-during-coupled-write',
+        'the concurrent reset must hold the verifier write'
+      );
+      const coupledSessions = await db
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(eq(sessions.userId, coupledAccount.id));
+      assert.equal(
+        coupledSessions.length,
+        1,
+        'a lost coupled write must not mint or rotate a session'
+      );
       const [wrappedBefore] = await db
         .select()
         .from(tables.users)

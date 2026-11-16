@@ -1514,6 +1514,93 @@ export async function runHonoFoundationContract(
         0,
         'a lost coupled write must not mint or rotate a session'
       );
+      // Slice 10 (#137): a password change racing a community deactivation
+      // must never 5xx and must end consistent on both orderings of the
+      // community row. The coupled password write takes the community lock
+      // (FOR SHARE) before its verifier write and its session revoke; the
+      // disable takes the same row (FOR UPDATE) first behind this open
+      // transaction. Both paths order community → users → sessions, so PG
+      // never aborts either side with a deadlock. The committed deactivation
+      // wins: the coupled authority gate matches zero rows when it finally
+      // runs, rolling the pair back and answering 409.
+      if (dialectOf(database) === 'postgresql') {
+        const deactivationEmail = `deactivation-pg-${tag}@example.test`;
+        const [deactivationAccount] = await db
+          .insert(tables.users)
+          .values({
+            ...userDefaults,
+            email: deactivationEmail,
+            username: `deactivation_pg_${tag}`,
+            role: 'viewer',
+            communityId: communityA,
+          })
+          .returning();
+        userIds.push(deactivationAccount.id);
+        const deactivationCookie = await login(deactivationEmail);
+        const deactivationSalt = Buffer.from(
+          crypto.getRandomValues(new Uint8Array(16))
+        ).toString('base64');
+        let pendingDeactivationChange!: Promise<Response>;
+        await db.transaction(async (tx: any) => {
+          await tx
+            .update(tables.communities)
+            .set({ isActive: false })
+            .where(eq(tables.communities.id, communityA));
+          pendingDeactivationChange = send(app, '/v2/auth/password', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              cookie: deactivationCookie,
+              'x-forwarded-for': '198.51.100.212',
+            },
+            body: JSON.stringify({
+              currentDerivedKey: stretchedKey,
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: deactivationSalt,
+              params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+              derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+            }),
+          });
+          pendingDeactivationChange.then(ignore, ignore);
+          const observed = await waitForBlocked(tx, 1, Date.now() + 4000);
+          if (observed < 1)
+            throw new Error(
+              'deactivation race never materialised: the password change never blocked behind the disable'
+            );
+        });
+        const deactivationResponse = await pendingDeactivationChange;
+        assert.equal(
+          deactivationResponse.status,
+          409,
+          `a password change racing a community deactivation must lose the authority gate and answer 409, never a 5xx (got ${deactivationResponse.status})`
+        );
+        // The disable's committed authority revokes every session of the
+        // account; the losing coupled write must not mint one either.
+        const deactivationRows = await db
+          .select({ id: sessions.id })
+          .from(sessions)
+          .where(eq(sessions.userId, deactivationAccount.id));
+        assert.equal(
+          deactivationRows.length,
+          0,
+          'a deactivation that wins the race must revoke every session and the coupled write must not mint one'
+        );
+        const deactivationPassword = await db
+          .select({ passwordVerifier: tables.users.passwordVerifier })
+          .from(tables.users)
+          .where(eq(tables.users.id, deactivationAccount.id));
+        assert.equal(
+          deactivationPassword[0]!.passwordVerifier,
+          stretchedVerifier,
+          'the losing coupled write must roll back, leaving the stored verifier unchanged'
+        );
+        await updateCommunity(communityA, { isActive: true });
+        await status(
+          me(deactivationCookie),
+          401,
+          'the pre-race cookie must stay rejected after re-enable'
+        );
+      }
       const [wrappedBefore] = await db
         .select()
         .from(tables.users)

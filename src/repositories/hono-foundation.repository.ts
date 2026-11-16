@@ -465,8 +465,29 @@ export class HonoFoundationRepository {
     const role = parseV2Role(input.user.role);
     if (!role) return { established: false, verifierWritten: false };
     const db = this.database;
-    const { users } = this.tables;
+    const { users, communities } = this.tables;
     const sessions = this.sessions;
+    // Community → users → sessions lock order (Greptile): the coupled write
+    // revokes the user's sessions, and a concurrent community deactivation
+    // locks the community row first and then revokes those same sessions in a
+    // trigger. Taking the community row before the verifier write and any
+    // session delete keeps both paths ordering the same way, so PG never
+    // aborts one of them with a deadlock. In PostgreSQL the lock is
+    // `FOR SHARE` (many coupled writers may hold it, the disable's `FOR
+    // UPDATE` waits for them) and in SQLite the read runs inside the
+    // single-writer transaction before the first write. A null-community
+    // account (e.g. `super_admin`) has no community row to lock.
+    const acquireCommunityFirst = (database: Executor): unknown => {
+      if (input.user.communityId === null) return undefined;
+      const lock = database
+        .select({ id: communities.id })
+        .from(communities)
+        .where(eq(communities.id, input.user.communityId));
+      if (dialectOf(this.database) === 'postgresql') return lock.for('share');
+      // better-sqlite3 executes synchronously; the select is issued inside
+      // the transaction before the first write.
+      return lock.all();
+    };
     // The verifier write and the session insert share one authority anchor, so
     // either both land or neither does.
     const verifierUpdate = (database: Executor) =>
@@ -560,6 +581,8 @@ export class HonoFoundationRepository {
     try {
       if (dialectOf(db) === 'postgresql') {
         return await db.transaction(async (tx: Executor) => {
+          // Community → users → sessions before any write (acquireCommunityFirst).
+          await acquireCommunityFirst(tx);
           const updated = await verifierUpdate(tx);
           if (updated.length === 0) throw new SessionGateLost();
           // Explicit revocation: a same-verifier write never fires the
@@ -575,6 +598,8 @@ export class HonoFoundationRepository {
         });
       }
       return await db.transaction((tx: Executor) => {
+        // Community → users → sessions before any write (acquireCommunityFirst).
+        acquireCommunityFirst(tx);
         const updated = verifierUpdate(tx).all();
         if (updated.length === 0) throw new SessionGateLost();
         // Explicit revocation: a same-verifier write never fires the

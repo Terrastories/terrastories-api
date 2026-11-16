@@ -32,8 +32,10 @@ const app = createHonoApp({
   storage: await createLocalStorage(
     process.env.HONO_STORAGE_ROOT ?? './uploads'
   ),
-  // Only a configured reverse proxy makes forwarded headers trustworthy; the
-  // socket peer address is the fallback (finding E).
+  // Only a configured reverse proxy makes forwarded headers trustworthy. The
+  // per-IP throttle then keys on the rightmost X-Forwarded-For entry — the
+  // one the trusted proxy appended — or X-Real-IP when the proxy sets it;
+  // without TRUSTED_PROXY the socket peer address is the limit (finding E).
   trustProxy: /^(1|true|yes)$/i.test(process.env.TRUSTED_PROXY ?? ''),
   clientAddress: (c) => getConnInfo(c).remote.address ?? null,
 });

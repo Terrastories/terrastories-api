@@ -617,11 +617,10 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     });
     expect(ok.status).toBe(200);
     const after = await db.select().from(authThrottleSqlite);
-    // Finding E: a successful login clears only the per-account counter; the
-    // per-IP row survives so one account's success cannot wipe a shared
-    // address's guessing record.
-    expect(after).toHaveLength(1);
-    expect(after[0]?.kind).toBe('ip');
+    // §6.8 — "counters reset on success" (SPEC-V2 §6.10): a successful login
+    // clears both the account's and the address's counters; a shared NAT must
+    // not lock out the community because of a stranger's typos.
+    expect(after).toHaveLength(0);
   });
 
   it('blocks the per-account counter at the backoff threshold and refuses the correct key', async () => {

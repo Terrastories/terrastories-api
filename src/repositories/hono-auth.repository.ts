@@ -8,7 +8,7 @@
  * fakes, audit rows — lives in one reviewable place. It is transport-agnostic:
  * SQLite/D1, PostgreSQL and the Workers D1 batch share the same methods.
  */
-import { and, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -602,18 +602,25 @@ export class HonoAuthRepository {
   }
 
   /**
-   * Clear one account's failure counter after a successful login (§6.8).
-   *
-   * The per-IP counter is deliberately left alone (finding E): a shared NAT or
-   * proxy address carries many accounts, so one successful login must not
-   * wipe the per-IP record of the guesses that preceded it.
+   * Clear the account's and the client address's failure counters after a
+   * successful login (§6.8 — "counters reset on success"). A shared NAT or
+   * proxy address carrying many accounts must not let ten unrelated typos
+   * lock the whole community out for an exponentially growing backoff when
+   * anyone behind it authenticates correctly.
    */
-  async resetAccountThrottle(accountId: number, secret: string): Promise<void> {
+  async resetAccountThrottle(
+    accountId: number,
+    clientIp: string,
+    secret: string
+  ): Promise<void> {
     const throttle = this.tables.authThrottle;
     await this.db
       .delete(throttle)
       .where(
-        eq(throttle.key, await this.accountThrottleKey(accountId, secret))
+        inArray(throttle.key, [
+          await this.accountThrottleKey(accountId, secret),
+          await this.ipThrottleKey(clientIp, secret),
+        ])
       );
   }
 

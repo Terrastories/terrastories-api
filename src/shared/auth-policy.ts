@@ -263,10 +263,12 @@ function usableIp(value: string | null | undefined): string | null {
  *
  * Trust is explicit (finding E): `cf-connecting-ip` is honoured only on
  * Workers, where the platform sets it and a client cannot forge it;
- * `x-forwarded-for` only when a trusted proxy is configured; otherwise the
- * transport's own peer address. Anything unusable becomes the `unknown`
- * bucket, so a request without a usable address still feeds exactly one
- * per-IP counter.
+ * `x-real-ip` when the trusted proxy sets it, or the rightmost entry of
+ * `x-forwarded-for` — the only entry the trusted proxy itself appended (a
+ * leftmost entry is caller-controlled under any proxy that passes mixed
+ * chains); otherwise the transport's own peer address. Anything unusable
+ * becomes the `unknown` bucket, so a request without a usable address still
+ * feeds exactly one per-IP counter.
  */
 export function clientIpOf(
   headers: Headers,
@@ -277,11 +279,20 @@ export function clientIpOf(
     if (fromCf !== null) return fromCf;
   }
   if (options.trustProxy === true) {
-    for (const name of ['x-forwarded-for', 'x-real-ip'] as const) {
-      const raw = headers.get(name);
-      if (raw === null) continue;
-      const first = name === 'x-forwarded-for' ? raw.split(',')[0] : raw;
-      const value = usableIp(first);
+    // The proxy appends the peer address to the END of the chain — the
+    // rightmost entry is the only one the trusted proxy vouches for. Taking
+    // the leftmost instead would let every caller steer its own per-IP
+    // bucket, and X-Real-IP, when a proxy sets it, is the proxy's own view
+    // of the client and wins over X-Forwarded-For.
+    const real = headers.get('x-real-ip');
+    if (real !== null) {
+      const value = usableIp(real);
+      if (value !== null) return value;
+    }
+    const raw = headers.get('x-forwarded-for');
+    if (raw !== null) {
+      const last = raw.split(',').pop();
+      const value = usableIp(last);
       if (value !== null) return value;
     }
   }

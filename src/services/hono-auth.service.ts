@@ -299,7 +299,7 @@ export class HonoAuthService {
     // row between the read and the write): a uniform failure and no session.
     if (!established)
       return this.reject(account, clientIp, userAgent, now, secret);
-    await this.repository.resetAccountThrottle(account.id, secret);
+    await this.repository.resetAccountThrottle(account.id, clientIp, secret);
     await this.auditAuthEvent({
       communityId: account.communityId,
       actorId: account.id,
@@ -614,7 +614,7 @@ export class HonoAuthService {
       return null;
     }
     if (secret !== undefined && secret !== '')
-      await this.repository.resetAccountThrottle(account.id, secret);
+      await this.repository.resetAccountThrottle(account.id, clientIp, secret);
     await this.auditAuthEvent({
       communityId: account.communityId,
       actorId: account.id,

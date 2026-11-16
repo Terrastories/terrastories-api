@@ -20,6 +20,14 @@ export function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/** Base64url of a byte array (no padding, `-` and `_` alphabets). */
+export function toBase64Url(bytes: Uint8Array): string {
+  return toBase64(bytes)
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '');
+}
+
 /** Decode lowercase/uppercase hex into bytes. */
 export function fromHex(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
@@ -53,6 +61,26 @@ export async function hmacSha256Hex(
     encoder.encode(input)
   );
   return toHex(new Uint8Array(signature));
+}
+
+/** HMAC-SHA256 of a UTF-8 input under a UTF-8 secret, raw digest bytes. */
+export async function hmacSha256Bytes(
+  secret: string,
+  input: string
+): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    encoder.encode(input)
+  );
+  return new Uint8Array(signature);
 }
 
 /**

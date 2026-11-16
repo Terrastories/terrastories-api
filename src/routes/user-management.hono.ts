@@ -17,6 +17,11 @@ import {
 export interface UserManagementRoutesOptions {
   repository: UserManagementRepository;
   publicOrigin?: string;
+  /**
+   * Prelogin-style HMAC key (`AUTH_SERVER_SECRET`). Without it the
+   * device-session handle endpoints fail closed with 503.
+   */
+  serverSecret?: string;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -32,7 +37,9 @@ export function registerUserManagementRoutes(
   app: Hono<any>,
   options: UserManagementRoutesOptions
 ): void {
-  const service = new UserManagementService(options.repository);
+  const service = new UserManagementService(options.repository, {
+    serverSecret: options.serverSecret,
+  });
 
   app.get('/v2/users', async (c) => {
     const actor = actorOf(c);
@@ -97,12 +104,12 @@ export function registerUserManagementRoutes(
     return respond(c, result);
   });
 
-  app.delete('/v2/users/:id/sessions/:sessionId', async (c) => {
+  app.delete('/v2/users/:id/sessions/:handle', async (c) => {
     const actor = actorOf(c);
     const result = await service.revokeSession(
       actor,
       c.req.param('id'),
-      c.req.param('sessionId')
+      c.req.param('handle')
     );
     return respond(c, result);
   });

@@ -24,7 +24,13 @@ import {
 import type { FoundationUser } from '../repositories/hono-foundation.repository.js';
 import { userStatusFromPhysical } from '../policy/canonical-state.js';
 import { deriveUserIdentityColumns } from '../shared/utils/derived-columns.js';
-import { sha256Hex, toHex } from '../shared/auth-crypto.js';
+import {
+  sha256Hex,
+  toHex,
+  constantTimeEqual,
+  hmacSha256Bytes,
+  toBase64Url,
+} from '../shared/auth-crypto.js';
 import {
   ARGON2ID_ALGORITHM,
   ADMIN_ISSUED_CODE_TTL_MS,
@@ -38,7 +44,8 @@ import {
   CreateManagedUserRequestSchema,
   ListUsersQuerySchema,
   PatchManagedUserRequestSchema,
-  SESSION_ID_PATTERN,
+  SESSION_HANDLE_PATTERN,
+  DEVICE_SESSION_HANDLE_LENGTH,
   type ManagedUser,
   type ManagedUserListResponse,
 } from '../shared/schemas/users-admin.js';
@@ -67,7 +74,7 @@ export const LAST_ADMIN_BODY = Object.freeze({
 export type UserManagementResult<T> =
   | { status: 200 | 201; body: T }
   | { status: 204 }
-  | { status: 400 | 403 | 404 | 409 | 500; body: V2ErrorResponse };
+  | { status: 400 | 403 | 404 | 409 | 500 | 503; body: V2ErrorResponse };
 
 export interface AdminUserManagementCaller {
   actorId: number;
@@ -80,8 +87,58 @@ const base64Url = (bytes: Uint8Array): string =>
     .replaceAll('/', '_')
     .replace(/=+$/, '');
 
+/**
+ * Prelogin-style fail-closed body for an unconfigured deployment secret
+ * (§7): the session-handle surface cannot compute handles without it.
+ */
+export const HANDLE_SERVICE_UNAVAILABLE_BODY: V2ErrorResponse = Object.freeze({
+  error: 'Service unavailable',
+});
+
+/**
+ * Input of the HMAC that binds a device-session handle to this deployment.
+ * Never a token digest and never a session id.
+ */
+const SESSION_HANDLE_INPUT_PREFIX = 'session-handle:';
+
 export class UserManagementService {
-  constructor(private readonly repository: UserManagementRepository) {}
+  private readonly serverSecret?: string;
+
+  constructor(
+    private readonly repository: UserManagementRepository,
+    options: { serverSecret?: string } = {}
+  ) {
+    this.serverSecret = options.serverSecret;
+  }
+
+  /**
+   * Opaque, per-deployment handle for a session id (base64url HMAC-SHA256
+   * truncated to 22 chars). Verifies nothing about possession; it only names
+   * the session without exposing the raw id (which is a token digest).
+   */
+  private async sessionHandle(sessionId: string): Promise<string> {
+    const digest = await hmacSha256Bytes(
+      this.serverSecret as string,
+      `${SESSION_HANDLE_INPUT_PREFIX}${sessionId}`
+    );
+    return toBase64Url(digest).slice(0, DEVICE_SESSION_HANDLE_LENGTH);
+  }
+
+  /** Constant-time handle resolution against a target's live device sessions. */
+  private async resolveSessionHandle(
+    targetUserId: number,
+    handle: string
+  ): Promise<string | null> {
+    const rows = await this.repository.listDeviceSessions(
+      targetUserId,
+      new Date()
+    );
+    for (const row of rows) {
+      const candidate = await this.sessionHandle(row.id);
+      if (constantTimeEqual(candidate, handle)) return row.id;
+    }
+    return null;
+  }
 
   /**
    * The shared authority gate: canonical `admin` of a non-null community.
@@ -592,7 +649,7 @@ export class UserManagementService {
   ): Promise<
     UserManagementResult<{
       data: Array<{
-        id: string;
+        handle: string;
         kind: 'device';
         createdAt: string;
         lastSeenAt: string | null;
@@ -604,6 +661,9 @@ export class UserManagementService {
     // The registry §6 lists Device sessions of an own-community account for
     // the user-management admin; the registry does not grant an account-owner
     // exception for non-admins, so self-service stays on /v2/auth/revoke.
+    if (!this.serverSecret) {
+      return { status: 503, body: HANDLE_SERVICE_UNAVAILABLE_BODY };
+    }
     const caller = await this.authorizeCaller(actor, {
       allowDisabledCommunity: false,
     });
@@ -622,27 +682,34 @@ export class UserManagementService {
     );
     const iso = (value: number | null) =>
       value === null ? null : new Date(value).toISOString();
+    const data = await Promise.all(
+      rows.map(async (row) => ({
+        handle: await this.sessionHandle(row.id),
+        kind: 'device' as const,
+        createdAt:
+          row.createdAt === null ? '' : new Date(row.createdAt).toISOString(),
+        lastSeenAt: iso(row.lastSeenAt),
+        idleExpiresAt: iso(row.idleExpiresAt),
+        absoluteExpiresAt: iso(row.absoluteExpiresAt),
+      }))
+    );
     return {
       status: 200,
-      body: {
-        data: rows.map((row) => ({
-          id: row.id,
-          kind: 'device',
-          createdAt:
-            row.createdAt === null ? '' : new Date(row.createdAt).toISOString(),
-          lastSeenAt: iso(row.lastSeenAt),
-          idleExpiresAt: iso(row.idleExpiresAt),
-          absoluteExpiresAt: iso(row.absoluteExpiresAt),
-        })),
-      },
+      body: { data },
     };
   }
 
   async revokeSession(
     actor: FoundationUser,
     idParam: string,
-    sessionId: string
+    handle: string
   ): Promise<UserManagementResult<never>> {
+    // Handles are resolved by computing one for every live device session of
+    // the target (a bounded, already user-scoped set) and comparing in
+    // constant time — the raw id is never supplied or accepted.
+    if (!this.serverSecret) {
+      return { status: 503, body: HANDLE_SERVICE_UNAVAILABLE_BODY };
+    }
     const caller = await this.authorizeCaller(actor, {
       allowDisabledCommunity: false,
     });
@@ -650,7 +717,7 @@ export class UserManagementService {
     if (!isDatabaseIdString(idParam)) {
       return { status: 404, body: NOT_FOUND_BODY };
     }
-    if (!SESSION_ID_PATTERN.test(sessionId)) {
+    if (!SESSION_HANDLE_PATTERN.test(handle)) {
       return { status: 404, body: NOT_FOUND_BODY };
     }
     const target = await this.repository.findCommunityUser(
@@ -658,6 +725,8 @@ export class UserManagementService {
       Number(idParam)
     );
     if (!target) return { status: 404, body: NOT_FOUND_BODY };
+    const sessionId = await this.resolveSessionHandle(target.id, handle);
+    if (sessionId === null) return { status: 404, body: NOT_FOUND_BODY };
     const revoked = await this.repository.revokeDeviceSession({
       userId: target.id,
       sessionId,

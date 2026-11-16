@@ -1,10 +1,13 @@
 /**
  * Focused tests for the Slice 11a device-session list/revoke routes (#188):
- * GET /v2/users/:id/sessions and DELETE /v2/users/:id/sessions/:sessionId —
+ * GET /v2/users/:id/sessions and DELETE /v2/users/:id/sessions/:handle —
  * SPEC-V2 §6.8 (Session), §7 (Sessions); route registry §6. Metadata only —
- * never token digests; revoke sets the §6.8 tombstone (revoked_at/revoked_by).
+ * never token digests and never the raw session id; the wire carries an
+ * opaque per-deployment handle (base64url HMAC-SHA256 truncated to 22 chars).
+ * Revoke sets the §6.8 tombstone (revoked_at/revoked_by).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { createHmac } from 'node:crypto';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -33,6 +36,7 @@ const API_ORIGIN = 'https://api.example.test';
 let app: ReturnType<typeof createHonoApp>;
 const ids: Record<string, number> = {};
 const cookies: Record<string, string> = {};
+const serverSecret = makeServerSecret();
 
 async function insertRow<T extends { $inferInsert: Record<string, unknown> }>(
   table: any,
@@ -204,7 +208,7 @@ beforeAll(async () => {
     secureCookies: false,
     publicOrigin: API_ORIGIN,
     storage: { read: async () => null },
-    serverSecret: makeServerSecret(),
+    serverSecret,
   });
 
   cookies.admin = await loginAs('admin@own.example.test', ids.own!);
@@ -287,7 +291,7 @@ describe('device-session list/revoke authority gates (registry §6, §6.8)', () 
 });
 
 describe('GET /v2/users/:id/sessions', () => {
-  it('lists only live device sessions, metadata only, never token hashes', async () => {
+  it('lists only live device sessions, metadata only, never token hashes or raw ids', async () => {
     // Fresh device session for the member; the seeded standard session stays.
     const deviceCookie = await loginAs(
       'member@own.example.test',
@@ -304,39 +308,70 @@ describe('GET /v2/users/:id/sessions', () => {
       data: Array<Record<string, unknown>>;
     };
     expect(body.data.length).toBeGreaterThanOrEqual(1);
+    const sessionRows = await db
+      .select({
+        id: tables.sessions.id,
+        tokenHash: tables.sessions.tokenHash,
+        kind: tables.sessions.kind,
+        revokedAt: tables.sessions.revokedAt,
+        idleExpiresAt: tables.sessions.idleExpiresAt,
+        absoluteExpiresAt: tables.sessions.absoluteExpiresAt,
+        expiresAt: tables.sessions.expiresAt,
+      })
+      .from(tables.sessions)
+      .where(eq(tables.sessions.userId, ids.uMember!));
     for (const session of body.data) {
       expect(session.kind).toBe('device');
-      expect(typeof session.id).toBe('string');
+      expect(typeof session.handle).toBe('string');
+      expect(String(session.handle)).toMatch(/^[A-Za-z0-9_-]{22}$/);
       expect(Object.keys(session).sort()).toEqual([
         'absoluteExpiresAt',
         'createdAt',
-        'id',
+        'handle',
         'idleExpiresAt',
         'kind',
         'lastSeenAt',
       ]);
+      // The handle is never the raw session id (a token digest) and never
+      // equals a stored token hash.
+      for (const row of sessionRows) {
+        expect(session.handle).not.toBe(row.id);
+        expect(session.handle).not.toBe(row.tokenHash);
+      }
       const created = new Date(session.createdAt as string).getTime();
       const idle = new Date(session.idleExpiresAt as string).getTime();
       expect(Number.isFinite(created)).toBe(true);
       expect(idle - created).toBe(DEVICE_WINDOW_MS);
     }
-    // The standard session of the member is not listed.
-    const standardIds = (
-      await db
-        .select({ id: tables.sessions.id })
-        .from(tables.sessions)
-        .where(eq(tables.sessions.userId, ids.uMember!))
-    ).map((row) => row.id);
-    const listedIds = body.data.map((row) => row.id);
-    for (const listed of listedIds) {
-      expect(standardIds).toContain(listed);
+    // The standard session of the member is not listed (and the raw id is
+    // not on the wire).
+    const listedHandles = body.data.map((row) => String(row.handle));
+    for (const row of sessionRows) {
+      expect(listedHandles).not.toContain(row.id);
+      expect(listedHandles).not.toContain(row.tokenHash);
     }
+    // The handle is defined exactly as
+    // base64url(HMAC-SHA256(serverSecret, "session-handle:" + sessions.id))
+    // truncated to 22 chars — re-derive it for the live device rows.
+    const nowMs = Date.now();
+    const expectedHandles = sessionRows
+      .filter((row) => row.kind === 'device' && row.revokedAt === null)
+      .filter((row) => Number(row.expiresAt) > nowMs)
+      .map((row) =>
+        createHmac('sha256', serverSecret)
+          .update(`session-handle:${row.id}`, 'utf8')
+          .digest()
+      )
+      .map((digest) => digest.toString('base64url').slice(0, 22))
+      .sort();
+    expect([...listedHandles].sort()).toEqual(expectedHandles);
     const kinds = await db
       .select({ id: tables.sessions.id, kind: tables.sessions.kind })
       .from(tables.sessions)
       .where(eq(tables.sessions.userId, ids.uMember!));
-    const listedKinds = kinds.filter((row) => listedIds.includes(row.id));
-    expect(listedKinds.every((row) => row.kind === 'device')).toBe(true);
+    expect(
+      kinds.filter((row) => row.kind === 'device').length
+    ).toBeGreaterThanOrEqual(listedHandles.length);
   });
 
   it('returns an empty list when the account holds no live device sessions', async () => {
@@ -348,8 +383,8 @@ describe('GET /v2/users/:id/sessions', () => {
   });
 });
 
-describe('DELETE /v2/users/:id/sessions/:sessionId', () => {
-  it('revokes a device session (tombstone) and the account re-authenticates without it', async () => {
+describe('DELETE /v2/users/:id/sessions/:handle', () => {
+  it('revokes a device session by handle (tombstone) and the account re-authenticates without it', async () => {
     // Fresh device session for member2 to revoke.
     const deviceCookie = await loginAs(
       'member2@own.example.test',
@@ -361,13 +396,13 @@ describe('DELETE /v2/users/:id/sessions/:sessionId', () => {
       `/v2/users/${ids.uMember2}/sessions`,
       { cookie: cookies.admin }
     );
-    const listed = (list.json as { data: Array<{ id: string }> }).data;
+    const listed = (list.json as { data: Array<{ handle: string }> }).data;
     expect(listed.length).toBeGreaterThanOrEqual(1);
-    const sessionId = listed[0]!.id;
+    const handle = listed[0]!.handle;
 
     const res = await requestJson(
       'DELETE',
-      `/v2/users/${ids.uMember2}/sessions/${sessionId}`,
+      `/v2/users/${ids.uMember2}/sessions/${handle}`,
       { cookie: cookies.admin }
     );
     expect(res.status).toBe(204);
@@ -380,15 +415,16 @@ describe('DELETE /v2/users/:id/sessions/:sessionId', () => {
     expect(after.status).toBe(401);
 
     // The tombstone carries revoked_by (the acting admin), not a deletion.
-    const [row] = await db
+    const underlying = await db
       .select({
+        id: tables.sessions.id,
         revokedAt: tables.sessions.revokedAt,
         revokedBy: tables.sessions.revokedBy,
       })
       .from(tables.sessions)
-      .where(eq(tables.sessions.id, sessionId));
-    expect(row?.revokedAt).not.toBeNull();
-    expect(row?.revokedBy).toBe(ids.uAdmin);
+      .where(eq(tables.sessions.userId, ids.uMember2!));
+    const revoked = underlying.find((row) => row.revokedAt !== null);
+    expect(revoked?.revokedBy).toBe(ids.uAdmin);
 
     // The member2 account's standard sessions are untouched.
     const member2Standard = await loginAs('member2@own.example.test', ids.own!);
@@ -397,7 +433,8 @@ describe('DELETE /v2/users/:id/sessions/:sessionId', () => {
     });
     expect(me.status).toBe(200);
 
-    // Audited, without the session identifier.
+    // Audited, without the session handle nor the underlying raw id.
+    const sessionIds = underlying.map((row) => row.id);
     const auditRows = await db
       .select()
       .from(tables.auditEntries)
@@ -407,12 +444,16 @@ describe('DELETE /v2/users/:id/sessions/:sessionId', () => {
     for (const row of auditRows) {
       expect(row.resourceType).toBe('session');
       expect(row.resourceIds).toEqual([]);
-      expect(JSON.stringify(row)).not.toContain(sessionId);
+      const serialized = JSON.stringify(row);
+      expect(serialized).not.toContain(handle);
+      for (const sessionId of sessionIds) {
+        expect(serialized).not.toContain(sessionId);
+      }
       expect(row.communityId).toBe(ids.own);
     }
   });
 
-  it('returns 404 for standard sessions, wrong users, foreign sessions and replays', async () => {
+  it('returns 404 for standard sessions, wrong users, foreign handles and replays', async () => {
     // Seed a fresh standard session for member2 and try to revoke it as a device session.
     await loginAs('member2@own.example.test', ids.own!);
     const standard = await db
@@ -421,14 +462,15 @@ describe('DELETE /v2/users/:id/sessions/:sessionId', () => {
       .where(eq(tables.sessions.userId, ids.uMember2!));
     const standardId = standard.find((row) => row.kind === 'standard')?.id;
     expect(standardId).toBeDefined();
-    const res = await requestJson(
+    const standardAsHandle = await requestJson(
       'DELETE',
       `/v2/users/${ids.uMember2}/sessions/${standardId}`,
       { cookie: cookies.admin }
     );
-    expect(res.status).toBe(404);
+    expect(standardAsHandle.status).toBe(404);
 
-    // A device session of a DIFFERENT user cannot be revoked via this path.
+    // A device session of a DIFFERENT user cannot be revoked via this path:
+    // its handle resolves only against the target user's own live sessions.
     const deviceCookie = await loginAs(
       'member@own.example.test',
       ids.own!,
@@ -440,11 +482,12 @@ describe('DELETE /v2/users/:id/sessions/:sessionId', () => {
       `/v2/users/${ids.uMember}/sessions`,
       { cookie: cookies.admin }
     );
-    const memberSession = (memberList.json as { data: Array<{ id: string }> })
-      .data[0]!.id;
+    const memberHandle = (
+      memberList.json as { data: Array<{ handle: string }> }
+    ).data[0]!.handle;
     const wrongUser = await requestJson(
       'DELETE',
-      `/v2/users/${ids.uMember2}/sessions/${memberSession}`,
+      `/v2/users/${ids.uMember2}/sessions/${memberHandle}`,
       { cookie: cookies.admin }
     );
     expect(wrongUser.status).toBe(404);
@@ -452,18 +495,18 @@ describe('DELETE /v2/users/:id/sessions/:sessionId', () => {
     // Replaying the revoke is a 404, not a double effect.
     const first = await requestJson(
       'DELETE',
-      `/v2/users/${ids.uMember}/sessions/${memberSession}`,
+      `/v2/users/${ids.uMember}/sessions/${memberHandle}`,
       { cookie: cookies.admin }
     );
     expect(first.status).toBe(204);
     const replay = await requestJson(
       'DELETE',
-      `/v2/users/${ids.uMember}/sessions/${memberSession}`,
+      `/v2/users/${ids.uMember}/sessions/${memberHandle}`,
       { cookie: cookies.admin }
     );
     expect(replay.status).toBe(404);
 
-    // Malformed session ids never reach the database.
+    // Malformed handles never reach the database.
     const bad = await requestJson(
       'DELETE',
       `/v2/users/${ids.uMember2}/sessions/not valid!!`,

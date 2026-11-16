@@ -480,6 +480,7 @@ export function createHonoApp(options: FoundationOptions) {
   registerUserManagementRoutes(app, {
     repository: new UserManagementRepository(options.repository.connection),
     publicOrigin: configuredOrigin,
+    serverSecret: options.serverSecret,
   });
   // Transitional Explore read adapter (#198): Rails-shaped public reads for
   // the existing Explore client; removed once the V2 frontend is canonical.

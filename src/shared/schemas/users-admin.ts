@@ -139,21 +139,28 @@ export type AdminLoginCodeResponse = z.infer<
   typeof AdminLoginCodeResponseSchema
 >;
 
-/** Metadata-only device-session projection (never tokens or hashes). */
+/**
+ * Metadata-only device-session projection (never tokens, hashes or the raw
+ * session id). `handle` is an opaque, deployment-secret-bound reference:
+ * base64url(HMAC-SHA256(AUTH_SERVER_SECRET, "session-handle:" + sessions.id))
+ * truncated to 22 chars. It cannot be reversed into the session id and is
+ * stable across list/revoke within one deployment.
+ */
+export const DEVICE_SESSION_HANDLE_LENGTH = 22;
+export const SESSION_HANDLE_PATTERN = /^[A-Za-z0-9_-]{22}$/;
+
 export const DeviceSessionSchema = z.object({
-  id: z.string().min(1).max(64),
+  handle: z.string().regex(SESSION_HANDLE_PATTERN),
   kind: z.literal('device'),
   createdAt: z.string().datetime(),
   lastSeenAt: z.string().datetime().nullable(),
   idleExpiresAt: z.string().datetime().nullable(),
   absoluteExpiresAt: z.string().datetime().nullable(),
 });
+
 export const DeviceSessionListResponseSchema = z.object({
   data: z.array(DeviceSessionSchema),
 });
 export type DeviceSessionListResponse = z.infer<
   typeof DeviceSessionListResponseSchema
 >;
-
-/** Session path parameter: opaque, 1..64 chars, no separators. */
-export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;

@@ -5340,7 +5340,7 @@ export async function createFixture(
     const mediaMetadataCheck = (body: unknown): boolean =>
       MediaMetadataResponseSchema.safeParse(body).success;
     let qaManagedUserId = 0;
-    let userManagedSessionId = '';
+    let userManagedSessionHandle = '';
     let qaStageFileId = '';
     let qaStageFile2Id = '';
     let qaAudioFileId = '';
@@ -5363,7 +5363,7 @@ export async function createFixture(
       expected: 204,
       useSavedCookie: 'qaAdminCookie',
       prepare: () =>
-        `/v2/users/${qaManagedUserId}/sessions/${userManagedSessionId}`,
+        `/v2/users/${qaManagedUserId}/sessions/${userManagedSessionHandle}`,
     };
     // Cross-community negatives for a private-community admin (#188).
     const privateAdminUserManagementSteps: Step[] = [
@@ -5727,19 +5727,24 @@ export async function createFixture(
           const rows = (
             body as {
               data?: Array<{
-                id?: unknown;
+                handle?: unknown;
                 kind?: unknown;
                 tokenHash?: unknown;
+                id?: unknown;
               }>;
             }
           )?.data;
           if (!Array.isArray(rows) || rows.length !== 1) return false;
           const session = rows[0]!;
           if (session.kind !== 'device') return false;
-          if (typeof session.id !== 'string' || session.id.length === 0)
+          if (
+            typeof session.handle !== 'string' ||
+            session.handle.length !== 22
+          )
             return false;
-          if ('tokenHash' in session) return false;
-          userManagedSessionId = session.id;
+          // The raw session id (a token digest) never reaches the wire.
+          if ('id' in session || 'tokenHash' in session) return false;
+          userManagedSessionHandle = session.handle;
           return true;
         },
       },

@@ -423,6 +423,51 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     expect(body.params).toEqual(JSON.parse(passwordParams));
   });
 
+  it('answers an existing below-policy Argon2id row with its stored shape, not a fake', async () => {
+    // A future policy raise must not flip today's below-policy rows into
+    // fakes: the row answers with its stored shape, so the client can react.
+    const { app, db } = await setup();
+    const passwordSalt = base64(16);
+    const belowParams = { memoryKiB: 8 * 1024, iterations: 1, parallelism: 1 };
+    const passwordParams = JSON.stringify(belowParams);
+    await db.insert(usersSqlite).values({
+      passwordHash: (await hash('BelowPolicyPrelogin123!', 4)).replace(
+        '$2b$',
+        '$2a$'
+      ),
+      firstName: 'Below',
+      lastName: 'Policy',
+      isActive: true as const,
+      email: 'below-policy@prelogin.test',
+      username: 'below_policy_alpha',
+      emailNormalized: normalizeSearchText('below-policy@prelogin.test'),
+      usernameNormalized: normalizeSearchText('below_policy_alpha'),
+      role: 'member',
+      communityId: (
+        await db
+          .select({ id: communitiesSqlite.id })
+          .from(communitiesSqlite)
+          .where(eq(communitiesSqlite.slug, 'prelogin-alpha'))
+      )[0]!.id,
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordSalt,
+      passwordParams,
+      passwordVerifier: base64(32),
+    });
+    const response = await postPrelogin(app, {
+      identifier: 'below-policy@prelogin.test',
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      algorithm: string;
+      salt: string;
+      params: { memoryKiB: number; iterations: number; parallelism: number };
+    };
+    expect(body.algorithm).toBe(ARGON2ID_ALGORITHM);
+    expect(body.salt).toBe(passwordSalt);
+    expect(body.params).toEqual(belowParams);
+  });
+
   it('gives every fake bcrypt salt a Rails-shaped 22nd character', async () => {
     // A real bcrypt salt ends in one of `.Oeu` — its last character carries
     // two significant bits (finding C). A fake must match that shape.

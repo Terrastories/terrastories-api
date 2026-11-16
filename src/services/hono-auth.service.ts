@@ -32,7 +32,7 @@ import {
   DERIVED_KEY_PATTERN,
   RAILS_BCRYPT_ALGORITHM,
   AuthLoginRejected,
-  argon2idParamsSatisfyPolicy,
+  isWellFormedArgon2idParams,
   isCanonicalArgon2idParams,
   isCanonicalBcryptSalt,
   isCanonicalVerifierSalt,
@@ -149,22 +149,23 @@ export class HonoAuthService {
   }
 
   /**
-   * Whether a stored verifier row carries the canonical shape the fake mirrors
-   * (SPEC-V2 §7 step 1): the one Argon2id salt length and params, or the
-   * 22-character bcrypt salt with a cost a Rails row actually carries.
+   * Whether a stored verifier row carries a usable shape for the fake mirror
+   * (SPEC-V2 §7 step 1): an Argon2id salt with any well-formed params shape,
+   * or the 22-character bcrypt salt with a cost a Rails row actually carries.
    */
   private static isCanonicalShape(
     account: { passwordAlgorithm: string; passwordSalt: string },
     params: PreloginParams
   ): boolean {
     // Existing rows keep whatever shape they were written with (a Rails
-    // cost, policy params or better, any usable salt); refusing them would
-    // both lock out valid accounts and widen the existence oracle. New
-    // writes are still canonical (§7 "Verifier registry").
+    // cost, below-policy or policy params, any usable salt); refusing them
+    // would both lock out valid accounts ahead of a policy raise and widen
+    // the existence oracle. New writes are still canonical (§7 "Verifier
+    // registry"); only policy-shaped rows are written today.
     if (account.passwordAlgorithm === ARGON2ID_ALGORITHM)
       return (
         isUsableVerifierSalt(account.passwordSalt) &&
-        argon2idParamsSatisfyPolicy(params)
+        isWellFormedArgon2idParams(params)
       );
     if (account.passwordAlgorithm === RAILS_BCRYPT_ALGORITHM)
       return (

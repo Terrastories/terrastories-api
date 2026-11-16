@@ -54,6 +54,32 @@ export function argon2idParamsSatisfyPolicy(params: unknown): boolean {
 }
 
 /**
+ * Whether stored Argon2id parameters are merely *well formed*, independent
+ * of policy: positive integers in the expected units. The read path
+ * (prelogin) accepts them for existing rows — a future policy raise must not
+ * turn today's below-policy rows into fakes and lock them out. New verifier
+ * writes still require `argon2idParamsSatisfyPolicy`.
+ */
+export function isWellFormedArgon2idParams(params: unknown): boolean {
+  if (typeof params !== 'object' || params === null) return false;
+  const { memoryKiB, iterations, parallelism } = params as Record<
+    string,
+    unknown
+  >;
+  return (
+    typeof memoryKiB === 'number' &&
+    Number.isInteger(memoryKiB) &&
+    memoryKiB >= 1 &&
+    typeof iterations === 'number' &&
+    Number.isInteger(iterations) &&
+    iterations >= 1 &&
+    typeof parallelism === 'number' &&
+    Number.isInteger(parallelism) &&
+    parallelism >= 1
+  );
+}
+
+/**
  * The one Argon2id parameter set every new verifier V2 writes must use: the
  * named policy constants, exactly. A real row and a prelogin fake therefore
  * share one params shape, so the response is not an existence oracle

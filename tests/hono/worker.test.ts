@@ -13,6 +13,7 @@ import {
   MAX_PUBLIC_FILTER_VALUES,
   MAX_PUBLIC_TOTAL_FILTER_VALUES,
 } from '../../src/shared/schemas/public-content.js';
+import { AUTH_THROTTLE_WINDOW_MS } from '../../src/shared/auth-policy.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 it('serves the foundation through workerd D1/R2 without Node compatibility', async () => {
   // bundleWorkerModule fails the test when the bundle keeps any runtime import.
@@ -689,6 +690,114 @@ it('runs the orphan sweep from the scheduled() cron handler', async () => {
     await mf.dispose();
   }
 });
+it('runs the maintenance sweeps from the scheduled() cron handler', async () => {
+  // The scheduled handler must also run the byte-free maintenance sweeps:
+  // past-90-day audit entries lose ip/user_agent, expired session rows are
+  // deleted, and spent non-blocking throttle rows are deleted. Live rows
+  // survive; ORPHAN_SWEEP_PAUSED does not pause these jobs.
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(
+      `import worker from './src/worker.js'; export default worker;`
+    ),
+    { ENVIRONMENT: 'test', ORPHAN_SWEEP_PAUSED: 'true' },
+    { unsafeTriggerHandlers: true }
+  );
+  try {
+    const db = await mf.getD1Database('DB');
+    await applyD1Migrations(db);
+    const nowMs = Date.now();
+    await db.batch([
+      db.prepare(
+        "INSERT INTO communities(id,name,slug,created_at,updated_at) VALUES(1,'Maintenance','maintenance',0,0)"
+      ),
+      db.prepare(
+        "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,created_at,updated_at) VALUES(1,'maintenance@example.org','anchor-hash','Maint','User','member',1,0,0)"
+      ),
+      db
+        .prepare(
+          `INSERT INTO sessions(id,token_hash,user_id,expires_at,kind,created_at,last_seen_at,idle_expires_at,absolute_expires_at)
+         VALUES('sess-worker-expired','hash-expired',1,?, 'standard',?,?,?,?)`
+        )
+        .bind(
+          nowMs - 1000,
+          nowMs - 2000,
+          nowMs - 2000,
+          nowMs - 1000,
+          nowMs + 30 * 24 * 3600 * 1000
+        ),
+      db
+        .prepare(
+          `INSERT INTO sessions(id,token_hash,user_id,expires_at,kind,created_at,last_seen_at,idle_expires_at,absolute_expires_at)
+         VALUES('sess-worker-live','hash-live',1,?, 'standard',?,?,?,?)`
+        )
+        .bind(
+          nowMs + 5 * 24 * 3600 * 1000,
+          nowMs,
+          nowMs,
+          nowMs + 5 * 24 * 3600 * 1000,
+          nowMs + 30 * 24 * 3600 * 1000
+        ),
+      db
+        .prepare(
+          "INSERT INTO auth_throttle(key,kind,community_id,failures,window_started_at,blocked_until) VALUES('worker-throttle-spent','ip',NULL,3,?,NULL)"
+        )
+        .bind(nowMs - 2 * AUTH_THROTTLE_WINDOW_MS),
+      db
+        .prepare(
+          "INSERT INTO auth_throttle(key,kind,community_id,failures,window_started_at,blocked_until) VALUES('worker-throttle-blocked','ip',NULL,3,?,?)"
+        )
+        .bind(nowMs - 2 * AUTH_THROTTLE_WINDOW_MS, nowMs + 3600 * 1000),
+      db
+        .prepare(
+          `INSERT INTO audit_entries(community_id,actor_id,action,resource_type,resource_ids,outcome,ip_address,user_agent,created_at)
+         VALUES(1,1,'auth.login','auth','[]','success','203.0.113.9','sweep-agent/1.0',?)`
+        )
+        .bind(nowMs - 100 * 24 * 3600 * 1000),
+      db
+        .prepare(
+          `INSERT INTO audit_entries(community_id,actor_id,action,resource_type,resource_ids,outcome,ip_address,user_agent,created_at)
+         VALUES(1,1,'auth.logout','auth','[]','success','203.0.113.10','sweep-agent/1.0',?)`
+        )
+        .bind(nowMs - 10 * 24 * 3600 * 1000),
+    ]);
+
+    const res = await mf.dispatchFetch(
+      `http://localhost/cdn-cgi/handler/scheduled?cron=0+*+*+*+*&time=${nowMs}`,
+      { method: 'POST' }
+    );
+    expect(res.status).toBe(200);
+
+    const audits = await db
+      .prepare(
+        'SELECT action, ip_address, user_agent FROM audit_entries ORDER BY action'
+      )
+      .all();
+    expect(audits.results).toHaveLength(2);
+    expect(audits.results[0]).toMatchObject({
+      action: 'auth.login',
+      ip_address: null,
+      user_agent: null,
+    });
+    expect(audits.results[1]).toMatchObject({
+      action: 'auth.logout',
+      ip_address: '203.0.113.10',
+      user_agent: 'sweep-agent/1.0',
+    });
+
+    const sessionRows = await db
+      .prepare('SELECT id FROM sessions ORDER BY id')
+      .all();
+    expect(sessionRows.results).toEqual([{ id: 'sess-worker-live' }]);
+
+    const throttleRows = await db
+      .prepare('SELECT key FROM auth_throttle ORDER BY key')
+      .all();
+    expect(throttleRows.results).toEqual([{ key: 'worker-throttle-blocked' }]);
+  } finally {
+    await mf.dispose();
+  }
+});
+
 it('resumes the scheduled R2 sweep past live objects across multiple runs', async () => {
   // More live (files-row-backed) objects sort before the orphan than the
   // per-run Worker budget, so a single run cannot reach it. The sweep

@@ -7,6 +7,10 @@ import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
 import { scheduleOrphanSweep } from './services/orphan-sweep-scheduler.js';
+import {
+  runMaintenanceSweeps,
+  scheduleMaintenanceSweeps,
+} from './services/maintenance-sweeps.js';
 import { envFlagEnabled } from './services/hono-foundation.service.js';
 import {
   validateNodeV2Runtime,
@@ -78,12 +82,25 @@ const sweepOrphanObjects = () => {
 };
 const orphanSweepTimers = scheduleOrphanSweep(sweepOrphanObjects);
 
+// Maintenance sweeps on the Workers cron cadence: audit IP/UA scrub past the
+// 90-day retention cutoff, expired session rows, and spent non-blocking
+// throttle rows. These jobs touch no bytes — only audit/session/throttle
+// rows — so ORPHAN_SWEEP_PAUSED (the storage-restore hold, which covers byte
+// deletion) deliberately does not pause them. Each job runs in its own
+// try/catch with content-free logging; one failing job never blocks the
+// others. First run after a named delay; unref'd interval.
+const maintenanceSweepTimers = scheduleMaintenanceSweeps(() => {
+  void runMaintenanceSweeps(db);
+});
+
 let shuttingDown = false;
 const shutdown = () => {
   if (shuttingDown) return;
   shuttingDown = true;
   clearTimeout(orphanSweepTimers.first);
   clearInterval(orphanSweepTimers.interval);
+  clearTimeout(maintenanceSweepTimers.first);
+  clearInterval(maintenanceSweepTimers.interval);
   server.close(() => process.exit(0));
 };
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

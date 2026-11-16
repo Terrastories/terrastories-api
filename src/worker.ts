@@ -24,6 +24,7 @@ import {
   V2RuntimeConfigError,
   v2RuntimeModeNotice,
 } from './config/v2-runtime.js';
+import { runMaintenanceSweeps } from './services/maintenance-sweeps.js';
 
 export interface WorkerBindings {
   DB: D1Database;
@@ -276,7 +277,9 @@ export function createWorker() {
     /**
      * Hourly cron trigger: run the restart-safe orphan sweeper so bytes whose
      * `files` row is gone (failed storage delete, crash between commit and
-     * delete) are eventually removed. The run is bounded by subrequests —
+     * delete) are eventually removed, plus the maintenance sweeps that touch
+     * no bytes (audit IP/UA scrub, expired session rows, spent non-blocking
+     * throttle rows). The orphan run is bounded by subrequests —
      * WORKER_SWEEP_SUBREQUEST_BUDGET, sized under the Workers Free 50 — so a
      * full keyspace pass takes several hourly runs, tracked by the cursor.
      * Referenced/fresh objects consume only their share of reference-query
@@ -285,8 +288,13 @@ export function createWorker() {
      * Throughput math: one hourly run scans ~6 list pages (~1,200 keys) with
      * zero orphans — ~28,800 keys/day, i.e. even a 100k-key keyspace cycles
      * in under 4 days, inside the 30-day §6.7 bound; an all-orphan backlog
-     * clears at ~34 deletes/run (~800/day). A failure is logged content-free
-     * rather than swallowed.
+     * clears at ~34 deletes/run (~800/day). The maintenance sweeps add a
+     * fixed three statements beyond that budget (one row-capped statement
+     * each, MAINTENANCE_SWEEP_ROW_LIMIT rows, three subrequests at most) and
+     * are not funded from it; they are not paused by ORPHAN_SWEEP_PAUSED
+     * because they delete no bytes — the restore hold covers byte deletion
+     * only. A failure is logged content-free rather than swallowed, and one
+     * failing maintenance job never blocks the others.
      */
     scheduled: async (
       _controller: ScheduledController,
@@ -303,11 +311,14 @@ export function createWorker() {
               return Reflect.get(target, key, receiver);
             },
           });
+          const db = drizzle(client);
+          const scheduledNow = () =>
+            new Date(_controller.scheduledTime || Date.now());
           const cleanup = new MediaCleanupCoordinator(
-            drizzle(client),
+            db,
             createR2Storage(env.MEDIA),
             {
-              now: () => new Date(_controller.scheduledTime || Date.now()),
+              now: scheduledNow,
               // Subrequest-budgeted run; the sweeper also honours an
               // ORPHAN_SWEEP_PAUSED binding / `system/orphan-sweep-hold`
               // marker for the restore hold.
@@ -321,6 +332,10 @@ export function createWorker() {
             // eslint-disable-next-line no-console -- workerd's only operator channel
             console.warn('media cleanup: scheduled orphan sweep failed');
           }
+          // Maintenance sweeps: audit IP/UA scrub, expired sessions and spent
+          // throttle rows. Touch no bytes, so ORPHAN_SWEEP_PAUSED does not
+          // pause them; each job runs in its own try/catch.
+          await runMaintenanceSweeps(db, { now: scheduledNow });
         })()
       );
     },

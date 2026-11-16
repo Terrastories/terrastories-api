@@ -39,6 +39,7 @@ import {
   parseStoredPasswordParams,
   type PreloginMix,
 } from '../shared/prelogin.js';
+import { MAINTENANCE_SWEEP_ROW_LIMIT } from '../shared/maintenance-sweep.js';
 
 /** The account columns login, upgrade and password change need. */
 export interface AuthAccount {
@@ -713,23 +714,30 @@ export class HonoAuthRepository {
 
   /**
    * Delete throttle rows whose window is spent and that are not currently
-   * blocking, for the scheduled sweep (§6.8).
-   *
-   * TODO(slice-9): call this from the scheduled handler added in PR #247
-   * (`worker.ts` `scheduled` + `wrangler.jsonc` cron), alongside
-   * `sweepExpiredSessions`. Slice 10 deliberately adds no scheduled handler.
+   * blocking, for the scheduled sweep (§6.8). Bounded to
+   * MAINTENANCE_SWEEP_ROW_LIMIT rows in one statement so a scheduled
+   * invocation stays within its budget; rows beyond the cap wait for the
+   * next tick.
    */
-  async sweepAuthThrottle(now: number): Promise<number> {
+  async sweepAuthThrottle(
+    now: number,
+    limit: number = MAINTENANCE_SWEEP_ROW_LIMIT
+  ): Promise<number> {
     const throttle = this.tables.authThrottle;
+    const eligible = and(
+      sql`${throttle.windowStartedAt} <= ${now - AUTH_THROTTLE_WINDOW_MS}`,
+      or(isNull(throttle.blockedUntil), sql`${throttle.blockedUntil} <= ${now}`)
+    );
     const deleted = await this.db
       .delete(throttle)
       .where(
-        and(
-          sql`${throttle.windowStartedAt} <= ${now - AUTH_THROTTLE_WINDOW_MS}`,
-          or(
-            isNull(throttle.blockedUntil),
-            sql`${throttle.blockedUntil} <= ${now}`
-          )
+        inArray(
+          throttle.key,
+          this.db
+            .select({ key: throttle.key })
+            .from(throttle)
+            .where(eligible)
+            .limit(limit)
         )
       )
       .returning({ key: throttle.key });
@@ -738,23 +746,32 @@ export class HonoAuthRepository {
 
   /**
    * Delete expired session rows, for the scheduled sweep (§7 "Sessions").
-   *
-   * TODO(slice-9): call this from the scheduled handler added in PR #247
-   * (`worker.ts` `scheduled` + `wrangler.jsonc` cron). Slice 10 deliberately
-   * does not add a scheduled handler here; until it lands, expired rows are
-   * filtered out on read by `sessionWindowCondition` and simply accumulate.
+   * Bounded to MAINTENANCE_SWEEP_ROW_LIMIT rows in one statement so a
+   * scheduled invocation stays within its budget; rows beyond the cap wait
+   * for the next tick.
    */
-  async sweepExpiredSessions(now: number): Promise<number> {
+  async sweepExpiredSessions(
+    now: number,
+    limit: number = MAINTENANCE_SWEEP_ROW_LIMIT
+  ): Promise<number> {
     const sessions = this.tables.sessions;
+    const eligible = or(
+      sql`coalesce(${sessions.idleExpiresAt}, ${sessions.expiresAt}) <= ${now}`,
+      and(
+        sql`${sessions.absoluteExpiresAt} IS NOT NULL`,
+        sql`${sessions.absoluteExpiresAt} <= ${now}`
+      )
+    );
     const deleted = await this.db
       .delete(sessions)
       .where(
-        or(
-          sql`coalesce(${sessions.idleExpiresAt}, ${sessions.expiresAt}) <= ${now}`,
-          and(
-            sql`${sessions.absoluteExpiresAt} IS NOT NULL`,
-            sql`${sessions.absoluteExpiresAt} <= ${now}`
-          )
+        inArray(
+          sessions.id,
+          this.db
+            .select({ id: sessions.id })
+            .from(sessions)
+            .where(eligible)
+            .limit(limit)
         )
       )
       .returning({ id: sessions.id });

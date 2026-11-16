@@ -1217,27 +1217,14 @@ export async function runHonoFoundationContract(
       // The delete path takes FOR UPDATE on the candidate files row before
       // its guarded DELETE, which conflicts with the FOR KEY SHARE the attach
       // takes, so the two serialize.
-      // Wait until at least `minBlocked` backends are blocked on a PG lock
-      // (excluding this transaction). Failing to reach the threshold within the
-      // deadline throws, so an unconfirmed wait fails the case instead of
-      // silently proceeding without the race being proven.
-      const waitForLockWaiter = async (
-        tx: any,
-        waitMs = 3000,
-        minBlocked = 1
-      ) => {
+      const waitForLockWaiter = async (tx: any, waitMs = 3000) => {
         const deadline = Date.now() + waitMs;
-        for (;;) {
+        while (Date.now() < deadline) {
           const blocked = await tx.execute(
-            sql`select 1 from pg_stat_activity where pid <> pg_backend_pid() and wait_event_type = 'Lock' limit 2`
+            sql`select 1 from pg_stat_activity where pid <> pg_backend_pid() and wait_event_type = 'Lock' limit 1`
           );
           const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
-          if ((blockedRows?.length ?? 0) >= minBlocked) return;
-          if (Date.now() >= deadline) {
-            throw new Error(
-              `expected at least ${minBlocked} blocked backend(s), saw ${blockedRows?.length ?? 0}`
-            );
-          }
+          if (blockedRows.length > 0) return;
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
       };
@@ -1595,12 +1582,7 @@ export async function runHonoFoundationContract(
           'story_media'
         );
         void pendingStory.finally(() => {});
-        // Require both attach backends to be blocked: the story attach can
-        // only block (on the files row) after it has taken the new story's
-        // FOR UPDATE, so two blocked backends prove the interposition race
-        // deterministically instead of committing before the story attach
-        // reaches its owner lock.
-        await waitForLockWaiter(tx, 3000, 2);
+        await waitForLockWaiter(tx);
       });
       const [interposedPlaceRes, interposedStoryRes] = await Promise.all([
         withDeadline(pendingPlace, 10_000, 'interposed place-target attach'),

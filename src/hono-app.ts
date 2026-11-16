@@ -357,14 +357,14 @@ export function createHonoApp(options: FoundationOptions) {
     const parsed = mePatchSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);
     const actor = c.get('actor');
-    // Own-profile edit: only the display name, never role, status,
-    // communityId, username or email (SPEC-V2 §6.2, route registry). NFC
-    // composes without case-folding so stored text matches the client.
-    const displayName =
-      parsed.data.displayName === null
-        ? null
-        : parsed.data.displayName.normalize('NFC');
-    await options.repository.updateDisplayName(actor.id, displayName, now());
+    // Only the display name, never role, status, communityId, username or
+    // email (SPEC-V2 §6.2): parsing here, the normalisation + write live in
+    // the service layer.
+    const displayName = await authService.updateOwnProfile(
+      actor,
+      parsed.data.displayName,
+      now()
+    );
     return c.json({ user: publicUser({ ...actor, displayName }) });
   });
   app.post('/v2/auth/password', jsonBody4k, async (c) => {

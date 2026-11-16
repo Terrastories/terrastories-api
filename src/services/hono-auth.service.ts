@@ -96,6 +96,23 @@ export class HonoAuthService {
   ) {}
 
   /**
+   * Own-profile edit (SPEC-V2 §6.2, route registry): only the display name,
+   * never role, status, communityId, username or email. NFC composes without
+   * case-folding so stored text matches the client. Returns the stored
+   * display name (`null` clears it).
+   */
+  async updateOwnProfile(
+    actor: FoundationUser,
+    displayName: string | null,
+    now: Date
+  ): Promise<string | null> {
+    const normalized =
+      displayName === null ? null : displayName.normalize('NFC');
+    await this.foundation.updateDisplayName(actor.id, normalized, now);
+    return normalized;
+  }
+
+  /**
    * Verifier shape for `identifier` (+ optional `communitySlug` locator), or
    * `null` when the server secret is missing and the request must fail closed.
    *

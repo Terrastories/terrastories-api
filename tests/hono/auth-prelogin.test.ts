@@ -773,6 +773,71 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     expect(text).not.toContain('password_verifier');
   });
 
+  it('bounds the population mix query by distinct combos, never by account count', async () => {
+    const { db } = await setup();
+    const [alpha] = await db
+      .select({ id: communitiesSqlite.id })
+      .from(communitiesSqlite)
+      .where(eq(communitiesSqlite.slug, 'prelogin-alpha'));
+    const passwordHash = await hash('MixBoundPass!', 4);
+    const base = {
+      passwordHash,
+      firstName: 'Mix',
+      lastName: 'Bound',
+      isActive: true as const,
+      communityId: alpha!.id,
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordVerifier: base64(32),
+    };
+    const combos: Array<[string, number]> = [
+      [ARGON2ID_PARAMS_JSON, 16],
+      [ARGON2ID_PARAMS_JSON, 32],
+      [
+        JSON.stringify({ memoryKiB: 8 * 1024, iterations: 1, parallelism: 1 }),
+        16,
+      ],
+      [
+        JSON.stringify({ memoryKiB: 8 * 1024, iterations: 1, parallelism: 1 }),
+        32,
+      ],
+    ];
+    for (const [params, length] of combos) {
+      const tag = `${length}-${params.includes('8 * 1024') || params.includes('8192') ? 'below' : 'policy'}`;
+      const rows = [];
+      for (let index = 0; index < 12; index += 1) {
+        const email = `mix-${tag}-${index}@prelogin.test`;
+        rows.push({
+          ...base,
+          email,
+          username: `mix_${tag}_${index}`,
+          emailNormalized: normalizeSearchText(email),
+          usernameNormalized: normalizeSearchText(`mix_${tag}_${index}`),
+          passwordSalt: base64(length),
+          passwordParams: params,
+        });
+      }
+      await db.insert(usersSqlite).values(rows);
+    }
+    // 53 accounts, every one with a unique salt. A GROUP BY on the salt
+    // column would return ~53 rows; the byte-length group key stays below
+    // (#algorithms x #params x #salt-lengths + the two bcrypt buckets).
+    const repository = new HonoAuthRepository(db);
+    const groups = await repository.preloginMixGroups();
+    expect(groups.length).toBeLessThanOrEqual(6);
+    const mix = await repository.preloginMix();
+    expect(mix.total).toBe(53);
+    expect(mix.upgraded).toBe(50);
+    expect(mix.saltLengths?.reduce((sum, entry) => sum + entry.count, 0)).toBe(
+      50
+    );
+    expect(mix.saltLengths?.find((entry) => entry.length === 16)?.count).toBe(
+      26
+    );
+    expect(mix.saltLengths?.find((entry) => entry.length === 32)?.count).toBe(
+      24
+    );
+  });
+
   it('executes the same repository calls for an unknown slug as for a known slug with an unknown identifier (item 8)', async () => {
     const { app } = await setup();
     const accountSpy = vi.spyOn(

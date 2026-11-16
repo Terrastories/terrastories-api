@@ -28,7 +28,8 @@ import {
   RAILS_BCRYPT_ALGORITHM,
   authThrottleBackoffMs,
   sessionLifetimesFor,
-  verifierSaltBytes,
+  MIN_SALT_BYTES,
+  MAX_SALT_BYTES,
   type PasswordAlgorithm,
   type SessionKind,
 } from '../shared/auth-policy.js';
@@ -292,6 +293,52 @@ export class HonoAuthRepository {
   }
 
   /**
+   * The raw population-mix group rows (algorithm × params × salt length).
+   * Diagnostic/test surface; the cached {@link preloginMix} is the normal
+   * consumer. The group set is bounded by the number of algorithms, stored
+   * params combos and salt lengths, never by the account count.
+   */
+  async preloginMixGroups(): Promise<
+    Array<{
+      algorithm: string | null;
+      passwordParams: string | null;
+      saltBytes: number | null;
+      total: number;
+    }>
+  > {
+    const { users } = this.tables;
+    // Portable base64 byte length from its text length: `rtrim` on the `=`
+    // padding, integer division, same result on SQLite/D1 and PostgreSQL.
+    // Keeping the group key a small integer instead of the salt itself (a
+    // unique-per-user column) bounds the group set.
+    const saltBytesSql = sql<
+      number | null
+    >`cast((length(rtrim(${users.passwordSalt}, '=')) * 3) / 4 as integer)`;
+    const rows: Array<{
+      algorithm: string | null;
+      passwordParams: string | null;
+      saltBytes: number | string | null;
+      total: number | string;
+    }> = await this.db
+      .select({
+        algorithm: users.passwordAlgorithm,
+        passwordParams: users.passwordParams,
+        saltBytes: saltBytesSql,
+        total: sql<number>`count(*)`,
+      })
+      .from(users)
+      .groupBy(users.passwordAlgorithm, users.passwordParams, saltBytesSql);
+    return rows.map((row) => ({
+      ...row,
+      saltBytes:
+        row.saltBytes === null || row.saltBytes === undefined
+          ? null
+          : Number(row.saltBytes),
+      total: Number(row.total),
+    }));
+  }
+
+  /**
    * The deployment-wide prelogin population, cached for
    * `AUTH_PRELOGIN_MIX_TTL_MS`: the upgraded/total ratio plus the observed
    * bcrypt costs, Argon2id parameter combos and salt byte lengths. Every prelogin path (real account or fake) reads this same
@@ -302,25 +349,7 @@ export class HonoAuthRepository {
     const cached = this.mixCache;
     if (cached !== null && now - cached.at < AUTH_PRELOGIN_MIX_TTL_MS)
       return cached.mix;
-    const { users } = this.tables;
-    const rows: Array<{
-      algorithm: string | null;
-      passwordParams: string | null;
-      passwordSalt: string | null;
-      total: number | string;
-    }> = await this.db
-      .select({
-        algorithm: users.passwordAlgorithm,
-        passwordParams: users.passwordParams,
-        passwordSalt: users.passwordSalt,
-        total: sql<number>`count(*)`,
-      })
-      .from(users)
-      .groupBy(
-        users.passwordAlgorithm,
-        users.passwordParams,
-        users.passwordSalt
-      );
+    const rows = await this.preloginMixGroups();
     let upgraded = 0;
     let total = 0;
     const costCounts = new Map<number, number>();
@@ -357,10 +386,8 @@ export class HonoAuthRepository {
             parallelism: params.parallelism,
             count,
           });
-        const saltBytes = row.passwordSalt
-          ? verifierSaltBytes(row.passwordSalt)
-          : -1;
-        if (saltBytes >= 1 && saltBytes <= 64)
+        const saltBytes = row.saltBytes ?? -1;
+        if (saltBytes >= MIN_SALT_BYTES && saltBytes <= MAX_SALT_BYTES)
           saltLengthCounts.set(
             saltBytes,
             (saltLengthCounts.get(saltBytes) ?? 0) + count

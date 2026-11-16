@@ -483,6 +483,44 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     );
   });
 
+  it('saves the last fully walked page as the cursor after fresh-only pages, not an earlier processed object', async () => {
+    await seedSentinelFileRow();
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { store, storage } = createListableStorage();
+    const old = new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000);
+    // Page 1 starts with an old orphan (processed), then fresh-only pages.
+    store.set('communities/1/media/aaa-orphan', {
+      bytes: Uint8Array.from([9]),
+      uploaded: old,
+    });
+    for (let i = 0; i < 600; i += 1) {
+      store.set(`communities/1/media/live-${String(i).padStart(3, '0')}`, {
+        bytes: Uint8Array.from([1]),
+        uploaded: now,
+      });
+    }
+    const cleanup = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: () => {},
+      // list p1 + reference query + delete + list p2 + list p3 = 5.
+      subrequestBudget: 5,
+    });
+    const first = await cleanup.sweepOrphanObjects();
+    expect(first.deletedCount).toBe(1);
+    const cursorEntry = store.get('system/orphan-sweep-cursor.json');
+    expect(cursorEntry).toBeDefined();
+    const cursor = JSON.parse(new TextDecoder().decode(cursorEntry!.bytes)) as {
+      prefix: string;
+      startAfter?: string;
+    };
+    expect(cursor.prefix).toBe('communities/');
+    // Resumes after a fully walked fresh page, never back at page 1's orphan.
+    expect(cursor.startAfter! > 'communities/1/media/aaa-orphan').toBe(true);
+    expect(cursor.startAfter!.startsWith('communities/1/media/live-')).toBe(
+      true
+    );
+  });
+
   it('parses ORPHAN_SWEEP_PAUSED case-insensitively, fail closed', () => {
     // Only empty/'false'/'0' (any case, surrounding whitespace ignored)
     // means off; everything else is an explicit pause.

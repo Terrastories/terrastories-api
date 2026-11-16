@@ -783,6 +783,11 @@ export class MediaCleanupCoordinator {
       // (or wraps) instead of pinning the cursor on a gone prefix. Nothing
       // was skipped here: every past-grace object on this page was processed.
       if (!page.truncated || !page.nextStartAfter) return { kind: 'done' };
+      // Every past-grace object on this fully walked page was processed (or
+      // left on a failed reference query until the cursor wraps), so the
+      // resume point is the page's last key, never an earlier page's object:
+      // fresh-only pages walked after it must not be repeated next run.
+      lastProcessed = page.nextStartAfter;
       // Budget spent on this page: resume exactly after the last object
       // processed (the incoming cursor if none), never before it.
       if (input.budget.remaining <= 0) {

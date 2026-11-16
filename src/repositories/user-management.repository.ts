@@ -29,6 +29,12 @@ export interface ManagedUserRow {
   role: string;
   isActive: boolean;
   createdAt: Date;
+  /**
+   * Normalized identity columns. Internal read model only — never projected
+   * onto the wire (SPEC-V2 §6.2 identity checks need the stored values).
+   */
+  emailNormalized: string | null;
+  usernameNormalized: string | null;
 }
 
 export interface DeviceSessionRow {
@@ -101,6 +107,8 @@ export class UserManagementRepository {
     role: string;
     isActive: number | boolean;
     createdAt: Date | number;
+    emailNormalized: string | null;
+    usernameNormalized: string | null;
   }): ManagedUserRow {
     return {
       id: row.id,
@@ -111,6 +119,8 @@ export class UserManagementRepository {
       isActive: row.isActive === true || row.isActive === 1,
       createdAt:
         row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt),
+      emailNormalized: row.emailNormalized ?? null,
+      usernameNormalized: row.usernameNormalized ?? null,
     };
   }
 
@@ -124,6 +134,8 @@ export class UserManagementRepository {
       role: users.role,
       isActive: users.isActive,
       createdAt: users.createdAt,
+      emailNormalized: users.emailNormalized,
+      usernameNormalized: users.usernameNormalized,
     };
   }
 
@@ -314,9 +326,17 @@ export class UserManagementRepository {
     return { id: Number(row.id) };
   }
 
+  /**
+   * Result of the coupled update write. `not_found` — the target row is gone
+   * or never in this community (caller answers 404). `authority_lost` — the
+   * actor stopped being an active admin of the community mid-request (403).
+   * `last_admin` — the change would leave the community without an active
+   * administrator (409 `last_admin`). `updated` — the write landed.
+   */
   async updateCommunityUser(input: {
     id: number;
     communityId: number;
+    actorId: number;
     displayName?: string | null;
     username?: string | null;
     usernameNormalized?: string | null;
@@ -325,8 +345,8 @@ export class UserManagementRepository {
     role?: 'viewer' | 'member' | 'editor' | 'admin';
     isActive?: boolean;
     updatedAt: Date;
-  }): Promise<boolean> {
-    const { users } = this.tables;
+  }): Promise<'updated' | 'not_found' | 'authority_lost' | 'last_admin'> {
+    const { users, communities } = this.tables;
     const patch: Record<string, unknown> = { updatedAt: input.updatedAt };
     if (input.displayName !== undefined) patch.displayName = input.displayName;
     if (input.username !== undefined) {
@@ -343,30 +363,119 @@ export class UserManagementRepository {
         input.isActive ? 'active' : 'disabled'
       ).isActive;
     }
-    const rows = await this.database
+
+    // Whether the change keeps the *target* an active administrator. When it
+    // does, no admin-count guard is needed; when it does not, at least one
+    // other active admin must remain (excluding the target itself).
+    const keepActiveAdmin =
+      (input.role === undefined || input.role === 'admin') &&
+      (input.isActive === undefined || input.isActive === true);
+
+    if (dialectOf(this.database) === 'postgresql') {
+      // One transaction, lock order community -> users (sessions are not
+      // touched here). FOR UPDATE on the community row serialises concurrent
+      // role/status changes of the same community.
+      return (this.database as Executor).transaction(async (tx: Executor) => {
+        await tx
+          .select({ id: communities.id })
+          .from(communities)
+          .where(eq(communities.id, input.communityId))
+          .for('update');
+        const [actorRow] = await tx
+          .select({ role: users.role, isActive: users.isActive })
+          .from(users)
+          .where(
+            and(
+              eq(users.id, input.actorId),
+              eq(users.communityId, input.communityId),
+              eq(users.role, 'admin'),
+              eq(users.isActive, true)
+            )
+          )
+          .limit(1);
+        if (!actorRow) return 'authority_lost';
+        if (!keepActiveAdmin) {
+          const [countRow] = await tx
+            .select({ total: count() })
+            .from(users)
+            .where(
+              and(
+                eq(users.communityId, input.communityId),
+                eq(users.role, 'admin'),
+                eq(users.isActive, true),
+                ne(users.id, input.id)
+              )
+            );
+          if (Number(countRow?.total ?? 0) < 1) return 'last_admin';
+        }
+        const updated = await tx
+          .update(users)
+          .set(patch)
+          .where(
+            and(
+              eq(users.id, input.id),
+              eq(users.communityId, input.communityId)
+            )
+          )
+          .returning({ id: users.id });
+        return updated.length > 0 ? 'updated' : 'not_found';
+      });
+    }
+
+    // SQLite/D1: a single guarded statement — the admin-count and the
+    // actor-is-a-live-admin checks are part of the WRITE, not a pre-check
+    // racing the write. 0 rows → re-read to classify the refusal.
+    const adminGuard = keepActiveAdmin
+      ? undefined
+      : sql`(select count(*) from users o where o.community_id = ${input.communityId} and o.role = 'admin' and o.is_active = 1 and o.id <> ${input.id}) >= 1`;
+    const updated = await this.database
       .update(users)
       .set(patch)
       .where(
-        and(eq(users.id, input.id), eq(users.communityId, input.communityId))
+        and(
+          eq(users.id, input.id),
+          eq(users.communityId, input.communityId),
+          sql`exists (select 1 from users a where a.id = ${input.actorId} and a.community_id = ${input.communityId} and a.role = 'admin' and a.is_active = 1)`,
+          adminGuard
+        )
       )
       .returning({ id: users.id });
-    return rows.length > 0;
-  }
+    const rows = updated as Array<{ id: number }>;
+    if (rows.length > 0) return 'updated';
 
-  /** Active `admin` accounts of the community (role-change guard input). */
-  async countActiveAdmins(communityId: number): Promise<number> {
-    const { users } = this.tables;
-    const rows = await this.database
-      .select({ total: count() })
+    // Classification re-read (the guard failed; explain it precisely).
+    const target = await this.findCommunityUser(input.communityId, input.id);
+    if (!target) return 'not_found';
+    const [actorRow] = await this.database
+      .select({ role: users.role, isActive: users.isActive })
       .from(users)
       .where(
         and(
-          eq(users.communityId, communityId),
+          eq(users.id, input.actorId),
+          eq(users.communityId, input.communityId),
           eq(users.role, 'admin'),
           eq(users.isActive, true)
         )
-      );
-    return Number(rows[0]?.total ?? 0);
+      )
+      .limit(1);
+    if (!actorRow) return 'authority_lost';
+    if (!keepActiveAdmin) {
+      const [countRow] = await this.database
+        .select({ total: count() })
+        .from(users)
+        .where(
+          and(
+            eq(users.communityId, input.communityId),
+            eq(users.role, 'admin'),
+            eq(users.isActive, true),
+            ne(users.id, input.id)
+          )
+        );
+      if (Number(countRow?.total ?? 0) < 1) return 'last_admin';
+    }
+    // Every predicate passes on re-read: the row vanished between the guarded
+    // write and the re-read.
+    return 'not_found';
   }
 
   /**

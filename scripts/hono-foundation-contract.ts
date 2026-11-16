@@ -1042,6 +1042,182 @@ export async function runHonoFoundationContract(
         0,
         'no session may survive a concurrent role change'
       );
+
+      // PostgreSQL last-admin race (#188): two admins of one fresh community
+      // demote each other via the HTTP app concurrently. Exactly one write
+      // lands; the loser no longer holds user-management authority for the
+      // community (the write re-reads the actor's active-admin role under the
+      // community lock), so it is denied 403 — never a 5xx — and exactly one
+      // active administrator remains. An isolated community keeps the shared
+      // `adminEmail` account untouched for the later steps.
+      const [raceCrossCommunity] = await db
+        .insert(tables.communities)
+        .values({ name: 'Race Cross', slug: `hono-${tag}-race-cross` })
+        .returning();
+      const raceCrossCommunityId = raceCrossCommunity.id;
+      communityIds.push(raceCrossCommunityId);
+      const raceCrossAdminAEmail = `race-crossadmina-${tag}@example.test`;
+      const raceCrossAdminBEmail = `race-crossadminb-${tag}@example.test`;
+      const [raceCrossAdminA] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: raceCrossAdminAEmail,
+          role: 'admin',
+          communityId: raceCrossCommunityId,
+        })
+        .returning();
+      const raceCrossAdminAId = raceCrossAdminA.id;
+      // Registered for the cleanup phase: its community is deleted there and
+      // users.community_id is NO ACTION on PostgreSQL.
+      userIds.push(raceCrossAdminAId);
+      const [raceCrossAdminB] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: raceCrossAdminBEmail,
+          role: 'admin',
+          communityId: raceCrossCommunityId,
+        })
+        .returning();
+      const raceCrossAdminBId = raceCrossAdminB.id;
+      userIds.push(raceCrossAdminBId);
+      const raceAdminACookie = await login(raceCrossAdminAEmail);
+      const raceAdminBCookie = await login(raceCrossAdminBEmail);
+      const demote = (id: number, cookie: string, body: unknown) =>
+        send(app, `/v2/users/${id}`, {
+          method: 'PATCH',
+          headers: {
+            'content-type': 'application/json',
+            cookie,
+          },
+          body: JSON.stringify(body),
+        });
+      const [crossA, crossB] = await Promise.allSettled([
+        demote(raceCrossAdminBId, raceAdminACookie, { role: 'editor' }),
+        demote(raceCrossAdminAId, raceAdminBCookie, { role: 'editor' }),
+      ]);
+      const crossStatuses = [crossA, crossB]
+        .map((result) =>
+          result.status === 'fulfilled' ? result.value.status : 500
+        )
+        .sort((left, right) => left - right);
+      assert.equal(
+        crossStatuses.filter((status) => status === 200).length,
+        1,
+        `exactly one cross-demotion must land, got ${crossStatuses.join(', ')}`
+      );
+      assert.deepEqual(
+        crossStatuses,
+        [200, 403],
+        'the loser of the cross-demotion race no longer administers the community'
+      );
+      const crossRemaining = await db
+        .select({ id: tables.users.id })
+        .from(tables.users)
+        .where(
+          and(
+            eq(tables.users.communityId, raceCrossCommunityId),
+            eq(tables.users.role, 'admin'),
+            eq(tables.users.isActive, true)
+          )
+        );
+      assert.equal(
+        crossRemaining.length,
+        1,
+        'exactly one active administrator must remain after the cross-demotion race'
+      );
+
+      // The same race aimed at the actors themselves, in an isolated
+      // community holding exactly two administrators: two admins each try to
+      // demote themselves concurrently. Both see the other going in, so the
+      // first write is legal; the loser then has no other active admin to
+      // leave behind and is refused 409 last_admin — exactly one active
+      // administrator remains, never a 5xx.
+      const [selfRaceCommunity] = await db
+        .insert(tables.communities)
+        .values({ name: 'Race Self', slug: `hono-${tag}-race-self` })
+        .returning();
+      const selfRaceCommunityId = selfRaceCommunity.id;
+      communityIds.push(selfRaceCommunityId);
+      const selfRaceAdminAEmail = `race-selfadmina-${tag}@example.test`;
+      const selfRaceAdminBEmail = `race-selfadminb-${tag}@example.test`;
+      const [selfRaceAdminA] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: selfRaceAdminAEmail,
+          role: 'admin',
+          communityId: selfRaceCommunityId,
+        })
+        .returning();
+      const selfRaceAdminAId = selfRaceAdminA.id;
+      userIds.push(selfRaceAdminAId);
+      const [selfRaceAdminB] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: selfRaceAdminBEmail,
+          role: 'admin',
+          communityId: selfRaceCommunityId,
+        })
+        .returning();
+      const selfRaceAdminBId = selfRaceAdminB.id;
+      userIds.push(selfRaceAdminBId);
+      const selfRaceACookie = await login(selfRaceAdminAEmail);
+      const selfRaceBCookie = await login(selfRaceAdminBEmail);
+      const [selfA, selfB] = await Promise.allSettled([
+        demote(selfRaceAdminAId, selfRaceACookie, { role: 'editor' }),
+        demote(selfRaceAdminBId, selfRaceBCookie, { role: 'editor' }),
+      ]);
+      const selfStatuses = [selfA, selfB]
+        .map((result) =>
+          result.status === 'fulfilled' ? result.value.status : 500
+        )
+        .sort((left, right) => left - right);
+      assert.deepEqual(
+        selfStatuses,
+        [200, 409],
+        'the loser of the self-demotion race must lose the last-admin guard'
+      );
+      const selfRemaining = await db
+        .select({ id: tables.users.id })
+        .from(tables.users)
+        .where(
+          and(
+            eq(tables.users.communityId, selfRaceCommunityId),
+            eq(tables.users.role, 'admin'),
+            eq(tables.users.isActive, true)
+          )
+        );
+      // The losing account keeps administration: the guard blocked its
+      // demotion, it did not apply it.
+      assert.equal(
+        selfRemaining.length,
+        1,
+        'exactly one active administrator must remain after the self-demotion race'
+      );
+      // The refused account remains an active admin and keeps its authority:
+      // the guard blocked the demotion, it did not apply it.
+      const selfRequests = [
+        { id: selfRaceAdminAId, result: selfA },
+        { id: selfRaceAdminBId, result: selfB },
+      ];
+      const refused = selfRequests.find(
+        (entry) =>
+          entry.result.status === 'fulfilled' &&
+          entry.result.value.status === 409
+      );
+      assert.ok(refused, 'one self-demotion must have been refused');
+      const refusedRow = await db
+        .select({
+          role: tables.users.role,
+          isActive: tables.users.isActive,
+        })
+        .from(tables.users)
+        .where(eq(tables.users.id, refused.id));
+      assert.equal(refusedRow[0]?.role, 'admin');
+      assert.equal(refusedRow[0]?.isActive, true);
     }
 
     // Concurrent duplicate-identity create (#188, both dialects): two

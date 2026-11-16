@@ -429,30 +429,17 @@ export class UserManagementService {
     // SPEC-V2 §6.2: the disabled gate fixes exactly which administrators keep
     // authority at disable time; the task rule — an admin cannot demote or
     // deactivate themselves when that would leave the community without an
-    // administrator — prevents silent lockout. No disabled-state path appoints
-    // or widens administrators.
-    const wouldOrphanAdmins =
-      target.role === 'admin' &&
-      target.isActive &&
-      (next.role !== 'admin' || next.status === 'disabled');
-    if (wouldOrphanAdmins) {
-      const activeAdmins = await this.repository.countActiveAdmins(
-        caller.communityId
-      );
-      if (activeAdmins <= 1) {
-        await this.audit(actor, {
-          action: 'user.update',
-          resourceType: 'user',
-          resourceIds: [target.id],
-          outcome: 'failure',
-        });
-        return { status: 409, body: LAST_ADMIN_BODY };
-      }
-    }
+    // administrator — prevents silent lockout. The guard is part of the
+    // write itself (a single guarded statement on SQLite/D1, or a
+    // community-locked transaction on PostgreSQL): the actor is re-read as an
+    // active admin inside the write, so a concurrent role change cannot slip
+    // a lockout in behind a pre-check.
+    let outcome: 'updated' | 'not_found' | 'authority_lost' | 'last_admin';
     try {
-      await this.repository.updateCommunityUser({
+      outcome = await this.repository.updateCommunityUser({
         id: target.id,
         communityId: caller.communityId,
+        actorId: caller.actorId,
         ...(body.displayName !== undefined
           ? { displayName: body.displayName }
           : {}),
@@ -482,6 +469,21 @@ export class UserManagementService {
         return { status: 409, body: CONFLICT_BODY };
       }
       throw error;
+    }
+    if (outcome === 'not_found') {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+    if (outcome === 'authority_lost') {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (outcome === 'last_admin') {
+      await this.audit(actor, {
+        action: 'user.update',
+        resourceType: 'user',
+        resourceIds: [target.id],
+        outcome: 'failure',
+      });
+      return { status: 409, body: LAST_ADMIN_BODY };
     }
     // The users_revoke_sessions trigger fires on role/community/is_active
     // changes and deletes the target's sessions (SPEC-V2 §6.8); nothing else

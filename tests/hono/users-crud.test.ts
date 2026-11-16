@@ -17,6 +17,7 @@ import {
 } from './auth-test-utils.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
+import { UserManagementRepository } from '../../src/repositories/user-management.repository.js';
 import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
 
 const sqlite = new Sqlite(':memory:');
@@ -859,6 +860,84 @@ describe('PATCH /v2/users/:id', () => {
       body: { displayName: 'Still one admin' },
     });
     expect(otherDemote.status).toBe(200);
+  });
+
+  it('refuses the second demotion inside the guarded write itself (SQLite/D1)', async () => {
+    // Two admins in one fresh community: the first demotion is legal, the
+    // second is refused by the guarded UPDATE statement — not by a pre-check.
+    const guardCommunity = await insertRow(tables.communities, {
+      name: 'Guard Nation',
+      slug: `guard-${Date.now()}`,
+      locale: 'en',
+      publicStories: false,
+      isActive: true,
+      createdAt: T0,
+      updatedAt: T0,
+    });
+    const stamp = Date.now();
+    const seedAdmin = async (suffix: string) => {
+      const email = `guard-${suffix}-${stamp}@guard.example.test`;
+      const username = `qa_guard_${suffix}_${stamp}`;
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+      const id = await insertRow(tables.users, {
+        email,
+        username,
+        ...deriveUserIdentityColumns({ email, username }),
+        firstName: 'Guard',
+        lastName: suffix,
+        ...seed,
+        role: 'admin',
+        communityId: guardCommunity,
+        isActive: true,
+        createdAt: T0,
+        updatedAt: T0,
+      });
+      return { id, email, username };
+    };
+    const adminA = await seedAdmin('a');
+    const adminB = await seedAdmin('b');
+    const repository = new UserManagementRepository(db);
+    const first = await repository.updateCommunityUser({
+      id: adminB.id,
+      communityId: guardCommunity,
+      actorId: adminA.id,
+      role: 'editor',
+      updatedAt: new Date(),
+    });
+    expect(first).toBe('updated');
+    // B no longer administers; A is the community's only active admin.
+    const second = await repository.updateCommunityUser({
+      id: adminA.id,
+      communityId: guardCommunity,
+      actorId: adminA.id,
+      role: 'editor',
+      updatedAt: new Date(),
+    });
+    expect(second).toBe('last_admin');
+    // Deactivating A is refused for the same reason.
+    const third = await repository.updateCommunityUser({
+      id: adminA.id,
+      communityId: guardCommunity,
+      actorId: adminA.id,
+      isActive: false,
+      updatedAt: new Date(),
+    });
+    expect(third).toBe('last_admin');
+    // An actor that lost its admin authority cannot slip a write through.
+    const fourth = await repository.updateCommunityUser({
+      id: adminB.id,
+      communityId: guardCommunity,
+      actorId: adminB.id, // now an editor, not an active admin
+      role: 'viewer',
+      updatedAt: new Date(),
+    });
+    expect(fourth).toBe('authority_lost');
+    const [a] = await db
+      .select({ role: tables.users.role, isActive: tables.users.isActive })
+      .from(tables.users)
+      .where(eq(tables.users.id, adminA.id));
+    expect(a?.role).toBe('admin');
+    expect(a?.isActive).toBe(true);
   });
 
   it('returns 404 for unknown, cross-community and malformed targets', async () => {

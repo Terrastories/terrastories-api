@@ -6,8 +6,9 @@
  * older than the configured retention deadline (max 90 days).
  */
 
-import { and, isNotNull, lte, or } from 'drizzle-orm';
+import { and, inArray, isNotNull, lte, or } from 'drizzle-orm';
 import { tablesFor } from '../db/dialect.js';
+import { MAINTENANCE_SWEEP_ROW_LIMIT } from '../shared/maintenance-sweep.js';
 import type { AuditEntry } from '../db/schema/audit_entries.js';
 import {
   auditNetworkMetadataCutoff,
@@ -47,18 +48,25 @@ export interface ScrubAuditNetworkMetadataResult {
 }
 
 /**
- * Scrub `ip_address` and `user_agent` on all audit entries created at or
- * before the retention cutoff (default 90 days). Never modifies any other
- * column and never deletes rows.
+ * Scrub `ip_address` and `user_agent` on audit entries created at or before
+ * the retention cutoff (default 90 days). Never modifies any other column
+ * and never deletes rows. Bounded to MAINTENANCE_SWEEP_ROW_LIMIT rows in one
+ * statement per call so a scheduled invocation stays within its budget; rows
+ * beyond the cap are scrubbed on the next tick.
  */
 export async function scrubExpiredAuditNetworkMetadata(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   database: any,
-  options: { now?: Date; retentionDays?: number } = {}
+  options: { now?: Date; retentionDays?: number; limit?: number } = {}
 ): Promise<ScrubAuditNetworkMetadataResult> {
   const cutoff = auditNetworkMetadataCutoff(options.now, options.retentionDays);
+  const limit = options.limit ?? MAINTENANCE_SWEEP_ROW_LIMIT;
   const { auditEntries } = tablesFor(database);
 
+  const eligible = and(
+    lte(auditEntries.createdAt, cutoff),
+    or(isNotNull(auditEntries.ipAddress), isNotNull(auditEntries.userAgent))
+  );
   const updated = await database
     .update(auditEntries)
     .set({
@@ -66,9 +74,13 @@ export async function scrubExpiredAuditNetworkMetadata(
       userAgent: null,
     })
     .where(
-      and(
-        lte(auditEntries.createdAt, cutoff),
-        or(isNotNull(auditEntries.ipAddress), isNotNull(auditEntries.userAgent))
+      inArray(
+        auditEntries.id,
+        database
+          .select({ id: auditEntries.id })
+          .from(auditEntries)
+          .where(eligible)
+          .limit(limit)
       )
     )
     .returning({ id: auditEntries.id });

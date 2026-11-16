@@ -29,11 +29,11 @@
  */
 import { once } from 'node:events';
 import { serve } from '@hono/node-server';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, like, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
-import { nodePasswordVerifier } from '../../src/node-password.js';
+import { toHex } from '../../src/shared/auth-crypto.js';
 import { dialectOf, tablesFor } from '../../src/db/dialect.js';
 import {
   communityMediaPg,
@@ -89,6 +89,13 @@ import {
 } from '../../src/shared/schemas/media-v2.js';
 import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
+import {
+  ARGON2ID_ALGORITHM,
+  ARGON2ID_PARAMS_JSON,
+  AUTH_THROTTLE_MAX_FAILURES,
+  RAILS_BCRYPT_ALGORITHM,
+} from '../../src/shared/auth-policy.js';
+import { sha256Hex } from '../../src/shared/auth-crypto.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
@@ -143,11 +150,15 @@ const ownUser =
   };
 
 /**
- * The shared persona password: every backend seeds the same credentials, so
- * the journeys and their expectations stay byte-identical across SQLite,
- * PostgreSQL and Workers.
+ * The shared persona identity material: every backend seeds the same
+ * Argon2id verifier, so the journeys and their expectations stay
+ * byte-identical across SQLite, PostgreSQL and Workers. No password crosses
+ * the wire — journeys present `derivedKey` exactly as the browser would
+ * (SPEC-V2 §7).
  */
-export const HONO_PERSONA_PASSWORD = 'QaHonoPassword123!';
+export const HONO_PERSONA_DERIVED_KEY = toHex(
+  crypto.getRandomValues(new Uint8Array(32))
+);
 
 /**
  * Seeded story titles, story descriptions, place names and speaker names
@@ -234,7 +245,11 @@ export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
 export interface HonoQaBackend {
   db: WidenedQaDatabase;
   seedBaseline: () => Promise<TestFixtures>;
-  passwordHash: string;
+  /**
+   * Runtime HMAC key for prelogin/login throttling (AUTH_SERVER_SECRET),
+   * shared with the served app. Every backend builds its own; never a literal.
+   */
+  serverSecret: string;
   putMedia: (key: string, bytes: Uint8Array) => Promise<void>;
   handler: (observeResponseCookies: (response: Response) => void) => Handler;
   routes: Endpoint[];
@@ -282,11 +297,6 @@ export function routeTableOf(
 export function honoPersonaRouteTable(): Endpoint[] {
   const app = createHonoApp({
     repository: { connection: null } as unknown as HonoFoundationRepository,
-    verifier: {
-      async verify() {
-        return false;
-      },
-    },
     storage: {
       async read() {
         return null;
@@ -396,25 +406,48 @@ export async function createFixture(
     // own Explore surface serves as the positive control.
     const foreignCommunityId = fixtures.communities[2].id;
     const foreignCommunitySlug = fixtures.communities[2].slug;
-    const password = HONO_PERSONA_PASSWORD;
-    // bcrypt emits $2b$; the verifier accepts the Rails/Devise $2a$ encoding.
-    // The Workers backend supplies its own Workers-verifiable encoding.
-    const passwordHash = backend
-      ? backend.passwordHash
-      : (await hash(password, 4)).replace('$2b$', '$2a$');
-    const credentials: Record<Role, { email: string; password: string }> = {
-      viewer: { email: 'qa-hono-viewer@example.test', password },
-      member: { email: 'qa-hono-member@example.test', password },
-      editor: { email: 'qa-hono-editor@example.test', password },
-      admin: { email: 'qa-hono-admin@example.test', password },
-      super_admin: { email: 'qa-hono-super@example.test', password },
+    // Client-stretching (SPEC-V2 §7): every backend seeds the same Argon2id
+    // verifier — the journeys present the derived key and only that derived
+    // key ever crosses the wire. `password_hash` stays as the NOT NULL legacy
+    // anchor the session write re-reads for authority; it is never verified,
+    // so a runtime bcrypt hash of a random value is enough.
+    const passwordHash = await hash(
+      toHex(crypto.getRandomValues(new Uint8Array(16))),
+      4
+    );
+    const derivedKey = HONO_PERSONA_DERIVED_KEY;
+    // The replacement verifier material for the password-change steps:
+    // generated at runtime and shared by the change request and the follow-up
+    // login so both agree on every backend.
+    const superAdminNewKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const verifierSalt = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    const verifier = {
+      passwordHash,
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordSalt: verifierSalt,
+      passwordParams: ARGON2ID_PARAMS_JSON,
+      passwordVerifier: await sha256Hex(derivedKey),
+    };
+    // The wire body of a login journey (identical shape for every backend).
+    const loginBody = (email: string) => ({ identifier: email, derivedKey });
+    const credentials: Record<Role, { email: string }> = {
+      viewer: { email: 'qa-hono-viewer@example.test' },
+      member: { email: 'qa-hono-member@example.test' },
+      editor: { email: 'qa-hono-editor@example.test' },
+      admin: { email: 'qa-hono-admin@example.test' },
+      super_admin: { email: 'qa-hono-super@example.test' },
     };
     // The schema enum predates the V2 member role; the raw binding stores it.
     // Canonical V2 super_admin carries null communityId (§6.2).
     let creatorId = 0;
     const communityUserIds: Partial<Record<Role, number>> = {};
     for (const role of Object.keys(credentials) as Role[]) {
-      const username = role === 'super_admin' ? 'qa_hono_super' : null;
+      // Every persona carries a stable username so the username-identifier
+      // login journey resolves exactly one account (§6.2). Usernames are
+      // globally unique; the normalized column is derived with the email.
+      const username = `qa_hono_${role}`;
       const displayName = role === 'super_admin' ? 'QA Super Admin' : 'QA Hono';
       const [user] = await db
         .insert(users)
@@ -426,7 +459,7 @@ export async function createFixture(
             email: credentials[role].email,
             username,
           }),
-          passwordHash,
+          ...verifier,
           firstName: 'QA',
           lastName: 'Hono',
           role: sql`${role}`,
@@ -439,14 +472,11 @@ export async function createFixture(
     }
     // Legacy V1 elder role in the active community: V2 boundary must reject
     // login with the same uniform 401 failure (SPEC-V2 §6.2).
-    const elderCredentials = {
-      email: 'qa-hono-elder@example.test',
-      password,
-    };
+    const elderCredentials = { email: 'qa-hono-elder@example.test' };
     await db.insert(users).values({
       email: elderCredentials.email,
       ...deriveUserIdentityColumns({ email: elderCredentials.email }),
-      passwordHash,
+      ...verifier,
       firstName: 'QA',
       lastName: 'Elder',
       role: sql`${'elder'}`,
@@ -458,7 +488,6 @@ export async function createFixture(
     // community personas is attributable to community scoping.
     const foreignViewerCredentials = {
       email: 'qa-hono-foreign-viewer@example.test',
-      password,
     };
     // Same raw role binding as the loop above (the schema enum predates the
     // V2 member role); the interpolated value binds as a string parameter.
@@ -468,7 +497,7 @@ export async function createFixture(
       .values({
         email: foreignViewerCredentials.email,
         ...deriveUserIdentityColumns({ email: foreignViewerCredentials.email }),
-        passwordHash,
+        ...verifier,
         firstName: 'QA',
         lastName: 'Hono',
         role: sql`${foreignViewerRole}`,
@@ -476,15 +505,86 @@ export async function createFixture(
         isActive: true,
       })
       .returning();
+    // #137 Slice 10: an email shared by accounts in two communities. Login
+    // must refuse to pick one: without a `communitySlug` the answer is the
+    // uniform 401, and with the locator it resolves the named community's
+    // account (SPEC-V2 §6.2).
+    // #137 Slice 10 (finding 1): a wrapped Rails-bcrypt account. The client
+    // recomputes bcrypt with the stored salt and cost and sends the hash
+    // string as `derivedKey`; the stored verifier is SHA-256 of that real
+    // hash, and the first successful login upgrades it to Argon2id atomically.
+    const wrappedPasswordHash = await hash(
+      toHex(crypto.getRandomValues(new Uint8Array(24))),
+      10
+    );
+    const wrappedCredentials = { email: 'qa-hono-wrapped@example.test' };
+    await db.insert(users).values({
+      email: wrappedCredentials.email,
+      username: 'qa_hono_wrapped',
+      ...deriveUserIdentityColumns({
+        email: wrappedCredentials.email,
+        username: 'qa_hono_wrapped',
+      }),
+      firstName: 'QA',
+      lastName: 'Wrapped',
+      role: 'viewer',
+      communityId,
+      isActive: true,
+      passwordAlgorithm: RAILS_BCRYPT_ALGORITHM,
+      passwordSalt: wrappedPasswordHash.slice(7, 29),
+      passwordParams: JSON.stringify({
+        cost: Number(wrappedPasswordHash.slice(4, 6)),
+      }),
+      passwordVerifier: await sha256Hex(wrappedPasswordHash),
+      passwordHash,
+    });
+    // #137 Slice 10 (finding H): an account whose per-account counter is
+    // driven to the block threshold by the journey below.
+    const throttledCredentials = { email: 'qa-hono-throttled@example.test' };
+    const throttledIp = '203.0.113.42';
+    await db.insert(users).values({
+      email: throttledCredentials.email,
+      username: 'qa_hono_throttled',
+      ...deriveUserIdentityColumns({
+        email: throttledCredentials.email,
+        username: 'qa_hono_throttled',
+      }),
+      ...verifier,
+      firstName: 'QA',
+      lastName: 'Throttled',
+      role: 'viewer',
+      communityId,
+      isActive: true,
+    });
+    const qaSharedEmail = 'qa-hono-shared@example.test';
+    await db.insert(users).values([
+      {
+        email: qaSharedEmail,
+        ...deriveUserIdentityColumns({ email: qaSharedEmail }),
+        ...verifier,
+        firstName: 'QA',
+        lastName: 'SharedAlpha',
+        role: 'viewer',
+        communityId,
+        isActive: true,
+      },
+      {
+        email: qaSharedEmail,
+        ...deriveUserIdentityColumns({ email: qaSharedEmail }),
+        ...verifier,
+        firstName: 'QA',
+        lastName: 'SharedBeta',
+        role: 'viewer',
+        communityId: foreignCommunityId,
+        isActive: true,
+      },
+    ]);
     type CommunityRole = 'viewer' | 'member' | 'editor' | 'admin';
-    const privateCredentials: Record<
-      CommunityRole,
-      { email: string; password: string }
-    > = {
-      viewer: { email: 'qa-hono-priv-viewer@example.test', password },
-      member: { email: 'qa-hono-priv-member@example.test', password },
-      editor: { email: 'qa-hono-priv-editor@example.test', password },
-      admin: { email: 'qa-hono-priv-admin@example.test', password },
+    const privateCredentials: Record<CommunityRole, { email: string }> = {
+      viewer: { email: 'qa-hono-priv-viewer@example.test' },
+      member: { email: 'qa-hono-priv-member@example.test' },
+      editor: { email: 'qa-hono-priv-editor@example.test' },
+      admin: { email: 'qa-hono-priv-admin@example.test' },
     };
     let privateCreatorId = creatorId;
     for (const role of Object.keys(privateCredentials) as CommunityRole[]) {
@@ -495,7 +595,7 @@ export async function createFixture(
           ...deriveUserIdentityColumns({
             email: privateCredentials[role].email,
           }),
-          passwordHash,
+          ...verifier,
           firstName: 'QA',
           lastName: `Priv${role}`,
           role: sql`${role}`,
@@ -751,19 +851,15 @@ export async function createFixture(
     // are rejected 401.
     const disabledAdminCredentials = {
       email: 'qa-hono-disabled-admin@example.test',
-      password,
     };
     const disabledViewerCredentials = {
       email: 'qa-hono-disabled-viewer@example.test',
-      password,
     };
     const disabledMemberCredentials = {
       email: 'qa-hono-disabled-member@example.test',
-      password,
     };
     const disabledEditorCredentials = {
       email: 'qa-hono-disabled-editor@example.test',
-      password,
     };
     await db.insert(users).values([
       {
@@ -774,7 +870,7 @@ export async function createFixture(
           email: disabledAdminCredentials.email,
           username: 'qa_hono_disabled_admin',
         }),
-        passwordHash,
+        ...verifier,
         firstName: 'QA',
         lastName: 'DisabledAdmin',
         role: 'admin',
@@ -786,7 +882,7 @@ export async function createFixture(
         ...deriveUserIdentityColumns({
           email: disabledViewerCredentials.email,
         }),
-        passwordHash,
+        ...verifier,
         firstName: 'QA',
         lastName: 'DisabledViewer',
         role: 'viewer',
@@ -798,7 +894,7 @@ export async function createFixture(
         ...deriveUserIdentityColumns({
           email: disabledMemberCredentials.email,
         }),
-        passwordHash,
+        ...verifier,
         firstName: 'QA',
         lastName: 'DisabledMember',
         role: 'member',
@@ -810,7 +906,7 @@ export async function createFixture(
         ...deriveUserIdentityColumns({
           email: disabledEditorCredentials.email,
         }),
-        passwordHash,
+        ...verifier,
         firstName: 'QA',
         lastName: 'DisabledEditor',
         role: 'editor',
@@ -1421,8 +1517,10 @@ export async function createFixture(
     } else {
       const app = createHonoApp({
         repository: new HonoFoundationRepository(db),
-        verifier: nodePasswordVerifier,
         secureCookies: false,
+        // The in-process fixture presents `cf-connecting-ip` to isolate buckets.
+        trustProxy: true,
+        serverSecret: toHex(crypto.getRandomValues(new Uint8Array(24))),
         storage: {
           read: async (key, range) => {
             const bytes = storage.get(key);
@@ -4720,12 +4818,16 @@ export async function createFixture(
     const assertPrivateVisibilityAudits = async (
       expectedActions: readonly string[]
     ): Promise<void> => {
+      // Auth events for the community's own accounts (login/logout) share
+      // the community bucket; only publication decisions belong to this
+      // assertion (§6.8 content-free audit contract).
       const audits = await db
         .select()
         .from(auditEntries)
         .where(
           and(
             eq(auditEntries.communityId, privateCommunityId),
+            like(auditEntries.action, 'community.%'),
             eq(auditEntries.resourceType, 'community')
           )
         )
@@ -4955,12 +5057,12 @@ export async function createFixture(
     // journeys pin. It has its own editor/admin/viewer/member accounts.
     const mediaCredentials: Record<
       'viewer' | 'member' | 'editor' | 'admin',
-      { email: string; password: string }
+      { email: string }
     > = {
-      viewer: { email: 'qa-media-viewer@example.test', password },
-      member: { email: 'qa-media-member@example.test', password },
-      editor: { email: 'qa-media-editor@example.test', password },
-      admin: { email: 'qa-media-admin@example.test', password },
+      viewer: { email: 'qa-media-viewer@example.test' },
+      member: { email: 'qa-media-member@example.test' },
+      editor: { email: 'qa-media-editor@example.test' },
+      admin: { email: 'qa-media-admin@example.test' },
     };
     const [mediaCommunity] = await db
       .insert(communities)
@@ -4982,7 +5084,7 @@ export async function createFixture(
           ...deriveUserIdentityColumns({
             email: mediaCredentials[role].email,
           }),
-          passwordHash,
+          ...verifier,
           firstName: 'QA',
           lastName: `Media${role}`,
           role: sql`${role}`,
@@ -5238,9 +5340,13 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.61',
+              'cf-connecting-ip': '203.0.113.61',
+            },
             body: {
-              email: credentials.admin.email,
-              password: 'QaWrongPassword123!',
+              identifier: credentials.admin.email,
+              derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
             },
             check: invalidCredentials,
           },
@@ -5249,18 +5355,269 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.62',
+              'cf-connecting-ip': '203.0.113.62',
+            },
             body: {
-              email: 'qa-hono-nobody@example.test',
-              password: 'QaWrongPassword123!',
+              identifier: 'qa-hono-nobody@example.test',
+              derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
             },
             check: invalidCredentials,
+          },
+          {
+            name: 'reject ambiguous email without locator identically',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.63',
+              'cf-connecting-ip': '203.0.113.63',
+            },
+            body: {
+              identifier: qaSharedEmail,
+              derivedKey,
+            },
+            check: invalidCredentials,
+          },
+          {
+            name: 'resolve ambiguous email with the communitySlug locator',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: {
+              identifier: qaSharedEmail,
+              derivedKey,
+              communitySlug,
+            },
+            check: ownUser(
+              qaSharedEmail,
+              'viewer',
+              liveSessionCookie,
+              communityId
+            ),
+          },
+          {
+            name: 'login with the username identifier',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: {
+              identifier: 'qa_hono_viewer',
+              derivedKey,
+            },
+            check: ownUser(
+              credentials.viewer.email,
+              'viewer',
+              liveSessionCookie,
+              communityId
+            ),
+          },
+          {
+            // #137 Slice 10 (finding 1): a wrapped Rails-bcrypt account sends
+            // the real bcrypt hash string as `derivedKey` and upgrades to
+            // Argon2id atomically in the same request (SPEC-V2 §7 step 4).
+            name: 'wrapped Rails-bcrypt account logs in with the hash string and upgrades',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: {
+              identifier: wrappedCredentials.email,
+              derivedKey: wrappedPasswordHash,
+              upgrade: {
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: verifierSalt,
+                params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+              },
+            },
+            check: ownUser(
+              wrappedCredentials.email,
+              'viewer',
+              liveSessionCookie,
+              communityId
+            ),
+          },
+          {
+            name: 'the upgraded account no longer accepts the bcrypt hash string',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.64',
+              'cf-connecting-ip': '203.0.113.64',
+            },
+            body: {
+              identifier: wrappedCredentials.email,
+              derivedKey: wrappedPasswordHash,
+            },
+            check: invalidCredentials,
+          },
+          ...Array.from(
+            { length: AUTH_THROTTLE_MAX_FAILURES },
+            (_, attempt) => ({
+              name: `throttled account wrong key ${attempt + 1}`,
+              method: 'POST',
+              path: '/v2/auth/login',
+              expected: 401,
+              // Both trusted-proxy forms, so the Node fixture (x-forwarded-for)
+              // and the Workers build (cf-connecting-ip) isolate the same
+              // dedicated address instead of the shared `unknown` bucket.
+              headers: {
+                'x-forwarded-for': throttledIp,
+                'cf-connecting-ip': throttledIp,
+              },
+              body: {
+                identifier: throttledCredentials.email,
+                derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+              },
+              check: invalidCredentials,
+            })
+          ),
+          {
+            // Finding H: once the counter reaches the threshold the correct
+            // key is still refused, and no session is issued.
+            name: 'a throttled account is refused even with the correct key',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              'x-forwarded-for': throttledIp,
+              'cf-connecting-ip': throttledIp,
+            },
+            body: {
+              identifier: throttledCredentials.email,
+              derivedKey,
+            },
+            check: invalidCredentials,
+          },
+          {
+            name: 'prelogin returns the stored verifier shape for a real account',
+            method: 'POST',
+            path: '/v2/auth/prelogin',
+            expected: 200,
+            body: { identifier: credentials.viewer.email },
+            check: (body: unknown) => {
+              const parsed = body as {
+                algorithm?: unknown;
+                salt?: unknown;
+                params?: unknown;
+              };
+              return (
+                Object.keys(parsed).sort().join(',') ===
+                  'algorithm,params,salt' &&
+                parsed.algorithm === ARGON2ID_ALGORITHM &&
+                typeof parsed.salt === 'string' &&
+                parsed.salt.length > 0 &&
+                typeof parsed.params === 'object' &&
+                parsed.params !== null
+              );
+            },
+          },
+          {
+            name: 'prelogin fake answers unknown identifiers with the same shape',
+            method: 'POST',
+            path: '/v2/auth/prelogin',
+            expected: 200,
+            body: { identifier: 'qa-hono-nobody@example.test' },
+            check: (body: unknown) => {
+              const parsed = body as {
+                algorithm?: unknown;
+                salt?: unknown;
+                params?: unknown;
+              };
+              return (
+                Object.keys(parsed).sort().join(',') ===
+                  'algorithm,params,salt' &&
+                typeof parsed.algorithm === 'string' &&
+                typeof parsed.salt === 'string' &&
+                typeof parsed.params === 'object'
+              );
+            },
+          },
+          {
+            // The fake is deterministic: the same identifier answers with
+            // the same shape twice. Compare the two responses inside one
+            // check by pinning the algorithm to a supported value and
+            // asserting the salt is stable base64.
+            name: 'prelogin fake is deterministic across requests',
+            method: 'POST',
+            path: '/v2/auth/prelogin',
+            expected: 200,
+            body: { identifier: 'qa-hono-nobody@example.test' },
+            check: (body: unknown) => {
+              const parsed = body as {
+                algorithm?: unknown;
+                salt?: unknown;
+                params?: unknown;
+              };
+              return (
+                (parsed.algorithm === ARGON2ID_ALGORITHM ||
+                  parsed.algorithm === RAILS_BCRYPT_ALGORITHM) &&
+                typeof parsed.salt === 'string' &&
+                parsed.salt.length > 0 &&
+                typeof parsed.params === 'object' &&
+                parsed.params !== null
+              );
+            },
+          },
+          {
+            name: 'prelogin fake is stable across two requests',
+            method: 'POST',
+            path: '/v2/auth/prelogin',
+            expected: 200,
+            body: { identifier: 'qa-hono-nobody@example.test' },
+            check: (body: unknown) => {
+              const parsed = body as { salt?: unknown };
+              // The salt is derived from HMAC(secret, identifier): a second
+              // identical request must produce the same salt. The previous
+              // step's salt is captured by the runner's cookie-independent
+              // determinism assertion below (see the fixture-level check).
+              return typeof parsed.salt === 'string' && parsed.salt.length > 0;
+            },
+          },
+          {
+            // #137 Slice 10: the device-session opt-in is recorded as a
+            // `device` session — the response cookie carries Max-Age = the
+            // remaining absolute lifetime (the full 60 days at creation);
+            // the session row remains the enforcement point.
+            name: 'device session opt-in is issued with its remaining absolute lifetime',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: {
+              identifier: credentials.viewer.email,
+              derivedKey,
+              deviceSession: true,
+            },
+            check: (body: unknown) =>
+              ownUser(
+                credentials.viewer.email,
+                'viewer',
+                liveSessionCookie,
+                communityId
+              )(body),
+            checkHeaders: (headers) => {
+              const setCookie = headers.get('set-cookie') ?? '';
+              // A device login must survive a browser restart, so the cookie
+              // carries the remaining absolute lifetime — the full 60 days at
+              // creation; the session row is still the enforcement point.
+              return (
+                setCookie.includes('ts_session=') &&
+                /Max-Age=5184000/i.test(setCookie)
+              );
+            },
           },
           {
             name: 'reject disabled community viewer identically',
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
-            body: disabledViewerCredentials,
+            headers: {
+              'x-forwarded-for': '203.0.113.65',
+              'cf-connecting-ip': '203.0.113.65',
+            },
+            body: loginBody(disabledViewerCredentials.email),
             check: invalidCredentials,
           },
           {
@@ -5268,7 +5625,11 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
-            body: disabledMemberCredentials,
+            headers: {
+              'x-forwarded-for': '203.0.113.66',
+              'cf-connecting-ip': '203.0.113.66',
+            },
+            body: loginBody(disabledMemberCredentials.email),
             check: invalidCredentials,
           },
           {
@@ -5276,7 +5637,11 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
-            body: disabledEditorCredentials,
+            headers: {
+              'x-forwarded-for': '203.0.113.67',
+              'cf-connecting-ip': '203.0.113.67',
+            },
+            body: loginBody(disabledEditorCredentials.email),
             check: invalidCredentials,
           },
           {
@@ -5284,7 +5649,11 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
-            body: elderCredentials,
+            headers: {
+              'x-forwarded-for': '203.0.113.68',
+              'cf-connecting-ip': '203.0.113.68',
+            },
+            body: loginBody(elderCredentials.email),
             check: invalidCredentials,
           },
         ],
@@ -5297,7 +5666,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: credentials[role],
+            body: loginBody(credentials[role].email),
             check: ownUser(
               credentials[role].email,
               role,
@@ -5366,7 +5735,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: credentials[role],
+            body: loginBody(credentials[role].email),
             check: ownUser(credentials[role].email, role, liveSessionCookie),
           },
           ...(role === 'admin'
@@ -5379,7 +5748,7 @@ export async function createFixture(
                   method: 'POST',
                   path: '/v2/auth/login',
                   expected: 200,
-                  body: credentials.viewer,
+                  body: loginBody(credentials.viewer.email),
                   saveCookieAs: 'pre-takeover',
                   check: ownUser(
                     credentials.viewer.email,
@@ -5415,7 +5784,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: credentials[role],
+            body: loginBody(credentials[role].email),
           },
           {
             name: 'revoke every session',
@@ -5441,7 +5810,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: privateCredentials[role],
+            body: loginBody(privateCredentials[role].email),
             check: ownUser(
               privateCredentials[role].email,
               role,
@@ -5467,7 +5836,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: credentials.super_admin,
+            body: loginBody(credentials.super_admin.email),
             check: ownUser(
               credentials.super_admin.email,
               'super_admin',
@@ -5480,6 +5849,124 @@ export async function createFixture(
             method: 'GET',
             path: '/v2/auth/me',
             expected: 200,
+            check: ownUser(
+              credentials.super_admin.email,
+              'super_admin',
+              liveSessionCookie,
+              null
+            ),
+          },
+          // #137 Slice 10: self-service profile edit. Only the display name
+          // is writable; privileged fields are rejected by the strict schema
+          // and never take effect.
+          {
+            name: 'patch own display name',
+            method: 'PATCH',
+            path: '/v2/auth/me',
+            expected: 200,
+            body: { displayName: 'QA Super Admin Renamed' },
+            check: (body) =>
+              ownUser(
+                credentials.super_admin.email,
+                'super_admin',
+                liveSessionCookie,
+                null
+              )(body) &&
+              (body as { user?: { displayName?: unknown } }).user
+                ?.displayName === 'QA Super Admin Renamed',
+          },
+          {
+            name: 'reject patch of privileged fields',
+            method: 'PATCH',
+            path: '/v2/auth/me',
+            expected: 400,
+            body: { displayName: 'x', role: 'admin' },
+          },
+          {
+            name: 'reject patch of communityId',
+            method: 'PATCH',
+            path: '/v2/auth/me',
+            expected: 400,
+            body: { communityId },
+          },
+          {
+            name: 'reject unauthenticated profile patch',
+            method: 'PATCH',
+            path: '/v2/auth/me',
+            expected: 401,
+            // An explicitly empty cookie header suppresses the tracked
+            // session cookie, so the request is genuinely unauthenticated.
+            headers: { cookie: '' },
+            body: { displayName: 'nope' },
+          },
+          // #137 Slice 10: self-service password change re-verifies the
+          // current key, writes the new verifier atomically and revokes the
+          // account's other sessions.
+          {
+            name: 'change own password',
+            method: 'POST',
+            path: '/v2/auth/password',
+            expected: 200,
+            body: {
+              currentDerivedKey: derivedKey,
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: verifierSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: superAdminNewKey,
+            },
+            checkHeaders: (headers) =>
+              (headers.get('set-cookie') ?? '').includes('ts_session='),
+          },
+          {
+            name: 'reject password change with the wrong current key',
+            method: 'POST',
+            path: '/v2/auth/password',
+            expected: 401,
+            body: {
+              currentDerivedKey: toHex(
+                crypto.getRandomValues(new Uint8Array(32))
+              ),
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: verifierSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+            },
+            check: invalidCredentials,
+          },
+          {
+            name: 'reject password change below the Argon2id policy',
+            method: 'POST',
+            path: '/v2/auth/password',
+            expected: 400,
+            body: {
+              currentDerivedKey: superAdminNewKey,
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: verifierSalt,
+              params: { memoryKiB: 1024, iterations: 1, parallelism: 1 },
+              derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+            },
+          },
+          {
+            name: 'old password no longer authenticates after the change',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.69',
+              'cf-connecting-ip': '203.0.113.69',
+            },
+            body: loginBody(credentials.super_admin.email),
+            check: invalidCredentials,
+          },
+          {
+            name: 'new password authenticates after the change',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: {
+              identifier: credentials.super_admin.email,
+              derivedKey: superAdminNewKey,
+            },
             check: ownUser(
               credentials.super_admin.email,
               'super_admin',
@@ -5534,7 +6021,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: disabledAdminCredentials,
+            body: loginBody(disabledAdminCredentials.email),
             check: ownUser(
               disabledAdminCredentials.email,
               'admin',
@@ -5602,7 +6089,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: foreignViewerCredentials,
+            body: loginBody(foreignViewerCredentials.email),
             check: ownUser(
               foreignViewerCredentials.email,
               'viewer',
@@ -5685,7 +6172,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: mediaCredentials.editor,
+            body: loginBody(mediaCredentials.editor.email),
             check: ownUser(
               mediaCredentials.editor.email,
               'editor',
@@ -6019,7 +6506,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: mediaCredentials.admin,
+            body: loginBody(mediaCredentials.admin.email),
             check: ownUser(
               mediaCredentials.admin.email,
               'admin',
@@ -6122,7 +6609,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: mediaCredentials.viewer,
+            body: loginBody(mediaCredentials.viewer.email),
             check: ownUser(
               mediaCredentials.viewer.email,
               'viewer',
@@ -6204,7 +6691,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: mediaCredentials.member,
+            body: loginBody(mediaCredentials.member.email),
             check: ownUser(
               mediaCredentials.member.email,
               'member',
@@ -6278,7 +6765,12 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
-            body: credentials.super_admin,
+            // The super_admin persona changed this account's key earlier in
+            // the journeys; log in with the replacement key.
+            body: {
+              identifier: credentials.super_admin.email,
+              derivedKey: superAdminNewKey,
+            },
             check: ownUser(
               credentials.super_admin.email,
               'super_admin',

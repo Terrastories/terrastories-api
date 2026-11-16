@@ -19,7 +19,7 @@ const previousReleaseFixture = path.join(
   rootDir,
   'tests/fixtures/db/postgres-previous-release.sql'
 );
-const snapshotPath = path.join(migrationsFolder, 'meta/0010_snapshot.json');
+const snapshotPath = path.join(migrationsFolder, 'meta/0011_snapshot.json');
 
 const canonicalUniqueConstraints = [
   'communities_slug_unique',
@@ -612,6 +612,69 @@ async function verifySlice2BackfillAndOrphanUpgrade(
   );
 }
 
+async function verifySlice10SessionBackfill(
+  client: ReturnType<typeof postgres>
+): Promise<void> {
+  await resetDatabase(client);
+  const through0009 = await createPostgresMigrationsFolderThrough(
+    '0009_canonical_media_and_map_configs'
+  );
+  try {
+    await migrate(drizzle(client), { migrationsFolder: through0009 });
+  } finally {
+    await rm(through0009, { recursive: true, force: true });
+  }
+
+  const now = 1_700_000_000_000;
+  await client`
+    INSERT INTO communities (id, name, slug, created_at, updated_at)
+    VALUES (1, 'Slice10 PG Comm', 'slice10-pg-comm', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+  `;
+  await client`
+    INSERT INTO users (id, email, email_normalized, password_hash, first_name, last_name, role, community_id, created_at, updated_at)
+    VALUES (1, 's10pg@example.org', 's10pg@example.org', 'hash', 'S10', 'PG', 'viewer', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+  `;
+  const expiresBig = now + 30 * 24 * 3600_000;
+  await client`
+    INSERT INTO sessions (id, token_hash, user_id, expires_at)
+    VALUES ('sess-big', 'th-big', 1, ${expiresBig}), ('sess-small', 'th-small', 1, 1000)
+  `;
+
+  await migrate(drizzle(client), { migrationsFolder });
+
+  // DEVICE_SESSION_ABSOLUTE_MS (5184000000 ms) is the value sessionLifetimesFor
+  // applies for every kind; the migration files carry the literal.
+  const absoluteLifetime = 5_184_000_000;
+  const idleWindow = 43_200_000; // STANDARD_SESSION_IDLE_MS — 12h
+  const rows = await client`
+    SELECT id, kind, created_at, last_seen_at, idle_expires_at, absolute_expires_at
+    FROM sessions
+    ORDER BY id
+  `;
+  assert.equal(rows.length, 2, 'legacy session rows must survive 0010');
+  const big = rows.find((row) => String(row.id) === 'sess-big');
+  const small = rows.find((row) => String(row.id) === 'sess-small');
+  assert.ok(big && small, 'both legacy sessions must be backfilled');
+  // A renewing legacy session must not be cut off at its legacy expiry.
+  assert.equal(String(big.kind), 'standard');
+  assert.equal(Number(big.created_at), expiresBig - idleWindow);
+  assert.equal(Number(big.last_seen_at), Number(big.created_at));
+  assert.equal(Number(big.idle_expires_at), expiresBig);
+  assert.equal(
+    Number(big.absolute_expires_at),
+    Math.max(Number(big.created_at) + absoluteLifetime, expiresBig)
+  );
+  assert.ok(
+    Number(big.absolute_expires_at) > Number(big.idle_expires_at),
+    'renewal window must outlive the legacy expiry'
+  );
+  assert.equal(String(small.kind), 'standard');
+  assert.equal(Number(small.created_at), 0);
+  assert.equal(Number(small.last_seen_at), 0);
+  assert.equal(Number(small.idle_expires_at), 1000);
+  assert.equal(Number(small.absolute_expires_at), absoluteLifetime);
+}
+
 async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   assert.ok(databaseUrl, 'DATABASE_URL is required');
@@ -621,19 +684,21 @@ async function main(): Promise<void> {
   try {
     console.log('🐘 PostgreSQL migration regression gate');
     console.log(
-      '  1/5 previous-schema ownership orphan expand-contract upgrade'
+      '  1/6 previous-schema ownership orphan expand-contract upgrade'
     );
     await verifyLegacyCommunityOwnershipOrphanUpgrade(client);
-    console.log('  2/5 cross-schema constraint-name collision upgrade');
+    console.log('  2/6 cross-schema constraint-name collision upgrade');
     await verifyConstraintNameCollisionUpgrade(client);
-    console.log('  3/5 orphan-theme expand-contract upgrade');
+    console.log('  3/6 orphan-theme expand-contract upgrade');
     await verifyOrphanThemeUpgrade(client);
-    console.log('  4/5 applied constraints match Drizzle snapshot semantics');
+    console.log('  4/6 applied constraints match Drizzle snapshot semantics');
     await verifyFreshSnapshotConstraintNames(client);
     console.log(
-      '  5/5 Slice 2 files/community_media backfill and orphan files guard'
+      '  5/6 Slice 2 files/community_media backfill and orphan files guard'
     );
     await verifySlice2BackfillAndOrphanUpgrade(client);
+    console.log('  6/6 Slice 10 legacy session backfill');
+    await verifySlice10SessionBackfill(client);
     console.log('✅ PostgreSQL migration regression gate passed');
   } finally {
     await client.end();

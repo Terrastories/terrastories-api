@@ -83,7 +83,10 @@ it('serves a fully valid production configuration', async () => {
     await bundleWorkerModule(
       `import worker from './src/worker.js'; export default {fetch:(r,e)=>worker.fetch(r,e)};`
     ),
-    { PUBLIC_ORIGIN: 'https://api.terrastories.org' }
+    {
+      PUBLIC_ORIGIN: 'https://api.terrastories.org',
+      AUTH_SERVER_SECRET: 'prelogin-hsm-material-9f8e7d6c5b4a3f2',
+    }
   );
   try {
     const healthy = await mf.dispatchFetch('https://worker.test/health');

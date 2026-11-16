@@ -1,9 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from 'node:assert/strict';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, like, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { serve } from '@hono/node-server';
-import { EventEmitter, once } from 'node:events';
+import { once } from 'node:events';
 import type { Database } from '../src/db/index.js';
 import { dialectOf, tablesFor } from '../src/db/dialect.js';
 import {
@@ -13,8 +13,15 @@ import {
   sessionsSqlite,
 } from '../src/db/schema/sessions.js';
 import { HonoFoundationRepository } from '../src/repositories/hono-foundation.repository.js';
+import { HonoAuthRepository } from '../src/repositories/hono-auth.repository.js';
 import { createHonoApp } from '../src/hono-app.js';
-import { nodePasswordVerifier } from '../src/node-password.js';
+import {
+  ARGON2ID_ALGORITHM,
+  ARGON2ID_PARAMS_JSON,
+  AUTH_THROTTLE_MAX_FAILURES,
+  authThrottleBackoffMs,
+} from '../src/shared/auth-policy.js';
+import { sha256Hex, toHex } from '../src/shared/auth-crypto.js';
 import {
   sessionLifetime,
   sessionRenewalInterval,
@@ -66,10 +73,50 @@ export async function runHonoFoundationContract(
       : communityMediaSqlite;
   const sessions =
     dialectOf(database) === 'postgresql' ? sessionsPg : sessionsSqlite;
+  /**
+   * Poll until at least `expected` backends are blocked behind this
+   * transaction's open lock, then return the observed count (or that count at
+   * the deadline). Deterministic: a backend blocked behind the uncommitted
+   * change is what lets the racing write lose the authority gate against the
+   * *committed* row, rather than fail for an unrelated reason.
+   */
+  /** Settle a promise so an unobserved rejection never crashes the process. */
+  const ignore = (): void => undefined;
+  const waitForBlocked = async (
+    tx: any,
+    expected: number,
+    deadline: number
+  ): Promise<number> => {
+    for (;;) {
+      const blocked = await tx.execute(
+        sql`select pid from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid))`
+      );
+      const rows = Array.isArray(blocked)
+        ? blocked
+        : ((blocked as { rows?: unknown[] }).rows ?? []);
+      if (rows.length >= expected) return rows.length;
+      if (Date.now() >= deadline) return rows.length;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
   const tag = crypto.randomUUID();
+  const slugA = `hono-${tag}-a`;
+  const slugB = `hono-${tag}-b`;
   const password = 'Foundation-password-42!';
-  // bcrypt emits $2b$; Rails/Devise preserves the compatible $2a$ encoding.
+  // The legacy `password_hash` stays the Rails-era anchor the session write
+  // re-reads; client-stretched auth verifies against the seeded verifier
+  // instead (SPEC-V2 §7). Seed both so every seeded account can log in.
   const passwordHash = (await hash(password, 4)).replace('$2b$', '$2a$');
+  const stretchedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const wrongKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const wrappedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const makeDerivedKey = () =>
+    toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const stretchedVerifier = await sha256Hex(stretchedKey);
+  const stretchedSalt = Buffer.from(
+    crypto.getRandomValues(new Uint8Array(16))
+  ).toString('base64');
+  const serverSecret = toHex(crypto.getRandomValues(new Uint8Array(24)));
   const communityIds: number[] = [];
   const userIds: number[] = [];
   const fileIds: string[] = [];
@@ -81,8 +128,10 @@ export async function runHonoFoundationContract(
   const deletedStorageKeys: string[] = [];
   const options = {
     repository,
-    verifier: nodePasswordVerifier,
     secureCookies: false,
+    // The contract presents `x-forwarded-for` to isolate per-IP buckets.
+    trustProxy: true,
+    serverSecret,
     now: () => instant,
     storage: {
       read: async (_key: string) => {
@@ -118,14 +167,23 @@ export async function runHonoFoundationContract(
   const bind = (communityId: number) =>
     db.update(media).set({ communityId }).where(eq(media.fileId, fileIds[0]));
   const login = async (
-    email: string,
-    communityId?: number,
+    identifier: string,
+    communitySlug?: string,
     previous?: string
   ) => {
+    // Successful logins use their own trusted-proxy address so the deliberate
+    // failure cases (which share the `unknown` bucket) cannot throttle them.
     const response = await postLogin(
       app,
-      { email, password, communityId },
-      previous ? { cookie: previous } : {}
+      {
+        identifier,
+        derivedKey: stretchedKey,
+        ...(communitySlug === undefined ? {} : { communitySlug }),
+      },
+      {
+        'x-forwarded-for': '198.51.100.200',
+        ...(previous ? { cookie: previous } : {}),
+      }
     );
     const body = await response.text();
     assert.equal(response.status, 200, `login failed: ${body}`);
@@ -157,13 +215,17 @@ export async function runHonoFoundationContract(
     }
     const [communityA, communityB] = communityIds;
     const viewerEmail = `viewer-${tag}@example.test`;
-    const credentials = { email: viewerEmail, password };
+    const credentials = { identifier: viewerEmail, derivedKey: stretchedKey };
     const adminEmail = `admin-${tag}@example.test`;
     const editorEmail = `editor-${tag}@example.test`;
     const systemEmail = `system-${tag}@example.test`;
     const duplicateEmail = `duplicate-${tag}@example.test`;
     const userDefaults = {
       passwordHash,
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordSalt: stretchedSalt,
+      passwordParams: ARGON2ID_PARAMS_JSON,
+      passwordVerifier: stretchedVerifier,
       firstName: 'Hono',
       lastName: 'Contract',
     };
@@ -187,6 +249,19 @@ export async function runHonoFoundationContract(
       userIds.push(row.id);
     }
     const viewerId = userIds[0];
+    // A dedicated account for the throttle-backoff case (finding 3), so the
+    // failures never block an account another case logs in with.
+    const backoffEmail = `backoff-${tag}@example.test`;
+    const [backoffUser] = await db
+      .insert(tables.users)
+      .values({
+        ...userDefaults,
+        email: backoffEmail,
+        role: 'viewer',
+        communityId: communityA,
+      })
+      .returning();
+    userIds.push(backoffUser.id);
     for (const communityId of [communityA, communityB, communityA]) {
       const id = crypto.randomUUID();
       await db.insert(tables.files).values({
@@ -267,25 +342,43 @@ export async function runHonoFoundationContract(
     await status(postLogin(app, credentials, { Origin: foreignOrigin }), 403);
     await status(me(), 401);
     for (const payload of [
-      { email: viewerEmail, password: 'wrong' },
-      { email: `missing-${tag}@example.test`, password },
-      { email: duplicateEmail, password },
-      { email: viewerEmail, password, communityId: communityB },
-      { email: viewerEmail, password, communityId: 2147483647 },
+      { identifier: viewerEmail, derivedKey: wrongKey },
+      { identifier: `missing-${tag}@example.test`, derivedKey: stretchedKey },
+      { identifier: duplicateEmail, derivedKey: stretchedKey },
+      {
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
+        communitySlug: slugB,
+      },
+      {
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
+        communitySlug: 'no-such-community',
+      },
     ])
       await status(postLogin(app, payload), 401);
     for (const payload of [
       {},
-      { email: viewerEmail, password, communityId: '1junk' },
-      { email: viewerEmail, password: 1 },
-      ...[0, -1, 1.5, 2147483648, 3000000000, Number.MAX_SAFE_INTEGER].map(
-        (communityId) => ({ email: viewerEmail, password, communityId })
-      ),
+      { identifier: viewerEmail },
+      { identifier: viewerEmail, derivedKey: 1 },
+      { identifier: 'x'.repeat(255), derivedKey: stretchedKey },
+      { identifier: viewerEmail, derivedKey: 'g'.repeat(64) },
+      { identifier: viewerEmail, derivedKey: 'a'.repeat(63) },
+      {
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
+        communitySlug: 'slug'.repeat(80),
+      },
+      {
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
+        upgrade: { algorithm: ARGON2ID_ALGORITHM },
+      },
     ]) {
       await status(postLogin(app, payload), 400);
     }
     await status(postRaw(app, '{'), 400);
-    await login(duplicateEmail, communityA);
+    await login(duplicateEmail, slugA);
     const attackerCookie = `ts_session=${'a'.repeat(64)}`;
     const cookie = await login(viewerEmail, undefined, attackerCookie);
     assert.notEqual(cookie, attackerCookie, 'fixation rejected');
@@ -451,16 +544,20 @@ export async function runHonoFoundationContract(
     );
     await status(me(expired), 401, 'expired cookie stays revoked');
     await status(me(afterBoundary), 200);
-    await updateUser(viewerId, { passwordHash: 'malformed' });
+    await updateUser(viewerId, { passwordVerifier: 'malformed' });
     await status(
       postLogin(app, {
-        ...credentials,
+        identifier: viewerEmail,
+        derivedKey: stretchedKey,
       }),
       401
     );
-    await updateUser(viewerId, { passwordHash });
+    await updateUser(viewerId, { passwordVerifier: stretchedVerifier });
+    // #137: the client-stretched verifier — not the legacy password_hash —
+    // is the authentication factor. A tampered/malformed stored verifier
+    // fails closed with the uniform 401 (SPEC-V2 §7 "Verifier registry").
     const currentCookie = await login(viewerEmail);
-    for (const dependency of ['readiness', 'session'] as const) {
+    for (const dependency of ['readiness', 'sessionContext'] as const) {
       const unavailable = new HonoFoundationRepository(database);
       unavailable[dependency] = storageOutage;
       const failing = createHonoApp({ ...options, repository: unavailable });
@@ -470,67 +567,40 @@ export async function runHonoFoundationContract(
         'private detail'
       );
     }
-    const barrier = new EventEmitter();
-    const reached = once(barrier, 'entered');
-    const racing = createHonoApp({
-      ...options,
-      verifier: {
-        verify: async () => {
-          barrier.emit('entered');
-          await once(barrier, 'resume');
-          return true;
-        },
-      },
-    });
-    const pending = postLogin(racing, credentials);
-    await reached;
-    await updateUser(viewerId, { passwordHash: 'reset-during-verification' });
-    barrier.emit('resume');
-    const rejected = await pending;
-    assert.equal(rejected.status, 401, 'password reset wins verifier race');
-    assert.equal(rejected.headers.get('set-cookie'), null);
-    await updateUser(viewerId, { passwordHash });
+    // (#137) The pre-slice barrier parked the login request inside the
+    // credential check and reset the password mid-flight. Client-stretched
+    // logins re-read authority in createSession's INSERT…SELECT (and the
+    // wrapped-bcrypt upgrade in a password_hash-guarded UPDATE), so the
+    // reset-wins property is pinned by the stale-anchor repository tests in
+    // tests/hono/auth-login.test.ts and by the PostgreSQL concurrent-disable
+    // case below — not by a black-box timing barrier.
     // #188 round 3: a cross-user login that fails the authority gate must
     // leave the presenting user's session intact — the revoking delete is
     // coupled to the verified session write and never runs when the login
-    // itself loses the verifier race.
+    // itself loses the race. Deterministic form: the failing account is
+    // deactivated before the attempt, so its login is rejected and the
+    // presenting cookie still authenticates afterwards.
     const heldCookie = await login(viewerEmail);
-    const takeoverBarrier = new EventEmitter();
-    const takeoverReached = once(takeoverBarrier, 'entered');
-    const racingTakeover = createHonoApp({
-      ...options,
-      verifier: {
-        verify: async () => {
-          takeoverBarrier.emit('entered');
-          await once(takeoverBarrier, 'resume');
-          return true;
-        },
-      },
-    });
-    const pendingTakeover = postLogin(
-      racingTakeover,
-      { email: adminEmail, password },
-      { cookie: heldCookie }
-    );
-    await takeoverReached;
-    await updateUser(userIds[1], {
-      passwordHash: 'reset-during-verification',
-    });
-    takeoverBarrier.emit('resume');
-    const rejectedTakeover = await pendingTakeover;
-    assert.equal(
-      rejectedTakeover.status,
+    await updateUser(userIds[1], { isActive: false });
+    await status(
+      postLogin(
+        app,
+        { identifier: adminEmail, derivedKey: stretchedKey },
+        { cookie: heldCookie }
+      ),
       401,
-      'failed cross-user login must not authenticate'
+      'authority-denied cross-user login must not authenticate'
     );
-    assert.equal(rejectedTakeover.headers.get('set-cookie'), null);
-    await updateUser(userIds[1], { passwordHash });
+    await updateUser(userIds[1], { isActive: true });
     await status(
       me(heldCookie),
       200,
       'failed cross-user login keeps the presenting user session'
     );
     await status(action('logout', heldCookie), 204);
+    // Fault-injection sessions are cleared before the shared-browser count,
+    // mirroring the PostgreSQL lock-race block below.
+    await db.delete(sessions).where(eq(sessions.userId, viewerId));
     // Shared-browser login (#188 review): user B signing in while user A's
     // valid cookie is present must get B's own fresh session row. A's
     // presented session is revoked, never rotated onto B's login.
@@ -547,7 +617,7 @@ export async function runHonoFoundationContract(
     const viewerRow = viewerRows[0];
     const takeover = await postLogin(
       app,
-      { email: adminEmail, password },
+      { identifier: adminEmail, derivedKey: stretchedKey },
       { cookie: sharedBrowserA }
     );
     assert.equal(takeover.status, 200);
@@ -678,7 +748,13 @@ export async function runHonoFoundationContract(
       await updateUser(nullSuperId, change);
       await status(me(superSessionCookie), 401);
       if ('isActive' in change) {
-        await status(postLogin(app, { email: nullSuperEmail, password }), 401);
+        await status(
+          postLogin(app, {
+            identifier: nullSuperEmail,
+            derivedKey: stretchedKey,
+          }),
+          401
+        );
       }
       await updateUser(nullSuperId, restore);
       await status(
@@ -743,8 +819,17 @@ export async function runHonoFoundationContract(
     );
     assert.ok(adminId > 0);
 
-    await status(postLogin(app, { email: disabledViewerEmail, password }), 401);
-    await status(postLogin(app, { email: elderEmail, password }), 401);
+    await status(
+      postLogin(app, {
+        identifier: disabledViewerEmail,
+        derivedKey: stretchedKey,
+      }),
+      401
+    );
+    await status(
+      postLogin(app, { identifier: elderEmail, derivedKey: stretchedKey }),
+      401
+    );
 
     // Ambiguous email (SPEC-V2 §6.2): sharing an email with a disabled-community,
     // inactive, or legacy elder account must remain ambiguous (401 without
@@ -809,7 +894,10 @@ export async function runHonoFoundationContract(
           .returning();
         userIds.push(row.id);
       }
-      const noLocator = await postLogin(app, { email: sharedEmail, password });
+      const noLocator = await postLogin(app, {
+        identifier: sharedEmail,
+        derivedKey: stretchedKey,
+      });
       assert.equal(
         noLocator.status,
         401,
@@ -818,7 +906,7 @@ export async function runHonoFoundationContract(
       assert.deepEqual(await noLocator.json(), {
         error: 'Invalid credentials',
       });
-      const narrowedCookie = await login(sharedEmail, communityA);
+      const narrowedCookie = await login(sharedEmail, slugA);
       await status(me(narrowedCookie), 200);
       await status(action('logout', narrowedCookie), 204);
     }
@@ -829,26 +917,21 @@ export async function runHonoFoundationContract(
       // disable cannot leave a session that survives and revives on re-enable.
       await db.delete(sessions).where(eq(sessions.userId, viewerId));
       const preRaceCookie = await login(viewerEmail);
-      let loginDone = false;
       let pendingRaceLogin!: Promise<Response>;
       await db.transaction(async (tx: any) => {
         await tx
           .update(tables.communities)
           .set({ isActive: false })
           .where(eq(tables.communities.id, communityA));
-        pendingRaceLogin = postLogin(app, credentials);
-        void pendingRaceLogin.finally(() => {
-          loginDone = true;
+        pendingRaceLogin = postLogin(app, credentials, {
+          'x-forwarded-for': '198.51.100.220',
         });
-        const deadline = Date.now() + 2000;
-        while (!loginDone && Date.now() < deadline) {
-          const blocked = await tx.execute(
-            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+        void pendingRaceLogin.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'community-disable race never materialised: the login never blocked behind the disable'
           );
-          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
-          if (blockedRows.length > 0) break;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
       });
       const raceResponse = await pendingRaceLogin;
       const raceCookie = raceResponse.headers.get('set-cookie')?.split(';')[0];
@@ -893,12 +976,16 @@ export async function runHonoFoundationContract(
 
     // Slice 7 audit existence & content-freedom contract on both SQLite and PostgreSQL (#145)
     const slice7AdminCookie = await login(adminEmail);
-    const patchCommunity = (body: unknown) =>
+    const patchCommunity = (
+      body: unknown,
+      extraHeaders: Record<string, string> = {}
+    ) =>
       send(app, '/v2/community', {
         method: 'PATCH',
         headers: {
           'content-type': 'application/json',
           cookie: slice7AdminCookie,
+          ...extraHeaders,
         },
         body: JSON.stringify(body),
       });
@@ -915,6 +1002,7 @@ export async function runHonoFoundationContract(
       .where(
         and(
           eq(tables.auditEntries.communityId, communityA),
+          like(tables.auditEntries.action, 'community.%'),
           eq(tables.auditEntries.resourceType, 'community')
         )
       )
@@ -951,26 +1039,22 @@ export async function runHonoFoundationContract(
       // PostgreSQL SELECT ... FOR UPDATE race (#145): concurrent toggle waiting
       // on a committed visibility flip must observe the updated visibility and
       // emit zero duplicate audit entries.
-      let toggleDone = false;
       let pendingToggle!: Promise<Response>;
       await db.transaction(async (tx: any) => {
         await tx
           .update(tables.communities)
           .set({ publicStories: true })
           .where(eq(tables.communities.id, communityA));
-        pendingToggle = patchCommunity({ visibility: 'public' });
-        void pendingToggle.finally(() => {
-          toggleDone = true;
-        });
-        const deadline = Date.now() + 2000;
-        while (!toggleDone && Date.now() < deadline) {
-          const blocked = await tx.execute(
-            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+        pendingToggle = patchCommunity(
+          { visibility: 'public' },
+          { 'x-forwarded-for': '198.51.100.221' }
+        );
+        void pendingToggle.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'community-toggle race never materialised: the toggle never blocked behind the flip'
           );
-          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
-          if (blockedRows.length > 0) break;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
       });
       assert.equal((await pendingToggle).status, 200);
       const auditsAfterLock = await db
@@ -979,6 +1063,7 @@ export async function runHonoFoundationContract(
         .where(
           and(
             eq(tables.auditEntries.communityId, communityA),
+            like(tables.auditEntries.action, 'community.%'),
             eq(tables.auditEntries.resourceType, 'community')
           )
         )
@@ -1002,6 +1087,7 @@ export async function runHonoFoundationContract(
         .where(
           and(
             eq(tables.auditEntries.communityId, communityA),
+            like(tables.auditEntries.action, 'community.%'),
             eq(tables.auditEntries.resourceType, 'community')
           )
         )
@@ -1046,7 +1132,6 @@ export async function runHonoFoundationContract(
         })
         .returning();
 
-      let delDone = false;
       let pendingDelete!: Promise<Response>;
       await db.transaction(async (tx: any) => {
         await tx.insert(tables.storyPlaces).values({
@@ -1057,20 +1142,17 @@ export async function runHonoFoundationContract(
         });
         pendingDelete = send(app, `/v2/places/${racePlace.id}`, {
           method: 'DELETE',
-          headers: { cookie: slice7AdminCookie },
+          headers: {
+            cookie: slice7AdminCookie,
+            'x-forwarded-for': '198.51.100.222',
+          },
         });
-        void pendingDelete.finally(() => {
-          delDone = true;
-        });
-        const deadline = Date.now() + 2000;
-        while (!delDone && Date.now() < deadline) {
-          const blocked = await tx.execute(
-            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+        void pendingDelete.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'story_places race never materialised: the places delete never blocked behind the insert'
           );
-          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
-          if (blockedRows.length > 0) break;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
       });
       assert.equal(
         (await pendingDelete).status,
@@ -1096,6 +1178,492 @@ export async function runHonoFoundationContract(
         1
       );
 
+      // Slice 10 (#137): concurrent failed logins on one account must not
+      // lose a counter update. `recordLoginFailure` writes the per-account and
+      // per-IP rows in one transaction; two simultaneous attempts must both
+      // land, and the counter must equal the attempt count (no lost update).
+      const authThrottle = tables.authThrottle;
+      const accountKey = await new HonoAuthRepository(
+        database as Database
+      ).accountThrottleKey(viewerId, serverSecret);
+      const ipKey = await new HonoAuthRepository(
+        database as Database
+      ).ipThrottleKey('203.0.113.250', serverSecret);
+      await db
+        .delete(authThrottle)
+        .where(inArray(authThrottle.key, [accountKey, ipKey]));
+      // The per-IP key is derived from the client IP header, so the burst must
+      // present the same address the assertion below hashes (SPEC-V2 §6.8:
+      // the per-IP counter is keyed on the client IP alone).
+      const burst = await Promise.all(
+        [0, 1, 2, 3].map(() =>
+          postLogin(
+            app,
+            { identifier: viewerEmail, derivedKey: wrongKey },
+            { 'x-forwarded-for': '203.0.113.250' }
+          )
+        )
+      );
+      assert.ok(
+        burst.every((response) => response.status === 401),
+        'every concurrent wrong-key attempt must answer the uniform 401'
+      );
+      const throttleRows = await db
+        .select()
+        .from(authThrottle)
+        .where(eq(authThrottle.key, accountKey));
+      assert.equal(
+        throttleRows.length,
+        1,
+        'concurrent failures must update one per-account row, not fork it'
+      );
+      assert.equal(
+        throttleRows[0].failures,
+        4,
+        'concurrent failed logins must not lose a counter update'
+      );
+      const ipRows = await db
+        .select()
+        .from(authThrottle)
+        .where(eq(authThrottle.key, ipKey));
+      assert.equal(ipRows[0].failures, 4);
+
+      // Slice 10 (finding 3): the backoff branch must actually execute on
+      // every backend. `AUTH_THROTTLE_MAX_FAILURES` failures block the account
+      // for exactly `now + authThrottleBackoffMs(...)`, and the next attempt
+      // with the *correct* key is still the uniform 401. On PostgreSQL this is
+      // also what exercises the `bigint` cast on `blocked_until`: an inferred
+      // int4 parameter would overflow on a millisecond value (22003), so a
+      // green assertion here is the evidence the last commit's fix works.
+      const throttleNow = new Date('2026-11-11T15:00:00Z');
+      const previousInstant = instant;
+      instant = throttleNow;
+      const authRepository = new HonoAuthRepository(database as Database);
+      const backoffAccountKey = await authRepository.accountThrottleKey(
+        backoffUser.id,
+        serverSecret
+      );
+      const unknownIp = '198.51.100.77';
+      const unknownIpKey = await authRepository.ipThrottleKey(
+        unknownIp,
+        serverSecret
+      );
+      // The account failures use one address and the correct-key attempt a
+      // different one, so only the per-account brake can reject it.
+      const accountIp = '198.51.100.10';
+      const freshIp = '198.51.100.11';
+      const accountIpKey = await authRepository.ipThrottleKey(
+        accountIp,
+        serverSecret
+      );
+      await db
+        .delete(authThrottle)
+        .where(
+          inArray(authThrottle.key, [
+            backoffAccountKey,
+            unknownIpKey,
+            accountIpKey,
+          ])
+        );
+      for (
+        let attempt = 0;
+        attempt < AUTH_THROTTLE_MAX_FAILURES;
+        attempt += 1
+      ) {
+        await status(
+          postLogin(
+            app,
+            { identifier: backoffEmail, derivedKey: wrongKey },
+            { 'x-forwarded-for': accountIp }
+          ),
+          401,
+          'a failed login must answer the uniform 401'
+        );
+      }
+      const backoffState = await authRepository.throttleState(
+        backoffAccountKey,
+        throttleNow.getTime()
+      );
+      assert.equal(backoffState.failures, AUTH_THROTTLE_MAX_FAILURES);
+      assert.equal(backoffState.blocked, true);
+      assert.equal(
+        backoffState.blockedUntil,
+        throttleNow.getTime() +
+          authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES),
+        'blocked_until must be now + the policy backoff'
+      );
+      await status(
+        postLogin(
+          app,
+          { identifier: backoffEmail, derivedKey: stretchedKey },
+          { 'x-forwarded-for': freshIp }
+        ),
+        401,
+        'the correct key must still be refused while the account is blocked'
+      );
+      // The same backoff on the per-IP counter, driven only by unresolved
+      // identifiers (finding 2: the per-IP brake must bound guessing).
+      for (
+        let attempt = 0;
+        attempt < AUTH_THROTTLE_MAX_FAILURES;
+        attempt += 1
+      ) {
+        await status(
+          postLogin(
+            app,
+            {
+              identifier: `nobody-${tag}-${attempt}@example.test`,
+              derivedKey: wrongKey,
+            },
+            { 'x-forwarded-for': unknownIp }
+          ),
+          401,
+          'an unknown identifier must answer the uniform 401'
+        );
+      }
+      const unknownIpState = await authRepository.throttleState(
+        unknownIpKey,
+        throttleNow.getTime()
+      );
+      assert.equal(unknownIpState.failures, AUTH_THROTTLE_MAX_FAILURES);
+      assert.equal(
+        unknownIpState.blockedUntil,
+        throttleNow.getTime() +
+          authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES),
+        'the per-IP backoff must be enforced on unresolved attempts'
+      );
+      await status(
+        postLogin(
+          app,
+          { identifier: backoffEmail, derivedKey: stretchedKey },
+          { 'x-forwarded-for': unknownIp }
+        ),
+        401,
+        'a blocked address must not authenticate even with the correct key'
+      );
+      await db
+        .delete(authThrottle)
+        .where(
+          inArray(authThrottle.key, [
+            backoffAccountKey,
+            unknownIpKey,
+            accountIpKey,
+          ])
+        );
+      instant = previousInstant;
+
+      // Slice 10: a wrapped-bcrypt upgrade is atomic — verifier, salt, params
+      // and algorithm land together, guarded by the re-read `password_hash`.
+      // A concurrent verifier change between the read and the write makes the
+      // login fail closed with the row unchanged.
+      const [wrappedAccount] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: `wrapped-pg-${tag}@example.test`,
+          username: `wrapped_pg_${tag}`,
+          role: 'member',
+          communityId: communityA,
+          passwordAlgorithm: 'client-bcrypt-rails+sha256',
+          passwordSalt: 'c2FsdA==',
+          passwordParams: JSON.stringify({ cost: 12 }),
+          passwordVerifier: await sha256Hex(wrappedKey),
+        })
+        .returning();
+      userIds.push(wrappedAccount.id);
+      // Slice 10 (#137): a login and a password change issued while a
+      // concurrent reset holds the users row must both resolve to the
+      // authority gate — the login to the uniform 401, the password change to
+      // 409 — never a 5xx. The reset's uncommitted row is invisible to the
+      // readers; only the coupled writes can see it, through the lock.
+      const coupledEmail = `coupled-pg-${tag}@example.test`;
+      const loginCoupledEmail = `coupled-pg-login-${tag}@example.test`;
+      const [coupledAccount] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: coupledEmail,
+          username: `coupled_pg_${tag}`,
+          role: 'viewer',
+          communityId: communityA,
+        })
+        .returning();
+      const [loginCoupledAccount] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: loginCoupledEmail,
+          username: `coupled_pg_login_${tag}`,
+          role: 'viewer',
+          communityId: communityA,
+        })
+        .returning();
+      userIds.push(coupledAccount.id, loginCoupledAccount.id);
+      const coupledCookie = await login(coupledEmail);
+      const newSalt = Buffer.from(
+        crypto.getRandomValues(new Uint8Array(16))
+      ).toString('base64');
+      // Case A — the password change loses the coupled write (409). The
+      // reset's uncommitted row is invisible to the readers; the change's
+      // coupled verifier update then blocks behind our row lock, and once
+      // the reset commits it matches zero rows and rolls back — 401 at the
+      // session gate or 5xx would not prove that, 409 proves the write was
+      // the losing side.
+      let pendingChange!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.users)
+          .set({ passwordVerifier: 'reset-during-coupled-write' })
+          .where(eq(tables.users.id, coupledAccount.id));
+        pendingChange = send(app, '/v2/auth/password', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: coupledCookie,
+            'x-forwarded-for': '198.51.100.211',
+          },
+          body: JSON.stringify({
+            currentDerivedKey: stretchedKey,
+            algorithm: ARGON2ID_ALGORITHM,
+            salt: newSalt,
+            params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+            derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+          }),
+        });
+        pendingChange.then(ignore, ignore);
+        const observed = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (observed < 1)
+          throw new Error(
+            'coupled-write race never materialised: the password change never blocked behind the reset'
+          );
+      });
+      // Case B — a login racing the same reset loses the authority gate and
+      // answers the uniform 401 without a session. Its authority-gated
+      // INSERT ... SELECT FOR SHARE blocks behind our row lock; once the
+      // reset commits it matches zero rows, so no session can be written.
+      let pendingLogin!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.users)
+          .set({ passwordVerifier: 'reset-during-coupled-write' })
+          .where(eq(tables.users.id, loginCoupledAccount.id));
+        pendingLogin = postLogin(
+          app,
+          { identifier: loginCoupledEmail, derivedKey: stretchedKey },
+          { 'x-forwarded-for': '198.51.100.210' }
+        );
+        pendingLogin.then(ignore, ignore);
+        const observed = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (observed < 1)
+          throw new Error(
+            'reset race never materialised: the login never blocked behind the reset'
+          );
+      });
+      const [changeResponse, loginResponse] = await Promise.all([
+        pendingChange,
+        pendingLogin,
+      ]);
+      assert.equal(
+        loginResponse.status,
+        401,
+        'a login racing a coupled password change must answer the uniform 401, never a 5xx'
+      );
+      assert.equal(
+        loginResponse.headers.get('set-cookie'),
+        null,
+        'the raced login must not issue a session cookie'
+      );
+      // The requests were observed blocked behind the reset, which then
+      // committed — so the change loses the coupled write (409, not a 401 at
+      // the session gate and not a 5xx) and the login loses the authority
+      // gate (401, never a session cookie).
+      assert.equal(
+        changeResponse.status,
+        409,
+        `a password change racing a coupled password change must lose the coupled write and answer 409 (got ${changeResponse.status})`
+      );
+      const coupledAfter = await db
+        .select()
+        .from(tables.users)
+        .where(eq(tables.users.id, coupledAccount.id));
+      assert.equal(
+        coupledAfter[0]!.passwordVerifier,
+        'reset-during-coupled-write',
+        'the concurrent reset must hold the verifier write'
+      );
+      const coupledSessions = await db
+        .select({
+          id: sessions.id,
+          userId: sessions.userId,
+          revokedAt: sessions.revokedAt,
+          createdAt: sessions.createdAt,
+        })
+        .from(sessions)
+        .where(
+          inArray(sessions.userId, [coupledAccount.id, loginCoupledAccount.id])
+        );
+      // The concurrent verifier change revokes every earlier session, so after
+      // a lost coupled write no live (unrevoked) session may exist: neither a
+      // newly minted one nor a rotated copy of the presented one. Same for the
+      // login account: its reset revokes the earlier sessions and the losing
+      // login must not mint or rotate one.
+      assert.equal(
+        coupledSessions.filter(
+          (row: { revokedAt: unknown }) => row.revokedAt == null
+        ).length,
+        0,
+        'a lost coupled write must not mint or rotate a session'
+      );
+      // Slice 10 (#137): a password change racing a community deactivation
+      // must never 5xx and must end consistent on both orderings of the
+      // community row. The coupled password write takes the community lock
+      // (FOR SHARE) before its verifier write and its session revoke; the
+      // disable takes the same row (FOR UPDATE) first behind this open
+      // transaction. Both paths order community → users → sessions, so PG
+      // never aborts either side with a deadlock. The committed deactivation
+      // wins: the coupled authority gate matches zero rows when it finally
+      // runs, rolling the pair back and answering 409.
+      if (dialectOf(database) === 'postgresql') {
+        const deactivationEmail = `deactivation-pg-${tag}@example.test`;
+        const [deactivationCommunity] = await db
+          .insert(tables.communities)
+          .values({ name: 'Deactivation Race', slug: `hono-${tag}-c` })
+          .returning();
+        communityIds.push(deactivationCommunity.id);
+        const [deactivationAccount] = await db
+          .insert(tables.users)
+          .values({
+            ...userDefaults,
+            email: deactivationEmail,
+            username: `deactivation_pg_${tag}`,
+            role: 'viewer',
+            communityId: deactivationCommunity.id,
+          })
+          .returning();
+        userIds.push(deactivationAccount.id);
+        const deactivationCookie = await login(deactivationEmail);
+        const deactivationSalt = Buffer.from(
+          crypto.getRandomValues(new Uint8Array(16))
+        ).toString('base64');
+        let pendingDeactivationChange!: Promise<Response>;
+        await db.transaction(async (tx: any) => {
+          await tx
+            .update(tables.communities)
+            .set({ isActive: false })
+            .where(eq(tables.communities.id, deactivationCommunity.id));
+          pendingDeactivationChange = send(app, '/v2/auth/password', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              cookie: deactivationCookie,
+              'x-forwarded-for': '198.51.100.212',
+            },
+            body: JSON.stringify({
+              currentDerivedKey: stretchedKey,
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: deactivationSalt,
+              params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+              derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+            }),
+          });
+          pendingDeactivationChange.then(ignore, ignore);
+          const observed = await waitForBlocked(tx, 1, Date.now() + 4000);
+          if (observed < 1)
+            throw new Error(
+              'deactivation race never materialised: the password change never blocked behind the disable'
+            );
+        });
+        const deactivationResponse = await pendingDeactivationChange;
+        assert.equal(
+          deactivationResponse.status,
+          409,
+          `a password change racing a community deactivation must lose the authority gate and answer 409, never a 5xx (got ${deactivationResponse.status})`
+        );
+        // The disable's committed authority revokes every session of the
+        // account; the losing coupled write must not mint one either.
+        const deactivationRows = await db
+          .select({ id: sessions.id })
+          .from(sessions)
+          .where(eq(sessions.userId, deactivationAccount.id));
+        assert.equal(
+          deactivationRows.length,
+          0,
+          'a deactivation that wins the race must revoke every session and the coupled write must not mint one'
+        );
+        const deactivationPassword = await db
+          .select({ passwordVerifier: tables.users.passwordVerifier })
+          .from(tables.users)
+          .where(eq(tables.users.id, deactivationAccount.id));
+        assert.equal(
+          deactivationPassword[0]!.passwordVerifier,
+          stretchedVerifier,
+          'the losing coupled write must roll back, leaving the stored verifier unchanged'
+        );
+        await updateCommunity(deactivationCommunity.id, { isActive: true });
+        await status(
+          me(deactivationCookie),
+          401,
+          'the pre-race cookie must stay rejected after re-enable'
+        );
+      }
+      const [wrappedBefore] = await db
+        .select()
+        .from(tables.users)
+        .where(eq(tables.users.id, wrappedAccount.id));
+      const upgradeSalt = Buffer.from(
+        crypto.getRandomValues(new Uint8Array(16))
+      ).toString('base64');
+      let pendingUpgrade!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        // The reset takes the row lock first, as in every other race case:
+        // only then is the upgrade's coupled verifier write guaranteed to
+        // block behind it (otherwise the upgrade may legally win).
+        await tx
+          .update(tables.users)
+          .set({ passwordVerifier: 'reset-during-upgrade' })
+          .where(eq(tables.users.id, wrappedAccount.id));
+        pendingUpgrade = postLogin(
+          app,
+          {
+            identifier: `wrapped-pg-${tag}@example.test`,
+            derivedKey: wrappedKey,
+            upgrade: {
+              algorithm: 'client-argon2id+sha256',
+              // A 16-byte base64 salt: anything less fails the verifier-salt
+              // policy before any write, so the coupled verifier update would
+              // never be reached and no race could ever form.
+              salt: upgradeSalt,
+              params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+              derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+            },
+          },
+          { 'x-forwarded-for': '198.51.100.212' }
+        );
+        void pendingUpgrade.then(ignore, ignore);
+        // The verifier write is blocked behind the UPDATE lock while the
+        // uncommitted reset changes the authority row.
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'wrapped-upgrade race never materialised: the login never blocked behind the reset'
+          );
+      });
+      const upgradeResponse = await pendingUpgrade;
+      assert.equal(
+        upgradeResponse.status,
+        401,
+        'a concurrent reset must win the upgrade race'
+      );
+      const [wrappedAfter] = await db
+        .select()
+        .from(tables.users)
+        .where(eq(tables.users.id, wrappedAccount.id));
+      assert.equal(
+        wrappedAfter.passwordVerifier,
+        'reset-during-upgrade',
+        'a rejected upgrade must leave the verifier row unchanged'
+      );
+      void wrappedBefore;
       // PostgreSQL SELECT ... FOR UPDATE race (PR #246): concurrent story
       // visibility toggle waiting behind an uncommitted visibility change must
       // observe the committed visibility and emit zero duplicate audit entries.
@@ -1770,6 +2338,13 @@ export async function runHonoFoundationContract(
       await db.delete(media).where(eq(media.fileId, id));
       await db.delete(tables.files).where(eq(tables.files.id, id));
     }
+    // Auth/security audit entries reference the seeded accounts (actorId)
+    // and communities; delete them with their parents. Entries may also carry
+    // null communityId (system-level auth events), so they cannot be removed
+    // by community alone.
+    await db
+      .delete(tables.auditEntries)
+      .where(inArray(tables.auditEntries.actorId, userIds));
     for (const id of userIds) {
       await db
         .delete(tables.auditEntries)

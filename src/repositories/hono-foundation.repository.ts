@@ -10,9 +10,12 @@ import {
   type V2CommunityRole,
 } from '../shared/authorization/sovereignty-policy.js';
 import {
-  sessionLifetime,
-  sessionRenewalInterval,
-} from '../shared/session-policy.js';
+  SESSION_LAST_SEEN_WRITE_INTERVAL_MS,
+  sessionIdleWindowMs,
+  sessionLifetimesFor,
+  type SessionKind,
+} from '../shared/auth-policy.js';
+import { sessionRenewalInterval } from '../shared/session-policy.js';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
 import {
@@ -41,6 +44,26 @@ interface RawFoundationUser {
   role: string;
   communityId: number | null;
 }
+
+/**
+ * Internal rollback signal for the coupled verifier/session write: the session
+ * gate lost the race, so the transaction rolls back and the caller answers
+ * `false` without an error. It never escapes the repository.
+ */
+class SessionGateLost extends Error {
+  constructor() {
+    super('session authority gate lost');
+    this.name = 'SessionGateLost';
+  }
+}
+
+// Drizzle's per-dialect executors (better-sqlite3, postgres.js, D1) share one
+// runtime shape but expose incompatible TypeScript overloads, so the coupled
+// write builders are typed through one deliberately loose pair of aliases.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Executor = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Statement = any;
 
 export class HonoFoundationRepository {
   private readonly tables;
@@ -104,6 +127,38 @@ export class HonoFoundationRepository {
     );
   }
 
+  /**
+   * The same authority gate as {@link allowedAuthConditions}, expressed without
+   * a `communities` join so it can guard a bare `UPDATE users` (the coupled
+   * verifier write has no join to hang `communities.is_active` on).
+   */
+  private verifierAuthorityConditions() {
+    const { users, communities } = this.tables;
+    // Subqueries rather than a raw `sql` fragment: the community flag is a
+    // boolean column, and a raw interpolation would bind a bare boolean that
+    // SQLite rejects. A query-builder subquery maps it like any other read.
+    const activeCommunities = this.database
+      .select({ id: communities.id })
+      .from(communities)
+      .where(eq(communities.isActive, communityStatusToPhysical('active')));
+    const disabledCommunities = this.database
+      .select({ id: communities.id })
+      .from(communities)
+      .where(eq(communities.isActive, communityStatusToPhysical('disabled')));
+    return and(
+      eq(users.isActive, userStatusToPhysical('active').isActive),
+      inArray(users.role, [...V2_COMMUNITY_ROLES]),
+      or(
+        and(isNull(users.communityId), eq(users.role, 'super_admin')),
+        inArray(users.communityId, activeCommunities),
+        and(
+          eq(users.role, 'admin'),
+          inArray(users.communityId, disabledCommunities)
+        )
+      )
+    );
+  }
+
   private toFoundationUser(row: RawFoundationUser): FoundationUser | null {
     const role = parseV2Role(row.role);
     if (!role) return null;
@@ -150,35 +205,87 @@ export class HonoFoundationRepository {
     return user ? [user] : [];
   }
 
-  async createSession(
-    tokenHash: string,
-    user: FoundationUser,
-    now: Date,
-    expiresAt: Date,
-    previousHash?: string
-  ): Promise<boolean> {
+  /** The parsed session write, as builders bound to an executor. */
+  private sessionWritePlan(input: {
+    tokenHash: string;
+    user: FoundationUser;
+    kind: SessionKind;
+    createdAt: Date;
+    idleExpiresAt: Date;
+    absoluteExpiresAt: Date;
+    previousHash?: string;
+    /** Explicit device-session revocation metadata (admin revoke, §6.8). */
+    revokedAt?: Date;
+    revokedBy?: number;
+    /**
+     * The verifier the session row must see committed before it may consume
+     * the login: the verifier the plain path verified against, or the new one
+     * just written by the coupled path (§7 step 4). `undefined` disables the
+     * extra condition (legacy tests only); `null` anchors to a NULL verifier.
+     */
+    expectedVerifier?: string | null;
+  }): {
+    tokenHash: string;
+    userId: number;
+    previousHash: string | undefined;
+    verifiedInsert: (database: Executor) => Statement;
+    revokePresented: (hash: string) => Statement;
+  } | null {
+    const { tokenHash, user } = input;
+    const now = input.createdAt;
     const role = parseV2Role(user.role);
-    if (!role) return false;
-    if (user.communityId === null && role !== 'super_admin') return false;
+    if (!role) return null;
+    if (user.communityId === null && role !== 'super_admin') return null;
     const sessions = this.sessions;
     const { users, communities } = this.tables;
-    const db = this.database;
+    const kind = input.kind;
+    const expiresAt = input.idleExpiresAt;
+    const createdAt = input.createdAt.getTime();
+    const lastSeenAt = input.createdAt.getTime();
+    const idleExpiresAt = input.idleExpiresAt.getTime();
+    const absoluteExpiresAt = input.absoluteExpiresAt.getTime();
+    const revokedAt = input.revokedAt ? input.revokedAt.getTime() : null;
+    const revokedBy = input.revokedAt ? (input.revokedBy ?? user.id) : null;
+    // Anchor the session to the verifier the request verified against — or
+    // the one the coupled write just committed — so a lost verifier race
+    // yields no session and, in the coupled path, rolls the account back to
+    // its pre-write state (§7 step 4). password_hash never changes in V2, so
+    // a password_hash-only anchor would consume logins after the verifier
+    // moved; only the verifier tells the truth about whose credentials were
+    // accepted.
+    const expectedVerifier = input.expectedVerifier;
+    const verifierCondition =
+      expectedVerifier === undefined
+        ? sql`1 = 1`
+        : expectedVerifier === null
+          ? isNull(users.passwordVerifier)
+          : eq(users.passwordVerifier, expectedVerifier);
     // A presented session belonging to a different user is never rotated
     // onto the new login: it is revoked, and the authenticating user always
     // gets a row of their own (#188 — shared-browser login). The revocation
     // is coupled to the verified session write below and runs only when that
     // write establishes the login, so a login that loses the authority race
     // never destroys the other user's session.
-    const verifiedInsert = (database: typeof db) => {
+    const sessionValues = {
+      tokenHash: sql`${tokenHash}`,
+      userId: sql`${user.id}`,
+      expiresAt: sql`${expiresAt.getTime()}`,
+      kind: sql`${kind}`,
+      createdAt: sql`${createdAt}`,
+      lastSeenAt: sql`${lastSeenAt}`,
+      idleExpiresAt: sql`${idleExpiresAt}`,
+      absoluteExpiresAt: sql`${absoluteExpiresAt}`,
+      revokedAt: revokedAt === null ? sql`null` : sql`${revokedAt}`,
+      revokedBy: revokedBy === null ? sql`null` : sql`${revokedBy}`,
+    };
+    const verifiedInsert = (database: Executor) => {
       const base = database
         .select({
           // Only an unexpired same-user row is rotated in place; an expired
           // presented row is never resurrected — the login allocates a fresh
           // row instead.
-          id: sql`coalesce((select ${sessions.id} from ${sessions} where ${sessions.tokenHash} = ${previousHash ?? ''} and ${sessions.userId} = ${user.id} and ${sessions.expiresAt} > ${now.getTime()}), ${tokenHash})`,
-          tokenHash: sql`${tokenHash}`,
-          userId: users.id,
-          expiresAt: sql`${expiresAt.getTime()}`,
+          id: sql`coalesce((select ${sessions.id} from ${sessions} where ${sessions.tokenHash} = ${input.previousHash ?? ''} and ${sessions.userId} = ${user.id} and ${sessions.expiresAt} > ${now.getTime()}), ${tokenHash})`,
+          ...sessionValues,
         })
         .from(users);
       const joined =
@@ -193,7 +300,8 @@ export class HonoFoundationRepository {
           user.communityId === null
             ? isNull(users.communityId)
             : eq(users.communityId, user.communityId),
-          this.allowedAuthConditions()
+          this.allowedAuthConditions(),
+          verifierCondition
         )
       );
       // PostgreSQL locks current authority through the write; a concurrent
@@ -215,98 +323,436 @@ export class HonoFoundationRepository {
         .select(verified)
         .onConflictDoUpdate({
           target: sessions.id,
-          set: { tokenHash, userId: user.id, expiresAt: expiresAt.getTime() },
+          set: sessionValues,
         })
         .returning({ id: sessions.id });
     };
     const revokePresented = (hash: string) =>
       and(eq(sessions.tokenHash, hash), ne(sessions.userId, user.id));
-    if (previousHash === undefined) {
-      const rows = await verifiedInsert(db);
+    return {
+      tokenHash,
+      userId: user.id,
+      previousHash: input.previousHash,
+      verifiedInsert,
+      revokePresented,
+    };
+  }
+
+  /**
+   * Establish a session row for a verified login (SPEC-V2 §6.8, §7
+   * "Sessions").
+   *
+   * The caller supplies the authoritative row contents: `tokenHash` plus the
+   * `kind`, `createdAt`, `idleExpiresAt` and `absoluteExpiresAt` the policy
+   * computed, and — for a same-user rotation — the `previousHash` whose row is
+   * rewritten in place. The authority gate is re-checked inside the write on
+   * both dialects: the INSERT…SELECT only produces a row while the account is
+   * still authenticable, and the PostgreSQL `FOR SHARE` lock makes a
+   * concurrent reset/disable either change that selection or wait and revoke
+   * the new session.
+   */
+  async createSession(input: {
+    tokenHash: string;
+    user: FoundationUser;
+    kind: SessionKind;
+    createdAt: Date;
+    idleExpiresAt: Date;
+    absoluteExpiresAt: Date;
+    previousHash?: string;
+    /** Explicit device-session revocation metadata (admin revoke, §6.8). */
+    revokedAt?: Date;
+    revokedBy?: number;
+    /** Verifier anchor for the session write (§7 step 4). */
+    expectedVerifier?: string | null;
+  }): Promise<boolean> {
+    const plan = this.sessionWritePlan(input);
+    if (!plan) return false;
+    const db = this.database;
+    const sessions = this.sessions;
+    if (plan.previousHash === undefined) {
+      const rows = await plan.verifiedInsert(db);
       return rows.length > 0;
     }
+    const revokeConditional = (database: Executor) =>
+      database
+        .delete(sessions)
+        .where(
+          and(
+            plan.revokePresented(plan.previousHash!),
+            sql`exists (select 1 from ${sessions} where ${sessions.tokenHash} = ${plan.tokenHash} and ${sessions.userId} = ${plan.userId})`
+          )
+        );
     // Workers/D1 has no interactive transactions: one atomic batch couples
     // the revocation to the insert, whose committed row the delete's exists
     // guard requires — a failed gate inserts nothing, so nothing is revoked.
     if (typeof db.batch === 'function') {
       const [rows] = await db.batch([
-        verifiedInsert(db),
-        db
-          .delete(sessions)
-          .where(
-            and(
-              revokePresented(previousHash),
-              sql`exists (select 1 from ${sessions} where ${sessions.tokenHash} = ${tokenHash} and ${sessions.userId} = ${user.id})`
-            )
-          ),
+        plan.verifiedInsert(db),
+        revokeConditional(db),
       ]);
       return rows.length > 0;
     }
     if (dialectOf(db) === 'postgresql') {
       return db.transaction(async (tx: typeof db) => {
-        const rows = await verifiedInsert(tx);
+        const rows = await plan.verifiedInsert(tx);
         if (rows.length > 0)
-          await tx.delete(sessions).where(revokePresented(previousHash));
+          await tx
+            .delete(sessions)
+            .where(plan.revokePresented(plan.previousHash!));
         return rows.length > 0;
       });
     }
     // better-sqlite3 (drizzle "sync" mode) exposes only synchronous
     // transactions; the insert and the coupled revocation run in one.
     return db.transaction((tx: typeof db) => {
-      const rows = verifiedInsert(tx).all();
+      const rows = plan.verifiedInsert(tx).all();
       if (rows.length > 0)
-        tx.delete(sessions).where(revokePresented(previousHash)).run();
+        tx.delete(sessions)
+          .where(plan.revokePresented(plan.previousHash!))
+          .run();
       return rows.length > 0;
     });
   }
 
-  /** Re-read current user/community state; mutation triggers permanently revoke sessions. */
+  /**
+   * Couple a verifier write to the session insert in one unit — the
+   * password-change path's atomicity guarantee (§7 step 4, finding 7).
+   *
+   * The verifier UPDATE runs *first*, so the `users_revoke_sessions` trigger
+   * revokes the account's other sessions before the fresh row is inserted
+   * (reversing the two would let the trigger delete the session it was meant
+   * to preserve). Both statements carry the *same* authority gate — id,
+   * `password_hash`, role, community and `allowedAuthConditions()` — so a lost
+   * race makes them fail together: `db.batch` on D1 runs them in one atomic
+   * unit, and SQLite/PostgreSQL run them in one transaction that rolls back
+   * when the insert establishes no row. The verifier write and the session
+   * therefore can no longer diverge, and a `Conflict` answer is truthful.
+   * The account's other sessions are also revoked explicitly: when the new
+   * material produces the same stored verifier the trigger does not fire,
+   * and every verifier change must revoke the account's other sessions
+   * (SPEC-V2 §7). The D1 batch executes the revoke without an interactive
+   * transaction, so it is gated on the new verifier actually being stored —
+   * a lost coupled write deletes nothing, exactly as the rolling-back
+   * SQLite/PostgreSQL paths. The one hole in that gate is an identical-material
+   * write (requested verifier reproduces the stored one) racing a concurrent
+   * authority change: see the note on the revoke below.
+   */
+  async createSessionWithVerifier(input: {
+    tokenHash: string;
+    user: FoundationUser;
+    kind: SessionKind;
+    createdAt: Date;
+    idleExpiresAt: Date;
+    absoluteExpiresAt: Date;
+    previousHash?: string;
+    verifier: {
+      passwordHash: string;
+      passwordVerifier: string;
+      passwordAlgorithm: string;
+      passwordSalt: string;
+      passwordParams: string;
+    };
+    /** The verifier read before this write; a stale one loses the race. */
+    previousVerifier?: string | null;
+  }): Promise<{ established: boolean; verifierWritten: boolean }> {
+    const plan = this.sessionWritePlan({
+      ...input,
+      // The coupled write commits its own verifier; the session row must
+      // anchor to exactly that value, or the two writes would disagree.
+      expectedVerifier: input.verifier.passwordVerifier,
+    });
+    if (!plan) return { established: false, verifierWritten: false };
+    const role = parseV2Role(input.user.role);
+    if (!role) return { established: false, verifierWritten: false };
+    const db = this.database;
+    const { users, communities } = this.tables;
+    const sessions = this.sessions;
+    // Community → users → sessions lock order (Greptile): the coupled write
+    // revokes the user's sessions, and a concurrent community deactivation
+    // locks the community row first and then revokes those same sessions in a
+    // trigger. Taking the community row before the verifier write and any
+    // session delete keeps both paths ordering the same way, so PG never
+    // aborts one of them with a deadlock. In PostgreSQL the lock is
+    // `FOR SHARE` (many coupled writers may hold it, the disable's `FOR
+    // UPDATE` waits for them) and in SQLite the read runs inside the
+    // single-writer transaction before the first write. A null-community
+    // account (e.g. `super_admin`) has no community row to lock.
+    const acquireCommunityFirst = (database: Executor): unknown => {
+      if (input.user.communityId === null) return undefined;
+      const lock = database
+        .select({ id: communities.id })
+        .from(communities)
+        .where(eq(communities.id, input.user.communityId));
+      if (dialectOf(this.database) === 'postgresql') return lock.for('share');
+      // better-sqlite3 executes synchronously; the select is issued inside
+      // the transaction before the first write.
+      return lock.all();
+    };
+    // The verifier write and the session insert share one authority anchor, so
+    // either both land or neither does.
+    const verifierUpdate = (database: Executor) =>
+      database
+        .update(users)
+        .set({
+          passwordHash: input.verifier.passwordHash,
+          passwordVerifier: input.verifier.passwordVerifier,
+          passwordAlgorithm: input.verifier.passwordAlgorithm,
+          passwordSalt: input.verifier.passwordSalt,
+          passwordParams: input.verifier.passwordParams,
+        })
+        .where(
+          and(
+            eq(users.id, input.user.id),
+            eq(users.passwordHash, input.verifier.passwordHash),
+            // A stale verifier loses the race (finding G).
+            input.previousVerifier === null
+              ? isNull(users.passwordVerifier)
+              : input.previousVerifier === undefined
+                ? sql`1 = 1`
+                : eq(users.passwordVerifier, input.previousVerifier),
+            eq(users.role, role),
+            input.user.communityId === null
+              ? isNull(users.communityId)
+              : eq(users.communityId, input.user.communityId),
+            this.verifierAuthorityConditions()
+          )
+        )
+        .returning({ id: users.id });
+    const revokePresentedConditional = (database: Executor) =>
+      database
+        .delete(sessions)
+        .where(
+          and(
+            plan.revokePresented(plan.previousHash!),
+            sql`exists (select 1 from ${sessions} where ${sessions.tokenHash} = ${plan.tokenHash} and ${sessions.userId} = ${plan.userId})`
+          )
+        );
+    // D1 note — the gate proves "stored == requested", not "this batch
+    // stored it". One hole remains: when the requested verifier reproduces
+    // the already-stored one (identical salt + derivedKey) the verifier
+    // update changes no row, so the batch reports established:false and no
+    // session is inserted — yet a concurrent authority change (role,
+    // community, password material or is_active changed in the same window)
+    // leaves the stored value equal to the requested one, and this delete
+    // fires on a failing coupled write. It cannot be distinguished without
+    // a connection-scoped changes(), which the D1 batch gives us no handle
+    // on across statements and which does not port to PostgreSQL; and the
+    // alternative gate "stored == requested AND requested <> previous" was
+    // rejected because it would also block the identical-material SUCCESS
+    // case, where §7 still requires the other sessions to die. In practice
+    // the residual costs nothing: losing the authority gate means one of
+    // those columns did change, and that change revokes the sessions
+    // through users_revoke_sessions / communities_revoke_sessions anyway.
+    const revokeAllSessions = (database: Executor) =>
+      database.delete(sessions).where(
+        and(
+          eq(sessions.userId, input.user.id),
+          sql`exists (
+            select 1 from ${users}
+            where ${users.id} = ${input.user.id}
+              and ${users.passwordVerifier} = ${input.verifier.passwordVerifier}
+          )`
+        )
+      );
+    // Workers/D1 has no interactive transactions: one atomic batch runs the
+    // verifier write, the session revocation, the session insert and the
+    // coupled revocation. SQLite serializes the batch, so the authority
+    // checked statements agree.
+    if (typeof db.batch === 'function') {
+      const list = [
+        verifierUpdate(db),
+        revokeAllSessions(db),
+        plan.verifiedInsert(db),
+      ];
+      if (plan.previousHash !== undefined)
+        list.push(revokePresentedConditional(db));
+      const [updated, , inserted] = await db.batch(list);
+      return {
+        established: inserted.length > 0,
+        verifierWritten: updated.length > 0,
+      };
+    }
+    // SQLite/PostgreSQL: one transaction, and a lost session gate rolls the
+    // verifier write back so the pair stays all-or-nothing.
+    // `await` is load-bearing on both dialects: the PostgreSQL transaction is
+    // async, so a bare `return` propagates a `SessionGateLost` rejection past
+    // the `catch` below as an unhandled error — the answer is a 500, not the
+    // truthful `established: false` (§6.8, §7 step 4).
+    try {
+      if (dialectOf(db) === 'postgresql') {
+        return await db.transaction(async (tx: Executor) => {
+          // Community → users → sessions before any write (acquireCommunityFirst).
+          await acquireCommunityFirst(tx);
+          const updated = await verifierUpdate(tx);
+          if (updated.length === 0) throw new SessionGateLost();
+          // Explicit revocation: a same-verifier write never fires the
+          // trigger, yet §7 requires the other sessions to die.
+          await revokeAllSessions(tx);
+          const inserted = await plan.verifiedInsert(tx);
+          if (inserted.length === 0) throw new SessionGateLost();
+          if (plan.previousHash !== undefined)
+            await tx
+              .delete(sessions)
+              .where(plan.revokePresented(plan.previousHash));
+          return { established: true, verifierWritten: updated.length > 0 };
+        });
+      }
+      return await db.transaction((tx: Executor) => {
+        // Community → users → sessions before any write (acquireCommunityFirst).
+        acquireCommunityFirst(tx);
+        const updated = verifierUpdate(tx).all();
+        if (updated.length === 0) throw new SessionGateLost();
+        // Explicit revocation: a same-verifier write never fires the
+        // trigger, yet §7 requires the other sessions to die.
+        revokeAllSessions(tx).run();
+        const inserted = plan.verifiedInsert(tx).all();
+        if (inserted.length === 0) throw new SessionGateLost();
+        if (plan.previousHash !== undefined)
+          tx.delete(sessions)
+            .where(plan.revokePresented(plan.previousHash))
+            .run();
+        return { established: true, verifierWritten: updated.length > 0 };
+      });
+    } catch (error) {
+      if (error instanceof SessionGateLost)
+        return { established: false, verifierWritten: false };
+      throw error;
+    }
+  }
+
+  /**
+   * Re-read current user/community state; mutation triggers permanently revoke
+   * sessions. Enforces the §6.8 expiry split (idle window, device absolute
+   * window, revocation tombstone) and persists `last_seen_at` at a bounded
+   * rate so a busy session does not spend one D1 row write per request.
+   *
+   * `sessionContext` also returns the `kind`, so the response cookie can be
+   * issued with the lifetime of the session the caller actually holds.
+   */
+  async sessionContext(
+    tokenHash: string,
+    now: Date,
+    renew = true
+  ): Promise<{
+    user: FoundationUser;
+    kind: SessionKind;
+    /** The row's absolute expiry, so a device cookie can carry the remainder. */
+    absoluteExpiresAt: number | null;
+  } | null> {
+    const { users, communities } = this.tables;
+    const sessions = this.sessions;
+    const nowMs = now.getTime();
+    const rows: (RawFoundationUser & {
+      expiresAt: number;
+      idleExpiresAt: number | null;
+      absoluteExpiresAt: number | null;
+      lastSeenAt: number | null;
+      kind: string;
+    })[] = await this.database
+      .select({
+        ...this.projection(),
+        expiresAt: sessions.expiresAt,
+        idleExpiresAt: sessions.idleExpiresAt,
+        absoluteExpiresAt: sessions.absoluteExpiresAt,
+        lastSeenAt: sessions.lastSeenAt,
+        kind: sessions.kind,
+      })
+      .from(sessions)
+      .innerJoin(users, eq(sessions.userId, users.id))
+      .leftJoin(communities, eq(users.communityId, communities.id))
+      .where(
+        and(
+          eq(sessions.tokenHash, tokenHash),
+          this.sessionWindowCondition(nowMs),
+          this.allowedAuthConditions()
+        )
+      )
+      .limit(1);
+    const row = rows[0];
+    const user = row ? this.toFoundationUser(row) : null;
+    if (!user || !row) return null;
+    const kind: SessionKind = row.kind === 'device' ? 'device' : 'standard';
+    // Bounded last-seen write: once a minute at most, plus the slide-renewal
+    // inside the final 15 minutes of the idle window.
+    const idleExpiresAt = row.idleExpiresAt ?? row.expiresAt;
+    const staleLastSeen =
+      row.lastSeenAt === null ||
+      nowMs - row.lastSeenAt >= SESSION_LAST_SEEN_WRITE_INTERVAL_MS;
+    // Renewal is rate-limited to once per `sessionRenewalInterval`: the idle
+    // expiry encodes the last renewal, so the threshold is the last renewal plus
+    // the interval, whichever idle window the kind uses.
+    const renewWindow =
+      renew &&
+      nowMs >=
+        idleExpiresAt - sessionIdleWindowMs(kind) + sessionRenewalInterval;
+    if (!staleLastSeen && !renewWindow)
+      return { user, kind, absoluteExpiresAt: row.absoluteExpiresAt };
+    const patch: Record<string, unknown> = { lastSeenAt: nowMs };
+    if (renewWindow) {
+      const next = sessionLifetimesFor(kind, nowMs);
+      patch.expiresAt = next.idleExpiresAt;
+      patch.idleExpiresAt = next.idleExpiresAt;
+    }
+    const touched = await this.database
+      .update(sessions)
+      .set(patch)
+      .where(
+        and(
+          eq(sessions.tokenHash, tokenHash),
+          eq(sessions.expiresAt, row.expiresAt),
+          gt(sessions.expiresAt, nowMs),
+          this.sessionWindowCondition(nowMs)
+        )
+      )
+      .returning({ id: sessions.id });
+    // A lost race — a concurrent revoke, deletion, idle- or absolute-expiry,
+    // or a renewed `expiresAt` — means the previously-read user can no longer
+    // authenticate. Whenever the touch was attempted and matched 0 rows
+    // (with or without a renewal due), re-read under the same validity
+    // conditions or answer as unauthenticated — never return stale authority.
+    if (touched.length === 0) return this.sessionContext(tokenHash, now, false);
+    return { user, kind, absoluteExpiresAt: row.absoluteExpiresAt };
+  }
+
   async session(
     tokenHash: string,
     now: Date,
     renew = true
   ): Promise<FoundationUser | null> {
-    const { users, communities } = this.tables;
-    const sessions = this.sessions;
-    const rows: (RawFoundationUser & { expiresAt: number })[] =
-      await this.database
-        .select({ ...this.projection(), expiresAt: sessions.expiresAt })
-        .from(sessions)
-        .innerJoin(users, eq(sessions.userId, users.id))
-        .leftJoin(communities, eq(users.communityId, communities.id))
-        .where(
-          and(
-            eq(sessions.tokenHash, tokenHash),
-            gt(sessions.expiresAt, now.getTime()),
-            this.allowedAuthConditions()
-          )
-        )
-        .limit(1);
-    const row = rows[0];
-    const user = row ? this.toFoundationUser(row) : null;
-    if (
-      user &&
-      row &&
-      renew &&
-      now.getTime() >= row.expiresAt - sessionLifetime + sessionRenewalInterval
-    ) {
-      const touched = await this.database
-        .update(sessions)
-        .set({ expiresAt: now.getTime() + sessionLifetime })
-        .where(
-          and(
-            eq(sessions.tokenHash, tokenHash),
-            eq(sessions.expiresAt, row.expiresAt),
-            gt(sessions.expiresAt, now.getTime())
-          )
-        )
-        .returning({ id: sessions.id });
-      // A lost renewal race must re-read authority, never resurrect a revoked row.
-      if (!touched.length) return this.session(tokenHash, now, false);
-    }
-    return user;
+    const context = await this.sessionContext(tokenHash, now, renew);
+    return context?.user ?? null;
   }
 
+  /**
+   * The §6.8 window predicate shared by reads and writes: not idle-expired,
+   * not past the absolute device window, not revoked.
+   */
+  private sessionWindowCondition(nowMs: number) {
+    const sessions = this.sessions;
+    return and(
+      or(isNull(sessions.idleExpiresAt), gt(sessions.idleExpiresAt, nowMs)),
+      or(
+        isNull(sessions.absoluteExpiresAt),
+        gt(sessions.absoluteExpiresAt, nowMs)
+      ),
+      isNull(sessions.revokedAt)
+    );
+  }
+
+  /** Set a user's display name (own profile edit, PATCH /v2/auth/me). */
+  async updateDisplayName(
+    id: number,
+    displayName: string | null,
+    now: Date
+  ): Promise<void> {
+    const { users } = this.tables;
+    await this.database
+      .update(users)
+      .set({ displayName, updatedAt: now })
+      .where(eq(users.id, id));
+  }
+
+  /** Delete this session row (logout) and clear it everywhere else. */
   async revokeSession(tokenHash: string): Promise<void> {
     await this.database
       .delete(this.sessions)

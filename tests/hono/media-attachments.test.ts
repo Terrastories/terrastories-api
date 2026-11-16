@@ -8,8 +8,11 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { and, asc, eq } from 'drizzle-orm';
-import { hash } from 'bcrypt';
-import { nodePasswordVerifier } from '../../src/node-password.js';
+import {
+  argon2Seed,
+  makeDerivedKey,
+  makeServerSecret,
+} from './auth-test-utils.js';
 import { tablesFor } from '../../src/db/dialect.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
@@ -34,7 +37,7 @@ sqlite.pragma('foreign_keys = ON');
 const db = drizzle(sqlite);
 const tables = tablesFor(db);
 
-const TEST_PASS = ['Slice9', 'Attachments', '2026!'].join('-');
+const TEST_DERIVED_KEY = makeDerivedKey();
 const API_ORIGIN = 'https://api.example.test';
 const CLIENT_ORIGIN = 'https://app.example.test';
 
@@ -132,7 +135,10 @@ async function loginAs(email: string): Promise<string> {
   const res = await app.request(`${API_ORIGIN}/v2/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email, password: TEST_PASS }),
+    body: JSON.stringify({
+      identifier: email,
+      derivedKey: TEST_DERIVED_KEY,
+    }),
   });
   expect(res.status).toBe(200);
   return (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
@@ -315,7 +321,7 @@ async function seedD1MediaFixture(
     .values({
       email,
       emailNormalized: derived.emailNormalized,
-      passwordHash: await hash(TEST_PASS, 4),
+      ...(await argon2Seed(TEST_DERIVED_KEY)),
       firstName: 'D1',
       lastName: 'Media',
       displayNameNormalized: derived.displayNameNormalized,
@@ -351,7 +357,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
   beforeAll(async () => {
     migrate(db, { migrationsFolder: './src/db/migrations' });
     const now = new Date('2026-06-01T12:00:00.000Z');
-    const passwordHash = await hash(TEST_PASS, 4);
+    const seed = await argon2Seed(TEST_DERIVED_KEY);
 
     ids.community = await insertRow(tables.communities, {
       name: 'Attach Nation',
@@ -384,7 +390,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
       return insertRow(tables.users, {
         email,
         emailNormalized: derived.emailNormalized,
-        passwordHash,
+        ...seed,
         firstName: 'QA',
         lastName: role,
         displayNameNormalized: derived.displayNameNormalized,
@@ -413,7 +419,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
 
     app = createHonoApp({
       repository: new HonoFoundationRepository(db),
-      verifier: nodePasswordVerifier,
+      serverSecret: makeServerSecret(),
       secureCookies: false,
       publicOrigin: API_ORIGIN,
       corsOrigins: [CLIENT_ORIGIN],
@@ -665,7 +671,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
     await insertRow(tables.users, {
       email: 'admin@disabled-attach.test',
       emailNormalized: derived.emailNormalized,
-      passwordHash: await hash(TEST_PASS, 4),
+      ...(await argon2Seed(TEST_DERIVED_KEY)),
       firstName: 'QA',
       lastName: 'Disabled',
       displayNameNormalized: derived.displayNameNormalized,
@@ -1148,7 +1154,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
       .values({
         email: 'd1-attach@example.test',
         emailNormalized: derived.emailNormalized,
-        passwordHash: await hash(TEST_PASS, 4),
+        ...(await argon2Seed(TEST_DERIVED_KEY)),
         firstName: 'D1',
         lastName: 'Attach',
         displayNameNormalized: derived.displayNameNormalized,
@@ -1550,7 +1556,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
         .values({
           email: realEmail,
           emailNormalized: derived.emailNormalized,
-          passwordHash: await hash(TEST_PASS, 4),
+          ...(await argon2Seed(TEST_DERIVED_KEY)),
           firstName: 'Real',
           lastName: 'D1',
           displayNameNormalized: derived.displayNameNormalized,
@@ -1676,7 +1682,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
         .values({
           email,
           emailNormalized: derived.emailNormalized,
-          passwordHash: await hash(TEST_PASS, 4),
+          ...(await argon2Seed(TEST_DERIVED_KEY)),
           firstName: 'TOCTOU',
           lastName: 'Editor',
           displayNameNormalized: derived.displayNameNormalized,
@@ -1782,7 +1788,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
         .values({
           email,
           emailNormalized: derived.emailNormalized,
-          passwordHash: await hash(TEST_PASS, 4),
+          ...(await argon2Seed(TEST_DERIVED_KEY)),
           firstName: 'TOCTOU',
           lastName: 'Editor',
           displayNameNormalized: derived.displayNameNormalized,
@@ -1907,7 +1913,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
         .values({
           email,
           emailNormalized: derived.emailNormalized,
-          passwordHash: await hash(TEST_PASS, 4),
+          ...(await argon2Seed(TEST_DERIVED_KEY)),
           firstName: 'TOCTOU',
           lastName: 'Editor',
           displayNameNormalized: derived.displayNameNormalized,
@@ -2018,7 +2024,7 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
         .values({
           email,
           emailNormalized: derived.emailNormalized,
-          passwordHash: await hash(TEST_PASS, 4),
+          ...(await argon2Seed(TEST_DERIVED_KEY)),
           firstName: 'Ordinal',
           lastName: 'Editor',
           displayNameNormalized: derived.displayNameNormalized,

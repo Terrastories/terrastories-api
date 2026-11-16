@@ -567,7 +567,6 @@ beforeAll(async () => {
   await seed();
   const options = {
     repository: new HonoFoundationRepository(db),
-    verifier: { verify: async () => false },
     secureCookies: false,
     storage: {
       read: async (key: string) => {
@@ -1147,7 +1146,6 @@ it('caps unpaged map points for very large relations', async () => {
     });
     const bigApp = createHonoApp({
       repository: new HonoFoundationRepository(big),
-      verifier: { verify: async () => false },
       secureCookies: false,
       storage: { read: async () => null },
     });

@@ -2345,6 +2345,7 @@ const rebuiltTables = [
   'attachments',
   'community_map_configs',
   'external_media_links',
+  'auth_throttle',
 ] as const;
 
 /**
@@ -2477,7 +2478,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0011_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0012_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2871,6 +2872,7 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0009_users_identity_and_audit_entries.sql',
       '0010_canonical_media_and_map_configs.sql',
       '0011_files_storage_key_path_indexes.sql',
+      '0012_auth_throttle_and_session_lifetimes.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')
@@ -3120,7 +3122,10 @@ async function runPostgresGate(): Promise<void> {
   console.log('🐘 PostgreSQL integration gate');
   await verifyStaticPortabilityContract();
   const client = createPostgresClient(databaseUrl, {
-    max: 2,
+    // The coupled-write and visibility races fire two concurrent HTTP
+    // requests from inside an open reset transaction; each needs its own
+    // pooled connection to reach the database at all.
+    max: 10,
     onnotice: () => undefined,
   });
   try {

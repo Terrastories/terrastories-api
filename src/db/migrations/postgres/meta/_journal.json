@@ -78,6 +78,13 @@
       "when": 1795089600000,
       "tag": "0010_files_storage_key_path_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795176000000,
+      "tag": "0011_auth_throttle_and_session_lifetimes",
+      "breakpoints": true
     }
   ]
 }

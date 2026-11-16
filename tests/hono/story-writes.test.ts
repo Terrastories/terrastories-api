@@ -7,9 +7,12 @@ import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { eq, asc, and } from 'drizzle-orm';
-import { hash } from 'bcrypt';
-import { nodePasswordVerifier } from '../../src/node-password.js';
 import { tablesFor } from '../../src/db/dialect.js';
+import {
+  argon2Seed,
+  makeDerivedKey,
+  makeServerSecret,
+} from './auth-test-utils.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { StoryWritesRepository } from '../../src/repositories/story-writes.repository.js';
@@ -29,7 +32,7 @@ const db = drizzle(sqlite);
 const tables = tablesFor(db);
 
 // Build test secret values at runtime so no static credential-shaped literals exist.
-const TEST_PASS = ['Slice8', 'StoryTest', '2026!'].join('-');
+const TEST_DERIVED_KEY = makeDerivedKey();
 const T0 = new Date('2026-06-01T12:00:00.000Z');
 
 const API_ORIGIN = 'https://api.example.test';
@@ -56,13 +59,22 @@ async function insertRow<T extends { $inferInsert: Record<string, unknown> }>(
 }
 
 async function loginAs(email: string, communityId?: number): Promise<string> {
+  let communitySlug: string | undefined;
+  if (communityId !== undefined) {
+    const [row] = await db
+      .select({ slug: tables.communities.slug })
+      .from(tables.communities)
+      .where(eq(tables.communities.id, communityId))
+      .limit(1);
+    communitySlug = row?.slug;
+  }
   const res = await app.request(`${API_ORIGIN}/v2/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      email,
-      password: TEST_PASS,
-      ...(communityId === undefined ? {} : { communityId }),
+      identifier: email,
+      derivedKey: TEST_DERIVED_KEY,
+      ...(communitySlug === undefined ? {} : { communitySlug }),
     }),
   });
   expect(res.status).toBe(200);
@@ -113,7 +125,7 @@ async function requestJson(
 
 beforeAll(async () => {
   migrate(db, { migrationsFolder: 'src/db/migrations' });
-  const passwordHash = await hash(TEST_PASS, 4);
+  const seed = await argon2Seed(TEST_DERIVED_KEY);
 
   ids.own = await insertRow(tables.communities, {
     name: 'Own Nation',
@@ -161,7 +173,7 @@ beforeAll(async () => {
       email,
       username,
       ...deriveUserIdentityColumns({ email, username }),
-      passwordHash,
+      ...seed,
       firstName: role,
       lastName: 'User',
       role,
@@ -326,11 +338,11 @@ beforeAll(async () => {
 
   app = createHonoApp({
     repository: new HonoFoundationRepository(db),
-    verifier: nodePasswordVerifier,
     secureCookies: false,
     publicOrigin: API_ORIGIN,
     corsOrigins: [CLIENT_ORIGIN],
     storage: { read: async () => null },
+    serverSecret: makeServerSecret(),
   });
 
   cookies.super = await loginAs('super@slice8.example.test');
@@ -1741,7 +1753,7 @@ describe('Slice 9 D1 owner-delete files purge (#140)', () => {
         updatedAt: now,
       })
       .returning();
-    const passwordHash = await hash(TEST_PASS, 4);
+    const seed = await argon2Seed(TEST_DERIVED_KEY);
     const email = `purge-editor-${slug}@example.test`;
     const username = email;
     const [actor] = await purgeDb
@@ -1750,7 +1762,7 @@ describe('Slice 9 D1 owner-delete files purge (#140)', () => {
         email,
         username,
         ...deriveUserIdentityColumns({ email, username }),
-        passwordHash,
+        ...seed,
         firstName: 'Purge',
         lastName: 'Editor',
         role: 'editor',
@@ -1854,12 +1866,11 @@ describe('Slice 9 D1 owner-delete files purge (#140)', () => {
   async function deleteThroughHttp(
     d1Like: unknown,
     email: string,
-    commId: number,
     storyId: number
   ) {
     const d1App = createHonoApp({
       repository: new HonoFoundationRepository(d1Like as never),
-      verifier: nodePasswordVerifier,
+      serverSecret: makeServerSecret(),
       secureCookies: false,
       publicOrigin: API_ORIGIN,
       corsOrigins: [CLIENT_ORIGIN],
@@ -1868,7 +1879,7 @@ describe('Slice 9 D1 owner-delete files purge (#140)', () => {
     const loginRes = await d1App.request(`${API_ORIGIN}/v2/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email, password: TEST_PASS, communityId: commId }),
+      body: JSON.stringify({ identifier: email, derivedKey: TEST_DERIVED_KEY }),
     });
     expect(loginRes.status).toBe(200);
     const cookie = (loginRes.headers.get('set-cookie') ?? '').split(';')[0]!;
@@ -1895,7 +1906,7 @@ describe('Slice 9 D1 owner-delete files purge (#140)', () => {
       await makeAttachment(storyId, fileId);
       const recorded: Array<Array<{ sql: string; params: unknown[] }>> = [];
       const d1Like = d1LikeWith(purgeSqlite, purgeDb, recorded);
-      const delRes = await deleteThroughHttp(d1Like, email, comm!.id, storyId);
+      const delRes = await deleteThroughHttp(d1Like, email, storyId);
       expect(delRes.status).toBe(204);
       expect(recorded).toHaveLength(1);
       expect(
@@ -1941,7 +1952,7 @@ describe('Slice 9 D1 owner-delete files purge (#140)', () => {
       await makeAttachment(doomed, fileB, 1);
       await makeAttachment(surviving, fileB, 0);
       const d1Like = d1LikeWith(purgeSqlite, purgeDb);
-      const delRes = await deleteThroughHttp(d1Like, email, comm!.id, doomed);
+      const delRes = await deleteThroughHttp(d1Like, email, doomed);
       expect(delRes.status).toBe(204);
       // The orphaned attachment was removed; the shared one kept:
       expect(
@@ -1987,7 +1998,7 @@ describe('Slice 9 D1 owner-delete files purge (#140)', () => {
       // The purge statement itself throws inside the batch: nothing may
       // commit, so the story, the attachments and the files row all remain.
       const d1Like = d1LikeWith(purgeSqlite, purgeDb, undefined, true);
-      const delRes = await deleteThroughHttp(d1Like, email, comm!.id, storyId);
+      const delRes = await deleteThroughHttp(d1Like, email, storyId);
       expect(delRes.status).toBe(500);
       expect(
         await purgeDb.select().from(t.stories).where(eq(t.stories.id, storyId))

@@ -1,12 +1,16 @@
 /** Opt-in Node coexistence listener; never imported by the Fastify entrypoint. */
 import { serve } from '@hono/node-server';
-import { nodePasswordVerifier } from './node-password.js';
+import { getConnInfo } from '@hono/node-server/conninfo';
 import { createLocalStorage } from './node-storage.js';
 import { getDb } from './db/index.js';
 import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
 import { scheduleOrphanSweep } from './services/orphan-sweep-scheduler.js';
+import {
+  runMaintenanceSweeps,
+  scheduleMaintenanceSweeps,
+} from './services/maintenance-sweeps.js';
 import { envFlagEnabled } from './services/hono-foundation.service.js';
 import {
   validateNodeV2Runtime,
@@ -18,6 +22,12 @@ import {
 const runtimeConfig = validateNodeV2Runtime(process.env);
 // PR #229 review: a relaxed mode must never be silent on a deployed host —
 // one content-free startup line naming the mode.
+/** Only the one explicit, case-insensitive header name enables X-Real-IP trust. */
+function isTrustedProxyHeader(
+  value: string | undefined
+): 'x-real-ip' | undefined {
+  return /^\s*x-real-ip\s*$/i.test(value ?? '') ? 'x-real-ip' : undefined;
+}
 const modeNotice = v2RuntimeModeNotice(runtimeConfig);
 if (modeNotice) {
   // eslint-disable-next-line no-console -- startup marker, content-free
@@ -28,18 +38,24 @@ const storage = await createLocalStorage(
   process.env.HONO_STORAGE_ROOT ?? './uploads'
 );
 const app = createHonoApp({
-  verifier: {
-    verify: (...args) =>
-      process.env.NODE_ENV === 'development'
-        ? nodePasswordVerifier.verify(...args)
-        : Promise.reject(new Error('Production verifier not configured')),
-  },
   repository: new HonoFoundationRepository(db),
+  // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
+  // production-like modes; prelogin fails closed when absent.
+  serverSecret: runtimeConfig.serverSecret,
   publicOrigin: runtimeConfig.publicOrigin,
   corsOrigins: runtimeConfig.corsOrigins,
   // HTTP cookies are allowed only for this opt-in loopback development listener.
   secureCookies: runtimeConfig.secureCookies,
   storage,
+  // Only a configured reverse proxy makes forwarded headers trustworthy: the
+  // per-IP throttle then keys on the rightmost X-Forwarded-For entry — the
+  // one the trusted proxy appended. X-Real-IP is honoured only when the
+  // operator explicitly names it as the proxy's client-address header; set it
+  // only when the proxy overwrites (or strips) X-Real-IP. Without TRUSTED_PROXY
+  // the socket peer address is the limit (finding E).
+  trustProxy: /^(1|true|yes)$/i.test(process.env.TRUSTED_PROXY ?? ''),
+  trustedProxyHeader: isTrustedProxyHeader(process.env.TRUSTED_PROXY_HEADER),
+  clientAddress: (c) => getConnInfo(c).remote.address ?? null,
 });
 const server = serve({
   fetch: app.fetch,
@@ -66,12 +82,31 @@ const sweepOrphanObjects = () => {
 };
 const orphanSweepTimers = scheduleOrphanSweep(sweepOrphanObjects);
 
+// Maintenance sweeps on the Workers cron cadence: audit IP/UA scrub past the
+// 90-day retention cutoff, expired session rows, and spent non-blocking
+// throttle rows. These jobs touch no bytes — only audit/session/throttle
+// rows — so ORPHAN_SWEEP_PAUSED (the storage-restore hold, which covers byte
+// deletion) deliberately does not pause them. Each job runs in its own
+// try/catch with content-free logging; one failing job never blocks the
+// others. First run after a named delay; unref'd interval.
+const maintenanceSweepTimers = scheduleMaintenanceSweeps(() => {
+  // Each job already catches its own failure; this catch keeps any
+  // unexpected throw from becoming an unhandled rejection that ends the
+  // process.
+  runMaintenanceSweeps(db).catch(() => {
+    // eslint-disable-next-line no-console -- operator channel; content-free
+    console.warn('maintenance sweeps: run failed');
+  });
+});
+
 let shuttingDown = false;
 const shutdown = () => {
   if (shuttingDown) return;
   shuttingDown = true;
   clearTimeout(orphanSweepTimers.first);
   clearInterval(orphanSweepTimers.interval);
+  clearTimeout(maintenanceSweepTimers.first);
+  clearInterval(maintenanceSweepTimers.interval);
   server.close(() => process.exit(0));
 };
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

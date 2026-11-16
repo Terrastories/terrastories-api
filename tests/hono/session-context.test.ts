@@ -4,9 +4,16 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { hash } from 'bcrypt';
 import { eq } from 'drizzle-orm';
-import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
+import {
+  HonoFoundationRepository,
+  type FoundationUser,
+} from '../../src/repositories/hono-foundation.repository.js';
 import { createHonoApp } from '../../src/hono-app.js';
-import { nodePasswordVerifier } from '../../src/node-password.js';
+import {
+  argon2Seed,
+  makeDerivedKey,
+  makeServerSecret,
+} from './auth-test-utils.js';
 import { tokenDigest } from '../../src/services/hono-foundation.service.js';
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
@@ -20,6 +27,24 @@ import {
   sessionRenewalInterval,
 } from '../../src/shared/session-policy.js';
 import type { V2CommunityRole } from '../../src/shared/authorization/sovereignty-policy.js';
+
+/** Slice 10: the repository takes one explicit session-lifetime input. */
+function createSession(
+  repository: HonoFoundationRepository,
+  tokenHash: string,
+  user: FoundationUser,
+  now: Date,
+  expiresAt: Date
+) {
+  return repository.createSession({
+    tokenHash,
+    user,
+    kind: 'standard',
+    createdAt: now,
+    idleExpiresAt: expiresAt,
+    absoluteExpiresAt: new Date(now.getTime() + sessionLifetime),
+  });
+}
 
 describe('Slice 3b HonoFoundationRepository & session middleware context (#137)', () => {
   const openDbs: Sqlite.Database[] = [];
@@ -35,8 +60,12 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     const db = drizzle(sqlite);
     migrate(db, { migrationsFolder: 'src/db/migrations' });
 
-    const password = 'Slice3bPassword123!';
-    const passwordHash = (await hash(password, 4)).replace('$2b$', '$2a$');
+    const passwordHash = (await hash('Slice3bPassword123!', 4)).replace(
+      '$2b$',
+      '$2a$'
+    );
+    const stretchedKey = makeDerivedKey();
+    const seed = await argon2Seed(stretchedKey);
     const now = new Date('2026-11-15T00:00:00Z');
 
     const [activeCommunity] = await db
@@ -78,6 +107,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'viewer@active.test',
           username: 'active_viewer',
           displayName: 'Active Viewer',
+          ...seed,
           passwordHash,
           firstName: 'Active',
           lastName: 'Viewer',
@@ -89,6 +119,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'member@active.test',
           username: 'active_member',
           displayName: null,
+          ...seed,
           passwordHash,
           firstName: 'Active',
           lastName: 'Member',
@@ -100,6 +131,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'elder@active.test',
           username: null,
           displayName: 'Legacy Elder',
+          ...seed,
           passwordHash,
           firstName: 'Legacy',
           lastName: 'Elder',
@@ -111,6 +143,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'inactive-admin@active.test',
           username: null,
           displayName: null,
+          ...seed,
           passwordHash,
           firstName: 'Inactive',
           lastName: 'Admin',
@@ -122,6 +155,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'super@system.test',
           username: 'null_super',
           displayName: 'System Super Admin',
+          ...seed,
           passwordHash,
           firstName: 'System',
           lastName: 'Super',
@@ -133,6 +167,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'inactive-super@system.test',
           username: null,
           displayName: null,
+          ...seed,
           passwordHash,
           firstName: 'Inactive',
           lastName: 'Super',
@@ -144,6 +179,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'orphan-admin@system.test',
           username: null,
           displayName: null,
+          ...seed,
           passwordHash,
           firstName: 'Orphan',
           lastName: 'Admin',
@@ -155,6 +191,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'admin@disabled.test',
           username: 'disabled_admin',
           displayName: 'Disabled Admin',
+          ...seed,
           passwordHash,
           firstName: 'Disabled',
           lastName: 'Admin',
@@ -166,6 +203,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'viewer@disabled.test',
           username: null,
           displayName: null,
+          ...seed,
           passwordHash,
           firstName: 'Disabled',
           lastName: 'Viewer',
@@ -177,6 +215,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'member@disabled.test',
           username: null,
           displayName: null,
+          ...seed,
           passwordHash,
           firstName: 'Disabled',
           lastName: 'Member',
@@ -188,6 +227,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
           email: 'editor@disabled.test',
           username: null,
           displayName: null,
+          ...seed,
           passwordHash,
           firstName: 'Disabled',
           lastName: 'Editor',
@@ -245,8 +285,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     let currentNow = now;
     const app = createHonoApp({
       repository,
-      verifier: nodePasswordVerifier,
       secureCookies: false,
+      serverSecret: makeServerSecret(),
       now: () => currentNow,
       storage: {
         read: async () => {
@@ -261,7 +301,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
       db,
       repository,
       app,
-      password,
+      stretchedKey,
+      seed,
       passwordHash,
       activeCommunity,
       disabledCommunity,
@@ -358,7 +399,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
       db,
       repository,
       app,
-      password,
+      stretchedKey,
+      seed,
       passwordHash,
       activeCommunity,
       disabledCommunity,
@@ -461,6 +503,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
       for (const entry of rows) {
         await db.insert(usersSqlite).values({
           email: sharedEmail,
+          ...seed,
           passwordHash,
           firstName: 'Shared',
           lastName: 'User',
@@ -482,7 +525,10 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
       const unlocated = await app.request('http://localhost/v2/auth/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email: sharedEmail, password }),
+        body: JSON.stringify({
+          identifier: sharedEmail,
+          derivedKey: stretchedKey,
+        }),
       });
       expect(unlocated.status).toBe(401);
       expect(await unlocated.json()).toEqual({ error: 'Invalid credentials' });
@@ -491,9 +537,9 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          email: sharedEmail,
-          password,
-          communityId: activeCommunity.id,
+          identifier: sharedEmail,
+          derivedKey: stretchedKey,
+          communitySlug: 'active-comm',
         }),
       });
       expect(located.status).toBe(200);
@@ -508,7 +554,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     // Null-community super_admin establishes and reads back a session (IS NULL path).
     const superHash = await tokenDigest('s'.repeat(64));
     expect(
-      await repository.createSession(
+      await createSession(
+        repository,
         superHash,
         {
           id: users.nullSuperAdmin.id,
@@ -533,7 +580,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
 
     // Wrong communityId expectation fails closed (null vs non-null mismatch).
     expect(
-      await repository.createSession(
+      await createSession(
+        repository,
         await tokenDigest('w'.repeat(64)),
         {
           id: users.nullSuperAdmin.id,
@@ -552,7 +600,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     // Disabled-community own-admin establishes and holds a session.
     const adminHash = await tokenDigest('a'.repeat(64));
     expect(
-      await repository.createSession(
+      await createSession(
+        repository,
         adminHash,
         {
           id: users.disabledAdmin.id,
@@ -613,7 +662,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
       ],
     ] as const) {
       expect(
-        await repository.createSession(
+        await createSession(
+          repository,
           await tokenDigest(label.padEnd(64, '0').slice(0, 64)),
           candidate,
           now,
@@ -651,7 +701,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     const {
       db,
       app,
-      password,
+      stretchedKey,
       activeCommunity,
       disabledCommunity,
       activeFileId,
@@ -661,11 +711,15 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
       getNow,
     } = await setup();
 
-    const login = (email: string, communityId?: number) =>
+    const login = (email: string, communitySlug?: string) =>
       app.request('http://localhost/v2/auth/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email, password, communityId }),
+        body: JSON.stringify({
+          identifier: email,
+          derivedKey: stretchedKey,
+          ...(communitySlug === undefined ? {} : { communitySlug }),
+        }),
       });
 
     // Uniform 401 across bad login, elder, disabled viewer/member/editor, inactive, orphan.
@@ -815,7 +869,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     ).toBe(404);
 
     // Active-community member with null displayName gets exact /v2/auth/me shape and can read active branding.
-    const memberLogin = await login('member@active.test', activeCommunity.id);
+    const memberLogin = await login('member@active.test', 'active-comm');
     expect(memberLogin.status).toBe(200);
     const memberCookie = memberLogin.headers.get('set-cookie')!.split(';')[0];
     expect(await memberLogin.json()).toEqual({
@@ -841,7 +895,8 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
     const {
       db,
       app,
-      password,
+      stretchedKey,
+      seed,
       passwordHash,
       activeCommunity,
       disabledCommunity,
@@ -854,6 +909,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
         email: 'admin@active.test',
         username: 'active_admin',
         displayName: 'Active Admin',
+        ...seed,
         passwordHash,
         firstName: 'Active',
         lastName: 'Admin',
@@ -867,7 +923,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
       app.request('http://localhost/v2/auth/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ identifier: email, derivedKey: stretchedKey }),
       });
 
     // 1. Active community admin's cookie returns 401 after community disable

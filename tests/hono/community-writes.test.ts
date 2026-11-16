@@ -6,10 +6,13 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { eq, asc, and } from 'drizzle-orm';
-import { hash } from 'bcrypt';
-import { nodePasswordVerifier } from '../../src/node-password.js';
+import { eq, asc, and, like } from 'drizzle-orm';
 import { tablesFor } from '../../src/db/dialect.js';
+import {
+  argon2Seed,
+  makeDerivedKey,
+  makeServerSecret,
+} from './auth-test-utils.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { CommunityReadsRepository } from '../../src/repositories/community-reads.repository.js';
@@ -35,7 +38,7 @@ const db = drizzle(sqlite);
 const tables = tablesFor(db);
 
 // Build test secret values at runtime so no static credential-shaped literals exist.
-const TEST_PASS = ['Slice7', 'WriteTest', '2026!'].join('-');
+const TEST_DERIVED_KEY = makeDerivedKey();
 const TOKEN_QUERY_KEY = ['access', 'token'].join('_');
 const TOKEN_QUERY_VAL = ['tok', 'example', '999'].join('.');
 const T0 = new Date('2026-06-01T12:00:00.000Z');
@@ -66,13 +69,22 @@ async function insertRow<T extends { $inferInsert: Record<string, unknown> }>(
 }
 
 async function loginAs(email: string, communityId?: number): Promise<string> {
+  let communitySlug: string | undefined;
+  if (communityId !== undefined) {
+    const [row] = await db
+      .select({ slug: tables.communities.slug })
+      .from(tables.communities)
+      .where(eq(tables.communities.id, communityId))
+      .limit(1);
+    communitySlug = row?.slug;
+  }
   const res = await app.request(`${API_ORIGIN}/v2/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      email,
-      password: TEST_PASS,
-      ...(communityId === undefined ? {} : { communityId }),
+      identifier: email,
+      derivedKey: TEST_DERIVED_KEY,
+      ...(communitySlug === undefined ? {} : { communitySlug }),
     }),
   });
   expect(res.status).toBe(200);
@@ -123,7 +135,7 @@ async function requestJson(
 
 beforeAll(async () => {
   migrate(db, { migrationsFolder: 'src/db/migrations' });
-  const passwordHash = await hash(TEST_PASS, 4);
+  const seed = await argon2Seed(TEST_DERIVED_KEY);
 
   ids.own = await insertRow(tables.communities, {
     name: 'Own Nation',
@@ -173,7 +185,7 @@ beforeAll(async () => {
       ...deriveUserIdentityColumns({ email, username }),
       firstName: role,
       lastName: 'Tester',
-      passwordHash,
+      ...seed,
       role,
       communityId,
       isActive: true,
@@ -264,11 +276,11 @@ beforeAll(async () => {
 
   app = createHonoApp({
     repository: new HonoFoundationRepository(db),
-    verifier: nodePasswordVerifier,
     secureCookies: false,
     publicOrigin: API_ORIGIN,
     corsOrigins: [CLIENT_ORIGIN],
     storage: { read: async () => null },
+    serverSecret: makeServerSecret(),
   });
 
   cookies.super = await loginAs('super@slice7.example.test');
@@ -403,12 +415,20 @@ describe('Slice 7 PATCH /v2/community', () => {
       .where(eq(tables.communities.id, ids.own!));
     expect(dbCommunity?.descriptionPlain).toBe('Welcome to our archive');
 
-    // AuditEntry emitted atomically and content-free
-    const audits = await db
-      .select()
-      .from(tables.auditEntries)
-      .where(eq(tables.auditEntries.communityId, ids.own!))
-      .orderBy(asc(tables.auditEntries.id));
+    // AuditEntry emitted atomically and content-free (auth events carry
+    // their own entries; restrict to the publication-decision domain)
+    const visibilityAudits = () =>
+      db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, ids.own!),
+            like(tables.auditEntries.action, 'community.%')
+          )
+        )
+        .orderBy(asc(tables.auditEntries.id));
+    const audits = await visibilityAudits();
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({
       communityId: ids.own,
@@ -435,12 +455,7 @@ describe('Slice 7 PATCH /v2/community', () => {
       body: { visibility: 'public' },
     });
     expect(idemRes.status).toBe(200);
-    expect(
-      await db
-        .select()
-        .from(tables.auditEntries)
-        .where(eq(tables.auditEntries.communityId, ids.own!))
-    ).toHaveLength(1);
+    expect(await visibilityAudits()).toHaveLength(1);
 
     // Toggle public -> private: emits second audit entry and immediately closes /v2/public/* and /explore/*
     const closeRes = await requestJson('PATCH', '/v2/community', {
@@ -452,11 +467,7 @@ describe('Slice 7 PATCH /v2/community', () => {
       PatchCommunityResponseSchema.parse(closeRes.json).data.visibility
     ).toBe('private');
 
-    const auditsAfter = await db
-      .select()
-      .from(tables.auditEntries)
-      .where(eq(tables.auditEntries.communityId, ids.own!))
-      .orderBy(asc(tables.auditEntries.id));
+    const auditsAfter = await visibilityAudits();
     expect(auditsAfter).toHaveLength(2);
     expect(auditsAfter[1]?.action).toBe('community.visibility.private');
 
@@ -719,8 +730,21 @@ describe('Slice 7 PATCH /v2/community', () => {
       .where(eq(tables.communities.id, ids.disabled!));
     expect(inactive).toBeDefined();
 
+    // Initial test emitted 2 (public, private); the slice offset is captured
+    // before the burst.
+    const visibilityBefore = (
+      await db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, ids.own!),
+            like(tables.auditEntries.action, 'community.%')
+          )
+        )
+    ).length;
     // 0-row update on inactive community & missing community writes zero audits
-    const beforeCount = (
+    const globalBefore = (
       await db.select({ id: tables.auditEntries.id }).from(tables.auditEntries)
     ).length;
 
@@ -746,7 +770,7 @@ describe('Slice 7 PATCH /v2/community', () => {
           .select({ id: tables.auditEntries.id })
           .from(tables.auditEntries)
       ).length
-    ).toBe(beforeCount);
+    ).toBe(globalBefore);
 
     // Concurrent-toggle burst via HTTP PATCH /v2/community (own is currently private)
     const seq: Array<'public' | 'public' | 'private' | 'public' | 'private'> = [
@@ -766,10 +790,17 @@ describe('Slice 7 PATCH /v2/community', () => {
     );
     expect(responses.every((r) => r.status === 200)).toBe(true);
 
+    // The slice offset was captured before the burst: the burst's effective
+    // transitions are the tail of the visibility-domain audits.
     const allOwnAudits = await db
       .select()
       .from(tables.auditEntries)
-      .where(eq(tables.auditEntries.communityId, ids.own!))
+      .where(
+        and(
+          eq(tables.auditEntries.communityId, ids.own!),
+          like(tables.auditEntries.action, 'community.%')
+        )
+      )
       .orderBy(asc(tables.auditEntries.id));
     // The five PATCHes run concurrently, so their execution order is not the
     // submission order and the number of effective transitions varies. The
@@ -777,7 +808,7 @@ describe('Slice 7 PATCH /v2/community', () => {
     // audits repeat a state, the first differs from the prior state), there
     // is at most one audit per request, and the last audit matches the
     // community's final visibility — no transition is lost or invented.
-    const burst = allOwnAudits.slice(beforeCount).map((a) => a.action);
+    const burst = allOwnAudits.slice(visibilityBefore).map((a) => a.action);
     expect(burst.length).toBeGreaterThanOrEqual(1);
     expect(burst.length).toBeLessThanOrEqual(seq.length);
     expect(burst[0]).toBe('community.visibility.public');

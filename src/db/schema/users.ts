@@ -99,6 +99,11 @@ export const usersPg = pgTable(
       table.communityId,
       table.email
     ),
+    // Unscoped identifier-first lookup (prelogin/login without a narrowing
+    // slug): the composite and null-community email indexes cannot serve it.
+    emailNormalizedIdx: index('users_email_normalized_idx').on(
+      table.emailNormalized
+    ),
   })
 );
 
@@ -167,6 +172,11 @@ export const usersSqlite = sqliteTable(
     communityEmailIdx: sqliteIndex('idx_users_community_email').on(
       table.communityId,
       table.email
+    ),
+    // Unscoped identifier-first lookup (prelogin/login without a narrowing
+    // slug): the composite and null-community email indexes cannot serve it.
+    emailNormalizedIdx: sqliteIndex('users_email_normalized_idx').on(
+      table.emailNormalized
     ),
   })
 );

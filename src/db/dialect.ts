@@ -31,17 +31,25 @@ import {
 } from './schema/story_speakers.js';
 import { themesPg, themesSqlite } from './schema/themes.js';
 import { usersPg, usersSqlite } from './schema/users.js';
+import {
+  authThrottlePg,
+  authThrottleSqlite,
+  sessionsPg,
+  sessionsSqlite,
+} from './schema/sessions.js';
 
 export type Dialect = 'postgresql' | 'sqlite';
 
 const sqliteTables = {
   attachments: attachmentsSqlite,
   auditEntries: auditEntriesSqlite,
+  authThrottle: authThrottleSqlite,
   communities: communitiesSqlite,
   communityMapConfigs: communityMapConfigsSqlite,
   externalMediaLinks: externalMediaLinksSqlite,
   files: filesSqlite,
   places: placesSqlite,
+  sessions: sessionsSqlite,
   speakers: speakersSqlite,
   stories: storiesSqlite,
   storyPlaces: storyPlacesSqlite,
@@ -53,11 +61,13 @@ const sqliteTables = {
 const postgresTables = {
   attachments: attachmentsPg,
   auditEntries: auditEntriesPg,
+  authThrottle: authThrottlePg,
   communities: communitiesPg,
   communityMapConfigs: communityMapConfigsPg,
   externalMediaLinks: externalMediaLinksPg,
   files: filesPg,
   places: placesPg,
+  sessions: sessionsPg,
   speakers: speakersPg,
   stories: storiesPg,
   storyPlaces: storyPlacesPg,

@@ -136,6 +136,11 @@ export interface V2RuntimeConfig {
   publicOrigin?: string;
   corsOrigins: string[];
   secureCookies: boolean;
+  /**
+   * The prelogin HMAC key (SPEC-V2 §7). Present whenever the secret was
+   * supplied — development and test keep it optional. Never logged.
+   */
+  serverSecret?: string;
 }
 
 /** Setting names differ per platform; messages always use the caller's name. */
@@ -144,6 +149,7 @@ export interface V2RuntimeSettingNames {
   publicOrigin: string;
   corsOrigins: string;
   secureCookies: string;
+  authServerSecret: string;
 }
 
 export interface V2RuntimeCoreInput {
@@ -153,6 +159,8 @@ export interface V2RuntimeCoreInput {
   secureCookies?: boolean | undefined;
   /** The explicit field-kit plain-HTTP opt-in (never available on Workers). */
   allowPlainHttp?: boolean | undefined;
+  /** Prelogin HMAC key from the deployment environment only. */
+  authServerSecret?: string | undefined;
   names: V2RuntimeSettingNames;
 }
 
@@ -259,6 +267,23 @@ export function validateV2RuntimeCore(
     checkOrigin(origin, names.corsOrigins);
   }
 
+  // The prelogin HMAC key (SPEC-V2 §7, #137). Production-like modes require
+  // it so a misconfigured deployment refuses to serve instead of answering
+  // prelogin with 503s at runtime; development and test stay ergonomic.
+  // Messages name the setting, never the value.
+  const secret = input.authServerSecret;
+  if (productionLike) {
+    if (secret === undefined || secret === '') {
+      problems.push(
+        `${names.authServerSecret} is required in ${environment} mode`
+      );
+    } else if (secret.length < 32 || isPlaceholderValue(secret)) {
+      problems.push(
+        `${names.authServerSecret} must be at least 32 characters and must not keep a template placeholder value`
+      );
+    }
+  }
+
   const secureCookies = input.secureCookies ?? true;
   if (!secureCookies && httpsRequired) {
     problems.push(
@@ -274,6 +299,7 @@ export function validateV2RuntimeCore(
     publicOrigin: input.publicOrigin || undefined,
     corsOrigins: [...(input.corsOrigins ?? [])],
     secureCookies,
+    serverSecret: secret || undefined,
   };
 }
 
@@ -317,6 +343,7 @@ export interface NodeV2Env {
   HONO_CORS_ORIGINS?: string | undefined;
   HONO_PORT?: string | undefined;
   HONO_ALLOW_PLAIN_HTTP?: string | undefined;
+  AUTH_SERVER_SECRET?: string | undefined;
 }
 
 export interface NodeV2RuntimeConfig extends V2RuntimeConfig {
@@ -351,11 +378,13 @@ export function validateNodeV2Runtime(env: NodeV2Env): NodeV2RuntimeConfig {
         originProtocol(env.HONO_PUBLIC_ORIGIN) === 'http:'
       ),
     allowPlainHttp: env.HONO_ALLOW_PLAIN_HTTP === 'true',
+    authServerSecret: env.AUTH_SERVER_SECRET,
     names: {
       environment: 'NODE_ENV',
       publicOrigin: 'HONO_PUBLIC_ORIGIN',
       corsOrigins: 'HONO_CORS_ORIGINS',
       secureCookies: 'secureCookies',
+      authServerSecret: 'AUTH_SERVER_SECRET',
     },
   });
   return { ...config, port };
@@ -366,6 +395,7 @@ export interface WorkerV2Env {
   ENVIRONMENT?: string | undefined;
   PUBLIC_ORIGIN?: string | undefined;
   CORS_ORIGINS?: string | undefined;
+  AUTH_SERVER_SECRET?: string | undefined;
   DB?: unknown;
   MEDIA?: unknown;
 }
@@ -386,11 +416,13 @@ export function validateWorkerV2Runtime(env: WorkerV2Env): V2RuntimeConfig {
       publicOrigin: env.PUBLIC_ORIGIN,
       corsOrigins: parseCorsOrigins(env.CORS_ORIGINS),
       secureCookies: true,
+      authServerSecret: env.AUTH_SERVER_SECRET,
       names: {
         environment: 'ENVIRONMENT',
         publicOrigin: 'PUBLIC_ORIGIN',
         corsOrigins: 'CORS_ORIGINS',
         secureCookies: 'secureCookies',
+        authServerSecret: 'AUTH_SERVER_SECRET',
       },
     });
   } catch (error) {

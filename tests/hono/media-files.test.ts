@@ -9,8 +9,11 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { and, asc, eq } from 'drizzle-orm';
-import { hash } from 'bcrypt';
-import { nodePasswordVerifier } from '../../src/node-password.js';
+import {
+  argon2Seed,
+  makeDerivedKey,
+  makeServerSecret,
+} from './auth-test-utils.js';
 import { tablesFor } from '../../src/db/dialect.js';
 import {
   communityMediaSqlite,
@@ -34,7 +37,7 @@ const db = drizzle(sqlite);
 const tables = tablesFor(db);
 
 // Build test credential material at runtime so no static credential-shaped literals exist.
-const TEST_PASS = ['Slice9', 'MediaFiles', '2026!'].join('-');
+const TEST_DERIVED_KEY = makeDerivedKey();
 const API_ORIGIN = 'https://api.example.test';
 const CLIENT_ORIGIN = 'https://app.example.test';
 const FOREIGN_ORIGIN = 'https://evil.invalid';
@@ -174,13 +177,22 @@ async function insertRow<T extends { $inferInsert: Record<string, unknown> }>(
 }
 
 async function loginAs(email: string, communityId?: number): Promise<string> {
+  let communitySlug: string | undefined;
+  if (communityId !== undefined) {
+    const [row] = await db
+      .select({ slug: tables.communities.slug })
+      .from(tables.communities)
+      .where(eq(tables.communities.id, communityId))
+      .limit(1);
+    communitySlug = row?.slug;
+  }
   const res = await app.request(`${API_ORIGIN}/v2/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      email,
-      password: TEST_PASS,
-      ...(communityId === undefined ? {} : { communityId }),
+      identifier: email,
+      derivedKey: TEST_DERIVED_KEY,
+      ...(communitySlug === undefined ? {} : { communitySlug }),
     }),
   });
   expect(res.status).toBe(200);
@@ -220,7 +232,7 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
   beforeAll(async () => {
     migrate(db, { migrationsFolder: './src/db/migrations' });
     const now = new Date('2026-06-01T12:00:00.000Z');
-    const passwordHash = await hash(TEST_PASS, 4);
+    const seed = await argon2Seed(TEST_DERIVED_KEY);
 
     ids.ownCommunity = await insertRow(tables.communities, {
       name: 'Own Nation',
@@ -255,7 +267,7 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
       return insertRow(tables.users, {
         email,
         emailNormalized: derived.emailNormalized,
-        passwordHash,
+        ...seed,
         firstName,
         lastName,
         displayNameNormalized: derived.displayNameNormalized,
@@ -330,7 +342,7 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
 
     app = createHonoApp({
       repository: new HonoFoundationRepository(db),
-      verifier: nodePasswordVerifier,
+      serverSecret: makeServerSecret(),
       secureCookies: false,
       publicOrigin: API_ORIGIN,
       corsOrigins: [CLIENT_ORIGIN],
@@ -1068,7 +1080,7 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
       .values({
         email: 'ed@d1.test',
         emailNormalized: derived.emailNormalized,
-        passwordHash: await hash(TEST_PASS, 4),
+        ...(await argon2Seed(TEST_DERIVED_KEY)),
         firstName: 'Ed',
         lastName: 'D1',
         displayNameNormalized: derived.displayNameNormalized,
@@ -1145,7 +1157,7 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
     const localCleanup = new MediaCleanupCoordinator(d1Db, wrappedStorage);
     const localApp = createHonoApp({
       repository: new HonoFoundationRepository(d1Db),
-      verifier: nodePasswordVerifier,
+      serverSecret: makeServerSecret(),
       secureCookies: false,
       publicOrigin: API_ORIGIN,
       corsOrigins: [CLIENT_ORIGIN],

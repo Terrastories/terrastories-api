@@ -1548,13 +1548,15 @@ export class MediaWritesRepository {
     role: AttachmentRole;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     executor?: any;
-    lock?: 'update' | 'share';
+    lock?: 'update' | 'share' | 'key share';
   }): Promise<AttachmentOwnerResolution> {
     const ex = input.executor ?? this.db;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const lock = (query: any): any => {
       if (!input.lock) return query;
-      return input.lock === 'update' ? query.for('update') : query.for('share');
+      if (input.lock === 'update') return query.for('update');
+      if (input.lock === 'key share') return query.for('key share');
+      return query.for('share');
     };
     const one = async (query: {
       all?: () => Promise<unknown[]> | unknown[];
@@ -1727,6 +1729,85 @@ export class MediaWritesRepository {
     return exists ? { status: 'ok', communityId } : { status: 'not_found' };
   }
 
+  /**
+   * §6.7 reuse rule: adding/reusing a relation that broadens the bytes'
+   * audience requires publishing authority over every affected owner.
+   *
+   * A file with no relations is private staging (§6.7): only its uploader or a
+   * same-community admin may attach it. A file that already carries relations
+   * may be reused only when the actor resolves `authorizeAttachmentOwner` on
+   * every existing owner; a restricted, unknown-privacy or unreadable owner
+   * fails closed as 404, uniformly with not-found. The caller must already
+   * hold change authority on the target owner. On PostgreSQL this runs before
+   * the files KEY SHARE lock, so lock order stays attachments-then-files.
+   */
+  async authorizeAttachReuse(input: {
+    actor: FoundationUser;
+    communityId: number | null;
+    file: Pick<StoredFileRecord, 'id' | 'uploadedBy'>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor?: any;
+    lock?: 'update' | 'share' | 'key share';
+  }): Promise<
+    { ok: true } | { ok: false; outcome: 'not_found' | 'forbidden' }
+  > {
+    const ex = input.executor ?? this.db;
+    const rows = (await this.fetchAll(
+      ex
+        .select({
+          ownerType: this.tables.attachments.ownerType,
+          ownerId: this.tables.attachments.ownerId,
+          role: this.tables.attachments.role,
+        })
+        .from(this.tables.attachments)
+        .where(
+          and(
+            eq(this.tables.attachments.fileId, input.file.id),
+            input.communityId === null
+              ? isNull(this.tables.attachments.communityId)
+              : eq(this.tables.attachments.communityId, input.communityId)
+          )
+        )
+    )) as Array<{
+      ownerType: AttachmentOwnerType | null;
+      ownerId: number | null;
+      role: AttachmentRole | null;
+    }>;
+
+    if (rows.length === 0) {
+      // No usable relation evidence: fail closed. An unattached staging object
+      // is only attachable by its uploader or a same-community admin; a row
+      // with an unreadable owner shape never widens the bytes' audience.
+      if (
+        input.file.uploadedBy !== null &&
+        input.file.uploadedBy === input.actor.id
+      ) {
+        return { ok: true };
+      }
+      const viewer = ownCommunityViewerForRole(input.actor.role);
+      if (input.communityId !== null && viewer === 'own-admin') {
+        return { ok: true };
+      }
+      return { ok: false, outcome: 'not_found' };
+    }
+
+    for (const row of rows) {
+      if (!row.ownerType || row.ownerId === null || !row.role) {
+        return { ok: false, outcome: 'not_found' };
+      }
+      const authority = await this.authorizeAttachmentOwner({
+        actor: input.actor,
+        ownerType: row.ownerType,
+        ownerId: row.ownerId,
+        role: row.role,
+        executor: ex,
+        lock: input.lock,
+      });
+      if (authority.status !== 'ok') return { ok: false, outcome: 'not_found' };
+    }
+    return { ok: true };
+  }
+
   private async resolveAttachableFile(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     executor: any,
@@ -1890,6 +1971,14 @@ export class MediaWritesRepository {
         authority.communityId
       );
       if (!file) return { status: 'not_found' };
+      const reuse = await this.authorizeAttachReuse({
+        actor: input.actor,
+        communityId: authority.communityId,
+        file,
+        executor: this.db,
+        lock: 'update',
+      });
+      if (!reuse.ok) return { status: reuse.outcome };
       if (!this.attachmentTypeMatches(input.role, file.mimeType)) {
         return { status: 'type_mismatch' };
       }
@@ -1971,6 +2060,14 @@ export class MediaWritesRepository {
           authority.communityId
         );
         if (!file) return { status: 'not_found' };
+        const reuse = await this.authorizeAttachReuse({
+          actor: input.actor,
+          communityId: authority.communityId,
+          file,
+          executor: tx,
+          lock: 'key share',
+        });
+        if (!reuse.ok) return { status: reuse.outcome };
         if (!this.attachmentTypeMatches(input.role, file.mimeType)) {
           return { status: 'type_mismatch' };
         }
@@ -2055,6 +2152,13 @@ export class MediaWritesRepository {
       authority.communityId
     );
     if (!file) return { status: 'not_found' };
+    const reuse = await this.authorizeAttachReuse({
+      actor: input.actor,
+      communityId: authority.communityId,
+      file,
+      executor: this.db,
+    });
+    if (!reuse.ok) return { status: reuse.outcome };
     if (!this.attachmentTypeMatches(input.role, file.mimeType)) {
       return { status: 'type_mismatch' };
     }

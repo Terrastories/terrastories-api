@@ -555,8 +555,12 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
         })
       ).status
     ).toBe(403);
+    // §6.7 staging: an admin may attach its own staging upload to a member's
+    // user_photo. Reusing another uploader's staging bytes stays a 404
+    // (covered in the reuse test below).
+    const adminFile = await upload({ cookie: cookies.admin });
     const adminUserPhoto = await attach(cookies.admin, {
-      fileId: communityFileId,
+      fileId: adminFile.fileId!,
       ownerType: 'user',
       ownerId: ids.member,
       role: 'user_photo',
@@ -572,6 +576,171 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
         })
       ).status
     ).toBe(403);
+  });
+
+  it('rejects §6.7 reuse that broadens the bytes audience and allows the uploader/admin to attach staging', async () => {
+    const publicStory = await insertRow(tables.stories, {
+      title: 'Reuse Story',
+      slug: 'reuse-story',
+      privacyLevel: 'public',
+      isRestricted: false,
+      communityId: ids.community,
+      createdBy: ids.editor,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const publicPlace = await insertRow(tables.places, {
+      name: 'Reuse Place',
+      communityId: ids.community,
+      isRestricted: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const restrictedStory = await insertRow(tables.stories, {
+      title: 'Reuse Restricted Story',
+      slug: 'reuse-restricted-story',
+      privacyLevel: 'public',
+      isRestricted: true,
+      communityId: ids.community,
+      createdBy: ids.editor,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Editor stages bytes and attaches them to a story whose change authority
+    // it holds (a public story), then the story is restricted underneath it.
+    // Reusing those bytes onto a public place is then a §6.7 audience-broadening
+    // reuse: the restricted owner resolves to 404, uniformly with not-found,
+    // and the bytes stay unserved through the refused relation.
+    const restrictedSource = await upload({ cookie: cookies.editor });
+    const restrictedSourceId = restrictedSource.fileId!;
+    const restrictedAttach = await attach(cookies.editor, {
+      fileId: restrictedSourceId,
+      ownerType: 'story',
+      ownerId: publicStory,
+      role: 'story_media',
+    });
+    expect(restrictedAttach.status).toBe(201);
+    await db
+      .update(tables.stories)
+      .set({ isRestricted: true })
+      .where(eq(tables.stories.id, publicStory));
+
+    const broaden = await attach(cookies.editor, {
+      fileId: restrictedSourceId,
+      ownerType: 'place',
+      ownerId: publicPlace,
+      role: 'place_photo',
+    });
+    expect(broaden.status).toBe(404);
+    const served = await app.request(
+      `${API_ORIGIN}/v2/media/${restrictedSourceId}`,
+      { headers: { cookie: cookies.editor } }
+    );
+    expect(served.status).toBe(404);
+    // The original restricted relation is untouched and still the only one.
+    const relations = await db
+      .select()
+      .from(tables.attachments)
+      .where(eq(tables.attachments.fileId, restrictedSourceId));
+    expect(relations).toHaveLength(1);
+    expect(relations[0]!.ownerType).toBe('story');
+    expect(relations[0]!.ownerId).toBe(publicStory);
+    const [restrictedRow] = await db
+      .select()
+      .from(tables.stories)
+      .where(eq(tables.stories.id, publicStory));
+    expect(restrictedRow?.isRestricted).toBe(true);
+
+    // Viewer cannot reuse a story's bytes as its own user_photo: the editor's
+    // public story file is not the viewer's to publish. Use a fresh, readable
+    // public story (the earlier one is restricted above).
+    const reuseStory = await insertRow(tables.stories, {
+      title: 'Reuse Public Story',
+      slug: 'reuse-public-story',
+      privacyLevel: 'public',
+      isRestricted: false,
+      communityId: ids.community,
+      createdBy: ids.editor,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const storyFile = await upload({ cookie: cookies.editor });
+    const storyFileId = storyFile.fileId!;
+    expect(
+      (
+        await attach(cookies.editor, {
+          fileId: storyFileId,
+          ownerType: 'story',
+          ownerId: reuseStory,
+          role: 'story_media',
+        })
+      ).status
+    ).toBe(201);
+    const viewerSelf = await attach(cookies.viewer, {
+      fileId: storyFileId,
+      ownerType: 'user',
+      ownerId: ids.viewer,
+      role: 'user_photo',
+    });
+    expect(viewerSelf.status).toBe(404);
+    // And the viewer never gains the bytes.
+    expect(
+      (
+        await app.request(`${API_ORIGIN}/v2/media/${storyFileId}`, {
+          headers: { cookie: cookies.viewer },
+        })
+      ).status
+    ).toBe(200);
+
+    // A same-community admin is allowed to adopt staging; an editor may not
+    // attach another uploader's unattached staging file.
+    const editorAStaging = await upload({ cookie: cookies.editor });
+    const editorAStagingId = editorAStaging.fileId!;
+    const stolenStaging = await attach(cookies.member, {
+      fileId: editorAStagingId,
+      ownerType: 'user',
+      ownerId: ids.member,
+      role: 'user_photo',
+    });
+    expect(stolenStaging.status).toBe(404);
+    // And the admin positive path: adopting another uploader's staging bytes
+    // is allowed for a same-community admin.
+    const adoptedStaging = await attach(cookies.admin, {
+      fileId: editorAStagingId,
+      ownerType: 'place',
+      ownerId: publicPlace,
+      role: 'place_photo',
+    });
+    expect(adoptedStaging.status).toBe(201);
+
+    // Positive: the uploader attaches its own staging file.
+    const ownStaging = await upload({ cookie: cookies.editor });
+    const ownStagingId = ownStaging.fileId!;
+    expect(
+      (
+        await attach(cookies.editor, {
+          fileId: ownStagingId,
+          ownerType: 'place',
+          ownerId: publicPlace,
+          role: 'place_photo',
+        })
+      ).status
+    ).toBe(201);
+
+    // Positive: an admin attaches its own staging file.
+    const adminStaging = await upload({ cookie: cookies.admin });
+    const adminStagingId = adminStaging.fileId!;
+    expect(
+      (
+        await attach(cookies.admin, {
+          fileId: adminStagingId,
+          ownerType: 'place',
+          ownerId: publicPlace,
+          role: 'place_photo',
+        })
+      ).status
+    ).toBe(201);
   });
 
   it('returns 404 for restricted/unknown-privacy owners and maps FK misses to 404', async () => {

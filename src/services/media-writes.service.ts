@@ -61,11 +61,23 @@ class UploadCategoryLimitError extends Error {
 
 class EarlyUploadRejectionError extends Error {
   constructor(
-    public readonly status: 400 | 403 | 413,
+    public readonly status: 400 | 403 | 404 | 413,
     public readonly body: unknown
   ) {
     super('Upload rejected');
     this.name = 'EarlyUploadRejectionError';
+  }
+}
+
+/**
+ * A direct upload whose bytes are already attached to another owner, and that
+ * this actor may not re-publish (§6.7 reuse rule). The partial bytes are
+ * cleaned up like any rejected upload; the caller maps this to 404.
+ */
+class ReusedMediaRejectionError extends Error {
+  constructor() {
+    super('Media bytes are not reusable by this actor');
+    this.name = 'ReusedMediaRejectionError';
   }
 }
 
@@ -643,6 +655,22 @@ export class MediaWritesService {
         };
       }
 
+      // §6.7 reuse rule: a direct upload binds brand-new bytes to the target
+      // account. Re-uploading bytes that already carry relations is only
+      // allowed when this actor may re-publish every affected owner; the
+      // repository's attach reuse check is the single source of that rule.
+      const reuse = await this.repository.authorizeAttachReuse({
+        actor,
+        communityId: actor.communityId,
+        file: {
+          id: parsed.fileResult.fileId,
+          uploadedBy: actor.id,
+        },
+      });
+      if (!reuse.ok) {
+        throw new ReusedMediaRejectionError();
+      }
+
       const dbOutcome = await this.repository.createUploadedMedia({
         fileId: parsed.fileResult.fileId,
         actor,
@@ -717,6 +745,18 @@ export class MediaWritesService {
           status: error.status,
           body: error.body as V2ValidationErrorResponse,
         };
+      }
+      if (error instanceof ReusedMediaRejectionError) {
+        // Content-free: the rejection is indistinguishable from a missing
+        // resource, so it must not reveal that the bytes exist elsewhere.
+        await this.auditDecision({
+          communityId: actor.communityId,
+          actorId: actor.id,
+          action: 'media.upload',
+          resourceIds: [actor.id],
+          outcome: 'denied',
+        });
+        return { status: 404, body: NOT_FOUND_BODY };
       }
       if (error instanceof UploadCategoryLimitError) {
         return { status: 413, body: { error: 'Request too large' } };

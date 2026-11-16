@@ -397,18 +397,44 @@ function parseIpv6Groups(value: string): number[] | null {
   return left;
 }
 
+/** Dotted-decimal IPv4 rendered from two 16-bit groups (offset = the hi group). */
+function dottedFromGroups(groups: number[], offset: number): string {
+  const hi = groups[offset]!;
+  const lo = groups[offset + 1]!;
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
 /**
  * The bucket the per-IP throttle keys on. IPv4 is keyed verbatim — the same
- * address always maps to the same bucket. IPv6 is keyed on its /64 prefix
- * with the low 64 bits zeroed: a /64 is the subscriber allocation span an
- * attacker controls, and rotating addresses inside it must not mint fresh
- * throttle buckets (§6.8). Non-IPv6 strings (the `unknown` bucket, or an
+ * address always maps to the same bucket — and an IPv4 address in
+ * IPv6-mapped or IPv4-compatible form (`::ffff:a.b.c.d`, in dotted or hex
+ * tail form, and the deprecated `::a.b.c.d`) is rewritten to the very same
+ * key as the plain IPv4 address it denotes, so no address is ever billed to
+ * two buckets and every embedded IPv4 keeps its own bucket. IPv6 is keyed on
+ * its /64 prefix with the low 64 bits zeroed: a /64 is the subscriber
+ * allocation span an attacker controls, and rotating addresses inside it must
+ * not mint fresh throttle buckets (§6.8). The unspecified and loopback
+ * addresses (`::`, `::1`) are keyed on themselves — they are single sockets,
+ * not a /64 subscriber span. Non-IPv6 strings (the `unknown` bucket, or an
  * address that fails parsing) pass through unchanged.
  */
 export function ipThrottleBucket(clientIp: string): string {
-  if (!clientIp.includes(':')) return clientIp;
+  if (!clientIp.includes(':')) return clientIp; // plain IPv4, the `unknown` bucket, …
   const groups = parseIpv6Groups(clientIp);
   if (groups === null || groups.length !== 8) return clientIp;
+  // IPv4-mapped (::ffff:a.b.c.d): first five groups zero, sixth `ffff`. Keyed
+  // as the IPv4 address they denote — the hex-tail form (`::ffff:cb00:7105`)
+  // lands in the same branch, so the two notations collapse to one bucket.
+  if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff)
+    return dottedFromGroups(groups, 6);
+  // IPv4-compatible (::/96): the unspecified and loopback addresses key on
+  // themselves (they are single sockets, not a /64 span), any other address
+  // keys like the IPv4 address it denotes.
+  if (groups.slice(0, 6).every((group) => group === 0)) {
+    if (groups[6] === 0 && groups[7] === 0) return '::';
+    if (groups[6] === 0 && groups[7] === 1) return '::1';
+    return dottedFromGroups(groups, 6);
+  }
   return `${groups
     .slice(0, 4)
     .map((group) => group.toString(16))

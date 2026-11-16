@@ -15,6 +15,8 @@ describe('ipThrottleBucket', () => {
     expect(ipThrottleBucket('2001:db8:abcd:1234::1')).toBe(
       '2001:db8:abcd:1234::/64'
     );
+    expect(ipThrottleBucket('2001:db8:1:2::5')).toBe('2001:db8:1:2::/64');
+    expect(ipThrottleBucket('2001:db8:1:2::9')).toBe('2001:db8:1:2::/64');
     expect(ipThrottleBucket('2001:db8:abcd:1234:dead:beef:0:1')).toBe(
       '2001:db8:abcd:1234::/64'
     );
@@ -42,9 +44,36 @@ describe('ipThrottleBucket', () => {
     );
   });
 
-  it('parses an embedded IPv4 tail and still folds onto the /64', () => {
-    expect(ipThrottleBucket('::ffff:192.0.2.1')).toBe('0:0:0:0::/64');
-    expect(ipThrottleBucket('::ffff:192.0.2.254')).toBe('0:0:0:0::/64');
+  it('unwraps an IPv4-mapped tail and keys it as its IPv4 address', () => {
+    // The mapped form keys exactly like the plain IPv4 address, so no client
+    // is billed to two buckets and the whole mapped population never shares
+    // one row.
+    expect(ipThrottleBucket('::ffff:203.0.113.5')).toBe('203.0.113.5');
+    expect(ipThrottleBucket('::ffff:198.51.100.9')).toBe('198.51.100.9');
+    expect(ipThrottleBucket('::ffff:192.0.2.1')).toBe(
+      ipThrottleBucket('192.0.2.1')
+    );
+    expect(ipThrottleBucket('::ffff:192.0.2.254')).toBe(
+      ipThrottleBucket('192.0.2.254')
+    );
+    // The bare-hex form (`::ffff:cb00:7105`) keys identically.
+    expect(ipThrottleBucket('::ffff:cb00:7105')).toBe('203.0.113.5');
+    // Distinct addresses get distinct keys.
+    expect(ipThrottleBucket('::ffff:203.0.113.5')).not.toBe(
+      ipThrottleBucket('::ffff:198.51.100.9')
+    );
+  });
+
+  it('unwraps IPv4-compatible addresses but not ::/::1', () => {
+    expect(ipThrottleBucket('::192.0.2.1')).toBe('192.0.2.1');
+    expect(ipThrottleBucket('::192.0.2.254')).toBe('192.0.2.254');
+    expect(ipThrottleBucket('::c000:201')).toBe('192.0.2.1');
+    expect(ipThrottleBucket('::')).toBe('::');
+    expect(ipThrottleBucket('::1')).toBe('::1');
+    expect(ipThrottleBucket('::1')).not.toBe(ipThrottleBucket('::'));
+  });
+
+  it('folds a mapped-form /64-like range no differently from any other', () => {
     expect(ipThrottleBucket('2001:db8::1.2.3.4')).toBe('2001:db8:0:0::/64');
     expect(ipThrottleBucket('2001:db8::5.6.7.8')).toBe('2001:db8:0:0::/64');
   });
@@ -60,8 +89,6 @@ describe('ipThrottleBucket', () => {
 
   it('passes a non-IP bucket string through unchanged', () => {
     expect(ipThrottleBucket('unknown')).toBe('unknown');
-    expect(ipThrottleBucket('::')).toBe('0:0:0:0::/64');
-    expect(ipThrottleBucket('::1')).toBe('0:0:0:0::/64');
   });
 
   it('makes the keyed hash of two IPv6 addresses in one /64 equal', async () => {

@@ -1845,6 +1845,11 @@
           "name": "users_email_community_unique",
           "columns": ["email", "community_id"],
           "isUnique": true
+        },
+        "users_email_normalized_idx": {
+          "name": "users_email_normalized_idx",
+          "columns": ["email_normalized"],
+          "isUnique": false
         }
       },
       "foreignKeys": {

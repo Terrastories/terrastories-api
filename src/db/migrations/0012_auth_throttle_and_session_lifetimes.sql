@@ -108,3 +108,5 @@ CREATE TABLE `auth_throttle` (
 );
 --> statement-breakpoint
 CREATE INDEX `auth_throttle_community_idx` ON `auth_throttle` (`community_id`);
+--> statement-breakpoint
+CREATE INDEX `users_email_normalized_idx` ON `users` (`email_normalized`);

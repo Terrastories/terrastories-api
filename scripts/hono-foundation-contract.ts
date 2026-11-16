@@ -1729,6 +1729,28 @@ export async function runHonoFoundationContract(
           `an editor reusing a ${label}-attached file onto a story they can edit must answer 404 (a 403 would disclose the protected relation), uniformly with D1/SQLite (${await reuse.text()})`
         );
       }
+      // The target owner's verdict decides first on every dialect: a viewer
+      // has no story authority, so the attach answers 403 even though the
+      // file's non-target branding owner sorts before the story (#140).
+      const viewerCookie = await login(viewerEmail);
+      const viewerReuse = await send(app, '/v2/attachments', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: viewerCookie,
+        },
+        body: JSON.stringify({
+          fileId: nonTargetFiles[0],
+          ownerType: 'story',
+          ownerId: crossStory.id,
+          role: 'story_media',
+        }),
+      });
+      assert.equal(
+        viewerReuse.status,
+        403,
+        `a viewer attaching onto a story answers the target verdict 403 on PG as on D1/SQLite (${await viewerReuse.text()})`
+      );
     }
   } finally {
     for (const id of communityIds) {

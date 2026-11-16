@@ -2192,6 +2192,11 @@ export class MediaWritesRepository {
             : a.ownerType.localeCompare(b.ownerType)
         );
         let authority: AttachmentOwnerResolution | undefined;
+        // Locks follow the canonical owner order, but verdicts do not: the
+        // target owner's verdict decides first (as on D1/SQLite, which check
+        // the target before reuse), and a failing non-target owner only
+        // collapses to 404 once the target itself has been authorised.
+        let nonTargetRejected = false;
         for (const owner of owners) {
           const resolved = await this.authorizeAttachmentOwner({
             actor: input.actor,
@@ -2210,9 +2215,9 @@ export class MediaWritesRepository {
           // publishable by this actor — or simply not this actor's to authorise —
           // widens nothing (§6.7): 404, uniform with absence. A disabled
           // community was already answered 403 once, above the loop.
-          if (resolved.status !== 'ok') return { status: 'not_found' };
+          if (resolved.status !== 'ok') nonTargetRejected = true;
         }
-        if (!authority || authority.status !== 'ok') {
+        if (!authority || authority.status !== 'ok' || nonTargetRejected) {
           return { status: 'not_found' };
         }
         const file = await this.resolveAttachableFile(

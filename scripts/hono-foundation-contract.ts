@@ -1120,9 +1120,16 @@ export async function runHonoFoundationContract(
       await db
         .delete(authThrottle)
         .where(inArray(authThrottle.key, [accountKey, ipKey]));
+      // The per-IP key is derived from the client IP header, so the burst must
+      // present the same address the assertion below hashes (SPEC-V2 §6.8:
+      // the per-IP counter is keyed on the client IP alone).
       const burst = await Promise.all(
         [0, 1, 2, 3].map(() =>
-          postLogin(app, { identifier: viewerEmail, derivedKey: wrongKey })
+          postLogin(
+            app,
+            { identifier: viewerEmail, derivedKey: wrongKey },
+            { 'cf-connecting-ip': '203.0.113.250' }
+          )
         )
       );
       assert.ok(

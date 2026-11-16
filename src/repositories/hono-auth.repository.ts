@@ -465,7 +465,13 @@ export class HonoAuthRepository {
     // The successor of the failure count after this write, computed once so the
     // blocked_until branch cannot drift from the counter branch.
     const nextFailures = sql`(case when ${windowExpired} then 1 else ${throttle.failures} + 1 end)`;
-    const blockedUntil = sql`(case when ${nextFailures} >= ${AUTH_THROTTLE_MAX_FAILURES} then ${now} + ${backoffLadderSql(nextFailures)} else null end)`;
+    // `now` is epoch milliseconds added to the small-integer backoff ladder.
+    // PostgreSQL resolves the parameter from the ladder's `int4` result and
+    // would bind it as `integer`, overflowing on any millisecond value
+    // (`22003`); SQLite has one 64-bit integer type and no such inference.
+    // The explicit `bigint` cast pins the parameter width on both backends
+    // without changing the value or the expression's meaning.
+    const blockedUntil = sql`(case when ${nextFailures} >= ${AUTH_THROTTLE_MAX_FAILURES} then cast(${now} as bigint) + ${backoffLadderSql(nextFailures)} else null end)`;
     return executor
       .insert(throttle)
       .values({

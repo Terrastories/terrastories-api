@@ -771,13 +771,30 @@ describe('Slice 7 PATCH /v2/community', () => {
       .from(tables.auditEntries)
       .where(eq(tables.auditEntries.communityId, ids.own!))
       .orderBy(asc(tables.auditEntries.id));
-    // Initial test emitted 2 (public, private); this burst has 4 effective transitions
-    expect(allOwnAudits.slice(beforeCount).map((a) => a.action)).toEqual([
-      'community.visibility.public',
-      'community.visibility.private',
-      'community.visibility.public',
-      'community.visibility.private',
-    ]);
+    // The five PATCHes run concurrently, so their execution order is not the
+    // submission order and the number of effective transitions varies. The
+    // invariant is: every audit records a real change (no two consecutive
+    // audits repeat a state, the first differs from the prior state), there
+    // is at most one audit per request, and the last audit matches the
+    // community's final visibility — no transition is lost or invented.
+    const burst = allOwnAudits.slice(beforeCount).map((a) => a.action);
+    expect(burst.length).toBeGreaterThanOrEqual(1);
+    expect(burst.length).toBeLessThanOrEqual(seq.length);
+    expect(burst[0]).toBe('community.visibility.public');
+    for (let i = 1; i < burst.length; i += 1) {
+      expect(burst[i], `audit ${i} repeats the previous state`).not.toBe(
+        burst[i - 1]
+      );
+    }
+    const [finalCommunity] = await db
+      .select({ publicStories: tables.communities.publicStories })
+      .from(tables.communities)
+      .where(eq(tables.communities.id, ids.own!));
+    expect(burst[burst.length - 1]).toBe(
+      finalCommunity!.publicStories
+        ? 'community.visibility.public'
+        : 'community.visibility.private'
+    );
   });
 });
 

@@ -190,15 +190,24 @@ export class MediaWritesRepository {
     return typeof this.db?.batch === 'function';
   }
 
-  async isCommunityActive(communityId: number): Promise<boolean> {
-    const rows = await this.db
-      .select({
-        publicStories: this.tables.communities.publicStories,
-        isActive: this.tables.communities.isActive,
-      })
-      .from(this.tables.communities)
-      .where(eq(this.tables.communities.id, communityId))
-      .limit(1);
+  async isCommunityActive(
+    communityId: number,
+    executor?: any
+  ): Promise<boolean> {
+    const exec = executor ?? this.db;
+    const rows = (await this.fetchAll(
+      exec
+        .select({
+          publicStories: this.tables.communities.publicStories,
+          isActive: this.tables.communities.isActive,
+        })
+        .from(this.tables.communities)
+        .where(eq(this.tables.communities.id, communityId))
+        .limit(1)
+    )) as Array<
+      | { publicStories: boolean | number; isActive: boolean | number }
+      | undefined
+    >;
     const row = rows[0];
     if (!row) return false;
     return (
@@ -1640,7 +1649,10 @@ export class MediaWritesRepository {
     }
 
     const communityId = input.actor.communityId;
-    const active = await this.isCommunityActive(communityId);
+    // The check must run on the caller's executor (usually the transaction's
+    // reserved connection), otherwise a two-connection pool starves when the
+    // other request holds the remaining connection: both wait forever.
+    const active = await this.isCommunityActive(communityId, ex);
     if (!active) {
       return { status: 'forbidden' };
     }

@@ -33,6 +33,28 @@ const failsClosed = async (response: Promise<Response>, detail: string) => {
   assert.equal(result.status, 503);
   assert.ok(!(await result.text()).includes(detail));
 };
+/** Fail fast instead of hanging a CI gate forever if the app stalls. */
+const withDeadline = <T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} exceeded ${ms}ms deadline`)),
+      ms
+    );
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 export async function runHonoFoundationContract(
   database: Database
 ): Promise<void> {
@@ -1417,10 +1439,19 @@ export async function runHonoFoundationContract(
           }),
         });
       // Fire both sides of the triangle at once: under the canonical owner
-      // order the loser waits for the winner and then completes.
+      // order the loser waits for the winner and then completes. Bounded by
+      // a deadline so a regression fails fast instead of hanging the gate.
       const [placeSide, storySide] = await Promise.all([
-        crossAttach('place', crossPlace.id, 'place_photo'),
-        crossAttach('story', crossStory.id, 'story_media'),
+        withDeadline(
+          crossAttach('place', crossPlace.id, 'place_photo'),
+          10_000,
+          'cross-attach place-target'
+        ),
+        withDeadline(
+          crossAttach('story', crossStory.id, 'story_media'),
+          10_000,
+          'cross-attach story-target'
+        ),
       ]);
       for (const [label, response] of [
         ['place-target', placeSide],

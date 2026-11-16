@@ -192,6 +192,7 @@ export class MediaWritesRepository {
 
   async isCommunityActive(
     communityId: number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     executor?: any
   ): Promise<boolean> {
     const exec = executor ?? this.db;

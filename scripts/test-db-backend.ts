@@ -3119,7 +3119,10 @@ async function runPostgresGate(): Promise<void> {
   console.log('🐘 PostgreSQL integration gate');
   await verifyStaticPortabilityContract();
   const client = createPostgresClient(databaseUrl, {
-    max: 2,
+    // The coupled-write and visibility races fire two concurrent HTTP
+    // requests from inside an open reset transaction; each needs its own
+    // pooled connection to reach the database at all.
+    max: 10,
     onnotice: () => undefined,
   });
   try {

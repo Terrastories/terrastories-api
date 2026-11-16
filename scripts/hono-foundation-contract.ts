@@ -51,6 +51,32 @@ export async function runHonoFoundationContract(
       : communityMediaSqlite;
   const sessions =
     dialectOf(database) === 'postgresql' ? sessionsPg : sessionsSqlite;
+  /**
+   * Poll until at least `expected` backends are blocked behind this
+   * transaction's open lock, then return the observed count (or that count at
+   * the deadline). Deterministic: a backend blocked behind the uncommitted
+   * change is what lets the racing write lose the authority gate against the
+   * *committed* row, rather than fail for an unrelated reason.
+   */
+  /** Settle a promise so an unobserved rejection never crashes the process. */
+  const ignore = (): void => undefined;
+  const waitForBlocked = async (
+    tx: any,
+    expected: number,
+    deadline: number
+  ): Promise<number> => {
+    for (;;) {
+      const blocked = await tx.execute(
+        sql`select pid from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid))`
+      );
+      const rows = Array.isArray(blocked)
+        ? blocked
+        : ((blocked as { rows?: unknown[] }).rows ?? []);
+      if (rows.length >= expected) return rows.length;
+      if (Date.now() >= deadline) return rows.length;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
   const tag = crypto.randomUUID();
   const slugA = `hono-${tag}-a`;
   const slugB = `hono-${tag}-b`;
@@ -861,26 +887,21 @@ export async function runHonoFoundationContract(
       // disable cannot leave a session that survives and revives on re-enable.
       await db.delete(sessions).where(eq(sessions.userId, viewerId));
       const preRaceCookie = await login(viewerEmail);
-      let loginDone = false;
       let pendingRaceLogin!: Promise<Response>;
       await db.transaction(async (tx: any) => {
         await tx
           .update(tables.communities)
           .set({ isActive: false })
           .where(eq(tables.communities.id, communityA));
-        pendingRaceLogin = postLogin(app, credentials);
-        void pendingRaceLogin.finally(() => {
-          loginDone = true;
+        pendingRaceLogin = postLogin(app, credentials, {
+          'x-forwarded-for': '198.51.100.220',
         });
-        const deadline = Date.now() + 2000;
-        while (!loginDone && Date.now() < deadline) {
-          const blocked = await tx.execute(
-            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+        void pendingRaceLogin.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'community-disable race never materialised: the login never blocked behind the disable'
           );
-          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
-          if (blockedRows.length > 0) break;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
       });
       const raceResponse = await pendingRaceLogin;
       const raceCookie = raceResponse.headers.get('set-cookie')?.split(';')[0];
@@ -925,12 +946,16 @@ export async function runHonoFoundationContract(
 
     // Slice 7 audit existence & content-freedom contract on both SQLite and PostgreSQL (#145)
     const slice7AdminCookie = await login(adminEmail);
-    const patchCommunity = (body: unknown) =>
+    const patchCommunity = (
+      body: unknown,
+      extraHeaders: Record<string, string> = {}
+    ) =>
       send(app, '/v2/community', {
         method: 'PATCH',
         headers: {
           'content-type': 'application/json',
           cookie: slice7AdminCookie,
+          ...extraHeaders,
         },
         body: JSON.stringify(body),
       });
@@ -983,26 +1008,22 @@ export async function runHonoFoundationContract(
       // PostgreSQL SELECT ... FOR UPDATE race (#145): concurrent toggle waiting
       // on a committed visibility flip must observe the updated visibility and
       // emit zero duplicate audit entries.
-      let toggleDone = false;
       let pendingToggle!: Promise<Response>;
       await db.transaction(async (tx: any) => {
         await tx
           .update(tables.communities)
           .set({ publicStories: true })
           .where(eq(tables.communities.id, communityA));
-        pendingToggle = patchCommunity({ visibility: 'public' });
-        void pendingToggle.finally(() => {
-          toggleDone = true;
-        });
-        const deadline = Date.now() + 2000;
-        while (!toggleDone && Date.now() < deadline) {
-          const blocked = await tx.execute(
-            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+        pendingToggle = patchCommunity(
+          { visibility: 'public' },
+          { 'x-forwarded-for': '198.51.100.221' }
+        );
+        void pendingToggle.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'community-toggle race never materialised: the toggle never blocked behind the flip'
           );
-          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
-          if (blockedRows.length > 0) break;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
       });
       assert.equal((await pendingToggle).status, 200);
       const auditsAfterLock = await db
@@ -1078,7 +1099,6 @@ export async function runHonoFoundationContract(
         })
         .returning();
 
-      let delDone = false;
       let pendingDelete!: Promise<Response>;
       await db.transaction(async (tx: any) => {
         await tx.insert(tables.storyPlaces).values({
@@ -1089,20 +1109,17 @@ export async function runHonoFoundationContract(
         });
         pendingDelete = send(app, `/v2/places/${racePlace.id}`, {
           method: 'DELETE',
-          headers: { cookie: slice7AdminCookie },
+          headers: {
+            cookie: slice7AdminCookie,
+            'x-forwarded-for': '198.51.100.222',
+          },
         });
-        void pendingDelete.finally(() => {
-          delDone = true;
-        });
-        const deadline = Date.now() + 2000;
-        while (!delDone && Date.now() < deadline) {
-          const blocked = await tx.execute(
-            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+        void pendingDelete.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'story_places race never materialised: the places delete never blocked behind the insert'
           );
-          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
-          if (blockedRows.length > 0) break;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
       });
       assert.equal(
         (await pendingDelete).status,
@@ -1317,7 +1334,7 @@ export async function runHonoFoundationContract(
           passwordAlgorithm: 'client-bcrypt-rails+sha256',
           passwordSalt: 'c2FsdA==',
           passwordParams: JSON.stringify({ cost: 12 }),
-          passwordVerifier: sha256Hex(wrappedKey),
+          passwordVerifier: await sha256Hex(wrappedKey),
         })
         .returning();
       userIds.push(wrappedAccount.id);
@@ -1327,6 +1344,7 @@ export async function runHonoFoundationContract(
       // 409 — never a 5xx. The reset's uncommitted row is invisible to the
       // readers; only the coupled writes can see it, through the lock.
       const coupledEmail = `coupled-pg-${tag}@example.test`;
+      const loginCoupledEmail = `coupled-pg-login-${tag}@example.test`;
       const [coupledAccount] = await db
         .insert(tables.users)
         .values({
@@ -1337,28 +1355,33 @@ export async function runHonoFoundationContract(
           communityId: communityA,
         })
         .returning();
-      userIds.push(coupledAccount.id);
+      const [loginCoupledAccount] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: loginCoupledEmail,
+          username: `coupled_pg_login_${tag}`,
+          role: 'viewer',
+          communityId: communityA,
+        })
+        .returning();
+      userIds.push(coupledAccount.id, loginCoupledAccount.id);
       const coupledCookie = await login(coupledEmail);
       const newSalt = Buffer.from(
         crypto.getRandomValues(new Uint8Array(16))
       ).toString('base64');
-      let loginDone = false;
-      let changeDone = false;
-      let pendingLogin!: Promise<Response>;
+      // Case A — the password change loses the coupled write (409). The
+      // reset's uncommitted row is invisible to the readers; the change's
+      // coupled verifier update then blocks behind our row lock, and once
+      // the reset commits it matches zero rows and rolls back — 401 at the
+      // session gate or 5xx would not prove that, 409 proves the write was
+      // the losing side.
       let pendingChange!: Promise<Response>;
       await db.transaction(async (tx: any) => {
         await tx
           .update(tables.users)
           .set({ passwordVerifier: 'reset-during-coupled-write' })
           .where(eq(tables.users.id, coupledAccount.id));
-        pendingLogin = postLogin(
-          app,
-          { identifier: coupledEmail, derivedKey: stretchedKey },
-          { 'x-forwarded-for': '198.51.100.210' }
-        );
-        void pendingLogin.finally(() => {
-          loginDone = true;
-        });
         pendingChange = send(app, '/v2/auth/password', {
           method: 'POST',
           headers: {
@@ -1374,25 +1397,38 @@ export async function runHonoFoundationContract(
             derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
           }),
         });
-        void pendingChange.finally(() => {
-          changeDone = true;
-        });
-        const deadline = Date.now() + 2000;
-        while ((!loginDone || !changeDone) && Date.now() < deadline) {
-          const blocked = await tx.execute(
-            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+        pendingChange.then(ignore, ignore);
+        const observed = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (observed < 1)
+          throw new Error(
+            'coupled-write race never materialised: the password change never blocked behind the reset'
           );
-          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
-          if (blockedRows.length > 0) {
-            await new Promise((resolve) => setTimeout(resolve, 5));
-            continue;
-          }
-          break;
-        }
       });
-      const [loginResponse, changeResponse] = await Promise.all([
-        pendingLogin,
+      // Case B — a login racing the same reset loses the authority gate and
+      // answers the uniform 401 without a session. Its authority-gated
+      // INSERT ... SELECT FOR SHARE blocks behind our row lock; once the
+      // reset commits it matches zero rows, so no session can be written.
+      let pendingLogin!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.users)
+          .set({ passwordVerifier: 'reset-during-coupled-write' })
+          .where(eq(tables.users.id, loginCoupledAccount.id));
+        pendingLogin = postLogin(
+          app,
+          { identifier: loginCoupledEmail, derivedKey: stretchedKey },
+          { 'x-forwarded-for': '198.51.100.210' }
+        );
+        pendingLogin.then(ignore, ignore);
+        const observed = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (observed < 1)
+          throw new Error(
+            'reset race never materialised: the login never blocked behind the reset'
+          );
+      });
+      const [changeResponse, loginResponse] = await Promise.all([
         pendingChange,
+        pendingLogin,
       ]);
       assert.equal(
         loginResponse.status,
@@ -1404,13 +1440,14 @@ export async function runHonoFoundationContract(
         null,
         'the raced login must not issue a session cookie'
       );
-      // The concurrent verifier change revokes the presented session (the
-      // users_revoke_sessions trigger) and invalidates the current key, so the
-      // racing change may fail at the session gate (401) or at the coupled
-      // write (409). Both are correct; a 5xx or any write is not.
-      assert.ok(
-        changeResponse.status === 401 || changeResponse.status === 409,
-        `a password change that loses the coupled write must answer 401 or 409, never a 5xx (got ${changeResponse.status})`
+      // The requests were observed blocked behind the reset, which then
+      // committed — so the change loses the coupled write (409, not a 401 at
+      // the session gate and not a 5xx) and the login loses the authority
+      // gate (401, never a session cookie).
+      assert.equal(
+        changeResponse.status,
+        409,
+        `a password change racing a coupled password change must lose the coupled write and answer 409 (got ${changeResponse.status})`
       );
       const coupledAfter = await db
         .select()
@@ -1424,14 +1461,19 @@ export async function runHonoFoundationContract(
       const coupledSessions = await db
         .select({
           id: sessions.id,
+          userId: sessions.userId,
           revokedAt: sessions.revokedAt,
           createdAt: sessions.createdAt,
         })
         .from(sessions)
-        .where(eq(sessions.userId, coupledAccount.id));
+        .where(
+          inArray(sessions.userId, [coupledAccount.id, loginCoupledAccount.id])
+        );
       // The concurrent verifier change revokes every earlier session, so after
       // a lost coupled write no live (unrevoked) session may exist: neither a
-      // newly minted one nor a rotated copy of the presented one.
+      // newly minted one nor a rotated copy of the presented one. Same for the
+      // login account: its reset revokes the earlier sessions and the losing
+      // login must not mint or rotate one.
       assert.equal(
         coupledSessions.filter(
           (row: { revokedAt: unknown }) => row.revokedAt == null
@@ -1443,39 +1485,43 @@ export async function runHonoFoundationContract(
         .select()
         .from(tables.users)
         .where(eq(tables.users.id, wrappedAccount.id));
-      // A concurrent reset while the upgrade is in flight must win: the
-      // login is rejected and the verifier row is unchanged.
-      let upgradeDone = false;
+      const upgradeSalt = Buffer.from(
+        crypto.getRandomValues(new Uint8Array(16))
+      ).toString('base64');
       let pendingUpgrade!: Promise<Response>;
       await db.transaction(async (tx: any) => {
-        pendingUpgrade = postLogin(app, {
-          identifier: `wrapped-pg-${tag}@example.test`,
-          derivedKey: wrappedKey,
-          upgrade: {
-            algorithm: 'client-argon2id+sha256',
-            salt: 'dXBkYXRlLXNhbHQ=',
-            params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
-            derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
-          },
-        });
-        void pendingUpgrade.finally(() => {
-          upgradeDone = true;
-        });
-        // The verifier write is blocked behind the UPDATE lock while the
-        // uncommitted reset changes the authority row.
+        // The reset takes the row lock first, as in every other race case:
+        // only then is the upgrade's coupled verifier write guaranteed to
+        // block behind it (otherwise the upgrade may legally win).
         await tx
           .update(tables.users)
           .set({ passwordVerifier: 'reset-during-upgrade' })
           .where(eq(tables.users.id, wrappedAccount.id));
-        const deadline = Date.now() + 2000;
-        while (!upgradeDone && Date.now() < deadline) {
-          const blocked = await tx.execute(
-            sql`select 1 from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid)) limit 1`
+        pendingUpgrade = postLogin(
+          app,
+          {
+            identifier: `wrapped-pg-${tag}@example.test`,
+            derivedKey: wrappedKey,
+            upgrade: {
+              algorithm: 'client-argon2id+sha256',
+              // A 16-byte base64 salt: anything less fails the verifier-salt
+              // policy before any write, so the coupled verifier update would
+              // never be reached and no race could ever form.
+              salt: upgradeSalt,
+              params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+              derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+            },
+          },
+          { 'x-forwarded-for': '198.51.100.212' }
+        );
+        void pendingUpgrade.then(ignore, ignore);
+        // The verifier write is blocked behind the UPDATE lock while the
+        // uncommitted reset changes the authority row.
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'wrapped-upgrade race never materialised: the login never blocked behind the reset'
           );
-          const blockedRows = Array.isArray(blocked) ? blocked : blocked.rows;
-          if (blockedRows.length > 0) break;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
       });
       const upgradeResponse = await pendingUpgrade;
       assert.equal(

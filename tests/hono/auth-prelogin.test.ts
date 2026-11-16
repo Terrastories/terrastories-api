@@ -17,11 +17,13 @@ import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS,
   ARGON2ID_PARAMS_JSON,
+  AUTH_PRELOGIN_MIX_TTL_MS,
   BCRYPT_RAILS_COSTS,
   RAILS_BCRYPT_ALGORITHM,
   isCanonicalArgon2idParams,
   isCanonicalVerifierSalt,
 } from '../../src/shared/auth-policy.js';
+import { HonoAuthRepository } from '../../src/repositories/hono-auth.repository.js';
 import { deterministicPreloginFake } from '../../src/shared/prelogin.js';
 import { normalizeSearchText } from '../../src/shared/utils/search-normalize.js';
 
@@ -276,6 +278,111 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     expect(real.params).toEqual(JSON.parse(ARGON2ID_PARAMS_JSON));
     expect(real.params).toEqual(ARGON2ID_PARAMS);
     expect(fake.params).toEqual(real.params);
+  });
+
+  it('draws fake bcrypt costs only from the deployment-observed costs', async () => {
+    // A deployment whose migrated rows only carry cost 10 must never see a
+    // fake claim cost 12 (finding C).
+    for (const identifier of [
+      'nobody-a@prelogin.test',
+      'nobody-b@prelogin.test',
+      'nobody-c@prelogin.test',
+      'nobody-d@prelogin.test',
+    ]) {
+      const fake10 = await deterministicPreloginFake(
+        'test-secret',
+        identifier,
+        { upgraded: 0, total: 1000 },
+        [10]
+      );
+      expect(fake10.params).toEqual({ cost: 10 });
+    }
+    const fake12 = await deterministicPreloginFake(
+      'test-secret',
+      'nobody@prelogin.test',
+      { upgraded: 0, total: 1000 },
+      [12]
+    );
+    expect(fake12.params).toEqual({ cost: 12 });
+    // With an empty observed list the fake falls back to the Rails 10/12 set.
+    const fallback = await deterministicPreloginFake(
+      'test-secret',
+      'nobody@prelogin.test',
+      { upgraded: 0, total: 1000 },
+      []
+    );
+    expect(BCRYPT_RAILS_COSTS as readonly number[]).toContain(
+      (fallback.params as { cost: number }).cost
+    );
+  });
+
+  it('gives every fake bcrypt salt a Rails-shaped 22nd character', async () => {
+    // A real bcrypt salt ends in one of `.Oeu` — its last character carries
+    // two significant bits (finding C). A fake must match that shape.
+    for (const identifier of [
+      'shape-a@prelogin.test',
+      'shape-b@prelogin.test',
+      'shape-c@prelogin.test',
+      'shape-d@prelogin.test',
+      'shape-e@prelogin.test',
+      'shape-f@prelogin.test',
+    ]) {
+      const fake = await deterministicPreloginFake('test-secret', identifier, {
+        upgraded: 0,
+        total: 1000,
+      });
+      expect(fake.salt).toMatch(/^[./A-Za-z0-9]{21}[.Oeu]$/);
+    }
+    // Cross-check a runtime-generated real Rails salt obeys the same rule.
+    const real = await hash('AnchorRealPassword!', 12);
+    const realSalt = real.slice(7, 29);
+    expect('.Oeu').toContain(realSalt[21]);
+  });
+
+  it('serves the population mix from a short-TTL cache on every prelogin path', async () => {
+    const { app, db, secret } = await setup();
+    const repository = new HonoAuthRepository(db);
+    const first = await repository.preloginMix();
+    // A migrated cost is observed in the mix: the seed carries cost 12.
+    expect(first.costs).toEqual([12]);
+    // A freshly seeded Argon2 account is invisible until the TTL lapses —
+    // the mix is computed once and served from the cache in between.
+    await db.insert(usersSqlite).values({
+      passwordHash: await hash('CachedAnchorPassword123!', 4),
+      firstName: 'Cached',
+      lastName: 'Mix',
+      isActive: true as const,
+      email: 'cached-mix@prelogin.test',
+      username: 'cached_mix',
+      emailNormalized: normalizeSearchText('cached-mix@prelogin.test'),
+      usernameNormalized: normalizeSearchText('cached_mix'),
+      role: 'member',
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordSalt: base64(16),
+      passwordParams: ARGON2ID_PARAMS_JSON,
+      passwordVerifier: base64(32),
+    });
+    const cached = await repository.preloginMix();
+    expect(cached).toEqual(first);
+    // Once the TTL lapses the mix is recomputed and sees the new account.
+    const refreshed = await repository.preloginMix(
+      Date.now() + AUTH_PRELOGIN_MIX_TTL_MS + 1000
+    );
+    expect(refreshed.total).toBe(first.total + 1);
+    expect(refreshed.upgraded).toBe(first.upgraded + 1);
+    // And the service answers a fake prelogin from the very same cache.
+    const response = await postPrelogin(app, {
+      identifier: 'nobody@prelogin.test',
+    });
+    const body = await response.json();
+    const mix = await repository.preloginMix();
+    const expected = await deterministicPreloginFake(
+      secret,
+      normalizeSearchText('nobody@prelogin.test'),
+      mix,
+      mix.costs
+    );
+    expect(body).toEqual(expected);
   });
 
   it('gives the fake and a migrated row the same canonical bcrypt shape', async () => {

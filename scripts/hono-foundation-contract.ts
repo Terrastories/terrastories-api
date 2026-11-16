@@ -78,6 +78,8 @@ export async function runHonoFoundationContract(
   const options = {
     repository,
     secureCookies: false,
+    // The contract presents `x-forwarded-for` to isolate per-IP buckets.
+    trustProxy: true,
     serverSecret,
     now: () => instant,
     storage: {
@@ -115,6 +117,8 @@ export async function runHonoFoundationContract(
     communitySlug?: string,
     previous?: string
   ) => {
+    // Successful logins use their own trusted-proxy address so the deliberate
+    // failure cases (which share the `unknown` bucket) cannot throttle them.
     const response = await postLogin(
       app,
       {
@@ -122,7 +126,10 @@ export async function runHonoFoundationContract(
         derivedKey: stretchedKey,
         ...(communitySlug === undefined ? {} : { communitySlug }),
       },
-      previous ? { cookie: previous } : {}
+      {
+        'x-forwarded-for': '198.51.100.200',
+        ...(previous ? { cookie: previous } : {}),
+      }
     );
     const body = await response.text();
     assert.equal(response.status, 200, `login failed: ${body}`);
@@ -1143,7 +1150,7 @@ export async function runHonoFoundationContract(
           postLogin(
             app,
             { identifier: viewerEmail, derivedKey: wrongKey },
-            { 'cf-connecting-ip': '203.0.113.250' }
+            { 'x-forwarded-for': '203.0.113.250' }
           )
         )
       );
@@ -1217,7 +1224,7 @@ export async function runHonoFoundationContract(
           postLogin(
             app,
             { identifier: backoffEmail, derivedKey: wrongKey },
-            { 'cf-connecting-ip': accountIp }
+            { 'x-forwarded-for': accountIp }
           ),
           401,
           'a failed login must answer the uniform 401'
@@ -1239,7 +1246,7 @@ export async function runHonoFoundationContract(
         postLogin(
           app,
           { identifier: backoffEmail, derivedKey: stretchedKey },
-          { 'cf-connecting-ip': freshIp }
+          { 'x-forwarded-for': freshIp }
         ),
         401,
         'the correct key must still be refused while the account is blocked'
@@ -1258,7 +1265,7 @@ export async function runHonoFoundationContract(
               identifier: `nobody-${tag}-${attempt}@example.test`,
               derivedKey: wrongKey,
             },
-            { 'cf-connecting-ip': unknownIp }
+            { 'x-forwarded-for': unknownIp }
           ),
           401,
           'an unknown identifier must answer the uniform 401'
@@ -1279,7 +1286,7 @@ export async function runHonoFoundationContract(
         postLogin(
           app,
           { identifier: backoffEmail, derivedKey: stretchedKey },
-          { 'cf-connecting-ip': unknownIp }
+          { 'x-forwarded-for': unknownIp }
         ),
         401,
         'a blocked address must not authenticate even with the correct key'

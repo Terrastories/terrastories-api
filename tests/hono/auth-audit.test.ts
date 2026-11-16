@@ -104,6 +104,8 @@ describe('Auth audit entries (#137 item 5)', () => {
       storage: { read: async () => null },
       serverSecret: makeServerSecret(),
       secureCookies: false,
+      // The audit journey presents `x-forwarded-for` to pin the client IP.
+      trustProxy: true,
     });
     const request = (
       path: string,
@@ -182,7 +184,7 @@ describe('Auth audit entries (#137 item 5)', () => {
         derivedKey: upgradedKey,
       },
       {
-        'cf-connecting-ip': '203.0.113.7',
+        'x-forwarded-for': '203.0.113.7',
         'user-agent': 'Slice10-Agent/1.0',
       }
     );

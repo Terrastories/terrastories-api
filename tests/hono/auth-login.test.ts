@@ -21,16 +21,17 @@ import {
   authThrottleSqlite,
   sessionsSqlite,
 } from '../../src/db/schema/sessions.js';
+import { auditEntriesSqlite } from '../../src/db/schema/audit_entries.js';
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
 import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS,
   ARGON2ID_PARAMS_JSON,
+  AUTH_THROTTLE_BACKOFF_MAX_MS,
   AUTH_THROTTLE_MAX_FAILURES,
   AuthLoginRejected,
   DEVICE_SESSION_ABSOLUTE_MS,
-  DEVICE_SESSION_IDLE_MS,
   RAILS_BCRYPT_ALGORITHM,
   STANDARD_SESSION_IDLE_MS,
   authThrottleBackoffMs,
@@ -159,6 +160,8 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
       storage: { read: async () => null },
       serverSecret: secret,
       secureCookies: false,
+      // Tests present `x-forwarded-for` to isolate per-IP buckets.
+      trustProxy: true,
       ...(options.now === undefined ? {} : { now: () => options.now as Date }),
     });
     const postLogin = (body: unknown, headers: Record<string, string> = {}) =>
@@ -290,7 +293,7 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(await response.json()).toEqual({ error: 'Invalid credentials' });
   });
 
-  it('establishes a device session with a Max-Age covering its idle window', async () => {
+  it('establishes a device session with a Max-Age covering its absolute lifetime', async () => {
     const { postLogin, stretchedKey, db } = await setup();
     const before = Date.now();
     const response = await postLogin({
@@ -300,9 +303,10 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     });
     expect(response.status).toBe(200);
     // A device login must survive a browser restart: the cookie carries the
-    // 60-day idle Max-Age, and the session row is still the enforcement point.
+    // remaining absolute lifetime (the full 60 days at creation), and the
+    // session row is still the enforcement point.
     const setCookie = response.headers.get('set-cookie') ?? '';
-    expect(setCookie).toContain(`Max-Age=${DEVICE_SESSION_IDLE_MS / 1000}`);
+    expect(setCookie).toContain(`Max-Age=${DEVICE_SESSION_ABSOLUTE_MS / 1000}`);
     expect(setCookie).not.toContain(
       `Max-Age=${STANDARD_SESSION_IDLE_MS / 1000}`
     );
@@ -611,8 +615,12 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
       derivedKey: stretchedKey,
     });
     expect(ok.status).toBe(200);
-    const after = await db.select({ value: count() }).from(authThrottleSqlite);
-    expect(after[0]?.value).toBe(0);
+    const after = await db.select().from(authThrottleSqlite);
+    // Finding E: a successful login clears only the per-account counter; the
+    // per-IP row survives so one account's success cannot wipe a shared
+    // address's guessing record.
+    expect(after).toHaveLength(1);
+    expect(after[0]?.kind).toBe('ip');
   });
 
   it('blocks the per-account counter at the backoff threshold and refuses the correct key', async () => {
@@ -664,7 +672,7 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
           identifier: `nobody-${attempt}@login.example.test`,
           derivedKey: makeDerivedKey(),
         },
-        { 'cf-connecting-ip': clientIp }
+        { 'x-forwarded-for': clientIp }
       );
       expect(response.status).toBe(401);
     }
@@ -689,10 +697,203 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
         identifier: 'upgraded@login.example.test',
         derivedKey: stretchedKey,
       },
-      { 'cf-connecting-ip': clientIp }
+      { 'x-forwarded-for': clientIp }
     );
     expect(blocked.status).toBe(401);
     expect(await blocked.json()).toEqual({ error: 'Invalid credentials' });
+  });
+
+  it('keeps growing the counter while a block is active instead of resetting the window (finding A)', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { db, secret } = await setup({ now });
+    const repository = new HonoAuthRepository(db);
+    const [account] = await db
+      .select({ id: usersSqlite.id, communityId: usersSqlite.communityId })
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'upgraded@login.example.test'));
+    const key = await repository.accountThrottleKey(account!.id, secret);
+    const t0 = now.getTime();
+    // An active block whose failure window is already spent: the legacy
+    // statement saw only the old window and reset failures to 1, clearing
+    // the block. The window is only spent once the block lapses.
+    await db.insert(authThrottleSqlite).values({
+      key,
+      kind: 'account',
+      communityId: account!.communityId,
+      failures: AUTH_THROTTLE_MAX_FAILURES,
+      windowStartedAt: t0 - 20 * 60 * 1000,
+      blockedUntil: t0 + 60_000,
+    });
+    await repository.recordLoginFailure(
+      {
+        account: { id: account!.id, communityId: account!.communityId },
+        clientIp: '198.51.100.99',
+        now: t0,
+      },
+      secret
+    );
+    const [grown] = await db
+      .select()
+      .from(authThrottleSqlite)
+      .where(eq(authThrottleSqlite.key, key));
+    expect(grown?.failures).toBe(AUTH_THROTTLE_MAX_FAILURES + 1);
+    expect(grown?.blockedUntil).toBe(
+      t0 + authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES + 1)
+    );
+    // The backoff grows monotonically while the block keeps being fed.
+    expect(
+      authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES + 1)
+    ).toBeGreaterThan(authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES));
+    // Once the block lapses *and* the window is spent, the counter resets.
+    await db
+      .update(authThrottleSqlite)
+      .set({ blockedUntil: t0 - 1 })
+      .where(eq(authThrottleSqlite.key, key));
+    await repository.recordLoginFailure(
+      {
+        account: { id: account!.id, communityId: account!.communityId },
+        clientIp: '198.51.100.99',
+        now: t0,
+      },
+      secret
+    );
+    const [reset] = await db
+      .select()
+      .from(authThrottleSqlite)
+      .where(eq(authThrottleSqlite.key, key));
+    expect(reset?.failures).toBe(1);
+  });
+
+  it('caps the blocked_until backoff at the policy maximum across successive blocks', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { db, secret } = await setup({ now });
+    const repository = new HonoAuthRepository(db);
+    const [account] = await db
+      .select({ id: usersSqlite.id, communityId: usersSqlite.communityId })
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, 'upgraded@login.example.test'));
+    const key = await repository.accountThrottleKey(account!.id, secret);
+    const t0 = now.getTime();
+    // A fresh window at the penultimate ladder rung with a lapsed block: the
+    // next failure reaches the cap, and further failures stay there.
+    await db.insert(authThrottleSqlite).values({
+      key,
+      kind: 'account',
+      communityId: account!.communityId,
+      failures: AUTH_THROTTLE_MAX_FAILURES + 4,
+      windowStartedAt: t0,
+      blockedUntil: t0 - 1,
+    });
+    const attempt = async (at: number) => {
+      await repository.recordLoginFailure(
+        {
+          account: { id: account!.id, communityId: account!.communityId },
+          clientIp: '198.51.100.98',
+          now: at,
+        },
+        secret
+      );
+      const [row] = await db
+        .select()
+        .from(authThrottleSqlite)
+        .where(eq(authThrottleSqlite.key, key));
+      return row;
+    };
+    // One rung below the cap climbs to it.
+    const capped = await attempt(t0 + 1);
+    expect(capped?.failures).toBe(AUTH_THROTTLE_MAX_FAILURES + 5);
+    expect(capped?.blockedUntil).toBe(t0 + 1 + AUTH_THROTTLE_BACKOFF_MAX_MS);
+    // Already at the cap with a lapsed block inside a fresh window: the
+    // backoff stays at the policy maximum instead of exceeding it.
+    await db
+      .update(authThrottleSqlite)
+      .set({ failures: AUTH_THROTTLE_MAX_FAILURES + 20, blockedUntil: t0 + 1 })
+      .where(eq(authThrottleSqlite.key, key));
+    const cappedAgain = await attempt(t0 + 2);
+    expect(cappedAgain?.failures).toBe(AUTH_THROTTLE_MAX_FAILURES + 21);
+    expect(cappedAgain?.blockedUntil).toBe(
+      t0 + 2 + AUTH_THROTTLE_BACKOFF_MAX_MS
+    );
+    // The policy ladder itself: monotonic while climbing, then flat at the cap.
+    expect(
+      authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES + 1)
+    ).toBeGreaterThan(authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES));
+    expect(authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES + 5)).toBe(
+      AUTH_THROTTLE_BACKOFF_MAX_MS
+    );
+    expect(authThrottleBackoffMs(AUTH_THROTTLE_MAX_FAILURES + 20)).toBe(
+      AUTH_THROTTLE_BACKOFF_MAX_MS
+    );
+  });
+
+  it('keeps throttle and audit row counts constant while a block is active (finding B)', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { postLogin, stretchedKey, db } = await setup({ now });
+    for (let attempt = 0; attempt < AUTH_THROTTLE_MAX_FAILURES; attempt += 1) {
+      const response = await postLogin({
+        identifier: 'upgraded@login.example.test',
+        derivedKey: makeDerivedKey(),
+      });
+      expect(response.status).toBe(401);
+    }
+    const snapshot = async () => ({
+      throttle: (await db.select().from(authThrottleSqlite)).map((row) => ({
+        ...row,
+      })),
+      audit: (await db.select().from(auditEntriesSqlite)).length,
+      sessions: (await db.select().from(sessionsSqlite)).length,
+    });
+    const before = await snapshot();
+    expect(before.throttle.length).toBeGreaterThan(0);
+    // The correct key is refused while blocked, and nothing is written.
+    const blocked = await postLogin({
+      identifier: 'upgraded@login.example.test',
+      derivedKey: stretchedKey,
+    });
+    expect(blocked.status).toBe(401);
+    expect(await snapshot()).toEqual(before);
+    // Same for a blocked address on the unresolved path.
+    const blockedIp = '198.51.100.10';
+    for (let attempt = 0; attempt < AUTH_THROTTLE_MAX_FAILURES; attempt += 1) {
+      await postLogin(
+        {
+          identifier: `nobody-block-${attempt}@login.example.test`,
+          derivedKey: makeDerivedKey(),
+        },
+        { 'x-forwarded-for': blockedIp }
+      );
+    }
+    const beforeIp = await snapshot();
+    const blockedFromIp = await postLogin(
+      { identifier: 'upgraded@login.example.test', derivedKey: stretchedKey },
+      { 'x-forwarded-for': blockedIp }
+    );
+    expect(blockedFromIp.status).toBe(401);
+    expect(await snapshot()).toEqual(beforeIp);
+  });
+
+  it('answers the blocked correct-key attempt with a byte-identical 401', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { postLogin, stretchedKey } = await setup({ now });
+    // Drive the account to the threshold and keep the tenth body.
+    let tenthBody = '';
+    for (let attempt = 0; attempt < AUTH_THROTTLE_MAX_FAILURES; attempt += 1) {
+      const response = await postLogin({
+        identifier: 'upgraded@login.example.test',
+        derivedKey: makeDerivedKey(),
+      });
+      expect(response.status).toBe(401);
+      tenthBody = await response.text();
+    }
+    const blocked = await postLogin({
+      identifier: 'upgraded@login.example.test',
+      derivedKey: stretchedKey,
+    });
+    expect(blocked.status).toBe(401);
+    // Byte-identical to the failure that tripped the block — a blocked
+    // caller cannot tell which rejection answered.
+    expect(await blocked.text()).toBe(tenthBody);
+    expect(tenthBody).toBe(JSON.stringify({ error: 'Invalid credentials' }));
   });
 
   it('reads the per-IP throttle before resolving the identifier', async () => {
@@ -748,7 +949,9 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(order.slice(0, 2)).toEqual(['ipKey', `throttle:${ipKey}`]);
     expect(order).not.toContain('candidates');
     expect(order).not.toContain('slug');
-    expect(order).toContain('record');
+    // Finding B: a blocked attempt writes nothing at all — no throttle row
+    // and no audit entry.
+    expect(order).not.toContain('record');
   });
 
   it('fails closed with 503 when the server secret is not configured', async () => {

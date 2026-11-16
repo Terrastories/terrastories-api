@@ -20,6 +20,7 @@ import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS,
   ARGON2ID_PARAMS_JSON,
+  AUTH_THROTTLE_MAX_FAILURES,
 } from '../../src/shared/auth-policy.js';
 import { sha256Hex } from '../../src/shared/auth-crypto.js';
 import {
@@ -225,14 +226,48 @@ describe('PATCH /v2/auth/me and POST /v2/auth/password (#137 item 4)', () => {
     expect(response.headers.get('set-cookie')).toContain('Max-Age=43200');
   });
 
-  it('renews the cookie with the device idle lifetime for device sessions', async () => {
-    const { patchMe, loginCookie } = await setup();
+  it('renews the device cookie with the remaining absolute lifetime', async () => {
+    const { db, patchMe, loginCookie } = await setup();
     const cookie = await loginCookie(true);
     const response = await patchMe({ displayName: 'device me' }, cookie);
     expect(response.status).toBe(200);
-    // A device cookie must survive a browser restart, so it carries the 60-day
-    // idle Max-Age; the session row stays the enforcement point.
-    expect(response.headers.get('set-cookie')).toContain('Max-Age=5184000');
+    // A device cookie must survive a browser restart, and on renewal it must
+    // not outlive the row: Max-Age is the row's remaining absolute lifetime
+    // (finding F), not a fresh 60 days.
+    const [row] = await db.select().from(sessionsSqlite);
+    const setCookie = response.headers.get('set-cookie') ?? '';
+    const match = /Max-Age=(\d+)/.exec(setCookie);
+    expect(match).not.toBeNull();
+    const maxAge = Number(match![1]);
+    const remaining = Math.floor(
+      ((row?.absoluteExpiresAt ?? 0) - Date.now()) / 1000
+    );
+    expect(maxAge).toBeGreaterThan(remaining - 5);
+    expect(maxAge).toBeLessThanOrEqual(remaining + 1);
+    expect(maxAge).toBeLessThan(5184000);
+  });
+
+  it('rejects idle-expired, absolute-expired and revoked session rows', async () => {
+    const { db, loginCookie, getMe } = await setup();
+    const past = Date.now() - 1000;
+    const cases: Array<{
+      idleExpiresAt?: number;
+      absoluteExpiresAt?: number;
+      revokedAt?: number;
+      revokedBy?: number;
+    }> = [
+      { idleExpiresAt: past },
+      { absoluteExpiresAt: past },
+      { revokedAt: Date.now(), revokedBy: 1 },
+    ];
+    for (const patch of cases) {
+      const cookie = await loginCookie();
+      // The middleware reads the row on every request, so each expiry condition
+      // must fail closed (finding H).
+      await db.update(sessionsSqlite).set(patch);
+      const response = await getMe(cookie);
+      expect(response.status).toBe(401);
+    }
   });
 
   it('changes the password, revokes other sessions and rotates this one', async () => {
@@ -307,6 +342,43 @@ describe('PATCH /v2/auth/me and POST /v2/auth/password (#137 item 4)', () => {
       .from(usersSqlite)
       .where(eq(usersSqlite.email, 'member@account.example.test'));
     expect(after).toEqual(before);
+  });
+
+  it('feeds the per-account throttle on a wrong current key and refuses while blocked (finding G)', async () => {
+    const { loginCookie, postPassword, postLogin, stretchedKey } =
+      await setup();
+    const cookie = await loginCookie();
+    for (let attempt = 0; attempt < AUTH_THROTTLE_MAX_FAILURES; attempt += 1) {
+      const response = await postPassword(
+        {
+          currentDerivedKey: makeDerivedKey(),
+          algorithm: ARGON2ID_ALGORITHM,
+          salt: makeVerifierSalt(),
+          params: { ...ARGON2ID_PARAMS },
+          derivedKey: makeDerivedKey(),
+        },
+        cookie
+      );
+      expect(response.status).toBe(401);
+    }
+    // The account is now blocked: even the correct key is refused, and a
+    // login with the correct key is refused too — nothing is written.
+    const blocked = await postPassword(
+      {
+        currentDerivedKey: stretchedKey,
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { ...ARGON2ID_PARAMS },
+        derivedKey: makeDerivedKey(),
+      },
+      cookie
+    );
+    expect(blocked.status).toBe(401);
+    const login = await postLogin({
+      identifier: 'member@account.example.test',
+      derivedKey: stretchedKey,
+    });
+    expect(login.status).toBe(401);
   });
 
   it('rejects below-policy material with 400 without changing anything', async () => {

@@ -86,6 +86,7 @@ import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entr
 import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS_JSON,
+  AUTH_THROTTLE_MAX_FAILURES,
   RAILS_BCRYPT_ALGORITHM,
 } from '../../src/shared/auth-policy.js';
 import { sha256Hex } from '../../src/shared/auth-crypto.js';
@@ -528,6 +529,24 @@ export async function createFixture(
       }),
       passwordVerifier: await sha256Hex(wrappedPasswordHash),
       passwordHash,
+    });
+    // #137 Slice 10 (finding H): an account whose per-account counter is
+    // driven to the block threshold by the journey below.
+    const throttledCredentials = { email: 'qa-hono-throttled@example.test' };
+    const throttledIp = '203.0.113.42';
+    await db.insert(users).values({
+      email: throttledCredentials.email,
+      username: 'qa_hono_throttled',
+      ...deriveUserIdentityColumns({
+        email: throttledCredentials.email,
+        username: 'qa_hono_throttled',
+      }),
+      ...verifier,
+      firstName: 'QA',
+      lastName: 'Throttled',
+      role: 'viewer',
+      communityId,
+      isActive: true,
     });
     const qaSharedEmail = 'qa-hono-shared@example.test';
     await db.insert(users).values([
@@ -1491,6 +1510,8 @@ export async function createFixture(
       const app = createHonoApp({
         repository: new HonoFoundationRepository(db),
         secureCookies: false,
+        // The in-process fixture presents `cf-connecting-ip` to isolate buckets.
+        trustProxy: true,
         serverSecret: toHex(crypto.getRandomValues(new Uint8Array(24))),
         storage: {
           read: async (key, range) => {
@@ -5053,6 +5074,10 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.61',
+              'cf-connecting-ip': '203.0.113.61',
+            },
             body: {
               identifier: credentials.admin.email,
               derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
@@ -5064,6 +5089,10 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.62',
+              'cf-connecting-ip': '203.0.113.62',
+            },
             body: {
               identifier: 'qa-hono-nobody@example.test',
               derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
@@ -5075,6 +5104,10 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.63',
+              'cf-connecting-ip': '203.0.113.63',
+            },
             body: {
               identifier: qaSharedEmail,
               derivedKey,
@@ -5144,9 +5177,51 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.64',
+              'cf-connecting-ip': '203.0.113.64',
+            },
             body: {
               identifier: wrappedCredentials.email,
               derivedKey: wrappedPasswordHash,
+            },
+            check: invalidCredentials,
+          },
+          ...Array.from(
+            { length: AUTH_THROTTLE_MAX_FAILURES },
+            (_, attempt) => ({
+              name: `throttled account wrong key ${attempt + 1}`,
+              method: 'POST',
+              path: '/v2/auth/login',
+              expected: 401,
+              // Both trusted-proxy forms, so the Node fixture (x-forwarded-for)
+              // and the Workers build (cf-connecting-ip) isolate the same
+              // dedicated address instead of the shared `unknown` bucket.
+              headers: {
+                'x-forwarded-for': throttledIp,
+                'cf-connecting-ip': throttledIp,
+              },
+              body: {
+                identifier: throttledCredentials.email,
+                derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+              },
+              check: invalidCredentials,
+            })
+          ),
+          {
+            // Finding H: once the counter reaches the threshold the correct
+            // key is still refused, and no session is issued.
+            name: 'a throttled account is refused even with the correct key',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              'x-forwarded-for': throttledIp,
+              'cf-connecting-ip': throttledIp,
+            },
+            body: {
+              identifier: throttledCredentials.email,
+              derivedKey,
             },
             check: invalidCredentials,
           },
@@ -5237,9 +5312,10 @@ export async function createFixture(
           },
           {
             // #137 Slice 10: the device-session opt-in is recorded as a
-            // `device` session — the response carries no Max-Age (the
-            // absolute bound is enforced by the session row).
-            name: 'device session opt-in is issued with the idle-window Max-Age',
+            // `device` session — the response cookie carries Max-Age = the
+            // remaining absolute lifetime (the full 60 days at creation);
+            // the session row remains the enforcement point.
+            name: 'device session opt-in is issued with its remaining absolute lifetime',
             method: 'POST',
             path: '/v2/auth/login',
             expected: 200,
@@ -5258,8 +5334,8 @@ export async function createFixture(
             checkHeaders: (headers) => {
               const setCookie = headers.get('set-cookie') ?? '';
               // A device login must survive a browser restart, so the cookie
-              // carries the 60-day idle Max-Age; the session row is still the
-              // enforcement point.
+              // carries the remaining absolute lifetime — the full 60 days at
+              // creation; the session row is still the enforcement point.
               return (
                 setCookie.includes('ts_session=') &&
                 /Max-Age=5184000/i.test(setCookie)
@@ -5271,6 +5347,10 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.65',
+              'cf-connecting-ip': '203.0.113.65',
+            },
             body: loginBody(disabledViewerCredentials.email),
             check: invalidCredentials,
           },
@@ -5279,6 +5359,10 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.66',
+              'cf-connecting-ip': '203.0.113.66',
+            },
             body: loginBody(disabledMemberCredentials.email),
             check: invalidCredentials,
           },
@@ -5287,6 +5371,10 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.67',
+              'cf-connecting-ip': '203.0.113.67',
+            },
             body: loginBody(disabledEditorCredentials.email),
             check: invalidCredentials,
           },
@@ -5295,6 +5383,10 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.68',
+              'cf-connecting-ip': '203.0.113.68',
+            },
             body: loginBody(elderCredentials.email),
             check: invalidCredentials,
           },
@@ -5593,6 +5685,10 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/login',
             expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.69',
+              'cf-connecting-ip': '203.0.113.69',
+            },
             body: loginBody(credentials.super_admin.email),
             check: invalidCredentials,
           },

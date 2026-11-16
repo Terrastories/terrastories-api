@@ -192,7 +192,9 @@ export function buildOwnerUnreferencedFilesDelete(
               .where(
                 and(
                   eq(tables.attachments.fileId, tables.files.id),
-                  sql`not ${ownerKey(tables.attachments)}`
+                  // NULL owner columns make the key NULL; coalesce so such a
+                  // row still counts as another reference and keeps the file.
+                  sql`not coalesce(${ownerKey(tables.attachments)}, false)`
                 )
               )
           ),

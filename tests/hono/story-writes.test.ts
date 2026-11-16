@@ -863,6 +863,21 @@ describe('Slice 8 story CRUD routes', () => {
         )
     ).toEqual([]);
 
+    // The files row whose only reference was the deleted attachment is gone.
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, fileIds.ownStoryFile))
+    ).toHaveLength(0);
+    // A still-referenced files row (the restricted story's file) is kept.
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, fileIds.restrictedStoryFile))
+    ).toHaveLength(1);
+
     // Referenced places & speakers still exist
     expect(
       await db

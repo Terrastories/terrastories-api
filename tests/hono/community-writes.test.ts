@@ -1577,6 +1577,41 @@ describe('Slice 7 race-safe 409 deletes & attachment preservation', () => {
       ordinal: 0,
       createdAt: T0,
     });
+    const soloFileId = '99999999-9999-4999-8999-999999999901';
+    await db.insert(tables.files).values({
+      id: soloFileId,
+      filename: 'solo-place.png',
+      originalName: 'solo-place.png',
+      path: 'communities/own/solo-place.png',
+      storageKey: 'communities/own/solo-place.png',
+      url: 'https://storage.invalid/solo-place.png',
+      mimeType: 'image/png',
+      size: 10,
+      byteSize: 10,
+      communityId: ids.own!,
+      uploadedBy: ids.uAdmin!,
+      isActive: true,
+      createdAt: T0,
+      updatedAt: T0,
+    });
+    await insertRow(tables.attachments, {
+      communityId: ids.own!,
+      fileId: soloFileId,
+      ownerType: 'place',
+      ownerId: unrefPlaceId,
+      role: 'place_photo',
+      ordinal: 1,
+      createdAt: T0,
+    });
+    await insertRow(tables.attachments, {
+      communityId: ids.own!,
+      fileId: soloFileId,
+      ownerType: 'speaker',
+      ownerId: unrefSpeakerId,
+      role: 'speaker_photo',
+      ordinal: 1,
+      createdAt: T0,
+    });
     const attUnrefSpeaker = await insertRow(tables.attachments, {
       communityId: ids.own!,
       fileId: fileIds.ownActive,
@@ -1655,6 +1690,20 @@ describe('Slice 7 race-safe 409 deletes & attachment preservation', () => {
         .from(tables.attachments)
         .where(eq(tables.attachments.id, attUnrefSpeaker))
     ).toHaveLength(0);
+    // The solo file's rows were purged once both owners were gone.
+    expect(
+      await db
+        .select({ id: tables.files.id })
+        .from(tables.files)
+        .where(eq(tables.files.id, soloFileId))
+    ).toHaveLength(0);
+    // The shared file's row is still referenced, so it is kept.
+    expect(
+      await db
+        .select({ id: tables.files.id })
+        .from(tables.files)
+        .where(eq(tables.files.id, fileIds.ownActive))
+    ).toHaveLength(1);
 
     // D1 batch race test: link added right before batch executes must return 'conflict',
     // never cascade-delete the link, and never delete the owner's attachments.
@@ -1750,6 +1799,22 @@ describe('Slice 7 race-safe 409 deletes & attachment preservation', () => {
         })
         .returning({ id: d1Tables.places.id });
 
+      const fIdOnly = '88888888-8888-4888-8888-888888888802';
+      await d1Db.insert(d1Tables.files).values({
+        id: fIdOnly,
+        filename: 'solo.png',
+        originalName: 'solo.png',
+        path: 'communities/1/solo.png',
+        storageKey: 'communities/1/solo.png',
+        url: 'https://storage.invalid/solo.png',
+        mimeType: 'image/png',
+        size: 10,
+        byteSize: 10,
+        communityId: comm!.id,
+        uploadedBy: usr!.id,
+        createdAt: T0,
+        updatedAt: T0,
+      });
       await d1Db.insert(d1Tables.attachments).values([
         {
           communityId: comm!.id,
@@ -1776,6 +1841,15 @@ describe('Slice 7 race-safe 409 deletes & attachment preservation', () => {
           ownerId: restrictedPlace!.id,
           role: 'place_photo',
           ordinal: 0,
+          createdAt: T0,
+        },
+        {
+          communityId: comm!.id,
+          fileId: fIdOnly,
+          ownerType: 'place',
+          ownerId: place!.id,
+          role: 'place_photo',
+          ordinal: 1,
           createdAt: T0,
         },
       ]);
@@ -1834,7 +1908,7 @@ describe('Slice 7 race-safe 409 deletes & attachment preservation', () => {
               eq(d1Tables.attachments.ownerId, place!.id)
             )
           )
-      ).toHaveLength(1);
+      ).toHaveLength(2);
 
       // Inject story_speakers right as deleteSpeaker's batch executes
       injectRace = () => {
@@ -1897,6 +1971,22 @@ describe('Slice 7 race-safe 409 deletes & attachment preservation', () => {
 
       expect(await d1Repo.deletePlace(comm!.id, place!.id)).toBe('deleted');
       expect(await d1Repo.deleteSpeaker(comm!.id, speaker!.id)).toBe('deleted');
+      // The files row whose only references were the deleted owners'
+      // attachments is gone.
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.files)
+          .where(eq(d1Tables.files.id, fIdOnly))
+      ).toHaveLength(0);
+      // The shared file is still referenced by the restricted place's
+      // attachment and is kept.
+      expect(
+        await d1Db
+          .select()
+          .from(d1Tables.files)
+          .where(eq(d1Tables.files.id, fId))
+      ).toHaveLength(1);
       expect(
         await d1Db
           .select()

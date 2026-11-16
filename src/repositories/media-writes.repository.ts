@@ -1243,6 +1243,54 @@ export class MediaWritesRepository {
     return false;
   }
 
+  /**
+   * True when at least one of this file's attachments names an owner the
+   * actor can read. Used to keep DELETE free of an existence oracle: without
+   * a readable owner the caller behaves as if the file were absent.
+   */
+  private async hasReadableAttachmentOwner(
+    fileId: string,
+    communityId: number,
+    actorId: number,
+    viewer: ReadRuleViewer
+  ): Promise<boolean> {
+    // own-community context: 'own-admin' carries user-management authority.
+    const viewerAuthorities: readonly string[] =
+      viewer === 'own-admin' ? ['user-management'] : [];
+    const attachmentRows: Array<{
+      ownerType: string | null;
+      ownerId: number | null;
+      role: string | null;
+    }> = await this.db
+      .select({
+        ownerType: this.tables.attachments.ownerType,
+        ownerId: this.tables.attachments.ownerId,
+        role: this.tables.attachments.role,
+      })
+      .from(this.tables.attachments)
+      .where(
+        and(
+          eq(this.tables.attachments.communityId, communityId),
+          eq(this.tables.attachments.fileId, fileId)
+        )
+      )
+      .limit(25);
+    for (const att of attachmentRows) {
+      if (
+        await this.isAttachmentReadableByViewer(
+          communityId,
+          actorId,
+          viewer,
+          viewerAuthorities,
+          att
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   async deleteUnreferencedFile(
     fileId: string,
     actor: FoundationUser,
@@ -1308,20 +1356,16 @@ export class MediaWritesRepository {
       }
       if (viewer !== 'own-admin') {
         if (file.uploadedBy !== actor.id) {
-          // Non-admin without ownership cannot delete another user's staging or media.
-          const hasAnyAtt = await this.db
-            .select({ id: this.tables.attachments.id })
-            .from(this.tables.attachments)
-            .where(
-              and(
-                eq(this.tables.attachments.communityId, actor.communityId),
-                eq(this.tables.attachments.fileId, fileId)
-              )
-            )
-            .limit(1);
-          return hasAnyAtt.length > 0
-            ? { status: 'forbidden' }
-            : { status: 'not_found' };
+          // Non-admin without ownership cannot delete another user's staging or
+          // media; the file's existence stays hidden unless at least one
+          // attachment owner is readable by this actor.
+          const readable = await this.hasReadableAttachmentOwner(
+            fileId,
+            actor.communityId,
+            actor.id,
+            viewer
+          );
+          return readable ? { status: 'forbidden' } : { status: 'not_found' };
         }
       }
     }

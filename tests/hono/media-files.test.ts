@@ -1068,4 +1068,86 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
     expect(delOutcome.status).toBe('deleted');
     d1Sqlite.close();
   });
+
+  it('DELETE /v2/media/:id answers 404 unless an attachment owner is readable by the actor', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+
+    // File attached to a restricted story: a community member cannot read the
+    // story, and the DELETE must not reveal whether the file exists.
+    const hidden = await uploadMedia({
+      cookie: cookies.editorA,
+      filename: 'oracle-hidden.png',
+      contentType: 'image/png',
+      bytes: PNG_BYTES,
+    });
+    expect(hidden.status).toBe(201);
+    const hiddenFileId = MediaUploadResponseSchema.parse(await hidden.json())
+      .data.id;
+    const restrictedStoryId = await insertRow(tables.stories, {
+      title: 'Oracle Restricted',
+      slug: `oracle-restricted-${Date.now().toString(36)}`,
+      privacyLevel: 'members_only',
+      isRestricted: true,
+      communityId: ids.ownCommunity,
+      createdBy: ids.editorA,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(tables.attachments).values({
+      fileId: hiddenFileId,
+      communityId: ids.ownCommunity,
+      ownerType: 'story',
+      ownerId: restrictedStoryId,
+      role: 'story_media',
+      ordinal: 0,
+      createdAt: now,
+    });
+    const hiddenDel = await app.request(
+      `${API_ORIGIN}/v2/media/${hiddenFileId}`,
+      {
+        method: 'DELETE',
+        headers: { cookie: cookies.member, origin: CLIENT_ORIGIN },
+      }
+    );
+    expect(hiddenDel.status).toBe(404);
+
+    // File attached to a public story the member can read: the DELETE keeps
+    // the 403 semantics, because the actor can already see this file.
+    const visible = await uploadMedia({
+      cookie: cookies.editorA,
+      filename: 'oracle-visible.png',
+      contentType: 'image/png',
+      bytes: PNG_BYTES,
+    });
+    expect(visible.status).toBe(201);
+    const visibleFileId = MediaUploadResponseSchema.parse(await visible.json())
+      .data.id;
+    const publicStoryId = await insertRow(tables.stories, {
+      title: 'Oracle Public',
+      slug: `oracle-public-${Date.now().toString(36)}`,
+      privacyLevel: 'members_only',
+      isRestricted: false,
+      communityId: ids.ownCommunity,
+      createdBy: ids.editorA,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(tables.attachments).values({
+      fileId: visibleFileId,
+      communityId: ids.ownCommunity,
+      ownerType: 'story',
+      ownerId: publicStoryId,
+      role: 'story_media',
+      ordinal: 0,
+      createdAt: now,
+    });
+    const visibleDel = await app.request(
+      `${API_ORIGIN}/v2/media/${visibleFileId}`,
+      {
+        method: 'DELETE',
+        headers: { cookie: cookies.member, origin: CLIENT_ORIGIN },
+      }
+    );
+    expect(visibleDel.status).toBe(403);
+  });
 });

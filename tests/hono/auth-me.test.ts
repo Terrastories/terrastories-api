@@ -31,6 +31,133 @@ import {
 } from './auth-test-utils.js';
 import { normalizeSearchText } from '../../src/shared/utils/search-normalize.js';
 
+describe('sessionContext() — concurrent revoke between read and the last-seen touch (Qodo #7)', () => {
+  const openDbs: Sqlite.Database[] = [];
+
+  afterEach(() => {
+    while (openDbs.length > 0) openDbs.pop()?.close();
+  });
+
+  async function seed() {
+    const sqlite = new Sqlite(':memory:');
+    sqlite.pragma('foreign_keys = ON');
+    openDbs.push(sqlite);
+    const db = drizzle(sqlite);
+    migrate(db, { migrationsFolder: 'src/db/migrations' });
+
+    const passwordHash = await hash('InterceptPassword!', 4);
+    const [alpha] = await db
+      .insert(communitiesSqlite)
+      .values({
+        name: 'Intercept Alpha',
+        slug: 'intercept-alpha',
+        publicStories: true,
+        isActive: true,
+      })
+      .returning();
+    const [member] = await db
+      .insert(usersSqlite)
+      .values({
+        passwordHash,
+        email: 'intercept@account.example.test',
+        username: 'intercept_alpha',
+        emailNormalized: normalizeSearchText('intercept@account.example.test'),
+        usernameNormalized: normalizeSearchText('intercept_alpha'),
+        firstName: 'Intercept',
+        lastName: 'Alpha',
+        role: 'member',
+        communityId: alpha.id,
+        isActive: true,
+      })
+      .returning();
+    const rawToken = 'a'.repeat(64);
+    const tokenHash = await sha256Hex(rawToken);
+    const nowMs = Date.now();
+    const createdAt = nowMs - 10 * 60 * 1000;
+    // last_seen_at 10 minutes stale, so the bounded touch is attempted.
+    sqlite
+      .prepare(
+        `INSERT INTO sessions (id, token_hash, user_id, expires_at, kind, created_at, last_seen_at, idle_expires_at, absolute_expires_at, revoked_at, revoked_by)
+         VALUES (?, ?, ?, ?, 'standard', ?, ?, ?, ?, NULL, NULL)`
+      )
+      .run(
+        'sess-intercept',
+        tokenHash,
+        member.id,
+        nowMs + 12 * 60 * 60 * 1000,
+        createdAt,
+        createdAt,
+        nowMs + 12 * 60 * 60 * 1000,
+        nowMs + 30 * 24 * 60 * 60 * 1000
+      );
+    return { sqlite, db, rawToken, tokenHash, member };
+  }
+
+  function interposeDeletion(
+    sqlite: Sqlite.Database,
+    tokenHash: string,
+    db: Record<string, unknown>
+  ) {
+    let intercepted = 0;
+    const proxy = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'update') {
+          return (...args: unknown[]) => {
+            intercepted += 1;
+            sqlite
+              .prepare('DELETE FROM sessions WHERE token_hash = ?')
+              .run(tokenHash);
+            const realUpdate = Reflect.get(target, prop) as (
+              ...updateArgs: unknown[]
+            ) => unknown;
+            return realUpdate.apply(target, args);
+          };
+        }
+        return Reflect.get(target, prop);
+      },
+    }) as unknown as ReturnType<typeof drizzle>;
+    return { proxy, touched: () => intercepted };
+  }
+
+  it('answers 401 when the session is revoked between the read and the 0-row touch, never the stale user', async () => {
+    const { sqlite, db, rawToken, tokenHash } = await seed();
+    const { proxy, touched } = interposeDeletion(
+      sqlite,
+      tokenHash,
+      db as unknown as Record<string, unknown>
+    );
+    const app = createHonoApp({
+      repository: new HonoFoundationRepository(proxy),
+      storage: { read: async () => null },
+      serverSecret: makeServerSecret(),
+      secureCookies: false,
+    });
+    const response = await app.request('http://test/v2/auth/me', {
+      headers: { cookie: `ts_session=${rawToken}` },
+    });
+    expect(response.status).toBe(401);
+    expect(touched()).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renews the session when the touch lands (control: no revocation)', async () => {
+    const { sqlite, db, rawToken } = await seed();
+    const app = createHonoApp({
+      repository: new HonoFoundationRepository(db),
+      storage: { read: async () => null },
+      serverSecret: makeServerSecret(),
+      secureCookies: false,
+    });
+    const response = await app.request('http://test/v2/auth/me', {
+      headers: { cookie: `ts_session=${rawToken}` },
+    });
+    expect(response.status).toBe(200);
+    const row = sqlite
+      .prepare('SELECT last_seen_at FROM sessions WHERE id = ?')
+      .get('sess-intercept') as { last_seen_at: number };
+    expect(row.last_seen_at).toBeGreaterThan(Date.now() - 60 * 1000);
+  });
+});
+
 describe('PATCH /v2/auth/me and POST /v2/auth/password (#137 item 4)', () => {
   const openDbs: Sqlite.Database[] = [];
 

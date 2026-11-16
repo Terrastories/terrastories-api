@@ -680,9 +680,12 @@ export class HonoFoundationRepository {
         )
       )
       .returning({ id: sessions.id });
-    // A lost renewal race must re-read authority, never resurrect a revoked row.
-    if (!touched.length && renewWindow)
-      return this.sessionContext(tokenHash, now, false);
+    // A lost race — a concurrent revoke, deletion, idle- or absolute-expiry,
+    // or a renewed `expiresAt` — means the previously-read user can no longer
+    // authenticate. Whenever the touch was attempted and matched 0 rows
+    // (with or without a renewal due), re-read under the same validity
+    // conditions or answer as unauthenticated — never return stale authority.
+    if (touched.length === 0) return this.sessionContext(tokenHash, now, false);
     return { user, kind, absoluteExpiresAt: row.absoluteExpiresAt };
   }
 

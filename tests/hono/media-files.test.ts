@@ -635,6 +635,70 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
     ).toBe(404);
   });
 
+  it('serves an imported null-community super_admin own user_photo with uploadedBy=null from the owner prefix only', async () => {
+    // Imported bytes keep no uploader (uploadedBy is null); authorization
+    // flows through the own-account user_photo attachment, so the serving
+    // prefix must derive from that attachment's owner — the actor for this
+    // exception — never from uploadedBy.
+    const importedAt = new Date('2026-06-01T12:00:00.000Z');
+    const fileId = crypto.randomUUID();
+    const storageKey = `users/${ids.superAdminA}/media/${fileId}`;
+    await db.insert(tables.files).values({
+      id: fileId,
+      filename: fileId,
+      originalName: 'imported.png',
+      path: storageKey,
+      storageKey,
+      url: `/v2/media/${fileId}`,
+      mimeType: 'image/png',
+      size: PNG_BYTES.byteLength,
+      byteSize: PNG_BYTES.byteLength,
+      checksum: null,
+      communityId: null,
+      uploadedBy: null,
+      culturalRestrictions: null,
+      isActive: true,
+      createdAt: importedAt,
+      updatedAt: importedAt,
+    });
+    await db.insert(tables.attachments).values({
+      fileId,
+      communityId: null,
+      ownerType: 'user',
+      ownerId: ids.superAdminA,
+      role: 'user_photo',
+      ordinal: 0,
+      createdAt: importedAt,
+    });
+    memStore.set(storageKey, {
+      bytes: PNG_BYTES,
+      contentType: 'image/png',
+    });
+
+    // The owning super_admin downloads it: 200.
+    const owner = await app.request(`${API_ORIGIN}/v2/media/${fileId}`, {
+      headers: { cookie: cookies.superAdminA },
+    });
+    expect(owner.status).toBe(200);
+    expect(
+      Buffer.from(await owner.arrayBuffer()).equals(Buffer.from(PNG_BYTES))
+    ).toBe(true);
+
+    // Another null-community super_admin does not: 404 — its derived prefix
+    // (users/<B>/) never matches the key.
+    const otherSuperAdmin = await app.request(
+      `${API_ORIGIN}/v2/media/${fileId}`,
+      { headers: { cookie: cookies.superAdminB } }
+    );
+    expect(otherSuperAdmin.status).toBe(404);
+
+    // A community administrator reaches it no better: 404.
+    const admin = await app.request(`${API_ORIGIN}/v2/media/${fileId}`, {
+      headers: { cookie: cookies.admin },
+    });
+    expect(admin.status).toBe(404);
+  });
+
   it('rejects SVG/HTML payloads, magic-byte/extension mismatches, oversize Content-Length, and CSRF origin mismatches', async () => {
     const before = memStore.size;
 

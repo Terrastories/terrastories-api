@@ -185,12 +185,19 @@ export class MediaWritesService {
       return null;
     }
 
-    const expectedPrefix =
-      file.communityId !== null
-        ? `communities/${file.communityId}/`
-        : file.uploadedBy !== null
-          ? `users/${file.uploadedBy}/`
-          : '';
+    let expectedPrefix = '';
+    if (file.communityId !== null) {
+      expectedPrefix = `communities/${file.communityId}/`;
+    } else if (file.uploadedBy !== null) {
+      expectedPrefix = `users/${file.uploadedBy}/`;
+    } else if (actor.role === 'super_admin' && actor.communityId === null) {
+      // Imported null-community super_admin own user_photo whose
+      // `uploadedBy` is null: the authorized account owner is the actor
+      // itself (the own-account user_photo exception), so the prefix is
+      // that actor's `users/<id>/` — never another account's. Other
+      // accounts still 404.
+      expectedPrefix = `users/${actor.id}/`;
+    }
 
     if (!expectedPrefix) {
       return null;

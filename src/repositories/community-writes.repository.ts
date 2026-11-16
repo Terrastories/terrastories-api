@@ -1,4 +1,4 @@
-import { and, eq, isNull, ne, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, isNull, ne, notExists, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -9,6 +9,13 @@ import {
 } from '../policy/canonical-state.js';
 import type { PublicMapConfigRow } from './public-communities.repository.js';
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
+import {
+  buildOwnerUnreferencedFilesDelete,
+  buildUnreferencedFilesDelete,
+  lockFileRowsForCleanup,
+  toFileByteCleanups,
+  type FileByteCleanup,
+} from '../services/media-cleanup.service.js';
 
 export interface CommunitySettingsUpdateInput {
   name?: string;
@@ -601,16 +608,48 @@ export class CommunityWritesRepository {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     physicalOwnerScope: any,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    referenceGuards: (executor: any) => any[]
+    referenceGuards: (executor: any) => any[],
+    removedFiles?: FileByteCleanup[]
   ): Promise<PlaceDeleteOutcome> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const collectFiles = (rows: any) => {
+      if (removedFiles) removedFiles.push(...toFileByteCleanups(rows));
+    };
+    // Candidates for byte cleanup are the attachments actually deleted in
+    // this transaction/batch (DELETE ... RETURNING file_id), so a relation
+    // inserted and cascaded away within this very operation is included.
+    // Row keys arrive drizzle-mapped in production drivers; the D1-like
+    // batch harness returns raw column names, so accept both spellings.
+    const fileIdsOf = (rows: unknown): string[] =>
+      (Array.isArray(rows)
+        ? (rows as Array<{
+            fileId?: string | null;
+            file_id?: string | null;
+          }>)
+        : []
+      )
+        .map((row) => row.fileId ?? row.file_id ?? null)
+        .filter((id): id is string => typeof id === 'string');
     try {
       if (this.hasD1Batch()) {
-        // Put NOT EXISTS reference guards inside DELETE itself so a concurrent
-        // story_places/story_speakers insert never silently cascades, and gate
-        // attachment cleanup on the owner row actually being gone afterward.
+        // The files purge gates on the exact DELETE predicate, so the purge
+        // never frees files in a batch whose owner delete will match nothing.
+        // It runs inside the same batch, before the relation rows go, so a
+        // crash can never leave rows behind for the owner (or a claim of
+        // garbage bytes that were never released).
+        const ownerDeleteScope = and(
+          readableScope,
+          ...referenceGuards(this.db)
+        );
+        const ownerDeleteGuard = exists(
+          this.db
+            .select({ one: sql`1` })
+            .from(table)
+            .where(ownerDeleteScope)
+        );
         const deleteOwner = this.db
           .delete(table)
-          .where(and(readableScope, ...referenceGuards(this.db)))
+          .where(ownerDeleteScope)
           .returning({ id: table.id });
 
         const ownerGoneGuard = notExists(
@@ -625,7 +664,7 @@ export class CommunityWritesRepository {
           ownerType,
           ownerId,
           ownerGoneGuard
-        );
+        ).returning({ fileId: this.tables.attachments.fileId });
 
         const existingOwnerCheck = this.db
           .select({ id: table.id })
@@ -633,18 +672,28 @@ export class CommunityWritesRepository {
           .where(readableScope)
           .limit(1);
 
-        const [deletedRows, , existingRows] = await this.db.batch([
+        // One atomic batch: files purge first (the still-present attachments
+        // are the evidence), then owner and attachments, then an owner-existence
+        // check for the conflict verdict.
+        const [purgeRows, deletedRows, , existingRows] = await this.db.batch([
+          ...buildOwnerUnreferencedFilesDelete(
+            this.db,
+            this.connection,
+            { communityId, ownerType, ownerId },
+            ownerDeleteGuard
+          ),
           deleteOwner,
           deleteAttachments,
           existingOwnerCheck,
         ]);
 
-        if (Array.isArray(deletedRows) && deletedRows.length > 0) {
-          return 'deleted';
+        if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
+          return Array.isArray(existingRows) && existingRows.length > 0
+            ? 'conflict'
+            : 'not_found';
         }
-        return Array.isArray(existingRows) && existingRows.length > 0
-          ? 'conflict'
-          : 'not_found';
+        collectFiles(Array.isArray(purgeRows) ? (purgeRows as never) : []);
+        return 'deleted';
       }
 
       if (dialectOf(this.connection) === 'postgresql') {
@@ -668,11 +717,27 @@ export class CommunityWritesRepository {
             return 'conflict';
           }
 
-          await this.deleteOwnerAttachmentsQuery(
+          const deletedAttachments = await this.deleteOwnerAttachmentsQuery(
             tx,
             communityId,
             ownerType,
             ownerId
+          ).returning({ fileId: this.tables.attachments.fileId });
+          const fileIds = fileIdsOf(deletedAttachments);
+          // Lock the candidate rows before the guarded delete so an attach that
+          // is still uncommitted cannot have its relation cascaded away (see
+          // lockFileRowsForCleanup).
+          const lockedFileIds = await lockFileRowsForCleanup(
+            tx,
+            this.connection,
+            fileIds
+          );
+          collectFiles(
+            (
+              await Promise.all(
+                buildUnreferencedFilesDelete(tx, this.connection, lockedFileIds)
+              )
+            ).flat()
           );
           return 'deleted';
         });
@@ -687,12 +752,21 @@ export class CommunityWritesRepository {
           .all();
 
         if (deleted.length > 0) {
-          this.deleteOwnerAttachmentsQuery(
+          const deletedAttachments = this.deleteOwnerAttachmentsQuery(
             tx,
             communityId,
             ownerType,
             ownerId
-          ).run();
+          )
+            .returning({ fileId: this.tables.attachments.fileId })
+            .all();
+          const fileIds = fileIdsOf(deletedAttachments);
+          collectFiles(
+            buildUnreferencedFilesDelete(tx, this.connection, fileIds).flatMap(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (statement: any) => statement.returning().all()
+            )
+          );
           return 'deleted';
         }
 
@@ -715,7 +789,8 @@ export class CommunityWritesRepository {
 
   async deletePlace(
     communityId: number,
-    placeId: number
+    placeId: number,
+    removedFiles?: FileByteCleanup[]
   ): Promise<PlaceDeleteOutcome> {
     const physicalScope = and(
       eq(this.tables.places.id, placeId),
@@ -732,7 +807,8 @@ export class CommunityWritesRepository {
       placeId,
       readableScope,
       physicalScope,
-      (executor) => this.placeReferenceGuards(executor, communityId, placeId)
+      (executor) => this.placeReferenceGuards(executor, communityId, placeId),
+      removedFiles
     );
   }
 
@@ -811,7 +887,8 @@ export class CommunityWritesRepository {
 
   async deleteSpeaker(
     communityId: number,
-    speakerId: number
+    speakerId: number,
+    removedFiles?: FileByteCleanup[]
   ): Promise<SpeakerDeleteOutcome> {
     const scope = and(
       eq(this.tables.speakers.id, speakerId),
@@ -825,7 +902,8 @@ export class CommunityWritesRepository {
       scope,
       scope,
       (executor) =>
-        this.speakerReferenceGuards(executor, communityId, speakerId)
+        this.speakerReferenceGuards(executor, communityId, speakerId),
+      removedFiles
     );
   }
 }

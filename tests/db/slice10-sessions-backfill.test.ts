@@ -39,7 +39,7 @@ function createSqliteMigrationsFolderThrough(lastTag: string): string {
   return tmpDir;
 }
 
-describe('Slice 10 SQLite migration 0011 — legacy session backfill', () => {
+describe('Slice 10 SQLite migration 0012 — legacy session backfill', () => {
   const openDbs: Database.Database[] = [];
   const tempDirs: string[] = [];
 
@@ -51,14 +51,14 @@ describe('Slice 10 SQLite migration 0011 — legacy session backfill', () => {
     }
   });
 
-  it('keeps pre-0011 session rows and gives them a renewable absolute expiry', () => {
+  it('keeps pre-0012 session rows and gives them a renewable absolute expiry', () => {
     const through0010 = createSqliteMigrationsFolderThrough(
       '0010_canonical_media_and_map_configs'
     );
-    const through0011 = createSqliteMigrationsFolderThrough(
-      '0011_auth_throttle_and_session_lifetimes'
+    const through0012 = createSqliteMigrationsFolderThrough(
+      '0012_auth_throttle_and_session_lifetimes'
     );
-    tempDirs.push(through0010, through0011);
+    tempDirs.push(through0010, through0012);
 
     const sqlite = new Database(':memory:');
     sqlite.pragma('foreign_keys = ON');
@@ -96,7 +96,7 @@ describe('Slice 10 SQLite migration 0011 — legacy session backfill', () => {
       )
       .run('sess-small', 'th-small', userId, expiresAtSmall);
 
-    migrate(db, { migrationsFolder: through0011 });
+    migrate(db, { migrationsFolder: through0012 });
 
     type SessionRow = {
       id: string;

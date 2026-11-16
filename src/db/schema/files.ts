@@ -58,6 +58,9 @@ export const filesPg = pgTable(
     userIdx: pgIndex('files_user_idx').on(table.uploadedBy),
     // MIME type index for filtering
     mimeTypeIdx: pgIndex('files_mime_type_idx').on(table.mimeType),
+    // Orphan sweeper reference checks (#140): both lookups must stay indexed.
+    storageKeyIdx: pgIndex('files_storage_key_idx').on(table.storageKey),
+    pathIdx: pgIndex('files_path_idx').on(table.path),
     // Active files index
     activeIdx: pgIndex('files_active_idx').on(table.isActive),
     // Created date index for ordering
@@ -112,6 +115,9 @@ export const filesSqlite = sqliteTable(
     communityIdx: sqliteIndex('files_community_idx').on(table.communityId),
     userIdx: sqliteIndex('files_user_idx').on(table.uploadedBy),
     mimeTypeIdx: sqliteIndex('files_mime_type_idx').on(table.mimeType),
+    // Orphan sweeper reference checks (#140): both lookups must stay indexed.
+    storageKeyIdx: sqliteIndex('files_storage_key_idx').on(table.storageKey),
+    pathIdx: sqliteIndex('files_path_idx').on(table.path),
     activeIdx: sqliteIndex('files_active_idx').on(table.isActive),
     createdAtIdx: sqliteIndex('files_created_at_idx').on(table.createdAt),
     // Parent key for the composite tenant FK from community_media (#186)

@@ -6,6 +6,10 @@ import {
   startWorkerRuntime,
 } from '../helpers/worker-runtime.js';
 import {
+  ORPHAN_SWEEP_REFERENCE_CHUNK,
+  WORKER_SWEEP_SUBREQUEST_BUDGET,
+} from '../../src/services/media-cleanup.service.js';
+import {
   MAX_PUBLIC_FILTER_VALUES,
   MAX_PUBLIC_TOTAL_FILTER_VALUES,
 } from '../../src/shared/schemas/public-content.js';
@@ -561,6 +565,230 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
         .all()
     ).results;
     expect(leftoverLinks).toHaveLength(0);
+
+    // Slice 9 R2 + D1 streaming multipart upload, metadata, Range download, and delete
+    const pngBytes = Uint8Array.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+    ]);
+    const boundary = 'r2WorkerUploadBoundary';
+    const enc = new TextEncoder();
+    const mpHead = enc.encode(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="r2-smoke.png"\r\nContent-Type: image/png\r\n\r\n`
+    );
+    const mpTail = enc.encode(`\r\n--${boundary}--\r\n`);
+    const mpBody = new Uint8Array(
+      mpHead.byteLength + pngBytes.byteLength + mpTail.byteLength
+    );
+    mpBody.set(mpHead, 0);
+    mpBody.set(pngBytes, mpHead.byteLength);
+    mpBody.set(mpTail, mpHead.byteLength + pngBytes.byteLength);
+
+    const r2UpRes = await mf.dispatchFetch('https://worker.test/v2/media', {
+      method: 'POST',
+      headers: {
+        cookie: pubAdminCookie,
+        origin: 'https://worker.test',
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body: mpBody,
+    });
+    expect(r2UpRes.status).toBe(201);
+    const r2UpBody = (await r2UpRes.json()) as {
+      data: { id: string; checksum: string; byteSize: number };
+    };
+    const r2FileId = r2UpBody.data.id;
+    expect(r2UpBody.data.checksum).toBe(
+      createHash('sha256').update(pngBytes).digest('hex')
+    );
+    expect(r2UpBody.data.byteSize).toBe(pngBytes.byteLength);
+
+    const r2MetaRes = await asCookie(
+      `/v2/media/${r2FileId}/metadata`,
+      pubAdminCookie
+    );
+    expect(r2MetaRes.status).toBe(200);
+
+    const r2RangeRes = await mf.dispatchFetch(
+      `https://worker.test/v2/media/${r2FileId}`,
+      {
+        headers: {
+          cookie: pubAdminCookie,
+          range: 'bytes=0-3',
+        },
+      }
+    );
+    expect(r2RangeRes.status).toBe(206);
+    expect(new Uint8Array(await r2RangeRes.arrayBuffer())).toEqual(
+      pngBytes.subarray(0, 4)
+    );
+
+    const storedR2 = await bucket.get(`communities/3/media/${r2FileId}`);
+    expect(storedR2).not.toBeNull();
+
+    const r2DelRes = await mf.dispatchFetch(
+      `https://worker.test/v2/media/${r2FileId}`,
+      {
+        method: 'DELETE',
+        headers: {
+          cookie: pubAdminCookie,
+          origin: 'https://worker.test',
+        },
+      }
+    );
+    expect(r2DelRes.status).toBe(204);
+    expect(await bucket.get(`communities/3/media/${r2FileId}`)).toBeNull();
+  } finally {
+    await mf.dispose();
+  }
+});
+
+it('runs the orphan sweep from the scheduled() cron handler', async () => {
+  // The scheduled handler is only triggerable when Miniflare's
+  // unsafeTriggerHandlers is enabled; the sweep itself must delete an object
+  // whose files row is gone and keep a still-referenced object.
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(
+      `import worker from './src/worker.js'; export default worker;`
+    ),
+    { ENVIRONMENT: 'test' },
+    { unsafeTriggerHandlers: true }
+  );
+  try {
+    const db = await mf.getD1Database('DB');
+    const bucket = await mf.getR2Bucket('MEDIA');
+    await applyD1Migrations(db);
+    await db.batch([
+      db.prepare(
+        "INSERT INTO communities(id,name,slug,created_at,updated_at) VALUES(1,'Sweep','sweep',0,0)"
+      ),
+      db.prepare(
+        "INSERT INTO files(id,filename,original_name,path,storage_key,url,mime_type,size,community_id,uploaded_by,created_at,updated_at) VALUES('11111111-1111-4111-8111-111111111111','keep','keep','communities/1/keep','communities/1/keep','https://ignored.invalid','image/png',3,1,NULL,0,0)"
+      ),
+    ]);
+    // Referenced object (has a files row) and orphan object (no files row).
+    await bucket.put('communities/1/keep', 'abc');
+    await bucket.put('communities/1/orphan', 'xyz');
+
+    // Dispatch with a scheduled time 48 h in the future: the freshly-put
+    // objects (uploaded "now") are then older than the 24 h grace window, so
+    // the orphan is swept and the referenced object is kept.
+    const scheduledTime = Date.now() + 48 * 60 * 60 * 1000;
+    const res = await mf.dispatchFetch(
+      `http://localhost/cdn-cgi/handler/scheduled?cron=0+*+*+*+*&time=${scheduledTime}`,
+      { method: 'POST' }
+    );
+    expect(res.status).toBe(200);
+
+    // The orphan (no files row) is removed.
+    expect(await bucket.get('communities/1/orphan')).toBeNull();
+    // The referenced object survives because its files row still exists.
+    expect(await bucket.get('communities/1/keep')).not.toBeNull();
+  } finally {
+    await mf.dispose();
+  }
+});
+it('resumes the scheduled R2 sweep past live objects across multiple runs', async () => {
+  // More live (files-row-backed) objects sort before the orphan than the
+  // per-run Worker budget, so a single run cannot reach it. The sweep
+  // persists its key-based resume position in R2 and later runs finish the
+  // job; a referenced object is never deleted.
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(
+      `import worker from './src/worker.js'; export default worker;`
+    ),
+    { ENVIRONMENT: 'test' },
+    { unsafeTriggerHandlers: true }
+  );
+  try {
+    const db = await mf.getD1Database('DB');
+    const bucket = await mf.getR2Bucket('MEDIA');
+    await applyD1Migrations(db);
+    await db
+      .prepare(
+        "INSERT INTO communities(id,name,slug,created_at,updated_at) VALUES(1,'Live','live',0,0)"
+      )
+      .run();
+
+    // More live (files-row-backed) objects than one scheduled run's
+    // subrequest budget can scan. The sweep pages 200 keys at a time; each
+    // full live page costs 1 list + ceil(200/45) reference queries. The
+    // bound below is derived from the budget constants, so it stays valid if
+    // either constant changes — the orphan must be reached within it.
+    const pageSize = 200;
+    const refQueriesPerFullPage = Math.ceil(
+      pageSize / ORPHAN_SWEEP_REFERENCE_CHUNK
+    ); // ≤ 45 keys per query
+    const subrequestsPerFullLivePage = 1 + refQueriesPerFullPage;
+    const livePagesPerRun = Math.floor(
+      WORKER_SWEEP_SUBREQUEST_BUDGET / subrequestsPerFullLivePage
+    );
+    // One full page more than a single run can walk, so the orphan (sorted
+    // after every live key) is unreachable in run 1 whatever the budget is.
+    const liveCount = (livePagesPerRun + 1) * pageSize;
+    const computedBound =
+      Math.ceil(Math.ceil(liveCount / pageSize) / livePagesPerRun) + 1;
+    const inserts: ReturnType<typeof db.prepare>[] = [];
+    for (let i = 0; i < liveCount; i += 1) {
+      const suffix = String(i).padStart(4, '0');
+      const key = `communities/1/media/live-${suffix}`;
+      inserts.push(
+        db.prepare(
+          `INSERT INTO files(id,filename,original_name,path,storage_key,url,mime_type,size,community_id,uploaded_by,created_at,updated_at) VALUES('live-${suffix}','live-${suffix}','live-${suffix}','${key}','${key}','https://ignored.invalid','image/png',3,1,NULL,0,0)`
+        )
+      );
+    }
+    for (let i = 0; i < inserts.length; i += 500) {
+      await db.batch(inserts.slice(i, i + 500));
+    }
+    for (let i = 0; i < liveCount; i += 1) {
+      const suffix = String(i).padStart(4, '0');
+      await bucket.put(`communities/1/media/live-${suffix}`, 'live');
+    }
+    await bucket.put('communities/1/media/zz-orphan', 'orphan');
+
+    // Schedule 48 h in the future so everything is older than the 24 h grace.
+    const scheduledTime = Date.now() + 48 * 60 * 60 * 1000;
+    const dispatch = () =>
+      mf.dispatchFetch(
+        `http://localhost/cdn-cgi/handler/scheduled?cron=0+*+*+*+*&time=${scheduledTime}`,
+        { method: 'POST' }
+      );
+
+    // Dispatch until the orphan is reached, within the computed bound.
+    // The first run must stop inside communities/ (liveCount exceeds one
+    // run's scan capacity), so reaching the orphan proves the cursor
+    // resume mechanism rather than a lucky single run.
+    let runs = 0;
+    let orphanDeleted = false;
+    while (runs < computedBound && !orphanDeleted) {
+      const res = await dispatch();
+      expect(res.status).toBe(200);
+      runs += 1;
+      orphanDeleted =
+        (await bucket.get('communities/1/media/zz-orphan')) === null;
+      if (runs === 1 && !orphanDeleted) {
+        // The first run stopped on budget; the resume position is stored.
+        const resumed = await bucket.get('system/orphan-sweep-cursor.json');
+        expect(resumed).not.toBeNull();
+      }
+    }
+    expect(
+      orphanDeleted,
+      `orphan must be reached within ${computedBound} run(s) derived from the budget constants`
+    ).toBe(true);
+    expect(
+      runs,
+      'a single run cannot scan this many live objects'
+    ).toBeGreaterThanOrEqual(2);
+    // Every live object survived every run.
+    for (let i = 0; i < liveCount; i += 1) {
+      const suffix = String(i).padStart(4, '0');
+      expect(
+        await bucket.get(`communities/1/media/live-${suffix}`)
+      ).not.toBeNull();
+    }
   } finally {
     await mf.dispose();
   }

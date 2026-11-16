@@ -93,11 +93,27 @@ and roadmap Phase 9; this document does not declare a release ready.
    needs it; Wrangler 3.4.0 or later). Keep the timestamped export as a
    retained copy, and record the bookmark that `d1 time-travel info` prints
    immediately before the apply. `wrangler d1 migrations apply` is not known to
-   run a migration file atomically. If a run fails after a migration's guard,
+   run a migration file atomically. Before any restore, set the restore hold so
+   the hourly orphan-sweep cron (`0 * * * *`) cannot delete restored bytes whose
+   `files` rows are not yet visible to it — a Time Travel restore recreates
+   database state, not storage, and the cron reacts within the hour:
+   - Workers binding: `ORPHAN_SWEEP_PAUSED=true` (re-enable only after the
+     restored D1 and R2 agree), or
+   - `system/orphan-sweep-hold` object in the MEDIA bucket
+     (`npx wrangler r2 object put <bucket>/system/orphan-sweep-hold --file /dev/null --remote`; wrangler requires a body, so pass the empty file);
+     remove it with
+     `npx wrangler r2 object delete <bucket>/system/orphan-sweep-hold --remote`
+     once they do;
+
+   the hourly cron is the reaction window — the hold closes it. See
+   [`OPERATIONS-GOVERNANCE.md` §6.4](./OPERATIONS-GOVERNANCE.md#64-restore-hold-for-the-orphan-sweeper)
+   for the full procedure and the exact hold semantics. If a run fails after a
+   migration's guard,
    restore in place (destructive: it overwrites the database, cancels in-flight
    queries and asks for confirmation) with
    `npx wrangler d1 time-travel restore terrastories-staging --env staging --bookmark=<bookmark>`,
-   repair the data, and re-apply. Time Travel is always on: 7 days of history
+   repair the data, re-apply, and lift the hold only after the restored D1 and
+   R2 agree with each other and with the out-of-band erasure records. Time Travel is always on: 7 days of history
    on Workers Free, 30 on Paid
    (https://developers.cloudflare.com/d1/reference/time-travel/). See the header
    of `src/db/migrations/0005_composite_tenant_fks.sql`. Secrets are entered

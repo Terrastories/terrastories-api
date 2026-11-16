@@ -590,6 +590,8 @@ function verifySqliteSchema(sqlite: Database.Database): void {
     'files_mime_type_idx',
     'files_active_idx',
     'files_created_at_idx',
+    'files_storage_key_idx',
+    'files_path_idx',
   ]) {
     assert.ok(fileIndexes.has(indexName), `missing SQLite index ${indexName}`);
   }
@@ -2476,7 +2478,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0011_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0012_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2869,7 +2871,8 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0008_slice1_content_columns.sql',
       '0009_users_identity_and_audit_entries.sql',
       '0010_canonical_media_and_map_configs.sql',
-      '0011_auth_throttle_and_session_lifetimes.sql',
+      '0011_files_storage_key_path_indexes.sql',
+      '0012_auth_throttle_and_session_lifetimes.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')

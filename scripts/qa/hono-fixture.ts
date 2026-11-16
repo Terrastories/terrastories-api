@@ -81,6 +81,12 @@ import {
   ExternalMediaLinkWriteResponseSchema,
   StoryWriteResponseSchema,
 } from '../../src/shared/schemas/story-writes.js';
+import {
+  AttachmentListResponseSchema,
+  AttachmentResponseSchema,
+  MediaMetadataResponseSchema,
+  MediaUploadResponseSchema,
+} from '../../src/shared/schemas/media-v2.js';
 import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import {
@@ -436,6 +442,7 @@ export async function createFixture(
     // The schema enum predates the V2 member role; the raw binding stores it.
     // Canonical V2 super_admin carries null communityId (§6.2).
     let creatorId = 0;
+    const communityUserIds: Partial<Record<Role, number>> = {};
     for (const role of Object.keys(credentials) as Role[]) {
       // Every persona carries a stable username so the username-identifier
       // login journey resolves exactly one account (§6.2). Usernames are
@@ -461,6 +468,7 @@ export async function createFixture(
         })
         .returning();
       if (role === 'admin') creatorId = user.id;
+      communityUserIds[role] = user.id;
     }
     // Legacy V1 elder role in the active community: V2 boundary must reject
     // login with the same uniform 401 failure (SPEC-V2 §6.2).
@@ -1521,6 +1529,29 @@ export async function createFixture(
               body: range ? bytes.subarray(range.start, range.end + 1) : bytes,
               size: bytes.byteLength,
             };
+          },
+          async put(key, stream) {
+            const reader = stream.getReader();
+            const chunks: Uint8Array[] = [];
+            let total = 0;
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value) {
+                chunks.push(value);
+                total += value.byteLength;
+              }
+            }
+            const merged = new Uint8Array(total);
+            let offset = 0;
+            for (const chunk of chunks) {
+              merged.set(chunk, offset);
+              offset += chunk.byteLength;
+            }
+            storage.set(key, merged);
+          },
+          async delete(key) {
+            storage.delete(key);
           },
         },
       });
@@ -4796,7 +4827,8 @@ export async function createFixture(
         .where(
           and(
             eq(auditEntries.communityId, privateCommunityId),
-            like(auditEntries.action, 'community.%')
+            like(auditEntries.action, 'community.%'),
+            eq(auditEntries.resourceType, 'community')
           )
         )
         .orderBy(asc(auditEntries.id));
@@ -5019,6 +5051,240 @@ export async function createFixture(
         expected: 204,
       },
     ];
+    // Slice 9 media QA fixtures live in a dedicated PRIVATE community that no
+    // Explore/read journey visits, so upload/attach/reorder/delete exercises
+    // cannot change the exact public counts, points, or filter sets those
+    // journeys pin. It has its own editor/admin/viewer/member accounts.
+    const mediaCredentials: Record<
+      'viewer' | 'member' | 'editor' | 'admin',
+      { email: string; password: string }
+    > = {
+      viewer: { email: 'qa-media-viewer@example.test', password },
+      member: { email: 'qa-media-member@example.test', password },
+      editor: { email: 'qa-media-editor@example.test', password },
+      admin: { email: 'qa-media-admin@example.test', password },
+    };
+    const [mediaCommunity] = await db
+      .insert(communities)
+      .values({
+        name: 'QA media community',
+        slug: 'qa-media-community',
+        publicStories: false,
+        isActive: true,
+      })
+      .returning();
+    const mediaUserIds: Partial<Record<Role, number>> = {};
+    for (const role of Object.keys(mediaCredentials) as Array<
+      keyof typeof mediaCredentials
+    >) {
+      const [mediaUser] = await db
+        .insert(users)
+        .values({
+          email: mediaCredentials[role].email,
+          ...deriveUserIdentityColumns({
+            email: mediaCredentials[role].email,
+          }),
+          passwordHash,
+          firstName: 'QA',
+          lastName: `Media${role}`,
+          role: sql`${role}`,
+          communityId: mediaCommunity.id,
+          isActive: true,
+        })
+        .returning();
+      mediaUserIds[role] = mediaUser.id;
+    }
+    const [mediaStory] = await db
+      .insert(stories)
+      .values({
+        title: 'QA media story',
+        slug: 'qa-media-story',
+        communityId: mediaCommunity.id,
+        createdBy: mediaUserIds.editor!,
+        privacyLevel: 'public',
+      })
+      .returning();
+    const [mediaRestrictedStory] = await db
+      .insert(stories)
+      .values({
+        title: 'QA media restricted story',
+        slug: 'qa-media-restricted-story',
+        communityId: mediaCommunity.id,
+        createdBy: mediaUserIds.editor!,
+        privacyLevel: 'public',
+        isRestricted: true,
+      })
+      .returning();
+    const [mediaPlace] = await db
+      .insert(places)
+      .values({
+        name: 'QA media place',
+        communityId: mediaCommunity.id,
+        latitude: -3.4,
+        longitude: -60.4,
+      })
+      .returning();
+    const [mediaSpeaker] = await db
+      .insert(speakers)
+      .values({
+        name: 'QA media speaker',
+        communityId: mediaCommunity.id,
+        isActive: true,
+      })
+      .returning();
+    // Community map configuration so the admin static_map attachment has a
+    // real owner row to authorize against.
+    const mediaMapTimestamp = new Date();
+    await db.insert(communityMapConfigs).values({
+      communityId: mediaCommunity.id,
+      styleUrl: 'https://tiles.example.test/media-style.json',
+      basemapStyle: 'terrain',
+      centerLatitude: -3.4,
+      centerLongitude: -60.4,
+      southWestLatitude: -4,
+      southWestLongitude: -61,
+      northEastLatitude: -2,
+      northEastLongitude: -59,
+      zoom: 8,
+      pitch: 0,
+      bearing: 0,
+      threeDimensional: false,
+      projection: 'mercator',
+      staticMapFileId: null,
+      createdAt: mediaMapTimestamp,
+      updatedAt: mediaMapTimestamp,
+    });
+    // A media-community file already attached to its own story: a non-owner
+    // member delete must be 403 (never a 404 existence oracle).
+    const mediaGuardedStory = await db
+      .insert(stories)
+      .values({
+        title: 'QA media guarded story',
+        slug: 'qa-media-guarded-story',
+        communityId: mediaCommunity.id,
+        createdBy: mediaUserIds.editor!,
+        privacyLevel: 'public',
+      })
+      .returning();
+    const mediaGuardedBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const mediaGuardedFileId = crypto.randomUUID();
+    const mediaGuardedPath = `communities/${mediaCommunity.id}/media/${mediaGuardedFileId}`;
+    await db.insert(files).values({
+      id: mediaGuardedFileId,
+      filename: `${mediaGuardedFileId}.png`,
+      originalName: 'qa-guarded.png',
+      path: mediaGuardedPath,
+      storageKey: mediaGuardedPath,
+      url: `/v2/media/${mediaGuardedFileId}`,
+      mimeType: 'image/png',
+      size: mediaGuardedBytes.byteLength,
+      byteSize: mediaGuardedBytes.byteLength,
+      uploadedBy: mediaUserIds.editor!,
+      communityId: mediaCommunity.id,
+      culturalRestrictions: null,
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await db.insert(attachments).values({
+      communityId: mediaCommunity.id,
+      fileId: mediaGuardedFileId,
+      ownerType: 'story',
+      ownerId: mediaGuardedStory[0]!.id,
+      role: 'story_media',
+      ordinal: 0,
+      createdAt: new Date(),
+    });
+
+    // Slice 9 media journey helpers: multipart bodies are built at runtime
+    // (no credential-shaped literals) and exercised identically by SQLite,
+    // PostgreSQL, and the Workers/R2 build.
+    const mediaPngBytes = Uint8Array.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+    ]);
+    // 11 MiB exceeds the 10 MiB image cap and is small enough to stream in
+    // every backend without allocating the 100 MiB request ceiling.
+    const mediaOversizeBytes = (() => {
+      const bytes = new Uint8Array(11 * 1024 * 1024);
+      bytes.set(mediaPngBytes, 0);
+      return bytes;
+    })();
+    const mediaWavBytes = (() => {
+      const buf = new Uint8Array(44);
+      buf.set(new TextEncoder().encode('RIFF'), 0);
+      new DataView(buf.buffer).setUint32(4, 36, true);
+      buf.set(new TextEncoder().encode('WAVEfmt '), 8);
+      new DataView(buf.buffer).setUint32(16, 16, true);
+      new DataView(buf.buffer).setUint16(20, 1, true);
+      new DataView(buf.buffer).setUint16(22, 1, true);
+      new DataView(buf.buffer).setUint32(24, 8000, true);
+      new DataView(buf.buffer).setUint32(28, 8000, true);
+      new DataView(buf.buffer).setUint16(32, 1, true);
+      new DataView(buf.buffer).setUint16(34, 8, true);
+      buf.set(new TextEncoder().encode('data'), 36);
+      return buf;
+    })();
+    const qaMultipart = (options: {
+      filename: string;
+      contentType: string;
+      bytes: Uint8Array;
+      fields?: Record<string, string>;
+    }): { rawBody: Uint8Array; headers: Record<string, string> } => {
+      const boundary = `qa-bound-${Math.random().toString(16).slice(2)}`;
+      const enc = new TextEncoder();
+      const chunks: Uint8Array[] = [];
+      for (const [key, value] of Object.entries(options.fields ?? {})) {
+        chunks.push(
+          enc.encode(
+            `--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${value}\r\n`
+          )
+        );
+      }
+      chunks.push(
+        enc.encode(
+          `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${options.filename}"\r\nContent-Type: ${options.contentType}\r\n\r\n`
+        )
+      );
+      chunks.push(options.bytes);
+      chunks.push(enc.encode(`\r\n--${boundary}--\r\n`));
+      const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+      const rawBody = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        rawBody.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return {
+        rawBody,
+        headers: {
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+        },
+      };
+    };
+    const mediaUploadStagingCheck = (body: unknown): boolean => {
+      const parsed = MediaUploadResponseSchema.safeParse(body);
+      return (
+        parsed.success &&
+        parsed.data.data.attachment === null &&
+        !('storageKey' in parsed.data.data)
+      );
+    };
+    const mediaMetadataCheck = (body: unknown): boolean =>
+      MediaMetadataResponseSchema.safeParse(body).success;
+    let qaStageFileId = '';
+    let qaStageFile2Id = '';
+    let qaAudioFileId = '';
+    let qaStoryAttId = 0;
+    let qaStoryAtt2Id = 0;
+    let qaAdminFileId = '';
+    let qaDisplayAttId = 0;
+    let qaViewerFileId = '';
+    let qaViewerAttId = 0;
+    let qaMemberFileId = '';
+    let qaSuperPhotoId = '';
+
     const journeys: Journey[] = [
       {
         persona: 'anonymous',
@@ -5894,6 +6160,697 @@ export async function createFixture(
             check: publicNotFoundCheck,
           },
           ...publicCommunitiesWithSession,
+        ],
+      },
+      {
+        // Slice 9 media journeys: every new route reached with success and
+        // adversarial paths on the same shared SQLite/PostgreSQL/Workers app.
+        persona: 'media_editor',
+        steps: [
+          {
+            name: 'login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: mediaCredentials.editor,
+            check: ownUser(
+              mediaCredentials.editor.email,
+              'editor',
+              liveSessionCookie,
+              mediaCommunity.id
+            ),
+          },
+          {
+            name: 'upload private staging media',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaStageFile',
+            ...qaMultipart({
+              filename: 'qa-still.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaStageFileId = parsed.data.data.id;
+              return (
+                parsed.data.data.attachment === null &&
+                !('storageKey' in parsed.data.data)
+              );
+            },
+          },
+          {
+            name: 'read staging metadata without storage key',
+            method: 'GET',
+            path: '/v2/media/{qaStageFile}/metadata',
+            expected: 200,
+            check: mediaMetadataCheck,
+          },
+          {
+            name: 'reject magic-byte/type mismatch on upload',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 400,
+            ...qaMultipart({
+              filename: 'qa-spoof.mp3',
+              contentType: 'audio/mpeg',
+              bytes: mediaPngBytes,
+            }),
+          },
+          // The real-HTTP transport cannot send an 11 MiB body and keep the
+          // connection reusable after the server answers 413 without draining
+          // it; the 100 MiB Content-Length cap and the per-category cap are
+          // covered by tests/hono/media-files.test.ts. Exercise the streamed
+          // per-category cap on the in-process and Workers transports.
+          ...(transport === 'http'
+            ? []
+            : [
+                {
+                  name: 'reject oversize request',
+                  method: 'POST',
+                  path: '/v2/media',
+                  expected: 413,
+                  ...qaMultipart({
+                    filename: 'qa-big.png',
+                    contentType: 'image/png',
+                    bytes: mediaOversizeBytes,
+                  }),
+                },
+              ]),
+          {
+            name: 'attach first story media',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            captureId: 'qaStoryAtt',
+            body: {
+              fileId: '{qaStageFile}',
+              ownerType: 'story',
+              ownerId: mediaStory.id,
+              role: 'story_media',
+            },
+            check: (body) => {
+              const parsed = AttachmentResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaStoryAttId = parsed.data.data.id;
+              return (
+                parsed.data.data.ownerType === 'story' &&
+                parsed.data.data.ownerId === mediaStory.id &&
+                parsed.data.data.role === 'story_media' &&
+                parsed.data.data.ordinal === 0
+              );
+            },
+          },
+          {
+            name: 'upload second staging media',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaStageFile2',
+            ...qaMultipart({
+              filename: 'qa-second.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaStageFile2Id = parsed.data.data.id;
+              return parsed.data.data.attachment === null;
+            },
+          },
+          {
+            name: 'attach second story media with deterministic ordinal',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            captureId: 'qaStoryAtt2',
+            body: {
+              fileId: '{qaStageFile2}',
+              ownerType: 'story',
+              ownerId: mediaStory.id,
+              role: 'story_media',
+            },
+            check: (body) => {
+              const parsed = AttachmentResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaStoryAtt2Id = parsed.data.data.id;
+              return parsed.data.data.ordinal === 1;
+            },
+          },
+          {
+            name: 'reorder story media within one owner and role',
+            method: 'PATCH',
+            path: '/v2/attachments/reorder',
+            expected: 200,
+            body: {
+              ownerType: 'story',
+              ownerId: mediaStory.id,
+              role: 'story_media',
+              attachmentIds: ['{qaStoryAtt2}', '{qaStoryAtt}'],
+            },
+            check: (body) => {
+              const parsed = AttachmentListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.map((row) => row.id).join(',') ===
+                  `${qaStoryAtt2Id},${qaStoryAttId}` &&
+                parsed.data.data.map((row) => row.ordinal).join(',') === '0,1'
+              );
+            },
+          },
+          {
+            name: 'reject another community file',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 404,
+            body: {
+              fileId: foreignFileId,
+              ownerType: 'story',
+              ownerId: mediaStory.id,
+              role: 'story_media',
+            },
+          },
+          {
+            name: 'reject restricted story owner',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 404,
+            body: {
+              fileId: '{qaStageFile2}',
+              ownerType: 'story',
+              ownerId: mediaRestrictedStory.id,
+              role: 'story_media',
+            },
+          },
+          {
+            name: 'upload place-name audio',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaAudioFile',
+            ...qaMultipart({
+              filename: 'qa-place.wav',
+              contentType: 'audio/wav',
+              bytes: mediaWavBytes,
+            }),
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaAudioFileId = parsed.data.data.id;
+              return parsed.data.data.mimeType === 'audio/wav';
+            },
+          },
+          {
+            name: 'attach place-name audio',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            body: {
+              fileId: '{qaAudioFile}',
+              ownerType: 'place',
+              ownerId: mediaPlace.id,
+              role: 'place_name_audio',
+            },
+          },
+          {
+            name: 'attach place photo',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            body: {
+              fileId: '{qaStageFile2}',
+              ownerType: 'place',
+              ownerId: mediaPlace.id,
+              role: 'place_photo',
+            },
+          },
+          {
+            name: 'reject image bytes for an audio-only role',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 400,
+            body: {
+              fileId: '{qaStageFile2}',
+              ownerType: 'place',
+              ownerId: mediaPlace.id,
+              role: 'place_name_audio',
+            },
+          },
+          {
+            name: 'upload speaker photo',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaSpeakerFile',
+            ...qaMultipart({
+              filename: 'qa-speaker.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+          },
+          {
+            name: 'attach speaker photo',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            captureId: 'qaSpeakerAtt',
+            body: {
+              fileId: '{qaSpeakerFile}',
+              ownerType: 'speaker',
+              ownerId: mediaSpeaker.id,
+              role: 'speaker_photo',
+            },
+          },
+          {
+            name: 'reject community branding attach for an editor',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 403,
+            body: {
+              fileId: '{qaStageFile}',
+              ownerType: 'community',
+              ownerId: mediaCommunity.id,
+              role: 'community_display_image',
+            },
+          },
+          {
+            name: 'detach first story media',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaStoryAtt}',
+            expected: 204,
+          },
+          {
+            name: 'detach second story media',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaStoryAtt2}',
+            expected: 204,
+          },
+          {
+            // Detaching the last relation already removed the files row and
+            // bytes; the explicit delete now finds nothing (§6.7 inline cleanup).
+            name: 'delete already-removed staging bytes is 404',
+            method: 'DELETE',
+            path: '/v2/media/{qaStageFile}',
+            expected: 404,
+          },
+          {
+            name: 'detach speaker photo',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaSpeakerAtt}',
+            expected: 204,
+          },
+          {
+            // Detaching the last relation already removed the files row and
+            // bytes; the explicit delete now finds nothing (§6.7 inline cleanup).
+            name: 'delete already-removed speaker bytes is 404',
+            method: 'DELETE',
+            path: '/v2/media/{qaSpeakerFile}',
+            expected: 404,
+          },
+          {
+            name: 'upload staging media for an explicit delete',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaDeleteFile',
+            ...qaMultipart({
+              filename: 'qa-delete.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+          },
+          {
+            // The explicit delete of a still-referenced file must succeed and
+            // remove both the row and its bytes on every backend.
+            name: 'delete staging media removes its bytes',
+            method: 'DELETE',
+            path: '/v2/media/{qaDeleteFile}',
+            expected: 204,
+          },
+          {
+            name: 'logout',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ],
+      },
+      {
+        persona: 'media_admin',
+        steps: [
+          {
+            name: 'login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: mediaCredentials.admin,
+            check: ownUser(
+              mediaCredentials.admin.email,
+              'admin',
+              liveSessionCookie,
+              mediaCommunity.id
+            ),
+          },
+          {
+            name: 'upload admin staging media',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaAdminFile',
+            ...qaMultipart({
+              filename: 'qa-admin.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaAdminFileId = parsed.data.data.id;
+              return true;
+            },
+          },
+          {
+            name: 'admin attaches another member user photo',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            body: {
+              fileId: '{qaAdminFile}',
+              ownerType: 'user',
+              ownerId: mediaUserIds.member!,
+              role: 'user_photo',
+            },
+          },
+          {
+            name: 'admin attaches community display image',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            captureId: 'qaDisplayAtt',
+            body: {
+              fileId: '{qaAdminFile}',
+              ownerType: 'community',
+              ownerId: mediaCommunity.id,
+              role: 'community_display_image',
+            },
+            check: (body) => {
+              const parsed = AttachmentResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaDisplayAttId = parsed.data.data.id;
+              return true;
+            },
+          },
+          {
+            name: 'admin attaches sponsor logo',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            body: {
+              fileId: '{qaAdminFile}',
+              ownerType: 'community',
+              ownerId: mediaCommunity.id,
+              role: 'sponsor_logo',
+            },
+          },
+          {
+            name: 'admin attaches static map image',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            body: {
+              fileId: '{qaAdminFile}',
+              ownerType: 'map_config',
+              ownerId: mediaCommunity.id,
+              role: 'static_map',
+            },
+          },
+          {
+            name: 'admin detaches community display image',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaDisplayAtt}',
+            expected: 204,
+          },
+          {
+            name: 'logout',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ],
+      },
+      {
+        persona: 'media_viewer',
+        steps: [
+          {
+            name: 'login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: mediaCredentials.viewer,
+            check: ownUser(
+              mediaCredentials.viewer.email,
+              'viewer',
+              liveSessionCookie,
+              mediaCommunity.id
+            ),
+          },
+          {
+            name: 'reject untyped staging upload',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 403,
+            ...qaMultipart({
+              filename: 'qa-viewer.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+          },
+          {
+            name: 'upload own profile photo',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaViewerFile',
+            ...qaMultipart({
+              filename: 'qa-viewer-avatar.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+              fields: { role: 'user_photo' },
+            }),
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaViewerFileId = parsed.data.data.id;
+              qaViewerAttId = parsed.data.data.attachment?.id ?? 0;
+              return (
+                parsed.data.data.attachment?.ownerId === mediaUserIds.viewer &&
+                parsed.data.data.attachment?.role === 'user_photo'
+              );
+            },
+          },
+          {
+            name: 'reject attachment create for a viewer',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 403,
+            body: {
+              fileId: '{qaViewerFile}',
+              ownerType: 'story',
+              ownerId: mediaStory.id,
+              role: 'story_media',
+            },
+          },
+          {
+            name: 'reject reorder for a viewer',
+            method: 'PATCH',
+            path: '/v2/attachments/reorder',
+            expected: 403,
+            body: {
+              ownerType: 'story',
+              ownerId: mediaStory.id,
+              role: 'story_media',
+              attachmentIds: [1],
+            },
+          },
+          {
+            name: 'logout',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ],
+      },
+      {
+        persona: 'media_member',
+        steps: [
+          {
+            name: 'login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: mediaCredentials.member,
+            check: ownUser(
+              mediaCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              mediaCommunity.id
+            ),
+          },
+          {
+            name: 'reject untyped staging upload',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 403,
+            ...qaMultipart({
+              filename: 'qa-member.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+          },
+          {
+            name: 'upload own profile photo',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaMemberFile',
+            ...qaMultipart({
+              filename: 'qa-member-avatar.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+              fields: { role: 'user_photo' },
+            }),
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaMemberFileId = parsed.data.data.id;
+              return (
+                parsed.data.data.attachment?.ownerId === mediaUserIds.member
+              );
+            },
+          },
+          {
+            name: 'reject attachment create for a member',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 403,
+            body: {
+              fileId: '{qaMemberFile}',
+              ownerType: 'place',
+              ownerId: mediaPlace.id,
+              role: 'place_photo',
+            },
+          },
+          {
+            name: 'reject story media delete for a member',
+            method: 'DELETE',
+            path: `/v2/media/${mediaGuardedFileId}`,
+            expected: 403,
+          },
+          {
+            name: 'logout',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+        ],
+      },
+      {
+        persona: 'media_super_admin',
+        steps: [
+          {
+            name: 'login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: credentials.super_admin,
+            check: ownUser(
+              credentials.super_admin.email,
+              'super_admin',
+              liveSessionCookie,
+              null
+            ),
+          },
+          {
+            name: 'reject untyped staging upload',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 403,
+            ...qaMultipart({
+              filename: 'qa-super.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+            }),
+          },
+          {
+            name: 'reject non-photo typed staging upload',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 403,
+            ...qaMultipart({
+              filename: 'qa-super-story.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+              fields: { role: 'story_media' },
+            }),
+          },
+          {
+            name: 'upload super admin own profile photo',
+            method: 'POST',
+            path: '/v2/media',
+            expected: 201,
+            captureId: 'qaSuperPhoto',
+            ...qaMultipart({
+              filename: 'qa-super-avatar.png',
+              contentType: 'image/png',
+              bytes: mediaPngBytes,
+              fields: { role: 'user_photo' },
+            }),
+            check: (body) => {
+              const parsed = MediaUploadResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaSuperPhotoId = parsed.data.data.id;
+              return parsed.data.data.attachment?.role === 'user_photo';
+            },
+          },
+          {
+            name: 'reject community story attachment from null-community owner',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 403,
+            body: {
+              fileId: '{qaSuperPhoto}',
+              ownerType: 'story',
+              ownerId: mediaStory.id,
+              role: 'story_media',
+            },
+          },
+          {
+            name: 'reject community file for null-community attachment',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 404,
+            body: {
+              fileId: readableFileId,
+              ownerType: 'user',
+              ownerId: communityUserIds.super_admin!,
+              role: 'user_photo',
+            },
+          },
+          {
+            name: 'read own profile photo',
+            method: 'GET',
+            path: '/v2/media/{qaSuperPhoto}',
+            expected: 200,
+          },
+          {
+            name: 'logout',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
         ],
       },
       {

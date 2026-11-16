@@ -83,7 +83,14 @@
       "idx": 11,
       "version": "6",
       "when": 1795089600000,
-      "tag": "0011_auth_throttle_and_session_lifetimes",
+      "tag": "0011_files_storage_key_path_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1795176000000,
+      "tag": "0012_auth_throttle_and_session_lifetimes",
       "breakpoints": true
     }
   ]

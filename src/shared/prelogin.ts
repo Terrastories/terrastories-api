@@ -146,16 +146,17 @@ export async function deterministicPreloginFake(
       mix.params && mix.params.length > 0
         ? mix.params
         : [{ ...ARGON2ID_PARAMS, count: 1 }];
-    // Params pick at digest bytes 24..27: free of the salt (4..19), so the
-    // params draw is independent of the salt bytes (item 4).
+    // Params pick at digest bytes 24..27. The salt no longer comes from
+    // digest bytes 4..19 (it comes from the counter-mode stream below), so
+    // salt and params are independently derived.
     const picked = deterministicPick(digest, 24, paramWeights);
     const saltLenWeights: ReadonlyArray<WeightedSaltLength> =
       mix.saltLengths && mix.saltLengths.length > 0
         ? mix.saltLengths
         : [{ length: MIN_SALT_BYTES, count: 1 }];
-    // Bytes 28..31: free of the Argon2id salt (4..19) and the params pick
-    // (24..27). The salt bytes come from their own counter-mode stream off
-    // the HMAC digest, so the fake salt can match any stored length.
+    // Bytes 28..31: free of the params pick (24..27). The salt bytes come
+    // from their own counter-mode stream off the HMAC digest, so the fake
+    // salt can match any stored length.
     const saltLength = deterministicPick(digest, 28, saltLenWeights).length;
     const saltBytes = await keyStream(digestHex, saltLength);
     return {

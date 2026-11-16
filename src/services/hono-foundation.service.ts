@@ -8,10 +8,19 @@ export interface PasswordVerifier {
 }
 
 const invalidParts = new Set(['', '.', '..']);
+const safeKey = (key: string) =>
+  !key.includes('\\') && !key.split('/').some((part) => invalidParts.has(part));
 export const validStorageKey = (key: string) =>
-  /^(?:communities|users)\/[1-9][0-9]*\//.test(key) &&
-  !key.includes('\\') &&
-  !key.split('/').some((part) => invalidParts.has(part));
+  /^(?:communities|users)\/[1-9][0-9]*\//.test(key) && safeKey(key);
+
+/**
+ * System-owned object: the orphan sweeper's resume cursor. It lives outside the
+ * swept `communities/` and `users/` prefixes, so no sweep ever deletes it and no
+ * tenant key can collide with it.
+ */
+export const ORPHAN_SWEEP_CURSOR_KEY = 'system/orphan-sweep-cursor.json';
+export const validSystemStorageKey = (key: string) =>
+  key === ORPHAN_SWEEP_CURSOR_KEY;
 
 export interface StorageReadRange {
   /** Inclusive 0-based byte offset. */
@@ -65,6 +74,12 @@ export interface FoundationStorage {
    * sweeper. Optional: adapters without listing skip orphan sweeping.
    */
   list?(options?: StorageListOptions): Promise<StorageListResult>;
+  /**
+   * Read/write a system-owned object by absolute key (the orphan sweeper's
+   * resume cursor). Optional: adapters without them sweep without a cursor.
+   */
+  getSystemObject?(key: string): Promise<Uint8Array | null>;
+  putSystemObject?(key: string, bytes: Uint8Array): Promise<void>;
 }
 
 import { sessionLifetime } from '../shared/session-policy.js';

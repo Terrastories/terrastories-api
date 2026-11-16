@@ -11,6 +11,7 @@ import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import {
   validStorageKey,
+  validSystemStorageKey,
   type FoundationStorage,
   type PasswordVerifier,
 } from './services/hono-foundation.service.js';
@@ -187,6 +188,18 @@ export function createWorker(
         truncated: result.truncated,
         cursor: result.truncated ? result.cursor : undefined,
       };
+    },
+
+    async getSystemObject(key) {
+      if (!validSystemStorageKey(key)) return null;
+      const object = await bucket.get(key);
+      if (!object) return null;
+      return new Uint8Array(await object.arrayBuffer());
+    },
+
+    async putSystemObject(key, bytes) {
+      if (!validSystemStorageKey(key)) throw new Error('Invalid system key');
+      await bucket.put(key, bytes);
     },
   });
 

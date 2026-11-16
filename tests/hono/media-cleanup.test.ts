@@ -14,9 +14,10 @@ import {
   MediaCleanupCoordinator,
   ORPHAN_SWEEP_GRACE_MS,
 } from '../../src/services/media-cleanup.service.js';
-import type {
-  FoundationStorage,
-  StorageListEntry,
+import {
+  ORPHAN_SWEEP_CURSOR_KEY,
+  type FoundationStorage,
+  type StorageListEntry,
 } from '../../src/services/hono-foundation.service.js';
 
 const sqlite = new Sqlite(':memory:');
@@ -68,6 +69,8 @@ function createListableStorage(): {
       const limit = options?.limit ?? 200;
       const matched = [...store.entries()]
         .filter(([key]) => key.startsWith(prefix))
+        // The sweep cursor is system state, never sweepable bytes.
+        .filter(([key]) => key !== ORPHAN_SWEEP_CURSOR_KEY)
         .sort(([a], [b]) => a.localeCompare(b))
         .filter(([key]) => (options?.cursor ? key > options.cursor! : true));
       const page = matched.slice(0, limit);
@@ -81,6 +84,12 @@ function createListableStorage(): {
         truncated,
         cursor: truncated ? page[page.length - 1]![0] : undefined,
       };
+    },
+    async getSystemObject(key) {
+      return store.get(key)?.bytes ?? null;
+    },
+    async putSystemObject(key, bytes) {
+      store.set(key, { bytes, uploaded: new Date(0) });
     },
   };
   return { store, storage };
@@ -276,7 +285,7 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     }
   });
 
-  it('bounds a run by the per-run cap', async () => {
+  it('bounds a run by the per-run cap and resumes after the cap on the next run', async () => {
     const now = new Date('2026-06-01T12:00:00.000Z');
     const { store, storage } = createListableStorage();
     const uploaded = new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000);
@@ -290,9 +299,104 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
       now: () => now,
       log: () => {},
     });
-    const result = await cleanup.sweepOrphanObjects({ limit: 2 });
-    expect(result.scanned).toBe(2);
-    expect(result.deletedCount).toBe(2);
-    expect(store.size).toBe(3);
+    const first = await cleanup.sweepOrphanObjects({ limit: 2 });
+    expect(first.scanned).toBe(2);
+    expect(first.deletedCount).toBe(2);
+    expect(store.size).toBe(4);
+
+    // The cursor persisted inside the storage adapter resumes after the two
+    // objects the first run already walked.
+    const second = await cleanup.sweepOrphanObjects({ limit: 2 });
+    expect(second.scanned).toBe(2);
+    expect(second.deletedCount).toBe(2);
+    expect(store.size).toBe(2);
+  });
+
+  it('reaches an orphan behind more live objects than the per-run cap within a few runs', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { store, storage } = createListableStorage();
+    const uploaded = new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000);
+
+    // Live bytes: each has a `files` row, so the sweep must keep them but still
+    // spend its small per-run cap walking past them. There are more live
+    // objects than the per-run cap (3 > 2), ahead of the orphan.
+    for (let i = 0; i < 3; i++) {
+      const key = `communities/1/media/live-${i}`;
+      const id = crypto.randomUUID();
+      await db.insert(tables.files).values({
+        id,
+        filename: id,
+        originalName: `live-${i}.png`,
+        path: key,
+        storageKey: key,
+        url: `/v2/media/${id}`,
+        mimeType: 'image/png',
+        size: 1,
+        byteSize: 1,
+        checksum: null,
+        communityId: 1,
+        uploadedBy: null,
+        culturalRestrictions: null,
+        isActive: true,
+        createdAt: OLD,
+        updatedAt: OLD,
+      });
+      store.set(key, { bytes: Uint8Array.from([i]), uploaded });
+    }
+    // The orphan sorts after every live object.
+    const orphanKey = 'communities/1/media/zz-orphan';
+    store.set(orphanKey, { bytes: Uint8Array.from([9]), uploaded });
+
+    const cleanup = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: () => {},
+    });
+    const runs = 3;
+    for (let i = 0; i < runs && store.has(orphanKey); i++) {
+      await cleanup.sweepOrphanObjects({ limit: 2 });
+    }
+    expect(store.has(orphanKey), 'orphan reached within 2-3 capped runs').toBe(
+      false
+    );
+    // Every live object survived.
+    for (let i = 0; i < 3; i++) {
+      expect(store.has(`communities/1/media/live-${i}`)).toBe(true);
+    }
+  });
+
+  it('walks into the users/ prefix and wraps the cursor back to communities/', async () => {
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { store, storage } = createListableStorage();
+    const uploaded = new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000);
+    const communityOrphan = 'communities/1/media/orphan';
+    const userOrphan = 'users/2/media/orphan';
+    store.set(communityOrphan, { bytes: Uint8Array.from([1]), uploaded });
+    store.set(userOrphan, { bytes: Uint8Array.from([2]), uploaded });
+
+    const cleanup = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: () => {},
+    });
+    // One object per run: the first run clears communities/, the second reaches
+    // users/ and then wraps the cursor back to the start.
+    const first = await cleanup.sweepOrphanObjects({ limit: 1 });
+    expect(first.deletedCount).toBe(1);
+    expect(store.has(communityOrphan)).toBe(false);
+    expect(store.has(userOrphan), 'users/ prefix still pending').toBe(true);
+    // communities/ is fully walked within the run; the budget ran out on
+    // its last object, so the run resumes at users/ on the next run.
+    const cursorAfterFirst = JSON.parse(
+      new TextDecoder().decode(store.get(ORPHAN_SWEEP_CURSOR_KEY)!.bytes)
+    ) as { prefix?: string; startAfter?: string };
+    expect(cursorAfterFirst.prefix).toBe('users/');
+
+    const second = await cleanup.sweepOrphanObjects({ limit: 1 });
+    expect(second.deletedCount).toBe(1);
+    expect(store.has(userOrphan)).toBe(false);
+    // Both prefixes are done: the cursor wraps to the start.
+    const cursorAfterSecond = JSON.parse(
+      new TextDecoder().decode(store.get(ORPHAN_SWEEP_CURSOR_KEY)!.bytes)
+    ) as unknown;
+    expect(cursorAfterSecond).toBeNull();
   });
 });

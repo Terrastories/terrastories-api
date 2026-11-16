@@ -11,7 +11,9 @@ import {
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
+  ORPHAN_SWEEP_CURSOR_KEY,
   validStorageKey,
+  validSystemStorageKey,
   type FoundationStorage,
 } from './services/hono-foundation.service.js';
 
@@ -53,7 +55,7 @@ export async function createLocalStorage(
     key: string,
     createParentDirs: boolean
   ): Promise<{ targetPath: string; tenantRoot: string } | null> => {
-    if (!validStorageKey(key)) return null;
+    if (!validStorageKey(key) && !validSystemStorageKey(key)) return null;
     const tenantRoot = path.resolve(root, key.split('/').slice(0, 2).join('/'));
     const targetPath = path.resolve(root, key);
     if (!targetPath.startsWith(tenantRoot + path.sep)) return null;
@@ -69,6 +71,67 @@ export async function createLocalStorage(
       }
     }
     return { targetPath, tenantRoot };
+  };
+
+  /**
+   * Read a system object by absolute key. Only the storage layer itself calls
+   * this (the sweeper's cursor); media serving keeps the tenant-key guard.
+   */
+  const readSystemObject = async (key: string): Promise<Uint8Array | null> => {
+    if (!validSystemStorageKey(key)) return null;
+    try {
+      const filename = await realpath(path.resolve(root, key));
+      if (!filename.startsWith(root + path.sep)) return null;
+      const handle = await openFile(filename, 'r');
+      try {
+        const chunks: Uint8Array[] = [];
+        for await (const chunk of handle.createReadStream()) {
+          chunks.push(chunk as Uint8Array);
+        }
+        const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return bytes;
+      } finally {
+        await handle.close().catch(() => {});
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  };
+
+  const writeSystemObject = async (
+    key: string,
+    bytes: Uint8Array
+  ): Promise<void> => {
+    if (!validSystemStorageKey(key)) throw new Error('Invalid system key');
+    const targetPath = path.resolve(root, key);
+    const dir = path.dirname(targetPath);
+    await mkdir(dir, { recursive: true });
+    const tmpPath = path.join(dir, `.tmp-${randomUUID()}`);
+    const handle = await openFile(tmpPath, 'w', 0o600);
+    try {
+      let offset = 0;
+      while (offset < bytes.byteLength) {
+        const { bytesWritten } = await handle.write(
+          bytes,
+          offset,
+          bytes.byteLength - offset
+        );
+        offset += bytesWritten;
+      }
+      await handle.close();
+      await rename(tmpPath, targetPath);
+    } catch (error) {
+      await handle.close().catch(() => {});
+      await unlink(tmpPath).catch(() => {});
+      throw error;
+    }
   };
 
   return {
@@ -182,6 +245,8 @@ export async function createLocalStorage(
       await walkStorageDir(root, root, all);
       const matched = all
         .filter((key) => key.startsWith(prefix))
+        // The sweeper's cursor is system state, never sweepable bytes.
+        .filter((key) => key !== ORPHAN_SWEEP_CURSOR_KEY)
         .sort()
         .filter((key) => (options?.cursor ? key > options.cursor! : true));
       const page = matched.slice(0, limit);
@@ -200,5 +265,9 @@ export async function createLocalStorage(
         cursor: truncated ? page[page.length - 1] : undefined,
       };
     },
+
+    getSystemObject: (key) => readSystemObject(key),
+
+    putSystemObject: (key, bytes) => writeSystemObject(key, bytes),
   };
 }

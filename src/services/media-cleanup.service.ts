@@ -30,7 +30,10 @@ import {
   communityMediaPg,
   communityMediaSqlite,
 } from '../db/schema/sessions.js';
-import type { FoundationStorage } from './hono-foundation.service.js';
+import {
+  ORPHAN_SWEEP_CURSOR_KEY,
+  type FoundationStorage,
+} from './hono-foundation.service.js';
 
 export type MediaCleanupReason =
   | 'upload_rollback'
@@ -181,6 +184,9 @@ export const WORKER_ORPHAN_SWEEP_LIMIT = 20;
 
 /** Storage prefixes that can hold community/system bytes. */
 export const ORPHAN_SWEEP_PREFIXES = ['communities/', 'users/'] as const;
+
+/** Named per-page bound for the batched reference check (D1 parameter limit). */
+export const ORPHAN_SWEEP_REFERENCE_CHUNK = 90;
 
 export interface SweepResult {
   deletedCount: number;
@@ -391,6 +397,12 @@ export class MediaCleanupCoordinator {
    * delete). Only objects older than the grace window are considered; a
    * referenced object or a fresh in-flight upload is always kept.
    *
+   * The per-run cap counts only objects past the grace window, so a long run of
+   * live objects never starves garbage collection. Progress is a small cursor
+   * object in the storage adapter (`system/orphan-sweep-cursor.json`, outside
+   * the swept prefixes): each run resumes after `{prefix, startAfter}`, walks
+   * `communities/` then `users/`, and wraps to the start once both are done.
+   *
    * One bad object, page, or prefix never aborts the run: each is logged
    * content-free and the sweep continues, so a single unreadable object cannot
    * stop garbage collection for the rest of the keyspace.
@@ -405,71 +417,262 @@ export class MediaCleanupCoordinator {
     const cutoff =
       opts.olderThan ?? new Date(now().getTime() - ORPHAN_SWEEP_GRACE_MS);
     const limit = opts.limit ?? ORPHAN_SWEEP_LIMIT;
+    const resumable = Boolean(
+      this.storage.getSystemObject && this.storage.putSystemObject
+    );
+    const cursor = resumable ? await this.readSweepCursor() : null;
+
     let scanned = 0;
     let deletedCount = 0;
     let failedCount = 0;
+    const budget = { remaining: limit };
 
-    for (const prefix of ORPHAN_SWEEP_PREFIXES) {
-      let cursor: string | undefined;
-      do {
-        if (scanned >= limit) break;
-        let page;
-        try {
-          page = await this.storage.list({
-            prefix,
-            cursor,
-            limit: Math.min(200, limit - scanned),
-          });
-        } catch {
-          // Content-free: no key, no URL, no error text.
-          this.log('media cleanup: storage list failed; prefix skipped');
-          break;
-        }
-        for (const entry of page.entries) {
-          if (scanned >= limit) break;
+    // Resume prefix order: the cursor's prefix, then the rest, wrapping to the
+    // start once every prefix is done.
+    const prefixes: readonly string[] = cursor
+      ? [
+          ...ORPHAN_SWEEP_PREFIXES.filter((prefix) => prefix === cursor.prefix),
+          ...ORPHAN_SWEEP_PREFIXES.filter((prefix) => prefix !== cursor.prefix),
+        ]
+      : [...ORPHAN_SWEEP_PREFIXES];
+
+    let wrapped = false;
+    let next: { prefix: string; startAfter?: string } | null = cursor;
+    let stop: { prefix: string; startAfter?: string } | null = null;
+
+    while (budget.remaining > 0) {
+      const prefix = next?.prefix ?? prefixes[0]!;
+      const startAfter = next?.startAfter;
+      const outcome = await this.sweepPrefix({
+        prefix,
+        startAfter,
+        cutoff,
+        budget,
+        onScanned: () => {
           scanned++;
-          try {
-            if (entry.uploaded.getTime() >= cutoff.getTime()) continue;
-            // One query covers both stored-key spellings.
-            if (await this.isStorageKeyReferenced(entry.key)) continue;
-          } catch {
-            // Content-free: an unreadable candidate is left for the next run.
-            failedCount++;
-            this.log(
-              'media cleanup: reference check failed; object left in place'
-            );
-            continue;
-          }
-          const ok = await this.deleteStorageBestEffort(
-            entry.key,
-            'owner_deleted'
-          );
-          if (ok) deletedCount++;
-          else failedCount++;
-        }
-        cursor = page.truncated ? page.cursor : undefined;
-      } while (cursor && scanned < limit);
-      if (scanned >= limit) break;
+          budget.remaining--;
+        },
+        onDeleted: () => {
+          deletedCount++;
+        },
+        onFailed: () => {
+          failedCount++;
+        },
+      });
+      if (outcome.kind === 'list_failed') {
+        // The adapter could not list this prefix; the run ends where it stands
+        // and the stored cursor resumes at the failed prefix next time.
+        stop = { prefix, startAfter };
+        break;
+      }
+      if (outcome.kind === 'budget') {
+        stop = { prefix, startAfter: outcome.startAfter };
+        break;
+      }
+      // Prefix exhausted: move to the next one, wrapping to the start.
+      const index = prefixes.indexOf(prefix);
+      if (index + 1 < prefixes.length) {
+        next = { prefix: prefixes[index + 1]! };
+        continue;
+      }
+      next = null;
+      wrapped = true;
+      break;
     }
+
+    // Both prefixes are done: the cursor wraps to the start (the absence of
+    // a cursor), whether it got there by finishing this run or by the
+    // users/ → communities/ rotation.
+    if (next && next.prefix === 'communities/' && !next.startAfter) {
+      wrapped = true;
+      next = null;
+    }
+
+    if (stop) {
+      await this.writeSweepCursor(stop);
+      return { deletedCount, failedCount, scanned };
+    }
+    if (wrapped || next === null) {
+      // Both prefixes were walked to the end: the cursor wraps to the start.
+      await this.writeSweepCursor(null);
+      return { deletedCount, failedCount, scanned };
+    }
+    await this.writeSweepCursor(next);
 
     return { deletedCount, failedCount, scanned };
   }
 
   /**
-   * True when any `files` row still points at this stored object, under either
-   * the canonical `storage_key` or the legacy `path` spelling. One query, so a
-   * sweep spends a single subrequest per candidate.
+   * Walk one prefix from `startAfter` (exclusive) until the run budget is spent
+   * or the prefix is exhausted. Returns `{kind:'done'}` when the prefix is
+   * exhausted, `{kind:'budget', startAfter}` when the budget ran out after
+   * `startAfter`, and `{kind:'list_failed'}` when the prefix could not be
+   * listed.
    */
-  private async isStorageKeyReferenced(key: string): Promise<boolean> {
+  private async sweepPrefix(input: {
+    prefix: string;
+    startAfter: string | undefined;
+    cutoff: Date;
+    budget: { remaining: number };
+    onScanned: () => void;
+    onDeleted: () => void;
+    onFailed: () => void;
+  }): Promise<
+    | { kind: 'done' }
+    | { kind: 'budget'; startAfter?: string }
+    | { kind: 'list_failed' }
+  > {
+    let cursor = input.startAfter;
+    for (;;) {
+      let page;
+      try {
+        page = await this.storage.list!({
+          prefix: input.prefix,
+          cursor,
+          limit: 200,
+        });
+      } catch {
+        // Content-free: no key, no URL, no error text.
+        this.log('media cleanup: storage list failed; prefix skipped');
+        return { kind: 'list_failed' };
+      }
+
+      // Only objects past the grace window count toward the run budget.
+      const candidates = page.entries.filter(
+        (entry) => entry.uploaded.getTime() < input.cutoff.getTime()
+      );
+      for (
+        let start = 0;
+        start < candidates.length;
+        start += ORPHAN_SWEEP_REFERENCE_CHUNK
+      ) {
+        const chunk = candidates.slice(
+          start,
+          start + ORPHAN_SWEEP_REFERENCE_CHUNK
+        );
+        let referenced: Set<string>;
+        try {
+          referenced = await this.findReferencedKeys(
+            chunk.map((entry) => entry.key)
+          );
+        } catch {
+          // Content-free: an unreadable candidate set is left for the next run.
+          input.onFailed();
+          continue;
+        }
+        for (const entry of chunk) {
+          if (input.budget.remaining <= 0) {
+            // Resume strictly after the last object actually walked: the
+            // previous entry, or the incoming cursor for the first one.
+            const index = page.entries.indexOf(entry);
+            const resumeAfter =
+              index > 0 ? page.entries[index - 1]!.key : cursor;
+            return { kind: 'budget', startAfter: resumeAfter };
+          }
+          input.onScanned();
+          if (referenced.has(entry.key)) continue;
+          const ok = await this.deleteStorageBestEffort(
+            entry.key,
+            'owner_deleted'
+          );
+          if (ok) input.onDeleted();
+          else input.onFailed();
+        }
+      }
+
+      // The page is fully walked. If the last page is exhausted the prefix is
+      // done — even when the budget ran out on its final object — so the run
+      // moves on (or wraps) instead of pinning the cursor on a gone prefix.
+      if (!page.truncated || !page.cursor) return { kind: 'done' };
+      if (input.budget.remaining <= 0) {
+        const resumeAfter = page.entries[page.entries.length - 1]!.key;
+        return { kind: 'budget', startAfter: resumeAfter };
+      }
+      // No budget was spent (every entry was inside the grace window); keep
+      // walking, but never spin on a non-advancing cursor.
+      if (page.cursor === cursor) return { kind: 'done' };
+      cursor = page.cursor;
+    }
+  }
+
+  private async readSweepCursor(): Promise<{
+    prefix: string;
+    startAfter?: string;
+  } | null> {
+    const get = this.storage.getSystemObject;
+    if (!get) return null;
+    try {
+      const raw = await get(ORPHAN_SWEEP_CURSOR_KEY);
+      if (!raw) return null;
+      const parsed: unknown = JSON.parse(new TextDecoder().decode(raw));
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const { prefix, startAfter } = parsed as {
+        prefix?: unknown;
+        startAfter?: unknown;
+      };
+      if (typeof prefix !== 'string') return null;
+      if (
+        !ORPHAN_SWEEP_PREFIXES.includes(prefix as 'communities/' | 'users/')
+      ) {
+        return null;
+      }
+      return typeof startAfter === 'string'
+        ? { prefix, startAfter }
+        : { prefix };
+    } catch {
+      // Content-free: an unreadable cursor restarts the sweep at the beginning.
+      return null;
+    }
+  }
+
+  private async writeSweepCursor(
+    cursor: { prefix: string; startAfter?: string } | null
+  ): Promise<void> {
+    const put = this.storage.putSystemObject;
+    if (!put) return;
+    try {
+      await put(
+        ORPHAN_SWEEP_CURSOR_KEY,
+        new TextEncoder().encode(JSON.stringify(cursor))
+      );
+    } catch {
+      // Content-free: the next run simply resumes from the previous position.
+      this.log('media cleanup: sweep cursor write failed');
+    }
+  }
+
+  /**
+   * Keys of `files` rows that still point at any of `keys`, under either the
+   * canonical `storage_key` or the legacy `path` spelling. One query per ≤90
+   * keys keeps D1 bound parameters bounded.
+   */
+  private async findReferencedKeys(
+    keys: ReadonlyArray<string>
+  ): Promise<Set<string>> {
     const tables = tablesFor(this.connection);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = this.connection as any;
-    const rows = await db
-      .select({ id: tables.files.id })
-      .from(tables.files)
-      .where(or(eq(tables.files.storageKey, key), eq(tables.files.path, key)))
-      .limit(1);
-    return Array.isArray(rows) && rows.length > 0;
+    const referenced = new Set<string>();
+    for (let i = 0; i < keys.length; i += ORPHAN_SWEEP_REFERENCE_CHUNK) {
+      const chunk = keys.slice(i, i + ORPHAN_SWEEP_REFERENCE_CHUNK);
+      const rows = (await db
+        .select({
+          storageKey: tables.files.storageKey,
+          path: tables.files.path,
+        })
+        .from(tables.files)
+        .where(
+          or(
+            inArray(tables.files.storageKey, chunk),
+            inArray(tables.files.path, chunk)
+          )
+        )) as Array<{ storageKey: string | null; path: string }>;
+      for (const row of rows) {
+        if (row.storageKey) referenced.add(row.storageKey);
+        referenced.add(row.path);
+      }
+    }
+    return referenced;
   }
 }
 

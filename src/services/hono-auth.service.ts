@@ -224,9 +224,10 @@ export class HonoAuthService {
    * rejected attempt also feeds the per-IP counter and, when the identifier
    * resolved to exactly one account, that account's counter.
    *
-   * A successful attempt resets the per-account counter (the per-IP counter
-   * survives so a shared address keeps its guessing record), writes the
-   * verifier when the account upgrades, and establishes the session.
+   * A successful attempt resets both the per-account and the per-IP counters
+   * (SPEC-V2 §6.10) — a shared NAT must not keep a lockout from a stranger's
+   * typos — writes the verifier when the account upgrades, and establishes the
+   * session.
    */
   async login(
     input: LoginInput,

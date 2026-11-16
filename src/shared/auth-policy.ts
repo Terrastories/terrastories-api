@@ -300,11 +300,45 @@ export interface ClientIpOptions {
   remoteAddress?: string | null;
 }
 
+function isValidIpv4(value: string): boolean {
+  const parts = value.split('.');
+  if (parts.length !== 4) return false;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    if (Number(part) > 255) return false;
+  }
+  return true;
+}
+
+function isValidIpv6(value: string): boolean {
+  // Zones (fe80::1%eth0) carry a device the throttle must not key on.
+  if (value.includes('%') || !value.includes(':')) return false;
+  let tailLength = 0;
+  if (value.includes('.')) {
+    const embedded = value.slice(value.lastIndexOf(':') + 1);
+    if (!isValidIpv4(embedded)) return false;
+    tailLength = 2; // the embedded IPv4 counts as the final two 16-bit groups
+    value = value.slice(0, value.lastIndexOf(':'));
+  }
+  const sides = value.split('::');
+  if (sides.length > 2) return false;
+  const groupsOf = (side: string): string[] =>
+    side === '' ? [] : side.split(':');
+  const left = groupsOf(sides[0]!);
+  const right = sides.length === 2 ? groupsOf(sides[1]!) : [];
+  for (const group of [...left, ...right])
+    if (!/^[0-9a-fA-F]{1,4}$/.test(group)) return false;
+  if (sides.length === 2) return left.length + right.length + tailLength <= 8;
+  return left.length === 8 - tailLength;
+}
+
 function usableIp(value: string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   const trimmed = value.trim();
   if (trimmed === '' || trimmed.length > AUTH_CLIENT_IP_MAX_LENGTH) return null;
-  return trimmed;
+  if (trimmed.includes(':')) return isValidIpv6(trimmed) ? trimmed : null;
+  if (trimmed.includes('.')) return isValidIpv4(trimmed) ? trimmed : null;
+  return null;
 }
 
 /**
@@ -320,9 +354,10 @@ function usableIp(value: string | null | undefined): string | null {
  * the proxy's client-address header (`trustedProxyHeader: 'x-real-ip'`;
  * `TRUSTED_PROXY_HEADER=x-real-ip`), and otherwise ignored entirely: a proxy
  * that merely passes a caller-set `X-Real-IP` through must not hand the
- * caller its own per-IP bucket. Anything unusable becomes the `unknown`
- * bucket, so a request without a usable address still feeds exactly one
- * per-IP counter.
+ * caller its own per-IP bucket. Only syntactically valid IPv4/IPv6 addresses
+ * are used as keys, whichever source they come from; anything else falls
+ * back to the socket peer, and failing that becomes the `unknown` bucket, so
+ * a request without a usable address still feeds exactly one per-IP counter.
  */
 export function clientIpOf(
   headers: Headers,

@@ -94,6 +94,48 @@ describe('clientIpOf', () => {
     );
   });
 
+  it('honours only syntactically valid IPv4/IPv6 addresses', () => {
+    // IPv6 accepted with and without compression; IPv4-mapped and ::1 work.
+    expect(clientIpOf(h(['2001:db8::1']), { trustProxy: true })).toBe(
+      '2001:db8::1'
+    );
+    expect(clientIpOf(h(['::1']), { trustProxy: true })).toBe('::1');
+    expect(clientIpOf(h(['::ffff:192.0.2.1']), { trustProxy: true })).toBe(
+      '::ffff:192.0.2.1'
+    );
+    expect(clientIpOf(h(['1.2.3.4']), { trustProxy: true })).toBe('1.2.3.4');
+    // Out-of-range octets and malformed groups fall back to the socket peer.
+    for (const bogus of [
+      '256.1.1.1',
+      '999.1.1.1',
+      '1.2.3.256',
+      'not-an-ip',
+      'garbage',
+      'gg::1',
+      '1:2:3:4:5:6:7:8:9',
+      'fe80::1%eth0',
+      '1.2.3',
+      '192.168.1.1,',
+    ]) {
+      expect(
+        clientIpOf(h([bogus]), {
+          trustProxy: true,
+          remoteAddress: '198.51.100.4',
+        }),
+        `expected ${bogus} to fall back to the socket peer`
+      ).toBe('198.51.100.4');
+    }
+    // Garbage in x-real-ip with the explicit header set still falls back.
+    const headers = new Headers();
+    headers.set('x-forwarded-for', '198.51.100.7');
+    headers.set('x-real-ip', 'not-an-ip');
+    expect(
+      clientIpOf(headers, { trustProxy: true, trustedProxyHeader: 'x-real-ip' })
+    ).toBe('198.51.100.7');
+    // And garbage everywhere becomes the unknown bucket.
+    expect(clientIpOf(h(['not-an-ip']), { trustProxy: true })).toBe('unknown');
+  });
+
   it('becomes the unknown bucket when nothing usable exists', () => {
     expect(clientIpOf(new Headers(), {})).toBe('unknown');
   });

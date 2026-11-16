@@ -352,6 +352,36 @@ describe('Slice 9 media upload, metadata, ranged serving, and deletion (#140)', 
     sqlite.close();
   });
 
+  it('sniffs only MAGIC_SNIFF_BYTES of a first chunk larger than 8 KiB and stores every byte with a matching checksum', async () => {
+    // A single multipart body larger than the sniff window: the first stream
+    // chunk exceeds MAGIC_SNIFF_BYTES, so the bounded sniff copy and the
+    // per-chunk enqueue path both run.
+    const padded = new Uint8Array(PNG_BYTES.byteLength + 20_000);
+    padded.set(PNG_BYTES, 0);
+    for (let i = PNG_BYTES.byteLength; i < padded.byteLength; i += 1) {
+      padded[i] = i % 251;
+    }
+    const res = await uploadMedia({
+      cookie: cookies.editorA,
+      filename: 'large-first-chunk.png',
+      contentType: 'image/png',
+      bytes: padded,
+    });
+    expect(res.status).toBe(201);
+    const body = MediaUploadResponseSchema.parse(await res.json());
+    expect(body.data.byteSize).toBe(padded.byteLength);
+    expect(body.data.checksum).toBe(
+      createHash('sha256').update(padded).digest('hex')
+    );
+    const [dbFile] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, body.data.id));
+    const stored = memStore.get(dbFile!.storageKey!);
+    expect(stored).toBeDefined();
+    expect(Buffer.from(stored!.bytes).equals(Buffer.from(padded))).toBe(true);
+  });
+
   it('streams PNG upload with SHA-256, sanitizes traversal filename, serves ranges & sandbox headers, and hides storageKey', async () => {
     const res = await uploadMedia({
       cookie: cookies.editorA,

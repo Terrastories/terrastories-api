@@ -1404,10 +1404,13 @@ export async function runHonoFoundationContract(
         null,
         'the raced login must not issue a session cookie'
       );
-      assert.equal(
-        changeResponse.status,
-        409,
-        'a password change that loses the coupled write must answer 409, never a 5xx'
+      // The concurrent verifier change revokes the presented session (the
+      // users_revoke_sessions trigger) and invalidates the current key, so the
+      // racing change may fail at the session gate (401) or at the coupled
+      // write (409). Both are correct; a 5xx or any write is not.
+      assert.ok(
+        changeResponse.status === 401 || changeResponse.status === 409,
+        `a password change that loses the coupled write must answer 401 or 409, never a 5xx (got ${changeResponse.status})`
       );
       const coupledAfter = await db
         .select()
@@ -1419,12 +1422,21 @@ export async function runHonoFoundationContract(
         'the concurrent reset must hold the verifier write'
       );
       const coupledSessions = await db
-        .select({ id: sessions.id })
+        .select({
+          id: sessions.id,
+          revokedAt: sessions.revokedAt,
+          createdAt: sessions.createdAt,
+        })
         .from(sessions)
         .where(eq(sessions.userId, coupledAccount.id));
+      // The concurrent verifier change revokes every earlier session, so after
+      // a lost coupled write no live (unrevoked) session may exist: neither a
+      // newly minted one nor a rotated copy of the presented one.
       assert.equal(
-        coupledSessions.length,
-        1,
+        coupledSessions.filter(
+          (row: { revokedAt: unknown }) => row.revokedAt == null
+        ).length,
+        0,
         'a lost coupled write must not mint or rotate a session'
       );
       const [wrappedBefore] = await db

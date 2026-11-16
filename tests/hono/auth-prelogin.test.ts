@@ -649,6 +649,116 @@ describe('POST /v2/auth/prelogin (#137 item 2)', () => {
     expect(BCRYPT_RAILS_COSTS as readonly number[]).toContain(params.cost);
   });
 
+  it('gives pairwise identical paired-request responses (locator oracle regression)', async () => {
+    const { app, db } = await setup();
+    const body = async (request: Record<string, unknown>) =>
+      (await (await postPrelogin(app, request)).json()) as Record<
+        string,
+        unknown
+      >;
+    // (a) A uniquely resolved real account: no slug, a nonexistent slug, a
+    // real-but-wrong slug, a slug for its account-free community, and the
+    // right slug all answer with the stored verifier shape — nothing else
+    // a locator can legally flip.
+    const uniqueIdentifier = 'upgraded@prelogin.test';
+    const uniqueAnswers = await Promise.all([
+      body({ identifier: uniqueIdentifier }),
+      body({
+        identifier: uniqueIdentifier,
+        communitySlug: 'no-such-community',
+      }),
+      body({ identifier: uniqueIdentifier, communitySlug: 'prelogin-beta' }),
+      body({ identifier: uniqueIdentifier, communitySlug: 'prelogin-gamma' }),
+      body({ identifier: uniqueIdentifier, communitySlug: 'prelogin-alpha' }),
+    ]);
+    for (const answer of uniqueAnswers.slice(1))
+      expect(answer).toEqual(uniqueAnswers[0]);
+    // The same holds for a globally unique username.
+    const usernameAnswers = await Promise.all([
+      body({ identifier: 'upgraded_alpha' }),
+      body({ identifier: 'upgraded_alpha', communitySlug: 'prelogin-beta' }),
+      body({
+        identifier: 'upgraded_alpha',
+        communitySlug: 'no-such-community',
+      }),
+    ]);
+    for (const answer of usernameAnswers.slice(1))
+      expect(answer).toEqual(usernameAnswers[0]);
+    // (b) An unknown identifier: no slug, a nonexistent slug and a real
+    // slug for a community the client might be probing all answer with
+    // the same deployment-wide, slug-independent fake.
+    const unknownIdentifier = 'pairwise-unknown@prelogin.test';
+    const unknownAnswers = await Promise.all([
+      body({ identifier: unknownIdentifier }),
+      body({
+        identifier: unknownIdentifier,
+        communitySlug: 'no-such-community',
+      }),
+      body({ identifier: unknownIdentifier, communitySlug: 'prelogin-alpha' }),
+      body({ identifier: unknownIdentifier, communitySlug: 'prelogin-beta' }),
+      body({ identifier: unknownIdentifier, communitySlug: 'prelogin-gamma' }),
+    ]);
+    for (const answer of unknownAnswers.slice(1))
+      expect(answer).toEqual(unknownAnswers[0]);
+    // An email shared across two communities: no slug and a nonexistent
+    // slug answer with the same fake, and each community's slug gives that
+    // community's real parameters.
+    const sharedIdentifier = 'shared@prelogin.test';
+    const sharedFake = await body({ identifier: sharedIdentifier });
+    expect(await body({ identifier: sharedIdentifier })).toEqual(sharedFake);
+    expect(
+      await body({
+        identifier: sharedIdentifier,
+        communitySlug: 'no-such-community',
+      })
+    ).toEqual(sharedFake);
+    expect(
+      await body({
+        identifier: sharedIdentifier,
+        communitySlug: 'prelogin-beta',
+      })
+    ).not.toEqual(sharedFake);
+    const sharedEmailRows = await db
+      .select({
+        salt: usersSqlite.passwordSalt,
+        algorithm: usersSqlite.passwordAlgorithm,
+        params: usersSqlite.passwordParams,
+        communityId: usersSqlite.communityId,
+      })
+      .from(usersSqlite)
+      .where(
+        eq(
+          usersSqlite.emailNormalized,
+          normalizeSearchText('shared@prelogin.test')
+        )
+      );
+    expect(sharedEmailRows).toHaveLength(2);
+    const argonRow = sharedEmailRows.find(
+      (row) => row.algorithm === ARGON2ID_ALGORITHM
+    );
+    const bcryptRow = sharedEmailRows.find(
+      (row) => row.algorithm === RAILS_BCRYPT_ALGORITHM
+    );
+    expect(argonRow && bcryptRow).toBeTruthy();
+    const alphaResponse = await body({
+      identifier: sharedIdentifier,
+      communitySlug: 'prelogin-alpha',
+    });
+    expect(alphaResponse.algorithm).toBe(ARGON2ID_ALGORITHM);
+    expect(alphaResponse.salt).toBe(argonRow!.salt);
+    expect(alphaResponse.params).toEqual(JSON.parse(ARGON2ID_PARAMS_JSON));
+    const betaResponse = await body({
+      identifier: sharedIdentifier,
+      communitySlug: 'prelogin-beta',
+    });
+    expect(betaResponse.algorithm).toBe(RAILS_BCRYPT_ALGORITHM);
+    expect(betaResponse.salt).toBe(bcryptRow!.salt);
+    expect(betaResponse.params).toEqual(JSON.parse(bcryptRow!.params!));
+    // The two resolved answers differ: each community's slug picks that
+    // community's stored verifier, never the other's.
+    expect(alphaResponse).not.toEqual(betaResponse);
+  });
+
   it('does not reveal an ambiguous email without a locator, and resolves with one', async () => {
     const { app } = await setup();
     const ambiguous = await postPrelogin(app, {

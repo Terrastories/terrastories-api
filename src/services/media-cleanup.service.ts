@@ -206,8 +206,13 @@ export const ORPHAN_SWEEP_MAX_PAGES = 50;
 /** Storage prefixes that can hold community/system bytes. */
 export const ORPHAN_SWEEP_PREFIXES = ['communities/', 'users/'] as const;
 
-/** Named per-page bound for the batched reference check (D1 parameter limit). */
-export const ORPHAN_SWEEP_REFERENCE_CHUNK = 90;
+/**
+ * Named per-page bound for the batched reference check (D1's 100-parameter
+ * limit). Each candidate key is bound *twice* — once for `storage_key` and
+ * once for `path` — so the chunk is sized at 45 keys (90 bound parameters),
+ * not at the limit itself.
+ */
+export const ORPHAN_SWEEP_REFERENCE_CHUNK = 45;
 
 export interface SweepResult {
   deletedCount: number;
@@ -582,39 +587,41 @@ export class MediaCleanupCoordinator {
         return { kind: 'list_failed' };
       }
 
-      // Only objects past the grace window count toward the run budget.
+      // Consult the run budget *before* building any reference query: a
+      // chunk is capped to the remaining budget, so the query never binds
+      // more keys than the run can consume. Each key binds twice
+      // (storage_key and path), so a chunk stays at
+      // 2 * ORPHAN_SWEEP_REFERENCE_CHUNK <= 90 bound parameters.
+      let lastWalked: string | undefined;
       const candidates = page.entries.filter(
         (entry) => entry.uploaded.getTime() < input.cutoff.getTime()
       );
-      for (
-        let start = 0;
-        start < candidates.length;
-        start += ORPHAN_SWEEP_REFERENCE_CHUNK
-      ) {
+      let walkIndex = 0;
+      while (walkIndex < candidates.length && input.budget.remaining > 0) {
         const chunk = candidates.slice(
-          start,
-          start + ORPHAN_SWEEP_REFERENCE_CHUNK
+          walkIndex,
+          walkIndex + ORPHAN_SWEEP_REFERENCE_CHUNK
         );
+        const applicable =
+          input.budget.remaining >= chunk.length
+            ? chunk
+            : chunk.slice(0, input.budget.remaining);
+        if (applicable.length === 0) break;
+        walkIndex += applicable.length;
         let referenced: Set<string>;
         try {
           referenced = await this.findReferencedKeys(
-            chunk.map((entry) => entry.key)
+            applicable.map((entry) => entry.key)
           );
         } catch {
-          // Content-free: an unreadable candidate set is left for the next run.
+          // Content-free: an unreadable candidate set is left for the next
+          // run; it does not count against the per-run budget.
           input.onFailed();
           continue;
         }
-        for (const entry of chunk) {
-          if (input.budget.remaining <= 0) {
-            // Resume strictly after the last object actually walked: the
-            // previous entry, or the incoming cursor for the first one.
-            const index = page.entries.indexOf(entry);
-            const resumeAfter =
-              index > 0 ? page.entries[index - 1]!.key : startAfter;
-            return { kind: 'budget', startAfter: resumeAfter };
-          }
+        for (const entry of applicable) {
           input.onScanned();
+          lastWalked = entry.key;
           if (referenced.has(entry.key)) continue;
           const ok = await this.deleteStorageBestEffort(
             entry.key,
@@ -624,14 +631,23 @@ export class MediaCleanupCoordinator {
           else input.onFailed();
         }
       }
-
+      // The walk stopped early — budget ran out with unscanned
+      // past-grace objects left on this page. Resume strictly after the
+      // last object scanned (the incoming cursor if none was scanned),
+      // never before it and never skipping an unscanned one.
+      if (walkIndex < candidates.length) {
+        return { kind: 'budget', startAfter: lastWalked ?? startAfter };
+      }
       // The page is fully walked. If the prefix is exhausted it is done —
       // even when the budget ran out on its last object — so the run moves on
-      // (or wraps) instead of pinning the cursor on a gone prefix.
+      // (or wraps) instead of pinning the cursor on a gone prefix. Nothing
+      // was skipped by the budget cap here: every past-grace object on this
+      // page was processed.
       if (!page.truncated || !page.nextStartAfter) return { kind: 'done' };
+      // Budget spent on this page: resume exactly after the last object
+      // scanned (the incoming cursor if none), never before it.
       if (input.budget.remaining <= 0) {
-        const resumeAfter = page.entries[page.entries.length - 1]!.key;
-        return { kind: 'budget', startAfter: resumeAfter };
+        return { kind: 'budget', startAfter: lastWalked ?? startAfter };
       }
       // Listing cap reached: stop even though no budget was spent, so a run
       // of fresh objects cannot walk the whole prefix within one invocation.
@@ -719,8 +735,8 @@ export class MediaCleanupCoordinator {
 
   /**
    * Keys of `files` rows that still point at any of `keys`, under either the
-   * canonical `storage_key` or the legacy `path` spelling. One query per ≤90
-   * keys keeps D1 bound parameters bounded.
+   * canonical `storage_key` or the legacy `path` spelling. One query per ≤45
+   * keys keeps D1 bound parameters bounded (each key binds twice).
    */
   private async findReferencedKeys(
     keys: ReadonlyArray<string>

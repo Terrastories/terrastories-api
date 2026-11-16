@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { eq } from 'drizzle-orm';
 import { tablesFor } from '../../src/db/dialect.js';
@@ -523,5 +524,135 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
       new TextDecoder().decode(store.get(ORPHAN_SWEEP_CURSOR_KEY)!.bytes)
     ) as unknown;
     expect(cursorAfterSecond).toBeNull();
+  });
+
+  /**
+   * D1-driver harness with a bound-parameter counter. Every prepared
+   * statement in the sweep goes through this client, so the counter sees
+   * both the batched reference checks and the direct deletes.
+   */
+  function createParamCountD1Db(): {
+    db: ReturnType<typeof drizzleD1>;
+    sqlite: Sqlite.Database;
+    boundParams: number[];
+  } {
+    const d1Sqlite = new Sqlite(':memory:');
+    d1Sqlite.pragma('foreign_keys = ON');
+    migrate(drizzle(d1Sqlite), { migrationsFolder: './src/db/migrations' });
+    const boundParams: number[] = [];
+    const client = {
+      prepare(query: string) {
+        let params: unknown[] = [];
+        const stmt = {
+          bind(...vals: unknown[]) {
+            boundParams.push(vals.length);
+            params = vals;
+            return stmt;
+          },
+          all: async () => ({
+            results: d1Sqlite.prepare(query).all(...params),
+            success: true,
+            meta: {},
+          }),
+          raw: async () =>
+            d1Sqlite
+              .prepare(query)
+              .raw(true)
+              .all(...params),
+          first: async () => d1Sqlite.prepare(query).get(...params) ?? null,
+          run: async () => {
+            const info = d1Sqlite.prepare(query).run(...params);
+            return { success: true, meta: { changes: info.changes } };
+          },
+          _exec() {
+            const prepared = d1Sqlite.prepare(query);
+            if (prepared.reader) {
+              return { results: prepared.all(...params) };
+            }
+            const info = prepared.run(...params);
+            return {
+              results: [],
+              success: true,
+              meta: { changes: info.changes },
+            };
+          },
+        };
+        return stmt;
+      },
+      async batch(stmts: Array<{ _exec: () => unknown }>) {
+        return d1Sqlite.transaction(() => stmts.map((s) => s._exec()))();
+      },
+    };
+    return { db: drizzleD1(client as never), sqlite: d1Sqlite, boundParams };
+  }
+
+  it('sweeps a page with > 50 old unreferenced objects within D1 parameter limits', async () => {
+    const { db: d1Db, sqlite: d1Sqlite, boundParams } = createParamCountD1Db();
+    try {
+      const seed = drizzle(d1Sqlite);
+      const seedTables = tablesFor(seed);
+      const now = new Date('2026-06-01T12:00:00.000Z');
+      const [comm] = await seed
+        .insert(seedTables.communities)
+        .values({
+          name: 'Param Bound Comm',
+          slug: `param-bound-${crypto.randomUUID().slice(0, 8)}`,
+          publicStories: true,
+          isActive: true,
+          createdAt: OLD,
+          updatedAt: OLD,
+        })
+        .returning();
+      // Seed one unrelated files row so the empty-table restore-in-progress
+      // guard does not skip the sweep.
+      const sentinelId = crypto.randomUUID();
+      await seed.insert(seedTables.files).values({
+        id: sentinelId,
+        filename: sentinelId,
+        originalName: 'sentinel.png',
+        path: `sentinel/${sentinelId}/bytes`,
+        storageKey: null,
+        url: `/v2/media/${sentinelId}`,
+        mimeType: 'image/png',
+        size: 1,
+        byteSize: 1,
+        checksum: null,
+        communityId: comm!.id,
+        uploadedBy: null,
+        culturalRestrictions: null,
+        isActive: true,
+        createdAt: OLD,
+        updatedAt: OLD,
+      });
+      const { store, storage } = createListableStorage();
+      for (let i = 0; i < 120; i += 1) {
+        store.set(
+          `communities/${comm!.id}/media/old-${String(i).padStart(3, '0')}`,
+          {
+            bytes: Uint8Array.from([i % 256]),
+            uploaded: OLD,
+          }
+        );
+      }
+      const cleanup = new MediaCleanupCoordinator(d1Db as never, storage, {
+        now: () => now,
+        log: () => {},
+      });
+      const cutoff = new Date(OLD.getTime() + 1);
+      const result = await cleanup.sweepOrphanObjects({
+        olderThan: cutoff,
+        limit: 500,
+      });
+      expect(result.deletedCount).toBe(120);
+      // Only the system sweep-cursor object may remain in storage.
+      expect([...store.keys()]).toEqual([ORPHAN_SWEEP_CURSOR_KEY]);
+      expect(boundParams.length).toBeGreaterThan(0);
+      expect(
+        Math.max(...boundParams),
+        `every prepared statement must bind <= 100 parameters, got ${Math.max(...boundParams)}`
+      ).toBeLessThanOrEqual(100);
+    } finally {
+      d1Sqlite.close();
+    }
   });
 });

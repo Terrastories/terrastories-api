@@ -9,6 +9,7 @@ import {
 } from '../policy/canonical-state.js';
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
 import {
+  buildOwnerUnreferencedFilesDelete,
   buildUnreferencedFilesDelete,
   lockFileRowsForCleanup,
   toFileByteCleanups,
@@ -1101,47 +1102,37 @@ export class StoryWritesRepository {
         .filter((id): id is string => typeof id === 'string');
 
     if (this.hasD1Batch()) {
+      // One atomic batch for the relational delete *and* the files purge:
+      // owner row remove, attachments removed (cascade-safe guard), unreferenced
+      // files removed first from the still-present attachment rows. A crash
+      // between statements rolls back the whole batch, so a failure can never
+      // leave rows behind for the story, or bytes claimed with no relation:
+      // the storage objects stay listed by the orphan sweeper either way.
+      const ownerDeleteGuard = exists(
+        this.db
+          .select({ one: sql`1` })
+          .from(this.tables.stories)
+          .where(readableScope)
+      );
       const deleteStoryQuery = this.db
         .delete(this.tables.stories)
         .where(readableScope)
         .returning({ id: this.tables.stories.id });
       const deleteAttachmentsQuery = buildDeleteAttachments(this.db);
-
-      // One atomic batch for the relational delete: owner, attachments with
-      // RETURNING (so the file-cleanup candidates come from the rows actually
-      // deleted, including any racer cascaded away here), then the files purge
-      // in a follow-up batch keyed off those RETURNING ids.
-      const [deletedRows, deletedAttachments] = await this.db.batch([
+      const [purgeRows, deletedRows] = await this.db.batch([
+        ...buildOwnerUnreferencedFilesDelete(
+          this.db,
+          this.connection,
+          { communityId, ownerType: 'story', ownerId: storyId },
+          ownerDeleteGuard
+        ),
         deleteStoryQuery,
         deleteAttachmentsQuery,
       ]);
       if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
         return false;
       }
-      const fileIds = fileIdsOf(deletedAttachments);
-      if (fileIds.length === 0) {
-        return true;
-      }
-      // The relational delete already committed in its own batch; a failing
-      // files purge must not turn a completed delete into an error response.
-      // The leftover files row keeps the key referenced, so nothing is
-      // reclaimed silently; nothing here reveals existence either.
-      let fileResults: unknown[] = [];
-      try {
-        fileResults = await this.db.batch(
-          buildUnreferencedFilesDelete(this.db, this.connection, fileIds)
-        );
-      } catch {
-        // Content-free: no key, no file id, no error text.
-        // eslint-disable-next-line no-console -- operator channel; content-free
-        console.warn('media cleanup: owner-deleted files purge batch failed');
-        return true;
-      }
-      collectFiles(
-        fileResults.flatMap((rows: unknown) =>
-          Array.isArray(rows) ? rows : []
-        )
-      );
+      collectFiles(Array.isArray(purgeRows) ? (purgeRows as never) : []);
       return true;
     }
 

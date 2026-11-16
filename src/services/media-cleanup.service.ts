@@ -22,7 +22,17 @@
  * grace window.
  */
 
-import { and, eq, inArray, lte, notExists, or } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  inArray,
+  isNull,
+  lte,
+  notExists,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -110,6 +120,104 @@ export function buildUnreferencedFilesDelete(
     );
   }
   return statements;
+}
+
+/**
+ * Files purge keyed to an owning relation scope, for single-batch owner
+ * deletes on D1. The purge runs *inside* the owner-delete batch, before the
+ * relation rows are removed: the still-present attachments are the evidence,
+ * and the target is the file set this delete orphans — i.e. files referenced
+ * exclusively by the owner's own attachments.
+ *
+ * `ownerDeleteGuard` must reproduce the owner DELETE's own gating exactly
+ * (`EXISTS owner WHERE <the delete's WHERE>`), so the purge never frees
+ * files in a batch whose owner delete will match nothing. The caller must
+ * place this statement FIRST in the batch: it reads attachments rows that
+ * are gone afterward.
+ *
+ * Files attached to any other owner are kept: an `NOT EXISTS` clause with a
+ * NULL-safe owner-key comparison (coalesce ids against -1; owner ids start
+ * at 1) covers attachments in every community and of every owner type.
+ */
+export function buildOwnerUnreferencedFilesDelete(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  executor: any,
+  connection: Database | DrizzleD1Database,
+  owner: {
+    communityId: number | null;
+    ownerType:
+      | 'story'
+      | 'place'
+      | 'speaker'
+      | 'user'
+      | 'community'
+      | 'map_config';
+    ownerId: number;
+  },
+  /** `EXISTS (owner row where the owner delete's WHERE holds)` as a condition. */
+  ownerDeleteGuard: SQL
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): any[] {
+  const tables = tablesFor(connection);
+  const communityMedia =
+    dialectOf(connection) === 'postgresql'
+      ? communityMediaPg
+      : communityMediaSqlite;
+  const ownerScope = and(
+    owner.communityId === null
+      ? isNull(tables.attachments.communityId)
+      : eq(tables.attachments.communityId, owner.communityId),
+    eq(tables.attachments.ownerType, owner.ownerType),
+    eq(tables.attachments.ownerId, owner.ownerId)
+  );
+  const ownerKey = (alias: typeof tables.attachments) => sql`(
+    coalesce(${alias.communityId}, -1) = ${owner.communityId ?? -1}
+    and ${alias.ownerType} = ${owner.ownerType}
+    and ${alias.ownerId} = ${owner.ownerId}
+  )`;
+  return [
+    executor
+      .delete(tables.files)
+      .where(
+        and(
+          ownerDeleteGuard,
+          sql`${tables.files.id} in (
+            select ${tables.attachments.fileId} from ${tables.attachments}
+            where ${ownerScope}
+          )`,
+          notExists(
+            executor
+              .select({ id: tables.attachments.id })
+              .from(tables.attachments)
+              .where(
+                and(
+                  eq(tables.attachments.fileId, tables.files.id),
+                  sql`not ${ownerKey(tables.attachments)}`
+                )
+              )
+          ),
+          notExists(
+            executor
+              .select({ communityId: tables.communityMapConfigs.communityId })
+              .from(tables.communityMapConfigs)
+              .where(
+                eq(tables.communityMapConfigs.staticMapFileId, tables.files.id)
+              )
+          ),
+          notExists(
+            executor
+              .select({ fileId: communityMedia.fileId })
+              .from(communityMedia)
+              .where(eq(communityMedia.fileId, tables.files.id))
+          )
+        )
+      )
+      .returning({
+        id: tables.files.id,
+        storageKey: tables.files.storageKey,
+        path: tables.files.path,
+      }),
+  ];
 }
 
 /** Normalize deleted-file rows into byte-cleanup descriptors. */

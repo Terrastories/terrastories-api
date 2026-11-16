@@ -1,4 +1,4 @@
-import { and, eq, isNull, ne, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, isNull, ne, notExists, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -10,6 +10,7 @@ import {
 import type { PublicMapConfigRow } from './public-communities.repository.js';
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
 import {
+  buildOwnerUnreferencedFilesDelete,
   buildUnreferencedFilesDelete,
   lockFileRowsForCleanup,
   toFileByteCleanups,
@@ -631,12 +632,24 @@ export class CommunityWritesRepository {
         .filter((id): id is string => typeof id === 'string');
     try {
       if (this.hasD1Batch()) {
-        // Put NOT EXISTS reference guards inside DELETE itself so a concurrent
-        // story_places/story_speakers insert never silently cascades, and gate
-        // attachment cleanup on the owner row actually being gone afterward.
+        // The files purge gates on the exact DELETE predicate, so the purge
+        // never frees files in a batch whose owner delete will match nothing.
+        // It runs inside the same batch, before the relation rows go, so a
+        // crash can never leave rows behind for the owner (or a claim of
+        // garbage bytes that were never released).
+        const ownerDeleteScope = and(
+          readableScope,
+          ...referenceGuards(this.db)
+        );
+        const ownerDeleteGuard = exists(
+          this.db
+            .select({ one: sql`1` })
+            .from(table)
+            .where(ownerDeleteScope)
+        );
         const deleteOwner = this.db
           .delete(table)
-          .where(and(readableScope, ...referenceGuards(this.db)))
+          .where(ownerDeleteScope)
           .returning({ id: table.id });
 
         const ownerGoneGuard = notExists(
@@ -659,46 +672,27 @@ export class CommunityWritesRepository {
           .where(readableScope)
           .limit(1);
 
-        // One atomic batch for the relational delete: owner, attachments with
-        // RETURNING (file-cleanup candidates come from the rows actually
-        // deleted), owner-exists check. The files purge runs in a follow-up
-        // batch keyed off those RETURNING ids.
-        const [deletedRows, deletedAttachments, existingRows] =
-          await this.db.batch([
-            deleteOwner,
-            deleteAttachments,
-            existingOwnerCheck,
-          ]);
+        // One atomic batch: files purge first (the still-present attachments
+        // are the evidence), then owner and attachments, then an owner-existence
+        // check for the conflict verdict.
+        const [purgeRows, deletedRows, , existingRows] = await this.db.batch([
+          ...buildOwnerUnreferencedFilesDelete(
+            this.db,
+            this.connection,
+            { communityId, ownerType, ownerId },
+            ownerDeleteGuard
+          ),
+          deleteOwner,
+          deleteAttachments,
+          existingOwnerCheck,
+        ]);
 
         if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
           return Array.isArray(existingRows) && existingRows.length > 0
             ? 'conflict'
             : 'not_found';
         }
-        const fileIds = fileIdsOf(deletedAttachments);
-        if (fileIds.length === 0) {
-          return 'deleted';
-        }
-        // The relational delete already committed in its own batch; a failing
-        // files purge must not turn a completed delete into an error response.
-        // The leftover files row keeps the key referenced, so nothing is
-        // reclaimed silently.
-        let fileResults: unknown[] = [];
-        try {
-          fileResults = await this.db.batch(
-            buildUnreferencedFilesDelete(this.db, this.connection, fileIds)
-          );
-        } catch {
-          // Content-free: no key, no file id, no error text.
-          // eslint-disable-next-line no-console -- operator channel; content-free
-          console.warn('media cleanup: owner-deleted files purge batch failed');
-          return 'deleted';
-        }
-        collectFiles(
-          fileResults.flatMap((rows: unknown) =>
-            Array.isArray(rows) ? rows : []
-          )
-        );
+        collectFiles(Array.isArray(purgeRows) ? (purgeRows as never) : []);
         return 'deleted';
       }
 

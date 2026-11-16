@@ -245,7 +245,8 @@ export function createHonoApp(options: FoundationOptions) {
             previousToken: getCookie(c, 'ts_session'),
           },
           clientIpOf(c.req.raw.headers),
-          now()
+          now(),
+          c.req.header('user-agent')
         );
         setCookie(c, 'ts_session', result.token, sessionCookie(result.kind));
         return c.json({ user: publicUser(result.user) });
@@ -285,9 +286,20 @@ export function createHonoApp(options: FoundationOptions) {
   });
   app.get('/v2/auth/me', (c) => c.json({ user: publicUser(c.get('actor')) }));
   app.post('/v2/auth/logout', async (c) => {
+    const actor = c.get('actor');
     await options.repository.revokeSession(
       await tokenDigest(getCookie(c, 'ts_session')!)
     );
+    await authService.auditAuthEvent({
+      communityId: actor.communityId,
+      actorId: actor.id,
+      action: 'auth.logout',
+      outcome: 'success',
+      resourceType: 'session',
+      resourceIds: [],
+      ipAddress: clientIpOf(c.req.raw.headers),
+      userAgent: c.req.header('user-agent'),
+    });
     deleteCookie(c, 'ts_session', cookie);
     return c.body(null, 204);
   });
@@ -360,7 +372,8 @@ export function createHonoApp(options: FoundationOptions) {
         c.get('sessionKind'),
         getCookie(c, 'ts_session'),
         clientIpOf(c.req.raw.headers),
-        now()
+        now(),
+        c.req.header('user-agent')
       );
     } catch (error) {
       if (error instanceof AuthLoginRejected)
@@ -379,7 +392,18 @@ export function createHonoApp(options: FoundationOptions) {
     return c.json({ user: publicUser(actor) });
   });
   app.post('/v2/auth/revoke', async (c) => {
-    await options.repository.revokeUserSessions(c.get('actor').id);
+    const actor = c.get('actor');
+    await options.repository.revokeUserSessions(actor.id);
+    await authService.auditAuthEvent({
+      communityId: actor.communityId,
+      actorId: actor.id,
+      action: 'auth.session.revoke',
+      outcome: 'success',
+      resourceType: 'session',
+      resourceIds: [],
+      ipAddress: clientIpOf(c.req.raw.headers),
+      userAgent: c.req.header('user-agent'),
+    });
     deleteCookie(c, 'ts_session', cookie);
     return c.body(null, 204);
   });

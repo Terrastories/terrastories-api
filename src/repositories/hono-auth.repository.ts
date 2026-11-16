@@ -575,39 +575,6 @@ export class HonoAuthRepository {
     await this.db.delete(throttle).where(inArray(throttle.key, keys));
   }
 
-  /**
-   * Content-free audit row (SPEC-V2 §6.8, §7 "Audit logging"). Every caller
-   * passes an already `validateContentFreeAuditEntry`-checked record.
-   */
-  async writeAudit(
-    input: {
-      communityId: number | null;
-      actorId: number | null;
-      action: string;
-      outcome: string;
-      resourceType: string | null;
-      resourceIds: Array<number | string>;
-      ipAddress: string | null;
-      userAgent: string | null;
-      now: Date;
-    },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: any = this.db
-  ): Promise<void> {
-    const { auditEntries } = this.tables;
-    await executor.insert(auditEntries).values({
-      communityId: input.communityId,
-      actorId: input.actorId,
-      action: input.action,
-      resourceType: input.resourceType,
-      resourceIds: input.resourceIds,
-      outcome: input.outcome,
-      ipAddress: input.ipAddress,
-      userAgent: input.userAgent,
-      createdAt: input.now,
-    });
-  }
-
   /** Delete expired session rows (scheduled sweep, §7 "Sessions"). */
   async sweepExpiredSessions(now: number): Promise<number> {
     const sessions = this.tables.sessions;

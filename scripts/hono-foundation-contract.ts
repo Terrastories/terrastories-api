@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from 'node:assert/strict';
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, like, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { serve } from '@hono/node-server';
 import { once } from 'node:events';
@@ -918,7 +918,12 @@ export async function runHonoFoundationContract(
     const communityAudits = await db
       .select()
       .from(tables.auditEntries)
-      .where(eq(tables.auditEntries.communityId, communityA))
+      .where(
+        and(
+          eq(tables.auditEntries.communityId, communityA),
+          like(tables.auditEntries.action, 'community.%')
+        )
+      )
       .orderBy(asc(tables.auditEntries.id));
     assert.deepEqual(
       communityAudits.map((row: any) => row.action),
@@ -977,7 +982,12 @@ export async function runHonoFoundationContract(
       const auditsAfterLock = await db
         .select()
         .from(tables.auditEntries)
-        .where(eq(tables.auditEntries.communityId, communityA))
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            like(tables.auditEntries.action, 'community.%')
+          )
+        )
         .orderBy(asc(tables.auditEntries.id));
       assert.equal(
         auditsAfterLock.length,
@@ -995,7 +1005,12 @@ export async function runHonoFoundationContract(
       const auditsAfterBurst = await db
         .select()
         .from(tables.auditEntries)
-        .where(eq(tables.auditEntries.communityId, communityA))
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, communityA),
+            like(tables.auditEntries.action, 'community.%')
+          )
+        )
         .orderBy(asc(tables.auditEntries.id));
       assert.deepEqual(
         auditsAfterBurst.map((row: any) => row.action),
@@ -1105,6 +1120,13 @@ export async function runHonoFoundationContract(
       await db.delete(media).where(eq(media.fileId, id));
       await db.delete(tables.files).where(eq(tables.files.id, id));
     }
+    // Auth/security audit entries reference the seeded accounts (actorId)
+    // and communities; delete them with their parents. Entries may also carry
+    // null communityId (system-level auth events), so they cannot be removed
+    // by community alone.
+    await db
+      .delete(tables.auditEntries)
+      .where(inArray(tables.auditEntries.actorId, userIds));
     for (const id of userIds) {
       await db.delete(sessions).where(eq(sessions.userId, id));
       await db.delete(tables.users).where(eq(tables.users.id, id));

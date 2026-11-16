@@ -309,7 +309,7 @@ it('serves the foundation through workerd D1/R2 without Node compatibility', asy
     const d1Audits = (
       await db
         .prepare(
-          'SELECT community_id, actor_id, action, resource_type, resource_ids, outcome, ip_address, user_agent FROM audit_entries WHERE community_id = 3 ORDER BY id ASC'
+          "SELECT community_id, actor_id, action, resource_type, resource_ids, outcome, ip_address, user_agent FROM audit_entries WHERE community_id = 3 AND action LIKE 'community.%' ORDER BY id ASC"
         )
         .all<{
           community_id: number | null;

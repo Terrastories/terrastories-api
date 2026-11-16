@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { eq, asc, and } from 'drizzle-orm';
+import { eq, asc, and, like } from 'drizzle-orm';
 import { tablesFor } from '../../src/db/dialect.js';
 import {
   argon2Seed,
@@ -415,12 +415,20 @@ describe('Slice 7 PATCH /v2/community', () => {
       .where(eq(tables.communities.id, ids.own!));
     expect(dbCommunity?.descriptionPlain).toBe('Welcome to our archive');
 
-    // AuditEntry emitted atomically and content-free
-    const audits = await db
-      .select()
-      .from(tables.auditEntries)
-      .where(eq(tables.auditEntries.communityId, ids.own!))
-      .orderBy(asc(tables.auditEntries.id));
+    // AuditEntry emitted atomically and content-free (auth events carry
+    // their own entries; restrict to the publication-decision domain)
+    const visibilityAudits = () =>
+      db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, ids.own!),
+            like(tables.auditEntries.action, 'community.%')
+          )
+        )
+        .orderBy(asc(tables.auditEntries.id));
+    const audits = await visibilityAudits();
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({
       communityId: ids.own,
@@ -447,12 +455,7 @@ describe('Slice 7 PATCH /v2/community', () => {
       body: { visibility: 'public' },
     });
     expect(idemRes.status).toBe(200);
-    expect(
-      await db
-        .select()
-        .from(tables.auditEntries)
-        .where(eq(tables.auditEntries.communityId, ids.own!))
-    ).toHaveLength(1);
+    expect(await visibilityAudits()).toHaveLength(1);
 
     // Toggle public -> private: emits second audit entry and immediately closes /v2/public/* and /explore/*
     const closeRes = await requestJson('PATCH', '/v2/community', {
@@ -464,11 +467,7 @@ describe('Slice 7 PATCH /v2/community', () => {
       PatchCommunityResponseSchema.parse(closeRes.json).data.visibility
     ).toBe('private');
 
-    const auditsAfter = await db
-      .select()
-      .from(tables.auditEntries)
-      .where(eq(tables.auditEntries.communityId, ids.own!))
-      .orderBy(asc(tables.auditEntries.id));
+    const auditsAfter = await visibilityAudits();
     expect(auditsAfter).toHaveLength(2);
     expect(auditsAfter[1]?.action).toBe('community.visibility.private');
 
@@ -731,8 +730,21 @@ describe('Slice 7 PATCH /v2/community', () => {
       .where(eq(tables.communities.id, ids.disabled!));
     expect(inactive).toBeDefined();
 
+    // Initial test emitted 2 (public, private); the slice offset is captured
+    // before the burst.
+    const visibilityBefore = (
+      await db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, ids.own!),
+            like(tables.auditEntries.action, 'community.%')
+          )
+        )
+    ).length;
     // 0-row update on inactive community & missing community writes zero audits
-    const beforeCount = (
+    const globalBefore = (
       await db.select({ id: tables.auditEntries.id }).from(tables.auditEntries)
     ).length;
 
@@ -758,7 +770,7 @@ describe('Slice 7 PATCH /v2/community', () => {
           .select({ id: tables.auditEntries.id })
           .from(tables.auditEntries)
       ).length
-    ).toBe(beforeCount);
+    ).toBe(globalBefore);
 
     // Concurrent-toggle burst via HTTP PATCH /v2/community (own is currently private)
     const seq: Array<'public' | 'public' | 'private' | 'public' | 'private'> = [
@@ -778,13 +790,19 @@ describe('Slice 7 PATCH /v2/community', () => {
     );
     expect(responses.every((r) => r.status === 200)).toBe(true);
 
+    // The slice offset was captured before the burst: the burst's effective
+    // transitions are the tail of the visibility-domain audits.
     const allOwnAudits = await db
       .select()
       .from(tables.auditEntries)
-      .where(eq(tables.auditEntries.communityId, ids.own!))
+      .where(
+        and(
+          eq(tables.auditEntries.communityId, ids.own!),
+          like(tables.auditEntries.action, 'community.%')
+        )
+      )
       .orderBy(asc(tables.auditEntries.id));
-    // Initial test emitted 2 (public, private); this burst has 4 effective transitions
-    expect(allOwnAudits.slice(beforeCount).map((a) => a.action)).toEqual([
+    expect(allOwnAudits.slice(visibilityBefore).map((a) => a.action)).toEqual([
       'community.visibility.public',
       'community.visibility.private',
       'community.visibility.public',

@@ -38,6 +38,7 @@ import {
   type SessionKind,
 } from '../shared/auth-policy.js';
 import { constantTimeEqual, sha256Hex } from '../shared/auth-crypto.js';
+import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
 import { normalizeSearchText } from '../shared/utils/search-normalize.js';
 import { parseV2Role } from '../shared/authorization/sovereignty-policy.js';
 
@@ -142,6 +143,44 @@ export class HonoAuthService {
   }
 
   /**
+   * Content-free audit entry for an auth/security event (SPEC-V2 §6.8,
+   * §7 "Audit logging"). IP/UA are permitted only on auth events. A failed
+   * audit write is logged content-free and never changes the auth decision —
+   * the uniform 401 contract and the session-establishment path must hold
+   * regardless of the audit sink.
+   */
+  async auditAuthEvent(input: {
+    communityId: number | null;
+    actorId: number | null;
+    action: string;
+    outcome: 'success' | 'failure';
+    resourceType?: string;
+    resourceIds?: Array<number | string>;
+    ipAddress: string | null;
+    userAgent: string | undefined;
+  }): Promise<void> {
+    try {
+      await writeAuditEntry(this.repository.connection, {
+        communityId: input.communityId,
+        actorId: input.actorId,
+        action: input.action,
+        resourceType: input.resourceType ?? 'auth',
+        resourceIds: input.resourceIds ?? [],
+        outcome: input.outcome,
+        ipAddress: input.ipAddress,
+        userAgent: input.userAgent?.slice(0, 512) ?? null,
+      });
+    } catch {
+      // Content-free operational marker: the action and outcome only, never
+      // identifiers, keys or content.
+      console.error('auth audit write failed', {
+        action: input.action,
+        outcome: input.outcome,
+      });
+    }
+  }
+
+  /**
    * Authenticate one login attempt (§7 steps 3–4, step 6).
    *
    * Every rejection raises {@link AuthLoginRejected} — the same failure for an
@@ -156,7 +195,8 @@ export class HonoAuthService {
   async login(
     input: LoginInput,
     clientIp: string,
-    now: Date
+    now: Date,
+    userAgent?: string | undefined
   ): Promise<LoginSuccess> {
     const secret = this.serverSecret;
     // Login fails closed without a key exactly as prelogin does, and with the
@@ -170,7 +210,7 @@ export class HonoAuthService {
         : await this.repository.communityIdBySlug(input.communitySlug);
     // An unknown slug is a uniform failure, exactly like an unknown identifier.
     if (input.communitySlug !== undefined && communityId === null)
-      return this.reject(null, clientIp, now, secret);
+      return this.reject(null, clientIp, userAgent, now, secret);
     const candidates = await this.repository.loginCandidates(
       input.identifier,
       normalized,
@@ -180,7 +220,7 @@ export class HonoAuthService {
     // passes the authority gate (§6.2, HonoFoundationRepository).
     const candidate = candidates.length === 1 ? candidates[0] : undefined;
     if (candidate === undefined || !HonoAuthService.allowed(candidate))
-      return this.reject(candidate ?? null, clientIp, now, secret);
+      return this.reject(candidate ?? null, clientIp, userAgent, now, secret);
     const account = candidate as AuthAccount;
     // A throttled account or IP is the same uniform failure (§6.8).
     const [accountBlocked, ipBlocked] = await Promise.all([
@@ -194,9 +234,10 @@ export class HonoAuthService {
       ),
     ]);
     if (accountBlocked.blocked || ipBlocked.blocked)
-      return this.reject(account, clientIp, now, secret);
+      return this.reject(account, clientIp, userAgent, now, secret);
     const verification = await this.verifierFor(account, input);
-    if (!verification.ok) return this.reject(account, clientIp, now, secret);
+    if (!verification.ok)
+      return this.reject(account, clientIp, userAgent, now, secret);
     const kind: SessionKind =
       input.deviceSession === true ? 'device' : 'standard';
     const user = HonoAuthService.userOf(account);
@@ -211,8 +252,30 @@ export class HonoAuthService {
     });
     // The authority gate lost the race (a concurrent reset/disable changed the
     // row between the read and the write): a uniform failure and no session.
-    if (!established) return this.reject(account, clientIp, now, secret);
+    if (!established)
+      return this.reject(account, clientIp, userAgent, now, secret);
     await this.repository.resetThrottle(account.id, clientIp, secret);
+    await this.auditAuthEvent({
+      communityId: account.communityId,
+      actorId: account.id,
+      action: 'auth.login',
+      outcome: 'success',
+      resourceIds: [account.id],
+      ipAddress: clientIp,
+      userAgent,
+    });
+    if (verification.write !== null)
+      // A wrapped Rails-bcrypt verifier was replaced by the Argon2id
+      // material in the same atomic write (§7 step 4).
+      await this.auditAuthEvent({
+        communityId: account.communityId,
+        actorId: account.id,
+        action: 'auth.upgrade',
+        outcome: 'success',
+        resourceIds: [account.id],
+        ipAddress: clientIp,
+        userAgent,
+      });
     return { token: established.token, user, kind };
   }
 
@@ -315,6 +378,7 @@ export class HonoAuthService {
   private async reject(
     account: AuthAccount | null,
     clientIp: string,
+    userAgent: string | undefined,
     now: Date,
     secret: string
   ): Promise<never> {
@@ -329,6 +393,15 @@ export class HonoAuthService {
       },
       secret
     );
+    await this.auditAuthEvent({
+      communityId: account?.communityId ?? null,
+      actorId: account?.id ?? null,
+      action: 'auth.login',
+      outcome: 'failure',
+      resourceIds: account === null ? [] : [account.id],
+      ipAddress: clientIp,
+      userAgent,
+    });
     throw new AuthLoginRejected();
   }
 
@@ -356,26 +429,50 @@ export class HonoAuthService {
     kind: SessionKind,
     presentedToken: string | undefined,
     clientIp: string,
-    now: Date
+    now: Date,
+    userAgent?: string | undefined
   ): Promise<{ token: string } | null> {
     const user = input.user;
     const account = await this.repository.accountById(user.id);
-    if (account === null) return null;
+    if (account === null) {
+      await this.auditAuthEvent({
+        communityId: null,
+        actorId: null,
+        action: 'auth.password.change',
+        outcome: 'failure',
+        ipAddress: clientIp,
+        userAgent,
+      });
+      return null;
+    }
     const secret = this.serverSecret;
+    // Any rejected attempt is the same uniform failure, and it is audited
+    // (SPEC-V2 §7 "failed verification").
+    const rejectChange = async (): Promise<never> => {
+      await this.auditAuthEvent({
+        communityId: account.communityId,
+        actorId: account.id,
+        action: 'auth.password.change',
+        outcome: 'failure',
+        resourceIds: [account.id],
+        ipAddress: clientIp,
+        userAgent,
+      });
+      throw new AuthLoginRejected();
+    };
     const digest = await sha256Hex(input.currentDerivedKey);
     const stored = account.passwordVerifier;
-    if (stored === null) throw new AuthLoginRejected();
+    if (stored === null) return rejectChange();
     if (
       account.passwordAlgorithm !== ARGON2ID_ALGORITHM &&
       account.passwordAlgorithm !== RAILS_BCRYPT_ALGORITHM
     )
-      throw new AuthLoginRejected();
-    if (!constantTimeEqual(digest, stored)) throw new AuthLoginRejected();
+      return rejectChange();
+    if (!constantTimeEqual(digest, stored)) return rejectChange();
     // New material must satisfy the current Argon2id policy (named constants,
     // §7 step 4); anything weaker is refused without revealing the policy.
-    if (!argon2idParamsSatisfyPolicy(input.params))
-      throw new AuthLoginRejected();
-    if (!isUsableVerifierSalt(input.salt)) throw new AuthLoginRejected();
+    if (!argon2idParamsSatisfyPolicy(input.params)) return rejectChange();
+    if (!isUsableVerifierSalt(input.salt)) return rejectChange();
     const { memoryKiB, iterations, parallelism } = input.params as Record<
       string,
       number
@@ -397,10 +494,31 @@ export class HonoAuthService {
       previousToken: sessionTokenDigestInput(presentedToken) ?? undefined,
     });
     // The authority gate lost the race (a concurrent reset changed the row):
-    // the new verifier is not stored and no session is issued.
-    if (!established) return null;
+    // the new verifier is not stored and no session is issued. Audited as a
+    // rejected attempt; it reveals nothing beyond the rejection itself.
+    if (!established) {
+      await this.auditAuthEvent({
+        communityId: account.communityId,
+        actorId: account.id,
+        action: 'auth.password.change',
+        outcome: 'failure',
+        resourceIds: [account.id],
+        ipAddress: clientIp,
+        userAgent,
+      });
+      return null;
+    }
     if (secret !== undefined && secret !== '')
       await this.repository.resetThrottle(account.id, clientIp, secret);
+    await this.auditAuthEvent({
+      communityId: account.communityId,
+      actorId: account.id,
+      action: 'auth.password.change',
+      outcome: 'success',
+      resourceIds: [account.id],
+      ipAddress: clientIp,
+      userAgent,
+    });
     return { token: established.token };
   }
 }

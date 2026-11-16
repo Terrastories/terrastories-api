@@ -25,7 +25,9 @@ CREATE TABLE `login_codes` (
 	CONSTRAINT `login_codes_created_by_users_id_fk` FOREIGN KEY (`created_by`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE set null,
 	CONSTRAINT `login_codes_purpose_check` CHECK (`purpose` in ('admin_issued', 'recovery')),
 	CONSTRAINT `login_codes_purpose_expiry_check` CHECK ((`purpose` = 'admin_issued' AND `expires_at` IS NOT NULL) OR (`purpose` = 'recovery' AND `expires_at` IS NULL)),
-	CONSTRAINT `login_codes_expiry_check` CHECK (`expires_at` IS NULL OR `expires_at` > `created_at`)
+	CONSTRAINT `login_codes_expiry_check` CHECK (`expires_at` IS NULL OR `expires_at` > `created_at`),
+	CONSTRAINT `login_codes_admin_ttl_check` CHECK (`purpose` <> 'admin_issued' OR (`expires_at` IS NOT NULL AND `expires_at` - `created_at` <= 259200000)),
+	CONSTRAINT `login_codes_recovery_no_expiry_check` CHECK (`purpose` <> 'recovery' OR `expires_at` IS NULL)
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `login_codes_code_hash_unique` ON `login_codes` (`code_hash`);

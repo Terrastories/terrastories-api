@@ -748,6 +748,32 @@ describe('PATCH /v2/users/:id', () => {
     expect(clashEmail.status).toBe(409);
   });
 
+  it('does not re-check untouched identity fields on displayName-only edits', async () => {
+    // A legacy-imported row whose emailNormalized equals the target's
+    // username: re-checking the *full* identity on every PATCH would refuse
+    // unrelated edits forever. Changed-field-only re-checks let them pass.
+    const stamp = Date.now();
+    await insertRow(tables.users, {
+      email: `legacy-${stamp}@own.example.test`,
+      username: `legacyu-${stamp}`,
+      emailNormalized: 'qa_member_own',
+      usernameNormalized: `legacyu-${stamp}`,
+      firstName: 'Legacy',
+      lastName: 'Import',
+      ...(await argon2Seed(TEST_DERIVED_KEY)),
+      role: 'viewer',
+      communityId: ids.own!,
+      isActive: true,
+      createdAt: T0,
+      updatedAt: T0,
+    });
+    const res = await requestJson('PATCH', `/v2/users/${ids.uMember}`, {
+      cookie: cookies.admin,
+      body: { displayName: 'Nobody suspects the displayName edit' },
+    });
+    expect(res.status).toBe(200);
+  });
+
   it('revokes the target sessions on role and on status change (§6.8 trigger)', async () => {
     const username = `qa_trig_${Date.now()}`;
     const email = `qa-trig-${Date.now()}@own.example.test`;

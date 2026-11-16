@@ -762,6 +762,9 @@ export class UserManagementRepository {
         isNull(sessions.absoluteExpiresAt),
         gt(sessions.absoluteExpiresAt, nowMs)
       ),
+      // Rows whose single (legacy) expiry has passed never list or revoke,
+      // even if their idle/absolute split still looks live.
+      gt(sessions.expiresAt, nowMs),
       isNull(sessions.revokedAt)
     );
   }

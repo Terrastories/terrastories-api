@@ -420,20 +420,43 @@ export class UserManagementService {
       email: next.email,
       username: next.username ?? null,
     });
-    const collided = await this.repository.hasIdentityCollision({
-      communityId: caller.communityId,
-      emailNormalized: identity.emailNormalized as string,
-      usernameNormalized: identity.usernameNormalized ?? null,
-      excludeUserId: target.id,
-    });
-    if (collided) {
-      await this.audit(actor, {
-        action: 'user.update',
-        resourceType: 'user',
-        resourceIds: [target.id],
-        outcome: 'failure',
+    // Only the identity fields whose *normalized* value actually changed are
+    // re-checked (§6.2): an unrelated edit must not collide against the
+    // target's own untouched identifiers, and the guarded write re-checks
+    // the same set at write time.
+    const emailChanged =
+      body.email !== undefined &&
+      identity.emailNormalized !== target.emailNormalized;
+    const usernameChanged =
+      body.username !== undefined &&
+      (identity.usernameNormalized ?? null) !==
+        (target.usernameNormalized ?? null);
+    const collisionInput: {
+      emailNormalized?: string;
+      usernameNormalized?: string | null;
+    } = {
+      ...(emailChanged
+        ? { emailNormalized: identity.emailNormalized as string }
+        : {}),
+      ...(usernameChanged
+        ? { usernameNormalized: identity.usernameNormalized ?? null }
+        : {}),
+    };
+    if (emailChanged || usernameChanged) {
+      const collided = await this.repository.hasIdentityCollision({
+        communityId: caller.communityId,
+        ...collisionInput,
+        excludeUserId: target.id,
       });
-      return { status: 409, body: CONFLICT_BODY };
+      if (collided) {
+        await this.audit(actor, {
+          action: 'user.update',
+          resourceType: 'user',
+          resourceIds: [target.id],
+          outcome: 'failure',
+        });
+        return { status: 409, body: CONFLICT_BODY };
+      }
     }
     // SPEC-V2 §6.2: the disabled gate fixes exactly which administrators keep
     // authority at disable time; the task rule — an admin cannot demote or
@@ -467,11 +490,8 @@ export class UserManagementService {
           ? { email: body.email, emailNormalized: identity.emailNormalized }
           : {}),
         // The identity rules hold at write time too, not only at pre-check
-        // time (§6.2); the guarded write re-checks them atomically.
-        collision: {
-          emailNormalized: identity.emailNormalized as string,
-          usernameNormalized: identity.usernameNormalized ?? null,
-        },
+        // time (§6.2); the guarded write re-checks the same changed set.
+        collision: emailChanged || usernameChanged ? collisionInput : undefined,
         ...(body.role !== undefined ? { role: body.role } : {}),
         ...(body.status !== undefined
           ? { isActive: body.status === 'active' }

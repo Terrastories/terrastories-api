@@ -2253,6 +2253,14 @@
         "login_codes_expiry_check": {
           "name": "login_codes_expiry_check",
           "value": "\"login_codes\".\"expires_at\" IS NULL OR \"login_codes\".\"expires_at\" > \"login_codes\".\"created_at\""
+        },
+        "login_codes_admin_ttl_check": {
+          "name": "login_codes_admin_ttl_check",
+          "value": "\"login_codes\".\"purpose\" <> 'admin_issued' OR (\"login_codes\".\"expires_at\" IS NOT NULL AND \"login_codes\".\"expires_at\" - \"login_codes\".\"created_at\" <= 259200000)"
+        },
+        "login_codes_recovery_no_expiry_check": {
+          "name": "login_codes_recovery_no_expiry_check",
+          "value": "\"login_codes\".\"purpose\" <> 'recovery' OR \"login_codes\".\"expires_at\" IS NULL"
         }
       }
     },

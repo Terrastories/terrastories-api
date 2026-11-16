@@ -77,6 +77,14 @@ export const loginCodesPg = pgTable(
       'login_codes_expiry_check',
       sql`${table.expiresAt} IS NULL OR ${table.expiresAt} > ${table.createdAt}`
     ),
+    pgCheck(
+      'login_codes_admin_ttl_check',
+      sql`${table.purpose} <> 'admin_issued' OR (${table.expiresAt} IS NOT NULL AND ${table.expiresAt} - ${table.createdAt} <= 259200000)`
+    ),
+    pgCheck(
+      'login_codes_recovery_no_expiry_check',
+      sql`${table.purpose} <> 'recovery' OR ${table.expiresAt} IS NULL`
+    ),
   ]
 );
 
@@ -116,6 +124,14 @@ export const loginCodesSqlite = sqliteTable(
     check(
       'login_codes_expiry_check',
       sql`${table.expiresAt} IS NULL OR ${table.expiresAt} > ${table.createdAt}`
+    ),
+    check(
+      'login_codes_admin_ttl_check',
+      sql`${table.purpose} <> 'admin_issued' OR (${table.expiresAt} IS NOT NULL AND ${table.expiresAt} - ${table.createdAt} <= 259200000)`
+    ),
+    check(
+      'login_codes_recovery_no_expiry_check',
+      sql`${table.purpose} <> 'recovery' OR ${table.expiresAt} IS NULL`
     ),
   ]
 );

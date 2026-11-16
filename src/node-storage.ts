@@ -248,7 +248,9 @@ export async function createLocalStorage(
         // The sweeper's cursor is system state, never sweepable bytes.
         .filter((key) => key !== ORPHAN_SWEEP_CURSOR_KEY)
         .sort()
-        .filter((key) => (options?.cursor ? key > options.cursor! : true));
+        .filter((key) =>
+          options?.startAfter ? key > options.startAfter : true
+        );
       const page = matched.slice(0, limit);
       const truncated = matched.length > page.length;
       const entries = await Promise.all(
@@ -265,7 +267,7 @@ export async function createLocalStorage(
       return {
         entries,
         truncated,
-        cursor: truncated ? page[page.length - 1] : undefined,
+        nextStartAfter: truncated ? page[page.length - 1] : undefined,
       };
     },
 

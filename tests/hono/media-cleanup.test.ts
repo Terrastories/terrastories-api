@@ -72,7 +72,9 @@ function createListableStorage(): {
         // The sweep cursor is system state, never sweepable bytes.
         .filter(([key]) => key !== ORPHAN_SWEEP_CURSOR_KEY)
         .sort(([a], [b]) => a.localeCompare(b))
-        .filter(([key]) => (options?.cursor ? key > options.cursor! : true));
+        .filter(([key]) =>
+          options?.startAfter ? key > options.startAfter : true
+        );
       const page = matched.slice(0, limit);
       const entries: StorageListEntry[] = page.map(([key, value]) => ({
         key,
@@ -82,7 +84,7 @@ function createListableStorage(): {
       return {
         entries,
         truncated,
-        cursor: truncated ? page[page.length - 1]![0] : undefined,
+        nextStartAfter: truncated ? page[page.length - 1]![0] : undefined,
       };
     },
     async getSystemObject(key) {

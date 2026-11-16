@@ -48,13 +48,19 @@ export interface StorageListResult {
   entries: StorageListEntry[];
   /** True when more keys exist under the prefix (caller may paginate). */
   truncated: boolean;
-  /** Opaque continuation token for the next page. */
-  cursor?: string;
+  /**
+   * Key to resume after for key-based pagination (exclusive), identical in
+   * spirit and semantics to `startAfter`. Reported only when `truncated` is
+   * true. Callers that walk a prefix must pass the last `nextStartAfter` back
+   * in as `startAfter` to see the next page.
+   */
+  nextStartAfter?: string;
 }
 
 export interface StorageListOptions {
   prefix?: string;
-  cursor?: string;
+  /** Walk keys strictly after this key (exclusive). */
+  startAfter?: string;
   limit?: number;
 }
 

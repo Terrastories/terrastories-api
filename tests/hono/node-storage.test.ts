@@ -41,7 +41,7 @@ describe('createLocalStorage().list', () => {
       KEY_C,
     ]);
     expect(page.truncated).toBe(false);
-    expect(page.cursor).toBeUndefined();
+    expect(page.nextStartAfter).toBeUndefined();
     for (const entry of page.entries) {
       expect(entry.uploaded).toBeInstanceOf(Date);
       expect(Number.isNaN(entry.uploaded.getTime())).toBe(false);
@@ -53,20 +53,20 @@ describe('createLocalStorage().list', () => {
     expect(page.entries.map((entry) => entry.key)).toEqual([KEY_A, KEY_B]);
   });
 
-  it('pages with a stable cursor and reports truncation', async () => {
+  it('pages with a stable startAfter and reports truncation', async () => {
     const first = await storage.list!({ prefix: 'communities/1/', limit: 1 });
     expect(first.entries.map((entry) => entry.key)).toEqual([KEY_A]);
     expect(first.truncated).toBe(true);
-    expect(first.cursor).toBe(KEY_A);
+    expect(first.nextStartAfter).toBe(KEY_A);
 
     const second = await storage.list!({
       prefix: 'communities/1/',
       limit: 1,
-      cursor: first.cursor,
+      startAfter: first.nextStartAfter,
     });
     expect(second.entries.map((entry) => entry.key)).toEqual([KEY_B]);
     expect(second.truncated).toBe(false);
-    expect(second.cursor).toBeUndefined();
+    expect(second.nextStartAfter).toBeUndefined();
   });
 
   it('omits deleted objects and still lists interrupted-upload temp files', async () => {

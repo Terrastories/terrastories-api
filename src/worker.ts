@@ -174,9 +174,12 @@ export function createWorker(
     },
     async list(options) {
       const limit = options?.limit ?? 200;
+      // Key-based pagination: the caller walks the prefix by last seen key,
+      // never by R2's opaque cursor, so the sweeper can resume where it left
+      // off with only the key (which it also persists between runs).
       const result = await bucket.list({
         prefix: options?.prefix,
-        cursor: options?.cursor,
+        startAfter: options?.startAfter,
         limit,
       });
       const entries = result.objects.map((object) => ({
@@ -186,7 +189,10 @@ export function createWorker(
       return {
         entries,
         truncated: result.truncated,
-        cursor: result.truncated ? result.cursor : undefined,
+        nextStartAfter:
+          result.truncated && entries.length > 0
+            ? entries[entries.length - 1]!.key
+            : undefined,
       };
     },
 

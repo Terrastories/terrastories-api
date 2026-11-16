@@ -521,6 +521,9 @@ export class MediaCleanupCoordinator {
    * exhausted, `{kind:'budget', startAfter}` when the budget ran out after
    * `startAfter`, and `{kind:'list_failed'}` when the prefix could not be
    * listed.
+   *
+   * Pagination is key-based (`startAfter`), identical to the storage
+   * adapter contract, so resumption works the same on R2 and filesystem.
    */
   private async sweepPrefix(input: {
     prefix: string;
@@ -535,13 +538,13 @@ export class MediaCleanupCoordinator {
     | { kind: 'budget'; startAfter?: string }
     | { kind: 'list_failed' }
   > {
-    let cursor = input.startAfter;
+    let startAfter = input.startAfter;
     for (;;) {
       let page;
       try {
         page = await this.storage.list!({
           prefix: input.prefix,
-          cursor,
+          startAfter,
           limit: 200,
         });
       } catch {
@@ -579,7 +582,7 @@ export class MediaCleanupCoordinator {
             // previous entry, or the incoming cursor for the first one.
             const index = page.entries.indexOf(entry);
             const resumeAfter =
-              index > 0 ? page.entries[index - 1]!.key : cursor;
+              index > 0 ? page.entries[index - 1]!.key : startAfter;
             return { kind: 'budget', startAfter: resumeAfter };
           }
           input.onScanned();
@@ -593,18 +596,18 @@ export class MediaCleanupCoordinator {
         }
       }
 
-      // The page is fully walked. If the last page is exhausted the prefix is
-      // done — even when the budget ran out on its final object — so the run
-      // moves on (or wraps) instead of pinning the cursor on a gone prefix.
-      if (!page.truncated || !page.cursor) return { kind: 'done' };
+      // The page is fully walked. If the prefix is exhausted it is done —
+      // even when the budget ran out on its last object — so the run moves on
+      // (or wraps) instead of pinning the cursor on a gone prefix.
+      if (!page.truncated || !page.nextStartAfter) return { kind: 'done' };
       if (input.budget.remaining <= 0) {
         const resumeAfter = page.entries[page.entries.length - 1]!.key;
         return { kind: 'budget', startAfter: resumeAfter };
       }
       // No budget was spent (every entry was inside the grace window); keep
-      // walking, but never spin on a non-advancing cursor.
-      if (page.cursor === cursor) return { kind: 'done' };
-      cursor = page.cursor;
+      // walking, but never spin on a non-advancing startAfter.
+      if (page.nextStartAfter === startAfter) return { kind: 'done' };
+      startAfter = page.nextStartAfter;
     }
   }
 

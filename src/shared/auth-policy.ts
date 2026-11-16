@@ -57,6 +57,15 @@ export function argon2idParamsSatisfyPolicy(params: unknown): boolean {
 export const BCRYPT_MIN_COST = 10;
 export const BCRYPT_MAX_COST = 14;
 
+/** A client-generated verifier salt must be base64, at least 128 bits. */
+export function isUsableVerifierSalt(salt: string): boolean {
+  if (!SALT_BASE64_PATTERN.test(salt)) return false;
+  const padding = salt.endsWith('==') ? 2 : salt.endsWith('=') ? 1 : 0;
+  // floor(length * 3 / 4) - padding, without accepting atob's leniency.
+  const bytes = Math.floor((salt.length * 3) / 4) - padding;
+  return bytes >= MIN_SALT_BYTES;
+}
+
 /** A client-derived key is a lowercase SHA-256 digest in hex. */
 export const DERIVED_KEY_PATTERN = /^[a-f0-9]{64}$/;
 

@@ -31,9 +31,8 @@ import {
   DERIVED_KEY_PATTERN,
   RAILS_BCRYPT_ALGORITHM,
   AuthLoginRejected,
-  MIN_SALT_BYTES,
-  SALT_BASE64_PATTERN,
   argon2idParamsSatisfyPolicy,
+  isUsableVerifierSalt,
   sessionTokenDigestInput,
   type PasswordAlgorithm,
   type SessionKind,
@@ -255,7 +254,7 @@ export class HonoAuthService {
       if (upgrade === undefined) return { ok: false };
       if (upgrade.algorithm !== ARGON2ID_ALGORITHM) return { ok: false };
       if (!argon2idParamsSatisfyPolicy(upgrade.params)) return { ok: false };
-      if (!HonoAuthService.usableSalt(upgrade.salt)) return { ok: false };
+      if (!isUsableVerifierSalt(upgrade.salt)) return { ok: false };
       if (!DERIVED_KEY_PATTERN.test(upgrade.derivedKey)) return { ok: false };
       const { memoryKiB, iterations, parallelism } = upgrade.params as Record<
         string,
@@ -282,15 +281,6 @@ export class HonoAuthService {
     // Unsupported, malformed or tampered verifier row: fail closed without
     // revealing which check failed (§7 "Verifier registry").
     return { ok: false };
-  }
-
-  /** A stored salt must be decodable base64 of at least 128 bits (§7 step 2). */
-  private static usableSalt(salt: string): boolean {
-    if (!SALT_BASE64_PATTERN.test(salt)) return false;
-    const padding = salt.endsWith('==') ? 2 : salt.endsWith('=') ? 1 : 0;
-    // floor(length * 3 / 4) - padding, without accepting atob's leniency.
-    const bytes = Math.floor((salt.length * 3) / 4) - padding;
-    return bytes >= MIN_SALT_BYTES;
   }
 
   /**
@@ -320,7 +310,8 @@ export class HonoAuthService {
     };
   }
 
-  /** Record one rejected attempt and raise the uniform failure. */
+  /**
+   * Record one rejected attempt and raise the uniform failure. */
   private async reject(
     account: AuthAccount | null,
     clientIp: string,
@@ -339,5 +330,77 @@ export class HonoAuthService {
       secret
     );
     throw new AuthLoginRejected();
+  }
+
+  /**
+   * Change the account's password (`POST /v2/auth/password`, §7 step 4 and
+   * "Verifier registry"). Verifies the presented key against the stored
+   * verifier, then writes the new material atomically in the same guarded
+   * flow that establishes a fresh session: the verifier change fires the
+   * revocation trigger, so the account's other sessions die first and the
+   * fresh one survives — one row per device afterwards.
+   *
+   * Throws {@link AuthLoginRejected} for any rejected attempt (wrong key, a
+   * malformed stored verifier row, a code-only account). Returns `null`
+   * when the write loses the authority race — a concurrent reset changed the
+   * row between the read and the write — so the route can answer 409.
+   */
+  async changePassword(
+    input: {
+      user: FoundationUser;
+      currentDerivedKey: string;
+      derivedKey: string;
+      salt: string;
+      params: unknown;
+    },
+    kind: SessionKind,
+    presentedToken: string | undefined,
+    clientIp: string,
+    now: Date
+  ): Promise<{ token: string } | null> {
+    const user = input.user;
+    const account = await this.repository.accountById(user.id);
+    if (account === null) return null;
+    const secret = this.serverSecret;
+    const digest = await sha256Hex(input.currentDerivedKey);
+    const stored = account.passwordVerifier;
+    if (stored === null) throw new AuthLoginRejected();
+    if (
+      account.passwordAlgorithm !== ARGON2ID_ALGORITHM &&
+      account.passwordAlgorithm !== RAILS_BCRYPT_ALGORITHM
+    )
+      throw new AuthLoginRejected();
+    if (!constantTimeEqual(digest, stored)) throw new AuthLoginRejected();
+    // New material must satisfy the current Argon2id policy (named constants,
+    // §7 step 4); anything weaker is refused without revealing the policy.
+    if (!argon2idParamsSatisfyPolicy(input.params))
+      throw new AuthLoginRejected();
+    if (!isUsableVerifierSalt(input.salt)) throw new AuthLoginRejected();
+    const { memoryKiB, iterations, parallelism } = input.params as Record<
+      string,
+      number
+    >;
+    const write: VerifierWrite = {
+      passwordHash: account.passwordHash,
+      passwordVerifier: await sha256Hex(input.derivedKey),
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordSalt: input.salt,
+      passwordParams: JSON.stringify({ memoryKiB, iterations, parallelism }),
+    };
+    const established = await this.repository.establishLogin({
+      repository: this.foundation,
+      account,
+      user,
+      verifier: write,
+      kind,
+      now,
+      previousToken: sessionTokenDigestInput(presentedToken) ?? undefined,
+    });
+    // The authority gate lost the race (a concurrent reset changed the row):
+    // the new verifier is not stored and no session is issued.
+    if (!established) return null;
+    if (secret !== undefined && secret !== '')
+      await this.repository.resetThrottle(account.id, clientIp, secret);
+    return { token: established.token };
   }
 }

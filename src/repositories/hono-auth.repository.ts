@@ -217,6 +217,28 @@ export class HonoAuthRepository {
     };
   }
 
+  /**
+   * The account row of an authenticated user, re-read for a verifier-changing
+   * operation (password change). `null` means the account vanished between
+   * the session re-read and the write, which is fail-closed.
+   */
+  async accountById(id: number): Promise<AuthAccount | null> {
+    const { users, communities } = this.tables;
+    const rows: RawAuthAccount[] = await this.db
+      .select(AUTH_COLUMNS(this.tables))
+      .from(users)
+      .leftJoin(communities, eq(users.communityId, communities.id))
+      .where(eq(users.id, id))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ...row,
+      isActive: toFlag(row.isActive) === true,
+      communityIsActive: toFlag(row.communityIsActive),
+    };
+  }
+
   /** One community slug → id lookup for the login/prelogin locator. */
   async communityIdBySlug(slug: string): Promise<number | null> {
     const { communities } = this.tables;

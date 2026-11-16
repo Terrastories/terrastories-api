@@ -475,7 +475,7 @@ export async function runHonoFoundationContract(
     // is the authentication factor. A tampered/malformed stored verifier
     // fails closed with the uniform 401 (SPEC-V2 §7 "Verifier registry").
     const currentCookie = await login(viewerEmail);
-    for (const dependency of ['readiness', 'session'] as const) {
+    for (const dependency of ['readiness', 'sessionContext'] as const) {
       const unavailable = new HonoFoundationRepository(database);
       unavailable[dependency] = storageOutage;
       const failing = createHonoApp({ ...options, repository: unavailable });

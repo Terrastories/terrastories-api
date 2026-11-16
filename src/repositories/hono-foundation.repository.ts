@@ -307,12 +307,18 @@ export class HonoFoundationRepository {
    * sessions. Enforces the §6.8 expiry split (idle window, device absolute
    * window, revocation tombstone) and persists `last_seen_at` at a bounded
    * rate so a busy session does not spend one D1 row write per request.
+   *
+   * `sessionContext` also returns the `kind`, so the response cookie can be
+   * issued with the lifetime of the session the caller actually holds.
    */
-  async session(
+  async sessionContext(
     tokenHash: string,
     now: Date,
     renew = true
-  ): Promise<FoundationUser | null> {
+  ): Promise<{
+    user: FoundationUser;
+    kind: SessionKind;
+  } | null> {
     const { users, communities } = this.tables;
     const sessions = this.sessions;
     const nowMs = now.getTime();
@@ -344,11 +350,11 @@ export class HonoFoundationRepository {
       .limit(1);
     const row = rows[0];
     const user = row ? this.toFoundationUser(row) : null;
-    if (!user || !row) return user;
+    if (!user || !row) return null;
+    const kind: SessionKind = row.kind === 'device' ? 'device' : 'standard';
     // Bounded last-seen write: once a minute at most, plus the slide-renewal
     // inside the final 15 minutes of the idle window.
     const idleExpiresAt = row.idleExpiresAt ?? row.expiresAt;
-    const kind = row.kind === 'device' ? 'device' : 'standard';
     const staleLastSeen =
       row.lastSeenAt === null ||
       nowMs - row.lastSeenAt >= SESSION_LAST_SEEN_WRITE_INTERVAL_MS;
@@ -359,7 +365,7 @@ export class HonoFoundationRepository {
       renew &&
       nowMs >=
         idleExpiresAt - sessionIdleWindowMs(kind) + sessionRenewalInterval;
-    if (!staleLastSeen && !renewWindow) return user;
+    if (!staleLastSeen && !renewWindow) return { user, kind };
     const patch: Record<string, unknown> = { lastSeenAt: nowMs };
     if (renewWindow) {
       const next = sessionLifetimesFor(kind, nowMs);
@@ -380,8 +386,17 @@ export class HonoFoundationRepository {
       .returning({ id: sessions.id });
     // A lost renewal race must re-read authority, never resurrect a revoked row.
     if (!touched.length && renewWindow)
-      return this.session(tokenHash, now, false);
-    return user;
+      return this.sessionContext(tokenHash, now, false);
+    return { user, kind };
+  }
+
+  async session(
+    tokenHash: string,
+    now: Date,
+    renew = true
+  ): Promise<FoundationUser | null> {
+    const context = await this.sessionContext(tokenHash, now, renew);
+    return context?.user ?? null;
   }
 
   /**
@@ -398,6 +413,19 @@ export class HonoFoundationRepository {
       ),
       isNull(sessions.revokedAt)
     );
+  }
+
+  /** Set a user's display name (own profile edit, PATCH /v2/auth/me). */
+  async updateDisplayName(
+    id: number,
+    displayName: string | null,
+    now: Date
+  ): Promise<void> {
+    const { users } = this.tables;
+    await this.database
+      .update(users)
+      .set({ displayName, updatedAt: now })
+      .where(eq(users.id, id));
   }
 
   /** Delete this session row (logout) and clear it everywhere else. */

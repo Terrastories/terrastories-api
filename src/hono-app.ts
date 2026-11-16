@@ -17,9 +17,13 @@ import { z } from 'zod';
 import {
   AUTH_LOGIN_FAILURE_BODY,
   DERIVED_KEY_PATTERN,
+  ARGON2ID_ALGORITHM,
   AuthLoginRejected,
+  argon2idParamsSatisfyPolicy,
   clientIpOf,
+  isUsableVerifierSalt,
   sessionCookieMaxAge,
+  type SessionKind,
 } from './shared/auth-policy.js';
 import type {
   FoundationUser,
@@ -71,6 +75,20 @@ const loginSchema = z
     deviceSession: z.boolean().optional(),
   })
   .strict();
+const mePatchSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(255).nullable(),
+  })
+  .strict();
+const passwordChangeSchema = z
+  .object({
+    currentDerivedKey: z.string().regex(DERIVED_KEY_PATTERN),
+    algorithm: z.literal(ARGON2ID_ALGORITHM),
+    salt: z.string().min(1).max(128),
+    params: z.record(z.string(), z.unknown()),
+    derivedKey: z.string().regex(DERIVED_KEY_PATTERN),
+  })
+  .strict();
 const publicUser = (user: FoundationUser) => ({
   id: user.id,
   email: user.email,
@@ -81,7 +99,9 @@ const publicUser = (user: FoundationUser) => ({
 });
 
 export function createHonoApp(options: FoundationOptions) {
-  const app = new Hono<{ Variables: { actor: FoundationUser } }>();
+  const app = new Hono<{
+    Variables: { actor: FoundationUser; sessionKind: SessionKind };
+  }>();
   const service = new HonoFoundationService(
     options.repository,
     options.storage
@@ -123,6 +143,20 @@ export function createHonoApp(options: FoundationOptions) {
     sameSite: 'Strict' as const,
     path: '/',
     maxAge: sessionLifetime / 1000,
+  };
+  // The renewal/issue cookie of a live session: `standard` sessions carry the
+  // idle Max-Age; `device` sessions get no Max-Age — their absolute bound is
+  // enforced by the session row (§7 "Sessions").
+  const sessionCookie = (kind: SessionKind) => {
+    const maxAge = sessionCookieMaxAge(kind);
+    return maxAge === null
+      ? {
+          httpOnly: true,
+          secure: options.secureCookies ?? true,
+          sameSite: 'Strict' as const,
+          path: '/',
+        }
+      : { ...cookie, maxAge };
   };
   app.use('*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
@@ -213,20 +247,7 @@ export function createHonoApp(options: FoundationOptions) {
           clientIpOf(c.req.raw.headers),
           now()
         );
-        const maxAge = sessionCookieMaxAge(result.kind);
-        setCookie(
-          c,
-          'ts_session',
-          result.token,
-          maxAge === null
-            ? {
-                httpOnly: true,
-                secure: options.secureCookies ?? true,
-                sameSite: 'Strict',
-                path: '/',
-              }
-            : { ...cookie, maxAge }
-        );
+        setCookie(c, 'ts_session', result.token, sessionCookie(result.kind));
         return c.json({ user: publicUser(result.user) });
       } catch (error) {
         // Every rejected attempt answers one identical 401 body (§6.2, §7).
@@ -244,15 +265,23 @@ export function createHonoApp(options: FoundationOptions) {
     publicOrigin: configuredOrigin,
   });
   app.use('/v2/*', async (c, next) => {
-    const user = await service.actor(getCookie(c, 'ts_session'), now());
-    if (!user) return c.json({ error: 'Unauthorized' }, 401);
-    c.set('actor', user);
+    const session = await service.actor(getCookie(c, 'ts_session'), now());
+    if (!session) return c.json({ error: 'Unauthorized' }, 401);
+    c.set('actor', session.user);
+    c.set('sessionKind', session.kind);
     await next();
     if (
       c.res.status < 400 &&
-      !['/v2/auth/logout', '/v2/auth/revoke'].includes(c.req.path)
+      !['/v2/auth/logout', '/v2/auth/revoke', '/v2/auth/password'].includes(
+        c.req.path
+      )
     )
-      setCookie(c, 'ts_session', getCookie(c, 'ts_session')!, cookie);
+      setCookie(
+        c,
+        'ts_session',
+        getCookie(c, 'ts_session')!,
+        sessionCookie(session.kind)
+      );
   });
   app.get('/v2/auth/me', (c) => c.json({ user: publicUser(c.get('actor')) }));
   app.post('/v2/auth/logout', async (c) => {
@@ -261,6 +290,93 @@ export function createHonoApp(options: FoundationOptions) {
     );
     deleteCookie(c, 'ts_session', cookie);
     return c.body(null, 204);
+  });
+  const jsonBody4k = bodyLimit({
+    maxSize: 4096,
+    onError: (c) => c.json({ error: 'Request too large' }, 413),
+  });
+  app.patch('/v2/auth/me', jsonBody4k, async (c) => {
+    if (
+      c.req.header('Content-Type')?.split(';')[0].trim() !== 'application/json'
+    )
+      return c.json({ error: 'Expected JSON' }, 415);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid request' }, 400);
+    }
+    const parsed = mePatchSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);
+    const actor = c.get('actor');
+    // Own-profile edit: only the display name, never role, status,
+    // communityId, username or email (SPEC-V2 §6.2, route registry). NFC
+    // composes without case-folding so stored text matches the client.
+    const displayName =
+      parsed.data.displayName === null
+        ? null
+        : parsed.data.displayName.normalize('NFC');
+    await options.repository.updateDisplayName(actor.id, displayName, now());
+    return c.json({ user: publicUser({ ...actor, displayName }) });
+  });
+  app.post('/v2/auth/password', jsonBody4k, async (c) => {
+    if (
+      c.req.header('Content-Type')?.split(';')[0].trim() !== 'application/json'
+    )
+      return c.json({ error: 'Expected JSON' }, 415);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid request' }, 400);
+    }
+    const parsed = passwordChangeSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);
+    const params = parsed.data.params;
+    if (
+      !argon2idParamsSatisfyPolicy(params) ||
+      !isUsableVerifierSalt(parsed.data.salt)
+    )
+      return c.json({ error: 'Password does not meet requirements' }, 400);
+    const { memoryKiB, iterations, parallelism } = params as Record<
+      string,
+      number
+    >;
+    const actor = c.get('actor');
+    // The verifier change fires the session-revocation trigger, so the
+    // account's other sessions die first and the fresh one survives
+    // (SPEC-V2 §6.8, §7 step 4). Any rejected attempt answers one identical
+    // 401 body.
+    let changed: { token: string } | null;
+    try {
+      changed = await authService.changePassword(
+        {
+          user: actor,
+          currentDerivedKey: parsed.data.currentDerivedKey,
+          derivedKey: parsed.data.derivedKey,
+          salt: parsed.data.salt,
+          params: { memoryKiB, iterations, parallelism },
+        },
+        c.get('sessionKind'),
+        getCookie(c, 'ts_session'),
+        clientIpOf(c.req.raw.headers),
+        now()
+      );
+    } catch (error) {
+      if (error instanceof AuthLoginRejected)
+        return c.json(AUTH_LOGIN_FAILURE_BODY, 401);
+      throw error;
+    }
+    if (!changed)
+      // The authority gate lost the race to a concurrent reset.
+      return c.json({ error: 'Conflict' }, 409);
+    setCookie(
+      c,
+      'ts_session',
+      changed.token,
+      sessionCookie(c.get('sessionKind'))
+    );
+    return c.json({ user: publicUser(actor) });
   });
   app.post('/v2/auth/revoke', async (c) => {
     await options.repository.revokeUserSessions(c.get('actor').id);

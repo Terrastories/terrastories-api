@@ -29,6 +29,7 @@ export interface FoundationStorage {
 }
 
 import { parseV2Role } from '../shared/authorization/sovereignty-policy.js';
+import type { SessionKind } from '../shared/auth-policy.js';
 
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -47,13 +48,21 @@ export class HonoFoundationService {
     readonly storage: FoundationStorage
   ) {}
 
+  /**
+   * The session's user and kind (`standard` or `device`), re-read from the
+   * database. The kind lets the response cookie reflect the session the
+   * caller actually holds (§7 "Sessions").
+   */
   async actor(
     token: string | undefined,
     now: Date
-  ): Promise<FoundationUser | null> {
+  ): Promise<{ user: FoundationUser; kind: SessionKind } | null> {
     if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
-    const user = await this.repository.session(await tokenDigest(token), now);
-    return user && parseV2Role(user.role) ? user : null;
+    const context = await this.repository.sessionContext(
+      await tokenDigest(token),
+      now
+    );
+    return context && parseV2Role(context.user.role) ? context : null;
   }
 
   async media(id: string, user: FoundationUser) {

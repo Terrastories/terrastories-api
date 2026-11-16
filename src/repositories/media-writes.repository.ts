@@ -1897,9 +1897,11 @@ export class MediaWritesRepository {
       communityId: number | null;
       viewer: ReadRuleViewer | null;
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): { table: any; where: any } {
     const t = this.tables;
     const cid = input.communityId;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const closed: { table: any; where: any } = {
       table: t.stories,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2003,6 +2005,7 @@ export class MediaWritesRepository {
       communityId: number | null;
       viewer: ReadRuleViewer | null;
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): any {
     const source = this.ownerSource(executor, input);
     return exists(

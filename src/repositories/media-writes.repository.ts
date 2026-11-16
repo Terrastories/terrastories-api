@@ -2189,21 +2189,6 @@ export class MediaWritesRepository {
         return { status: 'type_mismatch' };
       }
 
-      const maxRows = await this.db
-        .select({
-          maxOrd: sql<number>`COALESCE(MAX(${this.tables.attachments.ordinal}), -1)`,
-        })
-        .from(this.tables.attachments)
-        .where(
-          this.attachmentScope(
-            authority.communityId,
-            input.ownerType,
-            input.ownerId,
-            input.role
-          )
-        );
-      const ordinal = input.ordinal ?? Number(maxRows[0]?.maxOrd ?? -1) + 1;
-
       // INSERT ... SELECT with the owner still present in the same
       // statement, so an owner deleted between `authorizeAttachmentOwner` and
       // this batch makes the statement produce no row (mapped to 404) — a
@@ -2216,6 +2201,19 @@ export class MediaWritesRepository {
         communityId: authority.communityId,
         viewer: ownCommunityViewerForRole(input.actor.role),
       });
+      // The next ordinal is computed inside the statement (a scalar
+      // subquery over the same owner/role in this transaction), so two
+      // inserts reading the owner's current max in one batch — or two
+      // sequential batches — cannot both take the same slot.
+      const ordinalSql =
+        input.ordinal !== undefined
+          ? sql`${input.ordinal}`
+          : sql`coalesce((select max(${this.tables.attachments.ordinal}) from ${this.tables.attachments} where ${this.attachmentScope(
+              authority.communityId,
+              input.ownerType,
+              input.ownerId,
+              input.role
+            )}), -1) + 1`;
       const insertAttachment = this.db
         .insert(this.tables.attachments)
         .select(
@@ -2230,7 +2228,7 @@ export class MediaWritesRepository {
               ownerType: sql`${input.ownerType}`.as('owner_type'),
               ownerId: sql`${input.ownerId}`.as('owner_id'),
               role: sql`${input.role}`.as('role'),
-              ordinal: sql`${ordinal}`.as('ordinal'),
+              ordinal: ordinalSql.as('ordinal'),
               attachableId: sql`NULL`.as('attachable_id'),
               attachableType: sql`NULL`.as('attachable_type'),
               url: sql`NULL`.as('url'),

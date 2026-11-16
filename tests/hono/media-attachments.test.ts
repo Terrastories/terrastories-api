@@ -1988,4 +1988,116 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
       d1Sqlite.close();
     }
   });
+
+  it('assigns distinct, sequential ordinals to consecutive attaches in one owner/role', async () => {
+    const { db: d1Db, sqlite: d1Sqlite } = createRealD1Db();
+    try {
+      const seed = drizzle(d1Sqlite);
+      const seedTables = tablesFor(seed);
+      const now = new Date();
+      const [comm] = await seed
+        .insert(seedTables.communities)
+        .values({
+          name: 'Ordinal Comm',
+          slug: `ordinal-${crypto.randomUUID().slice(0, 8)}`,
+          publicStories: true,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const email = `ordinal-${crypto.randomUUID().slice(0, 8)}@example.test`;
+      const derived = deriveUserIdentityColumns({
+        email,
+        firstName: 'Ordinal',
+        lastName: 'Editor',
+        communityId: comm!.id,
+      });
+      const [actor] = await seed
+        .insert(seedTables.users)
+        .values({
+          email,
+          emailNormalized: derived.emailNormalized,
+          passwordHash: await hash(TEST_PASS, 4),
+          firstName: 'Ordinal',
+          lastName: 'Editor',
+          displayNameNormalized: derived.displayNameNormalized,
+          role: 'editor',
+          communityId: comm!.id,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const [story] = await seed
+        .insert(seedTables.stories)
+        .values({
+          title: 'Ordinal Story',
+          slug: `ordinal-${crypto.randomUUID().slice(0, 8)}`,
+          privacyLevel: 'public',
+          isRestricted: false,
+          communityId: comm!.id,
+          createdBy: actor!.id,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const fileIds: string[] = [
+        crypto.randomUUID(),
+        crypto.randomUUID(),
+        crypto.randomUUID(),
+      ];
+      for (const fileId of fileIds) {
+        await seed.insert(seedTables.files).values({
+          id: fileId,
+          filename: fileId,
+          originalName: `ordinal-${fileId.slice(0, 4)}.png`,
+          path: `communities/${comm!.id}/media/${fileId}`,
+          storageKey: `communities/${comm!.id}/media/${fileId}`,
+          url: `/v2/media/${fileId}`,
+          mimeType: 'image/png',
+          size: PNG_BYTES.byteLength,
+          byteSize: PNG_BYTES.byteLength,
+          checksum: null,
+          communityId: comm!.id,
+          uploadedBy: actor!.id,
+          culturalRestrictions: null,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      const repo = new MediaWritesRepository(d1Db as never);
+      const ordinals: number[] = [];
+      for (const fileId of fileIds) {
+        const created = await repo.createAttachment({
+          actor: {
+            id: actor!.id,
+            email,
+            role: 'editor',
+            communityId: comm!.id,
+            isActive: true,
+          },
+          fileId,
+          ownerType: 'story',
+          ownerId: story!.id,
+          role: 'story_media',
+        });
+        expect(created.status).toBe('created');
+        if (created.status !== 'created') return;
+        ordinals.push(created.attachment.ordinal);
+      }
+      expect(new Set(ordinals).size).toBe(fileIds.length);
+      expect([...ordinals].sort((a, b) => a - b)).toEqual([0, 1, 2]);
+      const rows = await seed
+        .select({
+          id: seedTables.attachments.id,
+          ordinal: seedTables.attachments.ordinal,
+        })
+        .from(seedTables.attachments);
+      expect(new Set(rows.map((row) => row.ordinal)).size).toBe(fileIds.length);
+    } finally {
+      d1Sqlite.close();
+    }
+  });
 });

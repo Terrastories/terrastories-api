@@ -42,6 +42,7 @@ import {
 } from '../db/schema/sessions.js';
 import {
   ORPHAN_SWEEP_CURSOR_KEY,
+  ORPHAN_SWEEP_HOLD_KEY,
   type FoundationStorage,
 } from './hono-foundation.service.js';
 
@@ -339,6 +340,13 @@ export interface MediaCleanupCoordinatorOptions {
    * ORPHAN_SWEEP_MAX_PAGES; Workers pass WORKER_ORPHAN_SWEEP_MAX_PAGES.
    */
   maxPages?: number;
+  /**
+   * Explicit restore hold (`ORPHAN_SWEEP_PAUSED=true` in the Node/Worker
+   * environment). While set, the orphan sweep deletes nothing; entrypoints
+   * wire this from their environment so an operator can pause garbage
+   * collection around a restore instead of relying on any table state.
+   */
+  sweepPaused?: boolean;
 }
 
 export class MediaCleanupCoordinator {
@@ -538,6 +546,12 @@ export class MediaCleanupCoordinator {
    * delete). Only objects older than the grace window are considered; a
    * referenced object or a fresh in-flight upload is always kept.
    *
+   * The sweep is skipped entirely while an explicit restore hold is in effect:
+   * either `ORPHAN_SWEEP_PAUSED=true` in the environment, or a storage marker
+   * object `system/orphan-sweep-hold` (outside the swept prefixes, so the sweep
+   * never deletes it). Operators set the hold before a filesystem/database
+   * restore and clear it once the restored state is verified.
+   *
    * The per-run cap counts only objects past the grace window, so a long run of
    * live objects never starves garbage collection. A separate per-run cap on
    * listed pages (`maxPages`) bounds total subrequests, so a page full of
@@ -557,11 +571,12 @@ export class MediaCleanupCoordinator {
     if (!this.storage.list || !this.storage.delete) {
       return { deletedCount: 0, failedCount: 0, scanned: 0 };
     }
-    if (!(await this.hasAnyFilesRow())) {
-      // A filesystem/database restore can recreate storage bytes before the
-      // files table knows them; with no file row anywhere, nothing here may
-      // be trusted as garbage, so the sweep is skipped entirely.
-      this.log('media cleanup: files table is empty; sweep skipped');
+    if (await this.orphanSweepPaused()) {
+      // Explicit restore hold: ORPHAN_SWEEP_PAUSED=true or a storage
+      // `system/orphan-sweep-hold` marker. A restore can recreate storage
+      // bytes before the `files` table knows them; sweeping then would delete
+      // bytes that are about to become referenced again.
+      this.log('media cleanup: orphan sweep hold; sweep skipped');
       return { deletedCount: 0, failedCount: 0, scanned: 0 };
     }
     const now = this.options.now ?? (() => new Date());
@@ -823,23 +838,24 @@ export class MediaCleanupCoordinator {
   }
 
   /**
-   * True when the files table holds at least one row. An empty table is the
-   * restore-in-progress state; sweeping then would delete bytes that are
-   * about to become referenced again. An unreadable table is treated as
-   * empty on purpose: keeping bytes is always safe.
+   * Explicit restore hold for the orphan sweeper. True when either the
+   * env/config flag (`sweepPaused`, wired from `ORPHAN_SWEEP_PAUSED=true`)
+   * is set, or the storage marker object `system/orphan-sweep-hold` exists.
+   * The marker lives outside the swept prefixes, so the sweep never deletes
+   * it; the hold can only be lifted by the operator who set it.
+   *
+   * An unreadable marker is treated as set on purpose: keeping bytes is
+   * always safe, deleting possibly-referenced bytes never is. An adapter
+   * without `getSystemObject` cannot carry a marker and sweeps normally.
    */
-  private async hasAnyFilesRow(): Promise<boolean> {
-    const tables = tablesFor(this.connection);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = this.connection as any;
+  private async orphanSweepPaused(): Promise<boolean> {
+    if (this.options.sweepPaused) return true;
+    const get = this.storage.getSystemObject;
+    if (!get) return false;
     try {
-      const rows = await db
-        .select({ id: tables.files.id })
-        .from(tables.files)
-        .limit(1);
-      return Array.isArray(rows) && rows.length > 0;
+      return (await get(ORPHAN_SWEEP_HOLD_KEY)) !== null;
     } catch {
-      return false;
+      return true;
     }
   }
 

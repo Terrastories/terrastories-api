@@ -19,8 +19,19 @@ export const validStorageKey = (key: string) =>
  * tenant key can collide with it.
  */
 export const ORPHAN_SWEEP_CURSOR_KEY = 'system/orphan-sweep-cursor.json';
+
+/**
+ * System-owned object: the orphan sweeper's explicit restore hold. While this
+ * object exists, the sweeper deletes nothing — a filesystem/database restore
+ * can recreate storage bytes before the `files` table knows them. Operators
+ * create it before a restore and remove it after the restored state is
+ * verified; it lives outside the swept prefixes, so the sweep never deletes
+ * it (the hold cannot dissolve itself).
+ */
+export const ORPHAN_SWEEP_HOLD_KEY = 'system/orphan-sweep-hold';
+
 export const validSystemStorageKey = (key: string) =>
-  key === ORPHAN_SWEEP_CURSOR_KEY;
+  key === ORPHAN_SWEEP_CURSOR_KEY || key === ORPHAN_SWEEP_HOLD_KEY;
 
 export interface StorageReadRange {
   /** Inclusive 0-based byte offset. */

@@ -36,6 +36,12 @@ export interface WorkerBindings {
   ENVIRONMENT?: string;
   PUBLIC_ORIGIN?: string;
   CORS_ORIGINS?: string;
+  /**
+   * Explicit restore hold for the orphan sweeper. `'true'` pauses sweeping;
+   * unset/anything else leaves it running. A storage `system/orphan-sweep-hold`
+   * marker pauses it independently of this binding.
+   */
+  ORPHAN_SWEEP_PAUSED?: string;
 }
 
 /** Auth method remains injectable pending the Workers Free measurements (#194). */
@@ -291,6 +297,9 @@ export function createWorker(
             {
               now: () => new Date(_controller.scheduledTime || Date.now()),
               maxPages: WORKER_ORPHAN_SWEEP_MAX_PAGES,
+              // Explicit restore hold; the sweeper itself also honours a
+              // `system/orphan-sweep-hold` storage marker.
+              sweepPaused: env.ORPHAN_SWEEP_PAUSED === 'true',
             }
           );
           try {

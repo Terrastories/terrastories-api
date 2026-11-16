@@ -12,6 +12,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
   ORPHAN_SWEEP_CURSOR_KEY,
+  ORPHAN_SWEEP_HOLD_KEY,
   validStorageKey,
   validSystemStorageKey,
   type FoundationStorage,
@@ -245,8 +246,11 @@ export async function createLocalStorage(
       await walkStorageDir(root, root, all);
       const matched = all
         .filter((key) => key.startsWith(prefix))
-        // The sweeper's cursor is system state, never sweepable bytes.
-        .filter((key) => key !== ORPHAN_SWEEP_CURSOR_KEY)
+        // The sweeper's system state (cursor, restore hold) is never sweepable bytes.
+        .filter(
+          (key) =>
+            key !== ORPHAN_SWEEP_CURSOR_KEY && key !== ORPHAN_SWEEP_HOLD_KEY
+        )
         .sort()
         .filter((key) =>
           options?.startAfter ? key > options.startAfter : true

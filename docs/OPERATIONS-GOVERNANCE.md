@@ -117,6 +117,21 @@ Operators coordinate; community administrators lead every decision that touches 
 4. **Notify/escalate.** Community administrators lead notification to their members; no public disclosure of cultural content — including in incident reports, issue trackers, or operator channels. Where administrators are unreachable, the recorded steward process carries the community's decision (SPEC-V2 §7); system privilege alone is never authority over community content.
 5. **Close.** Record the incident with identifiers/outcome only; retention of the incident record itself follows the operator's own policy — it is not community content and must never become a secondary leak of it.
 
+### 6.4 Restore hold for the orphan sweeper
+
+The restart-safe orphan sweeper (§6.7) deletes stored objects that no `files` row references and that are older than the 24-hour grace window. A filesystem/database restore can recreate storage bytes _before_ the `files` table knows them; the bytes then look like garbage and would be swept. The sweeper therefore has an explicit restore hold, checked at the start of every run. The sweep deletes nothing while either hold is in effect:
+
+1. **Environment/config flag** — `ORPHAN_SWEEP_PAUSED=true` (see `.env.example`). On the Node entrypoint it is read from the process environment; on Workers it is the `ORPHAN_SWEEP_PAUSED` binding. Unset or any other value leaves the sweep running.
+2. **Storage marker object** — `system/orphan-sweep-hold`, read through the storage adapter. It lives outside the swept `communities/` and `users/` prefixes, so the sweep never deletes it and the hold cannot dissolve itself; it is removable only by the operator who set it. An unreadable marker is treated as set (keeping bytes is always safe). An adapter without system-object access cannot carry a marker and sweeps normally.
+
+Operator procedure for any restore (D1 Time Travel, retained D1 export, self-hosted/field-kit file backup):
+
+1. Set the hold _before_ touching the restore — `ORPHAN_SWEEP_PAUSED=true`, or create the marker (self-hosted Node: `touch <storage-root>/system/orphan-sweep-hold`; Workers: put an empty `system/orphan-sweep-hold` object in the MEDIA bucket through the pinned CLI).
+2. Restore, then verify the restored state against the out-of-band erasure records and the files table before serving (Section 6.2/6.3 above).
+3. Lift the hold only after verification — unset the flag or remove `system/orphan-sweep-hold`. The Node sweep additionally never runs at boot; its first run is delayed (named constant, default 1 hour) so a restore in flight at process start is not raced.
+
+Neither hold touches the database; lifting the hold never deletes anything by itself — it only re-enables the normal sweep, which still honors the grace window, the reference check and the resume cursor.
+
 ## 7. Change control
 
 Changes to this document follow the `docs/SOURCE-OF-TRUTH.md` change-control contract: retention numbers belong to `docs/SPEC-V2.md` and may only change there; validator rules change in the same commit as `src/config/v2-runtime.ts` and their tests.

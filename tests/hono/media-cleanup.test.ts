@@ -17,6 +17,7 @@ import {
 } from '../../src/services/media-cleanup.service.js';
 import {
   ORPHAN_SWEEP_CURSOR_KEY,
+  ORPHAN_SWEEP_HOLD_KEY,
   type FoundationStorage,
   type StorageListEntry,
 } from '../../src/services/hono-foundation.service.js';
@@ -70,8 +71,11 @@ function createListableStorage(): {
       const limit = options?.limit ?? 200;
       const matched = [...store.entries()]
         .filter(([key]) => key.startsWith(prefix))
-        // The sweep cursor is system state, never sweepable bytes.
-        .filter(([key]) => key !== ORPHAN_SWEEP_CURSOR_KEY)
+        // The sweeper's system state (cursor, restore hold) is never sweepable bytes.
+        .filter(
+          ([key]) =>
+            key !== ORPHAN_SWEEP_CURSOR_KEY && key !== ORPHAN_SWEEP_HOLD_KEY
+        )
         .sort(([a], [b]) => a.localeCompare(b))
         .filter(([key]) =>
           options?.startAfter ? key > options.startAfter : true
@@ -102,10 +106,9 @@ const OLD = new Date('2026-01-01T00:00:00.000Z');
 const NOW = new Date('2026-06-01T12:00:00.000Z');
 
 /**
- * Seed one unrelated files row. The sweeper refuses to run on an empty files
- * table (a restore can recreate storage bytes before the table catches up),
- * so tests that exercise sweeping need the table to be non-empty. The sentinel
- * references no stored object, so it never keeps anything alive.
+ * Seed one unrelated files row so tests exercise the sweep against a non-empty
+ * table. The sentinel references no stored object, so it never keeps anything
+ * alive.
  */
 async function seedSentinelFileRow() {
   const [comm] = await db
@@ -458,9 +461,10 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     );
   });
 
-  it('skips the sweep entirely when the files table has zero rows', async () => {
-    // A fresh, empty database: a restore can recreate storage bytes before
-    // the files rows exist, so nothing may be trusted as garbage.
+  it('sweeps an old orphan even when the files table is completely empty', async () => {
+    // A fresh, empty database carries no restore signal by itself: the
+    // restore hold is the explicit guard (ORPHAN_SWEEP_PAUSED / the
+    // `system/orphan-sweep-hold` marker), not table state.
     const emptySqlite = new Sqlite(':memory:');
     emptySqlite.pragma('foreign_keys = ON');
     const emptyDb = drizzle(emptySqlite);
@@ -474,19 +478,74 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
       uploaded: new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000),
     });
 
-    const logs: string[] = [];
     const cleanup = new MediaCleanupCoordinator(emptyDb, storage, {
+      now: () => now,
+      log: () => {},
+    });
+    const result = await cleanup.sweepOrphanObjects();
+    expect(result.deletedCount).toBe(1);
+    expect(store.has(staleKey)).toBe(false);
+    emptySqlite.close();
+  });
+
+  it('deletes nothing while ORPHAN_SWEEP_PAUSED pauses the sweep', async () => {
+    await seedSentinelFileRow();
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { store, storage } = createListableStorage();
+    const staleKey = 'communities/1/media/stale';
+    store.set(staleKey, {
+      bytes: Uint8Array.from([1]),
+      uploaded: new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000),
+    });
+
+    const logs: string[] = [];
+    const cleanup = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: (line) => logs.push(line),
+      sweepPaused: true,
+    });
+    const result = await cleanup.sweepOrphanObjects();
+    expect(result).toEqual({ deletedCount: 0, failedCount: 0, scanned: 0 });
+    expect(store.has(staleKey)).toBe(true);
+    expect(logs.some((line) => line.includes('hold'))).toBe(true);
+  });
+
+  it('deletes nothing while the storage restore hold marker is present', async () => {
+    await seedSentinelFileRow();
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const { store, storage } = createListableStorage();
+    const staleKey = 'communities/1/media/stale';
+    store.set(staleKey, {
+      bytes: Uint8Array.from([1]),
+      uploaded: new Date(now.getTime() - ORPHAN_SWEEP_GRACE_MS - 1000),
+    });
+    // The hold marker lives outside the swept prefixes.
+    store.set(ORPHAN_SWEEP_HOLD_KEY, {
+      bytes: new TextEncoder().encode('hold\n'),
+      uploaded: new Date(0),
+    });
+
+    const logs: string[] = [];
+    const cleanup = new MediaCleanupCoordinator(db, storage, {
       now: () => now,
       log: (line) => logs.push(line),
     });
     const result = await cleanup.sweepOrphanObjects();
     expect(result).toEqual({ deletedCount: 0, failedCount: 0, scanned: 0 });
-    expect(
-      store.has(staleKey),
-      'no bytes are swept on an empty files table'
-    ).toBe(true);
-    expect(logs.some((line) => line.includes('empty'))).toBe(true);
-    emptySqlite.close();
+    expect(store.has(staleKey)).toBe(true);
+    // The marker is outside the swept prefixes and is never deleted itself.
+    expect(store.has(ORPHAN_SWEEP_HOLD_KEY)).toBe(true);
+    expect(logs.some((line) => line.includes('hold'))).toBe(true);
+
+    // Lifting the hold resumes the normal sweep.
+    store.delete(ORPHAN_SWEEP_HOLD_KEY);
+    const lifted = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: () => {},
+    });
+    const after = await lifted.sweepOrphanObjects();
+    expect(after.deletedCount).toBe(1);
+    expect(store.has(staleKey)).toBe(false);
   });
 
   it('walks into the users/ prefix and wraps the cursor back to communities/', async () => {
@@ -603,8 +662,7 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
           updatedAt: OLD,
         })
         .returning();
-      // Seed one unrelated files row so the empty-table restore-in-progress
-      // guard does not skip the sweep.
+      // Seed one unrelated files row so the sweep exercises a non-empty table.
       const sentinelId = crypto.randomUUID();
       await seed.insert(seedTables.files).values({
         id: sentinelId,

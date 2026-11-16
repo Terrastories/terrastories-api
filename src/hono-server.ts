@@ -49,10 +49,14 @@ const server = serve({
 // Restart-safe orphan sweeper: the first sweep runs after a named delay, then
 // on an unref'd interval so a long-lived Node server eventually removes bytes
 // whose `files` row is gone. No sweep happens at startup: a Node process that
-// just restored its storage before the files table finished restoring must not
-// treat missing rows as garbage. A failed sweep is reported content-free
-// instead of being swallowed.
-const cleanup = new MediaCleanupCoordinator(db, storage);
+// just restored its storage before the files table finished restoring must use
+// the explicit restore hold (ORPHAN_SWEEP_PAUSED=true or a
+// `system/orphan-sweep-hold` marker) until the restored state is verified. A
+// failed sweep is reported content-free instead of being swallowed.
+const cleanup = new MediaCleanupCoordinator(db, storage, {
+  // Explicit restore hold; see ORPHAN_SWEEP_HOLD_KEY in hono-foundation.service.ts.
+  sweepPaused: process.env.ORPHAN_SWEEP_PAUSED === 'true',
+});
 const sweepOrphanObjects = () => {
   void cleanup.sweepOrphanObjects().catch(() => {
     // eslint-disable-next-line no-console -- operator channel; content-free

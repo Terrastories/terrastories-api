@@ -1598,6 +1598,9 @@ export class MediaWritesRepository {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const lock = (query: any): any => {
       if (!input.lock) return query;
+      // SQLite/D1 select builders have no `.for()` — row locks are a
+      // PostgreSQL feature. Writers serialize there, so the lock is a no-op.
+      if (typeof query.for !== 'function') return query;
       if (input.lock === 'update') return query.for('update');
       if (input.lock === 'key share') return query.for('key share');
       return query.for('share');
@@ -2020,7 +2023,8 @@ export class MediaWritesRepository {
         communityId: authority.communityId,
         file,
         executor: this.db,
-        lock: 'update',
+        // D1/SQLite serialize writers and their select builders have no
+        // `.for()`; row locks are PostgreSQL-only.
       });
       if (!reuse.ok) return { status: reuse.outcome };
       if (!this.attachmentTypeMatches(input.role, file.mimeType)) {

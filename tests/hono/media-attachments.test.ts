@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { and, asc, eq } from 'drizzle-orm';
 import { hash } from 'bcrypt';
@@ -214,6 +215,64 @@ function createD1BatchDb(): {
     )();
   };
   return { db: d1Like, sqlite, batchCalls };
+}
+
+/**
+ * A D1Database-shaped client over better-sqlite3, driven through the real
+ * drizzle-orm/d1 driver. The better-sqlite3-shaped batch mock above cannot
+ * express everything the hosted Workers D1 accepts (e.g. it tolerates SQL the
+ * D1 driver rejects), so D1-specific bugs need this harness.
+ */
+function createRealD1Db(): {
+  db: ReturnType<typeof drizzleD1>;
+  sqlite: Sqlite.Database;
+} {
+  const d1Sqlite = new Sqlite(':memory:');
+  d1Sqlite.pragma('foreign_keys = ON');
+  migrate(drizzle(d1Sqlite), { migrationsFolder: './src/db/migrations' });
+  const client = {
+    prepare(query: string) {
+      let params: unknown[] = [];
+      const stmt = {
+        bind(...vals: unknown[]) {
+          params = vals;
+          return stmt;
+        },
+        all: async () => ({
+          results: d1Sqlite.prepare(query).all(...params),
+          success: true,
+          meta: {},
+        }),
+        raw: async () =>
+          d1Sqlite
+            .prepare(query)
+            .raw(true)
+            .all(...params),
+        first: async () => d1Sqlite.prepare(query).get(...params) ?? null,
+        run: async () => {
+          const info = d1Sqlite.prepare(query).run(...params);
+          return { success: true, meta: { changes: info.changes } };
+        },
+        _exec() {
+          const prepared = d1Sqlite.prepare(query);
+          if (prepared.reader) {
+            return { results: prepared.all(...params) };
+          }
+          const info = prepared.run(...params);
+          return {
+            results: [],
+            success: true,
+            meta: { changes: info.changes },
+          };
+        },
+      };
+      return stmt;
+    },
+    async batch(stmts: Array<{ _exec: () => unknown }>) {
+      return d1Sqlite.transaction(() => stmts.map((s) => s._exec()))();
+    },
+  };
+  return { db: drizzleD1(client as unknown as D1Database), sqlite: d1Sqlite };
 }
 
 /** Seed one community, editor, and public story for D1-batch delete tests. */
@@ -1322,6 +1381,125 @@ describe('Slice 9 attachments, byte cleanup, and D1 bounds (#140)', () => {
       );
     } finally {
       batchSqlite.close();
+    }
+  });
+
+  // Regression: the hosted Workers D1 driver's select builder has no `.for()`
+  // (row locks are PostgreSQL-only), so any lock on the D1 path crashed the
+  // request with a TypeError. The better-sqlite3 batch mock cannot express
+  // this, which is why the suite stayed green while qa:personas:workers 500'd.
+  it('creates an attachment through the real D1 driver (no row locks)', async () => {
+    const { db: d1Db, sqlite: d1Sqlite } = createRealD1Db();
+    try {
+      const seed = drizzle(d1Sqlite);
+      const seedTables = tablesFor(seed);
+      const now = new Date();
+      const [comm] = await seed
+        .insert(seedTables.communities)
+        .values({
+          name: 'Real D1 Comm',
+          slug: `real-d1-${crypto.randomUUID().slice(0, 8)}`,
+          publicStories: true,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const realEmail = `real-d1-${crypto.randomUUID().slice(0, 8)}@example.test`;
+      const derived = deriveUserIdentityColumns({
+        email: realEmail,
+        firstName: 'Real',
+        lastName: 'D1',
+        communityId: comm!.id,
+      });
+      const [actor] = await seed
+        .insert(seedTables.users)
+        .values({
+          email: realEmail,
+          emailNormalized: derived.emailNormalized,
+          passwordHash: await hash(TEST_PASS, 4),
+          firstName: 'Real',
+          lastName: 'D1',
+          displayNameNormalized: derived.displayNameNormalized,
+          role: 'editor',
+          communityId: comm!.id,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const [story] = await seed
+        .insert(seedTables.stories)
+        .values({
+          title: 'Real D1 Story',
+          slug: `real-d1-story-${crypto.randomUUID().slice(0, 8)}`,
+          privacyLevel: 'public',
+          isRestricted: false,
+          communityId: comm!.id,
+          createdBy: actor!.id,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const fileId = crypto.randomUUID();
+      await seed.insert(seedTables.files).values({
+        id: fileId,
+        filename: fileId,
+        originalName: 'real-d1.png',
+        path: `communities/${comm!.id}/media/${fileId}`,
+        storageKey: `communities/${comm!.id}/media/${fileId}`,
+        url: `/v2/media/${fileId}`,
+        mimeType: 'image/png',
+        size: PNG_BYTES.byteLength,
+        byteSize: PNG_BYTES.byteLength,
+        checksum: null,
+        communityId: comm!.id,
+        uploadedBy: actor!.id,
+        culturalRestrictions: null,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Seed an existing relation so the attach takes the reuse path — the
+      // one that runs row locks on the PostgreSQL driver.
+      await seed.insert(seedTables.attachments).values({
+        communityId: comm!.id,
+        fileId,
+        ownerType: 'story',
+        ownerId: story!.id,
+        role: 'story_media',
+        ordinal: 0,
+        createdAt: now,
+      });
+      const [place] = await seed
+        .insert(seedTables.places)
+        .values({
+          name: 'Real D1 Place',
+          communityId: comm!.id,
+          isRestricted: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      const repo = new MediaWritesRepository(d1Db as never);
+      const created = await repo.createAttachment({
+        actor: {
+          id: actor!.id,
+          email: realEmail,
+          role: 'editor',
+          communityId: comm!.id,
+          isActive: true,
+        },
+        fileId,
+        ownerType: 'place',
+        ownerId: place!.id,
+        role: 'place_photo',
+      });
+      expect(created.status).toBe('created');
+    } finally {
+      d1Sqlite.close();
     }
   });
 });

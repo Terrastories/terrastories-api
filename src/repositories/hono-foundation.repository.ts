@@ -430,7 +430,9 @@ export class HonoFoundationRepository {
    * The account's other sessions are also revoked explicitly: when the new
    * material produces the same stored verifier the trigger does not fire,
    * and every verifier change must revoke the account's other sessions
-   * (SPEC-V2 §7).
+   * (SPEC-V2 §7). The D1 batch executes the revoke unconditionally, so it is
+   * gated on the new verifier actually being stored — a lost coupled write
+   * deletes no sessions, exactly as the rolling-back SQLite/PostgreSQL paths.
    */
   async createSessionWithVerifier(input: {
     tokenHash: string;
@@ -502,7 +504,16 @@ export class HonoFoundationRepository {
           )
         );
     const revokeAllSessions = (database: Executor) =>
-      database.delete(sessions).where(eq(sessions.userId, input.user.id));
+      database.delete(sessions).where(
+        and(
+          eq(sessions.userId, input.user.id),
+          sql`exists (
+            select 1 from ${users}
+            where ${users.id} = ${input.user.id}
+              and ${users.passwordVerifier} = ${input.verifier.passwordVerifier}
+          )`
+        )
+      );
     // Workers/D1 has no interactive transactions: one atomic batch runs the
     // verifier write, the session revocation, the session insert and the
     // coupled revocation. SQLite serializes the batch, so the authority

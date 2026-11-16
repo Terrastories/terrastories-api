@@ -514,4 +514,84 @@ describe('PATCH /v2/auth/me and POST /v2/auth/password (#137 item 4)', () => {
     });
     expect(response.status).toBe(401);
   });
+
+  it('on the D1 batch path a coupled write that loses the gate deletes nothing', async () => {
+    const { db, stretchedKey, loginCookie, postPassword } = await setup();
+    // Workers binds the statements to one D1 database; emulate the D1
+    // `batch()` on better-sqlite3 — same connection, one atomic unit,
+    // insert required to see the verifier write just performed.
+    const database = db as unknown as {
+      transaction: (fn: () => unknown[][]) => unknown[][];
+    };
+    const statements: Array<{
+      config?: { returning?: unknown };
+      all: () => unknown[];
+      run: () => unknown;
+    }> = [];
+    const handle = db as unknown as {
+      batch?: (stmts: typeof statements) => Promise<unknown[][]>;
+    };
+    handle.batch = async (stmts) =>
+      database.transaction(() =>
+        stmts.map((stmt) =>
+          stmt.config?.returning !== undefined ? stmt.all() : (stmt.run(), [])
+        )
+      );
+    const cookie = await loginCookie();
+    // Win: a coupled write through the D1 emulation succeeds and the other
+    // session rules still hold.
+    const winner = await postPassword(
+      {
+        currentDerivedKey: stretchedKey,
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { ...ARGON2ID_PARAMS },
+        derivedKey: stretchedKey,
+      },
+      cookie
+    );
+    expect(winner.status).toBe(200);
+    expect((await db.select().from(sessionsSqlite)).length).toBe(1);
+    // Lose: the read verifier went stale before the write landed — the
+    // coupled write is rejected at the authority gate, and no session may
+    // be deleted (SQLite/PostgreSQL roll the whole unit back).
+    const account = (
+      await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.email, 'member@account.example.test'))
+    )[0]!;
+    const foundation = new HonoFoundationRepository(db);
+    const now = new Date();
+    const idleExpiresAt = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+    const absoluteExpiresAt = new Date(
+      now.getTime() + 30 * 24 * 60 * 60 * 1000
+    );
+    const lost = await foundation.createSessionWithVerifier({
+      tokenHash: 'stale-anchor-coupled-write',
+      user: {
+        id: account.id,
+        email: account.email,
+        username: account.username,
+        displayName: account.displayName,
+        passwordHash: account.passwordHash,
+        role: account.role as 'member',
+        communityId: account.communityId,
+      },
+      kind: 'standard',
+      createdAt: now,
+      idleExpiresAt,
+      absoluteExpiresAt,
+      verifier: {
+        passwordHash: account.passwordHash,
+        passwordVerifier: 'brand-new-verifier',
+        passwordAlgorithm: ARGON2ID_ALGORITHM,
+        passwordSalt: makeVerifierSalt(),
+        passwordParams: JSON.stringify(ARGON2ID_PARAMS),
+      },
+      previousVerifier: 'definitely-stale-verifier',
+    });
+    expect(lost).toEqual({ established: false, verifierWritten: false });
+    expect((await db.select().from(sessionsSqlite)).length).toBe(1);
+  });
 });

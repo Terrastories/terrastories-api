@@ -121,7 +121,7 @@ Operators coordinate; community administrators lead every decision that touches 
 
 The restart-safe orphan sweeper (SPEC-V2 §6.7) deletes stored objects that no `files` row references and that are older than the 24-hour grace window. A filesystem/database restore can recreate storage bytes _before_ the `files` table knows them; the bytes then look like garbage and would be swept. The sweeper therefore has an explicit restore hold, checked at the start of every run. The sweep deletes nothing while either hold is in effect:
 
-1. **Environment/config flag** — `ORPHAN_SWEEP_PAUSED=true` (see `.env.example`). On the Node entrypoint it is read from the process environment; on Workers it is the `ORPHAN_SWEEP_PAUSED` binding. Unset or any other value leaves the sweep running.
+1. **Environment/config flag** — `ORPHAN_SWEEP_PAUSED=true` (see `.env.example`). On the Node entrypoint it is read from the process environment; on Workers it is the `ORPHAN_SWEEP_PAUSED` binding. Parsing is case-insensitive and fail-closed: only an empty value or `false`/`0` (any case, surrounding whitespace ignored) leaves the sweep running — `TRUE`, `1`, `yes`, `on` or any other value pauses it.
 2. **Storage marker object** — `system/orphan-sweep-hold`, read through the storage adapter. It lives outside the swept `communities/` and `users/` prefixes, so the sweep never deletes it and the hold cannot dissolve itself; it is removable only by the operator who set it. An unreadable marker is treated as set (keeping bytes is always safe). An adapter without system-object access cannot carry a marker and sweeps normally.
 
 Operator procedure for any restore (D1 Time Travel, retained D1 export, self-hosted/field-kit file backup):

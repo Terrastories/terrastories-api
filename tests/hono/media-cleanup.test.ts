@@ -19,6 +19,7 @@ import {
 import {
   ORPHAN_SWEEP_CURSOR_KEY,
   ORPHAN_SWEEP_HOLD_KEY,
+  envFlagEnabled,
   type FoundationStorage,
   type StorageListEntry,
 } from '../../src/services/hono-foundation.service.js';
@@ -480,6 +481,27 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     expect(store.has(orphanKey), 'orphan reached by the resumed run').toBe(
       false
     );
+  });
+
+  it('parses ORPHAN_SWEEP_PAUSED case-insensitively, fail closed', () => {
+    // Only empty/'false'/'0' (any case, surrounding whitespace ignored)
+    // means off; everything else is an explicit pause.
+    for (const off of [undefined, '', ' ', 'false', 'FALSE', 'False', '0']) {
+      expect(envFlagEnabled(off), JSON.stringify(off)).toBe(false);
+    }
+    for (const on of [
+      'true',
+      'TRUE',
+      'True',
+      '1',
+      'tRuE',
+      'yes',
+      'on',
+      // Any unrecognized value is fail-closed: it pauses the sweep.
+      '2',
+    ]) {
+      expect(envFlagEnabled(on), JSON.stringify(on)).toBe(true);
+    }
   });
 
   it('sweeps an old orphan even when the files table is completely empty', async () => {

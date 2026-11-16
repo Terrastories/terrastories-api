@@ -33,6 +33,18 @@ export const ORPHAN_SWEEP_HOLD_KEY = 'system/orphan-sweep-hold';
 export const validSystemStorageKey = (key: string) =>
   key === ORPHAN_SWEEP_CURSOR_KEY || key === ORPHAN_SWEEP_HOLD_KEY;
 
+/**
+ * Parse an operator env switch, fail closed: only an unset/empty value, or
+ * `false`/`0` (case-insensitive), means off. Every other value — `true`,
+ * `1`, `TRUE`, `on`, `yes`, … — means on, so a misconfigured flag pauses
+ * rather than silently enables a destructive path (the orphan sweep).
+ */
+export function envFlagEnabled(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized !== 'false' && normalized !== '0';
+}
+
 export interface StorageReadRange {
   /** Inclusive 0-based byte offset. */
   start: number;

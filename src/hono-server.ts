@@ -55,7 +55,7 @@ const server = serve({
 // failed sweep is reported content-free instead of being swallowed.
 const cleanup = new MediaCleanupCoordinator(db, storage, {
   // Explicit restore hold; see ORPHAN_SWEEP_HOLD_KEY in hono-foundation.service.ts.
-  sweepPaused: process.env.ORPHAN_SWEEP_PAUSED === 'true',
+  sweepPaused: envFlagEnabled(process.env.ORPHAN_SWEEP_PAUSED),
 });
 const sweepOrphanObjects = () => {
   void cleanup.sweepOrphanObjects().catch(() => {

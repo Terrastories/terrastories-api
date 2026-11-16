@@ -12,6 +12,7 @@ import { HonoFoundationRepository } from './repositories/hono-foundation.reposit
 import {
   validStorageKey,
   validSystemStorageKey,
+  envFlagEnabled,
   type FoundationStorage,
   type PasswordVerifier,
 } from './services/hono-foundation.service.js';
@@ -307,7 +308,7 @@ export function createWorker(
               // ORPHAN_SWEEP_PAUSED binding / `system/orphan-sweep-hold`
               // marker for the restore hold.
               subrequestBudget: WORKER_SWEEP_SUBREQUEST_BUDGET,
-              sweepPaused: env.ORPHAN_SWEEP_PAUSED === 'true',
+              sweepPaused: envFlagEnabled(env.ORPHAN_SWEEP_PAUSED),
             }
           );
           try {

@@ -16,28 +16,39 @@ import {
   type ContentFreeAuditEntryInput,
 } from '../shared/utils/audit-entry.js';
 
+/**
+ * Build (but do not await) the audit-insert statement for a coupled write.
+ * Validation runs synchronously — a content-free violation throws before any
+ * statement is built — so the caller can drop the insert into the same unit
+ * as the write it records.
+ */
+export function buildAuditEntryInsert(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  database: any,
+  input: ContentFreeAuditEntryInput
+) {
+  const validated = validateContentFreeAuditEntry(input);
+  const { auditEntries } = tablesFor(database);
+
+  return database.insert(auditEntries).values({
+    communityId: validated.communityId,
+    actorId: validated.actorId,
+    action: validated.action,
+    resourceType: validated.resourceType,
+    resourceIds: validated.resourceIds,
+    outcome: validated.outcome,
+    ipAddress: validated.ipAddress,
+    userAgent: validated.userAgent,
+    createdAt: new Date(),
+  });
+}
+
 export async function writeAuditEntry(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   database: any,
   input: ContentFreeAuditEntryInput
 ): Promise<AuditEntry> {
-  const validated = validateContentFreeAuditEntry(input);
-  const { auditEntries } = tablesFor(database);
-
-  const [inserted] = await database
-    .insert(auditEntries)
-    .values({
-      communityId: validated.communityId,
-      actorId: validated.actorId,
-      action: validated.action,
-      resourceType: validated.resourceType,
-      resourceIds: validated.resourceIds,
-      outcome: validated.outcome,
-      ipAddress: validated.ipAddress,
-      userAgent: validated.userAgent,
-      createdAt: new Date(),
-    })
-    .returning();
+  const [inserted] = await buildAuditEntryInsert(database, input).returning();
 
   return inserted as AuditEntry;
 }

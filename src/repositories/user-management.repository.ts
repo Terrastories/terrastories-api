@@ -31,6 +31,12 @@ import { userStatusToPhysical } from '../policy/canonical-state.js';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
 import { sessionsPg, sessionsSqlite } from '../db/schema/sessions.js';
+import {
+  validateContentFreeAuditEntry,
+  type ContentFreeAuditEntryInput,
+  type ValidatedAuditEntryRecord,
+} from '../shared/utils/audit-entry.js';
+import { buildAuditEntryInsert } from './audit-entry.repository.js';
 
 export interface ManagedUserRow {
   id: number;
@@ -662,26 +668,33 @@ export class UserManagementRepository {
    * order community → users → sessions). Returns false when the authority
    * anchor lost the race (caller answers 409).
    */
-  async resetVerifierAndRevokeSessions(input: {
-    target: {
-      id: number;
-      communityId: number;
-      passwordHash: string;
-      passwordVerifier: string | null;
-    };
-    verifier: {
-      passwordVerifier: string;
-      passwordAlgorithm: string;
-      passwordSalt: string;
-      passwordParams: string;
-    };
-  }): Promise<boolean> {
+  async resetVerifierAndRevokeSessions(
+    input: {
+      target: {
+        id: number;
+        communityId: number;
+        passwordHash: string;
+        passwordVerifier: string | null;
+      };
+      verifier: {
+        passwordVerifier: string;
+        passwordAlgorithm: string;
+        passwordSalt: string;
+        passwordParams: string;
+      };
+    },
+    audit?: ContentFreeAuditEntryInput
+  ): Promise<boolean> {
     const db = this.database;
     const { users, communities } = this.tables;
+    const { auditEntries } = tablesFor(db);
     const sessions = (
       dialectOf(db) === 'postgresql' ? sessionsPg : sessionsSqlite
     ) as typeof sessionsSqlite;
     const { id, communityId, passwordHash, passwordVerifier } = input.target;
+    // Validate once, up front, so the content-free rule cannot be bypassed by
+    // the conditional insert path either.
+    const validatedAudit = audit ? validateContentFreeAuditEntry(audit) : null;
 
     // Community → users → sessions lock order (PostgreSQL FOR SHARE; SQLite
     // serializes the transaction before the first write). A null-community
@@ -731,11 +744,30 @@ export class UserManagementRepository {
         )
       );
 
+    // D1's whole-transaction unit is a batch; there is no interactive
+    // transaction. The audit row is therefore gated by the anchor condition
+    // inside the batch: it lands iff the verifier write landed.
+    const conditionalAuditInsert = (database: Executor) => {
+      const record = validatedAudit as ValidatedAuditEntryRecord;
+      return database.insert(auditEntries).select(
+        sql`select
+          ${null}, ${record.communityId}, ${record.actorId}, ${record.action},
+          ${record.resourceType}, ${JSON.stringify(record.resourceIds)},
+          ${record.outcome}, ${record.ipAddress}, ${record.userAgent},
+          ${Date.now()}
+        where exists (
+          select 1 from users
+          where id = ${id}
+            and community_id = ${communityId}
+            and password_verifier = ${input.verifier.passwordVerifier}
+        )`
+      );
+    };
+
     if (typeof db.batch === 'function') {
-      const [updated] = await db.batch([
-        verifierUpdate(db),
-        revokeAllSessions(db),
-      ]);
+      const statements = [verifierUpdate(db), revokeAllSessions(db)];
+      if (validatedAudit) statements.push(conditionalAuditInsert(db));
+      const [updated] = await db.batch(statements);
       return updated.length > 0;
     }
     if (dialectOf(db) === 'postgresql') {
@@ -743,6 +775,9 @@ export class UserManagementRepository {
         await acquireCommunityFirst(tx);
         const updated = await verifierUpdate(tx);
         if (updated.length > 0) await revokeAllSessions(tx);
+        if (updated.length > 0 && validatedAudit) {
+          await buildAuditEntryInsert(tx, validatedAudit);
+        }
         return updated.length > 0;
       });
     }
@@ -750,6 +785,9 @@ export class UserManagementRepository {
       acquireCommunityFirst(tx);
       const updated = verifierUpdate(tx).all();
       if (updated.length > 0) revokeAllSessions(tx).run();
+      if (updated.length > 0 && validatedAudit) {
+        buildAuditEntryInsert(tx, validatedAudit).run();
+      }
       return updated.length > 0;
     });
   }
@@ -831,31 +869,63 @@ export class UserManagementRepository {
     return rows.length > 0;
   }
 
-  /** Insert a LoginCode row (only the SHA-256 digest is stored). */
-  async insertLoginCode(input: {
-    communityId: number | null;
-    userId: number;
-    purpose: 'admin_issued' | 'recovery';
-    codeHash: string;
-    createdBy: number | null;
-    createdAt: number;
-    expiresAt: number | null;
-  }): Promise<{ id: number }> {
+  /**
+   * Insert a LoginCode row (only the SHA-256 digest is stored) with its
+   * content-free audit row in the same atomic unit — a D1 batch, or one
+   * transaction on SQLite/PostgreSQL. A failed audit rolls back the
+   * issuance: no code row is left behind.
+   */
+  async insertLoginCodeWithAudit(
+    input: {
+      communityId: number | null;
+      userId: number;
+      purpose: 'admin_issued' | 'recovery';
+      codeHash: string;
+      createdBy: number | null;
+      createdAt: number;
+      expiresAt: number | null;
+    },
+    audit: ContentFreeAuditEntryInput
+  ): Promise<{ id: number }> {
+    const db = this.database;
     const { loginCodes } = this.tables;
-    const [row] = await this.database
-      .insert(loginCodes)
-      .values({
-        communityId: input.communityId,
-        userId: input.userId,
-        purpose: input.purpose,
-        codeHash: input.codeHash,
-        createdBy: input.createdBy,
-        createdAt: input.createdAt,
-        expiresAt: input.expiresAt,
-        usedAt: null,
-        supersededAt: null,
-      })
-      .returning({ id: loginCodes.id });
-    return { id: Number(row.id) };
+    // Fail fast on an invalid audit shape before anything else runs.
+    const validatedAudit = validateContentFreeAuditEntry(audit);
+    const codeInsert = (database: Executor) =>
+      database
+        .insert(loginCodes)
+        .values({
+          communityId: input.communityId,
+          userId: input.userId,
+          purpose: input.purpose,
+          codeHash: input.codeHash,
+          createdBy: input.createdBy,
+          createdAt: input.createdAt,
+          expiresAt: input.expiresAt,
+          usedAt: null,
+          supersededAt: null,
+        })
+        .returning({ id: loginCodes.id });
+
+    if (typeof db.batch === 'function') {
+      const [codeRows] = await db.batch([
+        codeInsert(db),
+        buildAuditEntryInsert(db, validatedAudit),
+      ]);
+      const rows = codeRows as Array<{ id: number | string }>;
+      return { id: Number(rows[0]!.id) };
+    }
+    if (dialectOf(db) === 'postgresql') {
+      return db.transaction(async (tx: Executor) => {
+        const [codeRow] = await codeInsert(tx);
+        await buildAuditEntryInsert(tx, validatedAudit);
+        return { id: Number(codeRow.id) };
+      });
+    }
+    return db.transaction((tx: Executor) => {
+      const [codeRow] = codeInsert(tx).all();
+      buildAuditEntryInsert(tx, validatedAudit).run();
+      return { id: Number(codeRow.id) };
+    });
   }
 }

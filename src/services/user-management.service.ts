@@ -170,6 +170,32 @@ export class UserManagementService {
   }
 
   /**
+   * Content-free audit input for user-management actions (§7): actor,
+   * community, action, resource ids and outcome only — never codes,
+   * passwords, tokens, session identifiers or content.
+   */
+  private auditInput(
+    actor: { id: number; communityId: number | null },
+    input: {
+      action: string;
+      resourceType: string;
+      resourceIds: Array<number | string>;
+      outcome: 'success' | 'failure';
+    }
+  ) {
+    return {
+      communityId: actor.communityId,
+      actorId: actor.id,
+      action: input.action,
+      resourceType: input.resourceType,
+      resourceIds: input.resourceIds,
+      outcome: input.outcome,
+      ipAddress: null,
+      userAgent: null,
+    };
+  }
+
+  /**
    * Content-free audit trail for user-management actions (§7): actor,
    * community, action, resource ids and outcome only — never codes,
    * passwords, tokens, session identifiers or content.
@@ -184,16 +210,10 @@ export class UserManagementService {
     }
   ): Promise<void> {
     try {
-      await writeAuditEntry(this.repository.connection, {
-        communityId: actor.communityId,
-        actorId: actor.id,
-        action: input.action,
-        resourceType: input.resourceType,
-        resourceIds: input.resourceIds,
-        outcome: input.outcome,
-        ipAddress: null,
-        userAgent: null,
-      });
+      await writeAuditEntry(
+        this.repository.connection,
+        this.auditInput(actor, input)
+      );
     } catch {
       // Content-free operational marker only; the audit sink failing must
       // never change the user-management decision.
@@ -606,10 +626,15 @@ export class UserManagementService {
       passwordSalt: material.salt,
       passwordParams: JSON.stringify({ memoryKiB, iterations, parallelism }),
     };
-    const reset = await this.repository.resetVerifierAndRevokeSessions({
-      target,
-      verifier,
-    });
+    const reset = await this.repository.resetVerifierAndRevokeSessions(
+      { target, verifier },
+      this.auditInput(actor, {
+        action: 'user.password_reset',
+        resourceType: 'user',
+        resourceIds: [target.id],
+        outcome: 'success',
+      })
+    );
     if (!reset) {
       await this.audit(actor, {
         action: 'user.password_reset',
@@ -619,12 +644,6 @@ export class UserManagementService {
       });
       return { status: 409, body: CONFLICT_BODY };
     }
-    await this.audit(actor, {
-      action: 'user.password_reset',
-      resourceType: 'user',
-      resourceIds: [target.id],
-      outcome: 'success',
-    });
     return { status: 204 };
   }
 
@@ -664,24 +683,27 @@ export class UserManagementService {
     const codeHash = await sha256Hex(code);
     const now = Date.now();
     const expiresAt = now + ADMIN_ISSUED_CODE_TTL_MS;
-    await this.repository.insertLoginCode({
-      // Target is same-community by construction; §6.8 stores the
-      // account's community on the code row (null only for null-community
-      // accounts, which cannot reach here).
-      communityId: caller.communityId,
-      userId: target.id,
-      purpose: 'admin_issued',
-      codeHash,
-      createdBy: actor.id,
-      createdAt: now,
-      expiresAt,
-    });
-    await this.audit(actor, {
-      action: 'user.login_code_issue',
-      resourceType: 'user',
-      resourceIds: [target.id],
-      outcome: 'success',
-    });
+    // The audit entry commits with the code (or neither does).
+    await this.repository.insertLoginCodeWithAudit(
+      {
+        // Target is same-community by construction; §6.8 stores the
+        // account's community on the code row (null only for null-community
+        // accounts, which cannot reach here).
+        communityId: caller.communityId,
+        userId: target.id,
+        purpose: 'admin_issued',
+        codeHash,
+        createdBy: actor.id,
+        createdAt: now,
+        expiresAt,
+      },
+      this.auditInput(actor, {
+        action: 'user.login_code_issue',
+        resourceType: 'user',
+        resourceIds: [target.id],
+        outcome: 'success',
+      })
+    );
     return {
       status: 201,
       body: {

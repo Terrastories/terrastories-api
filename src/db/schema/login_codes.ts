@@ -144,9 +144,11 @@ export const claimTokensPg = pgTable(
       .notNull()
       .references(() => communitiesPg.id, { onDelete: 'cascade' }),
     tokenHash: pgText('token_hash').notNull(),
-    issuedBy: pgInteger('issued_by')
-      .notNull()
-      .references(() => usersPg.id, { onDelete: 'no action' }),
+    // Nullable with ON DELETE SET NULL: the issuer is an operational fact
+    // about the token, never a reason to block that user's erasure (§7).
+    issuedBy: pgInteger('issued_by').references(() => usersPg.id, {
+      onDelete: 'set null',
+    }),
     // `created_at` carries the created/issued instant (§6.8 lists `createdAt`;
     // the work order calls the same column `issued_at`).
     createdAt: bigint('created_at', { mode: 'number' }).notNull(),
@@ -179,9 +181,11 @@ export const claimTokensSqlite = sqliteTable(
       .notNull()
       .references(() => communitiesSqlite.id, { onDelete: 'cascade' }),
     tokenHash: text('token_hash').notNull(),
-    issuedBy: integer('issued_by')
-      .notNull()
-      .references(() => usersSqlite.id, { onDelete: 'no action' }),
+    // Nullable with ON DELETE SET NULL: the issuer is an operational fact
+    // about the token, never a reason to block that user's erasure (§7).
+    issuedBy: integer('issued_by').references(() => usersSqlite.id, {
+      onDelete: 'set null',
+    }),
     // `created_at` carries the created/issued instant (§6.8 lists `createdAt`;
     // the work order calls the same column `issued_at`).
     createdAt: integer('created_at').notNull(),

@@ -8,6 +8,9 @@
 -- Tenancy: login_codes.community_id is the target account's community (null
 -- only for a null-community account); claim_tokens.community_id is required
 -- and names the one empty, never-administered community the token may claim.
+-- Erasure: claim_tokens.issued_by is nullable with ON DELETE SET NULL so an
+-- issuer erasure is never blocked; login_codes.user_id cascades with the
+-- account and login_codes.created_by is SET NULL.
 
 CREATE TABLE `login_codes` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -40,14 +43,14 @@ CREATE TABLE `claim_tokens` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`community_id` integer NOT NULL,
 	`token_hash` text NOT NULL,
-	`issued_by` integer NOT NULL,
+	`issued_by` integer,
 	`created_at` integer NOT NULL,
 	`expires_at` integer NOT NULL,
 	`consumed_at` integer,
 	`consumed_by` integer,
 	`superseded_at` integer,
 	CONSTRAINT `claim_tokens_community_id_communities_id_fk` FOREIGN KEY (`community_id`) REFERENCES `communities`(`id`) ON UPDATE no action ON DELETE cascade,
-	CONSTRAINT `claim_tokens_issued_by_users_id_fk` FOREIGN KEY (`issued_by`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT `claim_tokens_issued_by_users_id_fk` FOREIGN KEY (`issued_by`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE set null,
 	CONSTRAINT `claim_tokens_consumed_by_users_id_fk` FOREIGN KEY (`consumed_by`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE set null,
 	CONSTRAINT `claim_tokens_expiry_check` CHECK (`expires_at` > `created_at`),
 	CONSTRAINT `claim_tokens_consumed_check` CHECK ((`consumed_at` IS NULL) = (`consumed_by` IS NULL))

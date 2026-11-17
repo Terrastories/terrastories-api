@@ -2668,7 +2668,7 @@
           "name": "issued_by",
           "type": "integer",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -2749,7 +2749,7 @@
           "tableTo": "users",
           "columnsFrom": ["issued_by"],
           "columnsTo": ["id"],
-          "onDelete": "no action",
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "claim_tokens_consumed_by_users_id_fk": {

@@ -9,6 +9,9 @@
 -- account's community (null only for a null-community account);
 -- claim_tokens.community_id is required and names the one empty,
 -- never-administered community the token may claim.
+-- Erasure: claim_tokens.issued_by is nullable with ON DELETE SET NULL so an
+-- issuer erasure is never blocked; login_codes.user_id cascades with the
+-- account and login_codes.created_by is SET NULL.
 
 CREATE TABLE "login_codes" (
 	"id" serial PRIMARY KEY NOT NULL,
@@ -38,7 +41,7 @@ CREATE TABLE "claim_tokens" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"community_id" integer NOT NULL CONSTRAINT "claim_tokens_community_id_communities_id_fk" REFERENCES "communities"("id") ON DELETE cascade ON UPDATE no action,
 	"token_hash" text NOT NULL,
-	"issued_by" integer NOT NULL CONSTRAINT "claim_tokens_issued_by_users_id_fk" REFERENCES "users"("id") ON DELETE no action ON UPDATE no action,
+	"issued_by" integer CONSTRAINT "claim_tokens_issued_by_users_id_fk" REFERENCES "users"("id") ON DELETE set null ON UPDATE no action,
 	"created_at" bigint NOT NULL,
 	"expires_at" bigint NOT NULL,
 	"consumed_at" bigint,

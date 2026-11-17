@@ -1268,6 +1268,85 @@ export async function runHonoFoundationContract(
       // Registered for the cleanup phase: its community is deleted there and
       // users.community_id is NO ACTION on PostgreSQL.
       userIds.push(crossSurvivors[0]!.id);
+
+      // PostgreSQL reset-vs-old-key login race (#188): an admin assisted
+      // reset for user U races a login of U with the OLD key. Whatever the
+      // outcome order, the raced account must be left with no live session —
+      // either the login loses the verifier-anchored gate (reset committed
+      // first) or the reset's coupled revocation deletes the freshly minted
+      // session (login committed first).
+      const resetRaceEmail = `reset-race-${tag}@example.test`;
+      const [resetRaceUser] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: resetRaceEmail,
+          role: 'editor',
+          communityId: communityA,
+        })
+        .returning();
+      const resetRaceUserId = resetRaceUser.id;
+      userIds.push(resetRaceUserId);
+      const resetRaceAdminCookie = await login(adminEmail);
+      const [resetResult, loginResult] = await Promise.allSettled([
+        send(app, `/v2/users/${resetRaceUserId}/password-reset`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: resetRaceAdminCookie,
+          },
+          body: JSON.stringify({
+            algorithm: ARGON2ID_ALGORITHM,
+            salt: stretchedSalt,
+            params: JSON.parse(ARGON2ID_PARAMS_JSON),
+            // A NEW verifier, not the stored one.
+            derivedKey: wrongKey,
+          }),
+        }),
+        postLogin(
+          app,
+          { identifier: resetRaceEmail, derivedKey: stretchedKey },
+          { 'x-forwarded-for': '198.51.100.222' }
+        ),
+      ]);
+      assert.equal(
+        resetResult.status === 'fulfilled' ? resetResult.value.status : 500,
+        204,
+        'the assisted reset must succeed regardless of the race outcome'
+      );
+      const racedLoginStatus =
+        loginResult.status === 'fulfilled' ? loginResult.value.status : 500;
+      assert.ok(
+        racedLoginStatus === 200 || racedLoginStatus === 401,
+        `the raced login must answer 200 or 401, never ${racedLoginStatus}`
+      );
+      const liveSessions = await db
+        .select({
+          revokedAt: sessions.revokedAt,
+          expiresAt: sessions.expiresAt,
+        })
+        .from(sessions)
+        .where(eq(sessions.userId, resetRaceUserId));
+      const liveAfter = liveSessions.filter(
+        (row) =>
+          row.revokedAt === null &&
+          typeof row.expiresAt === 'number' &&
+          row.expiresAt > Date.now()
+      );
+      assert.equal(
+        liveAfter.length,
+        0,
+        'no session of the raced account may survive the reset'
+      );
+      // And the old key is dead going forward.
+      await status(
+        postLogin(
+          app,
+          { identifier: resetRaceEmail, derivedKey: stretchedKey },
+          { 'x-forwarded-for': '198.51.100.222' }
+        ),
+        401
+      );
     }
 
     // Concurrent duplicate-identity create (#188, both dialects): two

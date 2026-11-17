@@ -417,6 +417,15 @@ export class UserManagementRepository {
     };
     if (dialectOf(this.database) === 'postgresql') {
       return (this.database as Executor).transaction(async (tx: Executor) => {
+        // Lock order community -> identity (advisory) -> users -> sessions,
+        // the same as PATCH: the users insert's FK check takes FOR KEY SHARE
+        // on the community row, so taking the advisory lock first would
+        // deadlock against a PATCH holding the community FOR UPDATE.
+        await tx
+          .select({ id: this.tables.communities.id })
+          .from(this.tables.communities)
+          .where(eq(this.tables.communities.id, input.communityId))
+          .for('share');
         await this.takeIdentityAdvisoryLocks(tx, input);
         const collided = await this.hasIdentityCollision(
           {

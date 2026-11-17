@@ -1269,6 +1269,81 @@ export async function runHonoFoundationContract(
       // users.community_id is NO ACTION on PostgreSQL.
       userIds.push(crossSurvivors[0]!.id);
 
+      // PostgreSQL create-vs-PATCH identity race (#188): a create claiming
+      // email E runs concurrently with a PATCH moving an existing user to the
+      // same email E in the same community. Both paths lock community ->
+      // identity -> users, so they serialize instead of deadlocking: exactly
+      // one claims E, the other answers the uniform 409, never a 5xx.
+      const idRacePatchEmail = `race-patch-${tag}@example.test`;
+      const idRaceTargetCreate = await send(app, '/v2/users', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: raceCrossCreateAdminCookie,
+        },
+        body: JSON.stringify({
+          username: `race-target-${tag}`,
+          email: `race-target-${tag}@example.test`,
+          role: 'viewer',
+        }),
+      });
+      assert.equal(idRaceTargetCreate.status, 201);
+      const idRaceTargetId = Number(
+        ((await idRaceTargetCreate.json()) as { data: { id: number } }).data.id
+      );
+      userIds.push(idRaceTargetId);
+      const [idRacedCreate, idRacedPatch] = await Promise.allSettled([
+        send(app, '/v2/users', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: raceCrossCreateAdminCookie,
+          },
+          body: JSON.stringify({
+            username: `race-new-${tag}`,
+            email: idRacePatchEmail,
+            role: 'viewer',
+          }),
+        }),
+        send(app, `/v2/users/${idRaceTargetId}`, {
+          method: 'PATCH',
+          headers: {
+            'content-type': 'application/json',
+            cookie: raceCrossCreateAdminCookie,
+          },
+          body: JSON.stringify({ email: idRacePatchEmail }),
+        }),
+      ]);
+      const idRacedStatuses = [idRacedCreate, idRacedPatch].map((result) =>
+        result.status === 'fulfilled' ? result.value.status : 500
+      );
+      assert.ok(
+        idRacedStatuses.every((status) => status < 500),
+        `create-vs-PATCH identity race must never answer 5xx (${idRacedStatuses.join(',')})`
+      );
+      const idRaceEmailHolders = await db
+        .select({ id: tables.users.id })
+        .from(tables.users)
+        .where(eq(tables.users.emailNormalized, idRacePatchEmail));
+      assert.equal(
+        idRaceEmailHolders.length,
+        1,
+        'exactly one account may hold the raced email'
+      );
+      if (idRacedStatuses[0] === 201) {
+        const created = (await (
+          idRacedCreate as PromiseFulfilledResult<Response>
+        ).value
+          .clone()
+          .json()) as { data: { id: number } };
+        if (created.data.id !== idRaceTargetId) userIds.push(created.data.id);
+      }
+      assert.deepEqual(
+        [...idRacedStatuses].sort((left, right) => left - right),
+        idRacedStatuses[0] === 201 ? [201, 409] : [200, 409],
+        `exactly one of create/PATCH claims the email (${idRacedStatuses.join(',')})`
+      );
+
       // PostgreSQL reset-vs-old-key login race (#188): an admin assisted
       // reset for user U races a login of U with the OLD key. Whatever the
       // outcome order, the raced account must be left with no live session —

@@ -755,17 +755,26 @@ export class UserManagementService {
     );
     const iso = (value: number | null) =>
       value === null ? null : new Date(value).toISOString();
-    const data = await Promise.all(
-      rows.map(async (row) => ({
-        handle: await this.sessionHandle(row.id),
-        kind: 'device' as const,
-        createdAt:
-          row.createdAt === null ? '' : new Date(row.createdAt).toISOString(),
-        lastSeenAt: iso(row.lastSeenAt),
-        idleExpiresAt: iso(row.idleExpiresAt),
-        absoluteExpiresAt: iso(row.absoluteExpiresAt),
-      }))
-    );
+    const data = (
+      await Promise.all(
+        rows.map(async (row) => {
+          // createdAt is never emitted as an empty string. When created_at
+          // is NULL the row falls back to last_seen_at; rows with neither
+          // are hidden — there is no honest timestamp to serve. The sweep
+          // removes such rows.
+          const since = row.createdAt ?? row.lastSeenAt;
+          if (since === null) return null;
+          return {
+            handle: await this.sessionHandle(row.id),
+            kind: 'device' as const,
+            createdAt: new Date(since).toISOString(),
+            lastSeenAt: iso(row.lastSeenAt),
+            idleExpiresAt: iso(row.idleExpiresAt),
+            absoluteExpiresAt: iso(row.absoluteExpiresAt),
+          };
+        })
+      )
+    ).filter((entry): entry is NonNullable<typeof entry> => entry !== null);
     return {
       status: 200,
       body: { data },

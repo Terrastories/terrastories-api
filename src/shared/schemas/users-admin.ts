@@ -145,6 +145,9 @@ export type AdminLoginCodeResponse = z.infer<
  * base64url(HMAC-SHA256(AUTH_SERVER_SECRET, "session-handle:" + sessions.id))
  * truncated to 22 chars. It cannot be reversed into the session id and is
  * stable across list/revoke within one deployment.
+ *
+ * `createdAt` is never empty: rows whose `created_at` is NULL fall back to
+ * `last_seen_at`; rows with neither are omitted from the listing entirely.
  */
 export const DEVICE_SESSION_HANDLE_LENGTH = 22;
 export const SESSION_HANDLE_PATTERN = /^[A-Za-z0-9_-]{22}$/;

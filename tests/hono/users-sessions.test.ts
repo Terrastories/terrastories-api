@@ -381,6 +381,64 @@ describe('GET /v2/users/:id/sessions', () => {
     expect(res.status).toBe(200);
     expect((res.json as { data: unknown[] }).data).toEqual([]);
   });
+
+  it('never emits an empty createdAt: falls back to last_seen_at, hides undatable rows', async () => {
+    // Seed a dedicated account with two hand-written device sessions: one
+    // missing created_at (last_seen_at set), one with neither.
+    const stamp = Date.now();
+    const email = `undatable-${stamp}@own.example.test`;
+    const username = `qa_undatable_${stamp}`;
+    const userId = await insertRow(tables.users, {
+      email,
+      username,
+      ...deriveUserIdentityColumns({ email, username }),
+      firstName: 'Undatable',
+      lastName: 'Row',
+      ...(await argon2Seed(TEST_DERIVED_KEY)),
+      role: 'viewer',
+      communityId: ids.own!,
+      isActive: true,
+      createdAt: T0,
+      updatedAt: T0,
+    });
+    const lastSeenMs = Date.now() - 5_000;
+    const farFuture = Date.now() + DEVICE_WINDOW_MS;
+    await insertRow(tables.sessions, {
+      id: `undatable-a-${stamp}`,
+      tokenHash: createHmac('sha256', 'test-token-a').digest('hex'),
+      userId,
+      expiresAt: farFuture,
+      kind: 'device',
+      createdAt: null,
+      lastSeenAt: lastSeenMs,
+      idleExpiresAt: farFuture,
+      absoluteExpiresAt: null,
+    });
+    await insertRow(tables.sessions, {
+      id: `undatable-b-${stamp}`,
+      tokenHash: createHmac('sha256', 'test-token-b').digest('hex'),
+      userId,
+      expiresAt: farFuture,
+      kind: 'device',
+      createdAt: null,
+      lastSeenAt: null,
+      idleExpiresAt: farFuture,
+      absoluteExpiresAt: null,
+    });
+    const res = await requestJson('GET', `/v2/users/${userId}/sessions`, {
+      cookie: cookies.admin,
+    });
+    expect(res.status).toBe(200);
+    const body = res.json as {
+      data: Array<Record<string, unknown>>;
+    };
+    // Undatable row b is hidden; row a falls back to last_seen_at and is
+    // never an empty string.
+    expect(body.data.length).toBe(1);
+    expect(body.data[0]!.createdAt).toBe(new Date(lastSeenMs).toISOString());
+    expect(body.data[0]!.createdAt).not.toBe('');
+    expect(body.data[0]!.lastSeenAt).toBe(new Date(lastSeenMs).toISOString());
+  });
 });
 
 describe('DELETE /v2/users/:id/sessions/:handle', () => {

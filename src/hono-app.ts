@@ -6,10 +6,12 @@ import { CommunityWritesRepository } from './repositories/community-writes.repos
 import { MediaWritesRepository } from './repositories/media-writes.repository.js';
 import { PublicCommunitiesRepository } from './repositories/public-communities.repository.js';
 import { StoryWritesRepository } from './repositories/story-writes.repository.js';
+import { UserManagementRepository } from './repositories/user-management.repository.js';
 import { registerCommunityReadRoutes } from './routes/community-reads.hono.js';
 import { registerCommunityWriteRoutes } from './routes/community-writes.hono.js';
 import { registerMediaRoutes } from './routes/media-writes.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
+import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
 import { Hono, type Context } from 'hono';
@@ -474,6 +476,11 @@ export function createHonoApp(options: FoundationOptions) {
     storage: options.storage,
     cleanup: mediaCleanup,
     publicOrigin: configuredOrigin,
+  });
+  registerUserManagementRoutes(app, {
+    repository: new UserManagementRepository(options.repository.connection),
+    publicOrigin: configuredOrigin,
+    serverSecret: options.serverSecret,
   });
   // Transitional Explore read adapter (#198): Rails-shaped public reads for
   // the existing Explore client; removed once the V2 frontend is canonical.

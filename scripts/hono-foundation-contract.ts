@@ -22,6 +22,7 @@ import {
   authThrottleBackoffMs,
 } from '../src/shared/auth-policy.js';
 import { sha256Hex, toHex } from '../src/shared/auth-crypto.js';
+import { normalizeSearchText } from '../src/shared/utils/search-normalize.js';
 import {
   sessionLifetime,
   sessionRenewalInterval,
@@ -972,7 +973,506 @@ export async function runHonoFoundationContract(
         0,
         'no session row may revive after re-enable'
       );
+
+      // PostgreSQL role-change lock race (#188): a concurrent role change
+      // (editor -> viewer) must hold the same community -> users -> sessions
+      // lock order as the session write, so the raced login either blocks and
+      // then loses the authority gate (zero rows from the INSERT...SELECT's
+      // role re-read) or was established before the change. Never a 5xx,
+      // never a surviving pre-change session.
+      const raceTargetEmail = `race-role-${tag}@example.test`;
+      const [raceTarget] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: raceTargetEmail,
+          role: 'editor',
+          communityId: communityA,
+        })
+        .returning();
+      const raceTargetId = raceTarget.id;
+      // Registered for the cleanup phase: its community is deleted there and
+      // users.community_id is NO ACTION on PostgreSQL.
+      userIds.push(raceTargetId);
+      await db.delete(sessions).where(eq(sessions.userId, raceTargetId));
+      const raceTargetCredentials = {
+        identifier: raceTargetEmail,
+        derivedKey: stretchedKey,
+      };
+      let pendingRoleRaceLogin!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.users)
+          .set({ role: 'viewer' })
+          .where(eq(tables.users.id, raceTargetId));
+        pendingRoleRaceLogin = postLogin(app, raceTargetCredentials, {
+          'x-forwarded-for': '198.51.100.221',
+        });
+        void pendingRoleRaceLogin.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'role-change race never materialised: the login never blocked behind the role change'
+          );
+      });
+      const roleRaceResponse = await pendingRoleRaceLogin;
+      assert.notEqual(
+        roleRaceResponse.status,
+        500,
+        'a concurrent role change must never produce a 5xx'
+      );
+      const roleRaceCookie = roleRaceResponse.headers
+        .get('set-cookie')
+        ?.split(';')[0];
+      // The INSERT...SELECT re-reads the role inside the write; the committed
+      // change (editor -> viewer) no longer matches the read role, so the
+      // gate yields zero rows and the attempt is the uniform 401.
+      assert.equal(
+        roleRaceResponse.status,
+        401,
+        'raced login must lose the authority gate, not survive the role change'
+      );
+      assert.equal(roleRaceCookie, undefined);
+      const roleRaceRows = await db
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(eq(sessions.userId, raceTargetId));
+      assert.equal(
+        roleRaceRows.length,
+        0,
+        'no session may survive a concurrent role change'
+      );
+
+      // PostgreSQL last-admin race (#188): two admins of one fresh community
+      // demote each other via the HTTP app concurrently. Exactly one write
+      // lands; the loser no longer holds user-management authority for the
+      // community (the write re-reads the actor's active-admin role under the
+      // community lock), so it is denied 403 — never a 5xx — and exactly one
+      // active administrator remains. An isolated community keeps the shared
+      // `adminEmail` account untouched for the later steps.
+      const [raceCrossCommunity] = await db
+        .insert(tables.communities)
+        .values({ name: 'Race Cross', slug: `hono-${tag}-race-cross` })
+        .returning();
+      const raceCrossCommunityId = raceCrossCommunity.id;
+      communityIds.push(raceCrossCommunityId);
+      const raceCrossAdminAEmail = `race-crossadmina-${tag}@example.test`;
+      const raceCrossAdminBEmail = `race-crossadminb-${tag}@example.test`;
+      const [raceCrossAdminA] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: raceCrossAdminAEmail,
+          role: 'admin',
+          communityId: raceCrossCommunityId,
+        })
+        .returning();
+      const raceCrossAdminAId = raceCrossAdminA.id;
+      // Registered for the cleanup phase: its community is deleted there and
+      // users.community_id is NO ACTION on PostgreSQL.
+      userIds.push(raceCrossAdminAId);
+      const [raceCrossAdminB] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: raceCrossAdminBEmail,
+          role: 'admin',
+          communityId: raceCrossCommunityId,
+        })
+        .returning();
+      const raceCrossAdminBId = raceCrossAdminB.id;
+      userIds.push(raceCrossAdminBId);
+      const raceAdminACookie = await login(raceCrossAdminAEmail);
+      const raceAdminBCookie = await login(raceCrossAdminBEmail);
+      const demote = (id: number, cookie: string, body: unknown) =>
+        send(app, `/v2/users/${id}`, {
+          method: 'PATCH',
+          headers: {
+            'content-type': 'application/json',
+            cookie,
+          },
+          body: JSON.stringify(body),
+        });
+      const [crossA, crossB] = await Promise.allSettled([
+        demote(raceCrossAdminBId, raceAdminACookie, { role: 'editor' }),
+        demote(raceCrossAdminAId, raceAdminBCookie, { role: 'editor' }),
+      ]);
+      const crossStatuses = [crossA, crossB]
+        .map((result) =>
+          result.status === 'fulfilled' ? result.value.status : 500
+        )
+        .sort((left, right) => left - right);
+      assert.equal(
+        crossStatuses.filter((status) => status === 200).length,
+        1,
+        `exactly one cross-demotion must land, got ${crossStatuses.join(', ')}`
+      );
+      assert.deepEqual(
+        crossStatuses,
+        [200, 403],
+        'the loser of the cross-demotion race no longer administers the community'
+      );
+      const crossRemaining = await db
+        .select({ id: tables.users.id })
+        .from(tables.users)
+        .where(
+          and(
+            eq(tables.users.communityId, raceCrossCommunityId),
+            eq(tables.users.role, 'admin'),
+            eq(tables.users.isActive, true)
+          )
+        );
+      assert.equal(
+        crossRemaining.length,
+        1,
+        'exactly one active administrator must remain after the cross-demotion race'
+      );
+
+      // The same race aimed at the actors themselves, in an isolated
+      // community holding exactly two administrators: two admins each try to
+      // demote themselves concurrently. Both see the other going in, so the
+      // first write is legal; the loser then has no other active admin to
+      // leave behind and is refused 409 last_admin — exactly one active
+      // administrator remains, never a 5xx.
+      const [selfRaceCommunity] = await db
+        .insert(tables.communities)
+        .values({ name: 'Race Self', slug: `hono-${tag}-race-self` })
+        .returning();
+      const selfRaceCommunityId = selfRaceCommunity.id;
+      communityIds.push(selfRaceCommunityId);
+      const selfRaceAdminAEmail = `race-selfadmina-${tag}@example.test`;
+      const selfRaceAdminBEmail = `race-selfadminb-${tag}@example.test`;
+      const [selfRaceAdminA] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: selfRaceAdminAEmail,
+          role: 'admin',
+          communityId: selfRaceCommunityId,
+        })
+        .returning();
+      const selfRaceAdminAId = selfRaceAdminA.id;
+      userIds.push(selfRaceAdminAId);
+      const [selfRaceAdminB] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: selfRaceAdminBEmail,
+          role: 'admin',
+          communityId: selfRaceCommunityId,
+        })
+        .returning();
+      const selfRaceAdminBId = selfRaceAdminB.id;
+      userIds.push(selfRaceAdminBId);
+      const selfRaceACookie = await login(selfRaceAdminAEmail);
+      const selfRaceBCookie = await login(selfRaceAdminBEmail);
+      const [selfA, selfB] = await Promise.allSettled([
+        demote(selfRaceAdminAId, selfRaceACookie, { role: 'editor' }),
+        demote(selfRaceAdminBId, selfRaceBCookie, { role: 'editor' }),
+      ]);
+      const selfStatuses = [selfA, selfB]
+        .map((result) =>
+          result.status === 'fulfilled' ? result.value.status : 500
+        )
+        .sort((left, right) => left - right);
+      assert.deepEqual(
+        selfStatuses,
+        [200, 409],
+        'the loser of the self-demotion race must lose the last-admin guard'
+      );
+      const selfRemaining = await db
+        .select({ id: tables.users.id })
+        .from(tables.users)
+        .where(
+          and(
+            eq(tables.users.communityId, selfRaceCommunityId),
+            eq(tables.users.role, 'admin'),
+            eq(tables.users.isActive, true)
+          )
+        );
+      // The losing account keeps administration: the guard blocked its
+      // demotion, it did not apply it.
+      assert.equal(
+        selfRemaining.length,
+        1,
+        'exactly one active administrator must remain after the self-demotion race'
+      );
+      // The refused account remains an active admin and keeps its authority:
+      // the guard blocked the demotion, it did not apply it.
+      const selfRequests = [
+        { id: selfRaceAdminAId, result: selfA },
+        { id: selfRaceAdminBId, result: selfB },
+      ];
+      const refused = selfRequests.find(
+        (entry) =>
+          entry.result.status === 'fulfilled' &&
+          entry.result.value.status === 409
+      );
+      assert.ok(refused, 'one self-demotion must have been refused');
+      const refusedRow = await db
+        .select({
+          role: tables.users.role,
+          isActive: tables.users.isActive,
+        })
+        .from(tables.users)
+        .where(eq(tables.users.id, refused.id));
+      assert.equal(refusedRow[0]?.role, 'admin');
+      assert.equal(refusedRow[0]?.isActive, true);
+
+      // PostgreSQL cross-rule identity race (#188): two concurrent creates
+      // whose identities cross-collide with each other (one account's
+      // username is the other's email, both ways). The advisory locks
+      // serialize the writers in a total order; exactly one insert lands,
+      // the loser answers the uniform 409.
+      const raceCrossCreateAdminCookie = await login(adminEmail);
+      const crossEmailA = `cross-a-${tag}@example.test`;
+      const crossEmailB = `cross-b-${tag}@example.test`;
+      const crossCreate = (username: string, email: string) =>
+        send(app, '/v2/users', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: raceCrossCreateAdminCookie,
+          },
+          body: JSON.stringify({
+            username,
+            email,
+            role: 'viewer',
+          }),
+        });
+      const [crossCreateA, crossCreateB] = await Promise.allSettled([
+        crossCreate(crossEmailA, crossEmailB),
+        crossCreate(crossEmailB, crossEmailA),
+      ]);
+      const crossCreateStatuses = [crossCreateA, crossCreateB]
+        .map((result) =>
+          result.status === 'fulfilled' ? result.value.status : 500
+        )
+        .sort((left, right) => left - right);
+      assert.deepEqual(
+        crossCreateStatuses,
+        [201, 409],
+        'concurrent cross-rule creates must yield exactly one 201 and one 409'
+      );
+      const crossSurvivors = await db
+        .select({ id: tables.users.id })
+        .from(tables.users)
+        .where(
+          inArray(tables.users.usernameNormalized, [crossEmailA, crossEmailB])
+        );
+      assert.equal(
+        crossSurvivors.length,
+        1,
+        'exactly one account may survive a cross-rule create race'
+      );
+      // Registered for the cleanup phase: its community is deleted there and
+      // users.community_id is NO ACTION on PostgreSQL.
+      userIds.push(crossSurvivors[0]!.id);
+
+      // PostgreSQL create-vs-PATCH identity race (#188): a create claiming
+      // email E runs concurrently with a PATCH moving an existing user to the
+      // same email E in the same community. Both paths lock community ->
+      // identity -> users, so they serialize instead of deadlocking: exactly
+      // one claims E, the other answers the uniform 409, never a 5xx.
+      const idRacePatchEmail = `race-patch-${tag}@example.test`;
+      const idRaceTargetCreate = await send(app, '/v2/users', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: raceCrossCreateAdminCookie,
+        },
+        body: JSON.stringify({
+          username: `race-target-${tag}`,
+          email: `race-target-${tag}@example.test`,
+          role: 'viewer',
+        }),
+      });
+      assert.equal(idRaceTargetCreate.status, 201);
+      const idRaceTargetId = Number(
+        ((await idRaceTargetCreate.json()) as { data: { id: number } }).data.id
+      );
+      userIds.push(idRaceTargetId);
+      const [idRacedCreate, idRacedPatch] = await Promise.allSettled([
+        send(app, '/v2/users', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: raceCrossCreateAdminCookie,
+          },
+          body: JSON.stringify({
+            username: `race-new-${tag}`,
+            email: idRacePatchEmail,
+            role: 'viewer',
+          }),
+        }),
+        send(app, `/v2/users/${idRaceTargetId}`, {
+          method: 'PATCH',
+          headers: {
+            'content-type': 'application/json',
+            cookie: raceCrossCreateAdminCookie,
+          },
+          body: JSON.stringify({ email: idRacePatchEmail }),
+        }),
+      ]);
+      const idRacedStatuses = [idRacedCreate, idRacedPatch].map((result) =>
+        result.status === 'fulfilled' ? result.value.status : 500
+      );
+      assert.ok(
+        idRacedStatuses.every((status) => status < 500),
+        `create-vs-PATCH identity race must never answer 5xx (${idRacedStatuses.join(',')})`
+      );
+      const idRaceEmailHolders = await db
+        .select({ id: tables.users.id })
+        .from(tables.users)
+        .where(eq(tables.users.emailNormalized, idRacePatchEmail));
+      assert.equal(
+        idRaceEmailHolders.length,
+        1,
+        'exactly one account may hold the raced email'
+      );
+      if (idRacedStatuses[0] === 201) {
+        const created = (await (
+          idRacedCreate as PromiseFulfilledResult<Response>
+        ).value
+          .clone()
+          .json()) as { data: { id: number } };
+        if (created.data.id !== idRaceTargetId) userIds.push(created.data.id);
+      }
+      assert.deepEqual(
+        [...idRacedStatuses].sort((left, right) => left - right),
+        idRacedStatuses[0] === 201 ? [201, 409] : [200, 409],
+        `exactly one of create/PATCH claims the email (${idRacedStatuses.join(',')})`
+      );
+
+      // PostgreSQL reset-vs-old-key login race (#188): an admin assisted
+      // reset for user U races a login of U with the OLD key. Whatever the
+      // outcome order, the raced account must be left with no live session —
+      // either the login loses the verifier-anchored gate (reset committed
+      // first) or the reset's coupled revocation deletes the freshly minted
+      // session (login committed first).
+      const resetRaceEmail = `reset-race-${tag}@example.test`;
+      const [resetRaceUser] = await db
+        .insert(tables.users)
+        .values({
+          ...userDefaults,
+          email: resetRaceEmail,
+          role: 'editor',
+          communityId: communityA,
+        })
+        .returning();
+      const resetRaceUserId = resetRaceUser.id;
+      userIds.push(resetRaceUserId);
+      const resetRaceAdminCookie = await login(adminEmail);
+      const [resetResult, loginResult] = await Promise.allSettled([
+        send(app, `/v2/users/${resetRaceUserId}/password-reset`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            cookie: resetRaceAdminCookie,
+          },
+          body: JSON.stringify({
+            algorithm: ARGON2ID_ALGORITHM,
+            salt: stretchedSalt,
+            params: JSON.parse(ARGON2ID_PARAMS_JSON),
+            // A NEW verifier, not the stored one.
+            derivedKey: wrongKey,
+          }),
+        }),
+        postLogin(
+          app,
+          { identifier: resetRaceEmail, derivedKey: stretchedKey },
+          { 'x-forwarded-for': '198.51.100.222' }
+        ),
+      ]);
+      assert.equal(
+        resetResult.status === 'fulfilled' ? resetResult.value.status : 500,
+        204,
+        'the assisted reset must succeed regardless of the race outcome'
+      );
+      const racedLoginStatus =
+        loginResult.status === 'fulfilled' ? loginResult.value.status : 500;
+      assert.ok(
+        racedLoginStatus === 200 || racedLoginStatus === 401,
+        `the raced login must answer 200 or 401, never ${racedLoginStatus}`
+      );
+      const liveSessions = await db
+        .select({
+          revokedAt: sessions.revokedAt,
+          expiresAt: sessions.expiresAt,
+        })
+        .from(sessions)
+        .where(eq(sessions.userId, resetRaceUserId));
+      const liveAfter = liveSessions.filter(
+        (row) =>
+          row.revokedAt === null &&
+          typeof row.expiresAt === 'number' &&
+          row.expiresAt > Date.now()
+      );
+      assert.equal(
+        liveAfter.length,
+        0,
+        'no session of the raced account may survive the reset'
+      );
+      // And the old key is dead going forward.
+      await status(
+        postLogin(
+          app,
+          { identifier: resetRaceEmail, derivedKey: stretchedKey },
+          { 'x-forwarded-for': '198.51.100.222' }
+        ),
+        401
+      );
     }
+
+    // Concurrent duplicate-identity create (#188, both dialects): two
+    // same-community creates racing the same normalized identifier — the
+    // unique indexes decide the loser. Exactly one 201 and one 409, never a
+    // 5xx, and exactly one row lands.
+    const raceCreateAdminCookie = await login(adminEmail);
+    const raceCreateEmail = `race-create-${tag}@example.test`;
+    const raceCreateUsername = `racecreate${tag.replace(/-/g, '').slice(0, 12)}`;
+    const createRace = () =>
+      send(app, '/v2/users', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: raceCreateAdminCookie,
+        },
+        body: JSON.stringify({
+          username: raceCreateUsername,
+          email: raceCreateEmail,
+          role: 'viewer',
+        }),
+      });
+    const [createA, createB] = await Promise.allSettled([
+      createRace(),
+      createRace(),
+    ]);
+    const createStatuses = [createA, createB]
+      .map((result) =>
+        result.status === 'fulfilled' ? result.value.status : 500
+      )
+      .sort((left, right) => left - right);
+    assert.deepEqual(
+      createStatuses,
+      [201, 409],
+      'concurrent same-identifier creates must yield exactly one 201 and one 409'
+    );
+    const raceCreated = await db
+      .select({ id: tables.users.id })
+      .from(tables.users)
+      .where(
+        eq(tables.users.emailNormalized, normalizeSearchText(raceCreateEmail))
+      );
+    assert.equal(
+      raceCreated.length,
+      1,
+      'exactly one account may survive a duplicate-identity race'
+    );
+    // The cleanup phase deletes seeded users before their communities; the
+    // raced account must be registered there or the final community delete
+    // violates users.community_id NO ACTION.
+    userIds.push(raceCreated[0]!.id);
 
     // Slice 7 audit existence & content-freedom contract on both SQLite and PostgreSQL (#145)
     const slice7AdminCookie = await login(adminEmail);

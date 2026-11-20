@@ -10,7 +10,8 @@ export interface Step extends Endpoint {
   body?: unknown;
   rawBody?: string | Uint8Array;
   captureId?: string;
-  prepare?: () => Promise<void>;
+  /** Runs before the request; may return a raw path for this run (cloned steps keep their own copy). */
+  prepare?: () => void | string | Promise<void | string>;
   headers?: Record<string, string>;
   check?: (body: unknown) => boolean;
   checkHeaders?: (headers: Headers) => boolean;
@@ -183,13 +184,16 @@ export async function runJourneys(options: {
       };
       try {
         const work = (async () => {
-          await step.prepare?.();
+          const prepared = await step.prepare?.();
           if (controller.signal.aborted)
             throw new Error('Request deadline elapsed');
-          path = step.path.replace(/\{(\w+)\}/g, (_, name: string) => {
-            if (!ids[name]) throw new Error(`Missing captured id: ${name}`);
-            return String(ids[name]);
-          });
+          path = (typeof prepared === 'string' ? prepared : step.path).replace(
+            /\{(\w+)\}/g,
+            (_, name: string) => {
+              if (!ids[name]) throw new Error(`Missing captured id: ${name}`);
+              return String(ids[name]);
+            }
+          );
           const headers = new Headers(step.headers);
           if (step.useSavedCookie) {
             const saved = savedCookies[step.useSavedCookie];

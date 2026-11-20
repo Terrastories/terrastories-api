@@ -240,6 +240,8 @@ export const LOGIN_CODE_ENTROPY_BYTES = 16;
 export const ADMIN_ISSUED_CODE_TTL_MS = 72 * 60 * 60 * 1000;
 /** Number of single-use recovery codes generated per recovery sheet (§6.8, §7). */
 export const RECOVERY_CODE_COUNT = 10;
+/** Maximum lifetime of a hosted ClaimToken: 72 hours (§6.8, §7). */
+export const CLAIM_TOKEN_MAX_TTL_MS = 72 * 60 * 60 * 1000;
 /**
  * Freshness bound for the one-shot verifier-free recovery-code generation
  * right granted to a session established by redeeming an `admin_issued` code
@@ -553,6 +555,7 @@ export const AUTH_THROTTLE_BACKOFF_MAX_MS = 60 * 60 * 1000;
 /** Keys are keyed hashes; the input prefix keeps kinds from colliding. */
 export const AUTH_THROTTLE_KEY_ACCOUNT = 'account:';
 export const AUTH_THROTTLE_KEY_IP = 'ip:';
+export const AUTH_THROTTLE_KEY_CLAIM = 'claim:';
 
 /**
  * How long a computed prelogin population mix (upgraded/total and the

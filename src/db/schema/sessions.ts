@@ -100,7 +100,7 @@ export const authThrottlePg = pgTable(
   'auth_throttle',
   {
     key: pgText('key').primaryKey(),
-    kind: pgText('kind', { enum: ['account', 'ip'] }).notNull(),
+    kind: pgText('kind', { enum: ['account', 'ip', 'claim'] }).notNull(),
     communityId: pgInteger('community_id').references(() => communitiesPg.id, {
       onDelete: 'cascade',
     }),
@@ -114,13 +114,13 @@ export const authThrottlePg = pgTable(
     pgIndex('auth_throttle_community_idx').on(table.communityId),
     pgCheck(
       'auth_throttle_kind_check',
-      sql`${table.kind} in ('account', 'ip')`
+      sql`${table.kind} in ('account', 'ip', 'claim')`
     ),
-    // Per-IP rows are null-community by construction (§6.8); account rows may
-    // be either (a null-community `super_admin` account has no community).
+    // Per-IP rows are null-community by construction (§6.8); claim rows carry
+    // the resolved ClaimToken's non-null community; account rows may be either.
     pgCheck(
       'auth_throttle_ip_community_check',
-      sql`${table.kind} = 'account' OR ${table.communityId} IS NULL`
+      sql`(${table.kind} = 'account') OR (${table.kind} = 'ip' AND ${table.communityId} IS NULL) OR (${table.kind} = 'claim' AND ${table.communityId} IS NOT NULL)`
     ),
   ]
 );
@@ -129,7 +129,7 @@ export const authThrottleSqlite = sqliteTable(
   'auth_throttle',
   {
     key: text('key').primaryKey().notNull(),
-    kind: text('kind', { enum: ['account', 'ip'] }).notNull(),
+    kind: text('kind', { enum: ['account', 'ip', 'claim'] }).notNull(),
     communityId: integer('community_id').references(
       () => communitiesSqlite.id,
       {
@@ -142,10 +142,13 @@ export const authThrottleSqlite = sqliteTable(
   },
   (table) => [
     index('auth_throttle_community_idx').on(table.communityId),
-    check('auth_throttle_kind_check', sql`${table.kind} in ('account', 'ip')`),
+    check(
+      'auth_throttle_kind_check',
+      sql`${table.kind} in ('account', 'ip', 'claim')`
+    ),
     check(
       'auth_throttle_ip_community_check',
-      sql`${table.kind} = 'account' OR ${table.communityId} IS NULL`
+      sql`(${table.kind} = 'account') OR (${table.kind} = 'ip' AND ${table.communityId} IS NULL) OR (${table.kind} = 'claim' AND ${table.communityId} IS NOT NULL)`
     ),
   ]
 );

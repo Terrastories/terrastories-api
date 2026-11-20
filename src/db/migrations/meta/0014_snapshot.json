@@ -2118,11 +2118,11 @@
       "checkConstraints": {
         "auth_throttle_kind_check": {
           "name": "auth_throttle_kind_check",
-          "value": "\"auth_throttle\".\"kind\" in ('account', 'ip')"
+          "value": "\"auth_throttle\".\"kind\" in ('account', 'ip', 'claim')"
         },
         "auth_throttle_ip_community_check": {
           "name": "auth_throttle_ip_community_check",
-          "value": "\"auth_throttle\".\"kind\" = 'account' OR \"auth_throttle\".\"community_id\" IS NULL"
+          "value": "(\"auth_throttle\".\"kind\" = 'account') OR (\"auth_throttle\".\"kind\" = 'ip' AND \"auth_throttle\".\"community_id\" IS NULL) OR (\"auth_throttle\".\"kind\" = 'claim' AND \"auth_throttle\".\"community_id\" IS NOT NULL)"
         }
       }
     },

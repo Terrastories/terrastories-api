@@ -1,6 +1,7 @@
 /**
- * Installation bootstrap orchestration (Slice 11b-B, #188; SPEC-V2 §4, §6.8,
- * §7 "Bootstrap and account lifecycle"; route registry §1).
+ * Installation bootstrap and hosted community claim orchestration (Slice 11b-B
+ * and 11b-C, #188; SPEC-V2 §4, §6.8, §7 "Bootstrap and account lifecycle";
+ * route registry §1).
  */
 import type { BootstrapRepository } from '../repositories/bootstrap.repository.js';
 import type {
@@ -10,14 +11,18 @@ import type {
 import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
 import {
   ARGON2ID_ALGORITHM,
+  AUTH_LOGIN_FAILURE_BODY,
+  CLAIM_TOKEN_MAX_TTL_MS,
   RECOVERY_CODE_COUNT,
   isCanonicalArgon2idParams,
   isCanonicalVerifierSalt,
   sessionLifetimesFor,
+  sessionTokenDigestInput,
   type SessionKind,
 } from '../shared/auth-policy.js';
 import { sha256Hex, toHex } from '../shared/auth-crypto.js';
 import {
+  BootstrapClaimRequestSchema,
   BootstrapRequestSchema,
   type BootstrapResponse,
 } from '../shared/schemas/bootstrap.js';
@@ -31,6 +36,7 @@ import {
   deriveDescriptionForWrite,
   deriveUserIdentityColumns,
 } from '../shared/utils/derived-columns.js';
+import { CONFLICT_BODY } from './community-writes.service.js';
 import { FORBIDDEN_BODY } from './public-communities.service.js';
 import {
   generateEntropyCode,
@@ -46,12 +52,18 @@ export type BootstrapResult =
       body: BootstrapResponse;
     }
   | {
-      status: 400 | 403;
+      status: 400 | 401 | 403 | 409 | 503;
       body: V2ErrorResponse | V2ValidationErrorResponse;
     };
 
 const PASSWORD_REQUIREMENTS_BODY: V2ErrorResponse = Object.freeze({
   error: 'Password does not meet requirements',
+});
+const INVALID_REQUEST_BODY: V2ErrorResponse = Object.freeze({
+  error: 'Invalid request',
+});
+const SERVICE_UNAVAILABLE_BODY: V2ErrorResponse = Object.freeze({
+  error: 'Service unavailable',
 });
 
 /** Derive a deterministic URL-safe slug when `community.slug` is omitted. */
@@ -67,6 +79,7 @@ export function deriveBootstrapSlug(name: string): string {
 }
 
 export class BootstrapService {
+  private readonly serverSecret?: string;
   private readonly fieldKitCaFingerprint?: string;
 
   constructor(
@@ -77,6 +90,7 @@ export class BootstrapService {
       fieldKitCaFingerprint?: string;
     } = {}
   ) {
+    this.serverSecret = options.serverSecret;
     const trimmed = options.fieldKitCaFingerprint?.trim();
     this.fieldKitCaFingerprint =
       trimmed && trimmed.length > 0 ? trimmed : undefined;
@@ -274,6 +288,235 @@ export class BootstrapService {
           ...(this.fieldKitCaFingerprint !== undefined
             ? { caFingerprint: this.fieldKitCaFingerprint }
             : {}),
+        },
+      },
+    };
+  }
+
+  /**
+   * POST /v2/bootstrap/claim — unauthenticated single-use `ClaimToken`
+   * redemption for an empty, never-administered hosted community. Throttled
+   * per IP and per resolved ClaimToken row via `AuthThrottle`.
+   */
+  async claimCommunity(
+    rawBody: unknown,
+    previousToken: string | undefined,
+    context: AuthRequestContext
+  ): Promise<BootstrapResult> {
+    const parsed = BootstrapClaimRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return { status: 400, body: INVALID_REQUEST_BODY };
+    }
+
+    const { token, username, email, displayName, password, deviceSession } =
+      parsed.data;
+    if (
+      !isCanonicalArgon2idParams(password.params) ||
+      !isCanonicalVerifierSalt(password.salt)
+    ) {
+      return { status: 400, body: PASSWORD_REQUIREMENTS_BODY };
+    }
+
+    const secret = this.serverSecret;
+    if (secret === undefined || secret === '') {
+      return { status: 503, body: SERVICE_UNAVAILABLE_BODY };
+    }
+
+    const nowMs = context.now.getTime();
+    const ipBlocked = await this.authRepo.throttleState(
+      await this.authRepo.ipThrottleKey(context.clientIp, secret),
+      nowMs
+    );
+    if (ipBlocked.blocked) {
+      return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
+    }
+
+    const tokenHash = await sha256Hex(token);
+    const claimRow = await this.bootstrapRepo.findClaimTokenByHash(tokenHash);
+
+    if (claimRow === null) {
+      await this.authRepo.recordClaimFailure(
+        {
+          claimToken: null,
+          clientIp: context.clientIp,
+          now: nowMs,
+        },
+        secret
+      );
+      await this.auditFailure({
+        communityId: null,
+        action: 'bootstrap.claim',
+        resourceType: 'bootstrap',
+        resourceIds: [],
+        clientIp: context.clientIp,
+        userAgent: context.userAgent,
+      });
+      return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
+    }
+
+    const tokenBlocked = await this.authRepo.throttleState(
+      await this.authRepo.claimThrottleKey(claimRow.id, secret),
+      nowMs
+    );
+    if (tokenBlocked.blocked) {
+      return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
+    }
+
+    const rejectClaim = async (): Promise<BootstrapResult> => {
+      await this.authRepo.recordClaimFailure(
+        {
+          claimToken: { id: claimRow.id, communityId: claimRow.communityId },
+          clientIp: context.clientIp,
+          now: nowMs,
+        },
+        secret
+      );
+      await this.auditFailure({
+        communityId: claimRow.communityId,
+        action: 'claim_token.consume',
+        resourceType: 'claim_token',
+        resourceIds: [claimRow.id],
+        clientIp: context.clientIp,
+        userAgent: context.userAgent,
+      });
+      return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
+    };
+
+    if (
+      claimRow.consumedAt !== null ||
+      claimRow.supersededAt !== null ||
+      claimRow.expiresAt <= nowMs ||
+      claimRow.expiresAt - claimRow.createdAt > CLAIM_TOKEN_MAX_TTL_MS ||
+      !claimRow.communityIsActive
+    ) {
+      return rejectClaim();
+    }
+
+    const { memoryKiB, iterations, parallelism } = password.params as {
+      memoryKiB: number;
+      iterations: number;
+      parallelism: number;
+    };
+    const passwordHash = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const verifier: VerifierWrite = {
+      passwordHash,
+      passwordVerifier: await sha256Hex(password.derivedKey),
+      passwordAlgorithm: ARGON2ID_ALGORITHM,
+      passwordSalt: password.salt,
+      passwordParams: JSON.stringify({ memoryKiB, iterations, parallelism }),
+    };
+
+    const identity = deriveUserIdentityColumns({ email, username });
+    const emailNormalized = identity.emailNormalized as string;
+    const usernameNormalized = identity.usernameNormalized as string;
+
+    const codes = Array.from({ length: RECOVERY_CODE_COUNT }, () =>
+      generateEntropyCode()
+    );
+    const recoveryCodeHashes = await Promise.all(
+      codes.map((code) => sha256Hex(code))
+    );
+
+    const sessionToken = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const sessionTokenHash = await sha256Hex(sessionToken);
+    const kind: SessionKind = deviceSession === true ? 'device' : 'standard';
+    const lifetimes = sessionLifetimesFor(kind, nowMs);
+    const previousValid = sessionTokenDigestInput(previousToken);
+    const previousHash =
+      previousValid === null ? undefined : await sha256Hex(previousValid);
+
+    const execution = await this.bootstrapRepo.claimCommunityAtomically(
+      {
+        claimTokenId: claimRow.id,
+        tokenHash,
+        communityId: claimRow.communityId,
+        admin: {
+          username,
+          usernameNormalized,
+          email,
+          emailNormalized,
+          displayName: displayName ?? null,
+          passwordHash,
+          verifier,
+        },
+        recoveryCodeHashes,
+        session: {
+          tokenHash: sessionTokenHash,
+          kind,
+          idleExpiresAtMs: lifetimes.idleExpiresAt,
+          absoluteExpiresAtMs: lifetimes.absoluteExpiresAt,
+          previousHash,
+        },
+        now: context.now,
+      },
+      {
+        ipAddress: context.clientIp,
+        userAgent: sanitizeUserAgent(context.userAgent),
+      }
+    );
+
+    if (execution.outcome === 'invalid_token') {
+      return rejectClaim();
+    }
+
+    if (execution.outcome === 'identity_conflict') {
+      await this.authRepo.recordClaimFailure(
+        {
+          claimToken: { id: claimRow.id, communityId: claimRow.communityId },
+          clientIp: context.clientIp,
+          now: nowMs,
+        },
+        secret
+      );
+      await this.auditFailure({
+        communityId: claimRow.communityId,
+        action: 'claim_token.consume',
+        resourceType: 'claim_token',
+        resourceIds: [claimRow.id],
+        clientIp: context.clientIp,
+        userAgent: context.userAgent,
+      });
+      return { status: 409, body: CONFLICT_BODY };
+    }
+
+    await this.authRepo.resetClaimThrottle(
+      claimRow.id,
+      context.clientIp,
+      secret
+    );
+
+    return {
+      status: 201,
+      token: sessionToken,
+      kind,
+      body: {
+        data: {
+          community: {
+            id: execution.community.id,
+            name: execution.community.name,
+            slug: execution.community.slug,
+            description: execution.community.description,
+            locale: execution.community.locale,
+            country: execution.community.country,
+            visibility: execution.community.visibility,
+            status: 'active',
+            createdAt: execution.community.createdAt.toISOString(),
+            updatedAt: execution.community.updatedAt.toISOString(),
+          },
+          user: {
+            id: execution.userId,
+            email,
+            username,
+            displayName: displayName ?? null,
+            role: 'admin',
+            communityId: execution.community.id,
+            recoveryCodesConfirmed: true,
+          },
+          recoveryCodes: {
+            codes,
+            purpose: 'recovery',
+            createdAt: context.now.toISOString(),
+          },
         },
       },
     };

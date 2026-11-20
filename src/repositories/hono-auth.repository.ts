@@ -20,6 +20,7 @@ import {
   AUTH_PRELOGIN_MIX_TTL_MS,
   AUTH_THROTTLE_BACKOFF_MAX_MS,
   AUTH_THROTTLE_KEY_ACCOUNT,
+  AUTH_THROTTLE_KEY_CLAIM,
   AUTH_THROTTLE_KEY_IP,
   AUTH_THROTTLE_MAX_FAILURES,
   AUTH_THROTTLE_WINDOW_MS,
@@ -77,6 +78,13 @@ interface RawAuthAccount {
 /** A failed-login counter update: at most two rows (SPEC-V2 §6.8). */
 export interface ThrottleIncrement {
   account: { id: number; communityId: number | null } | null;
+  clientIp: string;
+  now: number;
+}
+
+/** A failed claim-token counter update: per-token (when resolved) + per-IP. */
+export interface ClaimThrottleIncrement {
+  claimToken: { id: number; communityId: number } | null;
   clientIp: string;
   now: number;
 }
@@ -569,6 +577,13 @@ export class HonoAuthRepository {
     return this.throttleKey(`${AUTH_THROTTLE_KEY_ACCOUNT}${accountId}`, secret);
   }
 
+  claimThrottleKey(claimTokenId: number, secret: string): Promise<string> {
+    return this.throttleKey(
+      `${AUTH_THROTTLE_KEY_CLAIM}${claimTokenId}`,
+      secret
+    );
+  }
+
   /**
    * Per-IP throttle key (keyed hash of the client IP alone, §6.8). IPv6 is
    * keyed on its /64 prefix so rotating within a /64 does not mint fresh
@@ -589,7 +604,7 @@ export class HonoAuthRepository {
   private incrementStatement(
     executor: typeof this.db,
     throttleKey: string,
-    kind: 'account' | 'ip',
+    kind: 'account' | 'ip' | 'claim',
     communityId: number | null,
     now: number
   ) {
@@ -685,6 +700,54 @@ export class HonoAuthRepository {
     });
   }
 
+  /**
+   * Record one failed claim attempt: the per-token counter (when the presented
+   * digest resolved to a ClaimToken row) and the per-IP counter in one round
+   * trip. Unknown token digests feed ONLY the per-IP counter (§6.8).
+   */
+  async recordClaimFailure(
+    input: ClaimThrottleIncrement,
+    secret: string
+  ): Promise<void> {
+    const ipKey = await this.ipThrottleKey(input.clientIp, secret);
+    const claimKey = input.claimToken
+      ? await this.claimThrottleKey(input.claimToken.id, secret)
+      : null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const statementsFor = (executor: any) => {
+      const statements = [];
+      if (input.claimToken && claimKey !== null) {
+        statements.push(
+          this.incrementStatement(
+            executor,
+            claimKey,
+            'claim',
+            input.claimToken.communityId,
+            input.now
+          )
+        );
+      }
+      statements.push(
+        this.incrementStatement(executor, ipKey, 'ip', null, input.now)
+      );
+      return statements;
+    };
+    const db = this.db;
+    if (typeof db.batch === 'function') {
+      await db.batch(statementsFor(db));
+      return;
+    }
+    if (dialectOf(this.connection) === 'postgresql') {
+      await db.transaction(async (tx: typeof db) => {
+        for (const statement of statementsFor(tx)) await statement;
+      });
+      return;
+    }
+    db.transaction((tx: typeof db) => {
+      for (const statement of statementsFor(tx)) statement.run();
+    });
+  }
+
   /** Current throttle state of one account or IP key. */
   async throttleState(
     throttleKey: string,
@@ -726,6 +789,23 @@ export class HonoAuthRepository {
       .where(
         inArray(throttle.key, [
           await this.accountThrottleKey(accountId, secret),
+          await this.ipThrottleKey(clientIp, secret),
+        ])
+      );
+  }
+
+  /** Clear the per-token and per-IP counters after a successful claim (§6.8). */
+  async resetClaimThrottle(
+    claimTokenId: number,
+    clientIp: string,
+    secret: string
+  ): Promise<void> {
+    const throttle = this.tables.authThrottle;
+    await this.db
+      .delete(throttle)
+      .where(
+        inArray(throttle.key, [
+          await this.claimThrottleKey(claimTokenId, secret),
           await this.ipThrottleKey(clientIp, secret),
         ])
       );

@@ -15,3 +15,11 @@ CREATE TABLE "installation_bootstrap" (
 	"completed_at" bigint NOT NULL,
 	CONSTRAINT "installation_bootstrap_singleton_check" CHECK ("id" = 1)
 );
+--> statement-breakpoint
+ALTER TABLE "auth_throttle" DROP CONSTRAINT "auth_throttle_kind_check";
+--> statement-breakpoint
+ALTER TABLE "auth_throttle" DROP CONSTRAINT "auth_throttle_ip_community_check";
+--> statement-breakpoint
+ALTER TABLE "auth_throttle" ADD CONSTRAINT "auth_throttle_kind_check" CHECK ("kind" in ('account', 'ip', 'claim'));
+--> statement-breakpoint
+ALTER TABLE "auth_throttle" ADD CONSTRAINT "auth_throttle_ip_community_check" CHECK (("kind" = 'account') OR ("kind" = 'ip' AND "community_id" IS NULL) OR ("kind" = 'claim' AND "community_id" IS NOT NULL));

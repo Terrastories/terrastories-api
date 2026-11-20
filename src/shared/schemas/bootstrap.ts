@@ -123,3 +123,16 @@ export const BootstrapResponseSchema = z.object({
   }),
 });
 export type BootstrapResponse = z.infer<typeof BootstrapResponseSchema>;
+
+/** POST /v2/bootstrap/claim request body (unauthenticated ClaimToken holder). */
+export const BootstrapClaimRequestSchema = z
+  .object({
+    token: z.string().min(1).max(256),
+    username: z.string().trim().min(1).max(254),
+    email: z.string().trim().email().max(254),
+    displayName: z.string().trim().min(1).max(255).nullable().optional(),
+    password: VerifierMaterialSchema,
+    deviceSession: z.boolean().optional(),
+  })
+  .strict();
+export type BootstrapClaimRequest = z.infer<typeof BootstrapClaimRequestSchema>;

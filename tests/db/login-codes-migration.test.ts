@@ -75,8 +75,13 @@ describe('0014 migration: sessions step-up column and login_codes (user_id, purp
           updatedAt: now,
         })
         .returning({ id: t.users.id });
-      const tokenHash = await sha256Hex('existing-session-token');
       const nowMs = now.getTime();
+      sqlite
+        .prepare(
+          "INSERT INTO auth_throttle (key, kind, community_id, failures, window_started_at, blocked_until) VALUES ('acct-pre-0014', 'account', ?, 3, ?, NULL), ('ip-pre-0014', 'ip', NULL, 1, ?, NULL)"
+        )
+        .run(comm.id, nowMs, nowMs);
+      const tokenHash = await sha256Hex('existing-session-token');
       sqlite
         .prepare(
           `INSERT INTO sessions (id, token_hash, user_id, expires_at, kind, created_at, last_seen_at, idle_expires_at, absolute_expires_at)
@@ -132,6 +137,43 @@ describe('0014 migration: sessions step-up column and login_codes (user_id, purp
         plan.some((row) => row.detail.includes('login_codes_user_purpose_idx'))
       ).toBe(true);
 
+      // auth_throttle rebuild in 0014 preserves existing account/ip rows,
+      // permits kind='claim' with non-null community_id, and rejects
+      // kind='claim' with null community_id or kind='ip' with non-null community_id.
+      expect(
+        sqlite
+          .prepare(
+            "SELECT kind, failures FROM auth_throttle WHERE key = 'acct-pre-0014'"
+          )
+          .get()
+      ).toEqual({ kind: 'account', failures: 3 });
+      expect(
+        sqlite
+          .prepare(
+            "SELECT kind, failures FROM auth_throttle WHERE key = 'ip-pre-0014'"
+          )
+          .get()
+      ).toEqual({ kind: 'ip', failures: 1 });
+      sqlite
+        .prepare(
+          "INSERT INTO auth_throttle (key, kind, community_id, failures, window_started_at, blocked_until) VALUES ('claim-key-1', 'claim', ?, 2, ?, NULL)"
+        )
+        .run(comm.id, nowMs);
+      expect(() =>
+        sqlite
+          .prepare(
+            "INSERT INTO auth_throttle (key, kind, community_id, failures, window_started_at, blocked_until) VALUES ('claim-bad-null', 'claim', NULL, 1, ?, NULL)"
+          )
+          .run(nowMs)
+      ).toThrow();
+      expect(() =>
+        sqlite
+          .prepare(
+            "INSERT INTO auth_throttle (key, kind, community_id, failures, window_started_at, blocked_until) VALUES ('ip-bad-comm', 'ip', ?, 1, ?, NULL)"
+          )
+          .run(comm.id, nowMs)
+      ).toThrow();
+
       // installation_bootstrap table added in 0014: singleton CHECK (id = 1)
       // and ON DELETE SET NULL on community_id / admin_user_id.
       sqlite
@@ -162,6 +204,28 @@ describe('0014 migration: sessions step-up column and login_codes (user_id, purp
         community_id: null,
         admin_user_id: null,
       });
+      // Community deletion cascades claim and account throttle rows, while ip rows survive.
+      expect(
+        sqlite
+          .prepare(
+            "SELECT kind, failures FROM auth_throttle WHERE key = 'claim-key-1'"
+          )
+          .get()
+      ).toBeUndefined();
+      expect(
+        sqlite
+          .prepare(
+            "SELECT kind, failures FROM auth_throttle WHERE key = 'acct-pre-0014'"
+          )
+          .get()
+      ).toBeUndefined();
+      expect(
+        sqlite
+          .prepare(
+            "SELECT kind, failures FROM auth_throttle WHERE key = 'ip-pre-0014'"
+          )
+          .get()
+      ).toEqual({ kind: 'ip', failures: 1 });
       sqlite.close();
 
       // Fresh migrate check via Drizzle migrator too.

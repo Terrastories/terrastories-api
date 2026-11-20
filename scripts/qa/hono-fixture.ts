@@ -33,7 +33,7 @@ import { and, asc, eq, like, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
-import { toHex } from '../../src/shared/auth-crypto.js';
+import { toBase64Url, toHex } from '../../src/shared/auth-crypto.js';
 import { dialectOf, tablesFor } from '../../src/db/dialect.js';
 import {
   communityMediaPg,
@@ -5978,6 +5978,28 @@ export async function createFixture(
               typeof body === 'object' &&
               body !== null &&
               (body as { error?: string }).error === 'Forbidden',
+          },
+          {
+            name: 'reject unknown claim token uniformly',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.70',
+              'cf-connecting-ip': '203.0.113.70',
+            },
+            body: {
+              token: toBase64Url(crypto.getRandomValues(new Uint8Array(24))),
+              username: 'claim_unknown_admin',
+              email: 'claim-unknown@example.test',
+              password: {
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: verifierSalt,
+                params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+              },
+            },
+            check: invalidCredentials,
           },
           {
             name: 'require auth on v2 community reads',

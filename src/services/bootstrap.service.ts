@@ -20,7 +20,7 @@ import {
   sessionTokenDigestInput,
   type SessionKind,
 } from '../shared/auth-policy.js';
-import { sha256Hex, toHex } from '../shared/auth-crypto.js';
+import { sha256Hex, constantTimeEqual, toHex } from '../shared/auth-crypto.js';
 import {
   BootstrapClaimRequestSchema,
   BootstrapRequestSchema,
@@ -36,7 +36,6 @@ import {
   deriveDescriptionForWrite,
   deriveUserIdentityColumns,
 } from '../shared/utils/derived-columns.js';
-import { CONFLICT_BODY } from './community-writes.service.js';
 import { FORBIDDEN_BODY } from './public-communities.service.js';
 import {
   generateEntropyCode,
@@ -334,7 +333,14 @@ export class BootstrapService {
     const tokenHash = await sha256Hex(token);
     const claimRow = await this.bootstrapRepo.findClaimTokenByHash(tokenHash);
 
-    if (claimRow === null) {
+    // The digest lookup is by index, but the presented material is still
+    // re-verified in constant time before any decision is made (§6.8): a row
+    // that somehow resolved without matching this request's digest is treated
+    // exactly like no row at all.
+    if (
+      claimRow === null ||
+      !constantTimeEqual(claimRow.tokenHash, tokenHash)
+    ) {
       await this.authRepo.recordClaimFailure(
         {
           claimToken: null,
@@ -455,35 +461,35 @@ export class BootstrapService {
       }
     );
 
-    if (execution.outcome === 'invalid_token') {
+    // §6.2 identity collisions are NOT disclosed: a token holder could
+    // otherwise probe which usernames/emails already exist by watching
+    // 409-vs-401. Both failures answer exactly like an invalid token (same
+    // throttling and content-free audit) and leave the token unconsumed for a
+    // retry with a free identity.
+    if (
+      execution.outcome === 'invalid_token' ||
+      execution.outcome === 'identity_conflict'
+    ) {
       return rejectClaim();
     }
 
-    if (execution.outcome === 'identity_conflict') {
-      await this.authRepo.recordClaimFailure(
-        {
-          claimToken: { id: claimRow.id, communityId: claimRow.communityId },
-          clientIp: context.clientIp,
-          now: nowMs,
-        },
+    try {
+      await this.authRepo.resetClaimThrottle(
+        claimRow.id,
+        context.clientIp,
         secret
       );
-      await this.auditFailure({
-        communityId: claimRow.communityId,
-        action: 'claim_token.consume',
-        resourceType: 'claim_token',
-        resourceIds: [claimRow.id],
-        clientIp: context.clientIp,
-        userAgent: context.userAgent,
+    } catch {
+      // The claim is already committed and the raw recovery codes exist only
+      // in this response. A failed counter reset is housekeeping: log it
+      // content-free and still deliver the one-time sheet and session
+      // (§6.8, §7) rather than failing a request that cannot be retried.
+      // eslint-disable-next-line no-console -- no logging seam in bootstrap service; content-free fallback
+      console.error('claim throttle reset failed', {
+        action: 'claim_token.throttle_reset',
+        outcome: 'failure',
       });
-      return { status: 409, body: CONFLICT_BODY };
     }
-
-    await this.authRepo.resetClaimThrottle(
-      claimRow.id,
-      context.clientIp,
-      secret
-    );
 
     return {
       status: 201,

@@ -16,6 +16,7 @@ import {
   CLAIM_TOKEN_MAX_TTL_MS,
   type SessionKind,
 } from '../shared/auth-policy.js';
+import { constantTimeEqual } from '../shared/auth-crypto.js';
 import {
   validateContentFreeAuditEntry,
   type ValidatedAuditEntryRecord,
@@ -1150,7 +1151,9 @@ export class BootstrapRepository {
               .limit(1);
             if (
               !tokenRow ||
-              tokenRow.tokenHash !== input.tokenHash ||
+              // The row was selected by id and locked, so its digest is
+              // re-verified in constant time before it is trusted (§6.8).
+              !constantTimeEqual(String(tokenRow.tokenHash), input.tokenHash) ||
               Number(tokenRow.communityId) !== input.communityId ||
               tokenRow.consumedAt !== null ||
               tokenRow.supersededAt !== null ||
@@ -1263,7 +1266,8 @@ export class BootstrapRepository {
           .all()[0];
         if (
           !tokenRow ||
-          tokenRow.tokenHash !== input.tokenHash ||
+          // Re-verified in constant time after the id lookup (§6.8).
+          !constantTimeEqual(String(tokenRow.tokenHash), input.tokenHash) ||
           Number(tokenRow.communityId) !== input.communityId ||
           tokenRow.consumedAt !== null ||
           tokenRow.supersededAt !== null ||

@@ -13,20 +13,25 @@
  *   community, already-administered community, previously-claimed community, and
  *   non-empty communities (stories, places, speakers, files, attachments,
  *   external_media_links, community_map_configs)
- * - 409 on §6.2 cross-community identity collisions leaving token unconsumed
+ * - Uniform 401 (identical to an invalid token) on §6.2 cross-community identity
+ *   collisions, leaving the token unconsumed for retry
  * - Shared-browser cross-user session revocation on success only
  * - AuthThrottle per-IP and per-token (`claim:`) isolation, community cascade,
  *   zero claim rows created for garbage tokens, reset on success
  * - Real concurrency races, D1 `db.batch()` emulation, audit-failure rollback
  * - Content-free audit verification (bootstrap.claim vs claim_token.consume)
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { eq } from 'drizzle-orm';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
+import { HonoAuthRepository } from '../../src/repositories/hono-auth.repository.js';
+import { BootstrapRepository } from '../../src/repositories/bootstrap.repository.js';
+import { BootstrapService } from '../../src/services/bootstrap.service.js';
+import type { Database } from '../../src/db/index.js';
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
 import {
@@ -631,7 +636,7 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
     expect(sqlite.open).toBe(true);
   });
 
-  it('rejects §6.2 cross-community identity collisions with 409 while leaving the token unconsumed for retry', async () => {
+  it('answers §6.2 cross-community identity collisions exactly like an invalid claim token and leaves the token unconsumed for retry', async () => {
     const {
       db,
       createProvisionedCommunity,
@@ -692,11 +697,31 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
         email: badIdentity.email,
         password: makePasswordPayload(),
       });
-      expect(res.status).toBe(409);
-      expect(await res.json()).toEqual({ error: 'Conflict' });
+      // A token holder must not be able to probe which identities exist: the
+      // collision is indistinguishable from an invalid token.
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: 'Invalid credentials' });
     }
 
-    // Token remains unconsumed; retrying with clean credentials succeeds 201!
+    const unknownTokenRes = await postClaim({
+      token: makeRawToken(),
+      username: 'unknown_probe_admin',
+      email: 'unknown-probe@collision.example.test',
+      password: makePasswordPayload(),
+    });
+    expect(unknownTokenRes.status).toBe(401);
+    expect(await unknownTokenRes.json()).toEqual({
+      error: 'Invalid credentials',
+    });
+
+    // Nothing was created for the community and the token remains unconsumed;
+    // retrying with clean credentials succeeds 201!
+    expect(
+      await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.communityId, comm.id))
+    ).toHaveLength(0);
     const [rowBeforeRetry] = await db
       .select()
       .from(claimTokensSqlite)
@@ -710,6 +735,202 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
       password: makePasswordPayload(),
     });
     expect(okRes.status).toBe(201);
+  });
+
+  it('delivers the one-time recovery sheet even when the post-commit throttle reset fails', async () => {
+    const {
+      db,
+      secret,
+      currentNow,
+      createProvisionedCommunity,
+      insertClaimToken,
+    } = await setup();
+    const comm = await createProvisionedCommunity('reset-failure-comm');
+    const tok = await insertClaimToken(comm.id);
+
+    const bootstrapRepo = new BootstrapRepository(db as unknown as Database);
+    const authRepo = new HonoAuthRepository(db as unknown as Database);
+    // The claim has already committed when the counters are cleared; a reset
+    // failure must not swallow the only copy of the recovery codes.
+    vi.spyOn(authRepo, 'resetClaimThrottle').mockRejectedValue(
+      new Error('throttle reset boom')
+    );
+    const logged = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    try {
+      const service = new BootstrapService(bootstrapRepo, authRepo, {
+        serverSecret: secret,
+      });
+      const result = await service.claimCommunity(
+        {
+          token: tok.raw,
+          username: 'reset_fail_admin',
+          email: 'reset-fail@claim.example.test',
+          password: makePasswordPayload(),
+        },
+        undefined,
+        { clientIp: '203.0.113.77', now: currentNow() }
+      );
+
+      expect(result.status).toBe(201);
+      if (result.status !== 201) throw new Error('claim did not succeed');
+      expect(result.body.data.recoveryCodes.codes).toHaveLength(
+        RECOVERY_CODE_COUNT
+      );
+      expect(result.token).toMatch(/^[0-9a-f]{64}$/);
+
+      const [consumed] = await db
+        .select()
+        .from(claimTokensSqlite)
+        .where(eq(claimTokensSqlite.id, tok.row.id));
+      expect(consumed?.consumedAt).not.toBeNull();
+
+      // The fallback log is content-free: no token, no code, no identity.
+      const loggedText = JSON.stringify(logged.mock.calls);
+      expect(loggedText).toContain('claim throttle reset failed');
+      expect(loggedText).toContain('claim_token.throttle_reset');
+      expect(loggedText).not.toContain(tok.raw);
+      expect(loggedText).not.toContain('reset-fail@claim.example.test');
+      for (const code of result.body.data.recoveryCodes.codes) {
+        expect(loggedText).not.toContain(code);
+      }
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it('re-verifies the presented claim digest in constant time before consuming anything', async () => {
+    const { db, secret, currentNow } = await setup();
+    const now = currentNow();
+    const presented = makeRawToken();
+    const claimWrite = vi.fn(async () => ({
+      outcome: 'claimed' as const,
+      community: {
+        id: 1,
+        name: 'Should Never Claim',
+        slug: 'should-never-claim',
+        description: null,
+        locale: 'en',
+        country: null,
+        visibility: 'private' as const,
+        status: 'active' as const,
+        createdAt: now,
+        updatedAt: now,
+      },
+      userId: 1,
+    }));
+    const bootstrapRepo = {
+      findClaimTokenByHash: async () => ({
+        id: 1,
+        communityId: 1,
+        // A row that does not match the presented material must never be
+        // trusted just because the lookup returned it.
+        tokenHash: await sha256Hex(makeRawToken()),
+        createdAt: now.getTime(),
+        expiresAt: now.getTime() + CLAIM_TOKEN_MAX_TTL_MS,
+        consumedAt: null,
+        supersededAt: null,
+        communityIsActive: true,
+        communityName: 'Claimable',
+        communitySlug: 'claimable',
+        communityDescription: null,
+        communityLocale: 'en',
+        communityCountry: null,
+        communityPublicStories: false,
+        communityCreatedAt: now,
+        communityUpdatedAt: now,
+      }),
+      claimCommunityAtomically: claimWrite,
+    } as unknown as BootstrapRepository;
+    const authRepo = {
+      connection: db,
+      throttleState: async () => ({
+        blocked: false,
+        failures: 0,
+        blockedUntil: null,
+      }),
+      ipThrottleKey: async () => 'throttle-key',
+      recordClaimFailure: async () => undefined,
+      resetClaimThrottle: async () => undefined,
+    } as unknown as HonoAuthRepository;
+    const service = new BootstrapService(bootstrapRepo, authRepo, {
+      serverSecret: secret,
+    });
+
+    const result = await service.claimCommunity(
+      {
+        token: presented,
+        username: 'digest_admin',
+        email: 'digest@claim.example.test',
+        password: makePasswordPayload(),
+      },
+      undefined,
+      { clientIp: '203.0.113.78', now }
+    );
+    expect(result.status).toBe(401);
+    expect(result.body).toEqual({ error: 'Invalid credentials' });
+    expect(claimWrite).not.toHaveBeenCalled();
+  });
+
+  it('re-verifies the locked claim row digest in the write unit', async () => {
+    const { db, currentNow, createProvisionedCommunity, insertClaimToken } =
+      await setup();
+    const comm = await createProvisionedCommunity('digest-repo-comm');
+    const tok = await insertClaimToken(comm.id);
+    const now = currentNow();
+    const nowMs = now.getTime();
+    const seed = await argon2Seed(makeDerivedKey());
+    const repo = new BootstrapRepository(db as unknown as Database);
+
+    const outcome = await repo.claimCommunityAtomically(
+      {
+        claimTokenId: tok.row.id,
+        // The row id resolves and locks, but the presented digest is a
+        // different token: the write must fail closed and consume nothing.
+        tokenHash: await sha256Hex(makeRawToken()),
+        communityId: comm.id,
+        admin: {
+          username: 'digest_repo_admin',
+          usernameNormalized: 'digest_repo_admin',
+          email: 'digest-repo@claim.example.test',
+          emailNormalized: 'digest-repo@claim.example.test',
+          displayName: null,
+          passwordHash: seed.passwordHash,
+          verifier: {
+            passwordHash: seed.passwordHash,
+            passwordVerifier: seed.passwordVerifier,
+            passwordAlgorithm: seed.passwordAlgorithm,
+            passwordSalt: seed.passwordSalt,
+            passwordParams: seed.passwordParams,
+          },
+        },
+        recoveryCodeHashes: Array.from({ length: RECOVERY_CODE_COUNT }, () =>
+          toHex(crypto.getRandomValues(new Uint8Array(32)))
+        ),
+        session: {
+          tokenHash: toHex(crypto.getRandomValues(new Uint8Array(32))),
+          kind: 'standard',
+          idleExpiresAtMs: nowMs + 3600_000,
+          absoluteExpiresAtMs: nowMs + 86_400_000,
+        },
+        now,
+      },
+      { ipAddress: '203.0.113.79', userAgent: null }
+    );
+
+    expect(outcome).toEqual({ outcome: 'invalid_token' });
+    const [row] = await db
+      .select()
+      .from(claimTokensSqlite)
+      .where(eq(claimTokensSqlite.id, tok.row.id));
+    expect(row?.consumedAt).toBeNull();
+    expect(
+      await db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.communityId, comm.id))
+    ).toHaveLength(0);
   });
 
   it('revokes a presented cross-user cookie only on 201 claim success', async () => {
@@ -821,7 +1042,7 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
         },
         { 'cf-connecting-ip': `203.0.113.${100 + i}` }
       );
-      expect(r.status).toBe(409);
+      expect(r.status).toBe(401);
     }
     const claimRows = (await db.select().from(authThrottleSqlite)).filter(
       (r) => r.kind === 'claim'
@@ -849,8 +1070,9 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
     const commB = await createProvisionedCommunity('throttle-b');
     const tokenB = await insertClaimToken(commB.id);
     for (let i = 0; i < 2; i += 1) {
-      // Trigger 409 identity collision using super_admin email so token stays
-      // valid while recording failure counters for token B + IP .52.
+      // Trigger the identity-collision failure (indistinguishable from an
+      // invalid token) using super_admin email so token stays valid while
+      // recording failure counters for token B + IP .52.
       const failRes = await postClaim(
         {
           token: tokenB.raw,
@@ -860,7 +1082,7 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
         },
         { 'cf-connecting-ip': '203.0.113.52' }
       );
-      expect(failRes.status).toBe(409);
+      expect(failRes.status).toBe(401);
     }
     const okRes = await postClaim(
       {
@@ -975,7 +1197,8 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
         .where(eq(usersSqlite.communityId, commD1.id))
     ).toHaveLength(1);
 
-    // 3. D1 concurrent same-username claim across TWO communities -> 1 wins (201), 1 gets 409
+    // 3. D1 concurrent same-username claim across TWO communities -> 1 wins
+    // (201), the loser answers the uniform non-enumerating 401
     const comm1 = await d1Ctx.createProvisionedCommunity('race-u-1');
     const comm2 = await d1Ctx.createProvisionedCommunity('race-u-2');
     const t1 = await d1Ctx.insertClaimToken(comm1.id);
@@ -1000,7 +1223,7 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
         { 'cf-connecting-ip': '203.0.113.56' }
       ),
     ]);
-    expect([uRes1.status, uRes2.status].sort()).toEqual([201, 409]);
+    expect([uRes1.status, uRes2.status].sort()).toEqual([201, 401]);
   });
 
   it('rolls back all claim writes when audit fails and emits strictly content-free audit entries', async () => {
@@ -1056,7 +1279,7 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
     await postClaim({
       token: tok.raw,
       username: 'audit_admin',
-      email: 'sa@claim.example.test', // 409 collision
+      email: 'sa@claim.example.test', // uniform 401 identity collision
       password: makePasswordPayload(),
     });
     const ok = await postClaim({

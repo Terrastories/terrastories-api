@@ -462,6 +462,20 @@ export class UserManagementService {
         ? { usernameNormalized: identity.usernameNormalized ?? null }
         : {}),
     };
+    // Write-time guard: every supplied identifier is re-checked in the
+    // guarded write, changed or not, because a concurrent edit can free an
+    // identifier another account then claims before this write lands.
+    const writeCollision: {
+      emailNormalized?: string;
+      usernameNormalized?: string | null;
+    } = {
+      ...(body.email !== undefined
+        ? { emailNormalized: identity.emailNormalized as string }
+        : {}),
+      ...(body.username !== undefined
+        ? { usernameNormalized: identity.usernameNormalized ?? null }
+        : {}),
+    };
     if (emailChanged || usernameChanged) {
       const collided = await this.repository.hasIdentityCollision({
         communityId: caller.communityId,
@@ -511,7 +525,10 @@ export class UserManagementService {
           : {}),
         // The identity rules hold at write time too, not only at pre-check
         // time (§6.2); the guarded write re-checks the same changed set.
-        collision: emailChanged || usernameChanged ? collisionInput : undefined,
+        collision:
+          body.email !== undefined || body.username !== undefined
+            ? writeCollision
+            : undefined,
         ...(body.role !== undefined ? { role: body.role } : {}),
         ...(body.status !== undefined
           ? { isActive: body.status === 'active' }

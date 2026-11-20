@@ -54,7 +54,7 @@ type Outcome =
   | 'identity_conflict';
 
 function makeStubRepository(outcome: Outcome) {
-  const calls = { findCommunityUser: 0 };
+  const calls = { findCommunityUser: 0, updates: [] as unknown[] };
   const stub = {
     connection: db,
     communityIsActive: async () => true,
@@ -63,7 +63,10 @@ function makeStubRepository(outcome: Outcome) {
       return calls.findCommunityUser > 1 ? UPDATED : TARGET;
     },
     hasIdentityCollision: async () => false,
-    updateCommunityUser: async () => outcome,
+    updateCommunityUser: async (input: unknown) => {
+      calls.updates.push(input);
+      return outcome;
+    },
     insertLoginCode: async () => ({ id: 1 }),
   };
   return {
@@ -124,6 +127,21 @@ async function auditRows(action: string) {
 async function resetAudit() {
   await db.delete(tables.auditEntries);
 }
+
+describe('PATCH /v2/users/:id write-time identity guard', () => {
+  it('passes unchanged supplied identifiers to the guarded write', async () => {
+    const { repository, calls } = makeStubRepository('updated');
+    const service = new UserManagementService(repository);
+    await service.patchUser(ACTOR, '42', {
+      email: TARGET.email,
+      displayName: 'After',
+    });
+    const update = calls.updates[0] as {
+      collision?: { emailNormalized?: string };
+    };
+    expect(update.collision?.emailNormalized).toBe(TARGET.emailNormalized);
+  });
+});
 
 describe('PATCH /v2/users/:id when the guarded write refuses (Item 6)', () => {
   it('answers 404, never 200 with the pre-change row, and audits no success', async () => {

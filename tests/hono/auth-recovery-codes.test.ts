@@ -24,7 +24,10 @@ import { HonoFoundationRepository } from '../../src/repositories/hono-foundation
 import { AuthRecoveryRepository } from '../../src/repositories/auth-recovery.repository.js';
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
-import { sessionsSqlite } from '../../src/db/schema/sessions.js';
+import {
+  authThrottleSqlite,
+  sessionsSqlite,
+} from '../../src/db/schema/sessions.js';
 import { loginCodesSqlite } from '../../src/db/schema/login_codes.js';
 import { auditEntriesSqlite } from '../../src/db/schema/audit_entries.js';
 import {
@@ -692,6 +695,45 @@ describe('POST /v2/auth/recovery-codes and GET /v2/auth/me flag (Slice 11b-A)', 
       currentDerivedKey: adminKey,
     });
     expect(throttledRight.status).toBe(401);
+  });
+
+  it('refuses password step-up when the client address is throttled by another auth endpoint', async () => {
+    const { app, db, admin, adminKey, login, postRecoveryCodes } =
+      await setup();
+    const adminCookie = await login(admin.email, adminKey);
+
+    // Ten unresolved login attempts from the same client address feed ONLY the
+    // per-IP counter (§6.8, §7 step 6), leaving the admin's account bucket clean.
+    for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES; i += 1) {
+      const bad = await app.request(`${API_ORIGIN}/v2/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          identifier: `unresolved-${i}@throttled.example.test`,
+          derivedKey: makeDerivedKey(),
+        }),
+      });
+      expect(bad.status).toBe(401);
+    }
+    const throttleRows = await db.select().from(authThrottleSqlite);
+    expect(throttleRows.filter((row) => row.kind === 'account')).toHaveLength(
+      0
+    );
+    const ipRow = throttleRows.find((row) => row.kind === 'ip');
+    expect(ipRow?.blockedUntil).not.toBeNull();
+
+    // The correct step-up key must still be refused: the address is blocked.
+    const blocked = await postRecoveryCodes(adminCookie, {
+      currentDerivedKey: adminKey,
+    });
+    expect(blocked.status).toBe(401);
+    expect(await blocked.json()).toEqual({ error: 'Invalid credentials' });
+    expect(
+      await db
+        .select()
+        .from(loginCodesSqlite)
+        .where(eq(loginCodesSqlite.userId, admin.id))
+    ).toHaveLength(0);
   });
 
   it('grants verifier-free step-up ONLY on fresh admin_issued sessions (one-shot, 15m TTL, cleared on rotation)', async () => {

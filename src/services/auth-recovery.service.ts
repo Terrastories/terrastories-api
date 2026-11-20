@@ -220,6 +220,18 @@ export class AuthRecoveryService {
       });
 
     if (parsed.data.currentDerivedKey !== undefined) {
+      // The per-IP brake is read before the step-up verifier, exactly as login
+      // does (SPEC-V2 §6.8, §7 step 6): a failed step-up increments both the
+      // account and the client-address counter, so a client address blocked by
+      // any other auth endpoint must be refused here too — otherwise the
+      // address-level brake is only a write amplifier.
+      const ipBlocked = await this.authRepo.throttleState(
+        await this.authRepo.ipThrottleKey(context.clientIp, secret),
+        nowMs
+      );
+      if (ipBlocked.blocked) {
+        return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
+      }
       const account = await this.authRepo.accountById(actor.id);
       if (account === null || !accountAllowed(account)) {
         await failAudit({ id: actor.id, communityId: actor.communityId });

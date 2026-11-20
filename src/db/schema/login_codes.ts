@@ -168,7 +168,7 @@ export const claimTokensPg = pgTable(
     ),
     pgCheck(
       'claim_tokens_consumed_check',
-      sql`(${table.consumedAt} IS NULL) = (${table.consumedBy} IS NULL)`
+      sql`(${table.consumedBy} IS NULL) OR (${table.consumedAt} IS NOT NULL)`
     ),
   ]
 );
@@ -205,7 +205,7 @@ export const claimTokensSqlite = sqliteTable(
     ),
     check(
       'claim_tokens_consumed_check',
-      sql`(${table.consumedAt} IS NULL) = (${table.consumedBy} IS NULL)`
+      sql`(${table.consumedBy} IS NULL) OR (${table.consumedAt} IS NOT NULL)`
     ),
   ]
 );

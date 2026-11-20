@@ -2771,7 +2771,7 @@
         },
         "claim_tokens_consumed_check": {
           "name": "claim_tokens_consumed_check",
-          "value": "(\"claim_tokens\".\"consumed_at\" IS NULL) = (\"claim_tokens\".\"consumed_by\" IS NULL)"
+          "value": "(\"claim_tokens\".\"consumed_by\" IS NULL) OR (\"claim_tokens\".\"consumed_at\" IS NOT NULL)"
         }
       }
     }

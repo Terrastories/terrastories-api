@@ -48,7 +48,7 @@ CREATE TABLE "claim_tokens" (
 	"consumed_by" integer CONSTRAINT "claim_tokens_consumed_by_users_id_fk" REFERENCES "users"("id") ON DELETE set null ON UPDATE no action,
 	"superseded_at" bigint,
 	CONSTRAINT "claim_tokens_expiry_check" CHECK ("expires_at" > "created_at"),
-	CONSTRAINT "claim_tokens_consumed_check" CHECK (("consumed_at" IS NULL) = ("consumed_by" IS NULL))
+	CONSTRAINT "claim_tokens_consumed_check" CHECK (("consumed_by" IS NULL) OR ("consumed_at" IS NOT NULL))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "claim_tokens_token_hash_unique" ON "claim_tokens" USING btree ("token_hash");

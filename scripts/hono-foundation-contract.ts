@@ -18,10 +18,11 @@ import { createHonoApp } from '../src/hono-app.js';
 import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS_JSON,
+  ADMIN_ISSUED_CODE_TTL_MS,
   AUTH_THROTTLE_MAX_FAILURES,
   authThrottleBackoffMs,
 } from '../src/shared/auth-policy.js';
-import { sha256Hex, toHex } from '../src/shared/auth-crypto.js';
+import { sha256Hex, toBase64Url, toHex } from '../src/shared/auth-crypto.js';
 import { normalizeSearchText } from '../src/shared/utils/search-normalize.js';
 import {
   sessionLifetime,
@@ -2106,6 +2107,124 @@ export async function runHonoFoundationContract(
           me(deactivationCookie),
           401,
           'the pre-race cookie must stay rejected after re-enable'
+        );
+      }
+      // Slice 11b-A cross-user redemption lock order: A redeems its own
+      // admin-issued code while presenting B's cookie and B does the mirror
+      // image. Both transactions delete the same two session rows, so they
+      // must take them under one deterministic order — otherwise each holds
+      // its own session while waiting for the other's and PG aborts one with a
+      // deadlock. The community row lock below parks both redemptions at the
+      // same point so the session phase really overlaps (a race that never
+      // forms must fail, not pass silently).
+      if (dialectOf(database) === 'postgresql') {
+        const lockAEmail = `redeem-lock-a-${tag}@example.test`;
+        const lockBEmail = `redeem-lock-b-${tag}@example.test`;
+        const lockAccounts: Array<{ id: number; email: string }> = [];
+        for (const [email, username] of [
+          [lockAEmail, `redeem_lock_a_${tag}`],
+          [lockBEmail, `redeem_lock_b_${tag}`],
+        ] as const) {
+          const [row] = await db
+            .insert(tables.users)
+            .values({
+              ...userDefaults,
+              email,
+              username,
+              role: 'admin',
+              communityId: communityA,
+            })
+            .returning();
+          userIds.push(row.id);
+          lockAccounts.push({ id: row.id, email });
+        }
+        const [lockAccountA, lockAccountB] = lockAccounts as [
+          { id: number; email: string },
+          { id: number; email: string },
+        ];
+        const cookieA = await login(lockAccountA.email);
+        const cookieB = await login(lockAccountB.email);
+        const nowMs = instant.getTime();
+        const codes: string[] = [];
+        for (const account of [lockAccountA, lockAccountB]) {
+          const rawCode = toBase64Url(
+            crypto.getRandomValues(new Uint8Array(16))
+          );
+          codes.push(rawCode);
+          await db.insert(tables.loginCodes).values({
+            communityId: communityA,
+            userId: account.id,
+            purpose: 'admin_issued',
+            codeHash: await sha256Hex(rawCode),
+            createdBy: account.id,
+            createdAt: nowMs,
+            expiresAt: nowMs + ADMIN_ISSUED_CODE_TTL_MS,
+            usedAt: null,
+            supersededAt: null,
+          });
+        }
+        const redeemWith = (rawCode: string, cookie: string, ip: string) =>
+          send(app, '/v2/auth/recovery/redeem', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              cookie,
+              'x-forwarded-for': ip,
+            },
+            body: JSON.stringify({ code: rawCode }),
+          });
+        let pendingRedeemA!: Promise<Response>;
+        let pendingRedeemB!: Promise<Response>;
+        await db.transaction(async (tx: any) => {
+          await tx.execute(
+            sql`select id from communities where id = ${communityA} for update`
+          );
+          pendingRedeemA = redeemWith(codes[0]!, cookieB, '198.51.100.230');
+          pendingRedeemB = redeemWith(codes[1]!, cookieA, '198.51.100.231');
+          pendingRedeemA.then(ignore, ignore);
+          pendingRedeemB.then(ignore, ignore);
+          const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+          if (blocked < 1)
+            throw new Error(
+              'cross-user redeem race never materialised: neither redemption blocked behind the community lock'
+            );
+        });
+        const [redeemA, redeemB] = await Promise.all([
+          pendingRedeemA,
+          pendingRedeemB,
+        ]);
+        assert.equal(
+          redeemA.status,
+          200,
+          `cross-user redemption must not deadlock (got ${redeemA.status})`
+        );
+        assert.equal(
+          redeemB.status,
+          200,
+          `cross-user redemption must not deadlock (got ${redeemB.status})`
+        );
+        for (const account of [lockAccountA, lockAccountB]) {
+          const live = await db
+            .select({ id: sessions.id })
+            .from(sessions)
+            .where(eq(sessions.userId, account.id));
+          assert.equal(
+            live.length,
+            1,
+            'each redemption must leave exactly one fresh session and revoke the presented cross-user one'
+          );
+        }
+        const lockCodeRows = await db
+          .select({ usedAt: tables.loginCodes.usedAt })
+          .from(tables.loginCodes)
+          .where(eq(tables.loginCodes.communityId, communityA));
+        const consumedCodes = lockCodeRows.filter(
+          (row: { usedAt: unknown }) => row.usedAt !== null
+        );
+        assert.equal(
+          consumedCodes.length,
+          2,
+          'both redeemed admin-issued codes must be consumed exactly once'
         );
       }
       const [wrappedBefore] = await db

@@ -578,6 +578,30 @@ export class AuthRecoveryRepository {
     const revokeSessions = () =>
       tx.delete(sessions).where(eq(sessions.userId, account.id));
 
+    /**
+     * Take every session row this redemption will delete under one `FOR UPDATE`
+     * in a single deterministic (ascending id) order before any of them is
+     * deleted. Two concurrent cross-user redemptions (A presenting B's cookie
+     * while B presents A's) otherwise lock the same two rows in opposite order
+     * — each its own session first — and PostgreSQL aborts one with a deadlock.
+     * Ordering both sides identically makes the second transaction wait instead
+     * of abort (SPEC-V2 §6.8).
+     */
+    const lockSessions = () =>
+      tx
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(
+          session.previousHash === undefined
+            ? eq(sessions.userId, account.id)
+            : or(
+                eq(sessions.userId, account.id),
+                eq(sessions.tokenHash, session.previousHash)
+              )
+        )
+        .orderBy(sessions.id)
+        .for('update');
+
     const insertSession = () =>
       tx.insert(sessions).values({
         id: session.tokenHash,
@@ -612,6 +636,7 @@ export class AuthRecoveryRepository {
       checkUser,
       consumeCode,
       updateVerifier,
+      lockSessions,
       revokeSessions,
       insertSession,
       revokePresentedCrossUser,
@@ -817,6 +842,9 @@ export class AuthRecoveryRepository {
           .for('update')
           .limit(1);
         if (!ops.checkUser(userRow)) return false;
+        // Sessions before login_codes, and all session rows in one ascending
+        // order: a cross-user redemption pair can then only serialize.
+        await ops.lockSessions();
         const consumed = await ops.consumeCode();
         if (consumed.length === 0) return false;
         const verStmt = ops.updateVerifier();

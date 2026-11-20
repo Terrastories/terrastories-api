@@ -5946,6 +5946,40 @@ export async function createFixture(
             expected: 401,
           },
           {
+            name: 'bootstrap is closed on seeded installation',
+            method: 'GET',
+            path: '/v2/bootstrap',
+            expected: 200,
+            check: (body) =>
+              typeof body === 'object' &&
+              body !== null &&
+              Object.keys(body).length === 1 &&
+              (body as { open?: unknown }).open === false,
+          },
+          {
+            name: 'reject bootstrap replay on seeded installation',
+            method: 'POST',
+            path: '/v2/bootstrap',
+            expected: 403,
+            body: {
+              community: { name: 'Replay Attempt' },
+              admin: {
+                username: 'replay_admin',
+                email: 'replay-admin@example.test',
+                password: {
+                  algorithm: ARGON2ID_ALGORITHM,
+                  salt: verifierSalt,
+                  params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                  derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+                },
+              },
+            },
+            check: (body) =>
+              typeof body === 'object' &&
+              body !== null &&
+              (body as { error?: string }).error === 'Forbidden',
+          },
+          {
             name: 'require auth on v2 community reads',
             method: 'GET',
             path: '/v2/community',

@@ -131,6 +131,37 @@ describe('0014 migration: sessions step-up column and login_codes (user_id, purp
       expect(
         plan.some((row) => row.detail.includes('login_codes_user_purpose_idx'))
       ).toBe(true);
+
+      // installation_bootstrap table added in 0014: singleton CHECK (id = 1)
+      // and ON DELETE SET NULL on community_id / admin_user_id.
+      sqlite
+        .prepare(
+          'INSERT INTO installation_bootstrap (id, setup_id, community_id, admin_user_id, completed_at) VALUES (1, ?, ?, ?, ?)'
+        )
+        .run('setup-1', comm.id, user.id, nowMs);
+      expect(() =>
+        sqlite
+          .prepare(
+            'INSERT INTO installation_bootstrap (id, setup_id, community_id, admin_user_id, completed_at) VALUES (2, ?, ?, ?, ?)'
+          )
+          .run('setup-2', comm.id, user.id, nowMs)
+      ).toThrow();
+      sqlite.prepare('DELETE FROM users WHERE id = ?').run(user.id);
+      sqlite.prepare('DELETE FROM communities WHERE id = ?').run(comm.id);
+      const retained = sqlite
+        .prepare(
+          'SELECT id, community_id, admin_user_id FROM installation_bootstrap WHERE id = 1'
+        )
+        .get() as {
+        id: number;
+        community_id: number | null;
+        admin_user_id: number | null;
+      };
+      expect(retained).toEqual({
+        id: 1,
+        community_id: null,
+        admin_user_id: null,
+      });
       sqlite.close();
 
       // Fresh migrate check via Drizzle migrator too.
@@ -143,6 +174,16 @@ describe('0014 migration: sessions step-up column and login_codes (user_id, purp
       expect(
         freshCols.some((c) => c.name === 'admin_code_step_up_expires_at')
       ).toBe(true);
+      const bootCols = freshSqlite
+        .prepare('PRAGMA table_info(installation_bootstrap)')
+        .all() as Array<{ name: string }>;
+      expect(bootCols.map((c) => c.name)).toEqual([
+        'id',
+        'setup_id',
+        'community_id',
+        'admin_user_id',
+        'completed_at',
+      ]);
       freshSqlite.close();
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });

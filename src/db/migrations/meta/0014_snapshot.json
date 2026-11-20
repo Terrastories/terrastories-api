@@ -2396,6 +2396,75 @@
           "value": "(\"claim_tokens\".\"consumed_by\" IS NULL) OR (\"claim_tokens\".\"consumed_at\" IS NOT NULL)"
         }
       }
+    },
+    "installation_bootstrap": {
+      "name": "installation_bootstrap",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "setup_id": {
+          "name": "setup_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "community_id": {
+          "name": "community_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "admin_user_id": {
+          "name": "admin_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "installation_bootstrap_community_id_communities_id_fk": {
+          "name": "installation_bootstrap_community_id_communities_id_fk",
+          "tableFrom": "installation_bootstrap",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "installation_bootstrap_admin_user_id_users_id_fk": {
+          "name": "installation_bootstrap_admin_user_id_users_id_fk",
+          "tableFrom": "installation_bootstrap",
+          "tableTo": "users",
+          "columnsFrom": ["admin_user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "installation_bootstrap_singleton_check": {
+          "name": "installation_bootstrap_singleton_check",
+          "value": "\"installation_bootstrap\".\"id\" = 1"
+        }
+      }
     }
   },
   "views": {},

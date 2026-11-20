@@ -82,7 +82,7 @@ const PASSWORD_REQUIREMENTS_BODY = Object.freeze({
 });
 
 /** Strip control characters and truncate User-Agent for safe audit storage. */
-function sanitizeUserAgent(raw: string | undefined): string | null {
+export function sanitizeUserAgent(raw: string | undefined): string | null {
   if (raw === undefined) return null;
   const cleaned = raw
     .replace(/[\r\n\0]/g, '')
@@ -92,7 +92,7 @@ function sanitizeUserAgent(raw: string | undefined): string | null {
 }
 
 /** Generate one >=100-bit CSPRNG code (128 bits, base64url). */
-function generateEntropyCode(): string {
+export function generateEntropyCode(): string {
   return toBase64Url(
     crypto.getRandomValues(new Uint8Array(LOGIN_CODE_ENTROPY_BYTES))
   );

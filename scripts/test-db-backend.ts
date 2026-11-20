@@ -2348,6 +2348,7 @@ const rebuiltTables = [
   'auth_throttle',
   'login_codes',
   'claim_tokens',
+  'installation_bootstrap',
 ] as const;
 
 /**

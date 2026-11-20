@@ -17,8 +17,11 @@ import {
   registerProtectedAuthRecoveryRoutes,
   registerPublicAuthRecoveryRoutes,
 } from './routes/auth-recovery.hono.js';
+import { registerPublicBootstrapRoutes } from './routes/bootstrap.hono.js';
 import { AuthRecoveryRepository } from './repositories/auth-recovery.repository.js';
 import { AuthRecoveryService } from './services/auth-recovery.service.js';
+import { BootstrapRepository } from './repositories/bootstrap.repository.js';
+import { BootstrapService } from './services/bootstrap.service.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
@@ -76,6 +79,8 @@ export interface FoundationOptions {
   /** The transport's observed peer address, when it can be read (Node socket). */
   clientAddress?: (c: Context) => string | null;
   mediaCleanup?: MediaCleanupCoordinator;
+  /** Optional local CA fingerprint surfaced once on field-kit bootstrap (§7). */
+  fieldKitCaFingerprint?: string;
 }
 const preloginSchema = z
   .object({
@@ -157,6 +162,14 @@ export function createHonoApp(options: FoundationOptions) {
     new AuthRecoveryRepository(options.repository.connection),
     authRepository,
     options.serverSecret
+  );
+  const bootstrapService = new BootstrapService(
+    new BootstrapRepository(options.repository.connection),
+    authRepository,
+    {
+      serverSecret: options.serverSecret,
+      fieldKitCaFingerprint: options.fieldKitCaFingerprint,
+    }
   );
   const configuredOrigin =
     options.publicOrigin === undefined
@@ -321,6 +334,13 @@ export function createHonoApp(options: FoundationOptions) {
     setSessionCookie: (c, token, kind) =>
       setCookie(c, 'ts_session', token, sessionCookie(kind)),
     publicUser,
+  });
+  registerPublicBootstrapRoutes(app, {
+    service: bootstrapService,
+    ipFor,
+    now,
+    setSessionCookie: (c, token, kind) =>
+      setCookie(c, 'ts_session', token, sessionCookie(kind)),
   });
   registerPublicCommunityRoutes(app, {
     repository: new PublicCommunitiesRepository(options.repository.connection),

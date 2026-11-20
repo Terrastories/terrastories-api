@@ -211,3 +211,49 @@ export const claimTokensSqlite = sqliteTable(
     ),
   ]
 );
+
+/**
+ * InstallationBootstrap singleton row (Slice 11b-B, SPEC-V2 §4, §7).
+ *
+ * Permanently closes fresh-installation bootstrap once used (id = 1 enforced
+ * by CHECK constraint). Foreign keys use ON DELETE SET NULL so erasing the
+ * initial community or admin account never reopens installation bootstrap.
+ */
+export const installationBootstrapPg = pgTable(
+  'installation_bootstrap',
+  {
+    id: pgInteger('id').primaryKey().notNull(),
+    setupId: pgText('setup_id').notNull(),
+    communityId: pgInteger('community_id').references(() => communitiesPg.id, {
+      onDelete: 'set null',
+    }),
+    adminUserId: pgInteger('admin_user_id').references(() => usersPg.id, {
+      onDelete: 'set null',
+    }),
+    completedAt: bigint('completed_at', { mode: 'number' }).notNull(),
+  },
+  (table) => [
+    pgCheck('installation_bootstrap_singleton_check', sql`${table.id} = 1`),
+  ]
+);
+
+export const installationBootstrapSqlite = sqliteTable(
+  'installation_bootstrap',
+  {
+    id: integer('id').primaryKey().notNull(),
+    setupId: text('setup_id').notNull(),
+    communityId: integer('community_id').references(
+      () => communitiesSqlite.id,
+      {
+        onDelete: 'set null',
+      }
+    ),
+    adminUserId: integer('admin_user_id').references(() => usersSqlite.id, {
+      onDelete: 'set null',
+    }),
+    completedAt: integer('completed_at').notNull(),
+  },
+  (table) => [
+    check('installation_bootstrap_singleton_check', sql`${table.id} = 1`),
+  ]
+);

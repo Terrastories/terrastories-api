@@ -6,3 +6,12 @@
 ALTER TABLE "sessions" ADD COLUMN "admin_code_step_up_expires_at" bigint;
 --> statement-breakpoint
 CREATE INDEX "login_codes_user_purpose_idx" ON "login_codes" USING btree ("user_id","purpose");
+--> statement-breakpoint
+CREATE TABLE "installation_bootstrap" (
+	"id" integer PRIMARY KEY NOT NULL,
+	"setup_id" text NOT NULL,
+	"community_id" integer CONSTRAINT "installation_bootstrap_community_id_communities_id_fk" REFERENCES "communities"("id") ON DELETE set null ON UPDATE no action,
+	"admin_user_id" integer CONSTRAINT "installation_bootstrap_admin_user_id_users_id_fk" REFERENCES "users"("id") ON DELETE set null ON UPDATE no action,
+	"completed_at" bigint NOT NULL,
+	CONSTRAINT "installation_bootstrap_singleton_check" CHECK ("id" = 1)
+);

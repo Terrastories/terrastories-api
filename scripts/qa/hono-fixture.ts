@@ -100,8 +100,11 @@ import type { Endpoint, Handler, Journey, Step } from './runner.js';
 
 type Role = 'viewer' | 'member' | 'editor' | 'admin' | 'super_admin';
 
-/** The public projection /v2/auth/me and login may ever return. */
+/** The public projection login and profile-update responses may ever return. */
 const publicUserKeys = 'communityId,displayName,email,id,role,username';
+/** The /v2/auth/me projection adds the recovery-code confirmation flag. */
+const meUserKeys =
+  'communityId,displayName,email,id,recoveryCodesConfirmed,role,username';
 
 /** Wrong password and unknown user must answer the same body. */
 const invalidCredentials = (body: unknown): boolean =>
@@ -143,6 +146,33 @@ const ownUser =
       typeof user.id === 'number' &&
       (user.username === null || typeof user.username === 'string') &&
       (user.displayName === null || typeof user.displayName === 'string') &&
+      (expectedCommunityId === undefined ||
+        user.communityId === expectedCommunityId) &&
+      !leaksSecret(body, cookieValue)
+    );
+  };
+
+const ownMeUser =
+  (
+    email: string,
+    role: Role,
+    cookieValue: () => string,
+    expectedCommunityId?: number | null,
+    expectedRecoveryCodesConfirmed?: boolean
+  ) =>
+  (body: unknown): boolean => {
+    const user = (body as { user?: Record<string, unknown> }).user;
+    return (
+      !!user &&
+      Object.keys(user).sort().join(',') === meUserKeys &&
+      user.email === email &&
+      user.role === role &&
+      typeof user.id === 'number' &&
+      (user.username === null || typeof user.username === 'string') &&
+      (user.displayName === null || typeof user.displayName === 'string') &&
+      typeof user.recoveryCodesConfirmed === 'boolean' &&
+      (expectedRecoveryCodesConfirmed === undefined ||
+        user.recoveryCodesConfirmed === expectedRecoveryCodesConfirmed) &&
       (expectedCommunityId === undefined ||
         user.communityId === expectedCommunityId) &&
       !leaksSecret(body, cookieValue)
@@ -5340,6 +5370,11 @@ export async function createFixture(
     const mediaMetadataCheck = (body: unknown): boolean =>
       MediaMetadataResponseSchema.safeParse(body).success;
     let qaManagedUserId = 0;
+    let qaIssuedLoginCode = '';
+    const qaIssuedRedeemBody = {
+      code: '',
+      communitySlug: 'qa-user-management-community',
+    };
     let userManagedSessionHandle = '';
     let qaStageFileId = '';
     let qaStageFile2Id = '';
@@ -5450,6 +5485,14 @@ export async function createFixture(
         method: 'DELETE',
         path: `/v2/users/${userCommunityIds.admin}/sessions/abc123def456`,
         expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny recovery code generation for viewer',
+        method: 'POST',
+        path: '/v2/auth/recovery-codes',
+        expected: 403,
+        body: {},
         check: forbiddenCheck,
       },
     ];
@@ -5660,12 +5703,16 @@ export async function createFixture(
             }
           )?.data;
           const code = data?.code;
-          return (
+          if (
             typeof code === 'string' &&
             /^[A-Za-z0-9_-]{20,64}$/.test(code) &&
             data?.purpose === 'admin_issued' &&
             typeof data?.expiresAt === 'string'
-          );
+          ) {
+            qaIssuedLoginCode = code;
+            return true;
+          }
+          return false;
         },
       },
       {
@@ -5710,11 +5757,12 @@ export async function createFixture(
         path: '/v2/auth/me',
         expected: 200,
         saveCookieAs: 'qaManagedCookie',
-        check: ownUser(
+        check: ownMeUser(
           'qa-managed@example.test',
           'editor',
           liveSessionCookie,
-          userCommunity.id
+          userCommunity.id,
+          false
         ),
       },
       {
@@ -5766,6 +5814,96 @@ export async function createFixture(
         path: '/v2/auth/me',
         expected: 401,
         useSavedCookie: 'qaManagedCookie',
+      },
+      {
+        name: 'reject recovery code generation without current key on password session',
+        method: 'POST',
+        path: '/v2/auth/recovery-codes',
+        expected: 401,
+        useSavedCookie: 'qaAdminCookie',
+        body: {},
+        check: invalidCredentials,
+      },
+      {
+        name: 'generate 10 recovery codes with current password step-up',
+        method: 'POST',
+        path: '/v2/auth/recovery-codes',
+        expected: 201,
+        useSavedCookie: 'qaAdminCookie',
+        body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+        check: (body) => {
+          const data = (
+            body as {
+              data?: {
+                codes?: unknown;
+                purpose?: unknown;
+                createdAt?: unknown;
+              };
+            }
+          )?.data;
+          if (!data || data.purpose !== 'recovery') return false;
+          if (typeof data.createdAt !== 'string') return false;
+          if (!Array.isArray(data.codes) || data.codes.length !== 10)
+            return false;
+          const unique = new Set(data.codes);
+          return (
+            unique.size === 10 &&
+            data.codes.every(
+              (code) =>
+                typeof code === 'string' && /^[A-Za-z0-9_-]{20,64}$/.test(code)
+            ) &&
+            !leaksSecret(body, liveSessionCookie)
+          );
+        },
+      },
+      {
+        name: 'admin profile reflects confirmed recovery codes',
+        method: 'GET',
+        path: '/v2/auth/me',
+        expected: 200,
+        useSavedCookie: 'qaAdminCookie',
+        check: ownMeUser(
+          userCommunityCredentials.admin.email,
+          'admin',
+          liveSessionCookie,
+          userCommunity.id,
+          true
+        ),
+      },
+      {
+        name: 'reject unknown login code on recovery redeem',
+        method: 'POST',
+        path: '/v2/auth/recovery/redeem',
+        expected: 401,
+        headers: { cookie: 'ts_session=' },
+        body: { code: 'definitely-unknown-recovery-code-0000' },
+        check: invalidCredentials,
+      },
+      {
+        name: 'redeem admin_issued login code',
+        method: 'POST',
+        path: '/v2/auth/recovery/redeem',
+        expected: 200,
+        headers: { cookie: 'ts_session=' },
+        prepare: () => {
+          qaIssuedRedeemBody.code = qaIssuedLoginCode;
+        },
+        body: qaIssuedRedeemBody,
+        check: ownUser(
+          'qa-managed@example.test',
+          'editor',
+          liveSessionCookie,
+          userCommunity.id
+        ),
+      },
+      {
+        name: 'reject replay of consumed admin_issued login code',
+        method: 'POST',
+        path: '/v2/auth/recovery/redeem',
+        expected: 401,
+        headers: { cookie: 'ts_session=' },
+        body: qaIssuedRedeemBody,
+        check: invalidCredentials,
       },
       {
         name: 'login again as user-management admin',
@@ -6175,11 +6313,12 @@ export async function createFixture(
             method: 'GET',
             path: '/v2/auth/me',
             expected: 200,
-            check: ownUser(
+            check: ownMeUser(
               credentials[role].email,
               role,
               liveSessionCookie,
-              communityId
+              communityId,
+              false
             ),
           },
           // #191 option A across the full claimed matrix: member — the
@@ -6350,11 +6489,12 @@ export async function createFixture(
             method: 'GET',
             path: '/v2/auth/me',
             expected: 200,
-            check: ownUser(
+            check: ownMeUser(
               credentials.super_admin.email,
               'super_admin',
               liveSessionCookie,
-              null
+              null,
+              false
             ),
           },
           // #137 Slice 10: self-service profile edit. Only the display name
@@ -6535,11 +6675,12 @@ export async function createFixture(
             method: 'GET',
             path: '/v2/auth/me',
             expected: 200,
-            check: ownUser(
+            check: ownMeUser(
               disabledAdminCredentials.email,
               'admin',
               liveSessionCookie,
-              inactiveCommunity.id
+              inactiveCommunity.id,
+              false
             ),
           },
           {

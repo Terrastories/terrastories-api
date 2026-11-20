@@ -13,6 +13,12 @@ import { registerMediaRoutes } from './routes/media-writes.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
+import {
+  registerProtectedAuthRecoveryRoutes,
+  registerPublicAuthRecoveryRoutes,
+} from './routes/auth-recovery.hono.js';
+import { AuthRecoveryRepository } from './repositories/auth-recovery.repository.js';
+import { AuthRecoveryService } from './services/auth-recovery.service.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
@@ -141,9 +147,15 @@ export function createHonoApp(options: FoundationOptions) {
     options.repository,
     options.storage
   );
+  const authRepository = new HonoAuthRepository(options.repository.connection);
   const authService = new HonoAuthService(
-    new HonoAuthRepository(options.repository.connection),
+    authRepository,
     options.repository,
+    options.serverSecret
+  );
+  const authRecoveryService = new AuthRecoveryService(
+    new AuthRecoveryRepository(options.repository.connection),
+    authRepository,
     options.serverSecret
   );
   const configuredOrigin =
@@ -302,6 +314,14 @@ export function createHonoApp(options: FoundationOptions) {
   );
   // Canonical V2 unauthenticated public routes must register before the
   // `/v2/*` session gate.
+  registerPublicAuthRecoveryRoutes(app, {
+    service: authRecoveryService,
+    ipFor,
+    now,
+    setSessionCookie: (c, token, kind) =>
+      setCookie(c, 'ts_session', token, sessionCookie(kind)),
+    publicUser,
+  });
   registerPublicCommunityRoutes(app, {
     repository: new PublicCommunitiesRepository(options.repository.connection),
     storage: options.storage,
@@ -326,7 +346,14 @@ export function createHonoApp(options: FoundationOptions) {
         sessionCookie(session.kind, session.absoluteExpiresAt, now().getTime())
       );
   });
-  app.get('/v2/auth/me', (c) => c.json({ user: publicUser(c.get('actor')) }));
+  app.get('/v2/auth/me', async (c) => {
+    const actor = c.get('actor');
+    const recoveryCodesConfirmed =
+      await options.repository.hasActiveRecoveryCodes(actor.id);
+    return c.json({
+      user: { ...publicUser(actor), recoveryCodesConfirmed },
+    });
+  });
   app.post('/v2/auth/logout', async (c) => {
     const actor = c.get('actor');
     await options.repository.revokeSession(
@@ -448,6 +475,11 @@ export function createHonoApp(options: FoundationOptions) {
     });
     deleteCookie(c, 'ts_session', cookie);
     return c.body(null, 204);
+  });
+  registerProtectedAuthRecoveryRoutes(app, {
+    service: authRecoveryService,
+    ipFor,
+    now,
   });
   const communityReadsRepository = new CommunityReadsRepository(
     options.repository.connection

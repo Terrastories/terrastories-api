@@ -63,6 +63,7 @@ export const loginCodesPg = pgTable(
   (table) => [
     pgUniqueIndex('login_codes_code_hash_unique').on(table.codeHash),
     pgIndex('login_codes_user_idx').on(table.userId),
+    pgIndex('login_codes_user_purpose_idx').on(table.userId, table.purpose),
     pgIndex('login_codes_community_idx').on(table.communityId),
     pgCheck(
       'login_codes_purpose_check',
@@ -112,6 +113,7 @@ export const loginCodesSqlite = sqliteTable(
   (table) => [
     uniqueIndex('login_codes_code_hash_unique').on(table.codeHash),
     index('login_codes_user_idx').on(table.userId),
+    index('login_codes_user_purpose_idx').on(table.userId, table.purpose),
     index('login_codes_community_idx').on(table.communityId),
     check(
       'login_codes_purpose_check',

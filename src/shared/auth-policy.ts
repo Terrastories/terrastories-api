@@ -238,6 +238,15 @@ export const LOGIN_CODE_ENTROPY_BYTES = 16;
  * that wants less may shrink it here, never grow it past 72h.
  */
 export const ADMIN_ISSUED_CODE_TTL_MS = 72 * 60 * 60 * 1000;
+/** Number of single-use recovery codes generated per recovery sheet (§6.8, §7). */
+export const RECOVERY_CODE_COUNT = 10;
+/**
+ * Freshness bound for the one-shot verifier-free recovery-code generation
+ * right granted to a session established by redeeming an `admin_issued` code
+ * (SPEC-V2 §6.10 #2). Bounded well below the 12-hour standard session lifetime
+ * and consumed atomically on first use.
+ */
+export const ADMIN_CODE_STEP_UP_TTL_MS = 15 * 60 * 1000;
 
 export type SessionKind = 'standard' | 'device';
 

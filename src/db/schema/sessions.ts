@@ -42,6 +42,9 @@ export const sessionsPg = pgTable(
     absoluteExpiresAt: bigint('absolute_expires_at', { mode: 'number' }),
     revokedAt: bigint('revoked_at', { mode: 'number' }),
     revokedBy: pgInteger('revoked_by'),
+    adminCodeStepUpExpiresAt: bigint('admin_code_step_up_expires_at', {
+      mode: 'number',
+    }),
   },
   (table) => [
     pgIndex('sessions_user_idx').on(table.userId),
@@ -74,6 +77,7 @@ export const sessionsSqlite = sqliteTable(
     absoluteExpiresAt: integer('absolute_expires_at'),
     revokedAt: integer('revoked_at'),
     revokedBy: integer('revoked_by'),
+    adminCodeStepUpExpiresAt: integer('admin_code_step_up_expires_at'),
   },
   (table) => [
     index('sessions_user_idx').on(table.userId),

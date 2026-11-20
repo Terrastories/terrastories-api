@@ -722,9 +722,11 @@ export async function runHonoFoundationContract(
       'displayName',
       'email',
       'id',
+      'recoveryCodesConfirmed',
       'role',
       'username',
     ]);
+    assert.equal(nullSuperBody.user.recoveryCodesConfirmed, false);
     assert.equal(nullSuperBody.user.communityId, null);
     assert.equal(nullSuperBody.user.username, `super_${tag}`);
     assert.equal(nullSuperBody.user.displayName, 'Null Super');

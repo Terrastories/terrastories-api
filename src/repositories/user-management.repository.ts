@@ -754,8 +754,10 @@ export class UserManagementRepository {
       );
 
     // D1's whole-transaction unit is a batch; there is no interactive
-    // transaction. The audit row is therefore gated by the anchor condition
-    // inside the batch: it lands iff the verifier write landed.
+    // transaction. The audit row is gated on the PRE-update anchor (the same
+    // predicate as verifierUpdate) and runs before the update, so it lands
+    // iff this request's write lands, never because another request already
+    // stored identical material.
     const conditionalAuditInsert = (database: Executor) => {
       const record = validatedAudit as ValidatedAuditEntryRecord;
       return database.insert(auditEntries).select(
@@ -768,15 +770,22 @@ export class UserManagementRepository {
           select 1 from users
           where id = ${id}
             and community_id = ${communityId}
-            and password_verifier = ${input.verifier.passwordVerifier}
+            and password_hash = ${passwordHash}
+            and ${
+              passwordVerifier === null
+                ? sql`password_verifier is null`
+                : sql`password_verifier = ${passwordVerifier}`
+            }
         )`
       );
     };
 
     if (typeof db.batch === 'function') {
-      const statements = [verifierUpdate(db), revokeAllSessions(db)];
+      const statements: unknown[] = [];
       if (validatedAudit) statements.push(conditionalAuditInsert(db));
-      const [updated] = await db.batch(statements);
+      statements.push(verifierUpdate(db), revokeAllSessions(db));
+      const results = await db.batch(statements);
+      const updated = results[validatedAudit ? 1 : 0];
       return updated.length > 0;
     }
     if (dialectOf(db) === 'postgresql') {

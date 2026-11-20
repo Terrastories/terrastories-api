@@ -417,6 +417,15 @@ describe('GET /v2/users (list)', () => {
     expect(paddedBody.meta.hasNextPage).toBe(false);
   });
 
+  it('rejects an unsafe-integer offset with 400', async () => {
+    const res = await requestJson(
+      'GET',
+      `/v2/users?offset=${'9'.repeat(400)}`,
+      { cookie: cookies.admin }
+    );
+    expect(res.status).toBe(400);
+  });
+
   it('rejects a disabled-community admin with 403', async () => {
     const res = await requestJson('GET', '/v2/users', {
       cookie: cookies.disabledAdmin,

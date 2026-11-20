@@ -67,7 +67,7 @@ export const ListUsersQuerySchema = z
       .string()
       .regex(/^\d+$/)
       .transform((val) => Number.parseInt(val, 10))
-      .refine((val) => val >= 0)
+      .refine((val) => Number.isSafeInteger(val) && val >= 0)
       .optional()
       .default(0),
   })
@@ -89,7 +89,7 @@ export type VerifierMaterial = z.infer<typeof VerifierMaterialSchema>;
 
 export const CreateManagedUserRequestSchema = z
   .object({
-    username: z.string().trim().min(1).max(255),
+    username: z.string().trim().min(1).max(254),
     // Registry §6 marks email optional, but the physical `users.email` column
     // is NOT NULL until the users expand-contract migration lands, so V2
     // requires it here and reports the deferral instead of synthesizing one.
@@ -108,7 +108,7 @@ export type CreateManagedUserRequest = z.infer<
 export const PatchManagedUserRequestSchema = z
   .object({
     displayName: z.string().trim().min(1).max(255).nullable().optional(),
-    username: z.string().trim().min(1).max(255).optional(),
+    username: z.string().trim().min(1).max(254).optional(),
     email: z.string().trim().email().max(254).optional(),
     role: ManagedUserRoleSchema.optional(),
     status: ManagedUserStatusSchema.optional(),

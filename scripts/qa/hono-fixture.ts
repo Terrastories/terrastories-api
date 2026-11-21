@@ -5372,6 +5372,8 @@ export async function createFixture(
     let qaManagedUserId = 0;
     let qaIssuedLoginCode = '';
     let qaRecoveryCode = '';
+    let qaOldRecoveryCode = '';
+    let qaSupersededRecoveryCode = '';
     let redeemedAdminCookie = '';
     const qaIssuedRedeemBody = {
       code: '',
@@ -5838,6 +5840,17 @@ export async function createFixture(
         check: invalidCredentials,
       },
       {
+        name: 'reject recovery code generation with wrong current password',
+        method: 'POST',
+        path: '/v2/auth/recovery-codes',
+        expected: 401,
+        useSavedCookie: 'qaAdminCookie',
+        body: {
+          currentDerivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+        },
+        check: invalidCredentials,
+      },
+      {
         name: 'generate 10 recovery codes with current password step-up',
         method: 'POST',
         path: '/v2/auth/recovery-codes',
@@ -5867,6 +5880,7 @@ export async function createFixture(
             )
           ) {
             qaRecoveryCode = data.codes[0] as string;
+            qaSupersededRecoveryCode = data.codes[1] as string;
           }
           return (
             unique.size === 10 &&
@@ -5991,6 +6005,18 @@ export async function createFixture(
             data.codes.length === 10
           );
         },
+      },
+      {
+        name: 'reject superseded recovery code from prior sheet',
+        method: 'POST',
+        path: '/v2/auth/recovery/redeem',
+        expected: 401,
+        headers: { cookie: 'ts_session=' },
+        prepare: () => {
+          qaRecoveryRedeemBody.code = qaSupersededRecoveryCode;
+        },
+        body: qaRecoveryRedeemBody,
+        check: invalidCredentials,
       },
       {
         name: 'login again as user-management admin',

@@ -5938,6 +5938,13 @@ export async function createFixture(
         },
       },
       {
+        name: 'old admin session rejected after recovery redeem',
+        method: 'GET',
+        path: '/v2/auth/me',
+        expected: 401,
+        useSavedCookie: 'qaAdminCookie',
+      },
+      {
         name: 'read own profile immediately after recovery redeem',
         method: 'GET',
         path: '/v2/auth/me',

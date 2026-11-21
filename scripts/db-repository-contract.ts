@@ -2739,4 +2739,128 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
   assert.equal(speakerWithV2Fields.birthDate, '1952-07-19');
   assert.equal(speakerWithV2Fields.birthplaceId, tenantFkPlaceAlpha.id);
   assert.equal(speakerWithV2Fields.affiliation, 'River Council');
+  // Export quotas count failed reservations on every database dialect. Test
+  // each quota independently, then prove a reclaimed writer stays retryable.
+  const { CommunityExportRepository } = await import(
+    '../src/repositories/community-export.repository.js'
+  );
+  const exports = new CommunityExportRepository(database as any);
+  const exportNow = Date.now();
+  for (const [index, limits] of [
+    { maxPerCommunity: 1, maxPerAccount: 2 },
+    { maxPerCommunity: 2, maxPerAccount: 1 },
+  ].entries()) {
+    const nowMs = exportNow + index * 7200000;
+    const reserve = (jobId: string) =>
+      exports.reserveExportJob({
+        jobId,
+        communityId: tenantFkCommunity.id,
+        requestedBy: tenantFkAuthor.id,
+        manifestStorageKey: `communities/${tenantFkCommunity.id}/exports/${jobId}/manifest.json`,
+        zipStorageKey: `communities/${tenantFkCommunity.id}/exports/${jobId}/media.zip`,
+        createdAtMs: nowMs,
+        expiresAtMs: nowMs + 900000,
+        windowStartMs: nowMs - 3600000,
+        windowMs: 3600000,
+        ...limits,
+        now: new Date(nowMs),
+      });
+    const jobId = crypto.randomUUID();
+    assert.equal((await reserve(jobId)).status, 'reserved');
+    const claim1 = await exports.claimJobForCleanup({
+      jobId,
+      status: 'generating',
+      nowMs: nowMs + 300001,
+      staleBeforeMs: nowMs + 1,
+    });
+    assert.equal(claim1?.status, 'failed');
+    assert.equal(claim1?.completedAt, null);
+    const markUnacked = await exports.markJobCleanedUp({
+      jobId,
+      nextStatus: 'failed',
+      expectedCompletedAt: claim1!.completedAt,
+      cleanedUpAtMs: nowMs + 300001,
+      clearUploadId: true,
+    });
+    assert.deepEqual(markUnacked, { updated: true, markedCleaned: false });
+    assert.equal(
+      (await exports.findJobById(jobId))?.cleanedUpAt,
+      null,
+      'an unacknowledged writer must remain retryable'
+    );
+    assert.equal(
+      await exports.failExportJob({
+        jobId,
+        communityId: tenantFkCommunity.id,
+        requestedBy: tenantFkAuthor.id,
+        cleanedUpAtMs: null,
+        clearUploadId: true,
+        now: new Date(nowMs + 300002),
+      }),
+      true
+    );
+    assert.equal(
+      await exports.failExportJob({
+        jobId,
+        communityId: tenantFkCommunity.id,
+        requestedBy: tenantFkAuthor.id,
+        cleanedUpAtMs: null,
+        clearUploadId: true,
+        now: new Date(nowMs + 300002),
+      }),
+      false,
+      'completedAt failure acknowledgement must transition strictly once'
+    );
+    const staleMark = await exports.markJobCleanedUp({
+      jobId,
+      nextStatus: 'failed',
+      expectedCompletedAt: claim1!.completedAt,
+      cleanedUpAtMs: nowMs + 300002,
+      clearUploadId: true,
+    });
+    assert.deepEqual(
+      staleMark,
+      { updated: false, markedCleaned: false },
+      'a stale sweep must not mark cleaned after the writer acknowledged failure'
+    );
+    assert.equal((await exports.findJobById(jobId))?.cleanedUpAt, null);
+
+    const claim2 = await exports.claimJobForCleanup({
+      jobId,
+      status: 'failed',
+      nowMs: nowMs + 300003,
+      staleBeforeMs: nowMs + 3,
+    });
+    assert.equal(claim2?.status, 'failed');
+    assert.equal(claim2?.completedAt, nowMs + 300002);
+    const finalMark = await exports.markJobCleanedUp({
+      jobId,
+      nextStatus: 'failed',
+      expectedCompletedAt: claim2!.completedAt,
+      cleanedUpAtMs: nowMs + 300003,
+      clearUploadId: true,
+    });
+    assert.deepEqual(finalMark, { updated: true, markedCleaned: true });
+    assert.equal(
+      (await exports.findJobById(jobId))?.cleanedUpAt,
+      nowMs + 300003
+    );
+    assert.equal((await reserve(crypto.randomUUID())).status, 'rate_limited');
+  }
+  await (database as any)
+    .update(dialectTables.communities)
+    .set({ description: '中'.repeat(20000) })
+    .where(eq(dialectTables.communities.id, tenantFkCommunity.id));
+  await assert.rejects(
+    exports.readCommunityExportSnapshot(tenantFkCommunity.id, {
+      maxBytes: 40000,
+    }),
+    (error: unknown) =>
+      (error as { limitName?: string }).limitName === 'maxManifestBytes'
+  );
+  assert.ok(
+    await exports.readCommunityExportSnapshot(tenantFkCommunity.id, {
+      maxBytes: 64 * 1024 * 1024,
+    })
+  );
 }

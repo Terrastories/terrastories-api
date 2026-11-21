@@ -14,6 +14,7 @@ export interface Step extends Endpoint {
   prepare?: () => void | string | Promise<void | string>;
   headers?: Record<string, string>;
   check?: (body: unknown) => boolean;
+  checkBytes?: (bytes: Uint8Array) => boolean | Promise<boolean>;
   checkHeaders?: (headers: Headers) => boolean;
   /** Save the cookie sent by this step, before response Set-Cookie changes it. */
   saveCookieAs?: string;
@@ -315,8 +316,37 @@ export async function runJourneys(options: {
                 failure ??= 'missing-created-id';
               }
             }
+          } else if (step.checkBytes) {
+            stage = 'Reading response bytes';
+            reader = response.body?.getReader();
+            const chunks: Uint8Array[] = [];
+            let total = 0;
+            if (reader) {
+              while (true) {
+                const part = await reader.read();
+                if (controller.signal.aborted)
+                  throw new Error('Request deadline elapsed');
+                if (part.done) break;
+                if (part.value) {
+                  chunks.push(part.value);
+                  total += part.value.byteLength;
+                }
+              }
+              reader.releaseLock();
+              reader = undefined;
+            }
+            const bytes = new Uint8Array(total);
+            let offset = 0;
+            for (const chunk of chunks) {
+              bytes.set(chunk, offset);
+              offset += chunk.byteLength;
+            }
+            if (!(await step.checkBytes(bytes))) {
+              pass = false;
+              failure ??= 'body-mismatch';
+            }
           }
-          if (!step.check && !step.captureId) {
+          if (!step.check && !step.captureId && !step.checkBytes) {
             stage = 'Closing response body';
             await response.body?.cancel();
           }

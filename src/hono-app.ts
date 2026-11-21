@@ -15,6 +15,10 @@ import { registerImportRoutes } from './routes/imports.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
+import { registerCommunityExportRoutes } from './routes/community-export.hono.js';
+import { CommunityExportRepository } from './repositories/community-export.repository.js';
+import { registerCommunityAuditRoutes } from './routes/community-audit.hono.js';
+import { CommunityAuditRepository } from './repositories/community-audit.repository.js';
 import { registerAdminRoutes } from './routes/admin.hono.js';
 import { AdminRepository } from './repositories/admin.repository.js';
 import {
@@ -557,6 +561,15 @@ export function createHonoApp(options: FoundationOptions) {
     repository: new UserManagementRepository(options.repository.connection),
     publicOrigin: configuredOrigin,
     serverSecret: options.serverSecret,
+  });
+  registerCommunityExportRoutes(app, {
+    repository: new CommunityExportRepository(options.repository.connection),
+    storage: options.storage,
+    isWorkers: options.isWorkers,
+    now,
+  });
+  registerCommunityAuditRoutes(app, {
+    repository: new CommunityAuditRepository(options.repository.connection),
   });
   registerAdminRoutes(app, {
     repository: new AdminRepository(options.repository.connection),

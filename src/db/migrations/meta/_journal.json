@@ -120,6 +120,13 @@
       "when": 1795435201000,
       "tag": "0016_communities_deprovisioned_at",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1795521600000,
+      "tag": "0017_community_export_jobs_and_tokens",
+      "breakpoints": true
     }
   ]
 }

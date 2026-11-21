@@ -13,6 +13,9 @@ import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { scrubExpiredAuditNetworkMetadata } from '../repositories/audit-entry.repository.js';
 import { HonoAuthRepository } from '../repositories/hono-auth.repository.js';
+import { CommunityExportRepository } from '../repositories/community-export.repository.js';
+import { CommunityExportService } from './community-export.service.js';
+import type { FoundationStorage } from './hono-foundation.service.js';
 
 /** Named delay before the first maintenance sweep after a Node boot. */
 // Offset from the interval so the one-shot and the first interval tick never
@@ -27,6 +30,10 @@ export interface RunMaintenanceSweepsOptions {
   now?: () => Date;
   /** Content-free operator log sink; defaults to console.warn. */
   log?: (message: string) => void;
+  /** Storage adapter for per-object expired export artifact cleanup (§7). */
+  storage?: FoundationStorage;
+  /** Optional batch limit for expired export cleanup. */
+  exportSweepLimit?: number;
 }
 
 /**
@@ -63,6 +70,20 @@ export async function runMaintenanceSweeps(
     await auth.sweepAuthThrottle(nowMs);
   } catch {
     log('maintenance: auth throttle sweep failed');
+  }
+  if (options.storage) {
+    try {
+      const exportService = new CommunityExportService(
+        new CommunityExportRepository(database),
+        options.storage,
+        { now: () => nowDate }
+      );
+      await exportService.cleanupExpiredExports({
+        limit: options.exportSweepLimit,
+      });
+    } catch {
+      log('maintenance: expired export sweep failed');
+    }
   }
 }
 

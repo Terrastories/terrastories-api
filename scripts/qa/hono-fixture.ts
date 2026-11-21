@@ -29,7 +29,7 @@
  */
 import { once } from 'node:events';
 import { serve } from '@hono/node-server';
-import { and, asc, eq, like, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, like, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
@@ -91,12 +91,20 @@ import {
   MediaMetadataResponseSchema,
   MediaUploadResponseSchema,
 } from '../../src/shared/schemas/media-v2.js';
+import { CreateCommunityExportResponseSchema } from '../../src/shared/schemas/community-export.js';
 import {
   AdminAuditEntryListResponseSchema,
   AdminCommunityListResponseSchema,
   AdminCommunityResponseSchema,
   ClaimTokenIssuedResponseSchema,
 } from '../../src/shared/schemas/admin.js';
+import {
+  CommunityAuditEntrySchema,
+  CommunityAuditEntriesListResponseSchema,
+} from '../../src/shared/schemas/community-audit.js';
+import { EXPORT_TOKEN_TTL_MS } from '../../src/shared/export-policy.js';
+import { parseDeterministicZip } from '../../src/shared/utils/deterministic-zip.js';
+import { StreamingSha256 } from '../../src/shared/utils/sha256-stream.js';
 import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import {
@@ -227,6 +235,7 @@ export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
   'QA members-only topic',
   'QA inactive community story',
   'QA inactive community story description',
+  'QA inactive restricted story',
   'QA private community story',
   'QA private community story description',
   'QA public place',
@@ -420,6 +429,8 @@ export async function createFixture(
     auditEntries,
     communities,
     communityMapConfigs,
+    exportJobs,
+    exportTokens,
     users,
     places,
     speakers,
@@ -1149,6 +1160,20 @@ export async function createFixture(
         },
       ])
       .returning();
+    // Separate statement keeps D1 bound parameters below 100.
+    const [inactiveRestrictedStory] = await db
+      .insert(stories)
+      .values({
+        // #162 hidden row in disabled community: verified present in
+        // disabled-community export manifest (§7).
+        title: 'QA inactive restricted story',
+        slug: 'qa-hono-inactive-restricted',
+        communityId: inactiveCommunity.id,
+        createdBy: disabledSeededAdmin!.id,
+        privacyLevel: 'editors',
+        isRestricted: true,
+      })
+      .returning();
     // Rails-shaped lists join places and speakers, so the public story stays
     // visible. The restricted place is evidenced by a public story too, so
     // its 404 is the restricted flag alone; the unassociated place has no
@@ -1611,8 +1636,13 @@ export async function createFixture(
               size: bytes.byteLength,
             };
           },
-          async put(key, stream) {
-            const reader = stream.getReader();
+          async put(key, body) {
+            if (body instanceof Uint8Array) {
+              const copy = Uint8Array.from(body);
+              storage.set(key, copy);
+              return { size: copy.byteLength };
+            }
+            const reader = body.getReader();
             const chunks: Uint8Array[] = [];
             let total = 0;
             while (true) {
@@ -1630,6 +1660,7 @@ export async function createFixture(
               offset += chunk.byteLength;
             }
             storage.set(key, merged);
+            return { size: merged.byteLength };
           },
           async delete(key) {
             storage.delete(key);
@@ -6444,6 +6475,72 @@ export async function createFixture(
         expected: 204,
       },
     ];
+    // Compare every page and its total with the tenant's stored audit IDs.
+    // Foreign/system events already exist, so a count or pagination leak fails
+    // even when the returned page happens to contain only own-community rows.
+    const communityAuditReadSteps = (tenantId: number): Step[] =>
+      [0, 2, 'end' as const].map((page) => {
+        let expectedIds: number[] = [];
+        let offset = 0;
+        return {
+          name: `read content-free own-community audit page ${page}`,
+          method: 'GET',
+          path: '/v2/community/audit-entries',
+          expected: 200,
+          prepare: async () => {
+            const rows = await db
+              .select({ id: auditEntries.id })
+              .from(auditEntries)
+              .where(eq(auditEntries.communityId, tenantId))
+              .orderBy(desc(auditEntries.createdAt), desc(auditEntries.id));
+            expectedIds = rows.map((row) => row.id);
+            if (expectedIds.length <= 2)
+              throw new Error(
+                'Audit pagination requires multiple nonempty pages'
+              );
+            offset = page === 'end' ? expectedIds.length : page;
+            return `/v2/community/audit-entries?limit=2&offset=${offset}`;
+          },
+          check: (body) => {
+            const parsed =
+              CommunityAuditEntriesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const { data, meta } = parsed.data;
+            const rawEntries = (body as { data: unknown[] }).data;
+            const text = JSON.stringify(body);
+            return (
+              meta.total === expectedIds.length &&
+              meta.limit === 2 &&
+              meta.offset === offset &&
+              meta.hasNextPage === offset + 2 < expectedIds.length &&
+              JSON.stringify(data.map((entry) => entry.id)) ===
+                JSON.stringify(expectedIds.slice(offset, offset + 2)) &&
+              rawEntries.every(
+                (entry) =>
+                  CommunityAuditEntrySchema.strict().safeParse(entry).success
+              ) &&
+              data.every((entry) => {
+                validateContentFreeAuditEntry({
+                  communityId: entry.communityId,
+                  actorId: entry.actorId,
+                  action: entry.action,
+                  resourceType: entry.resourceType,
+                  resourceIds: entry.resourceIds,
+                  outcome: entry.outcome,
+                  ipAddress: entry.ipAddress,
+                  userAgent: entry.userAgent,
+                });
+                return entry.communityId === tenantId;
+              }) &&
+              !HONO_PERSONA_CULTURAL_STRINGS.some((value) =>
+                text.includes(value)
+              ) &&
+              !leaksSecret(body, liveSessionCookie)
+            );
+          },
+        };
+      });
+    let activeAdminExport1ManifestToken = '';
     const journeys: Journey[] = [
       {
         persona: 'anonymous',
@@ -6551,6 +6648,25 @@ export async function createFixture(
             expected: 401,
           },
           ...unauthAdminSteps,
+          {
+            name: 'require auth on v2 community export',
+            method: 'POST',
+            path: '/v2/community/export',
+            expected: 401,
+            body: {},
+          },
+          {
+            name: 'require auth on v2 community export download',
+            method: 'GET',
+            path: `/v2/community/export/download/${'a'.repeat(64)}`,
+            expected: 401,
+          },
+          {
+            name: 'require auth on v2 community audit entries',
+            method: 'GET',
+            path: '/v2/community/audit-entries',
+            expected: 401,
+          },
           {
             name: 'reject wrong password',
             method: 'POST',
@@ -6945,6 +7061,325 @@ export async function createFixture(
             path: '/v2/media/not-a-uuid',
             expected: 404,
           },
+          ...(role !== 'admin'
+            ? [
+                {
+                  name: 'deny community export for non-admin role',
+                  method: 'POST',
+                  path: '/v2/community/export',
+                  expected: 403,
+                  body: {},
+                  check: forbiddenCheck,
+                },
+                {
+                  name: 'deny export download for non-admin role',
+                  method: 'GET',
+                  path: `/v2/community/export/download/${'a'.repeat(64)}`,
+                  expected: 403,
+                  check: forbiddenCheck,
+                },
+                {
+                  name: 'deny community audit entries for non-admin role',
+                  method: 'GET',
+                  path: '/v2/community/audit-entries',
+                  expected: 403,
+                  check: forbiddenCheck,
+                },
+              ]
+            : []),
+          ...(role === 'admin'
+            ? (() => {
+                let exportId1 = '';
+                let manifestToken1 = '';
+                let zipToken1 = '';
+                let manifestChecksum1 = '';
+                let zipChecksum1 = '';
+                let manifestBytes1 = new Uint8Array(0);
+                let zipBytes1 = new Uint8Array(0);
+                let exportId2 = '';
+                let manifestToken2 = '';
+                let zipToken2 = '';
+                return [
+                  {
+                    name: 'export active community',
+                    method: 'POST',
+                    path: '/v2/community/export',
+                    expected: 201,
+                    body: {},
+                    check: (body: unknown) => {
+                      const parsed =
+                        CreateCommunityExportResponseSchema.safeParse(body);
+                      if (!parsed.success) return false;
+                      exportId1 = parsed.data.data.exportId;
+                      manifestToken1 =
+                        parsed.data.data.artifacts.manifest.token;
+                      zipToken1 = parsed.data.data.artifacts.mediaZip.token;
+                      manifestChecksum1 =
+                        parsed.data.data.artifacts.manifest.checksum;
+                      zipChecksum1 =
+                        parsed.data.data.artifacts.mediaZip.checksum;
+                      activeAdminExport1ManifestToken = manifestToken1;
+                      return true;
+                    },
+                  },
+                  {
+                    name: 'valid export token still requires authentication',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 401,
+                    headers: { cookie: '' },
+                    prepare: () =>
+                      `/v2/community/export/download/${manifestToken1}`,
+                  },
+                  {
+                    name: 'download exported community manifest',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 200,
+                    prepare: () =>
+                      `/v2/community/export/download/${manifestToken1}`,
+                    checkHeaders: (headers: Headers) =>
+                      headers.get('cache-control') === 'no-store' &&
+                      headers.get('x-content-type-options') === 'nosniff' &&
+                      (headers.get('content-disposition') ?? '').includes(
+                        'attachment'
+                      ),
+                    checkBytes: (bytes: Uint8Array) => {
+                      if (
+                        new StreamingSha256().update(bytes).digestHex() !==
+                        manifestChecksum1
+                      ) {
+                        return false;
+                      }
+                      const text = new TextDecoder().decode(bytes);
+                      if (
+                        text.includes('passwordVerifier') ||
+                        text.includes('passwordHash') ||
+                        text.includes('passwordSalt') ||
+                        text.includes('passwordParams')
+                      ) {
+                        return false;
+                      }
+                      const manifest = JSON.parse(text) as {
+                        community?: { id?: number; status?: string };
+                        stories?: Array<{
+                          id: number;
+                          isRestricted?: boolean;
+                          privacyLevel?: string;
+                        }>;
+                        files?: Array<{ id: string }>;
+                        auditEntries?: Array<{ action: string }>;
+                      };
+                      const hasRestricted =
+                        manifest.stories?.some(
+                          (s) =>
+                            s.id === restrictedStory.id &&
+                            s.isRestricted === true
+                        ) ?? false;
+                      const hasUnknown =
+                        manifest.stories?.some(
+                          (s) =>
+                            s.id === unknownStory.id &&
+                            s.privacyLevel === 'unknown'
+                        ) ?? false;
+                      const hasReadableFile =
+                        manifest.files?.some((f) => f.id === readableFileId) ??
+                        false;
+                      const excludesExportLifecycle =
+                        manifest.auditEntries?.every(
+                          (e) => !e.action.startsWith('community.export.')
+                        ) ?? false;
+                      manifestBytes1 = bytes;
+                      return (
+                        manifest.community?.id === communityId &&
+                        manifest.community?.status === 'active' &&
+                        hasRestricted &&
+                        hasUnknown &&
+                        manifest.stories?.some(
+                          (s) => s.id === unevidencedStory.id
+                        ) &&
+                        manifest.stories?.some(
+                          (s) => s.id === membersStory.id
+                        ) &&
+                        !manifest.stories?.some(
+                          (s) => s.id === foreignStory.id
+                        ) &&
+                        hasReadableFile &&
+                        excludesExportLifecycle
+                      );
+                    },
+                  },
+                  {
+                    name: 'download exported community media zip',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 200,
+                    prepare: () => `/v2/community/export/download/${zipToken1}`,
+                    checkHeaders: (headers: Headers) =>
+                      headers.get('cache-control') === 'no-store' &&
+                      (headers.get('content-disposition') ?? '').includes(
+                        'attachment'
+                      ),
+                    checkBytes: (bytes: Uint8Array) => {
+                      if (
+                        new StreamingSha256().update(bytes).digestHex() !==
+                        zipChecksum1
+                      ) {
+                        return false;
+                      }
+                      const entries = parseDeterministicZip(bytes);
+                      zipBytes1 = bytes;
+                      return entries.some(
+                        (e) => e.path === `media/${readableFileId}`
+                      );
+                    },
+                  },
+                  {
+                    name: 're-export active community deterministically',
+                    method: 'POST',
+                    path: '/v2/community/export',
+                    expected: 201,
+                    body: {},
+                    check: (body: unknown) => {
+                      const parsed =
+                        CreateCommunityExportResponseSchema.safeParse(body);
+                      if (!parsed.success) return false;
+                      exportId2 = parsed.data.data.exportId;
+                      manifestToken2 =
+                        parsed.data.data.artifacts.manifest.token;
+                      zipToken2 = parsed.data.data.artifacts.mediaZip.token;
+                      return (
+                        exportId2 !== exportId1 &&
+                        manifestToken2 !== manifestToken1 &&
+                        zipToken2 !== zipToken1 &&
+                        parsed.data.data.artifacts.manifest.checksum ===
+                          manifestChecksum1 &&
+                        parsed.data.data.artifacts.mediaZip.checksum ===
+                          zipChecksum1
+                      );
+                    },
+                  },
+                  {
+                    name: 'verify byte-identical re-exported manifest',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 200,
+                    prepare: () =>
+                      `/v2/community/export/download/${manifestToken2}`,
+                    checkBytes: (bytes: Uint8Array) =>
+                      bytes.byteLength === manifestBytes1.byteLength &&
+                      bytes.every((b, idx) => b === manifestBytes1[idx]),
+                  },
+                  {
+                    name: 'verify byte-identical re-exported media zip',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 200,
+                    prepare: () => `/v2/community/export/download/${zipToken2}`,
+                    checkBytes: (bytes: Uint8Array) =>
+                      bytes.byteLength === zipBytes1.byteLength &&
+                      bytes.every((b, idx) => b === zipBytes1[idx]),
+                  },
+                  {
+                    name: 'expire export tokens and trigger per-object cleanup on download',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 404,
+                    prepare: async () => {
+                      const manifestKey = `communities/${communityId}/exports/${exportId2}/manifest.json`;
+                      const zipKey = `communities/${communityId}/exports/${exportId2}/media.zip`;
+                      if (!(await hasMedia(manifestKey))) {
+                        throw new Error(
+                          'Expected manifest object to exist before expiry'
+                        );
+                      }
+                      if (!(await hasMedia(zipKey))) {
+                        throw new Error(
+                          'Expected ZIP object to exist before expiry'
+                        );
+                      }
+                      const pastNow = Date.now() - 60_000;
+                      const pastCreated = pastNow - 2 * EXPORT_TOKEN_TTL_MS;
+                      await db
+                        .update(exportJobs)
+                        .set({ createdAt: pastCreated, expiresAt: pastNow })
+                        .where(eq(exportJobs.id, exportId2));
+                      await db
+                        .update(exportTokens)
+                        .set({ createdAt: pastCreated, expiresAt: pastNow })
+                        .where(eq(exportTokens.jobId, exportId2));
+                      return `/v2/community/export/download/${manifestToken2}`;
+                    },
+                  },
+                  {
+                    name: 'verify expired export artifacts deleted and second token fails',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 404,
+                    prepare: async () => {
+                      const manifestKey = `communities/${communityId}/exports/${exportId2}/manifest.json`;
+                      const zipKey = `communities/${communityId}/exports/${exportId2}/media.zip`;
+                      if (await hasMedia(manifestKey)) {
+                        throw new Error(
+                          'Expected expired manifest object to be deleted'
+                        );
+                      }
+                      if (await hasMedia(zipKey)) {
+                        throw new Error(
+                          'Expected expired ZIP object to be deleted'
+                        );
+                      }
+                      const [jobRow] = await db
+                        .select({
+                          status: exportJobs.status,
+                          cleanedUpAt: exportJobs.cleanedUpAt,
+                        })
+                        .from(exportJobs)
+                        .where(eq(exportJobs.id, exportId2))
+                        .limit(1);
+                      if (
+                        !jobRow ||
+                        jobRow.status !== 'expired' ||
+                        jobRow.cleanedUpAt === null
+                      ) {
+                        throw new Error(
+                          'Expected expired export job to record cleanup completion'
+                        );
+                      }
+                      return `/v2/community/export/download/${zipToken2}`;
+                    },
+                  },
+                  ...communityAuditReadSteps(communityId),
+                  {
+                    name: 'filter own community audit entries by export action',
+                    method: 'GET',
+                    path: '/v2/community/audit-entries?action=community.export.generate',
+                    expected: 200,
+                    check: (body: unknown) => {
+                      const parsed =
+                        CommunityAuditEntriesListResponseSchema.safeParse(body);
+                      if (!parsed.success) return false;
+                      return (
+                        parsed.data.data.length >= 1 &&
+                        parsed.data.data.every(
+                          (entry) =>
+                            entry.communityId === communityId &&
+                            entry.action === 'community.export.generate' &&
+                            entry.ipAddress === null &&
+                            entry.userAgent === null
+                        )
+                      );
+                    },
+                  },
+                  {
+                    name: 'reject caller communityId override on audit entries',
+                    method: 'GET',
+                    path: `/v2/community/audit-entries?communityId=${foreignCommunityId}`,
+                    expected: 400,
+                  },
+                ];
+              })()
+            : []),
           {
             // #188: re-login with the live cookie rotates the session row
             // (same user, unexpired) on every backend — including the atomic
@@ -7041,6 +7476,15 @@ export async function createFixture(
             ? [
                 ...privateAdminCommunityWriteSteps,
                 ...privateAdminUserManagementSteps,
+                {
+                  name: 'deny cross-community export download token',
+                  method: 'GET',
+                  path: '/v2/community/export/download/pending',
+                  expected: 404,
+                  prepare: () =>
+                    `/v2/community/export/download/${activeAdminExport1ManifestToken}`,
+                },
+                ...communityAuditReadSteps(privateCommunityId),
               ]
             : []),
           {
@@ -7226,6 +7670,28 @@ export async function createFixture(
             method: 'GET',
             path: `/v2/media/${foreignFileId}`,
             expected: 404,
+          },
+          {
+            name: 'deny community export for super_admin',
+            method: 'POST',
+            path: '/v2/community/export',
+            expected: 403,
+            body: {},
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny export download for super_admin',
+            method: 'GET',
+            path: `/v2/community/export/download/${'a'.repeat(64)}`,
+            expected: 403,
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny community audit entries for super_admin',
+            method: 'GET',
+            path: '/v2/community/audit-entries',
+            expected: 403,
+            check: forbiddenCheck,
           },
           {
             name: 'deny v2 users list',
@@ -7665,6 +8131,166 @@ export async function createFixture(
           ...forbiddenCommunityWriteSteps,
           ...forbiddenAdminSteps,
           ...forbiddenImportSteps('disabled admin'),
+          ...(() => {
+            let disabledManifestToken1 = '';
+            let disabledZipToken1 = '';
+            let disabledManifestChecksum1 = '';
+            let disabledZipChecksum1 = '';
+            let disabledManifestBytes1 = new Uint8Array(0);
+            let disabledZipBytes1 = new Uint8Array(0);
+            let disabledManifestToken2 = '';
+            let disabledZipToken2 = '';
+            return [
+              {
+                name: 'export disabled community as own admin',
+                method: 'POST',
+                path: '/v2/community/export',
+                expected: 201,
+                body: {},
+                check: (body: unknown) => {
+                  const parsed =
+                    CreateCommunityExportResponseSchema.safeParse(body);
+                  if (!parsed.success) return false;
+                  disabledManifestToken1 =
+                    parsed.data.data.artifacts.manifest.token;
+                  disabledZipToken1 = parsed.data.data.artifacts.mediaZip.token;
+                  disabledManifestChecksum1 =
+                    parsed.data.data.artifacts.manifest.checksum;
+                  disabledZipChecksum1 =
+                    parsed.data.data.artifacts.mediaZip.checksum;
+                  return true;
+                },
+              },
+              {
+                name: 'download disabled community manifest including #162 rows',
+                method: 'GET',
+                path: '/v2/community/export/download/pending',
+                expected: 200,
+                prepare: () =>
+                  `/v2/community/export/download/${disabledManifestToken1}`,
+                checkHeaders: (headers: Headers) =>
+                  headers.get('cache-control') === 'no-store' &&
+                  (headers.get('content-disposition') ?? '').includes(
+                    'attachment'
+                  ),
+                checkBytes: (bytes: Uint8Array) => {
+                  if (
+                    new StreamingSha256().update(bytes).digestHex() !==
+                    disabledManifestChecksum1
+                  ) {
+                    return false;
+                  }
+                  const manifest = JSON.parse(
+                    new TextDecoder().decode(bytes)
+                  ) as {
+                    community?: { id?: number; status?: string };
+                    stories?: Array<{
+                      id: number;
+                      isRestricted?: boolean;
+                      privacyLevel?: string;
+                    }>;
+                    files?: Array<{ id: string }>;
+                  };
+                  disabledManifestBytes1 = bytes;
+                  const hasPublicDisabled =
+                    manifest.stories?.some((s) => s.id === inactiveStory.id) ??
+                    false;
+                  const hasRestrictedDisabled =
+                    manifest.stories?.some(
+                      (s) =>
+                        s.id === inactiveRestrictedStory.id &&
+                        s.isRestricted === true &&
+                        s.privacyLevel === 'editors'
+                    ) ?? false;
+                  const hasDisabledFile =
+                    manifest.files?.some((f) => f.id === inactiveFileId) ??
+                    false;
+                  return (
+                    manifest.community?.id === inactiveCommunity.id &&
+                    manifest.community?.status === 'disabled' &&
+                    hasPublicDisabled &&
+                    hasRestrictedDisabled &&
+                    hasDisabledFile
+                  );
+                },
+              },
+              {
+                name: 'download disabled community media zip',
+                method: 'GET',
+                path: '/v2/community/export/download/pending',
+                expected: 200,
+                prepare: () =>
+                  `/v2/community/export/download/${disabledZipToken1}`,
+                checkBytes: (bytes: Uint8Array) => {
+                  if (
+                    new StreamingSha256().update(bytes).digestHex() !==
+                    disabledZipChecksum1
+                  ) {
+                    return false;
+                  }
+                  const entries = parseDeterministicZip(bytes);
+                  disabledZipBytes1 = bytes;
+                  return entries.some(
+                    (e) => e.path === `media/${inactiveFileId}`
+                  );
+                },
+              },
+              {
+                name: 're-export disabled community deterministically',
+                method: 'POST',
+                path: '/v2/community/export',
+                expected: 201,
+                body: {},
+                check: (body: unknown) => {
+                  const parsed =
+                    CreateCommunityExportResponseSchema.safeParse(body);
+                  if (!parsed.success) return false;
+                  disabledManifestToken2 =
+                    parsed.data.data.artifacts.manifest.token;
+                  disabledZipToken2 = parsed.data.data.artifacts.mediaZip.token;
+                  return (
+                    parsed.data.data.artifacts.manifest.checksum ===
+                      disabledManifestChecksum1 &&
+                    parsed.data.data.artifacts.mediaZip.checksum ===
+                      disabledZipChecksum1
+                  );
+                },
+              },
+              {
+                name: 'verify byte-identical disabled community manifest',
+                method: 'GET',
+                path: '/v2/community/export/download/pending',
+                expected: 200,
+                prepare: () =>
+                  `/v2/community/export/download/${disabledManifestToken2}`,
+                checkBytes: (bytes: Uint8Array) =>
+                  bytes.byteLength === disabledManifestBytes1.byteLength &&
+                  bytes.every(
+                    (byte, index) => byte === disabledManifestBytes1[index]
+                  ),
+              },
+              {
+                name: 'verify byte-identical disabled community media zip',
+                method: 'GET',
+                path: '/v2/community/export/download/pending',
+                expected: 200,
+                prepare: () =>
+                  `/v2/community/export/download/${disabledZipToken2}`,
+                checkBytes: (bytes: Uint8Array) =>
+                  bytes.byteLength === disabledZipBytes1.byteLength &&
+                  bytes.every(
+                    (byte, index) => byte === disabledZipBytes1[index]
+                  ),
+              },
+              {
+                name: 'deny community audit entries while community is disabled',
+                method: 'GET',
+                path: '/v2/community/audit-entries',
+                expected: 403,
+                check: forbiddenCheck,
+              },
+            ];
+          })(),
           {
             name: 'reset recovered disabled admin password (assisted)',
             method: 'POST',

@@ -9,6 +9,8 @@ import {
   ORPHAN_SWEEP_REFERENCE_CHUNK,
   WORKER_SWEEP_SUBREQUEST_BUDGET,
 } from '../../src/services/media-cleanup.service.js';
+import { parseDeterministicZip } from '../../src/shared/utils/deterministic-zip.js';
+import { CreateCommunityExportResponseSchema } from '../../src/shared/schemas/community-export.js';
 import {
   MAX_PUBLIC_FILTER_VALUES,
   MAX_PUBLIC_TOTAL_FILTER_VALUES,
@@ -898,6 +900,155 @@ it('resumes the scheduled R2 sweep past live objects across multiple runs', asyn
         await bucket.get(`communities/1/media/live-${suffix}`)
       ).not.toBeNull();
     }
+  } finally {
+    await mf.dispose();
+  }
+});
+
+it('streams community export via R2 multipart upload, serves authenticated downloads, and cleans up expired objects', async () => {
+  const authSecret = randomBytes(24).toString('hex');
+  const adminKey = randomBytes(32).toString('hex');
+  const sha256 = (value: string) =>
+    createHash('sha256').update(value).digest('hex');
+  const salt = randomBytes(16).toString('base64');
+  const params = JSON.stringify({
+    memoryKiB: 19 * 1024,
+    iterations: 2,
+    parallelism: 1,
+  });
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(
+      `import worker from './src/worker.js'; export default worker;`
+    ),
+    { ENVIRONMENT: 'test', AUTH_SERVER_SECRET: authSecret },
+    { unsafeTriggerHandlers: true }
+  );
+  try {
+    const db = await mf.getD1Database('DB');
+    const bucket = await mf.getR2Bucket('MEDIA');
+    await applyD1Migrations(db);
+    const fileId = '00000000-0000-4000-8000-000000000099';
+    const mediaBytes = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    const mediaChecksum = createHash('sha256').update(mediaBytes).digest('hex');
+    const storageKey = `communities/1/${fileId}.bin`;
+    await db.batch([
+      db.prepare(
+        "INSERT INTO communities(id,name,slug,public_stories,is_active,created_at,updated_at) VALUES(1,'Worker Export','worker-export',0,1,1000,1000)"
+      ),
+      db
+        .prepare(
+          "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,created_at,updated_at,password_algorithm,password_salt,password_params,password_verifier) VALUES(1,'wadmin@example.org','source-hash','Worker','Admin','admin',1,1000,1000,?,?,?,?)"
+        )
+        .bind('client-argon2id+sha256', salt, params, sha256(adminKey)),
+      db
+        .prepare(
+          "INSERT INTO files(id,filename,original_name,path,storage_key,url,mime_type,size,byte_size,checksum,community_id,uploaded_by,created_at,updated_at) VALUES(?,'sample.bin','sample.bin',?,?,'https://ignored.invalid','application/octet-stream',6,6,?,1,1,1000,1000)"
+        )
+        .bind(fileId, storageKey, storageKey, mediaChecksum),
+    ]);
+    await bucket.put(storageKey, mediaBytes);
+
+    const loginRes = await mf.dispatchFetch(
+      'https://worker.test/v2/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          identifier: 'wadmin@example.org',
+          derivedKey: adminKey,
+        }),
+      }
+    );
+    expect(loginRes.status).toBe(200);
+    const cookie = loginRes.headers.get('set-cookie')!.split(';')[0]!;
+
+    const exportRes = await mf.dispatchFetch(
+      'https://worker.test/v2/community/export',
+      {
+        method: 'POST',
+        headers: { cookie, 'Content-Type': 'application/json' },
+        body: '{}',
+      }
+    );
+    expect(exportRes.status).toBe(201);
+    const exportPayload = CreateCommunityExportResponseSchema.parse(
+      await exportRes.json()
+    );
+
+    const manifestRes = await mf.dispatchFetch(
+      `https://worker.test${exportPayload.data.artifacts.manifest.downloadPath}`,
+      { headers: { cookie } }
+    );
+    expect(manifestRes.status).toBe(200);
+    expect(manifestRes.headers.get('cache-control')).toBe('no-store');
+    expect(manifestRes.headers.get('content-disposition')).toContain(
+      'attachment'
+    );
+    const manifestBytes = new Uint8Array(await manifestRes.arrayBuffer());
+    expect(createHash('sha256').update(manifestBytes).digest('hex')).toBe(
+      exportPayload.data.artifacts.manifest.checksum
+    );
+
+    const zipRes = await mf.dispatchFetch(
+      `https://worker.test${exportPayload.data.artifacts.mediaZip.downloadPath}`,
+      { headers: { cookie } }
+    );
+    expect(zipRes.status).toBe(200);
+    const zipBytes = new Uint8Array(await zipRes.arrayBuffer());
+    expect(createHash('sha256').update(zipBytes).digest('hex')).toBe(
+      exportPayload.data.artifacts.mediaZip.checksum
+    );
+    const parsedEntries = parseDeterministicZip(zipBytes);
+    expect(parsedEntries).toHaveLength(1);
+    expect(parsedEntries[0]!.path).toBe(`media/${fileId}`);
+    expect(Array.from(parsedEntries[0]!.data)).toEqual(Array.from(mediaBytes));
+
+    // Advance scheduled cron past token TTL so scheduled cleanup deletes objects.
+    const futureMs = new Date(exportPayload.data.expiresAt).getTime() + 60_000;
+    const schedRes = await mf.dispatchFetch(
+      `http://localhost/cdn-cgi/handler/scheduled?cron=*+*+*+*+*&time=${futureMs}`,
+      { method: 'POST' }
+    );
+    expect(schedRes.status).toBe(200);
+
+    expect(
+      await bucket.get(
+        `communities/1/exports/${exportPayload.data.exportId}/manifest.json`
+      )
+    ).toBeNull();
+    expect(
+      await bucket.get(
+        `communities/1/exports/${exportPayload.data.exportId}/media.zip`
+      )
+    ).toBeNull();
+
+    // Failed generations consume the account quota on real D1, too.
+    for (let i = 0; i < 4; i += 1) {
+      await db
+        .prepare(
+          `INSERT INTO export_jobs
+        (id, community_id, requested_by, status, manifest_storage_key, zip_storage_key, created_at, expires_at, completed_at, cleaned_up_at)
+        VALUES (?, 1, 1, 'failed', ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          `failed-${i}`,
+          `communities/1/exports/failed-${i}/manifest.json`,
+          `communities/1/exports/failed-${i}/media.zip`,
+          Date.now(),
+          Date.now() + 900000,
+          Date.now(),
+          Date.now()
+        )
+        .run();
+    }
+    expect(
+      (
+        await mf.dispatchFetch('https://worker.test/v2/community/export', {
+          method: 'POST',
+          headers: { cookie },
+        })
+      ).status
+    ).toBe(429);
   } finally {
     await mf.dispose();
   }

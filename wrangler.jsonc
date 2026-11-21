@@ -20,6 +20,7 @@
   // Hourly sweep (§6.7 orphan bytes). Throughput: ~1,200 keys/run x 24 runs/day
   // ≈ 28,800 keys/day, cycling a 100k-key keyspace in < 4 days — well inside the
   // 30-day bound; ~34 deletes/run (~800/day) for all-orphan backlogs.
-  "triggers": { "crons": ["0 * * * *"] },
+  // Export artifacts have a 15-minute TTL and a one-minute cleanup grace.
+  "triggers": { "crons": ["0 * * * *", "* * * * *"] },
   "observability": { "enabled": false, "traces": { "enabled": false } },
 }

@@ -13,4 +13,5 @@ export * from './attachments.js';
 export * from './sessions.js';
 export * from './audit_entries.js';
 export * from './login_codes.js';
+export * from './community_exports.js';
 export * from './import_manifests.js';

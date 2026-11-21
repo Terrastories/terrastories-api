@@ -46,6 +46,12 @@ import {
   sessionsSqlite,
 } from './schema/sessions.js';
 import {
+  exportJobsPg,
+  exportJobsSqlite,
+  exportTokensPg,
+  exportTokensSqlite,
+} from './schema/community_exports.js';
+import {
   importManifestsPg,
   importManifestsSqlite,
 } from './schema/import_manifests.js';
@@ -57,6 +63,8 @@ const sqliteTables = {
   auditEntries: auditEntriesSqlite,
   authThrottle: authThrottleSqlite,
   claimTokens: claimTokensSqlite,
+  exportJobs: exportJobsSqlite,
+  exportTokens: exportTokensSqlite,
   loginCodes: loginCodesSqlite,
   communities: communitiesSqlite,
   communityMapConfigs: communityMapConfigsSqlite,
@@ -79,6 +87,8 @@ const postgresTables = {
   auditEntries: auditEntriesPg,
   authThrottle: authThrottlePg,
   claimTokens: claimTokensPg,
+  exportJobs: exportJobsPg,
+  exportTokens: exportTokensPg,
   loginCodes: loginCodesPg,
   communities: communitiesPg,
   communityMapConfigs: communityMapConfigsPg,

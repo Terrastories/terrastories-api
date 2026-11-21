@@ -51,6 +51,10 @@ export const storySpeakersPg = pgTable(
     updatedAt: timestamp('updated_at', { precision: 3 }).notNull().defaultNow(),
   },
   (table) => ({
+    // Community isolation lookup index for full-community export/erasure scans
+    communityIdx: index('story_speakers_community_id_idx').on(
+      table.communityId
+    ),
     // Non-unique lookup index; V2 retains story edge multiplicity (#189)
     storySpeakerIdx: index('story_speakers_story_speaker_idx').on(
       table.storyId,
@@ -94,6 +98,10 @@ export const storySpeakersSqlite = sqliteTable(
       .$defaultFn(() => new Date()),
   },
   (table) => ({
+    // Community isolation lookup index for full-community export/erasure scans
+    communityIdx: sqliteIndex('story_speakers_community_id_idx').on(
+      table.communityId
+    ),
     // Non-unique lookup index; V2 retains story edge multiplicity (#189)
     storySpeakerIdx: sqliteIndex('story_speakers_story_speaker_idx').on(
       table.storyId,

@@ -5371,9 +5371,22 @@ export async function createFixture(
       MediaMetadataResponseSchema.safeParse(body).success;
     let qaManagedUserId = 0;
     let qaIssuedLoginCode = '';
+    let qaRecoveryCode = '';
+    let redeemedAdminCookie = '';
     const qaIssuedRedeemBody = {
       code: '',
       communitySlug: 'qa-user-management-community',
+    };
+    const qaRecoveryRedeemBody = {
+      code: '',
+      identifier: userCommunityCredentials.admin.email,
+      communitySlug: 'qa-user-management-community',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: verifierSalt,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: HONO_PERSONA_DERIVED_KEY,
+      },
     };
     let userManagedSessionHandle = '';
     let qaStageFileId = '';
@@ -5846,6 +5859,15 @@ export async function createFixture(
           if (!Array.isArray(data.codes) || data.codes.length !== 10)
             return false;
           const unique = new Set(data.codes);
+          if (
+            unique.size === 10 &&
+            data.codes.every(
+              (code) =>
+                typeof code === 'string' && /^[A-Za-z0-9_-]{20,64}$/.test(code)
+            )
+          ) {
+            qaRecoveryCode = data.codes[0] as string;
+          }
           return (
             unique.size === 10 &&
             data.codes.every(
@@ -5880,6 +5902,48 @@ export async function createFixture(
         check: invalidCredentials,
       },
       {
+        name: 'redeem recovery code',
+        method: 'POST',
+        path: '/v2/auth/recovery/redeem',
+        expected: 200,
+        headers: { cookie: 'ts_session=' },
+        prepare: () => {
+          qaRecoveryRedeemBody.code = qaRecoveryCode;
+        },
+        body: qaRecoveryRedeemBody,
+        check: ownUser(
+          userCommunityCredentials.admin.email,
+          'admin',
+          liveSessionCookie,
+          userCommunity.id
+        ),
+        checkHeaders: (headers) => {
+          const sc = headers.get('set-cookie') ?? '';
+          redeemedAdminCookie = sc.split(';')[0] ?? '';
+          return true;
+        },
+      },
+      {
+        name: 'read own profile immediately after recovery redeem',
+        method: 'GET',
+        path: '/v2/auth/me',
+        expected: 200,
+        headers: {},
+        prepare() {
+          this.headers = { cookie: redeemedAdminCookie };
+        },
+        check: () => true,
+      },
+      {
+        name: 'reject replay of consumed recovery code',
+        method: 'POST',
+        path: '/v2/auth/recovery/redeem',
+        expected: 401,
+        headers: { cookie: 'ts_session=' },
+        body: qaRecoveryRedeemBody,
+        check: invalidCredentials,
+      },
+      {
         name: 'redeem admin_issued login code',
         method: 'POST',
         path: '/v2/auth/recovery/redeem',
@@ -5904,6 +5968,29 @@ export async function createFixture(
         headers: { cookie: 'ts_session=' },
         body: qaIssuedRedeemBody,
         check: invalidCredentials,
+      },
+      {
+        name: 'regenerate 10 recovery codes after redeem',
+        method: 'POST',
+        path: '/v2/auth/recovery-codes',
+        expected: 201,
+        headers: {},
+        prepare() {
+          this.headers = { cookie: redeemedAdminCookie };
+        },
+        body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+        check: (body) => {
+          const data = (
+            body as {
+              data?: { codes?: unknown; purpose?: unknown };
+            }
+          )?.data;
+          return (
+            data?.purpose === 'recovery' &&
+            Array.isArray(data?.codes) &&
+            data.codes.length === 10
+          );
+        },
       },
       {
         name: 'login again as user-management admin',

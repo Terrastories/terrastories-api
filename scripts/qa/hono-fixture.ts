@@ -5264,6 +5264,11 @@ export async function createFixture(
     const qaResetSalt = Buffer.from(
       crypto.getRandomValues(new Uint8Array(16))
     ).toString('base64');
+    // A distinct verifier for recovery redemption, so the persona proves the
+    // redeem installs a NEW verifier (old password rejected, new accepted).
+    const qaRecoveryRedeemDerivedKey = toHex(
+      crypto.getRandomValues(new Uint8Array(32))
+    );
     const mediaGuardedPath = `communities/${mediaCommunity.id}/media/${mediaGuardedFileId}`;
     await db.insert(files).values({
       id: mediaGuardedFileId,
@@ -5387,7 +5392,7 @@ export async function createFixture(
         algorithm: ARGON2ID_ALGORITHM,
         salt: verifierSalt,
         params: JSON.parse(ARGON2ID_PARAMS_JSON),
-        derivedKey: HONO_PERSONA_DERIVED_KEY,
+        derivedKey: qaRecoveryRedeemDerivedKey,
       },
     };
     let userManagedSessionHandle = '';
@@ -5945,6 +5950,15 @@ export async function createFixture(
         useSavedCookie: 'qaAdminCookie',
       },
       {
+        name: 'old password rejected after recovery redeem',
+        method: 'POST',
+        path: '/v2/auth/login',
+        expected: 401,
+        headers: { cookie: 'ts_session=' },
+        body: loginBody(userCommunityCredentials.admin.email),
+        check: invalidCredentials,
+      },
+      {
         name: 'read own profile immediately after recovery redeem',
         method: 'GET',
         path: '/v2/auth/me',
@@ -5999,7 +6013,7 @@ export async function createFixture(
         prepare() {
           this.headers = { cookie: redeemedAdminCookie };
         },
-        body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+        body: { currentDerivedKey: qaRecoveryRedeemDerivedKey },
         check: (body) => {
           const data = (
             body as {
@@ -6030,7 +6044,18 @@ export async function createFixture(
         method: 'POST',
         path: '/v2/auth/login',
         expected: 200,
-        body: loginBody(userCommunityCredentials.admin.email),
+        headers: { cookie: 'ts_session=' },
+        body: {
+          identifier: userCommunityCredentials.admin.email,
+          derivedKey: qaRecoveryRedeemDerivedKey,
+          communitySlug: 'qa-user-management-community',
+        },
+        check: ownUser(
+          userCommunityCredentials.admin.email,
+          'admin',
+          liveSessionCookie,
+          userCommunity.id
+        ),
       },
       {
         name: 'logout',

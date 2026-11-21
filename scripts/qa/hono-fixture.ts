@@ -81,7 +81,10 @@ import {
   ExternalMediaLinkWriteResponseSchema,
   StoryWriteResponseSchema,
 } from '../../src/shared/schemas/story-writes.js';
-import { ImportManifestDetailResponseSchema } from '../../src/shared/schemas/imports.js';
+import {
+  ImportManifestDetailResponseSchema,
+  ImportManifestListResponseSchema,
+} from '../../src/shared/schemas/imports.js';
 import {
   AttachmentListResponseSchema,
   AttachmentResponseSchema,
@@ -7286,6 +7289,40 @@ export async function createFixture(
               );
             },
           },
+          {
+            name: 'list own-community import manifests',
+            method: 'GET',
+            path: '/v2/imports',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestListResponseSchema.safeParse(body);
+              return parsed.success && parsed.data.data.length >= 1;
+            },
+          },
+          {
+            name: 'get previewed import manifest detail',
+            method: 'GET',
+            path: '/v2/imports/{qaImportManifest}',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return parsed.success && parsed.data.data.status === 'previewed';
+            },
+          },
+          {
+            name: 'discard previewed import manifest',
+            method: 'DELETE',
+            path: '/v2/imports/{qaImportManifest}',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'discarded' &&
+                parsed.data.data.canCommit === false
+              );
+            },
+          },
           // The real-HTTP transport cannot send an 11 MiB body and keep the
           // connection reusable after the server answers 413 without draining
           // it; the 100 MiB Content-Length cap and the per-category cap are
@@ -7753,6 +7790,24 @@ export async function createFixture(
               bytes: new TextEncoder().encode('name\nDenied\n'),
               fields: { kind: 'places' },
             }),
+          },
+          {
+            name: 'reject import manifest list for a viewer',
+            method: 'GET',
+            path: '/v2/imports',
+            expected: 403,
+          },
+          {
+            name: 'reject import manifest detail for a viewer',
+            method: 'GET',
+            path: '/v2/imports/1',
+            expected: 403,
+          },
+          {
+            name: 'reject import manifest discard for a viewer',
+            method: 'DELETE',
+            path: '/v2/imports/1',
+            expected: 403,
           },
           {
             name: 'logout',

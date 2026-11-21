@@ -22,6 +22,8 @@ import {
   IMPORT_REQUIRED_FIELDS,
   ImportKindSchema,
   ImportManifestDetailResponseSchema,
+  ImportManifestListResponseSchema,
+  ListImportsQuerySchema,
   MAX_IMPORT_CSV_BYTES,
   MAX_IMPORT_EXTERNAL_LINKS_PER_ROW,
   MAX_IMPORT_MEDIA_FILES,
@@ -31,6 +33,7 @@ import {
   type AudienceMapping,
   type DuplicateStrategy,
   type ImportManifestDetail,
+  type ImportManifestSummary,
   type ImportRowError,
   type ImportStoredMappings,
   type NormalizedPlaceRow,
@@ -55,10 +58,12 @@ import { authorizeCommunityWriteCaller } from './community-writes.service.js';
 import {
   FORBIDDEN_BODY,
   INTERNAL_ERROR_BODY,
+  NOT_FOUND_BODY,
 } from './public-communities.service.js';
 import {
   isValidCalendarDate,
   makeValidationErrorBody,
+  zodErrorToValidationFields,
   type V2ValidationErrorResponse,
   type V2ValidationFieldError,
 } from '../shared/schemas/community-writes.js';
@@ -263,9 +268,7 @@ function countReferencesInNormalizedData(data: StoredNormalizedImportData): {
   };
 }
 
-export function serializeImportManifestDetail(
-  manifest: ImportManifestRowRecord
-): ImportManifestDetail {
+function computeManifestPlan(manifest: ImportManifestRowRecord) {
   const normalizedData = manifest.normalizedRows;
   const manifestPayloadBytes = new TextEncoder().encode(
     JSON.stringify({
@@ -285,7 +288,19 @@ export function serializeImportManifestDetail(
     manifestPayloadBytes,
     sourceFilePayloadBytes,
   });
-  const mediaCounts = countReferencesInNormalizedData(normalizedData);
+  const canCommit =
+    manifest.status === 'previewed' &&
+    manifest.rowErrors.length === 0 &&
+    normalizedData.rows.length > 0 &&
+    plan.summary.withinD1Budget;
+
+  return { normalizedData, plan, canCommit };
+}
+
+export function serializeImportManifestSummary(
+  manifest: ImportManifestRowRecord
+): ImportManifestSummary {
+  const { normalizedData, canCommit } = computeManifestPlan(manifest);
 
   return {
     id: manifest.id,
@@ -293,15 +308,33 @@ export function serializeImportManifestDetail(
     status: manifest.status,
     createdBy: manifest.createdBy,
     sourceFileName: manifest.sourceFileName,
-    mappings: manifest.mappings.headerMappings,
-    unmappedHeaders: manifest.mappings.unmappedHeaders,
-    duplicateStrategy: manifest.mappings.duplicateStrategy,
     rowCount: manifest.rowCount,
     validRowCount: normalizedData.rows.length,
     errorCount: manifest.rowErrors.length,
+    stagedMediaCount: manifest.stagedFileIds.length,
+    canCommit,
+    resultSummary: manifest.resultSummary,
+    committedAt:
+      manifest.committedAt === null
+        ? null
+        : new Date(manifest.committedAt).toISOString(),
+    createdAt: new Date(manifest.createdAt).toISOString(),
+  };
+}
+
+export function serializeImportManifestDetail(
+  manifest: ImportManifestRowRecord
+): ImportManifestDetail {
+  const { normalizedData, plan } = computeManifestPlan(manifest);
+  const mediaCounts = countReferencesInNormalizedData(normalizedData);
+
+  return {
+    ...serializeImportManifestSummary(manifest),
+    mappings: manifest.mappings.headerMappings,
+    unmappedHeaders: manifest.mappings.unmappedHeaders,
+    duplicateStrategy: manifest.mappings.duplicateStrategy,
     skippedDuplicateCount: normalizedData.skippedDuplicates,
     rowErrors: manifest.rowErrors,
-    stagedMediaCount: manifest.stagedFileIds.length,
     mediaSummary: {
       stagedCount: manifest.stagedFileIds.length,
       existingReferencedCount: mediaCounts.existingCount,
@@ -313,18 +346,7 @@ export function serializeImportManifestDetail(
       placesToCreateCount: normalizedData.relatedPlacesToCreate.length,
       speakersToCreateCount: normalizedData.relatedSpeakersToCreate.length,
     },
-    canCommit:
-      manifest.status === 'previewed' &&
-      manifest.rowErrors.length === 0 &&
-      normalizedData.rows.length > 0 &&
-      plan.summary.withinD1Budget,
     commitPlan: plan.summary,
-    resultSummary: manifest.resultSummary,
-    committedAt:
-      manifest.committedAt === null
-        ? null
-        : new Date(manifest.committedAt).toISOString(),
-    createdAt: new Date(manifest.createdAt).toISOString(),
   };
 }
 
@@ -1173,6 +1195,164 @@ export class ImportsService {
       }
       return { status: 500, body: INTERNAL_ERROR_BODY };
     }
+  }
+
+  async listImports(
+    actor: FoundationUser,
+    rawQueries: Record<string, string[] | undefined>
+  ): Promise<
+    ImportServiceResult<z.infer<typeof ImportManifestListResponseSchema>>
+  > {
+    const caller = await authorizeCommunityWriteCaller(this.repository, actor, [
+      'editor',
+      'admin',
+    ]);
+    if (!caller) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    const flatQuery: Record<string, string> = {};
+    const duplicateErrors: V2ValidationFieldError[] = [];
+    for (const [key, values] of Object.entries(rawQueries)) {
+      if (!values || values.length === 0) continue;
+      if (values.length > 1) {
+        duplicateErrors.push({
+          path: key,
+          message: 'Duplicate query parameter',
+        });
+        continue;
+      }
+      flatQuery[key] = values[0]!;
+    }
+    if (duplicateErrors.length > 0) {
+      return { status: 400, body: makeValidationErrorBody(duplicateErrors) };
+    }
+
+    const parsed = ListImportsQuerySchema.safeParse(flatQuery);
+    if (!parsed.success) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
+      };
+    }
+
+    const { rows, total } = await this.repository.listManifests(
+      caller.communityId,
+      parsed.data
+    );
+    const checked = ImportManifestListResponseSchema.safeParse({
+      data: rows.map(serializeImportManifestSummary),
+      meta: {
+        total,
+        limit: parsed.data.limit,
+        offset: parsed.data.offset,
+        hasNextPage: parsed.data.offset + rows.length < total,
+      },
+    });
+    if (!checked.success) {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+    return { status: 200, body: checked.data };
+  }
+
+  async getImport(
+    actor: FoundationUser,
+    rawId: string
+  ): Promise<
+    ImportServiceResult<z.infer<typeof ImportManifestDetailResponseSchema>>
+  > {
+    const caller = await authorizeCommunityWriteCaller(this.repository, actor, [
+      'editor',
+      'admin',
+    ]);
+    if (!caller) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    if (!isDatabaseIdString(rawId)) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody([
+          {
+            path: 'id',
+            message: 'Import manifest ID must be a positive integer',
+          },
+        ]),
+      };
+    }
+
+    const manifest = await this.repository.getManifestById(
+      caller.communityId,
+      Number(rawId)
+    );
+    if (!manifest) {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+
+    const checked = ImportManifestDetailResponseSchema.safeParse({
+      data: serializeImportManifestDetail(manifest),
+    });
+    if (!checked.success) {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+    return { status: 200, body: checked.data };
+  }
+
+  async discardImport(
+    actor: FoundationUser,
+    rawId: string
+  ): Promise<
+    ImportServiceResult<z.infer<typeof ImportManifestDetailResponseSchema>>
+  > {
+    const caller = await authorizeCommunityWriteCaller(this.repository, actor, [
+      'editor',
+      'admin',
+    ]);
+    if (!caller) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    if (!isDatabaseIdString(rawId)) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody([
+          {
+            path: 'id',
+            message: 'Import manifest ID must be a positive integer',
+          },
+        ]),
+      };
+    }
+
+    const outcome = await this.repository.discardManifest({
+      communityId: caller.communityId,
+      actorId: caller.actorId,
+      actorRole: caller.role as 'editor' | 'admin',
+      manifestId: Number(rawId),
+      now: this.now(),
+    });
+
+    if (outcome.status === 'not_found') {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+    if (outcome.status === 'forbidden') {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (outcome.status === 'conflict') {
+      return {
+        status: 409,
+        body: { error: 'Only previewed import manifests can be discarded' },
+      };
+    }
+
+    await this.cleanup.deleteFilesBestEffort(outcome.removedFiles);
+    const checked = ImportManifestDetailResponseSchema.safeParse({
+      data: serializeImportManifestDetail(outcome.manifest),
+    });
+    if (!checked.success) {
+      return { status: 500, body: INTERNAL_ERROR_BODY };
+    }
+    return { status: 200, body: checked.data };
   }
 
   private validateAndNormalizeRows(input: {

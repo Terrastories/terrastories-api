@@ -1,6 +1,9 @@
 /**
  * Canonical Hono route handlers for Slice 12 bounded CSV imports (§4, §6.9, §8):
  * - POST /v2/imports/preview
+ * - GET /v2/imports
+ * - GET /v2/imports/:id
+ * - DELETE /v2/imports/:id
  */
 import type { Context, Hono } from 'hono';
 import { actorOf } from './community-writes.hono.js';
@@ -46,6 +49,21 @@ export function registerImportRoutes(
       contentLengthHeader: c.req.header('Content-Length'),
       body: c.req.raw.body,
     });
+    return respondImportResult(c, result);
+  });
+
+  app.get('/v2/imports', async (c) => {
+    const result = await service.listImports(actorOf(c), c.req.queries());
+    return respondImportResult(c, result);
+  });
+
+  app.get('/v2/imports/:id', async (c) => {
+    const result = await service.getImport(actorOf(c), c.req.param('id'));
+    return respondImportResult(c, result);
+  });
+
+  app.delete('/v2/imports/:id', async (c) => {
+    const result = await service.discardImport(actorOf(c), c.req.param('id'));
     return respondImportResult(c, result);
   });
 }

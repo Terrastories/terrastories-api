@@ -50,7 +50,9 @@ export type MediaCleanupReason =
   | 'upload_rollback'
   | 'file_deleted'
   | 'last_attachment_deleted'
-  | 'owner_deleted';
+  | 'owner_deleted'
+  | 'import_discarded'
+  | 'import_failed';
 
 /** A `files` row that was removed and whose bytes must now be deleted. */
 export interface FileByteCleanup {
@@ -88,6 +90,7 @@ export function buildUnreferencedFilesDelete(
         .where(
           and(
             inArray(tables.files.id, chunk),
+            eq(tables.files.isActive, true),
             notExists(
               executor
                 .select({ id: tables.attachments.id })
@@ -110,6 +113,12 @@ export function buildUnreferencedFilesDelete(
                 .select({ fileId: communityMedia.fileId })
                 .from(communityMedia)
                 .where(eq(communityMedia.fileId, tables.files.id))
+            ),
+            notExists(
+              executor
+                .select({ id: tables.importManifests.id })
+                .from(tables.importManifests)
+                .where(eq(tables.importManifests.sourceFileId, tables.files.id))
             )
           )
         )
@@ -212,6 +221,12 @@ export function buildOwnerUnreferencedFilesDelete(
               .select({ fileId: communityMedia.fileId })
               .from(communityMedia)
               .where(eq(communityMedia.fileId, tables.files.id))
+          ),
+          notExists(
+            executor
+              .select({ id: tables.importManifests.id })
+              .from(tables.importManifests)
+              .where(eq(tables.importManifests.sourceFileId, tables.files.id))
           )
         )
       )
@@ -430,6 +445,7 @@ export class MediaCleanupCoordinator {
     const noReferences = (executor: typeof db, fileId: string) =>
       and(
         eq(tables.files.id, fileId),
+        eq(tables.files.isActive, true),
         notExists(
           executor
             .select({ id: tables.attachments.id })
@@ -449,10 +465,17 @@ export class MediaCleanupCoordinator {
             .select({ fileId: communityMedia.fileId })
             .from(communityMedia)
             .where(eq(communityMedia.fileId, tables.files.id))
+        ),
+        notExists(
+          executor
+            .select({ id: tables.importManifests.id })
+            .from(tables.importManifests)
+            .where(eq(tables.importManifests.sourceFileId, tables.files.id))
         )
       );
 
     const conditions = [
+      eq(tables.files.isActive, true),
       notExists(
         db
           .select({ id: tables.attachments.id })
@@ -472,6 +495,12 @@ export class MediaCleanupCoordinator {
           .select({ fileId: communityMedia.fileId })
           .from(communityMedia)
           .where(eq(communityMedia.fileId, tables.files.id))
+      ),
+      notExists(
+        db
+          .select({ id: tables.importManifests.id })
+          .from(tables.importManifests)
+          .where(eq(tables.importManifests.sourceFileId, tables.files.id))
       ),
     ];
 

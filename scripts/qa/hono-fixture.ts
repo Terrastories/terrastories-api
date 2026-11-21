@@ -81,6 +81,7 @@ import {
   ExternalMediaLinkWriteResponseSchema,
   StoryWriteResponseSchema,
 } from '../../src/shared/schemas/story-writes.js';
+import { ImportManifestDetailResponseSchema } from '../../src/shared/schemas/imports.js';
 import {
   AttachmentListResponseSchema,
   AttachmentResponseSchema,
@@ -7261,6 +7262,30 @@ export async function createFixture(
               bytes: mediaPngBytes,
             }),
           },
+          {
+            name: 'preview CSV places import manifest',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportManifest',
+            ...qaMultipart({
+              filename: 'qa-places-preview.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,region\nQA Import Preview Place,North\n'
+              ),
+              fields: { kind: 'places' },
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true &&
+                parsed.data.data.rowCount === 1
+              );
+            },
+          },
           // The real-HTTP transport cannot send an 11 MiB body and keep the
           // connection reusable after the server answers 413 without draining
           // it; the 100 MiB Content-Length cap and the per-category cap are
@@ -7716,6 +7741,18 @@ export async function createFixture(
               role: 'story_media',
               attachmentIds: [1],
             },
+          },
+          {
+            name: 'reject CSV import preview for a viewer',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 403,
+            ...qaMultipart({
+              filename: 'qa-places-denied.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode('name\nDenied\n'),
+              fields: { kind: 'places' },
+            }),
           },
           {
             name: 'logout',

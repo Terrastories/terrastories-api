@@ -24,10 +24,13 @@
 
 import {
   and,
+  asc,
   eq,
+  exists,
   inArray,
   isNull,
   lte,
+  ne,
   notExists,
   or,
   sql,
@@ -41,6 +44,12 @@ import {
   communityMediaSqlite,
 } from '../db/schema/sessions.js';
 import {
+  IMPORT_PREVIEW_TTL_MS,
+  clearNormalizedImportData,
+  type StoredNormalizedImportData,
+} from '../shared/schemas/imports.js';
+import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
+import {
   ORPHAN_SWEEP_CURSOR_KEY,
   ORPHAN_SWEEP_HOLD_KEY,
   type FoundationStorage,
@@ -50,12 +59,49 @@ export type MediaCleanupReason =
   | 'upload_rollback'
   | 'file_deleted'
   | 'last_attachment_deleted'
-  | 'owner_deleted';
+  | 'owner_deleted'
+  | 'import_discarded'
+  | 'import_failed';
 
 /** A `files` row that was removed and whose bytes must now be deleted. */
 export interface FileByteCleanup {
   fileId: string;
   storageKey: string;
+}
+
+function notStagedInPreviewedImportManifest(
+  connection: Database | DrizzleD1Database,
+  tables: ReturnType<typeof tablesFor>
+): SQL {
+  if (dialectOf(connection) === 'postgresql') {
+    return sql`NOT EXISTS (
+      SELECT 1 FROM import_manifests im
+      WHERE im.community_id = ${tables.files.communityId}
+        AND im.status = 'previewed'
+        AND im.committed_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements_text(im.staged_file_ids) je(value)
+          WHERE je.value = CAST(${tables.files.id} AS text)
+        )
+    )`;
+  }
+  return sql`NOT EXISTS (
+    SELECT 1 FROM import_manifests im
+    WHERE im.community_id = ${tables.files.communityId}
+      AND im.status = 'previewed'
+      AND im.committed_at IS NULL
+      AND EXISTS (
+        SELECT 1 FROM json_each(im.staged_file_ids) je
+        WHERE je.value = ${tables.files.id}
+      )
+  )`;
+}
+
+function parseJsonColumnValue<T>(raw: unknown): T {
+  if (typeof raw === 'string') {
+    return JSON.parse(raw) as T;
+  }
+  return raw as T;
 }
 
 /**
@@ -88,6 +134,7 @@ export function buildUnreferencedFilesDelete(
         .where(
           and(
             inArray(tables.files.id, chunk),
+            notStagedInPreviewedImportManifest(connection, tables),
             notExists(
               executor
                 .select({ id: tables.attachments.id })
@@ -110,6 +157,12 @@ export function buildUnreferencedFilesDelete(
                 .select({ fileId: communityMedia.fileId })
                 .from(communityMedia)
                 .where(eq(communityMedia.fileId, tables.files.id))
+            ),
+            notExists(
+              executor
+                .select({ id: tables.importManifests.id })
+                .from(tables.importManifests)
+                .where(eq(tables.importManifests.sourceFileId, tables.files.id))
             )
           )
         )
@@ -212,6 +265,12 @@ export function buildOwnerUnreferencedFilesDelete(
               .select({ fileId: communityMedia.fileId })
               .from(communityMedia)
               .where(eq(communityMedia.fileId, tables.files.id))
+          ),
+          notExists(
+            executor
+              .select({ id: tables.importManifests.id })
+              .from(tables.importManifests)
+              .where(eq(tables.importManifests.sourceFileId, tables.files.id))
           )
         )
       )
@@ -334,6 +393,13 @@ export interface SweepResult {
   subrequests: number;
 }
 
+export interface ExpiredImportPreviewSweepResult {
+  expiredCount: number;
+  deletedBytesCount: number;
+  failedBytesCount: number;
+  subrequests: number;
+}
+
 export interface MediaCleanupCoordinatorOptions {
   /** Content-free operator channel; never receives content or URLs. */
   log?: (line: string) => void;
@@ -390,15 +456,13 @@ export class MediaCleanupCoordinator {
 
   /** Delete bytes for files whose `files` rows were removed in a commit. */
   async deleteFilesBestEffort(
-    files: ReadonlyArray<FileByteCleanup>
+    files: ReadonlyArray<FileByteCleanup>,
+    reason: MediaCleanupReason = 'file_deleted'
   ): Promise<{ deletedCount: number; failedCount: number }> {
     let deletedCount = 0;
     let failedCount = 0;
     for (const file of files) {
-      const ok = await this.deleteStorageBestEffort(
-        file.storageKey,
-        'file_deleted'
-      );
+      const ok = await this.deleteStorageBestEffort(file.storageKey, reason);
       if (ok) deletedCount++;
       else failedCount++;
     }
@@ -430,6 +494,7 @@ export class MediaCleanupCoordinator {
     const noReferences = (executor: typeof db, fileId: string) =>
       and(
         eq(tables.files.id, fileId),
+        notStagedInPreviewedImportManifest(this.connection, tables),
         notExists(
           executor
             .select({ id: tables.attachments.id })
@@ -449,10 +514,17 @@ export class MediaCleanupCoordinator {
             .select({ fileId: communityMedia.fileId })
             .from(communityMedia)
             .where(eq(communityMedia.fileId, tables.files.id))
+        ),
+        notExists(
+          executor
+            .select({ id: tables.importManifests.id })
+            .from(tables.importManifests)
+            .where(eq(tables.importManifests.sourceFileId, tables.files.id))
         )
       );
 
     const conditions = [
+      notStagedInPreviewedImportManifest(this.connection, tables),
       notExists(
         db
           .select({ id: tables.attachments.id })
@@ -472,6 +544,12 @@ export class MediaCleanupCoordinator {
           .select({ fileId: communityMedia.fileId })
           .from(communityMedia)
           .where(eq(communityMedia.fileId, tables.files.id))
+      ),
+      notExists(
+        db
+          .select({ id: tables.importManifests.id })
+          .from(tables.importManifests)
+          .where(eq(tables.importManifests.sourceFileId, tables.files.id))
       ),
     ];
 
@@ -545,6 +623,635 @@ export class MediaCleanupCoordinator {
   }
 
   /**
+   * Auto-discard abandoned `'previewed'` import manifests older than the 7-day
+   * TTL, purging staged media rows/bytes, clearing normalized row payloads, and
+   * marking unreferenced source CSV rows inactive so their bytes can be
+   * reclaimed immediately (or by `sweepOrphanObjects` if deferred).
+   */
+  async sweepExpiredImportPreviews(
+    opts: {
+      olderThan?: Date;
+      limit?: number;
+      budget?: { remaining: number };
+    } = {}
+  ): Promise<ExpiredImportPreviewSweepResult> {
+    if (await this.orphanSweepPaused()) {
+      this.log('media cleanup: orphan sweep hold; sweep skipped');
+      return {
+        expiredCount: 0,
+        deletedBytesCount: 0,
+        failedBytesCount: 0,
+        subrequests: 0,
+      };
+    }
+
+    return this.runExpiredImportPreviewsSweep(opts);
+  }
+
+  private async runExpiredImportPreviewsSweep(
+    opts: {
+      olderThan?: Date;
+      limit?: number;
+      budget?: { remaining: number };
+    } = {}
+  ): Promise<ExpiredImportPreviewSweepResult> {
+    if (opts.budget && opts.budget.remaining <= 0) {
+      return {
+        expiredCount: 0,
+        deletedBytesCount: 0,
+        failedBytesCount: 0,
+        subrequests: 0,
+      };
+    }
+
+    const tables = tablesFor(this.connection);
+    const communityMedia =
+      dialectOf(this.connection) === 'postgresql'
+        ? communityMediaPg
+        : communityMediaSqlite;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = this.connection as any;
+    const isD1 = typeof db?.batch === 'function';
+    const isPg = dialectOf(this.connection) === 'postgresql';
+    const nowDate = (this.options.now ?? (() => new Date()))();
+    const cutoffMs = (
+      opts.olderThan ?? new Date(nowDate.getTime() - IMPORT_PREVIEW_TTL_MS)
+    ).getTime();
+    const limit = opts.limit ?? 20;
+
+    const sourceCleanupWhere = (
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      executor: any,
+      communityId: number,
+      manifestId: number,
+      sourceFileId: string
+    ) =>
+      and(
+        eq(tables.files.id, sourceFileId),
+        eq(tables.files.communityId, communityId),
+        notExists(
+          executor
+            .select({ id: tables.importManifests.id })
+            .from(tables.importManifests)
+            .where(
+              and(
+                eq(tables.importManifests.sourceFileId, tables.files.id),
+                ne(tables.importManifests.id, manifestId),
+                inArray(tables.importManifests.status, [
+                  'previewed',
+                  'committed',
+                ])
+              )
+            )
+        ),
+        notExists(
+          executor
+            .select({ id: tables.attachments.id })
+            .from(tables.attachments)
+            .where(eq(tables.attachments.fileId, tables.files.id))
+        ),
+        notExists(
+          executor
+            .select({ communityId: tables.communityMapConfigs.communityId })
+            .from(tables.communityMapConfigs)
+            .where(
+              eq(tables.communityMapConfigs.staticMapFileId, tables.files.id)
+            )
+        ),
+        notExists(
+          executor
+            .select({ fileId: communityMedia.fileId })
+            .from(communityMedia)
+            .where(eq(communityMedia.fileId, tables.files.id))
+        )
+      );
+
+    const candidates = (await db
+      .select({
+        id: tables.importManifests.id,
+        communityId: tables.importManifests.communityId,
+        sourceFileId: tables.importManifests.sourceFileId,
+        stagedFileIds: tables.importManifests.stagedFileIds,
+        normalizedRows: tables.importManifests.normalizedRows,
+      })
+      .from(tables.importManifests)
+      .where(
+        and(
+          eq(tables.importManifests.status, 'previewed'),
+          isNull(tables.importManifests.committedAt),
+          lte(tables.importManifests.createdAt, cutoffMs)
+        )
+      )
+      .orderBy(
+        asc(tables.importManifests.createdAt),
+        asc(tables.importManifests.id)
+      )
+      .limit(limit)) as Array<{
+      id: number;
+      communityId: number;
+      sourceFileId: string;
+      stagedFileIds: string[] | string;
+      normalizedRows: StoredNormalizedImportData | string;
+    }>;
+
+    if (candidates.length === 0) {
+      return {
+        expiredCount: 0,
+        deletedBytesCount: 0,
+        failedBytesCount: 0,
+        subrequests: 0,
+      };
+    }
+
+    let subrequestsUsed = 1;
+    if (opts.budget) {
+      opts.budget.remaining -= 1;
+    }
+
+    let expiredCount = 0;
+    let deletedBytesCount = 0;
+    let failedBytesCount = 0;
+
+    for (const candidate of candidates) {
+      if (opts.budget && opts.budget.remaining <= 0) {
+        break;
+      }
+
+      const manifestId = Number(candidate.id);
+      const communityId = Number(candidate.communityId);
+      const sourceFileId = candidate.sourceFileId;
+      const stagedIds = Array.from(
+        new Set(parseJsonColumnValue<string[]>(candidate.stagedFileIds))
+      ).filter((id) => id && id !== sourceFileId);
+      const parsedNormalized = parseJsonColumnValue<StoredNormalizedImportData>(
+        candidate.normalizedRows
+      );
+      const clearedNormalized = clearNormalizedImportData(parsedNormalized);
+      const audit = validateContentFreeAuditEntry({
+        communityId,
+        actorId: null,
+        action: 'import.discard',
+        resourceType: 'import_manifest',
+        resourceIds: [manifestId],
+        outcome: 'success',
+        ipAddress: null,
+        userAgent: null,
+      });
+
+      if (opts.budget) {
+        opts.budget.remaining -= 1;
+      }
+      subrequestsUsed += 1;
+
+      let removedFiles: FileByteCleanup[] | null = null;
+
+      if (isD1) {
+        const nowMs = nowDate.getTime();
+        const expiredPreviewGuard = sql`EXISTS (
+          SELECT 1 FROM import_manifests im
+          WHERE im.id = ${manifestId}
+            AND im.community_id = ${communityId}
+            AND im.status = 'previewed'
+            AND im.committed_at IS NULL
+            AND im.created_at <= ${cutoffMs}
+        )`;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const statements: any[] = [];
+        const deleteBatchIndexes: number[] = [];
+        for (let i = 0; i < stagedIds.length; i += 70) {
+          const chunk = stagedIds.slice(i, i + 70);
+          deleteBatchIndexes.push(statements.length);
+          statements.push(
+            db
+              .delete(tables.files)
+              .where(
+                and(
+                  inArray(tables.files.id, chunk),
+                  eq(tables.files.communityId, communityId),
+                  eq(tables.files.isActive, false),
+                  expiredPreviewGuard,
+                  notExists(
+                    db
+                      .select({ id: tables.attachments.id })
+                      .from(tables.attachments)
+                      .where(eq(tables.attachments.fileId, tables.files.id))
+                  ),
+                  notExists(
+                    db
+                      .select({ id: tables.importManifests.id })
+                      .from(tables.importManifests)
+                      .where(
+                        eq(tables.importManifests.sourceFileId, tables.files.id)
+                      )
+                  )
+                )
+              )
+              .returning({
+                id: tables.files.id,
+                storageKey: tables.files.storageKey,
+                path: tables.files.path,
+              })
+          );
+        }
+
+        const sourceFileUpdateIdx = statements.length;
+        statements.push(
+          db
+            .update(tables.files)
+            .set({ isActive: false, updatedAt: nowDate })
+            .where(
+              and(
+                sourceCleanupWhere(db, communityId, manifestId, sourceFileId),
+                expiredPreviewGuard
+              )
+            )
+            .returning({
+              id: tables.files.id,
+              storageKey: tables.files.storageKey,
+              path: tables.files.path,
+            })
+        );
+
+        statements.push(
+          db.insert(tables.auditEntries).select(
+            db
+              .select({
+                id: sql`NULL`.as('id'),
+                communityId: tables.importManifests.communityId,
+                actorId: sql`NULL`.as('actor_id'),
+                action: sql`${audit.action}`.as('action'),
+                resourceType: sql`${audit.resourceType}`.as('resource_type'),
+                resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+                  'resource_ids'
+                ),
+                outcome: sql`${audit.outcome}`.as('outcome'),
+                ipAddress: sql`NULL`.as('ip_address'),
+                userAgent: sql`NULL`.as('user_agent'),
+                createdAt: sql`${nowMs}`.as('created_at'),
+              })
+              .from(tables.importManifests)
+              .where(
+                and(
+                  eq(tables.importManifests.id, manifestId),
+                  eq(tables.importManifests.communityId, communityId),
+                  eq(tables.importManifests.status, 'previewed'),
+                  isNull(tables.importManifests.committedAt),
+                  lte(tables.importManifests.createdAt, cutoffMs)
+                )
+              )
+          )
+        );
+
+        const updateIdx = statements.length;
+        statements.push(
+          db
+            .update(tables.importManifests)
+            .set({
+              status: 'discarded',
+              normalizedRows: clearedNormalized as unknown as Record<
+                string,
+                unknown
+              >,
+            })
+            .where(
+              and(
+                eq(tables.importManifests.id, manifestId),
+                eq(tables.importManifests.communityId, communityId),
+                eq(tables.importManifests.status, 'previewed'),
+                isNull(tables.importManifests.committedAt),
+                lte(tables.importManifests.createdAt, cutoffMs)
+              )
+            )
+            .returning({ id: tables.importManifests.id })
+        );
+
+        const results = await db.batch(statements);
+        const updatedRows = results[updateIdx];
+        if (Array.isArray(updatedRows) && updatedRows.length > 0) {
+          const deletedRows: Array<{
+            id: string;
+            storageKey?: string | null;
+            storage_key?: string | null;
+            path: string;
+          }> = [];
+          for (const idx of [...deleteBatchIndexes, sourceFileUpdateIdx]) {
+            if (Array.isArray(results[idx])) {
+              deletedRows.push(...results[idx]);
+            }
+          }
+          removedFiles = toFileByteCleanups(deletedRows);
+        }
+      } else if (isPg) {
+        removedFiles = await db.transaction(async (tx: typeof db) => {
+          const [lockedManifest] = (await tx
+            .select({
+              id: tables.importManifests.id,
+              status: tables.importManifests.status,
+              committedAt: tables.importManifests.committedAt,
+              createdAt: tables.importManifests.createdAt,
+              sourceFileId: tables.importManifests.sourceFileId,
+              stagedFileIds: tables.importManifests.stagedFileIds,
+              normalizedRows: tables.importManifests.normalizedRows,
+            })
+            .from(tables.importManifests)
+            .where(
+              and(
+                eq(tables.importManifests.id, manifestId),
+                eq(tables.importManifests.communityId, communityId)
+              )
+            )
+            .for('update')) as Array<{
+            id: number;
+            status: string;
+            committedAt: number | null;
+            createdAt: number;
+            sourceFileId: string;
+            stagedFileIds: string[] | string;
+            normalizedRows: StoredNormalizedImportData | string;
+          }>;
+          if (
+            !lockedManifest ||
+            lockedManifest.status !== 'previewed' ||
+            lockedManifest.committedAt !== null ||
+            Number(lockedManifest.createdAt) > cutoffMs
+          ) {
+            return null;
+          }
+
+          const liveStagedIds = Array.from(
+            new Set(
+              parseJsonColumnValue<string[]>(lockedManifest.stagedFileIds)
+            )
+          ).filter((id) => id && id !== lockedManifest.sourceFileId);
+          const sortedAllFileIds = Array.from(
+            new Set([lockedManifest.sourceFileId, ...liveStagedIds])
+          ).sort();
+          const lockedFileIds = await lockFileRowsForCleanup(
+            tx,
+            this.connection,
+            sortedAllFileIds
+          );
+          const lockedStagedIds = lockedFileIds.filter(
+            (id) => id !== lockedManifest.sourceFileId
+          );
+          const liveCleared = clearNormalizedImportData(
+            parseJsonColumnValue<StoredNormalizedImportData>(
+              lockedManifest.normalizedRows
+            )
+          );
+
+          const updatedRows = await tx
+            .update(tables.importManifests)
+            .set({
+              status: 'discarded',
+              normalizedRows: liveCleared as unknown as Record<string, unknown>,
+            })
+            .where(
+              and(
+                eq(tables.importManifests.id, manifestId),
+                eq(tables.importManifests.communityId, communityId),
+                eq(tables.importManifests.status, 'previewed'),
+                isNull(tables.importManifests.committedAt),
+                lte(tables.importManifests.createdAt, cutoffMs)
+              )
+            )
+            .returning({ id: tables.importManifests.id });
+          if (!Array.isArray(updatedRows) || updatedRows.length === 0) {
+            return null;
+          }
+
+          const deletedRows: Array<{
+            id: string;
+            storageKey: string | null;
+            path: string;
+          }> = [];
+          for (let i = 0; i < lockedStagedIds.length; i += 80) {
+            const chunk = lockedStagedIds.slice(i, i + 80);
+            const deleted = await tx
+              .delete(tables.files)
+              .where(
+                and(
+                  inArray(tables.files.id, chunk),
+                  eq(tables.files.communityId, communityId),
+                  eq(tables.files.isActive, false),
+                  notExists(
+                    tx
+                      .select({ id: tables.attachments.id })
+                      .from(tables.attachments)
+                      .where(eq(tables.attachments.fileId, tables.files.id))
+                  ),
+                  notExists(
+                    tx
+                      .select({ id: tables.importManifests.id })
+                      .from(tables.importManifests)
+                      .where(
+                        eq(tables.importManifests.sourceFileId, tables.files.id)
+                      )
+                  )
+                )
+              )
+              .returning({
+                id: tables.files.id,
+                storageKey: tables.files.storageKey,
+                path: tables.files.path,
+              });
+            deletedRows.push(...deleted);
+          }
+
+          if (lockedFileIds.includes(lockedManifest.sourceFileId)) {
+            const cleanedSource = await tx
+              .update(tables.files)
+              .set({ isActive: false, updatedAt: nowDate })
+              .where(
+                sourceCleanupWhere(
+                  tx,
+                  communityId,
+                  manifestId,
+                  lockedManifest.sourceFileId
+                )
+              )
+              .returning({
+                id: tables.files.id,
+                storageKey: tables.files.storageKey,
+                path: tables.files.path,
+              });
+            deletedRows.push(...cleanedSource);
+          }
+
+          await tx.insert(tables.auditEntries).values({
+            ...audit,
+            createdAt: nowDate,
+          });
+
+          return toFileByteCleanups(deletedRows);
+        });
+      } else {
+        removedFiles = db.transaction((tx: typeof db) => {
+          const liveManifest = tx
+            .select({
+              id: tables.importManifests.id,
+              status: tables.importManifests.status,
+              committedAt: tables.importManifests.committedAt,
+              createdAt: tables.importManifests.createdAt,
+              sourceFileId: tables.importManifests.sourceFileId,
+              stagedFileIds: tables.importManifests.stagedFileIds,
+              normalizedRows: tables.importManifests.normalizedRows,
+            })
+            .from(tables.importManifests)
+            .where(
+              and(
+                eq(tables.importManifests.id, manifestId),
+                eq(tables.importManifests.communityId, communityId)
+              )
+            )
+            .limit(1)
+            .all()[0] as
+            | {
+                id: number;
+                status: string;
+                committedAt: number | null;
+                createdAt: number;
+                sourceFileId: string;
+                stagedFileIds: string[] | string;
+                normalizedRows: StoredNormalizedImportData | string;
+              }
+            | undefined;
+
+          if (
+            !liveManifest ||
+            liveManifest.status !== 'previewed' ||
+            liveManifest.committedAt !== null ||
+            Number(liveManifest.createdAt) > cutoffMs
+          ) {
+            return null;
+          }
+
+          const liveStagedIds = Array.from(
+            new Set(parseJsonColumnValue<string[]>(liveManifest.stagedFileIds))
+          ).filter((id) => id && id !== liveManifest.sourceFileId);
+          const liveCleared = clearNormalizedImportData(
+            parseJsonColumnValue<StoredNormalizedImportData>(
+              liveManifest.normalizedRows
+            )
+          );
+
+          const updatedRows = tx
+            .update(tables.importManifests)
+            .set({
+              status: 'discarded',
+              normalizedRows: liveCleared as unknown as Record<string, unknown>,
+            })
+            .where(
+              and(
+                eq(tables.importManifests.id, manifestId),
+                eq(tables.importManifests.communityId, communityId),
+                eq(tables.importManifests.status, 'previewed'),
+                isNull(tables.importManifests.committedAt),
+                lte(tables.importManifests.createdAt, cutoffMs)
+              )
+            )
+            .returning({ id: tables.importManifests.id })
+            .all();
+          if (updatedRows.length === 0) return null;
+
+          const deletedRows: Array<{
+            id: string;
+            storageKey: string | null;
+            path: string;
+          }> = [];
+          for (let i = 0; i < liveStagedIds.length; i += 80) {
+            const chunk = liveStagedIds.slice(i, i + 80);
+            const deleted = tx
+              .delete(tables.files)
+              .where(
+                and(
+                  inArray(tables.files.id, chunk),
+                  eq(tables.files.communityId, communityId),
+                  eq(tables.files.isActive, false),
+                  notExists(
+                    tx
+                      .select({ id: tables.attachments.id })
+                      .from(tables.attachments)
+                      .where(eq(tables.attachments.fileId, tables.files.id))
+                  ),
+                  notExists(
+                    tx
+                      .select({ id: tables.importManifests.id })
+                      .from(tables.importManifests)
+                      .where(
+                        eq(tables.importManifests.sourceFileId, tables.files.id)
+                      )
+                  )
+                )
+              )
+              .returning({
+                id: tables.files.id,
+                storageKey: tables.files.storageKey,
+                path: tables.files.path,
+              })
+              .all();
+            deletedRows.push(...deleted);
+          }
+
+          const cleanedSource = tx
+            .update(tables.files)
+            .set({ isActive: false, updatedAt: nowDate })
+            .where(
+              sourceCleanupWhere(
+                tx,
+                communityId,
+                manifestId,
+                liveManifest.sourceFileId
+              )
+            )
+            .returning({
+              id: tables.files.id,
+              storageKey: tables.files.storageKey,
+              path: tables.files.path,
+            })
+            .all();
+          deletedRows.push(...cleanedSource);
+
+          tx.insert(tables.auditEntries)
+            .values({
+              ...audit,
+              createdAt: nowDate,
+            })
+            .run();
+
+          return toFileByteCleanups(deletedRows);
+        });
+      }
+
+      if (!removedFiles) continue;
+      expiredCount += 1;
+
+      for (const file of removedFiles) {
+        if (opts.budget && opts.budget.remaining <= 0) {
+          break;
+        }
+        if (opts.budget) {
+          opts.budget.remaining -= 1;
+        }
+        subrequestsUsed += 1;
+        const ok = await this.deleteStorageBestEffort(
+          file.storageKey,
+          'import_discarded'
+        );
+        if (ok) deletedBytesCount += 1;
+        else failedBytesCount += 1;
+      }
+    }
+
+    return {
+      expiredCount,
+      deletedBytesCount,
+      failedBytesCount,
+      subrequests: subrequestsUsed,
+    };
+  }
+
+  /**
    * Restart-safe orphan sweeper for objects whose `files` row is gone but whose
    * bytes remain (storage delete failed, or the process died between commit and
    * delete). Only objects older than the grace window are considered; a
@@ -592,14 +1299,28 @@ export class MediaCleanupCoordinator {
       this.options.subrequestBudget ??
       ORPHAN_SWEEP_SUBREQUEST_BUDGET;
     const budget = { remaining: initialBudget };
+
+    let expiredDeletedBytes = 0;
+    let expiredFailedBytes = 0;
+    try {
+      const expired = await this.runExpiredImportPreviewsSweep({
+        olderThan: new Date(now().getTime() - IMPORT_PREVIEW_TTL_MS),
+        budget,
+      });
+      expiredDeletedBytes = expired.deletedBytesCount;
+      expiredFailedBytes = expired.failedBytesCount;
+    } catch {
+      this.log('media cleanup: expired import preview sweep failed');
+    }
+
     const resumable = Boolean(
       this.storage.getSystemObject && this.storage.putSystemObject
     );
     const cursor = resumable ? await this.readSweepCursor() : null;
 
     let scanned = 0;
-    let deletedCount = 0;
-    let failedCount = 0;
+    let deletedCount = expiredDeletedBytes;
+    let failedCount = expiredFailedBytes;
 
     // Resume prefix order: the cursor's prefix, then the rest, wrapping to the
     // start once every prefix is done.
@@ -876,6 +1597,10 @@ export class MediaCleanupCoordinator {
     keys: ReadonlyArray<string>
   ): Promise<Set<string>> {
     const tables = tablesFor(this.connection);
+    const communityMedia =
+      dialectOf(this.connection) === 'postgresql'
+        ? communityMediaPg
+        : communityMediaSqlite;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = this.connection as any;
     const referenced = new Set<string>();
@@ -888,9 +1613,54 @@ export class MediaCleanupCoordinator {
         })
         .from(tables.files)
         .where(
-          or(
-            inArray(tables.files.storageKey, chunk),
-            inArray(tables.files.path, chunk)
+          and(
+            or(
+              inArray(tables.files.storageKey, chunk),
+              inArray(tables.files.path, chunk)
+            ),
+            // Keep bytes protected unless the row is an inactive source CSV
+            // whose only remaining reference is a discarded or failed manifest
+            // (the composite FK prevents deleting the `files` row, so the
+            // sweeper reclaims those bytes while protecting active files and
+            // previewed/committed manifests).
+            or(
+              eq(tables.files.isActive, true),
+              sql`NOT EXISTS (
+                SELECT 1 FROM import_manifests im
+                WHERE im.source_file_id = ${tables.files.id}
+                  AND im.status IN ('discarded', 'failed')
+              )`,
+              sql`EXISTS (
+                SELECT 1 FROM import_manifests im
+                WHERE im.source_file_id = ${tables.files.id}
+                  AND im.status IN ('previewed', 'committed')
+              )`,
+              exists(
+                db
+                  .select({ id: tables.attachments.id })
+                  .from(tables.attachments)
+                  .where(eq(tables.attachments.fileId, tables.files.id))
+              ),
+              exists(
+                db
+                  .select({
+                    communityId: tables.communityMapConfigs.communityId,
+                  })
+                  .from(tables.communityMapConfigs)
+                  .where(
+                    eq(
+                      tables.communityMapConfigs.staticMapFileId,
+                      tables.files.id
+                    )
+                  )
+              ),
+              exists(
+                db
+                  .select({ fileId: communityMedia.fileId })
+                  .from(communityMedia)
+                  .where(eq(communityMedia.fileId, tables.files.id))
+              )
+            )
           )
         )) as Array<{ storageKey: string | null; path: string }>;
       for (const row of rows) {

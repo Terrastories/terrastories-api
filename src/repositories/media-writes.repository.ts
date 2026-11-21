@@ -1424,6 +1424,14 @@ export class MediaWritesRepository {
             .select({ fileId: this.communityMedia.fileId })
             .from(this.communityMedia)
             .where(eq(this.communityMedia.fileId, this.tables.files.id))
+        ),
+        notExists(
+          executor
+            .select({ id: this.tables.importManifests.id })
+            .from(this.tables.importManifests)
+            .where(
+              eq(this.tables.importManifests.sourceFileId, this.tables.files.id)
+            )
         )
       );
 

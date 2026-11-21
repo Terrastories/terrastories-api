@@ -4,12 +4,14 @@ import { ExploreAdapterRepository } from './repositories/explore-adapter.reposit
 import { CommunityReadsRepository } from './repositories/community-reads.repository.js';
 import { CommunityWritesRepository } from './repositories/community-writes.repository.js';
 import { MediaWritesRepository } from './repositories/media-writes.repository.js';
+import { ImportsRepository } from './repositories/imports.repository.js';
 import { PublicCommunitiesRepository } from './repositories/public-communities.repository.js';
 import { StoryWritesRepository } from './repositories/story-writes.repository.js';
 import { UserManagementRepository } from './repositories/user-management.repository.js';
 import { registerCommunityReadRoutes } from './routes/community-reads.hono.js';
 import { registerCommunityWriteRoutes } from './routes/community-writes.hono.js';
 import { registerMediaRoutes } from './routes/media-writes.hono.js';
+import { registerImportRoutes } from './routes/imports.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
@@ -88,6 +90,8 @@ export interface FoundationOptions {
   mediaCleanup?: MediaCleanupCoordinator;
   /** Optional local CA fingerprint surfaced once on field-kit bootstrap (§7). */
   fieldKitCaFingerprint?: string;
+  /** Enforce D1 commit-plan budgets and 1/UTC-day import cap even outside D1. */
+  enforceD1Budget?: boolean;
 }
 const preloginSchema = z
   .object({
@@ -536,6 +540,13 @@ export function createHonoApp(options: FoundationOptions) {
     storage: options.storage,
     cleanup: mediaCleanup,
     publicOrigin: configuredOrigin,
+  });
+  registerImportRoutes(app, {
+    repository: new ImportsRepository(options.repository.connection),
+    storage: options.storage,
+    cleanup: mediaCleanup,
+    now,
+    enforceD1Budget: options.enforceD1Budget ?? options.isWorkers,
   });
   registerUserManagementRoutes(app, {
     repository: new UserManagementRepository(options.repository.connection),

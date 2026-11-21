@@ -707,6 +707,12 @@ function verifySqliteSchema(sqlite: Database.Database): void {
     ['community_id', 'file_id'],
     'CASCADE'
   );
+  compositeTenantFk(
+    'import_manifests',
+    'files',
+    ['community_id', 'source_file_id'],
+    'NO ACTION'
+  );
 
   // #189: additive speaker fields, composite birthplace FK, and non-unique
   // story-edge lookup indexes.
@@ -2349,6 +2355,7 @@ const rebuiltTables = [
   'login_codes',
   'claim_tokens',
   'installation_bootstrap',
+  'import_manifests',
 ] as const;
 
 /**
@@ -2481,7 +2488,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0014_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0015_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2878,6 +2885,7 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0012_auth_throttle_and_session_lifetimes.sql',
       '0013_login_codes_and_claim_tokens.sql',
       '0014_session_admin_code_step_up_and_login_code_idx.sql',
+      '0015_import_manifests.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')

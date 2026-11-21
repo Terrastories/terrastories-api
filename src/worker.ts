@@ -25,6 +25,7 @@ import {
   V2RuntimeConfigError,
   v2RuntimeModeNotice,
 } from './config/v2-runtime.js';
+import { CommunitySovereigntyRepository } from './repositories/community-sovereignty.repository.js';
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
 import { CommunityExportService } from './services/community-export.service.js';
 import { runMaintenanceSweeps } from './services/maintenance-sweeps.js';
@@ -356,9 +357,17 @@ export function createWorker() {
           const scheduledNow = () =>
             new Date(_controller.scheduledTime || Date.now());
           const r2Storage = createR2Storage(env.MEDIA);
-          // The minute tick is dedicated to export expiry. Keep the larger
+          // The minute tick handles notices and export expiry. Keep the larger
           // orphan/metadata sweep hourly and within its existing budget.
           if (_controller.cron === '* * * * *') {
+            try {
+              await new CommunitySovereigntyRepository(db).applyDueWithdrawals(
+                scheduledNow()
+              );
+            } catch {
+              // eslint-disable-next-line no-console -- content-free operator channel
+              console.warn('maintenance: sovereignty notice sweep failed');
+            }
             try {
               await new CommunityExportService(
                 new CommunityExportRepository(db),
@@ -400,6 +409,7 @@ export function createWorker() {
             // deletes, finalize), keeping the combined invocation below 50.
             // The dedicated minute tick handles the larger export batch.
             exportSweepLimit: 1,
+            sovereigntyNotices: false,
           });
         })()
       );

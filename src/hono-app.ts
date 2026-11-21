@@ -17,6 +17,8 @@ import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
 import { registerCommunityExportRoutes } from './routes/community-export.hono.js';
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
+import { registerCommunitySovereigntyRoutes } from './routes/community-sovereignty.hono.js';
+import { CommunitySovereigntyRepository } from './repositories/community-sovereignty.repository.js';
 import { registerCommunityAuditRoutes } from './routes/community-audit.hono.js';
 import { CommunityAuditRepository } from './repositories/community-audit.repository.js';
 import { registerAdminRoutes } from './routes/admin.hono.js';
@@ -246,6 +248,9 @@ export function createHonoApp(options: FoundationOptions) {
       trustedProxyHeader: options.trustedProxyHeader,
       remoteAddress: options.clientAddress ? options.clientAddress(c) : null,
     });
+  const sovereigntyRepository = new CommunitySovereigntyRepository(
+    options.repository.connection
+  );
   app.use('*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');
@@ -261,6 +266,13 @@ export function createHonoApp(options: FoundationOptions) {
       )
         return c.json({ error: 'Forbidden' }, 403);
     }
+    // Resolve persisted notice deadlines before any public or authenticated read.
+    // A bounded backlog fails closed until subsequent requests/ticks drain it.
+    if (
+      c.req.path !== '/health' &&
+      !(await sovereigntyRepository.applyDueWithdrawals(now()))
+    )
+      return c.json({ error: 'Service unavailable' }, 503);
     await next();
   });
   app.onError(() =>
@@ -566,6 +578,13 @@ export function createHonoApp(options: FoundationOptions) {
     repository: new CommunityExportRepository(options.repository.connection),
     storage: options.storage,
     isWorkers: options.isWorkers,
+    now,
+  });
+  registerCommunitySovereigntyRoutes(app, {
+    repository: sovereigntyRepository,
+    authRepository,
+    serverSecret: options.serverSecret,
+    ipFor,
     now,
   });
   registerCommunityAuditRoutes(app, {

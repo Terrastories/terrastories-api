@@ -456,14 +456,18 @@ export class HonoAuthService {
   /**
    * The authority gate a login candidate must still pass (§6.2, §7): an active
    * canonical-V2 account whose community is active, or an own-community
-   * administrator of a disabled community, or a null-community `super_admin`.
+   * administrator or designated steward of a disabled community, or a
+   * null-community `super_admin`.
    */
   private static allowed(account: AuthAccount): boolean {
     if (!account.isActive) return false;
     if (!parseV2Role(account.role)) return false;
     if (account.communityId === null) return account.role === 'super_admin';
     if (account.communityIsActive === true) return true;
-    return account.communityIsActive === false && account.role === 'admin';
+    return (
+      account.communityIsActive === false &&
+      (account.role === 'admin' || account.isDesignatedSteward)
+    );
   }
 
   private static userOf(account: AuthAccount): FoundationUser {

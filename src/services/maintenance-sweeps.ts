@@ -13,6 +13,7 @@ import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { scrubExpiredAuditNetworkMetadata } from '../repositories/audit-entry.repository.js';
 import { HonoAuthRepository } from '../repositories/hono-auth.repository.js';
+import { CommunitySovereigntyRepository } from '../repositories/community-sovereignty.repository.js';
 import { CommunityExportRepository } from '../repositories/community-export.repository.js';
 import { CommunityExportService } from './community-export.service.js';
 import type { FoundationStorage } from './hono-foundation.service.js';
@@ -34,6 +35,8 @@ export interface RunMaintenanceSweepsOptions {
   storage?: FoundationStorage;
   /** Optional batch limit for expired export cleanup. */
   exportSweepLimit?: number;
+  /** Workers uses its dedicated minute tick to preserve the hourly R2 budget. */
+  sovereigntyNotices?: boolean;
 }
 
 /**
@@ -56,6 +59,15 @@ export async function runMaintenanceSweeps(
   const nowDate = now();
   const nowMs = nowDate.getTime();
 
+  if (options.sovereigntyNotices !== false) {
+    try {
+      await new CommunitySovereigntyRepository(database).applyDueWithdrawals(
+        nowDate
+      );
+    } catch {
+      log('maintenance: sovereignty notice sweep failed');
+    }
+  }
   try {
     await scrubExpiredAuditNetworkMetadata(database, { now: nowDate });
   } catch {

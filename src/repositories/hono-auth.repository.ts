@@ -49,6 +49,7 @@ export interface AuthAccount {
   role: string;
   isActive: boolean;
   communityIsActive: boolean | null;
+  isDesignatedSteward: boolean;
   email: string;
   username: string | null;
   displayName: string | null;
@@ -65,6 +66,7 @@ interface RawAuthAccount {
   role: string;
   isActive: number | boolean;
   communityIsActive: number | boolean | null;
+  isDesignatedSteward: number | boolean;
   email: string;
   username: string | null;
   displayName: string | null;
@@ -112,6 +114,7 @@ const AUTH_COLUMNS = (tables: ReturnType<typeof tablesFor>) => ({
   role: tables.users.role,
   isActive: tables.users.isActive,
   communityIsActive: tables.communities.isActive,
+  isDesignatedSteward: sql<boolean>`exists (select 1 from ${tables.communityStewards} cs where cs.community_id = ${tables.users.communityId} and cs.user_id = ${tables.users.id})`,
   email: tables.users.email,
   username: tables.users.username,
   displayName: tables.users.displayName,
@@ -195,6 +198,7 @@ export class HonoAuthRepository {
       ...row,
       isActive: toFlag(row.isActive) === true,
       communityIsActive: toFlag(row.communityIsActive),
+      isDesignatedSteward: toFlag(row.isDesignatedSteward) === true,
     }));
   }
 
@@ -217,7 +221,13 @@ export class HonoAuthRepository {
       ...row,
       isActive: toFlag(row.isActive) === true,
       communityIsActive: toFlag(row.communityIsActive),
+      isDesignatedSteward: toFlag(row.isDesignatedSteward) === true,
     };
+  }
+
+  /** Clear the cached prelogin population mix on community lifecycle changes. */
+  invalidatePreloginMixCache(): void {
+    this.mixCache = null;
   }
 
   /** One community slug → id lookup for the login/prelogin locator. */

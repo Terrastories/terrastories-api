@@ -127,6 +127,13 @@
       "when": 1795521600000,
       "tag": "0017_community_export_jobs_and_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1795608000000,
+      "tag": "0018_community_sovereignty",
+      "breakpoints": true
     }
   ]
 }

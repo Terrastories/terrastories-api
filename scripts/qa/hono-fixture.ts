@@ -102,6 +102,12 @@ import {
   CommunityAuditEntrySchema,
   CommunityAuditEntriesListResponseSchema,
 } from '../../src/shared/schemas/community-audit.js';
+import {
+  CommunitySovereigntyStatusResponseSchema,
+  PutCommunityStewardResponseSchema,
+  CommunityWithdrawalResponseSchema,
+  CancelSovereigntyResponseSchema,
+} from '../../src/shared/schemas/community-sovereignty.js';
 import { EXPORT_TOKEN_TTL_MS } from '../../src/shared/export-policy.js';
 import { parseDeterministicZip } from '../../src/shared/utils/deterministic-zip.js';
 import { StreamingSha256 } from '../../src/shared/utils/sha256-stream.js';
@@ -429,6 +435,7 @@ export async function createFixture(
     auditEntries,
     communities,
     communityMapConfigs,
+    communitySovereigntyRequests,
     exportJobs,
     exportTokens,
     users,
@@ -7377,6 +7384,59 @@ export async function createFixture(
                     path: `/v2/community/audit-entries?communityId=${foreignCommunityId}`,
                     expected: 400,
                   },
+                  {
+                    name: 'read community sovereignty status',
+                    method: 'GET',
+                    path: '/v2/community/sovereignty',
+                    expected: 200,
+                    check: (body: unknown) => {
+                      const parsed =
+                        CommunitySovereigntyStatusResponseSchema.safeParse(
+                          body
+                        );
+                      return (
+                        parsed.success &&
+                        parsed.data.data.communityId === communityId &&
+                        parsed.data.data.status === 'active'
+                      );
+                    },
+                  },
+                  {
+                    name: 'designate community steward with password step-up',
+                    method: 'PUT',
+                    path: '/v2/community/steward',
+                    expected: 200,
+                    body: {
+                      stewardUserId: communityUserIds.member,
+                      currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+                    },
+                    check: (body: unknown) => {
+                      const parsed =
+                        PutCommunityStewardResponseSchema.safeParse(body);
+                      return (
+                        parsed.success &&
+                        parsed.data.data.steward?.userId ===
+                          communityUserIds.member
+                      );
+                    },
+                  },
+                  {
+                    name: 'clear community steward back to null',
+                    method: 'PUT',
+                    path: '/v2/community/steward',
+                    expected: 200,
+                    body: {
+                      stewardUserId: null,
+                      currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+                    },
+                    check: (body: unknown) => {
+                      const parsed =
+                        PutCommunityStewardResponseSchema.safeParse(body);
+                      return (
+                        parsed.success && parsed.data.data.steward === null
+                      );
+                    },
+                  },
                 ];
               })()
             : []),
@@ -10434,6 +10494,283 @@ export async function createFixture(
             path: '/v2/auth/logout',
             expected: 204,
             useSavedCookie: 'qaSysAdmin',
+          },
+        ],
+      },
+      {
+        persona: 'sovereignty',
+        steps: [
+          {
+            name: 'login system account before any steward designation',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: 'ts_session=' },
+            body: {
+              identifier: credentials.super_admin.email,
+              derivedKey: superAdminNewKey,
+            },
+          },
+          {
+            name: 'system privilege alone cannot withdraw a community',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 403,
+            saveCookieAs: 'sovSystem',
+            body: { communitySlug, currentDerivedKey: superAdminNewKey },
+          },
+          {
+            name: 'login community admin for sovereignty',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: loginBody(credentials.admin.email),
+            headers: { cookie: 'ts_session=' },
+          },
+          {
+            name: 'save acting admin sovereignty session',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 200,
+            saveCookieAs: 'sovAdmin',
+          },
+          {
+            name: 'designate null-community system account as steward',
+            method: 'PUT',
+            path: '/v2/community/steward',
+            expected: 200,
+            body: {
+              stewardUserId: communityUserIds.super_admin,
+              currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+            },
+            check: (body) => {
+              const parsed = PutCommunityStewardResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.steward?.sameCommunity === false
+              );
+            },
+          },
+          {
+            name: 'system steward must supply an explicit locator',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 400,
+            useSavedCookie: 'sovSystem',
+            body: { currentDerivedKey: superAdminNewKey },
+          },
+          {
+            name: 'system steward cannot target an undesignated community',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 403,
+            useSavedCookie: 'sovSystem',
+            body: {
+              communityId: foreignCommunityId,
+              currentDerivedKey: superAdminNewKey,
+            },
+          },
+          {
+            name: 'designated system steward starts a notice by explicit slug',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 202,
+            useSavedCookie: 'sovSystem',
+            body: { communitySlug, currentDerivedKey: superAdminNewKey },
+            check: (body) => {
+              const parsed = CommunityWithdrawalResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.communityId === communityId &&
+                parsed.data.data.request.state === 'notice' &&
+                parsed.data.data.status === 'active'
+              );
+            },
+          },
+          {
+            name: 'steward designation grants no sovereignty read access',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 403,
+            useSavedCookie: 'sovSystem',
+          },
+          {
+            name: 'replace system steward and cancel its pending notice',
+            method: 'PUT',
+            path: '/v2/community/steward',
+            expected: 200,
+            useSavedCookie: 'sovAdmin',
+            check: (body) => {
+              const parsed = PutCommunityStewardResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.steward?.userId === communityUserIds.member &&
+                parsed.data.data.cancelledRequestIds.length === 1
+              );
+            },
+            body: {
+              stewardUserId: communityUserIds.member,
+              currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+            },
+          },
+          {
+            name: 'login designated steward',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: loginBody(credentials.member.email),
+            headers: { cookie: 'ts_session=' },
+          },
+          {
+            name: 'steward withdrawal enters notice',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 202,
+            saveCookieAs: 'sovSteward',
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+            check: (body) => {
+              const parsed = CommunityWithdrawalResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.request.state === 'notice'
+              );
+            },
+          },
+          {
+            name: 'admin can see pending steward notice',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 200,
+            useSavedCookie: 'sovAdmin',
+            check: (body) => {
+              const parsed =
+                CommunitySovereigntyStatusResponseSchema.safeParse(body);
+              return (
+                parsed.success && parsed.data.data.pendingRequests.length === 1
+              );
+            },
+          },
+          {
+            name: 'admin cancels steward notice with step-up',
+            method: 'POST',
+            path: '/v2/community/sovereignty/cancel',
+            expected: 200,
+            useSavedCookie: 'sovAdmin',
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+            check: (body) => {
+              const parsed = CancelSovereigntyResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.cancelledRequests.length === 1 &&
+                parsed.data.data.cancelledRequests[0]?.state === 'cancelled'
+              );
+            },
+          },
+          {
+            name: 'admin withdrawal is immediate',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 200,
+            useSavedCookie: 'sovAdmin',
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+            check: (body) => {
+              const parsed = CommunityWithdrawalResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'disabled' &&
+                parsed.data.data.request.state === 'completed'
+              );
+            },
+          },
+          {
+            name: 'withdrawal invalidates steward member session',
+            method: 'GET',
+            path: '/v2/stories',
+            expected: 401,
+            useSavedCookie: 'sovSteward',
+          },
+          {
+            name: 'withdrawal invalidates historical public media URL',
+            method: 'GET',
+            path: `/v2/public/communities/${communitySlug}/media/${readableFileId}`,
+            expected: 404,
+          },
+          {
+            name: 'withdrawal immediately hides Explore detail',
+            method: 'GET',
+            path: `/explore/communities/${communitySlug}`,
+            expected: 404,
+          },
+          {
+            name: 'withdrawn admin reauthenticates',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: loginBody(credentials.admin.email),
+            headers: { cookie: 'ts_session=' },
+          },
+          {
+            name: 'withdrawn sovereignty remains reachable',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 200,
+            saveCookieAs: 'sovAdminAfter',
+            check: (body) => {
+              const parsed =
+                CommunitySovereigntyStatusResponseSchema.safeParse(body);
+              return parsed.success && parsed.data.data.status === 'disabled';
+            },
+          },
+
+          {
+            name: 'designated steward reauthenticates while withdrawn',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: 'ts_session=' },
+            body: loginBody(credentials.member.email),
+          },
+          {
+            name: 'withdrawn steward starts another notice',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 202,
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+          },
+          {
+            name: 'persisted notice takes effect on next read after downtime',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 200,
+            useSavedCookie: 'sovAdminAfter',
+            prepare: async () => {
+              const ms = Date.now();
+              await db
+                .update(communitySovereigntyRequests)
+                .set({
+                  requestedAt: ms - 8 * 86400000,
+                  noticeEndsAt: ms - 1000,
+                })
+                .where(
+                  and(
+                    eq(communitySovereigntyRequests.communityId, communityId),
+                    eq(communitySovereigntyRequests.state, 'notice')
+                  )
+                );
+            },
+            check: (body) => {
+              const parsed =
+                CommunitySovereigntyStatusResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.pendingRequests.length === 0 &&
+                parsed.data.data.recentRequests.some(
+                  (r) =>
+                    r.initiatedByRole === 'steward' && r.state === 'completed'
+                )
+              );
+            },
           },
         ],
       },

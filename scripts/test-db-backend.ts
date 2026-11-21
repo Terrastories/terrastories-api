@@ -2374,6 +2374,9 @@ const rebuiltTables = [
   'export_jobs',
   'export_tokens',
   'import_manifests',
+  'community_stewards',
+  'community_sovereignty_requests',
+  'community_archive_custody',
 ] as const;
 
 /**
@@ -2506,7 +2509,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0017_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0018_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2906,6 +2909,7 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0015_import_manifests.sql',
       '0016_communities_deprovisioned_at.sql',
       '0017_community_export_jobs_and_tokens.sql',
+      '0018_community_sovereignty.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')

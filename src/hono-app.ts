@@ -1,3 +1,5 @@
+import { CommunityErasureService } from './services/community-erasure.service.js';
+import type { ErasureRecordStore } from './services/erasure-record-store.js';
 import { sessionLifetime } from './shared/session-policy.js';
 import { registerExploreAdapter } from './explore-adapter.js';
 import { ExploreAdapterRepository } from './repositories/explore-adapter.repository.js';
@@ -17,6 +19,8 @@ import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
 import { registerCommunityExportRoutes } from './routes/community-export.hono.js';
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
+import { registerCommunitySovereigntyRoutes } from './routes/community-sovereignty.hono.js';
+import { CommunitySovereigntyRepository } from './repositories/community-sovereignty.repository.js';
 import { registerCommunityAuditRoutes } from './routes/community-audit.hono.js';
 import { CommunityAuditRepository } from './repositories/community-audit.repository.js';
 import { registerAdminRoutes } from './routes/admin.hono.js';
@@ -64,6 +68,7 @@ export type RequestHandler = (request: Request) => Promise<Response>;
 export interface FoundationOptions {
   repository: HonoFoundationRepository;
   storage: FoundationStorage;
+  erasureStore?: ErasureRecordStore;
   /**
    * Prelogin HMAC key (`AUTH_SERVER_SECRET`). Without it `POST
    * /v2/auth/prelogin` fails closed with 503 instead of answering with a
@@ -246,6 +251,9 @@ export function createHonoApp(options: FoundationOptions) {
       trustedProxyHeader: options.trustedProxyHeader,
       remoteAddress: options.clientAddress ? options.clientAddress(c) : null,
     });
+  const sovereigntyRepository = new CommunitySovereigntyRepository(
+    options.repository.connection
+  );
   app.use('*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');
@@ -261,6 +269,18 @@ export function createHonoApp(options: FoundationOptions) {
       )
         return c.json({ error: 'Forbidden' }, 403);
     }
+    // Resolve persisted notice deadlines before any public or authenticated read.
+    // A bounded backlog fails closed until subsequent requests/ticks drain it.
+    if (
+      c.req.path !== '/health' &&
+      !(await sovereigntyRepository.applyDueWithdrawals(now()))
+    )
+      return c.json({ error: 'Service unavailable' }, 503);
+    if (
+      c.req.path !== '/health' &&
+      !(await sovereigntyRepository.activateDueErasures(now()))
+    )
+      return c.json({ error: 'Service unavailable' }, 503);
     await next();
   });
   app.onError(() =>
@@ -373,6 +393,14 @@ export function createHonoApp(options: FoundationOptions) {
     if (!session) return c.json({ error: 'Unauthorized' }, 401);
     c.set('actor', session.user);
     c.set('sessionKind', session.kind);
+    if (
+      session.user.communityId !== null &&
+      !['/v2/community/sovereignty', '/v2/community/erasure'].includes(
+        c.req.path
+      ) &&
+      (await sovereigntyRepository.erasurePending(session.user.communityId))
+    )
+      return c.json({ error: 'Forbidden' }, 403);
     await next();
     if (
       c.res.status < 400 &&
@@ -566,6 +594,22 @@ export function createHonoApp(options: FoundationOptions) {
     repository: new CommunityExportRepository(options.repository.connection),
     storage: options.storage,
     isWorkers: options.isWorkers,
+    now,
+  });
+  registerCommunitySovereigntyRoutes(app, {
+    repository: sovereigntyRepository,
+    erasureStore: options.erasureStore,
+    erasureService: options.erasureStore
+      ? new CommunityErasureService(
+          sovereigntyRepository,
+          options.storage,
+          options.erasureStore,
+          now
+        )
+      : undefined,
+    authRepository,
+    serverSecret: options.serverSecret,
+    ipFor,
     now,
   });
   registerCommunityAuditRoutes(app, {

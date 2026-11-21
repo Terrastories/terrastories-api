@@ -1,3 +1,8 @@
+import { createWorkerErasureRecordStore } from './worker-erasure-record-store.js';
+import {
+  CommunityErasureService,
+  WORKER_ERASURE_STORAGE_BUDGET,
+} from './services/community-erasure.service.js';
 import type {
   D1Database,
   ExecutionContext,
@@ -11,8 +16,10 @@ import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import {
   validStorageKey,
+  validLegacyStorageKey,
   validSystemStorageKey,
   envFlagEnabled,
+  erasureFenceKey,
   type FoundationStorage,
 } from './services/hono-foundation.service.js';
 import {
@@ -25,6 +32,7 @@ import {
   V2RuntimeConfigError,
   v2RuntimeModeNotice,
 } from './config/v2-runtime.js';
+import { CommunitySovereigntyRepository } from './repositories/community-sovereignty.repository.js';
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
 import { CommunityExportService } from './services/community-export.service.js';
 import { runMaintenanceSweeps } from './services/maintenance-sweeps.js';
@@ -32,6 +40,7 @@ import { runMaintenanceSweeps } from './services/maintenance-sweeps.js';
 export interface WorkerBindings {
   DB: D1Database;
   MEDIA: R2Bucket;
+  ERASURE_RECORDS?: R2Bucket;
   /**
    * Runtime mode for the configuration gate (#150). Unset means production —
    * the strictest rules apply; only `development` and `test` relax them.
@@ -60,204 +69,302 @@ export interface WorkerBindings {
   ORPHAN_SWEEP_PAUSED?: string;
 }
 
-/**
- * The Workers entrypoint. Client-stretched authentication runs entirely in
- * the app (SPEC-V2 §7), so there is no auth method to inject here.
- */
+/** R2-backed storage adapter with object listing for the orphan sweeper. */
+export const createR2Storage = (bucket: R2Bucket): FoundationStorage => ({
+  async read(key, range) {
+    const object = range
+      ? await bucket.get(key, {
+          range: {
+            offset: range.start,
+            length: range.end - range.start + 1,
+          },
+        })
+      : await bucket.get(key);
+    if (!object) return null;
+    const reader = object.body.getReader();
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const next = await reader.read();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+      cancel: (reason) => reader.cancel(reason),
+    });
+    // workerd strips Content-Length on untyped ReadableStreams; FixedLengthStream
+    // preserves exact Content-Length on 200 and 206 without buffering.
+    const FixedLength = (
+      globalThis as {
+        FixedLengthStream?: new (
+          expectedLength: number
+        ) => TransformStream<Uint8Array, Uint8Array>;
+      }
+    ).FixedLengthStream;
+    const expectedLength = range
+      ? Math.min(
+          range.end - range.start + 1,
+          Math.max(0, object.size - range.start)
+        )
+      : object.size;
+    if (
+      FixedLength &&
+      Number.isSafeInteger(expectedLength) &&
+      expectedLength >= 0
+    ) {
+      const fixed = new FixedLength(expectedLength);
+      void stream.pipeTo(fixed.writable).catch(() => {});
+      return { body: fixed.readable, size: object.size };
+    }
+    return { body: stream, size: object.size };
+  },
+  async put(key, body, options) {
+    if (!validStorageKey(key)) {
+      throw new Error('Invalid storage key');
+    }
+    const httpMetadata = options?.contentType
+      ? { contentType: options.contentType }
+      : undefined;
+    const communityId = key.startsWith('communities/')
+      ? Number(key.split('/')[1])
+      : null;
+    const assertWritable = async () => {
+      if (
+        communityId !== null &&
+        (await bucket.head(erasureFenceKey(communityId)))
+      )
+        throw new Error('Community storage is erasing');
+    };
+    await assertWritable();
+    if (body instanceof Uint8Array && communityId === null) {
+      await bucket.put(key, body, { httpMetadata });
+      return { size: body.byteLength };
+    }
+    if (body instanceof Uint8Array) {
+      const bytes = body;
+      body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      });
+    }
+    // R2 parts are 5 MiB. Community writes always use abortable multipart;
+    // larger streams remain bounded well below Workers Free memory limits.
+    const PART_SIZE = 5 * 1024 * 1024;
+    const reader = body.getReader();
+    const buffer = new Uint8Array(PART_SIZE);
+    let buffered = 0;
+    let totalSize = 0;
+    let upload: R2MultipartUpload | null = null;
+    let multipartJournalKey: string | undefined;
+    let multipartFinished = false;
+    const uploadedParts: R2UploadedPart[] = [];
+    let partNumber = 1;
+    try {
+      const ensureMultipartUpload = async () => {
+        if (!upload) {
+          upload = await bucket.createMultipartUpload(key, {
+            httpMetadata,
+          });
+          // Persist the upload id before writing any part, including media/import
+          // uploads with no database job. Parts cannot be found by object listing.
+          multipartJournalKey = `${key.split('/').slice(0, 2).join('/')}/.multipart/${crypto.randomUUID()}.json`;
+          await bucket.put(
+            multipartJournalKey,
+            JSON.stringify({ key, uploadId: upload.uploadId })
+          );
+          // No bytes precede the journal. If fencing raced upload creation,
+          // this check aborts it; otherwise the sweeper can abort by journal.
+          await assertWritable();
+          await options?.onMultipartUploadCreated?.(upload.uploadId);
+        }
+        return upload;
+      };
+      if (options?.useMultipart || communityId !== null) {
+        await ensureMultipartUpload();
+      }
+      const flushPart = async (length: number) => {
+        const slice = buffer.slice(0, length);
+        const activeUpload = await ensureMultipartUpload();
+        uploadedParts.push(await activeUpload.uploadPart(partNumber++, slice));
+        buffered = 0;
+      };
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.byteLength === 0) continue;
+        let offset = 0;
+        while (offset < value.byteLength) {
+          const space = PART_SIZE - buffered;
+          const copyLen = Math.min(space, value.byteLength - offset);
+          buffer.set(value.subarray(offset, offset + copyLen), buffered);
+          buffered += copyLen;
+          offset += copyLen;
+          totalSize += copyLen;
+          if (buffered === PART_SIZE) {
+            await flushPart(PART_SIZE);
+          }
+        }
+      }
+      if (!upload) {
+        await bucket.put(key, buffer.slice(0, buffered), {
+          httpMetadata,
+        });
+      } else if (totalSize === 0 && uploadedParts.length === 0) {
+        // Even empty community objects use multipart: a direct put could
+        // race an abort and publish after the post-fence empty listing.
+        await flushPart(0);
+        await (upload as R2MultipartUpload).complete(uploadedParts);
+        multipartFinished = true;
+      } else {
+        if (buffered > 0) {
+          await flushPart(buffered);
+        }
+        await (upload as R2MultipartUpload).complete(uploadedParts);
+        multipartFinished = true;
+      }
+      return { size: totalSize };
+    } catch (error) {
+      if (upload) {
+        try {
+          await (upload as R2MultipartUpload).abort();
+          multipartFinished = true;
+        } catch {
+          /* journal remains for retry */
+        }
+      }
+      throw error;
+    } finally {
+      reader.releaseLock();
+      if (multipartFinished && multipartJournalKey)
+        await bucket.delete(multipartJournalKey).catch(() => {});
+    }
+  },
+  erasureDeleteCost: 3,
+  async fenceCommunity(communityId) {
+    await bucket.put(erasureFenceKey(communityId), new Uint8Array(0));
+  },
+  erasureBatchDeleteCost: (keys) =>
+    1 + 2 * keys.filter((key) => key.includes('/.multipart/')).length,
+  async deleteMany(keys) {
+    if (keys.length > 1000 || keys.some((key) => !validStorageKey(key)))
+      throw new Error('Invalid erasure batch');
+    for (const key of keys.filter((key) => key.includes('/.multipart/'))) {
+      const journal = await bucket.get(key);
+      if (!journal) continue;
+      const data = await journal.json<{ key: string; uploadId: string }>();
+      const prefix = key.split('/').slice(0, 2).join('/') + '/';
+      if (
+        !validStorageKey(data.key) ||
+        !data.key.startsWith(prefix) ||
+        typeof data.uploadId !== 'string' ||
+        !data.uploadId
+      )
+        throw new Error('Invalid multipart journal');
+      try {
+        await bucket.resumeMultipartUpload(data.key, data.uploadId).abort();
+      } catch (error) {
+        if (
+          !/no\s*such\s*upload|not\s*found|does\s*not\s*exist|already\s*(completed|aborted)|10024/i.test(
+            error instanceof Error ? error.message : ''
+          )
+        )
+          throw error;
+      }
+    }
+    if (keys.length) await bucket.delete(keys);
+  },
+  async delete(key) {
+    if (!validStorageKey(key) && !validLegacyStorageKey(key)) return;
+    if (
+      /^(?:communities|users)\/[1-9][0-9]*\/\.multipart\/[^/]+\.json$/.test(key)
+    ) {
+      const journal = await bucket.get(key);
+      if (journal) {
+        const data = await journal.json<{ key: string; uploadId: string }>();
+        const prefix = key.split('/').slice(0, 2).join('/') + '/';
+        if (
+          !validStorageKey(data.key) ||
+          !data.key.startsWith(prefix) ||
+          typeof data.uploadId !== 'string' ||
+          !data.uploadId
+        )
+          throw new Error('Invalid multipart journal');
+        try {
+          await bucket.resumeMultipartUpload(data.key, data.uploadId).abort();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '';
+          if (
+            !/no\s*such\s*upload|not\s*found|does\s*not\s*exist|already\s*(completed|aborted)|10024/i.test(
+              message
+            )
+          )
+            throw error;
+        }
+      }
+    }
+    await bucket.delete(key);
+  },
+  async abortMultipartUpload(key, uploadId) {
+    if (!validStorageKey(key) || !uploadId) return;
+    try {
+      await bucket.resumeMultipartUpload(key, uploadId).abort();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        /no\s*such\s*upload|not\s*found|does\s*not\s*exist|already\s*(completed|aborted)|10024/i.test(
+          message
+        )
+      ) {
+        // Upload may already be completed or aborted; treat missing upload idempotently.
+        return;
+      }
+      throw error;
+    }
+  },
+  async list(options) {
+    const limit = options?.limit ?? 200;
+    // Key-based pagination: the caller walks the prefix by last seen key,
+    // never by R2's opaque cursor, so the sweeper can resume where it left
+    // off with only the key (which it also persists between runs).
+    const result = await bucket.list({
+      prefix: options?.prefix,
+      startAfter: options?.startAfter,
+      limit,
+    });
+    const entries = result.objects.map((object) => ({
+      key: object.key,
+      uploaded: object.uploaded,
+    }));
+    return {
+      entries,
+      truncated: result.truncated,
+      nextStartAfter:
+        result.truncated && entries.length > 0
+          ? entries[entries.length - 1]!.key
+          : undefined,
+    };
+  },
+
+  async getSystemObject(key) {
+    if (!validSystemStorageKey(key)) return null;
+    const object = await bucket.get(key);
+    if (!object) return null;
+    return new Uint8Array(await object.arrayBuffer());
+  },
+
+  async putSystemObject(key, bytes) {
+    if (!validSystemStorageKey(key)) throw new Error('Invalid system key');
+    await bucket.put(key, bytes);
+  },
+});
+
+/** Workers entrypoint; client-stretched authentication runs in the app. */
 export function createWorker() {
   const apps = new WeakMap<WorkerBindings, ReturnType<typeof createHonoApp>>();
   // Throttle the one-line refusal log per isolate: module state persists for
   // the isolate's lifetime, which is at least as stable a key as the `env`
   // object's identity across requests (PR #229 review).
   let reportedConfigRefusal = false;
-
-  /** R2-backed storage adapter with object listing for the orphan sweeper. */
-  const createR2Storage = (bucket: R2Bucket): FoundationStorage => ({
-    async read(key, range) {
-      const object = range
-        ? await bucket.get(key, {
-            range: {
-              offset: range.start,
-              length: range.end - range.start + 1,
-            },
-          })
-        : await bucket.get(key);
-      if (!object) return null;
-      const reader = object.body.getReader();
-      const stream = new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          const next = await reader.read();
-          if (next.done) controller.close();
-          else controller.enqueue(next.value);
-        },
-        cancel: (reason) => reader.cancel(reason),
-      });
-      // workerd strips Content-Length on untyped ReadableStreams; FixedLengthStream
-      // preserves exact Content-Length on 200 and 206 without buffering.
-      const FixedLength = (
-        globalThis as {
-          FixedLengthStream?: new (
-            expectedLength: number
-          ) => TransformStream<Uint8Array, Uint8Array>;
-        }
-      ).FixedLengthStream;
-      const expectedLength = range
-        ? Math.min(
-            range.end - range.start + 1,
-            Math.max(0, object.size - range.start)
-          )
-        : object.size;
-      if (
-        FixedLength &&
-        Number.isSafeInteger(expectedLength) &&
-        expectedLength >= 0
-      ) {
-        const fixed = new FixedLength(expectedLength);
-        void stream.pipeTo(fixed.writable).catch(() => {});
-        return { body: fixed.readable, size: object.size };
-      }
-      return { body: stream, size: object.size };
-    },
-    async put(key, body, options) {
-      if (!validStorageKey(key)) {
-        throw new Error('Invalid storage key');
-      }
-      const httpMetadata = options?.contentType
-        ? { contentType: options.contentType }
-        : undefined;
-      if (body instanceof Uint8Array) {
-        await bucket.put(key, body, { httpMetadata });
-        return { size: body.byteLength };
-      }
-      // R2 minimum part size for multipart uploads is 5 MiB; uploads <= 5 MiB
-      // complete with a single put, while larger streams use R2 multipart parts
-      // so isolate memory remains bounded well below Workers Free limits.
-      const PART_SIZE = 5 * 1024 * 1024;
-      const reader = body.getReader();
-      const buffer = new Uint8Array(PART_SIZE);
-      let buffered = 0;
-      let totalSize = 0;
-      let upload: R2MultipartUpload | null = null;
-      const uploadedParts: R2UploadedPart[] = [];
-      let partNumber = 1;
-      try {
-        const ensureMultipartUpload = async () => {
-          if (!upload) {
-            upload = await bucket.createMultipartUpload(key, {
-              httpMetadata,
-            });
-            await options?.onMultipartUploadCreated?.(upload.uploadId);
-          }
-          return upload;
-        };
-        if (options?.useMultipart) {
-          await ensureMultipartUpload();
-        }
-        const flushPart = async (length: number) => {
-          const slice = buffer.slice(0, length);
-          const activeUpload = await ensureMultipartUpload();
-          uploadedParts.push(
-            await activeUpload.uploadPart(partNumber++, slice)
-          );
-          buffered = 0;
-        };
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!value || value.byteLength === 0) continue;
-          let offset = 0;
-          while (offset < value.byteLength) {
-            const space = PART_SIZE - buffered;
-            const copyLen = Math.min(space, value.byteLength - offset);
-            buffer.set(value.subarray(offset, offset + copyLen), buffered);
-            buffered += copyLen;
-            offset += copyLen;
-            totalSize += copyLen;
-            if (buffered === PART_SIZE) {
-              await flushPart(PART_SIZE);
-            }
-          }
-        }
-        if (!upload) {
-          await bucket.put(key, buffer.slice(0, buffered), {
-            httpMetadata,
-          });
-        } else if (totalSize === 0 && uploadedParts.length === 0) {
-          await (upload as R2MultipartUpload).abort().catch(() => {});
-          await bucket.put(key, new Uint8Array(0), { httpMetadata });
-        } else {
-          if (buffered > 0) {
-            await flushPart(buffered);
-          }
-          await (upload as R2MultipartUpload).complete(uploadedParts);
-        }
-        return { size: totalSize };
-      } catch (error) {
-        if (upload) {
-          await (upload as R2MultipartUpload).abort().catch(() => {});
-        }
-        throw error;
-      } finally {
-        reader.releaseLock();
-      }
-    },
-    async delete(key) {
-      if (!validStorageKey(key)) return;
-      await bucket.delete(key);
-    },
-    async abortMultipartUpload(key, uploadId) {
-      if (!validStorageKey(key) || !uploadId) return;
-      try {
-        await bucket.resumeMultipartUpload(key, uploadId).abort();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (
-          /no\s*such\s*upload|not\s*found|does\s*not\s*exist|already\s*(completed|aborted)|10024/i.test(
-            message
-          )
-        ) {
-          // Upload may already be completed or aborted; treat missing upload idempotently.
-          return;
-        }
-        throw error;
-      }
-    },
-    async list(options) {
-      const limit = options?.limit ?? 200;
-      // Key-based pagination: the caller walks the prefix by last seen key,
-      // never by R2's opaque cursor, so the sweeper can resume where it left
-      // off with only the key (which it also persists between runs).
-      const result = await bucket.list({
-        prefix: options?.prefix,
-        startAfter: options?.startAfter,
-        limit,
-      });
-      const entries = result.objects.map((object) => ({
-        key: object.key,
-        uploaded: object.uploaded,
-      }));
-      return {
-        entries,
-        truncated: result.truncated,
-        nextStartAfter:
-          result.truncated && entries.length > 0
-            ? entries[entries.length - 1]!.key
-            : undefined,
-      };
-    },
-
-    async getSystemObject(key) {
-      if (!validSystemStorageKey(key)) return null;
-      const object = await bucket.get(key);
-      if (!object) return null;
-      return new Uint8Array(await object.arrayBuffer());
-    },
-
-    async putSystemObject(key, bytes) {
-      if (!validSystemStorageKey(key)) throw new Error('Invalid system key');
-      await bucket.put(key, bytes);
-    },
-  });
 
   const appFor = (env: WorkerBindings) => {
     const cached = apps.get(env);
@@ -290,6 +397,9 @@ export function createWorker() {
       // workerd sets `cf-connecting-ip` and a client cannot forge it (finding E).
       isWorkers: true,
       storage: createR2Storage(env.MEDIA),
+      erasureStore: env.ERASURE_RECORDS
+        ? createWorkerErasureRecordStore(env.ERASURE_RECORDS)
+        : undefined,
     });
     apps.set(env, app);
     return app;
@@ -356,9 +466,32 @@ export function createWorker() {
           const scheduledNow = () =>
             new Date(_controller.scheduledTime || Date.now());
           const r2Storage = createR2Storage(env.MEDIA);
-          // The minute tick is dedicated to export expiry. Keep the larger
+          // The minute tick handles notices and export expiry. Keep the larger
           // orphan/metadata sweep hourly and within its existing budget.
+          if (_controller.cron === '*/1 * * * *') {
+            if (env.ERASURE_RECORDS) {
+              try {
+                await new CommunityErasureService(
+                  new CommunitySovereigntyRepository(db),
+                  r2Storage,
+                  createWorkerErasureRecordStore(env.ERASURE_RECORDS)
+                ).sweep(scheduledNow(), WORKER_ERASURE_STORAGE_BUDGET);
+              } catch {
+                // eslint-disable-next-line no-console -- content-free retry signal
+                console.warn('maintenance: community erasure sweep failed');
+              }
+            }
+            return;
+          }
           if (_controller.cron === '* * * * *') {
+            try {
+              await new CommunitySovereigntyRepository(db).applyDueWithdrawals(
+                scheduledNow()
+              );
+            } catch {
+              // eslint-disable-next-line no-console -- content-free operator channel
+              console.warn('maintenance: sovereignty notice sweep failed');
+            }
             try {
               await new CommunityExportService(
                 new CommunityExportRepository(db),
@@ -400,6 +533,7 @@ export function createWorker() {
             // deletes, finalize), keeping the combined invocation below 50.
             // The dedicated minute tick handles the larger export batch.
             exportSweepLimit: 1,
+            sovereigntyNotices: false,
           });
         })()
       );

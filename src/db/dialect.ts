@@ -52,6 +52,14 @@ import {
   exportTokensSqlite,
 } from './schema/community_exports.js';
 import {
+  communityArchiveCustodyPg,
+  communityArchiveCustodySqlite,
+  communitySovereigntyRequestsPg,
+  communitySovereigntyRequestsSqlite,
+  communityStewardsPg,
+  communityStewardsSqlite,
+} from './schema/community_sovereignty.js';
+import {
   importManifestsPg,
   importManifestsSqlite,
 } from './schema/import_manifests.js';
@@ -63,6 +71,9 @@ const sqliteTables = {
   auditEntries: auditEntriesSqlite,
   authThrottle: authThrottleSqlite,
   claimTokens: claimTokensSqlite,
+  communityArchiveCustody: communityArchiveCustodySqlite,
+  communitySovereigntyRequests: communitySovereigntyRequestsSqlite,
+  communityStewards: communityStewardsSqlite,
   exportJobs: exportJobsSqlite,
   exportTokens: exportTokensSqlite,
   loginCodes: loginCodesSqlite,
@@ -87,6 +98,9 @@ const postgresTables = {
   auditEntries: auditEntriesPg,
   authThrottle: authThrottlePg,
   claimTokens: claimTokensPg,
+  communityArchiveCustody: communityArchiveCustodyPg,
+  communitySovereigntyRequests: communitySovereigntyRequestsPg,
+  communityStewards: communityStewardsPg,
   exportJobs: exportJobsPg,
   exportTokens: exportTokensPg,
   loginCodes: loginCodesPg,

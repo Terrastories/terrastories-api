@@ -3,7 +3,8 @@
  *
  * Per SPEC-V2 §6.8 and §7:
  * - Append-only content-free security and lifecycle audit log.
- * - No update is permitted except the 90-day scrub nullifying ip_address and user_agent.
+ * - Updates are limited to the 90-day network scrub and erasure detaching an
+ *   erased account from surviving foreign/system audit history.
  * - Deletion happens only through community erasure; FKs use ON DELETE NO ACTION
  *   so deleting a community or user fails while audit entries exist, and the
  *   erasure slice must delete a community's audit entries explicitly before

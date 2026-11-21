@@ -92,6 +92,51 @@ describe('createLocalStorage().list', () => {
     expect(page.truncated).toBe(false);
   });
 
+  it('fences a paused writer before the empty listing and persists refusal across adapters', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let reading!: () => void;
+    const started = new Promise<void>((resolve) => {
+      reading = resolve;
+    });
+    const body = new ReadableStream<Uint8Array>(
+      {
+        start(c) {
+          controller = c;
+        },
+        pull() {
+          reading();
+        },
+      },
+      { highWaterMark: 0 }
+    );
+    const writing = storage.put!('communities/99/media/paused', body).then(
+      () => 'published',
+      () => 'refused'
+    );
+    await started;
+    expect(
+      (await storage.list!({ prefix: 'communities/99/' })).entries.length
+    ).toBeGreaterThan(0);
+    await (
+      await createLocalStorage(root)
+    ).fenceCommunity!(99);
+    const page = await storage.list!({ prefix: 'communities/99/' });
+    expect(page.entries).toEqual([]);
+    for (const entry of page.entries) await storage.delete!(entry.key);
+    expect(
+      (await storage.list!({ prefix: 'communities/99/' })).entries
+    ).toEqual([]);
+    expect(() => controller.enqueue(new Uint8Array([1]))).toThrow();
+    expect(await writing).toBe('refused');
+    expect(
+      (await storage.list!({ prefix: 'communities/99/' })).entries
+    ).toEqual([]);
+    const restarted = await createLocalStorage(root);
+    await expect(
+      restarted.put!('communities/99/media/late', new Uint8Array([2]))
+    ).rejects.toThrow('erasing');
+  });
+
   it('ages objects by max(mtime, ctime) so a restored file is never treated as old', async () => {
     const restoreKey = 'communities/1/media/restore-me.png';
     await putBytes(storage, restoreKey);

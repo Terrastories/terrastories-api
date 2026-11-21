@@ -1,3 +1,6 @@
+import { CommunityErasureService } from '../../src/services/community-erasure.service.js';
+import { CommunitySovereigntyRepository } from '../../src/repositories/community-sovereignty.repository.js';
+import type { ErasureRecord } from '../../src/services/erasure-record-store.js';
 /**
  * In-process Hono V2 persona fixture (#199 phase 2).
  *
@@ -102,6 +105,13 @@ import {
   CommunityAuditEntrySchema,
   CommunityAuditEntriesListResponseSchema,
 } from '../../src/shared/schemas/community-audit.js';
+import {
+  CommunitySovereigntyStatusResponseSchema,
+  PutCommunityStewardResponseSchema,
+  CommunityWithdrawalResponseSchema,
+  CancelSovereigntyResponseSchema,
+  CommunityErasureResponseSchema,
+} from '../../src/shared/schemas/community-sovereignty.js';
 import { EXPORT_TOKEN_TTL_MS } from '../../src/shared/export-policy.js';
 import { parseDeterministicZip } from '../../src/shared/utils/deterministic-zip.js';
 import { StreamingSha256 } from '../../src/shared/utils/sha256-stream.js';
@@ -302,6 +312,7 @@ export interface HonoQaBackend {
   serverSecret: string;
   putMedia: (key: string, bytes: Uint8Array) => Promise<void>;
   hasMedia?: (key: string) => Promise<boolean>;
+  runErasureSweep?: () => Promise<void>;
   handler: (observeResponseCookies: (response: Response) => void) => Handler;
   routes: Endpoint[];
   close: () => Promise<void>;
@@ -429,6 +440,7 @@ export async function createFixture(
     auditEntries,
     communities,
     communityMapConfigs,
+    communitySovereigntyRequests,
     exportJobs,
     exportTokens,
     users,
@@ -1612,6 +1624,7 @@ export async function createFixture(
     let handler: Handler | undefined;
     let baseUrl: string | undefined;
     let routes: Endpoint[];
+    let erasureSweep = backend?.runErasureSweep;
     if (backend) {
       // The backend states its coverage table; the fixture does not infer
       // one from `backend` presence. Only Workers/workerd runs the served
@@ -1621,13 +1634,60 @@ export async function createFixture(
       routes = backend.routes;
       handler = backend.handler(observeResponseCookies);
     } else {
+      const erasureRecords = new Map<number, ErasureRecord>();
+      const erasureFences = new Set<number>();
+      const fenceCommunity = async (id: number) => {
+        erasureFences.add(id);
+      };
+      const assertWritable = (key: string) => {
+        if (
+          key.startsWith('communities/') &&
+          erasureFences.has(Number(key.split('/')[1]))
+        )
+          throw new Error('Community storage is erasing');
+      };
+      erasureSweep = async () => {
+        await new CommunityErasureService(
+          new CommunitySovereigntyRepository(db),
+          {
+            fenceCommunity,
+            read: async () => null,
+            delete: async (key) => {
+              storage.delete(key);
+            },
+            list: async (options) => {
+              const keys = [...storage.keys()]
+                .filter((k) => k.startsWith(options?.prefix ?? ''))
+                .sort();
+              const page = keys.slice(0, options?.limit ?? 20);
+              return {
+                entries: page.map((key) => ({ key, uploaded: new Date() })),
+                truncated: page.length < keys.length,
+              };
+            },
+          },
+          {
+            list: async () => [...erasureRecords.values()],
+            write: async (r) => {
+              erasureRecords.set(r.communityId, structuredClone(r));
+            },
+          }
+        ).sweep(new Date());
+      };
       const app = createHonoApp({
+        erasureStore: {
+          list: async () => [...erasureRecords.values()],
+          write: async (r) => {
+            erasureRecords.set(r.communityId, structuredClone(r));
+          },
+        },
         repository: new HonoFoundationRepository(db),
         secureCookies: false,
         // The in-process fixture presents `cf-connecting-ip` to isolate buckets.
         trustProxy: true,
         serverSecret: toHex(crypto.getRandomValues(new Uint8Array(24))),
         storage: {
+          fenceCommunity,
           read: async (key, range) => {
             const bytes = storage.get(key);
             if (!bytes) return null;
@@ -1637,6 +1697,7 @@ export async function createFixture(
             };
           },
           async put(key, body) {
+            assertWritable(key);
             if (body instanceof Uint8Array) {
               const copy = Uint8Array.from(body);
               storage.set(key, copy);
@@ -1654,6 +1715,7 @@ export async function createFixture(
               }
             }
             const merged = new Uint8Array(total);
+            assertWritable(key);
             let offset = 0;
             for (const chunk of chunks) {
               merged.set(chunk, offset);
@@ -1664,6 +1726,16 @@ export async function createFixture(
           },
           async delete(key) {
             storage.delete(key);
+          },
+          async list(options) {
+            const keys = [...storage.keys()]
+              .filter((k) => k.startsWith(options?.prefix ?? ''))
+              .sort();
+            const page = keys.slice(0, options?.limit ?? 20);
+            return {
+              entries: page.map((key) => ({ key, uploaded: new Date() })),
+              truncated: page.length < keys.length,
+            };
           },
         },
       });
@@ -7377,6 +7449,59 @@ export async function createFixture(
                     path: `/v2/community/audit-entries?communityId=${foreignCommunityId}`,
                     expected: 400,
                   },
+                  {
+                    name: 'read community sovereignty status',
+                    method: 'GET',
+                    path: '/v2/community/sovereignty',
+                    expected: 200,
+                    check: (body: unknown) => {
+                      const parsed =
+                        CommunitySovereigntyStatusResponseSchema.safeParse(
+                          body
+                        );
+                      return (
+                        parsed.success &&
+                        parsed.data.data.communityId === communityId &&
+                        parsed.data.data.status === 'active'
+                      );
+                    },
+                  },
+                  {
+                    name: 'designate community steward with password step-up',
+                    method: 'PUT',
+                    path: '/v2/community/steward',
+                    expected: 200,
+                    body: {
+                      stewardUserId: communityUserIds.member,
+                      currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+                    },
+                    check: (body: unknown) => {
+                      const parsed =
+                        PutCommunityStewardResponseSchema.safeParse(body);
+                      return (
+                        parsed.success &&
+                        parsed.data.data.steward?.userId ===
+                          communityUserIds.member
+                      );
+                    },
+                  },
+                  {
+                    name: 'clear community steward back to null',
+                    method: 'PUT',
+                    path: '/v2/community/steward',
+                    expected: 200,
+                    body: {
+                      stewardUserId: null,
+                      currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+                    },
+                    check: (body: unknown) => {
+                      const parsed =
+                        PutCommunityStewardResponseSchema.safeParse(body);
+                      return (
+                        parsed.success && parsed.data.data.steward === null
+                      );
+                    },
+                  },
                 ];
               })()
             : []),
@@ -10434,6 +10559,396 @@ export async function createFixture(
             path: '/v2/auth/logout',
             expected: 204,
             useSavedCookie: 'qaSysAdmin',
+          },
+        ],
+      },
+      {
+        persona: 'sovereignty',
+        steps: [
+          {
+            name: 'login system account before any steward designation',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: 'ts_session=' },
+            body: {
+              identifier: credentials.super_admin.email,
+              derivedKey: superAdminNewKey,
+            },
+          },
+          {
+            name: 'system privilege alone cannot withdraw a community',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 403,
+            saveCookieAs: 'sovSystem',
+            body: { communitySlug, currentDerivedKey: superAdminNewKey },
+          },
+          {
+            name: 'login community admin for sovereignty',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: loginBody(credentials.admin.email),
+            headers: { cookie: 'ts_session=' },
+          },
+          {
+            name: 'save acting admin sovereignty session',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 200,
+            saveCookieAs: 'sovAdmin',
+          },
+          {
+            name: 'designate null-community system account as steward',
+            method: 'PUT',
+            path: '/v2/community/steward',
+            expected: 200,
+            body: {
+              stewardUserId: communityUserIds.super_admin,
+              currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+            },
+            check: (body) => {
+              const parsed = PutCommunityStewardResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.steward?.sameCommunity === false
+              );
+            },
+          },
+          {
+            name: 'system steward must supply an explicit locator',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 400,
+            useSavedCookie: 'sovSystem',
+            body: { currentDerivedKey: superAdminNewKey },
+          },
+          {
+            name: 'system steward cannot target an undesignated community',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 403,
+            useSavedCookie: 'sovSystem',
+            body: {
+              communityId: foreignCommunityId,
+              currentDerivedKey: superAdminNewKey,
+            },
+          },
+          {
+            name: 'designated system steward starts a notice by explicit slug',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 202,
+            useSavedCookie: 'sovSystem',
+            body: { communitySlug, currentDerivedKey: superAdminNewKey },
+            check: (body) => {
+              const parsed = CommunityWithdrawalResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.communityId === communityId &&
+                parsed.data.data.request.state === 'notice' &&
+                parsed.data.data.status === 'active'
+              );
+            },
+          },
+          {
+            name: 'steward designation grants no sovereignty read access',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 403,
+            useSavedCookie: 'sovSystem',
+          },
+          {
+            name: 'replace system steward and cancel its pending notice',
+            method: 'PUT',
+            path: '/v2/community/steward',
+            expected: 200,
+            useSavedCookie: 'sovAdmin',
+            check: (body) => {
+              const parsed = PutCommunityStewardResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.steward?.userId === communityUserIds.member &&
+                parsed.data.data.cancelledRequestIds.length === 1
+              );
+            },
+            body: {
+              stewardUserId: communityUserIds.member,
+              currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+            },
+          },
+          {
+            name: 'login designated steward',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: loginBody(credentials.member.email),
+            headers: { cookie: 'ts_session=' },
+          },
+          {
+            name: 'steward withdrawal enters notice',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 202,
+            saveCookieAs: 'sovSteward',
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+            check: (body) => {
+              const parsed = CommunityWithdrawalResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.request.state === 'notice'
+              );
+            },
+          },
+          {
+            name: 'admin can see pending steward notice',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 200,
+            useSavedCookie: 'sovAdmin',
+            check: (body) => {
+              const parsed =
+                CommunitySovereigntyStatusResponseSchema.safeParse(body);
+              return (
+                parsed.success && parsed.data.data.pendingRequests.length === 1
+              );
+            },
+          },
+          {
+            name: 'admin cancels steward notice with step-up',
+            method: 'POST',
+            path: '/v2/community/sovereignty/cancel',
+            expected: 200,
+            useSavedCookie: 'sovAdmin',
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+            check: (body) => {
+              const parsed = CancelSovereigntyResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.cancelledRequests.length === 1 &&
+                parsed.data.data.cancelledRequests[0]?.state === 'cancelled'
+              );
+            },
+          },
+          {
+            name: 'admin withdrawal is immediate',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 200,
+            useSavedCookie: 'sovAdmin',
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+            check: (body) => {
+              const parsed = CommunityWithdrawalResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'disabled' &&
+                parsed.data.data.request.state === 'completed'
+              );
+            },
+          },
+          {
+            name: 'withdrawal invalidates steward member session',
+            method: 'GET',
+            path: '/v2/stories',
+            expected: 401,
+            useSavedCookie: 'sovSteward',
+          },
+          {
+            name: 'withdrawal invalidates historical public media URL',
+            method: 'GET',
+            path: `/v2/public/communities/${communitySlug}/media/${readableFileId}`,
+            expected: 404,
+          },
+          {
+            name: 'withdrawal immediately hides Explore detail',
+            method: 'GET',
+            path: `/explore/communities/${communitySlug}`,
+            expected: 404,
+          },
+          {
+            name: 'withdrawn admin reauthenticates',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            body: loginBody(credentials.admin.email),
+            headers: { cookie: 'ts_session=' },
+          },
+          {
+            name: 'withdrawn sovereignty remains reachable',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 200,
+            saveCookieAs: 'sovAdminAfter',
+            check: (body) => {
+              const parsed =
+                CommunitySovereigntyStatusResponseSchema.safeParse(body);
+              return parsed.success && parsed.data.data.status === 'disabled';
+            },
+          },
+
+          {
+            name: 'designated steward reauthenticates while withdrawn',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: 'ts_session=' },
+            body: loginBody(credentials.member.email),
+          },
+          {
+            name: 'withdrawn steward starts another notice',
+            method: 'POST',
+            path: '/v2/community/withdrawal',
+            expected: 202,
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+          },
+          {
+            name: 'persisted notice takes effect on next read after downtime',
+            method: 'GET',
+            path: '/v2/community/sovereignty',
+            expected: 200,
+            useSavedCookie: 'sovAdminAfter',
+            prepare: async () => {
+              const ms = Date.now();
+              await db
+                .update(communitySovereigntyRequests)
+                .set({
+                  requestedAt: ms - 8 * 86400000,
+                  noticeEndsAt: ms - 1000,
+                })
+                .where(
+                  and(
+                    eq(communitySovereigntyRequests.communityId, communityId),
+                    eq(communitySovereigntyRequests.state, 'notice')
+                  )
+                );
+            },
+            check: (body) => {
+              const parsed =
+                CommunitySovereigntyStatusResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.pendingRequests.length === 0 &&
+                parsed.data.data.recentRequests.some(
+                  (r) =>
+                    r.initiatedByRole === 'steward' && r.state === 'completed'
+                )
+              );
+            },
+          },
+          {
+            name: 'community administrator cannot read system erasure records',
+            method: 'GET',
+            path: '/v2/admin/erasures',
+            expected: 403,
+            useSavedCookie: 'sovAdminAfter',
+          },
+          {
+            name: 'system privilege alone cannot erase another community',
+            method: 'POST',
+            path: '/v2/community/erasure',
+            expected: 403,
+            useSavedCookie: 'sovSystem',
+            body: {
+              confirmFinality: true,
+              communityId: foreignCommunityId,
+              currentDerivedKey: superAdminNewKey,
+            },
+          },
+          {
+            name: 'erasure requires explicit finality confirmation',
+            method: 'POST',
+            path: '/v2/community/erasure',
+            expected: 400,
+            useSavedCookie: 'sovAdminAfter',
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+          },
+          {
+            name: 'withdrawn own administrator requests irreversible erasure',
+            method: 'POST',
+            path: '/v2/community/erasure',
+            expected: 202,
+            useSavedCookie: 'sovAdminAfter',
+            body: {
+              confirmFinality: true,
+              currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+            },
+            check: (body) => {
+              const parsed = CommunityErasureResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.request.kind === 'erasure' &&
+                parsed.data.data.request.state === 'requested' &&
+                parsed.data.data.status === 'disabled' &&
+                parsed.data.data.erasureRecord?.outcome === 'pending'
+              );
+            },
+          },
+          {
+            name: 'system administrator reads content-free external erasure record',
+            method: 'GET',
+            path: '/v2/admin/erasures',
+            expected: 200,
+            useSavedCookie: 'sovSystem',
+            check: (body) => {
+              const data = (
+                body as {
+                  data?: Array<{
+                    communityId: number;
+                    requestingActorId: number | null;
+                    requestedAt: string;
+                  }>;
+                }
+              ).data;
+              return (
+                Array.isArray(data) &&
+                data.some(
+                  (r) =>
+                    r.communityId === communityId &&
+                    r.requestingActorId === communityUserIds.admin &&
+                    typeof r.requestedAt === 'string'
+                )
+              );
+            },
+          },
+          {
+            name: 'restart-safe erasure removes rows and bytes and retains completion record',
+            method: 'GET',
+            path: '/v2/admin/erasures',
+            expected: 200,
+            useSavedCookie: 'sovSystem',
+            prepare: async () => {
+              if (!erasureSweep)
+                throw new Error('Erasure maintenance seam missing');
+              for (let pass = 0; pass < 12; pass++) await erasureSweep();
+              const remaining = await db
+                .select({ id: communities.id })
+                .from(communities)
+                .where(eq(communities.id, communityId));
+              if (remaining.length)
+                throw new Error('Community erasure did not complete');
+            },
+            check: (body) => {
+              const data = (
+                body as {
+                  data?: Array<{
+                    communityId: number;
+                    outcome: string;
+                    completedAt: string | null;
+                  }>;
+                }
+              ).data;
+              return (
+                Array.isArray(data) &&
+                data.some(
+                  (r) =>
+                    r.communityId === communityId &&
+                    r.outcome === 'completed' &&
+                    r.completedAt !== null
+                )
+              );
+            },
           },
         ],
       },

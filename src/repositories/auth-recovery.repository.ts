@@ -104,6 +104,27 @@ export class AuthRecoveryRepository {
     };
   }
 
+  /** Whether `userId` is currently designated as steward for their community (or any community for a null-community super_admin). */
+  async isDesignatedSteward(userId: number): Promise<boolean> {
+    const { communityStewards, users } = this.tables;
+    const rows = await this.db
+      .select({ communityId: communityStewards.communityId })
+      .from(communityStewards)
+      .innerJoin(users, eq(users.id, communityStewards.userId))
+      .where(
+        and(
+          eq(communityStewards.userId, userId),
+          eq(users.isActive, true),
+          or(
+            isNull(users.communityId),
+            eq(users.communityId, communityStewards.communityId)
+          )
+        )
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
   private d1AuditInsert(
     database: Executor,
     record: ValidatedAuditEntryRecord,
@@ -127,7 +148,7 @@ export class AuthRecoveryRepository {
       actor: {
         id: number;
         communityId: number | null;
-        role: 'admin' | 'super_admin';
+        role: V2CommunityRole;
       };
       codeHashes: string[];
       nowMs: number;
@@ -252,7 +273,7 @@ export class AuthRecoveryRepository {
       actor: {
         id: number;
         communityId: number | null;
-        role: 'admin' | 'super_admin';
+        role: V2CommunityRole;
       };
       codeHashes: string[];
       nowMs: number;
@@ -262,7 +283,8 @@ export class AuthRecoveryRepository {
   ): Promise<RecoveryCodeGenerationOutcome> {
     const validatedAudit = validateContentFreeAuditEntry(audit);
     const db = this.db;
-    const { communities, users, sessions, loginCodes } = this.tables;
+    const { communities, communityStewards, users, sessions, loginCodes } =
+      this.tables;
     const { actor, codeHashes, nowMs, stepUp } = input;
 
     if (typeof db.batch === 'function') {
@@ -271,7 +293,15 @@ export class AuthRecoveryRepository {
         and ${
           actor.communityId === null
             ? sql`u.community_id is null and u.role = 'super_admin'`
-            : sql`u.community_id = ${actor.communityId} and c.id = ${actor.communityId} and (c.is_active = 1 or u.role = 'admin')`
+            : sql`u.community_id = ${actor.communityId}
+                and c.id = ${actor.communityId}
+                and (
+                  u.role = 'admin'
+                  or exists (
+                    select 1 from community_stewards cs
+                    where cs.community_id = u.community_id and cs.user_id = u.id
+                  )
+                )`
         }`;
 
       const gate =
@@ -398,9 +428,6 @@ export class AuthRecoveryRepository {
               .for('share')
               .limit(1);
             if (!comm) return 'authority_lost';
-            if (!isTrue(comm.isActive) && actor.role !== 'admin') {
-              return 'authority_lost';
-            }
           }
           const [userRow] = await tx
             .select({
@@ -417,6 +444,20 @@ export class AuthRecoveryRepository {
             .limit(1);
           const failure = ops.checkUser(userRow);
           if (failure !== null) return failure;
+          if (actor.communityId !== null && actor.role !== 'admin') {
+            const [stewardRow] = await tx
+              .select({ userId: communityStewards.userId })
+              .from(communityStewards)
+              .where(
+                and(
+                  eq(communityStewards.communityId, actor.communityId),
+                  eq(communityStewards.userId, actor.id)
+                )
+              )
+              .for('share')
+              .limit(1);
+            if (!stewardRow) return 'authority_lost';
+          }
           if (stepUp.mode === 'password') {
             if (stepUp.sessionTokenHash !== undefined) {
               await ops.clearStepUp(stepUp.sessionTokenHash);
@@ -448,9 +489,6 @@ export class AuthRecoveryRepository {
           .limit(1)
           .all()[0];
         if (!comm) return 'authority_lost';
-        if (!isTrue(comm.isActive) && actor.role !== 'admin') {
-          return 'authority_lost';
-        }
       }
       const userRow = tx
         .select({
@@ -467,6 +505,20 @@ export class AuthRecoveryRepository {
         .all()[0];
       const failure = ops.checkUser(userRow);
       if (failure !== null) return failure;
+      if (actor.communityId !== null && actor.role !== 'admin') {
+        const stewardRow = tx
+          .select({ userId: communityStewards.userId })
+          .from(communityStewards)
+          .where(
+            and(
+              eq(communityStewards.communityId, actor.communityId),
+              eq(communityStewards.userId, actor.id)
+            )
+          )
+          .limit(1)
+          .all()[0];
+        if (!stewardRow) return 'authority_lost';
+      }
       if (stepUp.mode === 'password') {
         if (stepUp.sessionTokenHash !== undefined) {
           ops.clearStepUp(stepUp.sessionTokenHash).run();
@@ -683,7 +735,8 @@ export class AuthRecoveryRepository {
   ): Promise<boolean> {
     const validatedAudit = validateContentFreeAuditEntry(audit);
     const db = this.db;
-    const { communities, users, sessions, loginCodes } = this.tables;
+    const { communities, communityStewards, users, sessions, loginCodes } =
+      this.tables;
     const { code, account, verifier, session, nowMs } = input;
 
     if (typeof db.batch === 'function') {
@@ -708,7 +761,7 @@ export class AuthRecoveryRepository {
           and (${
             account.communityId === null
               ? sql`u.community_id is null and u.role = 'super_admin'`
-              : sql`u.community_id = ${account.communityId} and c.id = ${account.communityId} and (c.is_active = 1 or (c.is_active = 0 and u.role = 'admin'))`
+              : sql`u.community_id = ${account.communityId} and c.id = ${account.communityId} and (c.is_active = 1 or (c.is_active = 0 and (u.role = 'admin' or exists (select 1 from community_stewards cs where cs.community_id = u.community_id and cs.user_id = u.id))))`
           })
       )`;
 
@@ -819,6 +872,7 @@ export class AuthRecoveryRepository {
     if (dialectOf(db) === 'postgresql') {
       return db.transaction(async (tx: Executor): Promise<boolean> => {
         const ops = this.buildRedeemStatements(tx, input, validatedAudit);
+        let disabledRequiresStewardCheck = false;
         if (account.communityId !== null) {
           const [comm] = await tx
             .select({ id: communities.id, isActive: communities.isActive })
@@ -827,7 +881,9 @@ export class AuthRecoveryRepository {
             .for('share')
             .limit(1);
           if (!comm) return false;
-          if (!isTrue(comm.isActive) && account.role !== 'admin') return false;
+          if (!isTrue(comm.isActive) && account.role !== 'admin') {
+            disabledRequiresStewardCheck = true;
+          }
         }
         const [userRow] = await tx
           .select({
@@ -842,9 +898,24 @@ export class AuthRecoveryRepository {
           .for('update')
           .limit(1);
         if (!ops.checkUser(userRow)) return false;
-        // Sessions before login_codes, and all session rows in one ascending
-        // order: a cross-user redemption pair can then only serialize.
+        // Sessions before community_stewards and login_codes, and all session
+        // rows in one ascending order: a cross-user redemption pair and a
+        // concurrent steward designation can then only serialize.
         await ops.lockSessions();
+        if (disabledRequiresStewardCheck && account.communityId !== null) {
+          const [stewardRow] = await tx
+            .select({ userId: communityStewards.userId })
+            .from(communityStewards)
+            .where(
+              and(
+                eq(communityStewards.communityId, account.communityId),
+                eq(communityStewards.userId, account.id)
+              )
+            )
+            .for('share')
+            .limit(1);
+          if (!stewardRow) return false;
+        }
         const consumed = await ops.consumeCode();
         if (consumed.length === 0) return false;
         const verStmt = ops.updateVerifier();
@@ -869,7 +940,20 @@ export class AuthRecoveryRepository {
           .limit(1)
           .all()[0];
         if (!comm) return false;
-        if (!isTrue(comm.isActive) && account.role !== 'admin') return false;
+        if (!isTrue(comm.isActive) && account.role !== 'admin') {
+          const stewardRow = tx
+            .select({ userId: communityStewards.userId })
+            .from(communityStewards)
+            .where(
+              and(
+                eq(communityStewards.communityId, account.communityId),
+                eq(communityStewards.userId, account.id)
+              )
+            )
+            .limit(1)
+            .all()[0];
+          if (!stewardRow) return false;
+        }
       }
       const userRow = tx
         .select({

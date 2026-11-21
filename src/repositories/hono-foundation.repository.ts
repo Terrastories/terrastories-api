@@ -109,10 +109,11 @@ export class HonoFoundationRepository {
    * - Active users with a canonical V2 role (legacy `elder` rejected);
    * - A `super_admin` with `community_id IS NULL`;
    * - Active users of an active community;
-   * - An own-community `admin` of a disabled community (sovereignty surface only).
+   * - An own-community `admin` or designated steward of a disabled community
+   *   (sovereignty surface only).
    */
   private allowedAuthConditions() {
-    const { users, communities } = this.tables;
+    const { users, communities, communityStewards } = this.tables;
     return and(
       eq(users.isActive, userStatusToPhysical('active').isActive),
       inArray(users.role, [...V2_COMMUNITY_ROLES]),
@@ -121,7 +122,10 @@ export class HonoFoundationRepository {
         eq(communities.isActive, communityStatusToPhysical('active')),
         and(
           eq(communities.isActive, communityStatusToPhysical('disabled')),
-          eq(users.role, 'admin')
+          or(
+            eq(users.role, 'admin'),
+            sql`exists (select 1 from ${communityStewards} cs where cs.community_id = ${users.communityId} and cs.user_id = ${users.id})`
+          )
         )
       )
     );
@@ -133,7 +137,7 @@ export class HonoFoundationRepository {
    * verifier write has no join to hang `communities.is_active` on).
    */
   private verifierAuthorityConditions() {
-    const { users, communities } = this.tables;
+    const { users, communities, communityStewards } = this.tables;
     // Subqueries rather than a raw `sql` fragment: the community flag is a
     // boolean column, and a raw interpolation would bind a bare boolean that
     // SQLite rejects. A query-builder subquery maps it like any other read.
@@ -152,8 +156,11 @@ export class HonoFoundationRepository {
         and(isNull(users.communityId), eq(users.role, 'super_admin')),
         inArray(users.communityId, activeCommunities),
         and(
-          eq(users.role, 'admin'),
-          inArray(users.communityId, disabledCommunities)
+          inArray(users.communityId, disabledCommunities),
+          or(
+            eq(users.role, 'admin'),
+            sql`exists (select 1 from ${communityStewards} cs where cs.community_id = ${users.communityId} and cs.user_id = ${users.id})`
+          )
         )
       )
     );

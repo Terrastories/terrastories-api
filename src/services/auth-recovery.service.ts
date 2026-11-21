@@ -100,14 +100,15 @@ export function generateEntropyCode(): string {
 
 /**
  * Accounts eligible to hold recovery codes (§6.8, §7): community admins,
- * null-community `super_admin`s, and (once Slice 13 lands) designated stewards.
+ * null-community `super_admin`s, and designated stewards.
  */
-function canHoldRecoveryCodes(
-  actor: FoundationUser
-): actor is FoundationUser & { role: 'admin' | 'super_admin' } {
+async function canHoldRecoveryCodes(
+  actor: FoundationUser,
+  recoveryRepo: AuthRecoveryRepository
+): Promise<boolean> {
   if (actor.role === 'admin' && actor.communityId !== null) return true;
   if (actor.role === 'super_admin' && actor.communityId === null) return true;
-  return false;
+  return recoveryRepo.isDesignatedSteward(actor.id);
 }
 
 function accountAllowed(account: AuthAccount): boolean {
@@ -115,7 +116,10 @@ function accountAllowed(account: AuthAccount): boolean {
   if (!parseV2Role(account.role)) return false;
   if (account.communityId === null) return account.role === 'super_admin';
   if (account.communityIsActive === true) return true;
-  return account.communityIsActive === false && account.role === 'admin';
+  return (
+    account.communityIsActive === false &&
+    (account.role === 'admin' || account.isDesignatedSteward)
+  );
 }
 
 function toFoundationUser(account: AuthAccount): FoundationUser {
@@ -180,7 +184,7 @@ export class AuthRecoveryService {
     sessionTokenHash: string | undefined,
     context: AuthRequestContext
   ): Promise<RecoveryCodesResult> {
-    if (!canHoldRecoveryCodes(actor)) {
+    if (!(await canHoldRecoveryCodes(actor, this.recoveryRepo))) {
       return { status: 403, body: FORBIDDEN_BODY };
     }
     const parsed = RecoveryCodesRequestSchema.safeParse(rawBody);

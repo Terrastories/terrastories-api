@@ -3,7 +3,17 @@
  * and 11b-C, #188; SPEC-V2 §4, §6.2, §6.8, §7 "Bootstrap and account
  * lifecycle"; route registry §1).
  */
-import { and, eq, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  isNotNull,
+  isNull,
+  ne,
+  or,
+  sql,
+  type AnyColumn,
+  type SQL,
+} from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -145,8 +155,294 @@ export interface BootstrapAuditMeta {
   userAgent: string | null;
 }
 
+export interface IssueClaimTokenInput {
+  actorId: number;
+  communityId: number;
+  tokenHash: string;
+  createdAtMs: number;
+  expiresAtMs: number;
+}
+
+export type IssueClaimTokenResult =
+  | { outcome: 'issued'; id: number }
+  | { outcome: 'not_found' }
+  | { outcome: 'authority_lost' }
+  | { outcome: 'conflict' };
+
+/**
+ * Portable SQL predicate holding iff `communityIdExpr` identifies a community
+ * that has never had an administrator (users, consumed claim_tokens,
+ * installation_bootstrap, login_codes, account auth_throttle, or any
+ * non-claim-issuance/failed-claim audit_entries) and holds zero content rows.
+ *
+ * Shared across `BootstrapRepository` (claim issuance + redemption) and
+ * `AdminRepository` (list `claimStatus` + deprovision). Uses zero boolean
+ * literals so SQLite, D1, and PostgreSQL evaluate it identically.
+ */
+export function communityUnclaimedAndEmptySql(
+  communityIdExpr: SQL | number | AnyColumn
+): SQL {
+  return sql`(
+    not exists (select 1 from users cu where cu.community_id = ${communityIdExpr})
+    and not exists (select 1 from claim_tokens cct where cct.community_id = ${communityIdExpr} and cct.consumed_at is not null)
+    and not exists (select 1 from installation_bootstrap ib where ib.community_id = ${communityIdExpr})
+    and not exists (select 1 from login_codes lc where lc.community_id = ${communityIdExpr})
+    and not exists (select 1 from stories s where s.community_id = ${communityIdExpr})
+    and not exists (select 1 from places p where p.community_id = ${communityIdExpr})
+    and not exists (select 1 from speakers sp where sp.community_id = ${communityIdExpr})
+    and not exists (select 1 from files f where f.community_id = ${communityIdExpr})
+    and not exists (select 1 from attachments a where a.community_id = ${communityIdExpr})
+    and not exists (select 1 from external_media_links eml where eml.community_id = ${communityIdExpr})
+    and not exists (select 1 from community_map_configs cmc where cmc.community_id = ${communityIdExpr})
+    and not exists (select 1 from themes th where th.community_id = ${communityIdExpr})
+    and not exists (select 1 from auth_throttle at_row where at_row.community_id = ${communityIdExpr} and at_row.kind = 'account')
+    and not exists (
+      select 1 from audit_entries ae
+      where ae.community_id = ${communityIdExpr}
+        and not (
+          ae.action = 'claim_token.issue'
+          or (ae.action = 'claim_token.consume' and ae.outcome = 'failure')
+        )
+    )
+  )`;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Executor = any;
+
+export async function isCommunityUnclaimedAndEmpty(
+  database: Executor,
+  communityId: number
+): Promise<boolean> {
+  const {
+    users,
+    claimTokens,
+    installationBootstrap,
+    loginCodes,
+    stories,
+    places,
+    speakers,
+    files,
+    attachments,
+    externalMediaLinks,
+    communityMapConfigs,
+    themes,
+    authThrottle,
+    auditEntries,
+  } = tablesFor(database);
+  const results = await Promise.all([
+    database
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.communityId, communityId))
+      .limit(1),
+    database
+      .select({ id: claimTokens.id })
+      .from(claimTokens)
+      .where(
+        and(
+          eq(claimTokens.communityId, communityId),
+          isNotNull(claimTokens.consumedAt)
+        )
+      )
+      .limit(1),
+    database
+      .select({ id: installationBootstrap.id })
+      .from(installationBootstrap)
+      .where(eq(installationBootstrap.communityId, communityId))
+      .limit(1),
+    database
+      .select({ id: loginCodes.id })
+      .from(loginCodes)
+      .where(eq(loginCodes.communityId, communityId))
+      .limit(1),
+    database
+      .select({ id: stories.id })
+      .from(stories)
+      .where(eq(stories.communityId, communityId))
+      .limit(1),
+    database
+      .select({ id: places.id })
+      .from(places)
+      .where(eq(places.communityId, communityId))
+      .limit(1),
+    database
+      .select({ id: speakers.id })
+      .from(speakers)
+      .where(eq(speakers.communityId, communityId))
+      .limit(1),
+    database
+      .select({ id: files.id })
+      .from(files)
+      .where(eq(files.communityId, communityId))
+      .limit(1),
+    database
+      .select({ id: attachments.id })
+      .from(attachments)
+      .where(eq(attachments.communityId, communityId))
+      .limit(1),
+    database
+      .select({ id: externalMediaLinks.id })
+      .from(externalMediaLinks)
+      .where(eq(externalMediaLinks.communityId, communityId))
+      .limit(1),
+    database
+      .select({ communityId: communityMapConfigs.communityId })
+      .from(communityMapConfigs)
+      .where(eq(communityMapConfigs.communityId, communityId))
+      .limit(1),
+    database
+      .select({ id: themes.id })
+      .from(themes)
+      .where(eq(themes.communityId, communityId))
+      .limit(1),
+    database
+      .select({ key: authThrottle.key })
+      .from(authThrottle)
+      .where(
+        and(
+          eq(authThrottle.communityId, communityId),
+          eq(authThrottle.kind, 'account')
+        )
+      )
+      .limit(1),
+    database
+      .select({ id: auditEntries.id })
+      .from(auditEntries)
+      .where(
+        and(
+          eq(auditEntries.communityId, communityId),
+          sql`not (${auditEntries.action} = 'claim_token.issue' or (${auditEntries.action} = 'claim_token.consume' and ${auditEntries.outcome} = 'failure'))`
+        )
+      )
+      .limit(1),
+  ]);
+  return results.every((rows) => rows.length === 0);
+}
+
+export function isCommunityUnclaimedAndEmptySync(
+  tx: Executor,
+  communityId: number
+): boolean {
+  const {
+    users,
+    claimTokens,
+    installationBootstrap,
+    loginCodes,
+    stories,
+    places,
+    speakers,
+    files,
+    attachments,
+    externalMediaLinks,
+    communityMapConfigs,
+    themes,
+    authThrottle,
+    auditEntries,
+  } = tablesFor(tx);
+  const checks = [
+    tx
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: claimTokens.id })
+      .from(claimTokens)
+      .where(
+        and(
+          eq(claimTokens.communityId, communityId),
+          isNotNull(claimTokens.consumedAt)
+        )
+      )
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: installationBootstrap.id })
+      .from(installationBootstrap)
+      .where(eq(installationBootstrap.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: loginCodes.id })
+      .from(loginCodes)
+      .where(eq(loginCodes.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: stories.id })
+      .from(stories)
+      .where(eq(stories.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: places.id })
+      .from(places)
+      .where(eq(places.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: speakers.id })
+      .from(speakers)
+      .where(eq(speakers.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: files.id })
+      .from(files)
+      .where(eq(files.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: attachments.id })
+      .from(attachments)
+      .where(eq(attachments.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: externalMediaLinks.id })
+      .from(externalMediaLinks)
+      .where(eq(externalMediaLinks.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ communityId: communityMapConfigs.communityId })
+      .from(communityMapConfigs)
+      .where(eq(communityMapConfigs.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: themes.id })
+      .from(themes)
+      .where(eq(themes.communityId, communityId))
+      .limit(1)
+      .all(),
+    tx
+      .select({ key: authThrottle.key })
+      .from(authThrottle)
+      .where(
+        and(
+          eq(authThrottle.communityId, communityId),
+          eq(authThrottle.kind, 'account')
+        )
+      )
+      .limit(1)
+      .all(),
+    tx
+      .select({ id: auditEntries.id })
+      .from(auditEntries)
+      .where(
+        and(
+          eq(auditEntries.communityId, communityId),
+          sql`not (${auditEntries.action} = 'claim_token.issue' or (${auditEntries.action} = 'claim_token.consume' and ${auditEntries.outcome} = 'failure'))`
+        )
+      )
+      .limit(1)
+      .all(),
+  ];
+  return checks.every((rows) => rows.length === 0);
+}
 
 const isTrue = (value: unknown): boolean => value === true || value === 1;
 
@@ -299,150 +595,26 @@ export class BootstrapRepository {
     return rows.length > 0;
   }
 
+  async isCommunityUnclaimedAndEmpty(
+    communityId: number,
+    database: Executor = this.db
+  ): Promise<boolean> {
+    return isCommunityUnclaimedAndEmpty(database, communityId);
+  }
+
   private async isCommunityClaimable(
     communityId: number,
     database: Executor = this.db
   ): Promise<boolean> {
-    const {
-      users,
-      claimTokens,
-      stories,
-      places,
-      speakers,
-      files,
-      attachments,
-      externalMediaLinks,
-      communityMapConfigs,
-    } = this.tables;
-    const results = await Promise.all([
-      database
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.communityId, communityId))
-        .limit(1),
-      database
-        .select({ id: claimTokens.id })
-        .from(claimTokens)
-        .where(
-          and(
-            eq(claimTokens.communityId, communityId),
-            isNotNull(claimTokens.consumedAt)
-          )
-        )
-        .limit(1),
-      database
-        .select({ id: stories.id })
-        .from(stories)
-        .where(eq(stories.communityId, communityId))
-        .limit(1),
-      database
-        .select({ id: places.id })
-        .from(places)
-        .where(eq(places.communityId, communityId))
-        .limit(1),
-      database
-        .select({ id: speakers.id })
-        .from(speakers)
-        .where(eq(speakers.communityId, communityId))
-        .limit(1),
-      database
-        .select({ id: files.id })
-        .from(files)
-        .where(eq(files.communityId, communityId))
-        .limit(1),
-      database
-        .select({ id: attachments.id })
-        .from(attachments)
-        .where(eq(attachments.communityId, communityId))
-        .limit(1),
-      database
-        .select({ id: externalMediaLinks.id })
-        .from(externalMediaLinks)
-        .where(eq(externalMediaLinks.communityId, communityId))
-        .limit(1),
-      database
-        .select({ communityId: communityMapConfigs.communityId })
-        .from(communityMapConfigs)
-        .where(eq(communityMapConfigs.communityId, communityId))
-        .limit(1),
-    ]);
-    return results.every((rows) => rows.length === 0);
+    return this.isCommunityUnclaimedAndEmpty(communityId, database);
+  }
+
+  isCommunityUnclaimedAndEmptySync(tx: Executor, communityId: number): boolean {
+    return isCommunityUnclaimedAndEmptySync(tx, communityId);
   }
 
   private isCommunityClaimableSync(tx: Executor, communityId: number): boolean {
-    const {
-      users,
-      claimTokens,
-      stories,
-      places,
-      speakers,
-      files,
-      attachments,
-      externalMediaLinks,
-      communityMapConfigs,
-    } = this.tables;
-    const checks = [
-      tx
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.communityId, communityId))
-        .limit(1)
-        .all(),
-      tx
-        .select({ id: claimTokens.id })
-        .from(claimTokens)
-        .where(
-          and(
-            eq(claimTokens.communityId, communityId),
-            isNotNull(claimTokens.consumedAt)
-          )
-        )
-        .limit(1)
-        .all(),
-      tx
-        .select({ id: stories.id })
-        .from(stories)
-        .where(eq(stories.communityId, communityId))
-        .limit(1)
-        .all(),
-      tx
-        .select({ id: places.id })
-        .from(places)
-        .where(eq(places.communityId, communityId))
-        .limit(1)
-        .all(),
-      tx
-        .select({ id: speakers.id })
-        .from(speakers)
-        .where(eq(speakers.communityId, communityId))
-        .limit(1)
-        .all(),
-      tx
-        .select({ id: files.id })
-        .from(files)
-        .where(eq(files.communityId, communityId))
-        .limit(1)
-        .all(),
-      tx
-        .select({ id: attachments.id })
-        .from(attachments)
-        .where(eq(attachments.communityId, communityId))
-        .limit(1)
-        .all(),
-      tx
-        .select({ id: externalMediaLinks.id })
-        .from(externalMediaLinks)
-        .where(eq(externalMediaLinks.communityId, communityId))
-        .limit(1)
-        .all(),
-      tx
-        .select({ communityId: communityMapConfigs.communityId })
-        .from(communityMapConfigs)
-        .where(eq(communityMapConfigs.communityId, communityId))
-        .limit(1)
-        .all(),
-    ];
-    return checks.every((rows) => rows.length === 0);
+    return this.isCommunityUnclaimedAndEmptySync(tx, communityId);
   }
 
   private toCommunityProjection(row: {
@@ -904,15 +1076,7 @@ export class BootstrapRepository {
               and (ct.expires_at - ct.created_at) <= ${CLAIM_TOKEN_MAX_TTL_MS}
               and c.is_active = 1
           )
-          and not exists (select 1 from users cu where cu.community_id = ${input.communityId})
-          and not exists (select 1 from claim_tokens cct where cct.community_id = ${input.communityId} and cct.consumed_at is not null)
-          and not exists (select 1 from stories s where s.community_id = ${input.communityId})
-          and not exists (select 1 from places p where p.community_id = ${input.communityId})
-          and not exists (select 1 from speakers sp where sp.community_id = ${input.communityId})
-          and not exists (select 1 from files f where f.community_id = ${input.communityId})
-          and not exists (select 1 from attachments a where a.community_id = ${input.communityId})
-          and not exists (select 1 from external_media_links eml where eml.community_id = ${input.communityId})
-          and not exists (select 1 from community_map_configs cmc where cmc.community_id = ${input.communityId})
+          and ${communityUnclaimedAndEmptySql(input.communityId)}
           and not exists (
             select 1 from users x
             where x.username_normalized = ${input.admin.usernameNormalized}
@@ -1412,5 +1576,272 @@ export class BootstrapRepository {
       }
       throw error;
     }
+  }
+
+  /**
+   * Atomically issue (or reissue, superseding earlier unconsumed tokens) a
+   * hosted `ClaimToken` for an active, empty, never-administered community
+   * (Slice 14, SPEC-V2 §6.8, §7). Commits the `claim_token.issue` community
+   * audit row in the same atomic unit (D1 `db.batch()`, PG transaction, or
+   * SQLite transaction).
+   */
+  async issueClaimTokenAtomically(
+    input: IssueClaimTokenInput
+  ): Promise<IssueClaimTokenResult> {
+    const auditTemplate: ValidatedAuditEntryRecord =
+      validateContentFreeAuditEntry({
+        communityId: input.communityId,
+        actorId: input.actorId,
+        action: 'claim_token.issue',
+        resourceType: 'claim_token',
+        resourceIds: [1],
+        outcome: 'success',
+        ipAddress: null,
+        userAgent: null,
+      });
+
+    const db = this.db;
+    const { communities, users, claimTokens, auditEntries } = this.tables;
+
+    if (typeof db.batch === 'function') {
+      const actorGuard = sql`exists (
+        select 1 from users a
+        where a.id = ${input.actorId}
+          and a.role = 'super_admin'
+          and a.community_id is null
+          and a.is_active = 1
+      )`;
+      const eligibleGuard = sql`${actorGuard}
+        and exists (
+          select 1 from communities c
+          where c.id = ${input.communityId}
+            and c.is_active = 1
+        )
+        and ${communityUnclaimedAndEmptySql(input.communityId)}`;
+
+      const supersedeStmt = db
+        .update(claimTokens)
+        .set({ supersededAt: input.createdAtMs })
+        .where(
+          and(
+            eq(claimTokens.communityId, input.communityId),
+            isNull(claimTokens.consumedAt),
+            isNull(claimTokens.supersededAt),
+            eligibleGuard
+          )
+        );
+
+      const insertTokenStmt = db
+        .insert(claimTokens)
+        .select(
+          sql`select
+            ${null}, ${input.communityId}, ${input.tokenHash}, ${input.actorId},
+            ${input.createdAtMs}, ${input.expiresAtMs}, ${null}, ${null}, ${null}
+          where ${eligibleGuard}`
+        )
+        .returning({ id: claimTokens.id });
+
+      const insertAuditStmt = db.insert(auditEntries).select(
+        sql`select
+          ${null}, ${input.communityId}, ${input.actorId}, ${auditTemplate.action},
+          ${auditTemplate.resourceType}, '[' || ct.id || ']',
+          ${auditTemplate.outcome}, ${auditTemplate.ipAddress},
+          ${auditTemplate.userAgent}, ${input.createdAtMs}
+        from claim_tokens ct
+        where ct.token_hash = ${input.tokenHash}
+          and ct.community_id = ${input.communityId}`
+      );
+
+      const results = (await db.batch([
+        supersedeStmt,
+        insertTokenStmt,
+        insertAuditStmt,
+      ])) as Array<Array<Record<string, unknown>>>;
+
+      const inserted = results[1] ?? [];
+      if (inserted.length > 0) {
+        return { outcome: 'issued', id: Number(inserted[0]!.id) };
+      }
+
+      const [actorRow, commRow] = await Promise.all([
+        db
+          .select({ id: users.id })
+          .from(users)
+          .where(
+            and(
+              eq(users.id, input.actorId),
+              eq(users.role, 'super_admin'),
+              isNull(users.communityId),
+              eq(users.isActive, true)
+            )
+          )
+          .limit(1),
+        db
+          .select({ id: communities.id })
+          .from(communities)
+          .where(eq(communities.id, input.communityId))
+          .limit(1),
+      ]);
+      if (actorRow.length === 0) return { outcome: 'authority_lost' };
+      if (commRow.length === 0) return { outcome: 'not_found' };
+      return { outcome: 'conflict' };
+    }
+
+    if (dialectOf(db) === 'postgresql') {
+      return db.transaction(
+        async (tx: Executor): Promise<IssueClaimTokenResult> => {
+          // Lock order: communities (FOR UPDATE) -> actor users (FOR SHARE) -> claim_tokens.
+          const [commRow] = await tx
+            .select({ id: communities.id, isActive: communities.isActive })
+            .from(communities)
+            .where(eq(communities.id, input.communityId))
+            .for('update')
+            .limit(1);
+          if (!commRow) return { outcome: 'not_found' };
+
+          const [actorRow] = await tx
+            .select({ id: users.id })
+            .from(users)
+            .where(
+              and(
+                eq(users.id, input.actorId),
+                eq(users.role, 'super_admin'),
+                isNull(users.communityId),
+                eq(users.isActive, true)
+              )
+            )
+            .for('share')
+            .limit(1);
+          if (!actorRow) return { outcome: 'authority_lost' };
+
+          if (
+            !isTrue(commRow.isActive) ||
+            !(await this.isCommunityUnclaimedAndEmpty(input.communityId, tx))
+          ) {
+            return { outcome: 'conflict' };
+          }
+
+          await tx
+            .update(claimTokens)
+            .set({ supersededAt: input.createdAtMs })
+            .where(
+              and(
+                eq(claimTokens.communityId, input.communityId),
+                isNull(claimTokens.consumedAt),
+                isNull(claimTokens.supersededAt)
+              )
+            );
+
+          const [inserted] = await tx
+            .insert(claimTokens)
+            .values({
+              communityId: input.communityId,
+              tokenHash: input.tokenHash,
+              issuedBy: input.actorId,
+              createdAt: input.createdAtMs,
+              expiresAt: input.expiresAtMs,
+              consumedAt: null,
+              consumedBy: null,
+              supersededAt: null,
+            })
+            .returning({ id: claimTokens.id });
+          const tokenId = Number(inserted.id);
+
+          await buildAuditEntryInsert(
+            tx,
+            {
+              communityId: input.communityId,
+              actorId: input.actorId,
+              action: 'claim_token.issue',
+              resourceType: 'claim_token',
+              resourceIds: [tokenId],
+              outcome: 'success',
+              ipAddress: null,
+              userAgent: null,
+            },
+            new Date(input.createdAtMs)
+          );
+
+          return { outcome: 'issued', id: tokenId };
+        }
+      );
+    }
+
+    // better-sqlite3 synchronous transaction: callback MUST NOT return a Promise.
+    return db.transaction((tx: Executor): IssueClaimTokenResult => {
+      const commRow = tx
+        .select({ id: communities.id, isActive: communities.isActive })
+        .from(communities)
+        .where(eq(communities.id, input.communityId))
+        .limit(1)
+        .all()[0];
+      if (!commRow) return { outcome: 'not_found' };
+
+      const actorRow = tx
+        .select({ id: users.id })
+        .from(users)
+        .where(
+          and(
+            eq(users.id, input.actorId),
+            eq(users.role, 'super_admin'),
+            isNull(users.communityId),
+            eq(users.isActive, true)
+          )
+        )
+        .limit(1)
+        .all()[0];
+      if (!actorRow) return { outcome: 'authority_lost' };
+
+      if (
+        !isTrue(commRow.isActive) ||
+        !this.isCommunityUnclaimedAndEmptySync(tx, input.communityId)
+      ) {
+        return { outcome: 'conflict' };
+      }
+
+      tx.update(claimTokens)
+        .set({ supersededAt: input.createdAtMs })
+        .where(
+          and(
+            eq(claimTokens.communityId, input.communityId),
+            isNull(claimTokens.consumedAt),
+            isNull(claimTokens.supersededAt)
+          )
+        )
+        .run();
+
+      const [inserted] = tx
+        .insert(claimTokens)
+        .values({
+          communityId: input.communityId,
+          tokenHash: input.tokenHash,
+          issuedBy: input.actorId,
+          createdAt: input.createdAtMs,
+          expiresAt: input.expiresAtMs,
+          consumedAt: null,
+          consumedBy: null,
+          supersededAt: null,
+        })
+        .returning({ id: claimTokens.id })
+        .all();
+      const tokenId = Number(inserted.id);
+
+      buildAuditEntryInsert(
+        tx,
+        {
+          communityId: input.communityId,
+          actorId: input.actorId,
+          action: 'claim_token.issue',
+          resourceType: 'claim_token',
+          resourceIds: [tokenId],
+          outcome: 'success',
+          ipAddress: null,
+          userAgent: null,
+        },
+        new Date(input.createdAtMs)
+      ).run();
+
+      return { outcome: 'issued', id: tokenId };
+    });
   }
 }

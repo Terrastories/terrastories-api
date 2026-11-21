@@ -25,7 +25,8 @@ import {
 export function buildAuditEntryInsert(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   database: any,
-  input: ContentFreeAuditEntryInput
+  input: ContentFreeAuditEntryInput,
+  createdAt: Date = new Date()
 ) {
   const validated = validateContentFreeAuditEntry(input);
   const { auditEntries } = tablesFor(database);
@@ -39,16 +40,21 @@ export function buildAuditEntryInsert(
     outcome: validated.outcome,
     ipAddress: validated.ipAddress,
     userAgent: validated.userAgent,
-    createdAt: new Date(),
+    createdAt,
   });
 }
 
 export async function writeAuditEntry(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   database: any,
-  input: ContentFreeAuditEntryInput
+  input: ContentFreeAuditEntryInput,
+  createdAt: Date = new Date()
 ): Promise<AuditEntry> {
-  const [inserted] = await buildAuditEntryInsert(database, input).returning();
+  const [inserted] = await buildAuditEntryInsert(
+    database,
+    input,
+    createdAt
+  ).returning();
 
   return inserted as AuditEntry;
 }

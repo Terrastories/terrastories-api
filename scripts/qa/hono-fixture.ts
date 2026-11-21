@@ -6950,6 +6950,26 @@ export async function createFixture(
             expected: 404,
           },
           {
+            name: 'list operational communities as super_admin',
+            method: 'GET',
+            path: '/v2/admin/communities',
+            expected: 200,
+          },
+          {
+            name: 'provision empty community as super_admin',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            captureId: 'qaAdminProvisioned',
+            body: { slug: 'qa-admin-step-a' },
+          },
+          {
+            name: 'issue claim token as super_admin',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaAdminProvisioned}/claim-tokens',
+            expected: 201,
+          },
+          {
             name: 'logout',
             method: 'POST',
             path: '/v2/auth/logout',

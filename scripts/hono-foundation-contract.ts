@@ -3190,6 +3190,330 @@ export async function runHonoFoundationContract(
         `a viewer attaching onto a story answers the target verdict 403 on PG as on D1/SQLite (${await viewerReuse.text()})`
       );
     }
+
+    // Slice 14-A (/v2/admin/communities + claim-tokens) dual-backend contract
+    // on both SQLite and PostgreSQL (#188, SPEC-V2 §6.2, §6.8, §7).
+    const saNullEmail = `sa-null-${tag}@example.test`;
+    const [saNullRow] = await db
+      .insert(tables.users)
+      .values({
+        ...userDefaults,
+        email: saNullEmail,
+        username: `sa_null_${tag.slice(0, 12)}`,
+        ...{
+          emailNormalized: saNullEmail.toLowerCase(),
+          usernameNormalized: `sa_null_${tag.slice(0, 12)}`.toLowerCase(),
+        },
+        role: 'super_admin',
+        communityId: null,
+      })
+      .returning();
+    userIds.push(saNullRow.id);
+    const saNullCookie = await login(saNullEmail);
+    const legacySaCookie = await login(systemEmail);
+    const adminViewerCookie = await login(viewerEmail);
+    const adminCommAdminCookie = await login(adminEmail);
+
+    // Community roles and malformed non-null super_admin are refused with 403.
+    for (const badCookie of [
+      adminViewerCookie,
+      adminCommAdminCookie,
+      legacySaCookie,
+    ]) {
+      await status(
+        send(app, '/v2/admin/communities', { headers: { cookie: badCookie } }),
+        403,
+        'non-null-super_admin caller must receive 403 on GET /v2/admin/communities'
+      );
+      await status(
+        send(app, '/v2/admin/communities', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', cookie: badCookie },
+          body: JSON.stringify({ slug: `denied-${tag}` }),
+        }),
+        403,
+        'non-null-super_admin caller must receive 403 on POST /v2/admin/communities'
+      );
+    }
+
+    // Provision operational community; reject descriptive fields with 400.
+    await status(
+      send(app, '/v2/admin/communities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({
+          slug: `bad-desc-${tag}`,
+          name: 'Descriptive Name Forbidden',
+        }),
+      }),
+      400
+    );
+
+    const provSlug = `contract-prov-${tag}`;
+    const [provResA, provResB] = await Promise.all([
+      send(app, '/v2/admin/communities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ slug: provSlug }),
+      }),
+      send(app, '/v2/admin/communities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ slug: provSlug }),
+      }),
+    ]);
+    assert.deepEqual(
+      [provResA.status, provResB.status].sort((a, b) => a - b),
+      [201, 409],
+      'concurrent same-slug provision must yield one 201 and one 409'
+    );
+    const provBody = (await (
+      provResA.status === 201 ? provResA : provResB
+    ).json()) as {
+      data: {
+        id: number;
+        slug: string;
+        status: string;
+        claimStatus: string;
+      };
+    };
+    const provCommId = provBody.data.id;
+    communityIds.push(provCommId);
+    assert.equal(provBody.data.slug, provSlug);
+    assert.equal(provBody.data.status, 'active');
+    assert.equal(provBody.data.claimStatus, 'unclaimed');
+
+    // Operational list never leaks descriptive columns and reflects claimStatus.
+    const listBeforeToken = (await (
+      await send(app, `/v2/admin/communities?limit=100&offset=0`, {
+        headers: { cookie: saNullCookie },
+      })
+    ).json()) as { data: Array<Record<string, unknown>> };
+    const listedBefore = listBeforeToken.data.find((c) => c.id === provCommId);
+    assert.ok(listedBefore);
+    assert.equal(listedBefore.claimStatus, 'unclaimed');
+    assert.equal('name' in listedBefore, false);
+    assert.equal('description' in listedBefore, false);
+    assert.equal('visibility' in listedBefore, false);
+
+    // Issue + reissue ClaimToken, verify claim_pending, then claim and verify
+    // subsequent issuance returns 409.
+    const issue1Res = await send(
+      app,
+      `/v2/admin/communities/${provCommId}/claim-tokens`,
+      {
+        method: 'POST',
+        headers: { cookie: saNullCookie },
+      }
+    );
+    assert.equal(issue1Res.status, 201);
+    const tok1 = ((await issue1Res.json()) as { data: { token: string } }).data
+      .token;
+
+    const issue2Res = await send(
+      app,
+      `/v2/admin/communities/${provCommId}/claim-tokens`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ ttlSeconds: 3600 }),
+      }
+    );
+    assert.equal(issue2Res.status, 201);
+    const tok2 = ((await issue2Res.json()) as { data: { token: string } }).data
+      .token;
+
+    const listPending = (await (
+      await send(app, `/v2/admin/communities?limit=100&offset=0`, {
+        headers: { cookie: saNullCookie },
+      })
+    ).json()) as { data: Array<Record<string, unknown>> };
+    assert.equal(
+      listPending.data.find((c) => c.id === provCommId)?.claimStatus,
+      'claim_pending'
+    );
+
+    // Superseded token 1 fails claim; token 2 succeeds.
+    const claimKey = makeDerivedKey();
+    await status(
+      send(app, '/v2/bootstrap/claim', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': '198.51.100.240',
+        },
+        body: JSON.stringify({
+          token: tok1,
+          username: `superseded_${tag.slice(0, 8)}`,
+          email: `superseded-${tag}@example.test`,
+          password: {
+            algorithm: ARGON2ID_ALGORITHM,
+            salt: stretchedSalt,
+            params: JSON.parse(ARGON2ID_PARAMS_JSON),
+            derivedKey: claimKey,
+          },
+        }),
+      }),
+      401
+    );
+    const claimOkRes = await send(app, '/v2/bootstrap/claim', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-for': '198.51.100.241',
+      },
+      body: JSON.stringify({
+        token: tok2,
+        username: `claimed_${tag.slice(0, 8)}`,
+        email: `claimed-${tag}@example.test`,
+        password: {
+          algorithm: ARGON2ID_ALGORITHM,
+          salt: stretchedSalt,
+          params: JSON.parse(ARGON2ID_PARAMS_JSON),
+          derivedKey: claimKey,
+        },
+      }),
+    });
+    assert.equal(claimOkRes.status, 201);
+    const claimedPayload = (await claimOkRes.json()) as {
+      data: { user: { id: number } };
+    };
+    userIds.push(claimedPayload.data.user.id);
+
+    // Claimed community shows claimStatus='claimed' and refuses new tokens.
+    const listClaimed = (await (
+      await send(app, `/v2/admin/communities?limit=100&offset=0`, {
+        headers: { cookie: saNullCookie },
+      })
+    ).json()) as { data: Array<Record<string, unknown>> };
+    assert.equal(
+      listClaimed.data.find((c) => c.id === provCommId)?.claimStatus,
+      'claimed'
+    );
+    await status(
+      send(app, `/v2/admin/communities/${provCommId}/claim-tokens`, {
+        method: 'POST',
+        headers: { cookie: saNullCookie },
+      }),
+      409
+    );
+
+    if (dialectOf(database) === 'postgresql') {
+      // PG race 1: lock interposition — issueClaimToken waiting behind an
+      // uncommitted user insert on communities FOR UPDATE must return 409
+      // after the transaction commits.
+      const raceRes = await send(app, '/v2/admin/communities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ slug: `pg-claim-race-${tag}` }),
+      });
+      assert.equal(raceRes.status, 201);
+      const raceCommId = ((await raceRes.json()) as { data: { id: number } })
+        .data.id;
+      communityIds.push(raceCommId);
+      let pendingIssue!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .select({ id: tables.communities.id })
+          .from(tables.communities)
+          .where(eq(tables.communities.id, raceCommId))
+          .for('update');
+        const [insertedRaceUser] = await tx
+          .insert(tables.users)
+          .values({
+            ...userDefaults,
+            email: `race-claim-user-${tag}@example.test`,
+            username: `race_cu_${tag.slice(0, 8)}`,
+            emailNormalized: `race-claim-user-${tag}@example.test`,
+            usernameNormalized: `race_cu_${tag.slice(0, 8)}`,
+            role: 'admin',
+            communityId: raceCommId,
+          })
+          .returning({ id: tables.users.id });
+        userIds.push(insertedRaceUser.id);
+        pendingIssue = send(
+          app,
+          `/v2/admin/communities/${raceCommId}/claim-tokens`,
+          {
+            method: 'POST',
+            headers: { cookie: saNullCookie },
+          }
+        );
+        void pendingIssue.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1)
+          throw new Error(
+            'admin claim-token race never materialised: issue never blocked on communities FOR UPDATE'
+          );
+      });
+      assert.equal(
+        (await pendingIssue).status,
+        409,
+        'blocked claim-token issuance behind committed admin creation must return 409'
+      );
+
+      // PG race 2: parallel contention between POST /v2/bootstrap/claim and
+      // POST /v2/admin/communities/:id/claim-tokens must serialize without
+      // deadlock (either claim wins [201, 409] or reissue wins [401, 201]).
+      const raceRes2 = await send(app, '/v2/admin/communities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ slug: `pg-claim-par-${tag}` }),
+      });
+      assert.equal(raceRes2.status, 201);
+      const raceComm2Id = ((await raceRes2.json()) as { data: { id: number } })
+        .data.id;
+      communityIds.push(raceComm2Id);
+      const preTokRes = await send(
+        app,
+        `/v2/admin/communities/${raceComm2Id}/claim-tokens`,
+        {
+          method: 'POST',
+          headers: { cookie: saNullCookie },
+        }
+      );
+      assert.equal(preTokRes.status, 201);
+      const preTok = ((await preTokRes.json()) as { data: { token: string } })
+        .data.token;
+      const [parClaimRes, parIssueRes] = await Promise.all([
+        send(app, '/v2/bootstrap/claim', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': '198.51.100.242',
+          },
+          body: JSON.stringify({
+            token: preTok,
+            username: `par_claim_${tag.slice(0, 8)}`,
+            email: `par-claim-${tag}@example.test`,
+            password: {
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: stretchedSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: makeDerivedKey(),
+            },
+          }),
+        }),
+        send(app, `/v2/admin/communities/${raceComm2Id}/claim-tokens`, {
+          method: 'POST',
+          headers: { cookie: saNullCookie },
+        }),
+      ]);
+      if (parClaimRes.status === 201) {
+        const parClaimJson = (await parClaimRes.json()) as {
+          data: { user: { id: number } };
+        };
+        userIds.push(parClaimJson.data.user.id);
+        assert.equal(
+          parIssueRes.status,
+          409,
+          'if parallel claim succeeded first, reissue must refuse with 409'
+        );
+      } else {
+        assert.equal(parClaimRes.status, 401);
+        assert.equal(parIssueRes.status, 201);
+      }
+    }
   } finally {
     for (const id of communityIds) {
       await db

@@ -12,7 +12,9 @@ import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
 import {
   ARGON2ID_ALGORITHM,
   AUTH_LOGIN_FAILURE_BODY,
+  CLAIM_TOKEN_ENTROPY_BYTES,
   CLAIM_TOKEN_MAX_TTL_MS,
+  CLAIM_TOKEN_MIN_TTL_MS,
   RECOVERY_CODE_COUNT,
   isCanonicalArgon2idParams,
   isCanonicalVerifierSalt,
@@ -20,7 +22,12 @@ import {
   sessionTokenDigestInput,
   type SessionKind,
 } from '../shared/auth-policy.js';
-import { sha256Hex, constantTimeEqual, toHex } from '../shared/auth-crypto.js';
+import {
+  sha256Hex,
+  constantTimeEqual,
+  toBase64Url,
+  toHex,
+} from '../shared/auth-crypto.js';
 import {
   BootstrapClaimRequestSchema,
   BootstrapRequestSchema,
@@ -64,6 +71,42 @@ const INVALID_REQUEST_BODY: V2ErrorResponse = Object.freeze({
 const SERVICE_UNAVAILABLE_BODY: V2ErrorResponse = Object.freeze({
   error: 'Service unavailable',
 });
+
+/** ClaimToken material returned once at issuance alongside its stored SHA-256 digest. */
+export interface ClaimTokenMaterial {
+  token: string;
+  tokenHash: string;
+  createdAtMs: number;
+  expiresAtMs: number;
+}
+
+/**
+ * Generate a single-use ClaimToken (256-bit CSPRNG, base64url) and its
+ * SHA-256 digest for Slice 11b/14 issuance (SPEC-V2 §6.8, §7).
+ */
+export async function generateClaimTokenMaterial(
+  now: Date,
+  ttlMs: number = CLAIM_TOKEN_MAX_TTL_MS
+): Promise<ClaimTokenMaterial> {
+  if (
+    !Number.isSafeInteger(ttlMs) ||
+    ttlMs < CLAIM_TOKEN_MIN_TTL_MS ||
+    ttlMs > CLAIM_TOKEN_MAX_TTL_MS
+  ) {
+    throw new RangeError('Invalid claim token TTL');
+  }
+  const token = toBase64Url(
+    crypto.getRandomValues(new Uint8Array(CLAIM_TOKEN_ENTROPY_BYTES))
+  );
+  const tokenHash = await sha256Hex(token);
+  const createdAtMs = now.getTime();
+  return {
+    token,
+    tokenHash,
+    createdAtMs,
+    expiresAtMs: createdAtMs + ttlMs,
+  };
+}
 
 /** Derive a deterministic URL-safe slug when `community.slug` is omitted. */
 export function deriveBootstrapSlug(name: string): string {

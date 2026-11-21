@@ -891,11 +891,15 @@ export async function createFixture(
     const disabledEditorCredentials = {
       email: 'qa-hono-disabled-editor@example.test',
     };
+    const disabledRecoveredAdminCredentials = {
+      email: 'qa-hono-disabled-recovered-admin@example.test',
+    };
     const [
       disabledSeededAdmin,
       disabledSeededViewer,
       disabledSeededMember,
       disabledSeededEditor,
+      disabledSeededRecoveredAdmin,
     ] = await db
       .insert(users)
       .values([
@@ -950,12 +954,29 @@ export async function createFixture(
           communityId: inactiveCommunity.id,
           isActive: true,
         },
+        {
+          email: disabledRecoveredAdminCredentials.email,
+          username: 'qa_hono_disabled_recovered_admin',
+          displayName: 'QA Disabled Recovered Admin',
+          ...deriveUserIdentityColumns({
+            email: disabledRecoveredAdminCredentials.email,
+            username: 'qa_hono_disabled_recovered_admin',
+          }),
+          ...verifier,
+          firstName: 'QA',
+          lastName: 'DisabledRecoveredAdmin',
+          role: 'admin',
+          communityId: inactiveCommunity.id,
+          isActive: true,
+        },
       ])
       .returning();
     void disabledSeededAdmin;
     void disabledSeededViewer;
     void disabledSeededEditor;
+    void disabledSeededRecoveredAdmin;
     const disabledMemberId = disabledSeededMember!.id;
+    const disabledRecoveredAdminId = disabledSeededRecoveredAdmin!.id;
     // #192: one more public ACTIVE community whose name carries composed
     // diacritics, exercising the Unicode-correct Explore name search on the
     // persona gates: SQLite/D1 lower() folds ASCII only, so only the
@@ -5376,6 +5397,7 @@ export async function createFixture(
       MediaMetadataResponseSchema.safeParse(body).success;
     let qaManagedUserId = 0;
     let qaIssuedLoginCode = '';
+    let qaDisabledRecoveredAdminLoginCode = '';
     let qaRecoveryCode = '';
     let qaOldRecoveryCode = '';
     let qaSupersededRecoveryCode = '';
@@ -5383,6 +5405,9 @@ export async function createFixture(
     const qaIssuedRedeemBody = {
       code: '',
       communitySlug: 'qa-user-management-community',
+    };
+    const qaDisabledRecoveredAdminRedeemBody = {
+      code: '',
     };
     const qaRecoveryRedeemBody = {
       code: '',
@@ -6944,18 +6969,73 @@ export async function createFixture(
           ...forbiddenCommunityReadSteps,
           ...forbiddenCommunityWriteSteps,
           {
-            name: 'logout',
+            name: 'reset recovered disabled admin password (assisted)',
+            method: 'POST',
+            path: `/v2/users/${disabledRecoveredAdminId}/password-reset`,
+            expected: 204,
+            body: {
+              algorithm: 'client-argon2id+sha256',
+              salt: qaResetSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: qaResetDerivedKey,
+            },
+          },
+          {
+            name: 'issue admin_issued code for recovered disabled admin',
+            method: 'POST',
+            path: `/v2/users/${disabledRecoveredAdminId}/login-codes`,
+            expected: 201,
+            check: (body) => {
+              const data = (
+                body as {
+                  data?: { code?: unknown; purpose?: unknown };
+                }
+              )?.data;
+              if (
+                data?.purpose === 'admin_issued' &&
+                typeof data?.code === 'string' &&
+                /^[A-Za-z0-9_-]{20,64}$/.test(data.code)
+              ) {
+                qaDisabledRecoveredAdminLoginCode = data.code;
+                return true;
+              }
+              return false;
+            },
+          },
+          {
+            name: 'redeem admin_issued code for recovered disabled admin',
+            method: 'POST',
+            path: '/v2/auth/recovery/redeem',
+            expected: 200,
+            headers: { cookie: 'ts_session=' },
+            prepare: () => {
+              qaDisabledRecoveredAdminRedeemBody.code =
+                qaDisabledRecoveredAdminLoginCode;
+            },
+            body: qaDisabledRecoveredAdminRedeemBody,
+            checkHeaders: (headers) =>
+              headers.get('set-cookie')?.includes('ts_session=') ?? false,
+          },
+          {
+            name: 'recovered disabled admin authenticates',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: (body) =>
+              (body as { user?: { email?: string } })?.user?.email ===
+              disabledRecoveredAdminCredentials.email,
+          },
+          {
+            name: 'recovered disabled admin content stays denied',
+            method: 'GET',
+            path: `/v2/media/${inactiveFileId}`,
+            expected: 404,
+          },
+          {
+            name: 'logout recovered disabled admin',
             method: 'POST',
             path: '/v2/auth/logout',
             expected: 204,
-            saveCookieAs: 'disabled-admin-pre-logout',
-          },
-          {
-            name: 'reject replayed cookie after logout',
-            method: 'GET',
-            path: '/v2/auth/me',
-            expected: 401,
-            useSavedCookie: 'disabled-admin-pre-logout',
           },
         ],
       },

@@ -135,6 +135,11 @@ const TOO_MANY_OPEN_PREVIEWS_BODY: V2ErrorResponse = {
   code: 'too_many_open_previews',
 };
 
+const D1_DAILY_IMPORT_LIMIT_BODY: V2ErrorResponse = {
+  error: `Daily D1 database import limit of 1 committed import per UTC day reached. ${D1_BUDGET_ALTERNATIVES_MESSAGE}`,
+  code: 'd1_daily_import_limit',
+};
+
 export type ImportServiceResult<T> =
   | { status: 200 | 201; body: T }
   | {
@@ -681,10 +686,7 @@ export class ImportsService {
       if (hitDaily) {
         return {
           status: 429,
-          body: {
-            error: `Daily D1 import limit of 1 committed import per UTC day reached. ${D1_BUDGET_ALTERNATIVES_MESSAGE}`,
-            code: 'd1_daily_import_limit',
-          },
+          body: D1_DAILY_IMPORT_LIMIT_BODY,
         };
       }
     }
@@ -1341,10 +1343,7 @@ export class ImportsService {
         );
         return {
           status: 429,
-          body: {
-            error: `Daily D1 import limit of 1 committed import per UTC day reached. ${D1_BUDGET_ALTERNATIVES_MESSAGE}`,
-            code: 'd1_daily_import_limit',
-          },
+          body: D1_DAILY_IMPORT_LIMIT_BODY,
         };
       }
       if (outcome.status === 'too_many_open_previews') {
@@ -1738,10 +1737,7 @@ export class ImportsService {
         }
         return {
           status: 429,
-          body: {
-            error: `Daily D1 import limit of 1 committed import per UTC day reached. ${D1_BUDGET_ALTERNATIVES_MESSAGE}`,
-            code: 'd1_daily_import_limit',
-          },
+          body: D1_DAILY_IMPORT_LIMIT_BODY,
         };
       }
     }
@@ -1930,10 +1926,7 @@ export class ImportsService {
     if (commitOutcome.status === 'daily_limit') {
       return {
         status: 429,
-        body: {
-          error: `Daily D1 import limit of 1 committed import per UTC day reached. ${D1_BUDGET_ALTERNATIVES_MESSAGE}`,
-          code: 'd1_daily_import_limit',
-        },
+        body: D1_DAILY_IMPORT_LIMIT_BODY,
       };
     }
     if (commitOutcome.status === 'conflict') {

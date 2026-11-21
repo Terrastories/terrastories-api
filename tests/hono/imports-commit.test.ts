@@ -3050,4 +3050,165 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
       vi.restoreAllMocks();
     }
   });
+
+  it('enforces database-wide 1/UTC-day D1 limit across communities with a tenant-opaque 429 response', async () => {
+    const d1 = createRealD1Db();
+    try {
+      let d1Now = new Date('2026-07-10T10:00:00.000Z');
+      const d1Tables = tablesFor(d1.db);
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+
+      const [commA] = await d1.db
+        .insert(d1Tables.communities)
+        .values({
+          id: 918273,
+          name: 'Alpha Sovereign Community',
+          slug: 'alpha-sovereign-comm',
+          publicStories: false,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.communities.id });
+      const [commB] = await d1.db
+        .insert(d1Tables.communities)
+        .values({
+          id: 918274,
+          name: 'Beta Valley Community',
+          slug: 'beta-valley-comm',
+          publicStories: false,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.communities.id });
+
+      for (const [email, communityId] of [
+        ['alpha-ed@example.test', commA.id],
+        ['beta-ed@example.test', commB.id],
+      ] as const) {
+        await d1.db.insert(d1Tables.users).values({
+          email,
+          username: email.split('@')[0]!,
+          ...deriveUserIdentityColumns({
+            email,
+            username: email.split('@')[0]!,
+          }),
+          firstName: 'D1',
+          lastName: 'Editor',
+          ...seed,
+          role: 'editor',
+          communityId,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        });
+      }
+
+      const d1Mem = createListableMemoryStorage();
+      const d1App = createHonoApp({
+        repository: new HonoFoundationRepository(d1.db as any),
+        storage: d1Mem.storage,
+        mediaCleanup: new MediaCleanupCoordinator(d1.db, d1Mem.storage, {
+          now: () => d1Now,
+        }),
+        publicOrigin: API_ORIGIN,
+        corsOrigins: [CLIENT_ORIGIN],
+        secureCookies: false,
+        serverSecret: makeServerSecret(),
+        now: () => d1Now,
+      });
+
+      const cookieA = await loginOnApp(
+        d1App,
+        d1.db,
+        'alpha-ed@example.test',
+        commA.id,
+        true
+      );
+      const cookieB = await loginOnApp(
+        d1App,
+        d1.db,
+        'beta-ed@example.test',
+        commB.id,
+        true
+      );
+
+      // Community B previews before any commit on Day 1
+      const betaPending = await createPreviewOnApp(d1App, cookieB, {
+        kind: 'places',
+        csvFilename: 'beta-day1.csv',
+        csvText: 'name\nBeta Pending Ridge\n',
+      });
+
+      // Community A previews and commits on Day 1
+      const alphaPreview = await createPreviewOnApp(d1App, cookieA, {
+        kind: 'places',
+        csvFilename: 'alpha-day1.csv',
+        csvText: 'name\nAlpha Secret Ridge\n',
+      });
+      const alphaCommitRes = await commitOnApp(d1App, cookieA, alphaPreview.id);
+      expect(alphaCommitRes.status).toBe(200);
+
+      // Community B preview and commit on Day 1 both return tenant-opaque 429
+      const betaPreviewMp = buildImportMultipart({
+        csvFilename: 'beta-blocked.csv',
+        csvText: 'name\nBeta Blocked Ridge\n',
+        fields: { kind: 'places' },
+      });
+      const betaPreviewRes = await d1App.request(
+        `${API_ORIGIN}/v2/imports/preview`,
+        {
+          method: 'POST',
+          headers: {
+            cookie: cookieB,
+            origin: CLIENT_ORIGIN,
+            'content-type': betaPreviewMp.contentTypeHeader,
+          },
+          body: betaPreviewMp.body,
+          duplex: 'half',
+        } as RequestInit
+      );
+      expect(betaPreviewRes.status).toBe(429);
+      const previewText = await betaPreviewRes.text();
+      const previewBody = JSON.parse(previewText) as Record<string, unknown>;
+      expect(Object.keys(previewBody).sort()).toEqual(['code', 'error']);
+      expect(previewBody.code).toBe('d1_daily_import_limit');
+      expect(previewText).not.toContain(String(commA.id));
+      expect(previewText).not.toContain('Alpha Sovereign Community');
+      expect(previewText).not.toContain('alpha-sovereign-comm');
+      expect(previewText).not.toContain('2026-07-10');
+
+      const betaCommitRes = await commitOnApp(d1App, cookieB, betaPending.id);
+      expect(betaCommitRes.status).toBe(429);
+      const commitText = await betaCommitRes.text();
+      const commitBody = JSON.parse(commitText) as Record<string, unknown>;
+      expect(commitBody).toEqual(previewBody);
+      expect(commitText).not.toContain(String(commA.id));
+      expect(commitText).not.toContain('Alpha Sovereign Community');
+      expect(commitText).not.toContain('alpha-sovereign-comm');
+
+      // Community B's manifest stays previewed (not failed/discarded)
+      const [betaAfter429] = await d1.db
+        .select({ status: d1Tables.importManifests.status })
+        .from(d1Tables.importManifests)
+        .where(eq(d1Tables.importManifests.id, betaPending.id));
+      expect(betaAfter429?.status).toBe('previewed');
+
+      // Community A can still idempotently re-commit on Day 1
+      const alphaIdempotent = await commitOnApp(
+        d1App,
+        cookieA,
+        alphaPreview.id
+      );
+      expect(alphaIdempotent.status).toBe(200);
+
+      // On Day 2 UTC, Community B can commit cleanly
+      d1Now = new Date('2026-07-11T00:05:00.000Z');
+      const betaDay2Commit = await commitOnApp(d1App, cookieB, betaPending.id);
+      expect(betaDay2Commit.status).toBe(200);
+    } finally {
+      d1.sqlite.close();
+    }
+  });
 });

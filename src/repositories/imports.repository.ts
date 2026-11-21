@@ -402,6 +402,11 @@ export class ImportsRepository {
     return rows.length > 0;
   }
 
+  /**
+   * SPEC-V2.md §4: the D1 1/UTC-day import allowance is intentionally scoped per
+   * D1 database (shared with login and other writes), not per community. Callers
+   * must surface a tenant-opaque 429 that never reveals which community imported.
+   */
   async hasCommittedImportInWindow(
     startMs: number,
     endMs: number,

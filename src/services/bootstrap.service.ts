@@ -221,6 +221,21 @@ export class BootstrapService {
       };
     }
 
+    // Per-IP throttle brake is checked BEFORE any secret comparison so a
+    // blocked address cannot keep guessing and a correct guess from a blocked
+    // IP cannot complete (round 4 item 2). Uniform 403, no comparison.
+    const secretForThrottle = this.bootstrapSecret;
+    if (secretForThrottle !== undefined) {
+      const preCheckNowMs = context.now.getTime();
+      const ipBlocked = await this.authRepo.throttleState(
+        await this.authRepo.ipThrottleKey(context.clientIp, secretForThrottle),
+        preCheckNowMs
+      );
+      if (ipBlocked.blocked) {
+        return { status: 403, body: FORBIDDEN_BODY };
+      }
+    }
+
     // The operator secret is compared as SHA-256 digests with the constant-time
     // comparator, so the raw value never crosses a comparison boundary and a
     // wrong/missing secret answers exactly like a closed installation (no

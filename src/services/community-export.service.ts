@@ -382,14 +382,21 @@ export class CommunityExportService {
         },
       };
     } catch (error) {
-      let allCleaned = !activeUploadId || !!this.storage.abortMultipartUpload;
-      if (activeUploadId && this.storage.abortMultipartUpload) {
-        try {
-          await this.storage.abortMultipartUpload(
-            zipStorageKey,
-            activeUploadId
-          );
-        } catch {
+      let abortFailed = false;
+      let allCleaned = true;
+      if (activeUploadId) {
+        if (this.storage.abortMultipartUpload) {
+          try {
+            await this.storage.abortMultipartUpload(
+              zipStorageKey,
+              activeUploadId
+            );
+          } catch {
+            abortFailed = true;
+            allCleaned = false;
+          }
+        } else {
+          abortFailed = true;
           allCleaned = false;
         }
       }
@@ -406,7 +413,8 @@ export class CommunityExportService {
           communityId: caller.communityId,
           requestedBy: caller.actorId,
           cleanedUpAtMs: allCleaned ? failTime.getTime() : null,
-          clearUploadId: allCleaned || !activeUploadId,
+          clearUploadId: !abortFailed,
+          persistUploadId: abortFailed ? activeUploadId : null,
           now: failTime,
         })
         .catch(() => {});
@@ -476,9 +484,6 @@ export class CommunityExportService {
           {
             id: record.jobId,
             status: record.jobStatus,
-            manifestStorageKey: record.manifestStorageKey,
-            zipStorageKey: record.zipStorageKey,
-            zipUploadId: record.zipUploadId,
           },
           nowMs
         ).catch(() => {});
@@ -641,31 +646,28 @@ export class CommunityExportService {
     job: {
       id: string;
       status: ExportJobStatus;
-      manifestStorageKey: string | null;
-      zipStorageKey: string | null;
-      zipUploadId: string | null;
     },
     nowMs: number
   ): Promise<'cleaned' | 'failed' | 'skipped'> {
-    const claimedStatus = await this.repository.claimJobForCleanup({
+    const claim = await this.repository.claimJobForCleanup({
       jobId: job.id,
       status: job.status,
       nowMs,
       staleBeforeMs: nowMs - EXPORT_GENERATION_STALE_MS,
     });
-    if (!claimedStatus) {
+    if (!claim) {
       return 'skipped';
     }
 
     let allSucceeded = true;
     let abortSucceeded = true;
 
-    if (job.zipUploadId && job.zipStorageKey) {
+    if (claim.zipUploadId && claim.zipStorageKey) {
       if (this.storage.abortMultipartUpload) {
         try {
           await this.storage.abortMultipartUpload(
-            job.zipStorageKey,
-            job.zipUploadId
+            claim.zipStorageKey,
+            claim.zipUploadId
           );
         } catch {
           allSucceeded = false;
@@ -677,22 +679,24 @@ export class CommunityExportService {
       }
     }
 
-    if (job.manifestStorageKey && validStorageKey(job.manifestStorageKey)) {
-      const ok = await this.deleteObjectBestEffort(job.manifestStorageKey);
+    if (claim.manifestStorageKey && validStorageKey(claim.manifestStorageKey)) {
+      const ok = await this.deleteObjectBestEffort(claim.manifestStorageKey);
       if (!ok) allSucceeded = false;
     }
-    if (job.zipStorageKey && validStorageKey(job.zipStorageKey)) {
-      const ok = await this.deleteObjectBestEffort(job.zipStorageKey);
+    if (claim.zipStorageKey && validStorageKey(claim.zipStorageKey)) {
+      const ok = await this.deleteObjectBestEffort(claim.zipStorageKey);
       if (!ok) allSucceeded = false;
     }
 
-    await this.repository.markJobCleanedUp({
+    const markResult = await this.repository.markJobCleanedUp({
       jobId: job.id,
-      nextStatus: claimedStatus,
+      nextStatus: claim.status,
+      expectedCompletedAt: claim.completedAt,
       cleanedUpAtMs: allSucceeded ? nowMs : null,
       clearUploadId: abortSucceeded,
     });
-    return allSucceeded ? 'cleaned' : 'failed';
+    if (!allSucceeded) return 'failed';
+    return markResult.updated ? 'cleaned' : 'skipped';
   }
 
   private scheduleExpiry(communityId: number, expiresAtMs: number): void {

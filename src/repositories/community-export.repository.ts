@@ -254,6 +254,19 @@ export interface ExportJobRecord {
   cleanedUpAt: number | null;
 }
 
+export interface ExportCleanupClaim {
+  status: 'expired' | 'failed';
+  manifestStorageKey: string | null;
+  zipStorageKey: string | null;
+  zipUploadId: string | null;
+  completedAt: number | null;
+}
+
+export interface MarkJobCleanedUpResult {
+  updated: boolean;
+  markedCleaned: boolean;
+}
+
 export interface ExportTokenWithJobRecord {
   tokenId: number;
   jobId: string;
@@ -1519,7 +1532,9 @@ export class CommunityExportRepository {
 
   /**
    * Mark a generating job `'failed'` and emit a content-free failure audit
-   * entry in one atomic unit. Preserves `cleanedUpAt = null` if any cleanup
+   * entry in one atomic unit. Transitions `completedAt` strictly once
+   * (`null -> failTime`) so concurrent cleanup sweeps cannot confuse states
+   * across generations, and preserves `cleanedUpAt = null` if any cleanup
    * failed so a subsequent sweep retries object deletion.
    */
   async failExportJob(input: {
@@ -1528,6 +1543,7 @@ export class CommunityExportRepository {
     requestedBy: number;
     cleanedUpAtMs: number | null;
     clearUploadId: boolean;
+    persistUploadId?: string | null;
     now: Date;
   }): Promise<boolean> {
     const { exportJobs } = this.tables;
@@ -1550,6 +1566,8 @@ export class CommunityExportRepository {
     };
     if (input.clearUploadId) {
       patch.zipUploadId = null;
+    } else if (input.persistUploadId) {
+      patch.zipUploadId = input.persistUploadId;
     }
 
     if (typeof db.batch === 'function') {
@@ -1561,7 +1579,8 @@ export class CommunityExportRepository {
           and(
             eq(exportJobs.id, input.jobId),
             eq(exportJobs.communityId, input.communityId),
-            inArray(exportJobs.status, ['generating', 'failed'])
+            inArray(exportJobs.status, ['generating', 'failed']),
+            isNull(exportJobs.completedAt)
           )
         )
         .returning({ id: exportJobs.id });
@@ -1569,6 +1588,7 @@ export class CommunityExportRepository {
         select 1 from ${exportJobs}
         where ${exportJobs.id} = ${input.jobId}
           and ${exportJobs.status} = 'failed'
+          and ${exportJobs.completedAt} = ${input.now.getTime()}
       ) and not exists (
         select 1 from ${auditEntries}
         where ${auditEntries.communityId} = ${input.communityId}
@@ -1592,7 +1612,8 @@ export class CommunityExportRepository {
             and(
               eq(exportJobs.id, input.jobId),
               eq(exportJobs.communityId, input.communityId),
-              inArray(exportJobs.status, ['generating', 'failed'])
+              inArray(exportJobs.status, ['generating', 'failed']),
+              isNull(exportJobs.completedAt)
             )
           )
           .returning({ id: exportJobs.id });
@@ -1610,7 +1631,8 @@ export class CommunityExportRepository {
           and(
             eq(exportJobs.id, input.jobId),
             eq(exportJobs.communityId, input.communityId),
-            inArray(exportJobs.status, ['generating', 'failed'])
+            inArray(exportJobs.status, ['generating', 'failed']),
+            isNull(exportJobs.completedAt)
           )
         )
         .returning({ id: exportJobs.id })
@@ -1842,17 +1864,39 @@ export class CommunityExportRepository {
   }
 
   /**
-   * Atomically fence an export job before deleting its storage objects or
-   * aborting its multipart upload so a concurrent completion to `'ready'`
-   * cannot have its artifacts deleted by a racing cleanup sweep.
+   * Atomically fence an export job and capture its post-fence cleanup snapshot
+   * (`manifestStorageKey`, `zipStorageKey`, `zipUploadId`, `completedAt`) before
+   * deleting storage objects or aborting multipart uploads, so a concurrent
+   * completion to `'ready'` or writer `failExportJob` cannot leave uncollected
+   * artifacts behind.
    */
   async claimJobForCleanup(input: {
     jobId: string;
     status: ExportJobStatus;
     nowMs: number;
     staleBeforeMs: number;
-  }): Promise<'expired' | 'failed' | null> {
+  }): Promise<ExportCleanupClaim | null> {
     const { exportJobs } = this.tables;
+    const claimColumns = {
+      status: exportJobs.status,
+      manifestStorageKey: exportJobs.manifestStorageKey,
+      zipStorageKey: exportJobs.zipStorageKey,
+      zipUploadId: exportJobs.zipUploadId,
+      completedAt: exportJobs.completedAt,
+    };
+    const toClaim = (
+      row: Record<string, unknown>,
+      status: 'expired' | 'failed'
+    ): ExportCleanupClaim => ({
+      status,
+      manifestStorageKey:
+        row.manifestStorageKey === null ? null : String(row.manifestStorageKey),
+      zipStorageKey:
+        row.zipStorageKey === null ? null : String(row.zipStorageKey),
+      zipUploadId: row.zipUploadId === null ? null : String(row.zipUploadId),
+      completedAt: toOptionalNumber(row.completedAt),
+    });
+
     if (input.status === 'generating') {
       const updated = await this.db
         .update(exportJobs)
@@ -1865,8 +1909,10 @@ export class CommunityExportRepository {
             isNull(exportJobs.cleanedUpAt)
           )
         )
-        .returning({ id: exportJobs.id });
-      return Array.isArray(updated) && updated.length > 0 ? 'failed' : null;
+        .returning(claimColumns);
+      return Array.isArray(updated) && updated.length > 0
+        ? toClaim(updated[0], 'failed')
+        : null;
     }
 
     if (input.status === 'ready') {
@@ -1881,12 +1927,14 @@ export class CommunityExportRepository {
             isNull(exportJobs.cleanedUpAt)
           )
         )
-        .returning({ id: exportJobs.id });
-      return Array.isArray(updated) && updated.length > 0 ? 'expired' : null;
+        .returning(claimColumns);
+      return Array.isArray(updated) && updated.length > 0
+        ? toClaim(updated[0], 'expired')
+        : null;
     }
 
     const rows = await this.db
-      .select({ status: exportJobs.status })
+      .select(claimColumns)
       .from(exportJobs)
       .where(
         and(
@@ -1896,35 +1944,60 @@ export class CommunityExportRepository {
         )
       )
       .limit(1);
-    return rows.length > 0 ? (input.status as 'expired' | 'failed') : null;
+    return rows.length > 0
+      ? toClaim(rows[0], input.status as 'expired' | 'failed')
+      : null;
   }
 
   async markJobCleanedUp(input: {
     jobId: string;
     nextStatus: 'expired' | 'failed';
+    expectedCompletedAt: number | null;
     cleanedUpAtMs: number | null;
     clearUploadId: boolean;
-  }): Promise<void> {
+  }): Promise<MarkJobCleanedUpResult> {
     const { exportJobs } = this.tables;
+    // A reclaimed writer may still be uploading. Only a sweep that observed a
+    // non-null completedAt BEFORE deleting objects may mark cleanedUpAt, and
+    // any concurrent completedAt transition during the delete pass forces a retry.
+    const canMarkCleaned =
+      input.cleanedUpAtMs !== null &&
+      (input.nextStatus === 'expired' || input.expectedCompletedAt !== null);
     const patch: Record<string, unknown> = {
       status: input.nextStatus,
-      // A reclaimed writer may still be uploading. Only its failure acknowledgement
-      // (completedAt) proves it has stopped; crashes remain retryable.
-      cleanedUpAt: sql`case when ${exportJobs.status} = 'failed' and ${exportJobs.completedAt} is null then null else cast(${input.cleanedUpAtMs} as bigint) end`,
+      cleanedUpAt: canMarkCleaned ? input.cleanedUpAtMs : null,
     };
     if (input.clearUploadId) {
       patch.zipUploadId = null;
     }
-    await this.db
+    const completedAtGuard =
+      input.expectedCompletedAt === null
+        ? isNull(exportJobs.completedAt)
+        : eq(exportJobs.completedAt, input.expectedCompletedAt);
+
+    const updated = await this.db
       .update(exportJobs)
       .set(patch)
       .where(
         and(
           eq(exportJobs.id, input.jobId),
           isNull(exportJobs.cleanedUpAt),
-          inArray(exportJobs.status, ['expired', 'failed'])
+          eq(exportJobs.status, input.nextStatus),
+          completedAtGuard
         )
-      );
+      )
+      .returning({
+        id: exportJobs.id,
+        cleanedUpAt: exportJobs.cleanedUpAt,
+      });
+
+    if (!Array.isArray(updated) || updated.length === 0) {
+      return { updated: false, markedCleaned: false };
+    }
+    return {
+      updated: true,
+      markedCleaned: updated[0]!.cleanedUpAt !== null,
+    };
   }
 
   private mapJobRow(row: Record<string, unknown>): ExportJobRecord {

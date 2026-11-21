@@ -1099,6 +1099,110 @@ describe('Slice 13a community export endpoints', () => {
     expect(downloadZipB.status).toBe(200);
   });
 
+  it('prevents a sweep paused between delete and markJobCleanedUp from marking cleaned after a reclaimed writer writes and fails cleanup', async () => {
+    const env = await setupEnv({ isWorkers: true });
+    const adminCookie = await env.loginAs('admin1@c1.test');
+
+    let entered!: () => void;
+    const barrierEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let releaseWriter!: () => void;
+    const barrierReleased = new Promise<void>((resolve) => {
+      releaseWriter = resolve;
+    });
+
+    env.testStorage.setPutMultipartId('upload-pause-between-delete-and-mark');
+    env.testStorage.setReadBarrier(env.file1Key, entered, barrierReleased);
+
+    const exportPromise = env.app.request(`${API_ORIGIN}/v2/community/export`, {
+      method: 'POST',
+      headers: { cookie: adminCookie },
+    });
+    await barrierEntered;
+
+    const sweepTimeMs = T0.getTime() + EXPORT_GENERATION_STALE_MS + 5_000;
+    env.advanceMs(EXPORT_GENERATION_STALE_MS + 5_000);
+    const repo = new CommunityExportRepository(env.db);
+    const svc = new CommunityExportService(repo, env.testStorage.storage, {
+      isWorkers: true,
+      now: () => new Date(sweepTimeMs),
+    });
+
+    let markEntered!: () => void;
+    const markEnteredPromise = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let releaseMark!: () => void;
+    const markReleasedPromise = new Promise<void>((resolve) => {
+      releaseMark = resolve;
+    });
+    const origMark = repo.markJobCleanedUp.bind(repo);
+    let pauseFirstMark = true;
+    repo.markJobCleanedUp = async (input) => {
+      if (pauseFirstMark) {
+        pauseFirstMark = false;
+        markEntered();
+        await markReleasedPromise;
+      }
+      return origMark(input);
+    };
+
+    const sweep1Promise = svc.cleanupExpiredExports();
+    await markEnteredPromise;
+
+    expect(
+      env.testStorage.abortedUploads.some(
+        (u) => u.uploadId === 'upload-pause-between-delete-and-mark'
+      )
+    ).toBe(true);
+    const staleJob = env.db.select().from(env.tables.exportJobs).get()!;
+    expect(staleJob.status).toBe('failed');
+    expect(staleJob.completedAt).toBeNull();
+    expect(staleJob.cleanedUpAt).toBeNull();
+    expect(env.testStorage.objects.has(staleJob.manifestStorageKey!)).toBe(
+      false
+    );
+    expect(env.testStorage.objects.has(staleJob.zipStorageKey!)).toBe(false);
+
+    // Reclaimed writer finishes writing artifacts, fails to delete the ZIP,
+    // and acknowledges failure via failExportJob while Sweep 1 is paused.
+    env.testStorage.setDeleteFailureKey(staleJob.zipStorageKey);
+    env.testStorage.clearReadBarrier();
+    releaseWriter();
+    const res = await exportPromise;
+    expect(res.status).toBe(409);
+    expect(env.testStorage.objects.has(staleJob.zipStorageKey!)).toBe(true);
+    const afterWriterFail = await repo.findJobById(staleJob.id);
+    expect(afterWriterFail?.completedAt).not.toBeNull();
+    expect(afterWriterFail?.cleanedUpAt).toBeNull();
+
+    // Resumed Sweep 1 must fail the completedAt generation guard so it does
+    // not mark cleanedUpAt over the leftover artifact.
+    releaseMark();
+    const sweep1Result = await sweep1Promise;
+    expect(sweep1Result).toEqual({ cleanedCount: 0, failedCount: 0 });
+    expect((await repo.findJobById(staleJob.id))?.cleanedUpAt).toBeNull();
+    expect(env.testStorage.objects.has(staleJob.zipStorageKey!)).toBe(true);
+
+    const pendingCleanup = await repo.findJobsNeedingCleanup({
+      nowMs: sweepTimeMs + 1_000,
+      staleBeforeMs: T0.getTime() + 10_000,
+      limit: 10,
+    });
+    expect(pendingCleanup.map((job) => job.id)).toContain(staleJob.id);
+
+    // Subsequent Sweep 2 deletes the leftover ZIP and marks cleanedUpAt.
+    env.testStorage.setDeleteFailureKey(null);
+    const sweep2Result = await svc.cleanupExpiredExports();
+    expect(sweep2Result).toEqual({ cleanedCount: 1, failedCount: 0 });
+    expect((await repo.findJobById(staleJob.id))?.cleanedUpAt).not.toBeNull();
+    for (const key of env.testStorage.objects.keys()) {
+      expect(key).not.toContain('/exports/');
+    }
+    expect(env.db.select().from(env.tables.exportTokens).all()).toHaveLength(0);
+  });
+
   it('streams local filesystem archive on Node, supports Range 206, and deletes disk files on expiry', async () => {
     const storageDir = await mkdtemp(path.join(tmpdir(), 'ts-export-node-'));
     tempDirs.push(storageDir);

@@ -2767,40 +2767,80 @@ export async function runRepositoryContract(database: unknown): Promise<void> {
       });
     const jobId = crypto.randomUUID();
     assert.equal((await reserve(jobId)).status, 'reserved');
-    assert.equal(
-      await exports.claimJobForCleanup({
-        jobId,
-        status: 'generating',
-        nowMs: nowMs + 300001,
-        staleBeforeMs: nowMs + 1,
-      }),
-      'failed'
-    );
-    await exports.markJobCleanedUp({
+    const claim1 = await exports.claimJobForCleanup({
+      jobId,
+      status: 'generating',
+      nowMs: nowMs + 300001,
+      staleBeforeMs: nowMs + 1,
+    });
+    assert.equal(claim1?.status, 'failed');
+    assert.equal(claim1?.completedAt, null);
+    const markUnacked = await exports.markJobCleanedUp({
       jobId,
       nextStatus: 'failed',
+      expectedCompletedAt: claim1!.completedAt,
       cleanedUpAtMs: nowMs + 300001,
       clearUploadId: true,
     });
+    assert.deepEqual(markUnacked, { updated: true, markedCleaned: false });
     assert.equal(
       (await exports.findJobById(jobId))?.cleanedUpAt,
       null,
       'an unacknowledged writer must remain retryable'
     );
-    await exports.failExportJob({
-      jobId,
-      communityId: tenantFkCommunity.id,
-      requestedBy: tenantFkAuthor.id,
-      cleanedUpAtMs: null,
-      clearUploadId: true,
-      now: new Date(nowMs + 300002),
-    });
-    await exports.markJobCleanedUp({
+    assert.equal(
+      await exports.failExportJob({
+        jobId,
+        communityId: tenantFkCommunity.id,
+        requestedBy: tenantFkAuthor.id,
+        cleanedUpAtMs: null,
+        clearUploadId: true,
+        now: new Date(nowMs + 300002),
+      }),
+      true
+    );
+    assert.equal(
+      await exports.failExportJob({
+        jobId,
+        communityId: tenantFkCommunity.id,
+        requestedBy: tenantFkAuthor.id,
+        cleanedUpAtMs: null,
+        clearUploadId: true,
+        now: new Date(nowMs + 300002),
+      }),
+      false,
+      'completedAt failure acknowledgement must transition strictly once'
+    );
+    const staleMark = await exports.markJobCleanedUp({
       jobId,
       nextStatus: 'failed',
+      expectedCompletedAt: claim1!.completedAt,
+      cleanedUpAtMs: nowMs + 300002,
+      clearUploadId: true,
+    });
+    assert.deepEqual(
+      staleMark,
+      { updated: false, markedCleaned: false },
+      'a stale sweep must not mark cleaned after the writer acknowledged failure'
+    );
+    assert.equal((await exports.findJobById(jobId))?.cleanedUpAt, null);
+
+    const claim2 = await exports.claimJobForCleanup({
+      jobId,
+      status: 'failed',
+      nowMs: nowMs + 300003,
+      staleBeforeMs: nowMs + 3,
+    });
+    assert.equal(claim2?.status, 'failed');
+    assert.equal(claim2?.completedAt, nowMs + 300002);
+    const finalMark = await exports.markJobCleanedUp({
+      jobId,
+      nextStatus: 'failed',
+      expectedCompletedAt: claim2!.completedAt,
       cleanedUpAtMs: nowMs + 300003,
       clearUploadId: true,
     });
+    assert.deepEqual(finalMark, { updated: true, markedCleaned: true });
     assert.equal(
       (await exports.findJobById(jobId))?.cleanedUpAt,
       nowMs + 300003

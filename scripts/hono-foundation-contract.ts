@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from 'node:assert/strict';
-import { and, asc, eq, inArray, like, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, like, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { serve } from '@hono/node-server';
 import { once } from 'node:events';
@@ -14,6 +14,10 @@ import {
 } from '../src/db/schema/sessions.js';
 import { HonoFoundationRepository } from '../src/repositories/hono-foundation.repository.js';
 import { HonoAuthRepository } from '../src/repositories/hono-auth.repository.js';
+import { CommunityExportRepository } from '../src/repositories/community-export.repository.js';
+import { CommunityExportService } from '../src/services/community-export.service.js';
+import type { FoundationStorage } from '../src/services/hono-foundation.service.js';
+import { EXPORT_GENERATION_STALE_MS } from '../src/shared/export-policy.js';
 import { MediaCleanupCoordinator } from '../src/services/media-cleanup.service.js';
 import { createHonoApp } from '../src/hono-app.js';
 import {
@@ -4596,8 +4600,161 @@ export async function runHonoFoundationContract(
         )
       );
     assert.equal(persistedBulkStories.length, 5_000);
+
+    // Slice 13a PostgreSQL concurrency race (PR #258 Greptile P1):
+    // A cleanup sweep that deleted objects and paused before markJobCleanedUp
+    // must block behind the reclaimed writer's failExportJob lock and then
+    // fail PostgreSQL READ COMMITTED EvalPlanQual re-evaluation so it cannot
+    // mark cleanedUpAt or clear zipUploadId over the writer's failure write.
+    if (dialectOf(database) === 'postgresql') {
+      const [exportAdmin] = await db
+        .select({ id: tables.users.id })
+        .from(tables.users)
+        .where(eq(tables.users.email, adminEmail))
+        .limit(1);
+      assert.ok(exportAdmin, 'admin user must exist for export race test');
+
+      const exportRepo = new CommunityExportRepository(database);
+      const exportObjects = new Map<string, Uint8Array>();
+      const abortedUploads: Array<{ key: string; uploadId: string }> = [];
+      const exportStorage: FoundationStorage = {
+        async read(key) {
+          const bytes = exportObjects.get(key);
+          return bytes ? { body: bytes, size: bytes.byteLength } : null;
+        },
+        async delete(key) {
+          exportObjects.delete(key);
+        },
+        async abortMultipartUpload(key, uploadId) {
+          abortedUploads.push({ key, uploadId });
+        },
+      };
+
+      const baseMs = instant.getTime() + 7_200_000;
+      const raceJobId = crypto.randomUUID();
+      const manifestKey = `communities/${communityA}/exports/${raceJobId}/manifest.json`;
+      const zipKey = `communities/${communityA}/exports/${raceJobId}/media.zip`;
+      const reserved = await exportRepo.reserveExportJob({
+        jobId: raceJobId,
+        communityId: communityA,
+        requestedBy: exportAdmin.id,
+        manifestStorageKey: manifestKey,
+        zipStorageKey: zipKey,
+        createdAtMs: baseMs,
+        expiresAtMs: baseMs + 900_000,
+        windowStartMs: baseMs - 3_600_000,
+        windowMs: 3_600_000,
+        maxPerCommunity: 10,
+        maxPerAccount: 10,
+        now: new Date(baseMs),
+      });
+      assert.equal(reserved.status, 'reserved');
+      exportObjects.set(manifestKey, new Uint8Array([1, 2, 3]));
+      exportObjects.set(zipKey, new Uint8Array([4, 5, 6]));
+
+      const sweepNowMs = baseMs + EXPORT_GENERATION_STALE_MS + 5_000;
+      const exportSvc = new CommunityExportService(exportRepo, exportStorage, {
+        now: () => new Date(sweepNowMs),
+      });
+
+      let markEntered!: () => void;
+      const markEnteredPromise = new Promise<void>((resolve) => {
+        markEntered = resolve;
+      });
+      let releaseMark!: () => void;
+      const markReleasedPromise = new Promise<void>((resolve) => {
+        releaseMark = resolve;
+      });
+      const origMark = exportRepo.markJobCleanedUp.bind(exportRepo);
+      let pauseFirstMark = true;
+      exportRepo.markJobCleanedUp = async (input) => {
+        if (pauseFirstMark) {
+          pauseFirstMark = false;
+          markEntered();
+          await markReleasedPromise;
+        }
+        return origMark(input);
+      };
+
+      const sweep1Promise = exportSvc.cleanupExpiredExports({
+        communityId: communityA,
+      });
+      void sweep1Promise.then(ignore, ignore);
+      await withDeadline(
+        markEnteredPromise,
+        5000,
+        'export sweep1 pause before markJobCleanedUp'
+      );
+      assert.equal(exportObjects.has(manifestKey), false);
+      assert.equal(exportObjects.has(zipKey), false);
+
+      // Reclaimed writer finishes writing a leftover object, fails its own
+      // cleanup, and locks the row in failExportJob while Sweep 1 resumes.
+      exportObjects.set(zipKey, new Uint8Array([9, 8, 7, 6]));
+      const failAtMs = sweepNowMs + 1_000;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .update(tables.exportJobs)
+          .set({
+            status: 'failed',
+            completedAt: failAtMs,
+            cleanedUpAt: null,
+            zipUploadId: 'writer-leftover-upload',
+          })
+          .where(
+            and(
+              eq(tables.exportJobs.id, raceJobId),
+              eq(tables.exportJobs.communityId, communityA),
+              inArray(tables.exportJobs.status, ['generating', 'failed']),
+              isNull(tables.exportJobs.completedAt)
+            )
+          );
+        releaseMark();
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        assert.ok(
+          blocked >= 1,
+          'stale sweep markJobCleanedUp must block behind writer failExportJob row lock'
+        );
+      });
+
+      const sweep1Res = await withDeadline(
+        sweep1Promise,
+        5000,
+        'export sweep1 completion'
+      );
+      assert.deepEqual(sweep1Res, { cleanedCount: 0, failedCount: 0 });
+
+      const afterSweep1 = await exportRepo.findJobById(raceJobId);
+      assert.ok(afterSweep1);
+      assert.equal(afterSweep1.status, 'failed');
+      assert.equal(afterSweep1.completedAt, failAtMs);
+      assert.equal(afterSweep1.cleanedUpAt, null);
+      assert.equal(afterSweep1.zipUploadId, 'writer-leftover-upload');
+      assert.equal(exportObjects.has(zipKey), true);
+
+      // Next sweep performs a fresh delete/abort pass and marks cleaned.
+      const sweep2Res = await exportSvc.cleanupExpiredExports({
+        communityId: communityA,
+      });
+      assert.deepEqual(sweep2Res, { cleanedCount: 1, failedCount: 0 });
+      assert.equal(exportObjects.has(zipKey), false);
+      assert.equal(
+        abortedUploads.some((u) => u.uploadId === 'writer-leftover-upload'),
+        true
+      );
+      const afterSweep2 = await exportRepo.findJobById(raceJobId);
+      assert.ok(afterSweep2);
+      assert.notEqual(afterSweep2.cleanedUpAt, null);
+      assert.equal(afterSweep2.zipUploadId, null);
+    }
   } finally {
     for (const id of communityIds) {
+      await db
+        .delete(tables.exportTokens)
+        .where(eq(tables.exportTokens.communityId, id));
+      await db
+        .delete(tables.exportJobs)
+        .where(eq(tables.exportJobs.communityId, id));
       await db
         .delete(tables.importManifests)
         .where(eq(tables.importManifests.communityId, id));

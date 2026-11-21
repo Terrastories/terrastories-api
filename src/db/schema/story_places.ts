@@ -50,6 +50,8 @@ export const storyPlacesPg = pgTable(
     updatedAt: timestamp('updated_at', { precision: 3 }).notNull().defaultNow(),
   },
   (table) => ({
+    // Community isolation lookup index for full-community export/erasure scans
+    communityIdx: index('story_places_community_id_idx').on(table.communityId),
     // Non-unique lookup index; V2 retains story edge multiplicity (#189)
     storyPlaceIdx: index('story_places_story_place_idx').on(
       table.storyId,
@@ -92,6 +94,10 @@ export const storyPlacesSqlite = sqliteTable(
       .$defaultFn(() => new Date()),
   },
   (table) => ({
+    // Community isolation lookup index for full-community export/erasure scans
+    communityIdx: sqliteIndex('story_places_community_id_idx').on(
+      table.communityId
+    ),
     // Non-unique lookup index; V2 retains story edge multiplicity (#189)
     storyPlaceIdx: sqliteIndex('story_places_story_place_idx').on(
       table.storyId,

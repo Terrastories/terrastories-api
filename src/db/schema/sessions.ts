@@ -163,6 +163,7 @@ export const communityMediaPg = pgTable(
     kind: pgText('kind').notNull(),
   },
   (table) => [
+    pgIndex('community_media_community_id_idx').on(table.communityId),
     pgCheck('community_media_kind_check', sql`${table.kind} = 'branding'`),
     // Composite tenant FK (#186): branding media must reference a file of the
     // same community, never another community's file.
@@ -184,6 +185,7 @@ export const communityMediaSqlite = sqliteTable(
     kind: text('kind').notNull(),
   },
   (table) => [
+    index('community_media_community_id_idx').on(table.communityId),
     check('community_media_kind_check', sql`${table.kind} = 'branding'`),
     // Composite tenant FK (#186): branding media must reference a file of the
     // same community, never another community's file.

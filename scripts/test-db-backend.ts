@@ -2349,6 +2349,8 @@ const rebuiltTables = [
   'login_codes',
   'claim_tokens',
   'installation_bootstrap',
+  'export_jobs',
+  'export_tokens',
 ] as const;
 
 /**
@@ -2481,7 +2483,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0014_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0016_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2878,6 +2880,7 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0012_auth_throttle_and_session_lifetimes.sql',
       '0013_login_codes_and_claim_tokens.sql',
       '0014_session_admin_code_step_up_and_login_code_idx.sql',
+      '0016_community_export_jobs_and_tokens.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')

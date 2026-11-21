@@ -99,6 +99,13 @@
       "when": 1795348800000,
       "tag": "0013_session_admin_code_step_up_and_login_code_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1795521600000,
+      "tag": "0015_community_export_jobs_and_tokens",
+      "breakpoints": true
     }
   ]
 }

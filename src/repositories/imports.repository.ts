@@ -138,6 +138,40 @@ class RollbackReferenceError extends Error {
   }
 }
 
+/**
+ * Map `INSERT ... RETURNING` rows to their caller-supplied records by a unique
+ * natural key rather than positional array order, which SQL engines do not
+ * guarantee across multi-row inserts.
+ */
+function mapReturnedIdsByKey<
+  TRow extends { id: number | string },
+  TKey extends string,
+>(
+  returnedRows: ReadonlyArray<TRow>,
+  expectedKeys: ReadonlyArray<TKey>,
+  keyOf: (row: TRow) => TKey
+): Map<TKey, number> {
+  if (returnedRows.length !== expectedKeys.length) {
+    throw new RollbackReferenceError();
+  }
+  const expectedSet = new Set(expectedKeys);
+  if (expectedSet.size !== expectedKeys.length) {
+    throw new RollbackReferenceError();
+  }
+  const out = new Map<TKey, number>();
+  for (const row of returnedRows) {
+    const key = keyOf(row);
+    if (!expectedSet.has(key) || out.has(key)) {
+      throw new RollbackReferenceError();
+    }
+    out.set(key, Number(row.id));
+  }
+  if (out.size !== expectedKeys.length) {
+    throw new RollbackReferenceError();
+  }
+  return out;
+}
+
 export interface StagedFileVerificationRecord {
   id: string;
   storageKey: string;
@@ -1798,45 +1832,54 @@ export class ImportsRepository {
     const { communityId, actorId, normalizedData, now } = input;
     return {
       relatedPlaces: normalizedData.relatedPlacesToCreate.map((p) => ({
-        communityId,
-        name: p.name,
-        description: null,
-        descriptionPlain: null,
-        typeOfPlace: null,
-        region: null,
-        latitude: null,
-        longitude: null,
-        isRestricted: false,
-        createdAt: now,
-        updatedAt: now,
+        row: p,
+        values: {
+          communityId,
+          name: p.name,
+          description: null,
+          descriptionPlain: null,
+          typeOfPlace: null,
+          region: null,
+          latitude: null,
+          longitude: null,
+          isRestricted: false,
+          createdAt: now,
+          updatedAt: now,
+        },
       })),
       relatedSpeakers: normalizedData.relatedSpeakersToCreate.map((sp) => ({
-        communityId,
-        name: sp.name,
-        birthDate: null,
-        birthplaceId: null,
-        affiliation: null,
-        isActive: true,
-        createdAt: now,
-        updatedAt: now,
+        row: sp,
+        values: {
+          communityId,
+          name: sp.name,
+          birthDate: null,
+          birthplaceId: null,
+          affiliation: null,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        },
       })),
-      buildPlaces: () =>
+      buildPlaceEntries: () =>
         (normalizedData.kind === 'places' ? normalizedData.rows : []).map(
           (row: NormalizedPlaceRow) => ({
-            communityId,
-            name: row.name,
-            description: row.description,
-            descriptionPlain: row.descriptionPlain,
-            typeOfPlace: row.typeOfPlace,
-            region: row.region,
-            latitude: row.latitude,
-            longitude: row.longitude,
-            isRestricted: false,
-            createdAt: now,
-            updatedAt: now,
+            row,
+            values: {
+              communityId,
+              name: row.name,
+              description: row.description,
+              descriptionPlain: row.descriptionPlain,
+              typeOfPlace: row.typeOfPlace,
+              region: row.region,
+              latitude: row.latitude,
+              longitude: row.longitude,
+              isRestricted: false,
+              createdAt: now,
+              updatedAt: now,
+            },
           })
         ),
-      buildSpeakers: (
+      buildSpeakerEntries: (
         resolvePlaceRef: (
           ref:
             | { kind: 'existing'; id: number }
@@ -1846,17 +1889,20 @@ export class ImportsRepository {
       ) =>
         (normalizedData.kind === 'speakers' ? normalizedData.rows : []).map(
           (row: NormalizedSpeakerRow) => ({
-            communityId,
-            name: row.name,
-            birthDate: row.birthDate,
-            birthplaceId: resolvePlaceRef(row.birthplaceRef),
-            affiliation: row.affiliation,
-            isActive: true,
-            createdAt: now,
-            updatedAt: now,
+            row,
+            values: {
+              communityId,
+              name: row.name,
+              birthDate: row.birthDate,
+              birthplaceId: resolvePlaceRef(row.birthplaceRef),
+              affiliation: row.affiliation,
+              isActive: true,
+              createdAt: now,
+              updatedAt: now,
+            },
           })
         ),
-      buildStories: (
+      buildStoryEntries: (
         resolvePlaceRef: (
           ref:
             | { kind: 'existing'; id: number }
@@ -1874,30 +1920,36 @@ export class ImportsRepository {
           (row: NormalizedStoryRow) => {
             const physical = storyVisibilityToPhysical(row.visibility);
             return {
-              title: row.title,
-              description: row.description,
-              descriptionPlain: row.descriptionPlain,
-              slug: row.slug,
-              communityId,
-              createdBy: actorId,
-              isRestricted: physical.isRestricted,
-              privacyLevel: physical.privacyLevel,
-              topic: row.topic,
-              topicNormalized: row.topicNormalized,
-              language: row.language,
-              dateInterviewed: row.dateInterviewed
-                ? new Date(row.dateInterviewed)
-                : null,
-              interviewLocationId: resolvePlaceRef(row.interviewLocationRef),
-              interviewerId: resolveSpeakerRef(row.interviewerRef),
-              createdAt: now,
-              updatedAt: now,
+              row,
+              values: {
+                title: row.title,
+                description: row.description,
+                descriptionPlain: row.descriptionPlain,
+                slug: row.slug,
+                communityId,
+                createdBy: actorId,
+                isRestricted: physical.isRestricted,
+                privacyLevel: physical.privacyLevel,
+                topic: row.topic,
+                topicNormalized: row.topicNormalized,
+                language: row.language,
+                dateInterviewed: row.dateInterviewed
+                  ? new Date(row.dateInterviewed)
+                  : null,
+                interviewLocationId: resolvePlaceRef(row.interviewLocationRef),
+                interviewerId: resolveSpeakerRef(row.interviewerRef),
+                createdAt: now,
+                updatedAt: now,
+              },
             };
           }
         ),
       collectEntityAttachments: (
         ownerType: 'place' | 'speaker',
-        ownerIds: ReadonlyArray<number>
+        entries: ReadonlyArray<{
+          row: NormalizedPlaceRow | NormalizedSpeakerRow;
+          ownerId: number;
+        }>
       ) => {
         const out: Array<{
           communityId: number;
@@ -1908,8 +1960,7 @@ export class ImportsRepository {
           ordinal: number;
           createdAt: Date;
         }> = [];
-        normalizedData.rows.forEach((row, idx) => {
-          const ownerId = ownerIds[idx]!;
+        for (const { row, ownerId } of entries) {
           for (const att of row.attachments) {
             out.push({
               communityId,
@@ -1921,11 +1972,14 @@ export class ImportsRepository {
               createdAt: now,
             });
           }
-        });
+        }
         return out;
       },
       collectStoryChildren: (
-        storyIds: ReadonlyArray<number>,
+        storyEntries: ReadonlyArray<{
+          row: NormalizedStoryRow;
+          storyId: number;
+        }>,
         resolvePlaceRef: (
           ref:
             | { kind: 'existing'; id: number }
@@ -1972,48 +2026,45 @@ export class ImportsRepository {
           createdAt: Date;
         }> = [];
 
-        if (normalizedData.kind === 'stories') {
-          normalizedData.rows.forEach((row, idx) => {
-            const storyId = storyIds[idx]!;
-            row.placeRefs.forEach((ref, sortOrder) => {
-              storyPlacesToInsert.push({
-                communityId,
-                storyId,
-                placeId: resolvePlaceRef(ref)!,
-                sortOrder,
-                createdAt: now,
-                updatedAt: now,
-              });
+        for (const { row, storyId } of storyEntries) {
+          row.placeRefs.forEach((ref, sortOrder) => {
+            storyPlacesToInsert.push({
+              communityId,
+              storyId,
+              placeId: resolvePlaceRef(ref)!,
+              sortOrder,
+              createdAt: now,
+              updatedAt: now,
             });
-            row.speakerRefs.forEach((ref, sortOrder) => {
-              storySpeakersToInsert.push({
-                communityId,
-                storyId,
-                speakerId: resolveSpeakerRef(ref)!,
-                sortOrder,
-                createdAt: now,
-                updatedAt: now,
-              });
+          });
+          row.speakerRefs.forEach((ref, sortOrder) => {
+            storySpeakersToInsert.push({
+              communityId,
+              storyId,
+              speakerId: resolveSpeakerRef(ref)!,
+              sortOrder,
+              createdAt: now,
+              updatedAt: now,
             });
-            for (const att of row.attachments) {
-              attachmentsToInsert.push({
-                communityId,
-                fileId: att.fileId,
-                ownerType: 'story',
-                ownerId: storyId,
-                role: att.role,
-                ordinal: att.ordinal,
-                createdAt: now,
-              });
-            }
-            row.externalMediaLinks.forEach((url, ordinal) => {
-              externalLinksToInsert.push({
-                communityId,
-                storyId,
-                url,
-                ordinal,
-                createdAt: now,
-              });
+          });
+          for (const att of row.attachments) {
+            attachmentsToInsert.push({
+              communityId,
+              fileId: att.fileId,
+              ownerType: 'story',
+              ownerId: storyId,
+              role: att.role,
+              ordinal: att.ordinal,
+              createdAt: now,
+            });
+          }
+          row.externalMediaLinks.forEach((url, ordinal) => {
+            externalLinksToInsert.push({
+              communityId,
+              storyId,
+              url,
+              ordinal,
+              createdAt: now,
             });
           });
         }
@@ -3198,46 +3249,98 @@ export class ImportsRepository {
 
           const createdPlaceByNorm = new Map<string, number>();
           if (payloads.relatedPlaces.length > 0) {
-            const insertedPlaces: Array<{ id: number }> = [];
-            for (const chunk of chunkRowsByBoundParamBudget(
-              payloads.relatedPlaces,
-              NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
-              this.tableColumnBound(this.tables.places)
-            )) {
-              const rows = await tx
-                .insert(this.tables.places)
-                .values(chunk)
-                .returning({ id: this.tables.places.id });
-              insertedPlaces.push(...rows);
-            }
-            normalizedData.relatedPlacesToCreate.forEach((p, idx) => {
-              createdPlaceByNorm.set(
-                p.normalizedName,
-                Number(insertedPlaces[idx]!.id)
+            const hasUniqueNames =
+              new Set(normalizedData.relatedPlacesToCreate.map((p) => p.name))
+                .size === normalizedData.relatedPlacesToCreate.length;
+            if (hasUniqueNames) {
+              const insertedPlaces: Array<{ id: number; name: string }> = [];
+              for (const chunk of chunkRowsByBoundParamBudget(
+                payloads.relatedPlaces.map((entry) => entry.values),
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.places)
+              )) {
+                const rows = (await tx
+                  .insert(this.tables.places)
+                  .values(chunk)
+                  .returning({
+                    id: this.tables.places.id,
+                    name: this.tables.places.name,
+                  })) as Array<{ id: number; name: string }>;
+                insertedPlaces.push(...rows);
+              }
+              const idByName = mapReturnedIdsByKey(
+                insertedPlaces,
+                normalizedData.relatedPlacesToCreate.map((p) => p.name),
+                (r) => r.name
               );
-            });
+              for (const p of normalizedData.relatedPlacesToCreate) {
+                createdPlaceByNorm.set(p.normalizedName, idByName.get(p.name)!);
+              }
+            } else {
+              for (const entry of payloads.relatedPlaces) {
+                const rows = (await tx
+                  .insert(this.tables.places)
+                  .values([entry.values])
+                  .returning({ id: this.tables.places.id })) as Array<{
+                  id: number;
+                }>;
+                if (rows.length !== 1) throw new RollbackReferenceError();
+                createdPlaceByNorm.set(
+                  entry.row.normalizedName,
+                  Number(rows[0]!.id)
+                );
+              }
+            }
           }
 
           const createdSpeakerByNorm = new Map<string, number>();
           if (payloads.relatedSpeakers.length > 0) {
-            const insertedSpeakers: Array<{ id: number }> = [];
-            for (const chunk of chunkRowsByBoundParamBudget(
-              payloads.relatedSpeakers,
-              NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
-              this.tableColumnBound(this.tables.speakers)
-            )) {
-              const rows = await tx
-                .insert(this.tables.speakers)
-                .values(chunk)
-                .returning({ id: this.tables.speakers.id });
-              insertedSpeakers.push(...rows);
-            }
-            normalizedData.relatedSpeakersToCreate.forEach((sp, idx) => {
-              createdSpeakerByNorm.set(
-                sp.normalizedName,
-                Number(insertedSpeakers[idx]!.id)
+            const hasUniqueNames =
+              new Set(
+                normalizedData.relatedSpeakersToCreate.map((sp) => sp.name)
+              ).size === normalizedData.relatedSpeakersToCreate.length;
+            if (hasUniqueNames) {
+              const insertedSpeakers: Array<{ id: number; name: string }> = [];
+              for (const chunk of chunkRowsByBoundParamBudget(
+                payloads.relatedSpeakers.map((entry) => entry.values),
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.speakers)
+              )) {
+                const rows = (await tx
+                  .insert(this.tables.speakers)
+                  .values(chunk)
+                  .returning({
+                    id: this.tables.speakers.id,
+                    name: this.tables.speakers.name,
+                  })) as Array<{ id: number; name: string }>;
+                insertedSpeakers.push(...rows);
+              }
+              const idByName = mapReturnedIdsByKey(
+                insertedSpeakers,
+                normalizedData.relatedSpeakersToCreate.map((sp) => sp.name),
+                (r) => r.name
               );
-            });
+              for (const sp of normalizedData.relatedSpeakersToCreate) {
+                createdSpeakerByNorm.set(
+                  sp.normalizedName,
+                  idByName.get(sp.name)!
+                );
+              }
+            } else {
+              for (const entry of payloads.relatedSpeakers) {
+                const rows = (await tx
+                  .insert(this.tables.speakers)
+                  .values([entry.values])
+                  .returning({ id: this.tables.speakers.id })) as Array<{
+                  id: number;
+                }>;
+                if (rows.length !== 1) throw new RollbackReferenceError();
+                createdSpeakerByNorm.set(
+                  entry.row.normalizedName,
+                  Number(rows[0]!.id)
+                );
+              }
+            }
           }
 
           const resolvePlaceRef = (
@@ -3277,65 +3380,156 @@ export class ImportsRepository {
           }> = [];
 
           if (normalizedData.kind === 'places') {
-            const placeValues = payloads.buildPlaces();
-            if (placeValues.length > 0) {
-              const inserted: Array<{ id: number }> = [];
+            const placeEntries = payloads.buildPlaceEntries();
+            if (placeEntries.length > 0) {
+              const plainPlaceValues = placeEntries
+                .filter((e) => e.row.attachments.length === 0)
+                .map((e) => e.values);
+              const attachedPlaceEntries = placeEntries.filter(
+                (e) => e.row.attachments.length > 0
+              );
               for (const chunk of chunkRowsByBoundParamBudget(
-                placeValues,
+                plainPlaceValues,
                 NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
                 this.tableColumnBound(this.tables.places)
               )) {
-                const rows = await tx
+                await tx.insert(this.tables.places).values(chunk);
+              }
+              const insertedAttached: Array<{
+                row: NormalizedPlaceRow;
+                ownerId: number;
+              }> = [];
+              for (const entry of attachedPlaceEntries) {
+                const rows = (await tx
                   .insert(this.tables.places)
-                  .values(chunk)
-                  .returning({ id: this.tables.places.id });
-                inserted.push(...rows);
+                  .values([entry.values])
+                  .returning({ id: this.tables.places.id })) as Array<{
+                  id: number;
+                }>;
+                if (rows.length !== 1) throw new RollbackReferenceError();
+                insertedAttached.push({
+                  row: entry.row,
+                  ownerId: Number(rows[0]!.id),
+                });
               }
               attachmentsToInsert = payloads.collectEntityAttachments(
                 'place',
-                inserted.map((r: { id: number }) => Number(r.id))
+                insertedAttached
               );
             }
           } else if (normalizedData.kind === 'speakers') {
-            const speakerValues = payloads.buildSpeakers(resolvePlaceRef);
-            if (speakerValues.length > 0) {
-              const inserted: Array<{ id: number }> = [];
+            const speakerEntries =
+              payloads.buildSpeakerEntries(resolvePlaceRef);
+            if (speakerEntries.length > 0) {
+              const plainSpeakerValues = speakerEntries
+                .filter((e) => e.row.attachments.length === 0)
+                .map((e) => e.values);
+              const attachedSpeakerEntries = speakerEntries.filter(
+                (e) => e.row.attachments.length > 0
+              );
               for (const chunk of chunkRowsByBoundParamBudget(
-                speakerValues,
+                plainSpeakerValues,
                 NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
                 this.tableColumnBound(this.tables.speakers)
               )) {
-                const rows = await tx
+                await tx.insert(this.tables.speakers).values(chunk);
+              }
+              const insertedAttached: Array<{
+                row: NormalizedSpeakerRow;
+                ownerId: number;
+              }> = [];
+              for (const entry of attachedSpeakerEntries) {
+                const rows = (await tx
                   .insert(this.tables.speakers)
-                  .values(chunk)
-                  .returning({ id: this.tables.speakers.id });
-                inserted.push(...rows);
+                  .values([entry.values])
+                  .returning({ id: this.tables.speakers.id })) as Array<{
+                  id: number;
+                }>;
+                if (rows.length !== 1) throw new RollbackReferenceError();
+                insertedAttached.push({
+                  row: entry.row,
+                  ownerId: Number(rows[0]!.id),
+                });
               }
               attachmentsToInsert = payloads.collectEntityAttachments(
                 'speaker',
-                inserted.map((r: { id: number }) => Number(r.id))
+                insertedAttached
               );
             }
           } else {
-            const storyValues = payloads.buildStories(
+            const storyEntries = payloads.buildStoryEntries(
               resolvePlaceRef,
               resolveSpeakerRef
             );
-            if (storyValues.length > 0) {
-              const insertedStories: Array<{ id: number }> = [];
-              for (const chunk of chunkRowsByBoundParamBudget(
-                storyValues,
-                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
-                this.tableColumnBound(this.tables.stories)
-              )) {
-                const rows = await tx
-                  .insert(this.tables.stories)
-                  .values(chunk)
-                  .returning({ id: this.tables.stories.id });
-                insertedStories.push(...rows);
+            if (storyEntries.length > 0) {
+              const hasUniqueSlugs =
+                new Set(storyEntries.map((e) => e.row.slug)).size ===
+                storyEntries.length;
+              let committedStoryEntries: Array<{
+                row: NormalizedStoryRow;
+                storyId: number;
+              }>;
+              if (hasUniqueSlugs) {
+                const insertedStories: Array<{ id: number; slug: string }> = [];
+                for (const chunk of chunkRowsByBoundParamBudget(
+                  storyEntries.map((e) => e.values),
+                  NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                  this.tableColumnBound(this.tables.stories)
+                )) {
+                  const rows = (await tx
+                    .insert(this.tables.stories)
+                    .values(chunk)
+                    .returning({
+                      id: this.tables.stories.id,
+                      slug: this.tables.stories.slug,
+                    })) as Array<{ id: number; slug: string }>;
+                  insertedStories.push(...rows);
+                }
+                const storyIdBySlug = mapReturnedIdsByKey(
+                  insertedStories,
+                  storyEntries.map((e) => e.row.slug),
+                  (r) => r.slug
+                );
+                committedStoryEntries = storyEntries.map((e) => ({
+                  row: e.row,
+                  storyId: storyIdBySlug.get(e.row.slug)!,
+                }));
+              } else {
+                const hasChildren = (row: NormalizedStoryRow) =>
+                  row.placeRefs.length > 0 ||
+                  row.speakerRefs.length > 0 ||
+                  row.attachments.length > 0 ||
+                  row.externalMediaLinks.length > 0;
+                const plainStoryValues = storyEntries
+                  .filter((e) => !hasChildren(e.row))
+                  .map((e) => e.values);
+                const childStoryEntries = storyEntries.filter((e) =>
+                  hasChildren(e.row)
+                );
+                for (const chunk of chunkRowsByBoundParamBudget(
+                  plainStoryValues,
+                  NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                  this.tableColumnBound(this.tables.stories)
+                )) {
+                  await tx.insert(this.tables.stories).values(chunk);
+                }
+                committedStoryEntries = [];
+                for (const entry of childStoryEntries) {
+                  const rows = (await tx
+                    .insert(this.tables.stories)
+                    .values([entry.values])
+                    .returning({ id: this.tables.stories.id })) as Array<{
+                    id: number;
+                  }>;
+                  if (rows.length !== 1) throw new RollbackReferenceError();
+                  committedStoryEntries.push({
+                    row: entry.row,
+                    storyId: Number(rows[0]!.id),
+                  });
+                }
               }
               const children = payloads.collectStoryChildren(
-                insertedStories.map((r: { id: number }) => Number(r.id)),
+                committedStoryEntries,
                 resolvePlaceRef,
                 resolveSpeakerRef
               );
@@ -3660,48 +3854,98 @@ export class ImportsRepository {
 
           const createdPlaceByNorm = new Map<string, number>();
           if (payloads.relatedPlaces.length > 0) {
-            const insertedPlaces: Array<{ id: number }> = [];
-            for (const chunk of chunkRowsByBoundParamBudget(
-              payloads.relatedPlaces,
-              NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
-              this.tableColumnBound(this.tables.places)
-            )) {
-              const rows = tx
-                .insert(this.tables.places)
-                .values(chunk)
-                .returning({ id: this.tables.places.id })
-                .all() as Array<{ id: number }>;
-              insertedPlaces.push(...rows);
-            }
-            normalizedData.relatedPlacesToCreate.forEach((p, idx) => {
-              createdPlaceByNorm.set(
-                p.normalizedName,
-                Number(insertedPlaces[idx]!.id)
+            const hasUniqueNames =
+              new Set(normalizedData.relatedPlacesToCreate.map((p) => p.name))
+                .size === normalizedData.relatedPlacesToCreate.length;
+            if (hasUniqueNames) {
+              const insertedPlaces: Array<{ id: number; name: string }> = [];
+              for (const chunk of chunkRowsByBoundParamBudget(
+                payloads.relatedPlaces.map((entry) => entry.values),
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.places)
+              )) {
+                const rows = tx
+                  .insert(this.tables.places)
+                  .values(chunk)
+                  .returning({
+                    id: this.tables.places.id,
+                    name: this.tables.places.name,
+                  })
+                  .all() as Array<{ id: number; name: string }>;
+                insertedPlaces.push(...rows);
+              }
+              const idByName = mapReturnedIdsByKey(
+                insertedPlaces,
+                normalizedData.relatedPlacesToCreate.map((p) => p.name),
+                (r) => r.name
               );
-            });
+              for (const p of normalizedData.relatedPlacesToCreate) {
+                createdPlaceByNorm.set(p.normalizedName, idByName.get(p.name)!);
+              }
+            } else {
+              for (const entry of payloads.relatedPlaces) {
+                const rows = tx
+                  .insert(this.tables.places)
+                  .values([entry.values])
+                  .returning({ id: this.tables.places.id })
+                  .all() as Array<{ id: number }>;
+                if (rows.length !== 1) throw new RollbackReferenceError();
+                createdPlaceByNorm.set(
+                  entry.row.normalizedName,
+                  Number(rows[0]!.id)
+                );
+              }
+            }
           }
 
           const createdSpeakerByNorm = new Map<string, number>();
           if (payloads.relatedSpeakers.length > 0) {
-            const insertedSpeakers: Array<{ id: number }> = [];
-            for (const chunk of chunkRowsByBoundParamBudget(
-              payloads.relatedSpeakers,
-              NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
-              this.tableColumnBound(this.tables.speakers)
-            )) {
-              const rows = tx
-                .insert(this.tables.speakers)
-                .values(chunk)
-                .returning({ id: this.tables.speakers.id })
-                .all() as Array<{ id: number }>;
-              insertedSpeakers.push(...rows);
-            }
-            normalizedData.relatedSpeakersToCreate.forEach((sp, idx) => {
-              createdSpeakerByNorm.set(
-                sp.normalizedName,
-                Number(insertedSpeakers[idx]!.id)
+            const hasUniqueNames =
+              new Set(
+                normalizedData.relatedSpeakersToCreate.map((sp) => sp.name)
+              ).size === normalizedData.relatedSpeakersToCreate.length;
+            if (hasUniqueNames) {
+              const insertedSpeakers: Array<{ id: number; name: string }> = [];
+              for (const chunk of chunkRowsByBoundParamBudget(
+                payloads.relatedSpeakers.map((entry) => entry.values),
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.speakers)
+              )) {
+                const rows = tx
+                  .insert(this.tables.speakers)
+                  .values(chunk)
+                  .returning({
+                    id: this.tables.speakers.id,
+                    name: this.tables.speakers.name,
+                  })
+                  .all() as Array<{ id: number; name: string }>;
+                insertedSpeakers.push(...rows);
+              }
+              const idByName = mapReturnedIdsByKey(
+                insertedSpeakers,
+                normalizedData.relatedSpeakersToCreate.map((sp) => sp.name),
+                (r) => r.name
               );
-            });
+              for (const sp of normalizedData.relatedSpeakersToCreate) {
+                createdSpeakerByNorm.set(
+                  sp.normalizedName,
+                  idByName.get(sp.name)!
+                );
+              }
+            } else {
+              for (const entry of payloads.relatedSpeakers) {
+                const rows = tx
+                  .insert(this.tables.speakers)
+                  .values([entry.values])
+                  .returning({ id: this.tables.speakers.id })
+                  .all() as Array<{ id: number }>;
+                if (rows.length !== 1) throw new RollbackReferenceError();
+                createdSpeakerByNorm.set(
+                  entry.row.normalizedName,
+                  Number(rows[0]!.id)
+                );
+              }
+            }
           }
 
           const resolvePlaceRef = (
@@ -3741,68 +3985,154 @@ export class ImportsRepository {
           }> = [];
 
           if (normalizedData.kind === 'places') {
-            const placeValues = payloads.buildPlaces();
-            if (placeValues.length > 0) {
-              const inserted: Array<{ id: number }> = [];
+            const placeEntries = payloads.buildPlaceEntries();
+            if (placeEntries.length > 0) {
+              const plainPlaceValues = placeEntries
+                .filter((e) => e.row.attachments.length === 0)
+                .map((e) => e.values);
+              const attachedPlaceEntries = placeEntries.filter(
+                (e) => e.row.attachments.length > 0
+              );
               for (const chunk of chunkRowsByBoundParamBudget(
-                placeValues,
+                plainPlaceValues,
                 NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
                 this.tableColumnBound(this.tables.places)
               )) {
+                tx.insert(this.tables.places).values(chunk).run();
+              }
+              const insertedAttached: Array<{
+                row: NormalizedPlaceRow;
+                ownerId: number;
+              }> = [];
+              for (const entry of attachedPlaceEntries) {
                 const rows = tx
                   .insert(this.tables.places)
-                  .values(chunk)
+                  .values([entry.values])
                   .returning({ id: this.tables.places.id })
                   .all() as Array<{ id: number }>;
-                inserted.push(...rows);
+                if (rows.length !== 1) throw new RollbackReferenceError();
+                insertedAttached.push({
+                  row: entry.row,
+                  ownerId: Number(rows[0]!.id),
+                });
               }
               attachmentsToInsert = payloads.collectEntityAttachments(
                 'place',
-                inserted.map((r) => Number(r.id))
+                insertedAttached
               );
             }
           } else if (normalizedData.kind === 'speakers') {
-            const speakerValues = payloads.buildSpeakers(resolvePlaceRef);
-            if (speakerValues.length > 0) {
-              const inserted: Array<{ id: number }> = [];
+            const speakerEntries =
+              payloads.buildSpeakerEntries(resolvePlaceRef);
+            if (speakerEntries.length > 0) {
+              const plainSpeakerValues = speakerEntries
+                .filter((e) => e.row.attachments.length === 0)
+                .map((e) => e.values);
+              const attachedSpeakerEntries = speakerEntries.filter(
+                (e) => e.row.attachments.length > 0
+              );
               for (const chunk of chunkRowsByBoundParamBudget(
-                speakerValues,
+                plainSpeakerValues,
                 NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
                 this.tableColumnBound(this.tables.speakers)
               )) {
+                tx.insert(this.tables.speakers).values(chunk).run();
+              }
+              const insertedAttached: Array<{
+                row: NormalizedSpeakerRow;
+                ownerId: number;
+              }> = [];
+              for (const entry of attachedSpeakerEntries) {
                 const rows = tx
                   .insert(this.tables.speakers)
-                  .values(chunk)
+                  .values([entry.values])
                   .returning({ id: this.tables.speakers.id })
                   .all() as Array<{ id: number }>;
-                inserted.push(...rows);
+                if (rows.length !== 1) throw new RollbackReferenceError();
+                insertedAttached.push({
+                  row: entry.row,
+                  ownerId: Number(rows[0]!.id),
+                });
               }
               attachmentsToInsert = payloads.collectEntityAttachments(
                 'speaker',
-                inserted.map((r) => Number(r.id))
+                insertedAttached
               );
             }
           } else {
-            const storyValues = payloads.buildStories(
+            const storyEntries = payloads.buildStoryEntries(
               resolvePlaceRef,
               resolveSpeakerRef
             );
-            if (storyValues.length > 0) {
-              const insertedStories: Array<{ id: number }> = [];
-              for (const chunk of chunkRowsByBoundParamBudget(
-                storyValues,
-                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
-                this.tableColumnBound(this.tables.stories)
-              )) {
-                const rows = tx
-                  .insert(this.tables.stories)
-                  .values(chunk)
-                  .returning({ id: this.tables.stories.id })
-                  .all() as Array<{ id: number }>;
-                insertedStories.push(...rows);
+            if (storyEntries.length > 0) {
+              const hasUniqueSlugs =
+                new Set(storyEntries.map((e) => e.row.slug)).size ===
+                storyEntries.length;
+              let committedStoryEntries: Array<{
+                row: NormalizedStoryRow;
+                storyId: number;
+              }>;
+              if (hasUniqueSlugs) {
+                const insertedStories: Array<{ id: number; slug: string }> = [];
+                for (const chunk of chunkRowsByBoundParamBudget(
+                  storyEntries.map((e) => e.values),
+                  NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                  this.tableColumnBound(this.tables.stories)
+                )) {
+                  const rows = tx
+                    .insert(this.tables.stories)
+                    .values(chunk)
+                    .returning({
+                      id: this.tables.stories.id,
+                      slug: this.tables.stories.slug,
+                    })
+                    .all() as Array<{ id: number; slug: string }>;
+                  insertedStories.push(...rows);
+                }
+                const storyIdBySlug = mapReturnedIdsByKey(
+                  insertedStories,
+                  storyEntries.map((e) => e.row.slug),
+                  (r) => r.slug
+                );
+                committedStoryEntries = storyEntries.map((e) => ({
+                  row: e.row,
+                  storyId: storyIdBySlug.get(e.row.slug)!,
+                }));
+              } else {
+                const hasChildren = (row: NormalizedStoryRow) =>
+                  row.placeRefs.length > 0 ||
+                  row.speakerRefs.length > 0 ||
+                  row.attachments.length > 0 ||
+                  row.externalMediaLinks.length > 0;
+                const plainStoryValues = storyEntries
+                  .filter((e) => !hasChildren(e.row))
+                  .map((e) => e.values);
+                const childStoryEntries = storyEntries.filter((e) =>
+                  hasChildren(e.row)
+                );
+                for (const chunk of chunkRowsByBoundParamBudget(
+                  plainStoryValues,
+                  NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                  this.tableColumnBound(this.tables.stories)
+                )) {
+                  tx.insert(this.tables.stories).values(chunk).run();
+                }
+                committedStoryEntries = [];
+                for (const entry of childStoryEntries) {
+                  const rows = tx
+                    .insert(this.tables.stories)
+                    .values([entry.values])
+                    .returning({ id: this.tables.stories.id })
+                    .all() as Array<{ id: number }>;
+                  if (rows.length !== 1) throw new RollbackReferenceError();
+                  committedStoryEntries.push({
+                    row: entry.row,
+                    storyId: Number(rows[0]!.id),
+                  });
+                }
               }
               const children = payloads.collectStoryChildren(
-                insertedStories.map((r) => Number(r.id)),
+                committedStoryEntries,
                 resolvePlaceRef,
                 resolveSpeakerRef
               );

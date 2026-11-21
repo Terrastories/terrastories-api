@@ -917,6 +917,152 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
     ]);
   });
 
+  it.each(['places', 'speakers', 'stories'] as const)(
+    'keeps %s attachments and relations on their input rows when RETURNING is shuffled',
+    async (kind) => {
+      const names = [`Shuffled ${kind} Alpha`, `Shuffled ${kind} Beta`];
+      const csvText =
+        kind === 'stories'
+          ? 'title,audience,place_names,speaker_names,media,external_media_links\n' +
+            names
+              .map(
+                (name, i) =>
+                  `${name},public,Shuffle Place ${i},Shuffle Speaker ${i},shuffle-${i}.png,https://media.example.test/shuffle-${i}`
+              )
+              .join('\n') +
+            '\n'
+          : kind === 'speakers'
+            ? 'name,birthplace_name,photo\n' +
+              names
+                .map(
+                  (name, i) =>
+                    `${name},Shuffle Birthplace ${i},shuffle-${i}.png`
+                )
+                .join('\n') +
+              '\n'
+            : 'name,photo\n' +
+              names.map((name, i) => `${name},shuffle-${i}.png`).join('\n') +
+              '\n';
+      const preview = await createPreviewOnApp(app, cookies.editorA, {
+        kind,
+        csvFilename: `shuffle-${kind}.csv`,
+        csvText,
+        mediaParts: [0, 1].map((i) => ({
+          filename: `shuffle-${i}.png`,
+          contentType: 'image/png',
+          bytes: PNG_BYTES,
+        })),
+      });
+      const originalPrepare = sqlite.prepare.bind(sqlite);
+      let shuffled = 0;
+      const prepareSpy = vi
+        .spyOn(sqlite, 'prepare')
+        .mockImplementation((sql) => {
+          const statement = originalPrepare(sql);
+          if (
+            /^insert into "(?:places|speakers|stories)"/i.test(sql) &&
+            /returning/i.test(sql)
+          ) {
+            const originalAll = statement.all.bind(statement);
+            vi.spyOn(statement, 'all').mockImplementation(
+              (...params: unknown[]) => {
+                const rows = originalAll(...params);
+                if (rows.length > 1) shuffled++;
+                return rows.reverse();
+              }
+            );
+          }
+          return statement;
+        });
+      try {
+        const response = await commitOnApp(app, cookies.editorA, preview.id);
+        expect(response.status).toBe(200);
+      } finally {
+        prepareSpy.mockRestore();
+      }
+      if (kind !== 'places') expect(shuffled).toBeGreaterThan(0);
+      const entityTable =
+        kind === 'places'
+          ? tables.places
+          : kind === 'speakers'
+            ? tables.speakers
+            : tables.stories;
+      const entities = await db
+        .select()
+        .from(entityTable)
+        .where(eq(entityTable.communityId, ids.ownCommunity));
+      for (const [i, name] of names.entries()) {
+        const entity = entities.find(
+          (row) => ('title' in row ? row.title : row.name) === name
+        )!;
+        expect(entity).toBeDefined();
+        const attachments = await db
+          .select()
+          .from(tables.attachments)
+          .where(
+            and(
+              eq(
+                tables.attachments.ownerType,
+                kind === 'places'
+                  ? 'place'
+                  : kind === 'speakers'
+                    ? 'speaker'
+                    : 'story'
+              ),
+              eq(tables.attachments.ownerId, entity.id),
+              eq(tables.attachments.communityId, ids.ownCommunity)
+            )
+          );
+        expect(attachments).toHaveLength(1);
+        const [file] = await db
+          .select()
+          .from(tables.files)
+          .where(eq(tables.files.id, attachments[0]!.fileId));
+        expect(file!.originalName).toBe(`shuffle-${i}.png`);
+        if (kind === 'speakers') {
+          const [speaker] = await db
+            .select()
+            .from(tables.speakers)
+            .where(eq(tables.speakers.id, entity.id));
+          const [place] = await db
+            .select()
+            .from(tables.places)
+            .where(eq(tables.places.id, speaker!.birthplaceId!));
+          expect(place!.name).toBe(`Shuffle Birthplace ${i}`);
+        }
+        if (kind === 'stories') {
+          const places = await db
+            .select({ name: tables.places.name })
+            .from(tables.storyPlaces)
+            .innerJoin(
+              tables.places,
+              eq(tables.places.id, tables.storyPlaces.placeId)
+            )
+            .where(eq(tables.storyPlaces.storyId, entity.id));
+          const speakers = await db
+            .select({ name: tables.speakers.name })
+            .from(tables.storySpeakers)
+            .innerJoin(
+              tables.speakers,
+              eq(tables.speakers.id, tables.storySpeakers.speakerId)
+            )
+            .where(eq(tables.storySpeakers.storyId, entity.id));
+          const links = await db
+            .select()
+            .from(tables.externalMediaLinks)
+            .where(eq(tables.externalMediaLinks.storyId, entity.id));
+          expect(places.map((row) => row.name)).toEqual([`Shuffle Place ${i}`]);
+          expect(speakers.map((row) => row.name)).toEqual([
+            `Shuffle Speaker ${i}`,
+          ]);
+          expect(links.map((row) => row.url)).toEqual([
+            `https://media.example.test/shuffle-${i}`,
+          ]);
+        }
+      }
+    }
+  );
+
   it('rejects non-committable manifests (422) and terminal manifests (409)', async () => {
     const withErrors = await createPreviewOnApp(app, cookies.editorA, {
       kind: 'stories',

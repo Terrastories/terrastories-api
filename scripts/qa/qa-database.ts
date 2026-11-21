@@ -18,6 +18,9 @@
  */
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
+import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
+import { migrate as migrateSqlite } from 'drizzle-orm/better-sqlite3/migrator';
 import { drizzle as drizzlePostgres } from 'drizzle-orm/postgres-js';
 import { migrate as migratePostgres } from 'drizzle-orm/postgres-js/migrator';
 import { tablesFor } from '../../src/db/dialect.js';
@@ -27,6 +30,7 @@ import type { TestFixtures } from '../../tests/helpers/database.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const sqliteMigrations = join(__dirname, '..', '..', 'src', 'db', 'migrations');
 const postgresMigrations = join(
   __dirname,
   '..',
@@ -51,6 +55,13 @@ export interface PersonaQaDatabase {
   db: WidenedQaDatabase;
   /** Seed the shared baseline fixtures (system + three communities + places). */
   seed: () => Promise<TestFixtures>;
+  /**
+   * Open an unseeded, freshly migrated database for fresh-installation
+   * bootstrap QA. On PostgreSQL this resets the single shared test database
+   * (closing the earlier client first so prepared statement OIDs stay fresh),
+   * so callers must invoke it only after seeded journeys complete.
+   */
+  openFresh: () => Promise<WidenedQaDatabase>;
   close: () => Promise<void>;
 }
 
@@ -266,21 +277,56 @@ export async function openPersonaQaDatabase(): Promise<PersonaQaDatabase> {
   if (!decision.run) {
     const manager = new TestDatabaseManager();
     const db = await manager.setup();
+    const freshSqlites: Database.Database[] = [];
     return {
       dialect: 'sqlite',
       db,
       seed: () => manager.seedTestData(),
-      close: () => manager.teardown(),
+      openFresh: async () => {
+        const sqlite = new Database(':memory:');
+        try {
+          sqlite.pragma('foreign_keys = ON');
+          const freshDb = drizzleSqlite(sqlite);
+          migrateSqlite(freshDb, { migrationsFolder: sqliteMigrations });
+          freshSqlites.push(sqlite);
+          return freshDb;
+        } catch (error) {
+          sqlite.close();
+          throw error;
+        }
+      },
+      close: async () => {
+        const errors: unknown[] = [];
+        try {
+          await manager.teardown();
+        } catch (error) {
+          errors.push(error);
+        }
+        while (freshSqlites.length > 0) {
+          const sqlite = freshSqlites.pop()!;
+          try {
+            sqlite.close();
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1)
+          throw new AggregateError(errors, 'SQLite persona QA cleanup failed');
+      },
     };
   }
   if (decision.target.status !== 'ready')
     throw new Error(
       `PostgreSQL persona QA requires a ready target: ${decision.target.reason}`
     );
-  const client = createPostgresClient(decision.target.url, {
+  const targetUrl = decision.target.url;
+  const client = createPostgresClient(targetUrl, {
     max: 2,
     onnotice: () => undefined,
   });
+  let mainClosed = false;
+  const freshClients: ReturnType<typeof createPostgresClient>[] = [];
   try {
     await resetPostgresSchema(client);
     const db = drizzlePostgres(client);
@@ -289,7 +335,53 @@ export async function openPersonaQaDatabase(): Promise<PersonaQaDatabase> {
       dialect: 'postgresql',
       db,
       seed: () => seedPersonaBaseline(db),
-      close: () => client.end(),
+      openFresh: async () => {
+        if (!mainClosed) {
+          mainClosed = true;
+          await client.end();
+        }
+        const freshClient = createPostgresClient(targetUrl, {
+          max: 2,
+          onnotice: () => undefined,
+        });
+        try {
+          await resetPostgresSchema(freshClient);
+          const freshDb = drizzlePostgres(freshClient);
+          await migratePostgres(freshDb, {
+            migrationsFolder: postgresMigrations,
+          });
+          freshClients.push(freshClient);
+          return freshDb;
+        } catch (error) {
+          await freshClient.end().catch(() => undefined);
+          throw error;
+        }
+      },
+      close: async () => {
+        const errors: unknown[] = [];
+        if (!mainClosed) {
+          mainClosed = true;
+          try {
+            await client.end();
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        while (freshClients.length > 0) {
+          const freshClient = freshClients.pop()!;
+          try {
+            await freshClient.end();
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1)
+          throw new AggregateError(
+            errors,
+            'PostgreSQL persona QA cleanup failed'
+          );
+      },
     };
   } catch (error) {
     await client.end().catch(() => undefined);

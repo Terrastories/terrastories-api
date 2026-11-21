@@ -843,4 +843,91 @@ describe('contract classification and HTTP baseUrl transport', () => {
       failure: 'body-mismatch',
     });
   });
+
+  it('dispatches journeys with per-journey handler and validates per-journey baseUrl', async () => {
+    const routes = [
+      { method: 'GET', path: '/main' },
+      { method: 'GET', path: '/fresh' },
+    ];
+    const hits: string[] = [];
+    const report = await runJourneys({
+      contract: 'canonical-v2',
+      routes,
+      handler: async (request) => {
+        const path = new URL(request.url).pathname;
+        hits.push(`main:${path}`);
+        return new Response(JSON.stringify({ source: 'main' }), {
+          headers: { 'set-cookie': 'sessionId=main-cookie; Path=/' },
+        });
+      },
+      journeys: [
+        {
+          persona: 'seeded',
+          steps: [
+            {
+              name: 'hit main',
+              method: 'GET',
+              path: '/main',
+              expected: 200,
+              check: (body) => (body as { source?: string }).source === 'main',
+            },
+          ],
+        },
+        {
+          persona: 'isolated',
+          handler: async (request) => {
+            const path = new URL(request.url).pathname;
+            hits.push(`fresh:${path}:${request.headers.get('cookie') ?? ''}`);
+            return new Response(JSON.stringify({ source: 'fresh' }), {
+              headers: { 'set-cookie': 'sessionId=fresh-cookie; Path=/' },
+            });
+          },
+          steps: [
+            {
+              name: 'hit fresh first',
+              method: 'GET',
+              path: '/fresh',
+              expected: 200,
+              check: (body) => (body as { source?: string }).source === 'fresh',
+            },
+            {
+              name: 'hit fresh with own cookie',
+              method: 'GET',
+              path: '/fresh',
+              expected: 200,
+            },
+          ],
+        },
+      ],
+    });
+    expect(report.pass).toBe(true);
+    expect(report.uncovered).toEqual([]);
+    expect(hits).toEqual([
+      'main:/main',
+      'fresh:/fresh:',
+      'fresh:/fresh:sessionId=fresh-cookie',
+    ]);
+
+    await expect(
+      runJourneys({
+        contract: 'canonical-v2',
+        routes: [{ method: 'GET', path: '/fresh' }],
+        handler: async () => new Response('{}'),
+        journeys: [
+          {
+            persona: 'bad_url',
+            baseUrl: 'file:///tmp/qa',
+            steps: [
+              {
+                name: 'never runs',
+                method: 'GET',
+                path: '/fresh',
+                expected: 200,
+              },
+            ],
+          },
+        ],
+      })
+    ).rejects.toThrow('Invalid base URL');
+  });
 });

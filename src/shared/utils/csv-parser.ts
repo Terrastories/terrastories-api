@@ -104,9 +104,15 @@ export function parseCsvText(
     throw new CsvParseError('empty_csv', 'CSV file is empty');
   }
 
-  const records: Array<{ csvLine: number; cells: string[] }> = [];
+  let headers: string[] | null = null;
+  const rows: ParsedCsvRow[] = [];
+  let leadingBlankLine: number | null = null;
+  const pendingBlankLines: number[] = [];
+  let overflowBlankCount = 0;
+
   let rowCells: string[] = [];
-  let cellChars: string[] = [];
+  let cellParts: string[] = [];
+  let segmentStart = -1;
   let cellLength = 0;
   let inQuotes = false;
   let justClosedQuote = false;
@@ -114,30 +120,8 @@ export function parseCsvText(
   let currentLine = 1;
   let recordStartLine = 1;
 
-  const pushCell = () => {
-    rowCells.push(cellChars.join(''));
-    cellChars = [];
-    cellLength = 0;
-    atCellStart = true;
-    justClosedQuote = false;
-    if (rowCells.length > maxColumns) {
-      throw new CsvParseError(
-        'too_many_columns',
-        `CSV exceeds maximum of ${maxColumns} columns`,
-        undefined,
-        recordStartLine
-      );
-    }
-  };
-
-  const pushRecord = () => {
-    pushCell();
-    records.push({ csvLine: recordStartLine, cells: rowCells });
-    rowCells = [];
-  };
-
-  const appendChar = (ch: string) => {
-    cellLength += ch.length;
+  const consumeChars = (count: number) => {
+    cellLength += count;
     if (cellLength > maxCellLength) {
       throw new CsvParseError(
         'cell_too_large',
@@ -146,8 +130,145 @@ export function parseCsvText(
         recordStartLine
       );
     }
-    cellChars.push(ch);
-    atCellStart = false;
+  };
+
+  const flushSegment = (endIdx: number) => {
+    if (segmentStart >= 0 && endIdx > segmentStart) {
+      cellParts.push(text.slice(segmentStart, endIdx));
+    }
+    segmentStart = -1;
+  };
+
+  const pushCell = (endIdx: number) => {
+    if (rowCells.length >= maxColumns) {
+      throw new CsvParseError(
+        'too_many_columns',
+        `CSV exceeds maximum of ${maxColumns} columns`,
+        undefined,
+        recordStartLine
+      );
+    }
+    flushSegment(endIdx);
+    const value =
+      cellParts.length === 0
+        ? ''
+        : cellParts.length === 1
+          ? cellParts[0]!
+          : cellParts.join('');
+    rowCells.push(value);
+    cellParts = [];
+    cellLength = 0;
+    atCellStart = true;
+    justClosedQuote = false;
+    segmentStart = -1;
+  };
+
+  const validateHeaders = (
+    rawHeaders: string[],
+    headerLine: number
+  ): string[] => {
+    const validated: string[] = [];
+    const seenHeaders = new Set<string>();
+    for (const raw of rawHeaders) {
+      const trimmed = raw.trim();
+      if (trimmed.length === 0) {
+        throw new CsvParseError(
+          'empty_header',
+          'CSV header column names must not be empty',
+          undefined,
+          headerLine
+        );
+      }
+      if (seenHeaders.has(trimmed)) {
+        throw new CsvParseError(
+          'duplicate_header',
+          'CSV contains duplicate column headers',
+          undefined,
+          headerLine
+        );
+      }
+      seenHeaders.add(trimmed);
+      validated.push(trimmed);
+    }
+    return validated;
+  };
+
+  const pushDataRow = (cells: string[], csvLine: number) => {
+    if (rows.length >= maxRows) {
+      throw new CsvParseError(
+        'too_many_rows',
+        `CSV exceeds maximum of ${maxRows} data rows`,
+        rows.length + 1,
+        csvLine
+      );
+    }
+    const rowNumber = rows.length + 1;
+    if (cells.length !== headers!.length) {
+      throw new CsvParseError(
+        'column_count_mismatch',
+        `CSV row ${rowNumber} column count does not match header count`,
+        rowNumber,
+        csvLine
+      );
+    }
+    rows.push({
+      rowNumber,
+      csvLine,
+      cells,
+    });
+  };
+
+  const pushRecord = (endIdx: number) => {
+    pushCell(endIdx);
+    const cells = rowCells;
+    rowCells = [];
+    const isBlankLine = cells.length === 1 && cells[0] === '';
+
+    if (headers === null) {
+      if (isBlankLine) {
+        if (leadingBlankLine === null) {
+          leadingBlankLine = recordStartLine;
+        }
+        return;
+      }
+      if (leadingBlankLine !== null) {
+        throw new CsvParseError(
+          'empty_header',
+          'CSV header column names must not be empty',
+          undefined,
+          leadingBlankLine
+        );
+      }
+      headers = validateHeaders(cells, recordStartLine);
+      return;
+    }
+
+    if (isBlankLine) {
+      if (rows.length + pendingBlankLines.length < maxRows) {
+        pendingBlankLines.push(recordStartLine);
+      } else {
+        overflowBlankCount += 1;
+      }
+      return;
+    }
+
+    if (
+      overflowBlankCount > 0 ||
+      rows.length + pendingBlankLines.length + 1 > maxRows
+    ) {
+      throw new CsvParseError(
+        'too_many_rows',
+        `CSV exceeds maximum of ${maxRows} data rows`,
+        undefined,
+        recordStartLine
+      );
+    }
+
+    for (const blankLine of pendingBlankLines) {
+      pushDataRow([''], blankLine);
+    }
+    pendingBlankLines.length = 0;
+    pushDataRow(cells, recordStartLine);
   };
 
   for (let i = 0; i < text.length; i++) {
@@ -156,41 +277,44 @@ export function parseCsvText(
     if (inQuotes) {
       if (ch === '"') {
         if (i + 1 < text.length && text[i + 1] === '"') {
-          appendChar('"');
+          flushSegment(i);
+          consumeChars(1);
+          cellParts.push('"');
           i += 1;
+          segmentStart = i + 1;
         } else {
+          flushSegment(i);
           inQuotes = false;
           justClosedQuote = true;
         }
-      } else {
-        if (ch === '\r') {
-          if (i + 1 < text.length && text[i + 1] === '\n') {
-            appendChar('\r\n');
-            i += 1;
-          } else {
-            appendChar('\r');
-          }
-          currentLine += 1;
-        } else if (ch === '\n') {
-          appendChar('\n');
-          currentLine += 1;
+      } else if (ch === '\r') {
+        if (i + 1 < text.length && text[i + 1] === '\n') {
+          consumeChars(2);
+          i += 1;
         } else {
-          appendChar(ch);
+          consumeChars(1);
         }
+        currentLine += 1;
+      } else if (ch === '\n') {
+        consumeChars(1);
+        currentLine += 1;
+      } else {
+        consumeChars(1);
       }
       continue;
     }
 
     if (justClosedQuote) {
       if (ch === ',') {
-        pushCell();
+        pushCell(i);
         continue;
       }
       if (ch === '\r' || ch === '\n') {
+        const end = i;
         if (ch === '\r' && i + 1 < text.length && text[i + 1] === '\n') {
           i += 1;
         }
-        pushRecord();
+        pushRecord(end);
         currentLine += 1;
         recordStartLine = currentLine;
         continue;
@@ -206,6 +330,7 @@ export function parseCsvText(
     if (atCellStart && ch === '"') {
       inQuotes = true;
       atCellStart = false;
+      segmentStart = i + 1;
       continue;
     }
 
@@ -219,23 +344,26 @@ export function parseCsvText(
     }
 
     if (ch === ',') {
-      pushCell();
+      pushCell(i);
       continue;
     }
 
     if (ch === '\r' || ch === '\n') {
+      const end = i;
       if (ch === '\r' && i + 1 < text.length && text[i + 1] === '\n') {
         i += 1;
       }
-      // If a trailing newline produces a zero-width final record, do not push a
-      // synthetic row once we finish below; handle trailing empty records next.
-      pushRecord();
+      pushRecord(end);
       currentLine += 1;
       recordStartLine = currentLine;
       continue;
     }
 
-    appendChar(ch);
+    if (atCellStart) {
+      segmentStart = i;
+      atCellStart = false;
+    }
+    consumeChars(1);
   }
 
   if (inQuotes) {
@@ -248,76 +376,15 @@ export function parseCsvText(
   }
 
   if (!atCellStart || rowCells.length > 0 || justClosedQuote) {
-    pushRecord();
+    pushRecord(text.length);
   }
 
-  // Drop trailing blank lines at EOF (e.g. final \n\n).
-  while (
-    records.length > 0 &&
-    records[records.length - 1]!.cells.length === 1 &&
-    records[records.length - 1]!.cells[0] === ''
-  ) {
-    records.pop();
-  }
-
-  if (records.length === 0) {
+  if (headers === null) {
     throw new CsvParseError('empty_csv', 'CSV file has no header row');
   }
 
-  const rawHeaders = records[0]!.cells;
-  const headers: string[] = [];
-  const seenHeaders = new Set<string>();
-  for (const raw of rawHeaders) {
-    const trimmed = raw.trim();
-    if (trimmed.length === 0) {
-      throw new CsvParseError(
-        'empty_header',
-        'CSV header column names must not be empty',
-        undefined,
-        records[0]!.csvLine
-      );
-    }
-    if (seenHeaders.has(trimmed)) {
-      throw new CsvParseError(
-        'duplicate_header',
-        'CSV contains duplicate column headers',
-        undefined,
-        records[0]!.csvLine
-      );
-    }
-    seenHeaders.add(trimmed);
-    headers.push(trimmed);
-  }
-
-  if (records.length === 1) {
+  if (rows.length === 0) {
     throw new CsvParseError('empty_csv', 'CSV file contains no data rows');
-  }
-
-  const dataRecords = records.slice(1);
-  if (dataRecords.length > maxRows) {
-    throw new CsvParseError(
-      'too_many_rows',
-      `CSV exceeds maximum of ${maxRows} data rows`
-    );
-  }
-
-  const rows: ParsedCsvRow[] = [];
-  for (let i = 0; i < dataRecords.length; i++) {
-    const rec = dataRecords[i]!;
-    const rowNumber = i + 1;
-    if (rec.cells.length !== headers.length) {
-      throw new CsvParseError(
-        'column_count_mismatch',
-        `CSV row ${rowNumber} column count does not match header count`,
-        rowNumber,
-        rec.csvLine
-      );
-    }
-    rows.push({
-      rowNumber,
-      csvLine: rec.csvLine,
-      cells: rec.cells,
-    });
   }
 
   return { headers, rows };

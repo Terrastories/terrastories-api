@@ -3,6 +3,7 @@ import {
   CsvParseError,
   decodeUtf8CsvStrict,
   hasCsvFormulaPrefix,
+  MAX_CSV_ROWS,
   neutralizeCsvFormulaCell,
   parseCsvText,
 } from '../../src/shared/utils/csv-parser.js';
@@ -77,7 +78,7 @@ describe('CSV parser and formula-injection guards', () => {
     expect((caught as Error).message).not.toContain(secretMarker);
   });
 
-  it('enforces maxRows, maxColumns, and maxCellLength bounds', () => {
+  it('enforces maxRows, maxColumns, and maxCellLength bounds early while parsing', () => {
     expect(() => parseCsvText('a,b,c\n1,2,3', { maxColumns: 2 })).toThrow(
       CsvParseError
     );
@@ -87,6 +88,82 @@ describe('CSV parser and formula-injection guards', () => {
     expect(() => parseCsvText('a\n12345', { maxCellLength: 4 })).toThrow(
       CsvParseError
     );
+
+    // Aborts on row cap BEFORE hitting a trailing malformed unclosed quote.
+    let tooManyRowsErr: unknown;
+    try {
+      parseCsvText('a\n1\n2\n3\n"unclosed', { maxRows: 2 });
+    } catch (err) {
+      tooManyRowsErr = err;
+    }
+    expect(tooManyRowsErr).toBeInstanceOf(CsvParseError);
+    expect((tooManyRowsErr as CsvParseError).code).toBe('too_many_rows');
+
+    // Aborts early on 500k short rows under default MAX_CSV_ROWS without buffering all records.
+    let hugeRowsErr: unknown;
+    try {
+      parseCsvText(`a\n${'x\n'.repeat(500_000)}"unclosed`);
+    } catch (err) {
+      hugeRowsErr = err;
+    }
+    expect(hugeRowsErr).toBeInstanceOf(CsvParseError);
+    expect((hugeRowsErr as CsvParseError).code).toBe('too_many_rows');
+    expect(MAX_CSV_ROWS).toBe(5_000);
+
+    // Aborts early on maxCellLength (unquoted and quoted with "" escapes / CRLF) before trailing unclosed quote.
+    let unquotedCellErr: unknown;
+    try {
+      parseCsvText(`a\n${'x'.repeat(200_000)}\n"unclosed`, {
+        maxCellLength: 100,
+      });
+    } catch (err) {
+      unquotedCellErr = err;
+    }
+    expect(unquotedCellErr).toBeInstanceOf(CsvParseError);
+    expect((unquotedCellErr as CsvParseError).code).toBe('cell_too_large');
+
+    let quotedCellErr: unknown;
+    try {
+      parseCsvText(`a\n"ab""cd\r\n${'y'.repeat(100)}"\n"unclosed`, {
+        maxCellLength: 50,
+      });
+    } catch (err) {
+      quotedCellErr = err;
+    }
+    expect(quotedCellErr).toBeInstanceOf(CsvParseError);
+    expect((quotedCellErr as CsvParseError).code).toBe('cell_too_large');
+
+    // Blank line handling at boundaries.
+    expect(parseCsvText('a\n1\n2\n\n\n', { maxRows: 2 }).rows).toHaveLength(2);
+    expect(
+      parseCsvText(`a\n1\n${'\n'.repeat(100_000)}`, { maxRows: 2 }).rows
+    ).toHaveLength(1);
+    expect(() => parseCsvText('a\n1\n\n2\n', { maxRows: 2 })).toThrow(
+      CsvParseError
+    );
+    expect(parseCsvText('a\n1\n\n2\n', { maxRows: 3 }).rows).toEqual([
+      { rowNumber: 1, csvLine: 2, cells: ['1'] },
+      { rowNumber: 2, csvLine: 3, cells: [''] },
+      { rowNumber: 3, csvLine: 4, cells: ['2'] },
+    ]);
+
+    let emptyErr: unknown;
+    try {
+      parseCsvText('\n\n\n');
+    } catch (err) {
+      emptyErr = err;
+    }
+    expect(emptyErr).toBeInstanceOf(CsvParseError);
+    expect((emptyErr as CsvParseError).code).toBe('empty_csv');
+
+    let emptyHeaderErr: unknown;
+    try {
+      parseCsvText('\na\n1\n');
+    } catch (err) {
+      emptyHeaderErr = err;
+    }
+    expect(emptyHeaderErr).toBeInstanceOf(CsvParseError);
+    expect((emptyHeaderErr as CsvParseError).code).toBe('empty_header');
   });
 
   it('detects and neutralizes spreadsheet formula prefixes', () => {

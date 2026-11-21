@@ -24,6 +24,10 @@ import {
   MAX_IMPORT_CSV_BYTES,
 } from '../../src/shared/schemas/imports.js';
 import { MediaUploadResponseSchema } from '../../src/shared/schemas/media-v2.js';
+import {
+  MAX_CSV_CELL_LENGTH,
+  MAX_CSV_ROWS,
+} from '../../src/shared/utils/csv-parser.js';
 import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 
@@ -1102,5 +1106,37 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
     } finally {
       d1.sqlite.close();
     }
+  });
+
+  it('rejects CSV exceeding MAX_CSV_ROWS or MAX_CSV_CELL_LENGTH with 400 and content-free errors', async () => {
+    const secretRowMarker = 'SECRET_OVER_CAP_ROW_VALUE';
+    const overRowsCsv =
+      'name\n' +
+      Array.from(
+        { length: MAX_CSV_ROWS + 1 },
+        (_, i) => `${secretRowMarker}_${i}`
+      ).join('\n') +
+      '\n';
+    const overRowsRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: overRowsCsv,
+      fields: { kind: 'places' },
+    });
+    expect(overRowsRes.status).toBe(400);
+    const overRowsText = await overRowsRes.text();
+    expect(overRowsText).not.toContain(secretRowMarker);
+
+    const secretCellMarker = 'SECRET_OVER_CELL_VALUE_';
+    const oversizedCell =
+      secretCellMarker +
+      'x'.repeat(MAX_CSV_CELL_LENGTH + 1 - secretCellMarker.length);
+    const overCellRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: `name\n${oversizedCell}\n`,
+      fields: { kind: 'places' },
+    });
+    expect(overCellRes.status).toBe(400);
+    const overCellText = await overCellRes.text();
+    expect(overCellText).not.toContain(secretCellMarker);
   });
 });

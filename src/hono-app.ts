@@ -276,8 +276,11 @@ export function createHonoApp(options: FoundationOptions) {
       !(await sovereigntyRepository.applyDueWithdrawals(now()))
     )
       return c.json({ error: 'Service unavailable' }, 503);
-    if (c.req.path !== '/health')
-      await sovereigntyRepository.activateDueErasures(now());
+    if (
+      c.req.path !== '/health' &&
+      !(await sovereigntyRepository.activateDueErasures(now()))
+    )
+      return c.json({ error: 'Service unavailable' }, 503);
     await next();
   });
   app.onError(() =>
@@ -600,7 +603,8 @@ export function createHonoApp(options: FoundationOptions) {
       ? new CommunityErasureService(
           sovereigntyRepository,
           options.storage,
-          options.erasureStore
+          options.erasureStore,
+          now
         )
       : undefined,
     authRepository,

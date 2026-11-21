@@ -9,18 +9,23 @@ import {
 import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
 import { SOVEREIGNTY_AUDIT_ACTIONS } from '../shared/sovereignty-policy.js';
 
+export const ERASURE_BATCH_SIZE = 1000;
+export const WORKER_ERASURE_STORAGE_BUDGET = 15;
+export const ERASURE_COMMUNITIES_PER_PASS = 2;
+
 /** Idempotent passes. No database ownership/byte pointers are lost before byte deletion. */
 export class CommunityErasureService {
   constructor(
     private readonly repository: CommunitySovereigntyRepository,
     private readonly storage: FoundationStorage,
-    private readonly store: ErasureRecordStore
+    private readonly store: ErasureRecordStore,
+    private readonly clock: () => Date = () => new Date()
   ) {}
 
   async sweep(now: Date, storageBudget = 25): Promise<void> {
     await this.repository.activateDueErasures(now);
     const records = await this.store.list();
-    for (const row of await this.repository.erasureWork()) {
+    for (const row of await this.repository.erasureWork(5, now)) {
       if (!records.some((r) => r.communityId === row.communityId)) {
         const record: ErasureRecord = {
           communityId: row.communityId,
@@ -34,7 +39,22 @@ export class CommunityErasureService {
         records.push(record);
       }
     }
-    for (const record of records) {
+    // Wall-clock round robin survives isolate/process restarts and keeps a
+    // large community from starving every community behind it.
+    const pending = records
+      .filter((record) => record.completedAt === null)
+      .sort((a, b) => a.communityId - b.communityId);
+    const start = pending.length
+      ? Math.floor(now.getTime() / 60000) % pending.length
+      : 0;
+    const ordered = [
+      ...[...pending.slice(start), ...pending.slice(0, start)].slice(
+        0,
+        ERASURE_COMMUNITIES_PER_PASS
+      ),
+      ...records.filter((record) => record.completedAt !== null),
+    ];
+    for (const record of ordered) {
       if (record.completedAt !== null) {
         const redacted = redactErasureActor(record, now);
         if (
@@ -48,6 +68,11 @@ export class CommunityErasureService {
       }
       if (!this.storage.list || !this.storage.delete)
         throw new Error('Erasure storage unavailable');
+      if (!this.storage.fenceCommunity)
+        throw new Error('Erasure writer fencing unavailable');
+      if (storageBudget < 2) return;
+      await this.storage.fenceCommunity(record.communityId);
+      storageBudget--;
       const prefix = `communities/${record.communityId}/`;
       for (const upload of await this.repository.erasureUploads(
         record.communityId
@@ -65,25 +90,46 @@ export class CommunityErasureService {
       if ((await this.repository.erasureUploads(record.communityId)).length)
         return;
       const deleteCost = this.storage.erasureDeleteCost ?? 1;
-      if (storageBudget < deleteCost + 1) return;
+      if (storageBudget < 2) return;
       const page = await this.storage.list({
         prefix,
-        limit: Math.min(Math.floor((storageBudget - 1) / deleteCost), 20),
+        limit: this.storage.deleteMany
+          ? ERASURE_BATCH_SIZE
+          : Math.min(Math.floor((storageBudget - 1) / deleteCost), 20),
       });
       storageBudget--;
       for (const object of page.entries) {
         if (!object.key.startsWith(prefix))
           throw new Error('Invalid erasure listing');
-        await this.storage.delete(object.key);
-        storageBudget -= deleteCost;
+      }
+      if (this.storage.deleteMany) {
+        const keys: string[] = [];
+        for (const object of page.entries) {
+          const next = [...keys, object.key];
+          if (
+            (this.storage.erasureBatchDeleteCost?.(next) ?? 1) > storageBudget
+          )
+            break;
+          keys.push(object.key);
+        }
+        if (keys.length) {
+          await this.storage.deleteMany(keys);
+          storageBudget -= this.storage.erasureBatchDeleteCost?.(keys) ?? 1;
+        }
+      } else {
+        for (const object of page.entries) {
+          if (storageBudget < deleteCost) break;
+          await this.storage.delete(object.key);
+          storageBudget -= deleteCost;
+        }
       }
       // A fresh empty listing verifies absence, and also catches interrupted uploads.
-      if (page.entries.length || page.truncated) return;
+      if (page.entries.length || page.truncated) continue;
       await this.repository.eraseRows(record.communityId, now);
       await this.store.write({
         ...record,
         outcome: 'completed',
-        completedAt: now.toISOString(),
+        completedAt: this.clock().toISOString(),
       });
     }
   }
@@ -102,6 +148,9 @@ export class CommunityErasureService {
   async reconcileRestore(point: Date, now: Date): Promise<void> {
     await verifyErasureRestorePoint(this.store, point);
     for (const record of await this.store.list()) {
+      if (!this.storage.fenceCommunity)
+        throw new Error('Erasure writer fencing unavailable');
+      await this.storage.fenceCommunity(record.communityId);
       const prefix = `communities/${record.communityId}/`;
       if (!this.storage.list || !this.storage.delete)
         throw new Error('Erasure storage unavailable');

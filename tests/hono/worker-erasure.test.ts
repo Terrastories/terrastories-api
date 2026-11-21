@@ -41,7 +41,7 @@ it('cron aborts journaled non-export multipart bytes and removes rows before rec
     await bucket.put('communities/2/media/object', new Uint8Array([5]));
     for (let pass = 0; pass < 2; pass++) {
       const response = await mf.dispatchFetch(
-        `http://localhost/cdn-cgi/handler/scheduled?cron=*+*+*+*+*&time=${now + pass * 60000}`,
+        `http://localhost/cdn-cgi/handler/scheduled?cron=*/1+*+*+*+*&time=${now + pass * 60000}`,
         { method: 'POST' }
       );
       expect(response.status).toBe(200);
@@ -61,6 +61,53 @@ it('cron aborts journaled non-export multipart bytes and removes rows before rec
       communityId: 1,
       requestId,
       outcome: 'completed',
+    });
+  } finally {
+    await mf.dispose();
+  }
+}, 30000);
+
+it('R2 fencing aborts a paused writer and survives adapter restart', async () => {
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(`
+    import { createR2Storage } from './src/worker.js';
+    export default { async fetch(request, env) {
+      const storage = createR2Storage(env.MEDIA);
+      let controller;
+      let started;
+      let resume;
+      let first = true;
+      const ready = new Promise(resolve => { started = resolve; });
+      const body = new ReadableStream({ pull(c) {
+        if (first) { first = false; c.enqueue(new Uint8Array(5 * 1024 * 1024)); return; }
+        controller = c;
+        started();
+        return new Promise(resolve => { resume = resolve; });
+      } }, {highWaterMark: 0});
+      const writing = storage.put('communities/1/media/paused', body).then(() => 'published', () => 'refused');
+      await ready;
+      await storage.fenceCommunity(1);
+      const page = await storage.list({prefix:'communities/1/'});
+      await storage.deleteMany(page.entries.map(entry => entry.key));
+      const emptyBeforeResume = (await storage.list({prefix:'communities/1/'})).entries.length;
+      controller.enqueue(new Uint8Array([1,2,3]));
+      controller.close();
+      resume();
+      const outcome = await writing;
+      const restarted = createR2Storage(env.MEDIA);
+      const late = await restarted.put('communities/1/media/late', new Uint8Array([4])).then(() => 'published', () => 'refused');
+      return Response.json({outcome, late, emptyBeforeResume, remaining:(await storage.list({prefix:'communities/1/'})).entries.length});
+    }};
+  `),
+    { ENVIRONMENT: 'test' }
+  );
+  try {
+    const response = await mf.dispatchFetch('http://localhost/fence');
+    expect(await response.json()).toEqual({
+      outcome: 'refused',
+      late: 'refused',
+      emptyBeforeResume: 0,
+      remaining: 0,
     });
   } finally {
     await mf.dispose();

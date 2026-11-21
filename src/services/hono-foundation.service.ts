@@ -25,9 +25,13 @@ export const ORPHAN_SWEEP_CURSOR_KEY = 'system/orphan-sweep-cursor.json';
  * it (the hold cannot dissolve itself).
  */
 export const ORPHAN_SWEEP_HOLD_KEY = 'system/orphan-sweep-hold';
+export const erasureFenceKey = (communityId: number) =>
+  `system/erasure-fences/${communityId}`;
 
 export const validSystemStorageKey = (key: string) =>
-  key === ORPHAN_SWEEP_CURSOR_KEY || key === ORPHAN_SWEEP_HOLD_KEY;
+  key === ORPHAN_SWEEP_CURSOR_KEY ||
+  key === ORPHAN_SWEEP_HOLD_KEY ||
+  /^system\/erasure-fences\/[1-9][0-9]*$/.test(key);
 
 /**
  * Parse an operator env switch, fail closed: only an unset/empty value, or
@@ -98,6 +102,10 @@ export interface FoundationStorage {
     options?: StoragePutOptions
   ): Promise<{ size: number }>;
   delete?(key: string): Promise<void>;
+  /** Persistently fence new writers; existing writers must be abortable by listing/deletion. */
+  fenceCommunity?(communityId: number): Promise<void>;
+  deleteMany?(keys: string[]): Promise<void>;
+  erasureBatchDeleteCost?(keys: string[]): number;
   /** Worst-case provider operations per erasure delete (multipart journal abort included). */
   erasureDeleteCost?: number;
   /** Abort an in-flight multipart upload by storage key and upload id (R2). */

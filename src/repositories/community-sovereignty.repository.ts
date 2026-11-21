@@ -1490,7 +1490,7 @@ export class CommunitySovereigntyRepository {
             .where(
               and(
                 eq(requests.communityId, communityId),
-                eq(requests.kind, 'withdrawal'),
+                eq(requests.kind, kind),
                 eq(requests.state, 'notice'),
                 gate
               )
@@ -1788,23 +1788,38 @@ export class CommunitySovereigntyRepository {
     return rows.length > 0;
   }
 
-  async erasureWork(limit = 5): Promise<SovereigntyRequestRecord[]> {
+  async erasureWork(
+    limit = 5,
+    now = new Date()
+  ): Promise<SovereigntyRequestRecord[]> {
     const r = this.tables.communitySovereigntyRequests;
+    const pending = and(
+      eq(r.kind, 'erasure'),
+      inArray(r.state, ['requested', 'executing'])
+    );
+    const [{ total }] = await this.db
+      .select({ total: sql<number>`count(*)`.mapWith(Number) })
+      .from(r)
+      .where(pending);
+    // Rotate discovery too: repeatedly reading only the oldest five would
+    // hide every later community from the out-of-band scheduler indefinitely.
+    const offset = total
+      ? (Math.floor(now.getTime() / 60000) * limit) % total
+      : 0;
     const rows = await this.db
       .select()
       .from(r)
-      .where(
-        and(eq(r.kind, 'erasure'), inArray(r.state, ['requested', 'executing']))
-      )
+      .where(pending)
       .orderBy(r.requestedAt, r.id)
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
     return rows.map(
       (row: Parameters<CommunitySovereigntyRepository['toRequestRecord']>[0]) =>
         this.toRequestRecord(row)
     );
   }
 
-  async activateDueErasures(now: Date): Promise<void> {
+  async activateDueErasures(now: Date): Promise<boolean> {
     const r = this.tables.communitySovereigntyRequests;
     const rows = await this.db
       .select({ id: r.id, communityId: r.communityId })
@@ -1854,6 +1869,20 @@ export class CommunitySovereigntyRepository {
             .returning(),
         ];
       });
+    // The partial due-notice index makes the backlog check bounded. Reads
+    // fail closed even when more than one activation batch is overdue.
+    const remaining = await this.db
+      .select({ id: r.id })
+      .from(r)
+      .where(
+        and(
+          eq(r.kind, 'erasure'),
+          eq(r.state, 'notice'),
+          sql`${r.noticeEndsAt} <= ${now.getTime()}`
+        )
+      )
+      .limit(1);
+    return remaining.length === 0;
   }
 
   async erasureUploads(communityId: number) {

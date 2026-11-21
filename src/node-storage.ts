@@ -11,14 +11,23 @@ import {
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
-  ORPHAN_SWEEP_CURSOR_KEY,
-  ORPHAN_SWEEP_HOLD_KEY,
   validStorageKey,
   validSystemStorageKey,
+  erasureFenceKey,
   type FoundationStorage,
 } from './services/hono-foundation.service.js';
 
 const DEFAULT_LIST_LIMIT = 200;
+
+// Shared by adapters for the same filesystem root, including request and cron
+// instances. Fencing cancels stalled streams and awaits handle closure.
+const activeLocalWrites = new Map<
+  string,
+  Set<{
+    cancel: () => void;
+    settled: Promise<void>;
+  }>
+>();
 
 /** Recursively collect regular-file storage keys under a directory. */
 async function walkStorageDir(
@@ -136,6 +145,14 @@ export async function createLocalStorage(
   };
 
   return {
+    async fenceCommunity(communityId) {
+      await writeSystemObject(erasureFenceKey(communityId), new Uint8Array(0));
+      const writers = [
+        ...(activeLocalWrites.get(`${root}:${communityId}`) ?? []),
+      ];
+      for (const writer of writers) writer.cancel();
+      await Promise.all(writers.map((writer) => writer.settled));
+    },
     async read(key, range) {
       if (!validStorageKey(key)) return null;
       try {
@@ -166,59 +183,98 @@ export async function createLocalStorage(
     },
 
     async put(key, body) {
-      const resolved = await resolveAuthorizedPath(key, true);
-      if (!resolved) {
-        throw new Error('Invalid storage key');
-      }
-      const { targetPath } = resolved;
-      const tmpPath = path.join(
-        path.dirname(targetPath),
-        `.tmp-${randomUUID()}`
-      );
-      const handle = await openFile(tmpPath, 'w', 0o600);
-      let size = 0;
+      const writerKey = `${root}:${key.startsWith('communities/') ? key.split('/')[1] : 'system'}`;
+      let cancelled = false;
+      let readerToCancel: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let settle!: () => void;
+      const writer = {
+        cancel: () => {
+          cancelled = true;
+          void readerToCancel?.cancel().catch(() => {});
+        },
+        settled: new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+      };
+      const writers = activeLocalWrites.get(writerKey) ?? new Set();
+      activeLocalWrites.set(writerKey, writers);
+      writers.add(writer);
       try {
-        if (body instanceof Uint8Array) {
-          let offset = 0;
-          while (offset < body.byteLength) {
-            const { bytesWritten } = await handle.write(
-              body,
-              offset,
-              body.byteLength - offset
-            );
-            offset += bytesWritten;
-          }
-          size = body.byteLength;
-        } else {
-          const reader = body.getReader();
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (value && value.byteLength > 0) {
-                let offset = 0;
-                while (offset < value.byteLength) {
-                  const { bytesWritten } = await handle.write(
-                    value,
-                    offset,
-                    value.byteLength - offset
-                  );
-                  offset += bytesWritten;
-                }
-                size += value.byteLength;
-              }
-            }
-          } finally {
-            reader.releaseLock();
-          }
+        const assertWritable = async () => {
+          if (cancelled) throw new Error('Community storage is erasing');
+          if (
+            key.startsWith('communities/') &&
+            (await readSystemObject(erasureFenceKey(Number(key.split('/')[1]))))
+          )
+            throw new Error('Community storage is erasing');
+        };
+        await assertWritable();
+        const resolved = await resolveAuthorizedPath(key, true);
+        if (!resolved) {
+          throw new Error('Invalid storage key');
         }
-        await handle.close();
-        await rename(tmpPath, targetPath);
-        return { size };
-      } catch (error) {
-        await handle.close().catch(() => {});
-        await unlink(tmpPath).catch(() => {});
-        throw error;
+        const { targetPath } = resolved;
+        const tmpPath = path.join(
+          path.dirname(targetPath),
+          `.tmp-${randomUUID()}`
+        );
+        const handle = await openFile(tmpPath, 'w', 0o600);
+        let size = 0;
+        try {
+          // The temporary inode precedes this fence check. Once fencing lands,
+          // a sweep can unlink it and every later rename fails, even if a writer
+          // had already passed its last fence check before the sweep.
+          await assertWritable();
+          if (body instanceof Uint8Array) {
+            let offset = 0;
+            while (offset < body.byteLength) {
+              const { bytesWritten } = await handle.write(
+                body,
+                offset,
+                body.byteLength - offset
+              );
+              offset += bytesWritten;
+            }
+            size = body.byteLength;
+          } else {
+            const reader = body.getReader();
+            readerToCancel = reader;
+            if (cancelled) await reader.cancel();
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                await assertWritable();
+                if (value && value.byteLength > 0) {
+                  let offset = 0;
+                  while (offset < value.byteLength) {
+                    const { bytesWritten } = await handle.write(
+                      value,
+                      offset,
+                      value.byteLength - offset
+                    );
+                    offset += bytesWritten;
+                  }
+                  size += value.byteLength;
+                }
+              }
+            } finally {
+              reader.releaseLock();
+            }
+          }
+          await handle.close();
+          await assertWritable();
+          await rename(tmpPath, targetPath);
+          return { size };
+        } catch (error) {
+          await handle.close().catch(() => {});
+          await unlink(tmpPath).catch(() => {});
+          throw error;
+        }
+      } finally {
+        writers.delete(writer);
+        if (!writers.size) activeLocalWrites.delete(writerKey);
+        settle();
       }
     },
 
@@ -247,10 +303,7 @@ export async function createLocalStorage(
       const matched = all
         .filter((key) => key.startsWith(prefix))
         // The sweeper's system state (cursor, restore hold) is never sweepable bytes.
-        .filter(
-          (key) =>
-            key !== ORPHAN_SWEEP_CURSOR_KEY && key !== ORPHAN_SWEEP_HOLD_KEY
-        )
+        .filter((key) => !validSystemStorageKey(key))
         .sort()
         .filter((key) =>
           options?.startAfter ? key > options.startAfter : true

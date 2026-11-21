@@ -65,7 +65,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       db,
       runErasureSweep: async () => {
         const response = await mf.dispatchFetch(
-          `http://localhost/cdn-cgi/handler/scheduled?cron=*+*+*+*+*&time=${Date.now()}`,
+          `http://localhost/cdn-cgi/handler/scheduled?cron=*/1+*+*+*+*&time=${Date.now()}`,
           { method: 'POST' }
         );
         if (response.status !== 200) throw new Error('Erasure cron failed');

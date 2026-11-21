@@ -21,6 +21,7 @@
   // ≈ 28,800 keys/day, cycling a 100k-key keyspace in < 4 days — well inside the
   // 30-day bound; ~34 deletes/run (~800/day) for all-orphan backlogs.
   // Export artifacts have a 15-minute TTL and a one-minute cleanup grace.
-  "triggers": { "crons": ["0 * * * *", "* * * * *"] },
+  // Separate invocation budgets: minute export expiry and minute erasure.
+  "triggers": { "crons": ["0 * * * *", "* * * * *", "*/1 * * * *"] },
   "observability": { "enabled": false, "traces": { "enabled": false } },
 }

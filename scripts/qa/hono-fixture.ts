@@ -1635,10 +1635,22 @@ export async function createFixture(
       handler = backend.handler(observeResponseCookies);
     } else {
       const erasureRecords = new Map<number, ErasureRecord>();
+      const erasureFences = new Set<number>();
+      const fenceCommunity = async (id: number) => {
+        erasureFences.add(id);
+      };
+      const assertWritable = (key: string) => {
+        if (
+          key.startsWith('communities/') &&
+          erasureFences.has(Number(key.split('/')[1]))
+        )
+          throw new Error('Community storage is erasing');
+      };
       erasureSweep = async () => {
         await new CommunityErasureService(
           new CommunitySovereigntyRepository(db),
           {
+            fenceCommunity,
             read: async () => null,
             delete: async (key) => {
               storage.delete(key);
@@ -1675,6 +1687,7 @@ export async function createFixture(
         trustProxy: true,
         serverSecret: toHex(crypto.getRandomValues(new Uint8Array(24))),
         storage: {
+          fenceCommunity,
           read: async (key, range) => {
             const bytes = storage.get(key);
             if (!bytes) return null;
@@ -1684,6 +1697,7 @@ export async function createFixture(
             };
           },
           async put(key, body) {
+            assertWritable(key);
             if (body instanceof Uint8Array) {
               const copy = Uint8Array.from(body);
               storage.set(key, copy);
@@ -1701,6 +1715,7 @@ export async function createFixture(
               }
             }
             const merged = new Uint8Array(total);
+            assertWritable(key);
             let offset = 0;
             for (const chunk of chunks) {
               merged.set(chunk, offset);

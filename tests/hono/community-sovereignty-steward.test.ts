@@ -275,6 +275,7 @@ describe('Slice 13b-A/B community sovereignty', () => {
     };
     const objects = new Map<string, Uint8Array>();
     const storage = {
+      fenceCommunity: async () => {},
       read: async () => null,
       delete: async (key: string) => {
         objects.delete(key);
@@ -294,7 +295,8 @@ describe('Slice 13b-A/B community sovereignty', () => {
     const erasureService = new CommunityErasureService(
       new CommunitySovereigntyRepository(db),
       storage,
-      erasureStore
+      erasureStore,
+      () => currentNow
     );
     const serverSecret = makeServerSecret();
     const app = createHonoApp({
@@ -1401,7 +1403,8 @@ describe('Slice 13b-A/B community sovereignty', () => {
       const restarted = new CommunityErasureService(
         new CommunitySovereigntyRepository(ctx.db),
         ctx.storage,
-        ctx.erasureStore
+        ctx.erasureStore,
+        ctx.getNow
       );
       await restarted.sweep(ctx.getNow());
       expect(
@@ -1455,6 +1458,82 @@ describe('Slice 13b-A/B community sovereignty', () => {
       });
       expect((await redacted.json()).data[0].requestingActorId).toBeNull();
       expect(ctx.records.get(ctx.activeComm.id)?.requestingActorId).toBeNull();
+    });
+  }
+
+  for (const d1Batch of [false, true]) {
+    it(`fails closed while a sixth due erasure awaits activation (D1=${d1Batch})`, async () => {
+      const ctx = await setup({ d1Batch });
+      for (let i = 0; i < 6; i++) {
+        const [community] = await ctx.db
+          .insert(communitiesSqlite)
+          .values({
+            name: `Due ${i}`,
+            slug: `due-${i}`,
+            isActive: true,
+          })
+          .returning();
+        await ctx.db.insert(communitySovereigntyRequestsSqlite).values({
+          id: crypto.randomUUID(),
+          communityId: community!.id,
+          kind: 'erasure',
+          state: 'notice',
+          initiatedByRole: 'steward',
+          requestedAt: ctx.getNow().getTime() - 1000,
+          noticeEndsAt: ctx.getNow().getTime(),
+          updatedAt: ctx.getNow().getTime(),
+        });
+      }
+      expect((await ctx.call('GET', '/v2/public/communities')).status).toBe(
+        503
+      );
+      expect((await ctx.call('GET', '/v2/public/communities')).status).not.toBe(
+        503
+      );
+      const repository = new CommunitySovereigntyRepository(ctx.db);
+      const discovered = [
+        ...(await repository.erasureWork(5, new Date(0))),
+        ...(await repository.erasureWork(5, new Date(60000))),
+      ];
+      expect(new Set(discovered.map((row) => row.communityId)).size).toBe(6);
+    });
+
+    it(`admin erasure atomically supersedes the matching steward notice (D1=${d1Batch})`, async () => {
+      const ctx = await setup({ d1Batch });
+      const noticeId = crypto.randomUUID();
+      ctx.objects.set(
+        `communities/${ctx.activeComm.id}/media/pending`,
+        new Uint8Array([1])
+      );
+      await ctx.db.insert(communitySovereigntyRequestsSqlite).values({
+        id: noticeId,
+        communityId: ctx.activeComm.id,
+        kind: 'erasure',
+        state: 'notice',
+        initiatedByRole: 'steward',
+        requestedAt: ctx.getNow().getTime(),
+        noticeEndsAt: ctx.getNow().getTime() + 604800000,
+        updatedAt: ctx.getNow().getTime(),
+      });
+      const cookie = await ctx.loginCookie(
+        ctx.adminUser.email!,
+        ctx.adminCreds.derivedKey
+      );
+      const response = await ctx.call('POST', '/v2/community/erasure', {
+        cookie,
+        body: {
+          confirmFinality: true,
+          currentDerivedKey: ctx.adminCreds.derivedKey,
+        },
+      });
+      expect(response.status).toBe(202);
+      const rows = await ctx.db
+        .select()
+        .from(communitySovereigntyRequestsSqlite)
+        .where(eq(communitySovereigntyRequestsSqlite.id, noticeId));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.state).toBe('cancelled');
+      expect(rows[0]!.cancelledBy).toBe(ctx.adminUser.id);
     });
   }
 

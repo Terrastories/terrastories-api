@@ -90,6 +90,7 @@ import {
 import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import {
+  ADMIN_ISSUED_CODE_TTL_MS,
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS_JSON,
   AUTH_THROTTLE_MAX_FAILURES,
@@ -411,6 +412,7 @@ export async function createFixture(
     storyPlaces,
     storySpeakers,
     files,
+    loginCodes,
   } = tablesFor(db);
   const communityMedia =
     dialectOf(db) === 'postgresql' ? communityMediaPg : communityMediaSqlite;
@@ -5401,6 +5403,26 @@ export async function createFixture(
     let qaRecoveryCode = '';
     let qaOldRecoveryCode = '';
     let qaSupersededRecoveryCode = '';
+    let qaAdminIssuedCodeForAdmin = '';
+    let qaAdminIssuedRedeemedCookie = '';
+    const qaAdminIssuedRedeemBody: { code: string } = { code: '' };
+    // Seed a DB-level admin_issued LoginCode for the community admin so the
+    // persona can exercise the verifier-free regeneration journey (one-shot)
+    // without a second administrator issuing it.
+    const qaAdminIssuedRawCode = toBase64Url(
+      crypto.getRandomValues(new Uint8Array(16))
+    );
+    const qaAdminIssuedCodeHash = await sha256Hex(qaAdminIssuedRawCode);
+    await db.insert(loginCodes).values({
+      communityId: userCommunity.id,
+      userId: userCommunityIds.admin,
+      purpose: 'admin_issued',
+      codeHash: qaAdminIssuedCodeHash,
+      createdBy: null,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + ADMIN_ISSUED_CODE_TTL_MS,
+    });
+    qaAdminIssuedCodeForAdmin = qaAdminIssuedRawCode;
     let redeemedAdminCookie = '';
     const qaIssuedRedeemBody = {
       code: '',
@@ -6081,6 +6103,63 @@ export async function createFixture(
           liveSessionCookie,
           userCommunity.id
         ),
+      },
+      {
+        name: 'redeem admin-issued code for admin (verifier-free setup)',
+        method: 'POST',
+        path: '/v2/auth/recovery/redeem',
+        expected: 200,
+        headers: { cookie: 'ts_session=' },
+        prepare: () => {
+          qaAdminIssuedRedeemBody.code = qaAdminIssuedCodeForAdmin;
+        },
+        body: qaAdminIssuedRedeemBody,
+        check: ownUser(
+          userCommunityCredentials.admin.email,
+          'admin',
+          liveSessionCookie,
+          userCommunity.id
+        ),
+        checkHeaders: (headers) => {
+          const sc = headers.get('set-cookie') ?? '';
+          qaAdminIssuedRedeemedCookie = sc.split(';')[0] ?? '';
+          return true;
+        },
+      },
+      {
+        name: 'regenerate recovery codes verifier-free via admin_issued session',
+        method: 'POST',
+        path: '/v2/auth/recovery-codes',
+        expected: 201,
+        headers: {},
+        prepare() {
+          this.headers = { cookie: qaAdminIssuedRedeemedCookie };
+        },
+        body: undefined,
+        check: (body) => {
+          const data = (
+            body as {
+              data?: { codes?: unknown; purpose?: unknown };
+            }
+          )?.data;
+          return (
+            data?.purpose === 'recovery' &&
+            Array.isArray(data?.codes) &&
+            data.codes.length === 10
+          );
+        },
+      },
+      {
+        name: 'reject second verifier-free regeneration (one-shot)',
+        method: 'POST',
+        path: '/v2/auth/recovery-codes',
+        expected: 401,
+        headers: {},
+        prepare() {
+          this.headers = { cookie: qaAdminIssuedRedeemedCookie };
+        },
+        body: {},
+        check: invalidCredentials,
       },
       {
         name: 'logout',

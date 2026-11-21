@@ -3514,6 +3514,248 @@ export async function runHonoFoundationContract(
         assert.equal(parIssueRes.status, 201);
       }
     }
+
+    // Slice 14-B (/v2/admin/communities/:id/status, DELETE, /v2/admin/audit-entries)
+    // dual-backend contract on both SQLite and PostgreSQL (#188, SPEC-V2 §6.2, §6.8, §7).
+    const claimedUserLoginRes = await send(app, '/v2/auth/login', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-for': '198.51.100.243',
+      },
+      body: JSON.stringify({
+        identifier: `claimed-${tag}@example.test`,
+        communitySlug: provSlug,
+        derivedKey: claimKey,
+      }),
+    });
+    assert.equal(claimedUserLoginRes.status, 200);
+    const claimedAdminCookie = claimedUserLoginRes.headers
+      .get('set-cookie')!
+      .split(';')[0]!;
+
+    // Disabling purges target community sessions while leaving super_admin & community A intact.
+    const disableRes = await send(
+      app,
+      `/v2/admin/communities/${provCommId}/status`,
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ status: 'disabled' }),
+      }
+    );
+    assert.equal(disableRes.status, 200);
+    const disableJson = (await disableRes.json()) as {
+      data: Record<string, unknown>;
+    };
+    assert.equal(disableJson.data.status, 'disabled');
+    assert.equal('name' in disableJson.data, false);
+    assert.equal('description' in disableJson.data, false);
+    await status(me(claimedAdminCookie), 401);
+    await status(me(saNullCookie), 200);
+    await status(me(adminCommAdminCookie), 200);
+
+    // Disabled own-admin can re-login for sovereignty surface, and idempotent disable purges it too.
+    const disabledAdminRelogin = await send(app, '/v2/auth/login', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-for': '198.51.100.244',
+      },
+      body: JSON.stringify({
+        identifier: `claimed-${tag}@example.test`,
+        communitySlug: provSlug,
+        derivedKey: claimKey,
+      }),
+    });
+    assert.equal(disabledAdminRelogin.status, 200);
+    const disabledAdminReloginCookie = disabledAdminRelogin.headers
+      .get('set-cookie')!
+      .split(';')[0]!;
+    await status(me(disabledAdminReloginCookie), 200);
+    await status(
+      send(app, `/v2/admin/communities/${provCommId}/status`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ status: 'disabled' }),
+      }),
+      200
+    );
+    await status(me(disabledAdminReloginCookie), 401);
+
+    // Restore active + refuse deprovision on claimed community (409).
+    await status(
+      send(app, `/v2/admin/communities/${provCommId}/status`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ status: 'active' }),
+      }),
+      200
+    );
+    await status(
+      send(app, `/v2/admin/communities/${provCommId}`, {
+        method: 'DELETE',
+        headers: { cookie: saNullCookie },
+      }),
+      409
+    );
+
+    // Provision -> issue claim token -> failed claim (creates pre-claim audit + claim throttle) -> deprovision (204) -> reprovision same slug.
+    const deprovSlug = `contract-deprov-${tag}`;
+    const deprovCreateRes = await send(app, '/v2/admin/communities', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: saNullCookie },
+      body: JSON.stringify({ slug: deprovSlug }),
+    });
+    assert.equal(deprovCreateRes.status, 201);
+    const deprovId = (
+      (await deprovCreateRes.json()) as { data: { id: number } }
+    ).data.id;
+    const deprovTokRes = await send(
+      app,
+      `/v2/admin/communities/${deprovId}/claim-tokens`,
+      { method: 'POST', headers: { cookie: saNullCookie } }
+    );
+    assert.equal(deprovTokRes.status, 201);
+    const deprovTok = (
+      (await deprovTokRes.json()) as { data: { token: string } }
+    ).data.token;
+    await status(
+      send(app, '/v2/bootstrap/claim', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': '198.51.100.245',
+        },
+        body: JSON.stringify({
+          token: deprovTok,
+          username: `sa_null_${tag.slice(0, 12)}`,
+          email: `deprov-fail-${tag}@example.test`,
+          password: {
+            algorithm: ARGON2ID_ALGORITHM,
+            salt: stretchedSalt,
+            params: JSON.parse(ARGON2ID_PARAMS_JSON),
+            derivedKey: makeDerivedKey(),
+          },
+        }),
+      }),
+      401
+    );
+    await status(
+      send(app, `/v2/admin/communities/${deprovId}`, {
+        method: 'DELETE',
+        headers: { cookie: saNullCookie },
+      }),
+      204
+    );
+    const reprovRes = await send(app, '/v2/admin/communities', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: saNullCookie },
+      body: JSON.stringify({ slug: deprovSlug }),
+    });
+    assert.equal(reprovRes.status, 201);
+    const reprovId = ((await reprovRes.json()) as { data: { id: number } }).data
+      .id;
+    communityIds.push(reprovId);
+
+    // System audit read: only communityId===null entries, zero claim_token.* leaks, 400 on ?communityId=...
+    await status(
+      send(app, `/v2/admin/audit-entries?communityId=${provCommId}`, {
+        headers: { cookie: saNullCookie },
+      }),
+      400
+    );
+    const sysAuditRes = await send(
+      app,
+      '/v2/admin/audit-entries?limit=100&offset=0',
+      { headers: { cookie: saNullCookie } }
+    );
+    assert.equal(sysAuditRes.status, 200);
+    const sysAuditBody = (await sysAuditRes.json()) as {
+      data: Array<{ communityId: unknown; action: string }>;
+    };
+    assert.ok(
+      sysAuditBody.data.every((row) => row.communityId === null),
+      'GET /v2/admin/audit-entries must return only communityId=null rows'
+    );
+    assert.equal(
+      sysAuditBody.data.some((row) => row.action.startsWith('claim_token.')),
+      false,
+      'community claim_token entries must never leak into system audit read'
+    );
+    for (const expectedAction of [
+      'system.community.provision',
+      'system.community.status.disabled',
+      'system.community.status.active',
+      'system.community.deprovision',
+    ]) {
+      assert.ok(
+        sysAuditBody.data.some((row) => row.action === expectedAction),
+        `expected ${expectedAction} in system audit read`
+      );
+    }
+
+    if (dialectOf(database) === 'postgresql') {
+      // PG race 3: parallel contention between POST /v2/bootstrap/claim and
+      // DELETE /v2/admin/communities/:id must serialize cleanly without deadlock
+      // or 500: either claim wins [201, 409] or deprovision wins [401, 204].
+      const raceRes3 = await send(app, '/v2/admin/communities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ slug: `pg-deprov-race-${tag}` }),
+      });
+      assert.equal(raceRes3.status, 201);
+      const raceComm3Id = ((await raceRes3.json()) as { data: { id: number } })
+        .data.id;
+      const raceTokRes3 = await send(
+        app,
+        `/v2/admin/communities/${raceComm3Id}/claim-tokens`,
+        { method: 'POST', headers: { cookie: saNullCookie } }
+      );
+      assert.equal(raceTokRes3.status, 201);
+      const raceTok3 = (
+        (await raceTokRes3.json()) as { data: { token: string } }
+      ).data.token;
+      const [claimRaceRes, deprovRaceRes] = await Promise.all([
+        send(app, '/v2/bootstrap/claim', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': '198.51.100.246',
+          },
+          body: JSON.stringify({
+            token: raceTok3,
+            username: `par_dep_${tag.slice(0, 8)}`,
+            email: `par-deprov-${tag}@example.test`,
+            password: {
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: stretchedSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: makeDerivedKey(),
+            },
+          }),
+        }),
+        send(app, `/v2/admin/communities/${raceComm3Id}`, {
+          method: 'DELETE',
+          headers: { cookie: saNullCookie },
+        }),
+      ]);
+      if (claimRaceRes.status === 201) {
+        communityIds.push(raceComm3Id);
+        const claimRaceJson = (await claimRaceRes.json()) as {
+          data: { user: { id: number } };
+        };
+        userIds.push(claimRaceJson.data.user.id);
+        assert.equal(
+          deprovRaceRes.status,
+          409,
+          'if claim won the race, deprovision must refuse with 409'
+        );
+      } else {
+        assert.equal(claimRaceRes.status, 401);
+        assert.equal(deprovRaceRes.status, 204);
+      }
+    }
   } finally {
     for (const id of communityIds) {
       await db

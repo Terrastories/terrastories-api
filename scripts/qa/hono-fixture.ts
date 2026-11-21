@@ -6970,6 +6970,25 @@ export async function createFixture(
             expected: 201,
           },
           {
+            name: 'disable provisioned community as super_admin',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaAdminProvisioned}/status',
+            expected: 200,
+            body: { status: 'disabled' },
+          },
+          {
+            name: 'deprovision unclaimed community as super_admin',
+            method: 'DELETE',
+            path: '/v2/admin/communities/{qaAdminProvisioned}',
+            expected: 204,
+          },
+          {
+            name: 'list system audit entries as super_admin',
+            method: 'GET',
+            path: '/v2/admin/audit-entries',
+            expected: 200,
+          },
+          {
             name: 'logout',
             method: 'POST',
             path: '/v2/auth/logout',

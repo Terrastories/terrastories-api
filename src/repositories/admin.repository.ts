@@ -8,7 +8,18 @@
  * commit their content-free `AuditEntry` in the same atomic unit (D1
  * `db.batch()`, PG transaction, or SQLite sync transaction).
  */
-import { and, asc, count, eq, isNull, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import {
   communityStatusFromPhysical,
@@ -23,7 +34,11 @@ import {
   type ValidatedAuditEntryRecord,
 } from '../shared/utils/audit-entry.js';
 import { buildAuditEntryInsert } from './audit-entry.repository.js';
-import { communityUnclaimedAndEmptySql } from './bootstrap.repository.js';
+import {
+  communityUnclaimedAndEmptySql,
+  isCommunityUnclaimedAndEmpty,
+  isCommunityUnclaimedAndEmptySync,
+} from './bootstrap.repository.js';
 import { isUniqueConstraintError } from './user-management.repository.js';
 
 export interface OperationalCommunityRow {
@@ -52,6 +67,50 @@ export type ProvisionCommunityResult =
   | { outcome: 'provisioned'; community: OperationalCommunityRow }
   | { outcome: 'slug_conflict' }
   | { outcome: 'authority_lost' };
+
+export interface UpdateCommunityStatusInput {
+  actorId: number;
+  communityId: number;
+  status: CommunityStatus;
+  now: Date;
+}
+
+export type UpdateCommunityStatusResult =
+  | { outcome: 'updated'; community: OperationalCommunityRow }
+  | { outcome: 'not_found' }
+  | { outcome: 'authority_lost' };
+
+export interface DeprovisionCommunityInput {
+  actorId: number;
+  communityId: number;
+  now: Date;
+}
+
+export type DeprovisionCommunityResult =
+  | { outcome: 'deprovisioned' }
+  | { outcome: 'not_found' }
+  | { outcome: 'authority_lost' }
+  | { outcome: 'conflict' };
+
+export interface SystemAuditEntryRow {
+  id: number;
+  communityId: null;
+  actorId: number | null;
+  action: string;
+  resourceType: string | null;
+  resourceIds: Array<number | string>;
+  outcome: string;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: Date;
+}
+
+export interface ListSystemAuditEntriesInput {
+  limit: number;
+  offset: number;
+  action?: string;
+  outcome?: string;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Executor = any;
@@ -396,5 +455,682 @@ export class AdminRepository {
       }
       throw error;
     }
+  }
+
+  /**
+   * Atomically update a community's operational lifecycle `status`
+   * (`active | disabled`), purge every session of that community when setting
+   * `disabled` (SPEC-V2 §6.2, §6.8), and write the content-free system
+   * `AuditEntry` in the same atomic unit. Never reads or writes descriptive
+   * community fields or content.
+   */
+  async setCommunityStatusAtomically(
+    input: UpdateCommunityStatusInput
+  ): Promise<UpdateCommunityStatusResult> {
+    const action =
+      input.status === 'disabled'
+        ? 'system.community.status.disabled'
+        : 'system.community.status.active';
+    const auditTemplate: ValidatedAuditEntryRecord =
+      validateContentFreeAuditEntry({
+        communityId: null,
+        actorId: input.actorId,
+        action,
+        resourceType: 'system',
+        resourceIds: [input.communityId],
+        outcome: 'success',
+        ipAddress: null,
+        userAgent: null,
+      });
+
+    const db = this.db;
+    const { communities, users, sessions, auditEntries } = this.tables;
+    const nextIsActive = communityStatusToPhysical(input.status);
+    const nowMs = input.now.getTime();
+
+    if (typeof db.batch === 'function') {
+      const actorGuard = sql`exists (
+        select 1 from users a
+        where a.id = ${input.actorId}
+          and a.role = 'super_admin'
+          and a.community_id is null
+          and a.is_active = 1
+      )`;
+
+      const updateCommStmt = db
+        .update(communities)
+        .set({ isActive: nextIsActive, updatedAt: input.now })
+        .where(and(eq(communities.id, input.communityId), actorGuard))
+        .returning({
+          id: communities.id,
+          slug: communities.slug,
+          isActive: communities.isActive,
+          claimStatus: this.claimStatusExpression(input.communityId, nowMs),
+          createdAt: communities.createdAt,
+          updatedAt: communities.updatedAt,
+        });
+
+      const insertAuditStmt = db.insert(auditEntries).select(
+        sql`select
+          ${null}, ${null}, ${input.actorId}, ${auditTemplate.action},
+          ${auditTemplate.resourceType}, '[' || c.id || ']',
+          ${auditTemplate.outcome}, ${auditTemplate.ipAddress},
+          ${auditTemplate.userAgent}, ${nowMs}
+        from communities c
+        where c.id = ${input.communityId}
+          and ${actorGuard}`
+      );
+
+      const statements: unknown[] = [updateCommStmt];
+      if (input.status === 'disabled') {
+        statements.push(
+          db
+            .delete(sessions)
+            .where(
+              and(
+                sql`${sessions.userId} in (select id from users where community_id = ${input.communityId})`,
+                actorGuard,
+                sql`exists (select 1 from communities c where c.id = ${input.communityId})`
+              )
+            )
+        );
+      }
+      statements.push(insertAuditStmt);
+
+      const results = (await db.batch(statements)) as Array<
+        Array<Record<string, unknown>>
+      >;
+      const commRow = results[0]?.[0];
+      if (commRow) {
+        return {
+          outcome: 'updated',
+          community: this.toOperationalRow(
+            commRow as Parameters<AdminRepository['toOperationalRow']>[0]
+          ),
+        };
+      }
+
+      const [actorRow] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(
+          and(
+            eq(users.id, input.actorId),
+            eq(users.role, 'super_admin'),
+            isNull(users.communityId),
+            eq(users.isActive, true)
+          )
+        )
+        .limit(1);
+      if (!actorRow) return { outcome: 'authority_lost' };
+      return { outcome: 'not_found' };
+    }
+
+    if (dialectOf(db) === 'postgresql') {
+      return db.transaction(
+        async (tx: Executor): Promise<UpdateCommunityStatusResult> => {
+          // Lock order: communities (FOR UPDATE) -> actor users (FOR SHARE) -> sessions.
+          const [existingComm] = await tx
+            .select({ id: communities.id })
+            .from(communities)
+            .where(eq(communities.id, input.communityId))
+            .for('update')
+            .limit(1);
+          if (!existingComm) return { outcome: 'not_found' };
+
+          const [actorRow] = await tx
+            .select({ id: users.id })
+            .from(users)
+            .where(
+              and(
+                eq(users.id, input.actorId),
+                eq(users.role, 'super_admin'),
+                isNull(users.communityId),
+                eq(users.isActive, true)
+              )
+            )
+            .for('share')
+            .limit(1);
+          if (!actorRow) return { outcome: 'authority_lost' };
+
+          const [commRow] = await tx
+            .update(communities)
+            .set({ isActive: nextIsActive, updatedAt: input.now })
+            .where(eq(communities.id, input.communityId))
+            .returning({
+              id: communities.id,
+              slug: communities.slug,
+              isActive: communities.isActive,
+              createdAt: communities.createdAt,
+              updatedAt: communities.updatedAt,
+            });
+
+          if (input.status === 'disabled') {
+            await tx
+              .delete(sessions)
+              .where(
+                inArray(
+                  sessions.userId,
+                  tx
+                    .select({ id: users.id })
+                    .from(users)
+                    .where(eq(users.communityId, input.communityId))
+                )
+              );
+          }
+
+          const [claimRow] = await tx
+            .select({
+              claimStatus: this.claimStatusExpression(input.communityId, nowMs),
+            })
+            .from(communities)
+            .where(eq(communities.id, input.communityId))
+            .limit(1);
+
+          await buildAuditEntryInsert(
+            tx,
+            {
+              communityId: null,
+              actorId: input.actorId,
+              action: auditTemplate.action,
+              resourceType: 'system',
+              resourceIds: [input.communityId],
+              outcome: 'success',
+              ipAddress: null,
+              userAgent: null,
+            },
+            input.now
+          );
+
+          return {
+            outcome: 'updated',
+            community: this.toOperationalRow({
+              ...commRow,
+              claimStatus: claimRow?.claimStatus ?? 'unclaimed',
+            }),
+          };
+        }
+      );
+    }
+
+    // better-sqlite3 synchronous transaction: callback MUST NOT return a Promise.
+    return db.transaction((tx: Executor): UpdateCommunityStatusResult => {
+      const existingComm = tx
+        .select({ id: communities.id })
+        .from(communities)
+        .where(eq(communities.id, input.communityId))
+        .limit(1)
+        .all()[0];
+      if (!existingComm) return { outcome: 'not_found' };
+
+      const actorRow = tx
+        .select({ id: users.id })
+        .from(users)
+        .where(
+          and(
+            eq(users.id, input.actorId),
+            eq(users.role, 'super_admin'),
+            isNull(users.communityId),
+            eq(users.isActive, true)
+          )
+        )
+        .limit(1)
+        .all()[0];
+      if (!actorRow) return { outcome: 'authority_lost' };
+
+      const [commRow] = tx
+        .update(communities)
+        .set({ isActive: nextIsActive, updatedAt: input.now })
+        .where(eq(communities.id, input.communityId))
+        .returning({
+          id: communities.id,
+          slug: communities.slug,
+          isActive: communities.isActive,
+          createdAt: communities.createdAt,
+          updatedAt: communities.updatedAt,
+        })
+        .all();
+
+      if (input.status === 'disabled') {
+        tx.delete(sessions)
+          .where(
+            inArray(
+              sessions.userId,
+              tx
+                .select({ id: users.id })
+                .from(users)
+                .where(eq(users.communityId, input.communityId))
+            )
+          )
+          .run();
+      }
+
+      const claimRow = tx
+        .select({
+          claimStatus: this.claimStatusExpression(input.communityId, nowMs),
+        })
+        .from(communities)
+        .where(eq(communities.id, input.communityId))
+        .limit(1)
+        .all()[0];
+
+      buildAuditEntryInsert(
+        tx,
+        {
+          communityId: null,
+          actorId: input.actorId,
+          action: auditTemplate.action,
+          resourceType: 'system',
+          resourceIds: [input.communityId],
+          outcome: 'success',
+          ipAddress: null,
+          userAgent: null,
+        },
+        input.now
+      ).run();
+
+      return {
+        outcome: 'updated',
+        community: this.toOperationalRow({
+          ...commRow,
+          claimStatus: claimRow?.claimStatus ?? 'unclaimed',
+        }),
+      };
+    });
+  }
+
+  /**
+   * Atomically deprovision a still-empty, never-administered community
+   * (SPEC-V2 §7). Removes any pre-claim audit entries, claim throttles, and
+   * unconsumed claim tokens in the same unit as the community delete, and
+   * records a system-level `system.community.deprovision` audit entry
+   * (`communityId: null`).
+   */
+  async deprovisionCommunityAtomically(
+    input: DeprovisionCommunityInput
+  ): Promise<DeprovisionCommunityResult> {
+    const auditTemplate: ValidatedAuditEntryRecord =
+      validateContentFreeAuditEntry({
+        communityId: null,
+        actorId: input.actorId,
+        action: 'system.community.deprovision',
+        resourceType: 'system',
+        resourceIds: [input.communityId],
+        outcome: 'success',
+        ipAddress: null,
+        userAgent: null,
+      });
+
+    const db = this.db;
+    const { communities, users, claimTokens, authThrottle, auditEntries } =
+      this.tables;
+    const nowMs = input.now.getTime();
+    const preClaimAuditFilter = or(
+      eq(auditEntries.action, 'claim_token.issue'),
+      and(
+        eq(auditEntries.action, 'claim_token.consume'),
+        eq(auditEntries.outcome, 'failure')
+      )
+    );
+
+    if (typeof db.batch === 'function') {
+      const actorGuard = sql`exists (
+        select 1 from users a
+        where a.id = ${input.actorId}
+          and a.role = 'super_admin'
+          and a.community_id is null
+          and a.is_active = 1
+      )`;
+      const eligibleGuard = sql`${actorGuard}
+        and exists (select 1 from communities c where c.id = ${input.communityId})
+        and ${communityUnclaimedAndEmptySql(input.communityId)}`;
+
+      // Order is load-bearing on D1:
+      // 1. Insert the system audit row while `communities` still exists so the
+      //    guarded SELECT finds `c.id` and `eligibleGuard` still passes.
+      // 2. Delete pre-claim community audit entries (ON DELETE NO ACTION),
+      //    claim throttles, and unconsumed claim tokens.
+      // 3. Delete the community row last.
+      const insertAuditStmt = db.insert(auditEntries).select(
+        sql`select
+          ${null}, ${null}, ${input.actorId}, ${auditTemplate.action},
+          ${auditTemplate.resourceType}, '[' || c.id || ']',
+          ${auditTemplate.outcome}, ${auditTemplate.ipAddress},
+          ${auditTemplate.userAgent}, ${nowMs}
+        from communities c
+        where c.id = ${input.communityId}
+          and ${actorGuard}
+          and ${communityUnclaimedAndEmptySql(input.communityId)}`
+      );
+
+      const deletePreClaimAuditsStmt = db
+        .delete(auditEntries)
+        .where(
+          and(
+            eq(auditEntries.communityId, input.communityId),
+            preClaimAuditFilter,
+            eligibleGuard
+          )
+        );
+
+      const deleteClaimThrottleStmt = db
+        .delete(authThrottle)
+        .where(
+          and(
+            eq(authThrottle.communityId, input.communityId),
+            eq(authThrottle.kind, 'claim'),
+            eligibleGuard
+          )
+        );
+
+      const deleteUnconsumedTokensStmt = db
+        .delete(claimTokens)
+        .where(
+          and(
+            eq(claimTokens.communityId, input.communityId),
+            isNull(claimTokens.consumedAt),
+            eligibleGuard
+          )
+        );
+
+      const deleteCommunityStmt = db
+        .delete(communities)
+        .where(and(eq(communities.id, input.communityId), eligibleGuard))
+        .returning({ id: communities.id });
+
+      const results = (await db.batch([
+        insertAuditStmt,
+        deletePreClaimAuditsStmt,
+        deleteClaimThrottleStmt,
+        deleteUnconsumedTokensStmt,
+        deleteCommunityStmt,
+      ])) as Array<Array<Record<string, unknown>>>;
+
+      const deleted = results[4] ?? [];
+      if (deleted.length > 0) {
+        return { outcome: 'deprovisioned' };
+      }
+
+      const [actorRow, commRow] = await Promise.all([
+        db
+          .select({ id: users.id })
+          .from(users)
+          .where(
+            and(
+              eq(users.id, input.actorId),
+              eq(users.role, 'super_admin'),
+              isNull(users.communityId),
+              eq(users.isActive, true)
+            )
+          )
+          .limit(1),
+        db
+          .select({ id: communities.id })
+          .from(communities)
+          .where(eq(communities.id, input.communityId))
+          .limit(1),
+      ]);
+      if (actorRow.length === 0) return { outcome: 'authority_lost' };
+      if (commRow.length === 0) return { outcome: 'not_found' };
+      return { outcome: 'conflict' };
+    }
+
+    if (dialectOf(db) === 'postgresql') {
+      return db.transaction(
+        async (tx: Executor): Promise<DeprovisionCommunityResult> => {
+          // Lock order: communities (FOR UPDATE) -> actor users (FOR SHARE) -> child cleanup -> delete.
+          const [commRow] = await tx
+            .select({ id: communities.id })
+            .from(communities)
+            .where(eq(communities.id, input.communityId))
+            .for('update')
+            .limit(1);
+          if (!commRow) return { outcome: 'not_found' };
+
+          const [actorRow] = await tx
+            .select({ id: users.id })
+            .from(users)
+            .where(
+              and(
+                eq(users.id, input.actorId),
+                eq(users.role, 'super_admin'),
+                isNull(users.communityId),
+                eq(users.isActive, true)
+              )
+            )
+            .for('share')
+            .limit(1);
+          if (!actorRow) return { outcome: 'authority_lost' };
+
+          if (!(await isCommunityUnclaimedAndEmpty(tx, input.communityId))) {
+            return { outcome: 'conflict' };
+          }
+
+          await tx
+            .delete(auditEntries)
+            .where(
+              and(
+                eq(auditEntries.communityId, input.communityId),
+                preClaimAuditFilter
+              )
+            );
+          await tx
+            .delete(authThrottle)
+            .where(
+              and(
+                eq(authThrottle.communityId, input.communityId),
+                eq(authThrottle.kind, 'claim')
+              )
+            );
+          await tx
+            .delete(claimTokens)
+            .where(
+              and(
+                eq(claimTokens.communityId, input.communityId),
+                isNull(claimTokens.consumedAt)
+              )
+            );
+          await tx
+            .delete(communities)
+            .where(eq(communities.id, input.communityId));
+
+          await buildAuditEntryInsert(
+            tx,
+            {
+              communityId: null,
+              actorId: input.actorId,
+              action: auditTemplate.action,
+              resourceType: 'system',
+              resourceIds: [input.communityId],
+              outcome: 'success',
+              ipAddress: null,
+              userAgent: null,
+            },
+            input.now
+          );
+
+          return { outcome: 'deprovisioned' };
+        }
+      );
+    }
+
+    // better-sqlite3 synchronous transaction: callback MUST NOT return a Promise.
+    return db.transaction((tx: Executor): DeprovisionCommunityResult => {
+      const commRow = tx
+        .select({ id: communities.id })
+        .from(communities)
+        .where(eq(communities.id, input.communityId))
+        .limit(1)
+        .all()[0];
+      if (!commRow) return { outcome: 'not_found' };
+
+      const actorRow = tx
+        .select({ id: users.id })
+        .from(users)
+        .where(
+          and(
+            eq(users.id, input.actorId),
+            eq(users.role, 'super_admin'),
+            isNull(users.communityId),
+            eq(users.isActive, true)
+          )
+        )
+        .limit(1)
+        .all()[0];
+      if (!actorRow) return { outcome: 'authority_lost' };
+
+      if (!isCommunityUnclaimedAndEmptySync(tx, input.communityId)) {
+        return { outcome: 'conflict' };
+      }
+
+      tx.delete(auditEntries)
+        .where(
+          and(
+            eq(auditEntries.communityId, input.communityId),
+            preClaimAuditFilter
+          )
+        )
+        .run();
+      tx.delete(authThrottle)
+        .where(
+          and(
+            eq(authThrottle.communityId, input.communityId),
+            eq(authThrottle.kind, 'claim')
+          )
+        )
+        .run();
+      tx.delete(claimTokens)
+        .where(
+          and(
+            eq(claimTokens.communityId, input.communityId),
+            isNull(claimTokens.consumedAt)
+          )
+        )
+        .run();
+      tx.delete(communities).where(eq(communities.id, input.communityId)).run();
+
+      buildAuditEntryInsert(
+        tx,
+        {
+          communityId: null,
+          actorId: input.actorId,
+          action: auditTemplate.action,
+          resourceType: 'system',
+          resourceIds: [input.communityId],
+          outcome: 'success',
+          ipAddress: null,
+          userAgent: null,
+        },
+        input.now
+      ).run();
+
+      return { outcome: 'deprovisioned' };
+    });
+  }
+
+  /**
+   * Read system-level `AuditEntry` records (`communityId IS NULL`) in
+   * deterministic `createdAt DESC, id DESC` order. Never returns community
+   * audit rows. Uses `idx_audit_entries_community_created_at`.
+   */
+  async listSystemAuditEntries(
+    input: ListSystemAuditEntriesInput
+  ): Promise<{ rows: SystemAuditEntryRow[]; total: number }> {
+    const { auditEntries } = this.tables;
+    const predicates: SQL[] = [isNull(auditEntries.communityId)];
+    if (input.action !== undefined) {
+      predicates.push(eq(auditEntries.action, input.action));
+    }
+    if (input.outcome !== undefined) {
+      predicates.push(eq(auditEntries.outcome, input.outcome));
+    }
+    const whereClause =
+      predicates.length === 1 ? predicates[0] : and(...predicates);
+
+    const [rows, totalRows] = await Promise.all([
+      this.db
+        .select({
+          id: auditEntries.id,
+          actorId: auditEntries.actorId,
+          action: auditEntries.action,
+          resourceType: auditEntries.resourceType,
+          resourceIds: auditEntries.resourceIds,
+          outcome: auditEntries.outcome,
+          ipAddress: auditEntries.ipAddress,
+          userAgent: auditEntries.userAgent,
+          createdAt: auditEntries.createdAt,
+        })
+        .from(auditEntries)
+        .where(whereClause)
+        .orderBy(desc(auditEntries.createdAt), desc(auditEntries.id))
+        .limit(input.limit)
+        .offset(input.offset),
+      this.db.select({ total: count() }).from(auditEntries).where(whereClause),
+    ]);
+
+    const normalized = (
+      rows as Array<{
+        id: number | string;
+        actorId: number | string | null;
+        action: string;
+        resourceType: string | null;
+        resourceIds: unknown;
+        outcome: string;
+        ipAddress: string | null;
+        userAgent: string | null;
+        createdAt: Date | number | string;
+      }>
+    ).map((row): SystemAuditEntryRow => {
+      let parsedIds: unknown = row.resourceIds;
+      if (typeof parsedIds === 'string') {
+        try {
+          parsedIds = JSON.parse(parsedIds);
+        } catch {
+          parsedIds = [];
+        }
+      }
+      const resourceIds = Array.isArray(parsedIds)
+        ? parsedIds.filter(
+            (v): v is number | string =>
+              (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0) ||
+              (typeof v === 'string' && v.length > 0)
+          )
+        : [];
+      return {
+        id: Number(row.id),
+        communityId: null,
+        actorId:
+          row.actorId === null || row.actorId === undefined
+            ? null
+            : Number(row.actorId),
+        action: String(row.action),
+        resourceType:
+          row.resourceType === null ||
+          row.resourceType === undefined ||
+          row.resourceType === ''
+            ? null
+            : String(row.resourceType),
+        resourceIds,
+        outcome: String(row.outcome),
+        ipAddress:
+          row.ipAddress === null ||
+          row.ipAddress === undefined ||
+          row.ipAddress === ''
+            ? null
+            : String(row.ipAddress),
+        userAgent:
+          row.userAgent === null ||
+          row.userAgent === undefined ||
+          row.userAgent === ''
+            ? null
+            : String(row.userAgent),
+        createdAt: toDate(row.createdAt),
+      };
+    });
+
+    return {
+      rows: normalized,
+      total: Number(totalRows[0]?.total ?? 0),
+    };
   }
 }

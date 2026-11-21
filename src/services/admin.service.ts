@@ -15,9 +15,12 @@ import type { BootstrapRepository } from '../repositories/bootstrap.repository.j
 import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
 import { generateClaimTokenMaterial } from './bootstrap.service.js';
 import {
+  AdminAuditEntriesQuerySchema,
   AdminCommunityListQuerySchema,
   IssueClaimTokenRequestSchema,
   ProvisionCommunityRequestSchema,
+  UpdateCommunityStatusRequestSchema,
+  type AdminAuditEntryListResponse,
   type AdminCommunityListResponse,
   type AdminCommunityOperational,
   type AdminCommunityResponse,
@@ -250,6 +253,143 @@ export class AdminService {
           token: material.token,
           expiresAt: new Date(material.expiresAtMs).toISOString(),
           createdAt: new Date(material.createdAtMs).toISOString(),
+        },
+      },
+    };
+  }
+
+  /** PATCH /v2/admin/communities/:id/status */
+  async updateCommunityStatus(
+    actor: FoundationUser,
+    idParam: string,
+    rawBody: unknown,
+    now: Date
+  ): Promise<AdminServiceResult<AdminCommunityResponse>> {
+    if (!isSuperAdminActor(actor)) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (!isDatabaseIdString(idParam)) {
+      return { status: 400, body: BAD_REQUEST_BODY };
+    }
+    const parsed = UpdateCommunityStatusRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
+      };
+    }
+
+    const communityId = Number(idParam);
+    const result = await this.adminRepo.setCommunityStatusAtomically({
+      actorId: actor.id,
+      communityId,
+      status: parsed.data.status,
+      now,
+    });
+
+    if (result.outcome === 'authority_lost') {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (result.outcome === 'not_found') {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+
+    return {
+      status: 200,
+      body: {
+        data: this.toOperationalProjection(result.community),
+      },
+    };
+  }
+
+  /** DELETE /v2/admin/communities/:id */
+  async deprovisionCommunity(
+    actor: FoundationUser,
+    idParam: string,
+    now: Date
+  ): Promise<AdminServiceResult<never>> {
+    if (!isSuperAdminActor(actor)) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (!isDatabaseIdString(idParam)) {
+      return { status: 400, body: BAD_REQUEST_BODY };
+    }
+
+    const communityId = Number(idParam);
+    const result = await this.adminRepo.deprovisionCommunityAtomically({
+      actorId: actor.id,
+      communityId,
+      now,
+    });
+
+    if (result.outcome === 'authority_lost') {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (result.outcome === 'not_found') {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+    if (result.outcome === 'conflict') {
+      await this.auditFailureBestEffort({
+        communityId: null,
+        actorId: actor.id,
+        action: 'system.community.deprovision',
+        resourceType: 'system',
+        resourceIds: [communityId],
+        now,
+      });
+      return { status: 409, body: CONFLICT_BODY };
+    }
+
+    return { status: 204 };
+  }
+
+  /** GET /v2/admin/audit-entries */
+  async listSystemAuditEntries(
+    actor: FoundationUser,
+    query: Record<string, string | undefined>
+  ): Promise<AdminServiceResult<AdminAuditEntryListResponse>> {
+    if (!isSuperAdminActor(actor)) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    const parsed = AdminAuditEntriesQuerySchema.safeParse(query);
+    if (!parsed.success) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
+      };
+    }
+
+    const { limit, offset, action, outcome } = parsed.data;
+    const { rows, total } = await this.adminRepo.listSystemAuditEntries({
+      limit,
+      offset,
+      action,
+      outcome,
+    });
+
+    const data = rows.map((row) => ({
+      id: row.id,
+      communityId: row.communityId,
+      actorId: row.actorId,
+      action: row.action,
+      resourceType: row.resourceType,
+      resourceIds: row.resourceIds,
+      outcome: row.outcome,
+      ipAddress: row.ipAddress,
+      userAgent: row.userAgent,
+      createdAt: row.createdAt.toISOString(),
+    }));
+
+    return {
+      status: 200,
+      body: {
+        data,
+        meta: {
+          total,
+          limit,
+          offset,
+          hasNextPage: offset + data.length < total,
         },
       },
     };

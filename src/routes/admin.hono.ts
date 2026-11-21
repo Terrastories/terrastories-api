@@ -116,4 +116,44 @@ export function registerAdminRoutes(
     );
     return respondAdmin(c, result);
   });
+
+  app.patch('/v2/admin/communities/:id/status', adminBody4k, async (c) => {
+    const actor = actorOf(c);
+    if (!isSuperAdminActor(actor)) {
+      return c.json(FORBIDDEN_BODY, 403);
+    }
+    const parsed = await parseJsonRequestBody(c);
+    if (!parsed.ok) {
+      return c.json({ error: parsed.error }, parsed.status);
+    }
+    const result = await service.updateCommunityStatus(
+      actor,
+      c.req.param('id'),
+      parsed.body,
+      options.now()
+    );
+    return respondAdmin(c, result);
+  });
+
+  app.delete('/v2/admin/communities/:id', async (c) => {
+    const actor = actorOf(c);
+    if (!isSuperAdminActor(actor)) {
+      return c.json(FORBIDDEN_BODY, 403);
+    }
+    const result = await service.deprovisionCommunity(
+      actor,
+      c.req.param('id'),
+      options.now()
+    );
+    return respondAdmin(c, result);
+  });
+
+  app.get('/v2/admin/audit-entries', async (c) => {
+    const actor = actorOf(c);
+    if (!isSuperAdminActor(actor)) {
+      return c.json(FORBIDDEN_BODY, 403);
+    }
+    const result = await service.listSystemAuditEntries(actor, c.req.query());
+    return respondAdmin(c, result);
+  });
 }

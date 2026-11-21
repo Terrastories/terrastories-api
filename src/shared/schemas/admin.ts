@@ -150,3 +150,69 @@ export const ClaimTokenIssuedResponseSchema = z
 export type ClaimTokenIssuedResponse = z.infer<
   typeof ClaimTokenIssuedResponseSchema
 >;
+
+export const UpdateCommunityStatusRequestSchema = z
+  .object({
+    status: AdminCommunityStatusSchema,
+  })
+  .strict();
+export type UpdateCommunityStatusRequest = z.infer<
+  typeof UpdateCommunityStatusRequestSchema
+>;
+
+const AUDIT_ACTION_QUERY_PATTERN = /^[a-z][a-z0-9_.:-]{0,127}$/;
+const AUDIT_OUTCOME_QUERY_PATTERN = /^[a-z][a-z0-9_.-]{0,63}$/;
+
+export const AdminAuditEntriesQuerySchema = z
+  .object({
+    limit: z
+      .string()
+      .regex(/^\d+$/)
+      .transform((val) => Number.parseInt(val, 10))
+      .refine((val) => val >= 1 && val <= MAX_ADMIN_PAGE_LIMIT, {
+        message: `limit must be between 1 and ${MAX_ADMIN_PAGE_LIMIT}`,
+      })
+      .optional()
+      .default(DEFAULT_ADMIN_PAGE_LIMIT),
+    offset: z
+      .string()
+      .regex(/^\d+$/)
+      .transform((val) => Number.parseInt(val, 10))
+      .refine((val) => Number.isSafeInteger(val) && val >= 0, {
+        message: 'offset must be a non-negative integer',
+      })
+      .optional()
+      .default(0),
+    action: z.string().regex(AUDIT_ACTION_QUERY_PATTERN).optional(),
+    outcome: z.string().regex(AUDIT_OUTCOME_QUERY_PATTERN).optional(),
+  })
+  .strict();
+export type AdminAuditEntriesQuery = z.infer<
+  typeof AdminAuditEntriesQuerySchema
+>;
+
+export const AdminSystemAuditEntrySchema = z
+  .object({
+    id: z.number().int().positive().max(MAX_DATABASE_ID),
+    communityId: z.null(),
+    actorId: z.number().int().positive().max(MAX_DATABASE_ID).nullable(),
+    action: z.string().min(1),
+    resourceType: z.string().min(1).nullable(),
+    resourceIds: z.array(z.union([z.number().int().min(0), z.string().min(1)])),
+    outcome: z.string().min(1),
+    ipAddress: z.string().min(1).nullable(),
+    userAgent: z.string().min(1).nullable(),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+export type AdminSystemAuditEntry = z.infer<typeof AdminSystemAuditEntrySchema>;
+
+export const AdminAuditEntryListResponseSchema = z
+  .object({
+    data: z.array(AdminSystemAuditEntrySchema),
+    meta: AdminPaginationMetaSchema,
+  })
+  .strict();
+export type AdminAuditEntryListResponse = z.infer<
+  typeof AdminAuditEntryListResponseSchema
+>;

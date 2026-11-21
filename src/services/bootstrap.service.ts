@@ -9,6 +9,7 @@ import type {
   VerifierWrite,
 } from '../repositories/hono-auth.repository.js';
 import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
+import { isForeignKeyConstraintError } from '../repositories/community-writes.repository.js';
 import {
   ARGON2ID_ALGORITHM,
   AUTH_LOGIN_FAILURE_BODY,
@@ -468,14 +469,7 @@ export class BootstrapService {
     const tokenHash = await sha256Hex(token);
     const claimRow = await this.bootstrapRepo.findClaimTokenByHash(tokenHash);
 
-    // The digest lookup is by index, but the presented material is still
-    // re-verified in constant time before any decision is made (§6.8): a row
-    // that somehow resolved without matching this request's digest is treated
-    // exactly like no row at all.
-    if (
-      claimRow === null ||
-      !constantTimeEqual(claimRow.tokenHash, tokenHash)
-    ) {
+    const rejectUnknownClaim = async (): Promise<BootstrapResult> => {
       await this.authRepo.recordClaimFailure(
         {
           claimToken: null,
@@ -493,6 +487,17 @@ export class BootstrapService {
         userAgent: context.userAgent,
       });
       return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
+    };
+
+    // The digest lookup is by index, but the presented material is still
+    // re-verified in constant time before any decision is made (§6.8): a row
+    // that somehow resolved without matching this request's digest is treated
+    // exactly like no row at all.
+    if (
+      claimRow === null ||
+      !constantTimeEqual(claimRow.tokenHash, tokenHash)
+    ) {
+      return rejectUnknownClaim();
     }
 
     const tokenBlocked = await this.authRepo.throttleState(
@@ -504,22 +509,53 @@ export class BootstrapService {
     }
 
     const rejectClaim = async (): Promise<BootstrapResult> => {
-      await this.authRepo.recordClaimFailure(
-        {
-          claimToken: { id: claimRow.id, communityId: claimRow.communityId },
-          clientIp: context.clientIp,
-          now: nowMs,
-        },
-        secret
-      );
-      await this.auditFailure({
-        communityId: claimRow.communityId,
-        action: 'claim_token.consume',
-        resourceType: 'claim_token',
-        resourceIds: [claimRow.id],
-        clientIp: context.clientIp,
-        userAgent: context.userAgent,
-      });
+      try {
+        await this.authRepo.recordClaimFailure(
+          {
+            claimToken: { id: claimRow.id, communityId: claimRow.communityId },
+            clientIp: context.clientIp,
+            now: nowMs,
+          },
+          secret
+        );
+      } catch (error) {
+        // Concurrent deprovision deletes the target community between lookup
+        // and rejection; fall back to the per-IP unknown-claim path so the
+        // caller still gets a uniform 401 rather than a 503 FK oracle.
+        if (isForeignKeyConstraintError(error)) {
+          return rejectUnknownClaim();
+        }
+        throw error;
+      }
+      try {
+        await writeAuditEntry(this.authRepo.connection, {
+          communityId: claimRow.communityId,
+          actorId: null,
+          action: 'claim_token.consume',
+          resourceType: 'claim_token',
+          resourceIds: [claimRow.id],
+          outcome: 'failure',
+          ipAddress: context.clientIp,
+          userAgent: sanitizeUserAgent(context.userAgent),
+        });
+      } catch (error) {
+        if (isForeignKeyConstraintError(error)) {
+          await this.auditFailure({
+            communityId: null,
+            action: 'bootstrap.claim',
+            resourceType: 'bootstrap',
+            resourceIds: [],
+            clientIp: context.clientIp,
+            userAgent: context.userAgent,
+          });
+        } else {
+          // eslint-disable-next-line no-console -- no logging seam in bootstrap service; content-free fallback
+          console.error('bootstrap audit write failed', {
+            action: 'claim_token.consume',
+            outcome: 'failure',
+          });
+        }
+      }
       return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
     };
 

@@ -5413,14 +5413,15 @@ export async function createFixture(
       crypto.getRandomValues(new Uint8Array(16))
     );
     const qaAdminIssuedCodeHash = await sha256Hex(qaAdminIssuedRawCode);
+    const qaAdminIssuedNowMs = Date.now();
     await db.insert(loginCodes).values({
       communityId: userCommunity.id,
       userId: userCommunityIds.admin,
       purpose: 'admin_issued',
       codeHash: qaAdminIssuedCodeHash,
       createdBy: null,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + ADMIN_ISSUED_CODE_TTL_MS,
+      createdAt: qaAdminIssuedNowMs,
+      expiresAt: qaAdminIssuedNowMs + ADMIN_ISSUED_CODE_TTL_MS,
     });
     qaAdminIssuedCodeForAdmin = qaAdminIssuedRawCode;
     let redeemedAdminCookie = '';

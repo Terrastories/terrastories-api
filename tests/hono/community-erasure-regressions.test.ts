@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import {
   CommunityErasureService,
   WORKER_ERASURE_STORAGE_BUDGET,
@@ -25,6 +25,8 @@ function fixture(count = 1) {
     activateDueErasures: async () => true,
     erasureWork: async () => [],
     erasureUploads: async () => [],
+    erasureArchiveCustody: async () => null,
+    erasureLegacyFiles: async () => [],
     eraseRows: async (id: number) => {
       erased.push(id);
       clock = new Date(9000);
@@ -160,4 +162,101 @@ it('bounds completion work per tick to reserve D1 and out-of-band subrequests', 
   ).sweep(new Date(0), WORKER_ERASURE_STORAGE_BUDGET);
   expect(f.erased).toEqual([1, 2]);
   expect(f.records[2]!.outcome).toBe('pending');
+});
+
+it('redacts and persists expired actors through the erasure service', async () => {
+  const f = fixture();
+  f.records[0] = {
+    ...f.records[0]!,
+    requestingActorId: 42,
+    completedAt: new Date(0).toISOString(),
+    outcome: 'completed',
+  };
+  const write = vi.spyOn(f.store, 'write');
+  const service = new CommunityErasureService(
+    f.repository,
+    { read: async () => null },
+    f.store
+  );
+  expect(
+    (await service.listRecords(new Date(29 * 86400000)))[0]!.requestingActorId
+  ).toBe(42);
+  expect(write).not.toHaveBeenCalled();
+  expect(
+    (await service.listRecords(new Date(30 * 86400000)))[0]!.requestingActorId
+  ).toBeNull();
+  expect(f.records[0]!.requestingActorId).toBeNull();
+  expect(write).toHaveBeenCalledOnce();
+});
+
+it('retains DB rows if custody evidence cannot be persisted before deletion', async () => {
+  const f = fixture();
+  vi.spyOn(f.repository, 'erasureArchiveCustody').mockResolvedValue({
+    communityId: 1,
+    custodianType: 'steward',
+    custodianUserId: 42,
+    status: 'destroyed',
+    retentionUntil: new Date(1000),
+    destroyedAt: new Date(500),
+    destructionAttestationRef: 'attestation-ref',
+  });
+  const write = vi
+    .spyOn(f.store, 'write')
+    .mockRejectedValueOnce(new Error('unavailable'));
+  const service = new CommunityErasureService(
+    f.repository,
+    {
+      read: async () => null,
+      fenceCommunity: async () => {},
+      delete: async () => {},
+      list: async () => ({ entries: [], truncated: false }),
+    },
+    f.store
+  );
+  await expect(service.sweep(new Date(1000))).rejects.toThrow('unavailable');
+  expect(f.erased).toEqual([]);
+  write.mockRestore();
+  await service.sweep(new Date(1000));
+  expect(f.erased).toEqual([1]);
+  expect(f.records[0]!.archiveCustody).toEqual({
+    custodianType: 'steward',
+    custodianUserId: 42,
+    retentionUntil: new Date(1000).toISOString(),
+    destructionAttestationRef: 'attestation-ref',
+  });
+});
+
+it('keeps legacy storage pointers on deletion failure and retries them before community rows', async () => {
+  const f = fixture();
+  const files = [
+    { id: crypto.randomUUID(), storageKey: null, path: 'legacy/file' },
+  ];
+  vi.spyOn(f.repository, 'erasureLegacyFiles').mockImplementation(async () => [
+    ...files,
+  ]);
+  const clear = vi.fn(async () => {
+    files.splice(0);
+  });
+  f.repository.clearErasureLegacyFile = clear;
+  const remove = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('unavailable'))
+    .mockResolvedValue(undefined);
+  const service = new CommunityErasureService(
+    f.repository,
+    {
+      read: async () => null,
+      fenceCommunity: async () => {},
+      delete: remove,
+      list: async () => ({ entries: [], truncated: false }),
+    },
+    f.store
+  );
+  await expect(service.sweep(new Date(0))).rejects.toThrow('unavailable');
+  expect(clear).not.toHaveBeenCalled();
+  expect(f.erased).toEqual([]);
+  await service.sweep(new Date(60000));
+  expect(remove).toHaveBeenNthCalledWith(2, 'legacy/file');
+  expect(clear).toHaveBeenCalledOnce();
+  expect(f.erased).toEqual([1]);
 });

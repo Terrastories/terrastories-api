@@ -22,6 +22,54 @@ export class CommunityErasureService {
     private readonly clock: () => Date = () => new Date()
   ) {}
 
+  async listRecords(now: Date): Promise<ErasureRecord[]> {
+    const records: ErasureRecord[] = [];
+    for (const record of await this.store.list()) {
+      const redacted = redactErasureActor(record, now);
+      if (redacted.requestingActorId !== record.requestingActorId)
+        await this.store.write(redacted);
+      records.push(redacted);
+    }
+    return records;
+  }
+
+  private async preserveCustody(record: ErasureRecord): Promise<ErasureRecord> {
+    // An allowed restore must not overwrite surviving completed evidence with
+    // an older database snapshot's custody designation or attestation.
+    if (record.completedAt !== null && record.archiveCustody !== undefined)
+      return record;
+    const custody = await this.repository.erasureArchiveCustody(
+      record.communityId
+    );
+    if (!custody) return record;
+    const updated: ErasureRecord = {
+      ...record,
+      archiveCustody: {
+        custodianType: custody.custodianType,
+        custodianUserId: custody.custodianUserId,
+        retentionUntil: custody.retentionUntil.toISOString(),
+        destructionAttestationRef: custody.destructionAttestationRef,
+      },
+    };
+    // Must succeed before any account/community cascade removes this evidence.
+    await this.store.write(updated);
+    return updated;
+  }
+
+  private async deleteLegacyFiles(
+    communityId: number,
+    budget: number
+  ): Promise<number> {
+    for (const file of await this.repository.erasureLegacyFiles(communityId)) {
+      const cost = this.storage.erasureDeleteCost ?? 1;
+      if (budget < cost) return 0;
+      await this.storage.delete!(file.storageKey ?? file.path);
+      budget -= cost;
+      await this.repository.clearErasureLegacyFile(communityId, file.id);
+    }
+    return budget;
+  }
+
   async sweep(now: Date, storageBudget = 25): Promise<void> {
     await this.repository.activateDueErasures(now);
     const records = await this.store.list();
@@ -54,7 +102,7 @@ export class CommunityErasureService {
       ),
       ...records.filter((record) => record.completedAt !== null),
     ];
-    for (const record of ordered) {
+    for (let record of ordered) {
       if (record.completedAt !== null) {
         const redacted = redactErasureActor(record, now);
         if (
@@ -73,6 +121,16 @@ export class CommunityErasureService {
       if (storageBudget < 2) return;
       await this.storage.fenceCommunity(record.communityId);
       storageBudget--;
+      record = await this.preserveCustody(record);
+      storageBudget = await this.deleteLegacyFiles(
+        record.communityId,
+        storageBudget
+      );
+      if (
+        storageBudget < 2 ||
+        (await this.repository.erasureLegacyFiles(record.communityId)).length
+      )
+        return;
       const prefix = `communities/${record.communityId}/`;
       for (const upload of await this.repository.erasureUploads(
         record.communityId
@@ -148,6 +206,7 @@ export class CommunityErasureService {
   async reconcileRestore(point: Date, now: Date): Promise<void> {
     await verifyErasureRestorePoint(this.store, point);
     for (const record of await this.store.list()) {
+      await this.preserveCustody(record);
       if (!this.storage.fenceCommunity)
         throw new Error('Erasure writer fencing unavailable');
       await this.storage.fenceCommunity(record.communityId);
@@ -178,6 +237,13 @@ export class CommunityErasureService {
           await this.storage.delete(object.key);
         }
       }
+      while (
+        (await this.repository.erasureLegacyFiles(record.communityId)).length
+      )
+        await this.deleteLegacyFiles(
+          record.communityId,
+          Number.POSITIVE_INFINITY
+        );
       await this.repository.eraseRows(record.communityId, now);
       await writeAuditEntry(
         this.repository.connection,

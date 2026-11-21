@@ -1904,6 +1904,56 @@ export class CommunitySovereigntyRepository {
       .where(and(eq(j.id, id), eq(j.zipUploadId, uploadId)));
   }
 
+  async erasureArchiveCustody(
+    communityId: number
+  ): Promise<ArchiveCustodyRecord | null> {
+    const t = this.tables.communityArchiveCustody;
+    const [row] = await this.db
+      .select()
+      .from(t)
+      .where(eq(t.communityId, communityId))
+      .limit(1);
+    return row ? this.toArchiveCustodyRecord(row) : null;
+  }
+
+  private legacyErasureFilesPredicate(communityId: number) {
+    const t = this.tables;
+    return and(
+      isNull(t.files.communityId),
+      inArray(
+        t.files.uploadedBy,
+        this.db
+          .select({ id: t.users.id })
+          .from(t.users)
+          .where(eq(t.users.communityId, communityId))
+      )
+    );
+  }
+
+  /** Indexed uploader lookup; retain each pointer until its bytes are gone. */
+  async erasureLegacyFiles(communityId: number) {
+    const f = this.tables.files;
+    return this.db
+      .select({ id: f.id, storageKey: f.storageKey, path: f.path })
+      .from(f)
+      .where(this.legacyErasureFilesPredicate(communityId))
+      .orderBy(f.id)
+      .limit(10) as Promise<
+      Array<{ id: string; storageKey: string | null; path: string }>
+    >;
+  }
+
+  async clearErasureLegacyFile(communityId: number, id: string): Promise<void> {
+    await this.db
+      .delete(this.tables.files)
+      .where(
+        and(
+          eq(this.tables.files.id, id),
+          this.legacyErasureFilesPredicate(communityId)
+        )
+      );
+  }
+
   async eraseRows(communityId: number, now: Date): Promise<void> {
     const t = this.tables;
     await this.sovereigntyUnit(communityId, null, (db) => [
@@ -1926,6 +1976,10 @@ export class CommunitySovereigntyRepository {
           )
         )
         .returning({ id: t.auditEntries.id }),
+      db
+        .delete(t.files)
+        .where(this.legacyErasureFilesPredicate(communityId))
+        .returning({ id: t.files.id }),
       db
         .update(t.files)
         .set({ uploadedBy: null })

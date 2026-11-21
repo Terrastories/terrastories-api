@@ -4,6 +4,16 @@ import { ERASURE_DISPUTE_WINDOW_MS } from '../shared/sovereignty-policy.js';
 
 export const ErasureRecordSchema = ErasureRecordSummarySchema.extend({
   requestingActorId: z.number().int().positive().nullable(),
+  archiveCustody: z
+    .object({
+      custodianType: z.enum(['community', 'steward']),
+      custodianUserId: z.number().int().positive().nullable(),
+      retentionUntil: z.string().datetime(),
+      destructionAttestationRef: z.string().nullable(),
+    })
+    .strict()
+    .nullable()
+    .optional(),
 }).strict();
 export type ErasureRecord = z.infer<typeof ErasureRecordSchema>;
 

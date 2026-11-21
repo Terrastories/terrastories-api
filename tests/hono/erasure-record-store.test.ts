@@ -19,6 +19,12 @@ it('persists excluded erasure records across adapter recreation and keeps comple
     requestedAt: '2026-11-21T00:00:00.000Z',
     completedAt: null,
     outcome: 'pending',
+    archiveCustody: {
+      custodianType: 'steward',
+      custodianUserId: 3,
+      retentionUntil: '2026-11-21T00:00:00.000Z',
+      destructionAttestationRef: 'attestation-ref',
+    },
   };
   await store.write(record);
   await expect(verifyErasureRestorePoint(store, new Date())).rejects.toThrow();

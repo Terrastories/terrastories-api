@@ -18,7 +18,7 @@ import {
  * - D1 `db.batch()` emulation coverage
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -27,6 +27,7 @@ import { createHonoApp } from '../../src/hono-app.js';
 import { CommunitySovereigntyRepository } from '../../src/repositories/community-sovereignty.repository.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
 import { communitiesSqlite } from '../../src/db/schema/communities.js';
+import { filesSqlite } from '../../src/db/schema/files.js';
 import { usersSqlite } from '../../src/db/schema/users.js';
 import {
   sessionsSqlite,
@@ -1373,6 +1374,43 @@ describe('Slice 13b-A/B community sovereignty', () => {
           })
         ).status
       ).toBe(400);
+      const legacyKey = 'legacy/community-file';
+      const foreignKey = 'legacy/foreign-file';
+      ctx.objects.set(legacyKey, new Uint8Array([3]));
+      ctx.objects.set(foreignKey, new Uint8Array([4]));
+      for (const [key, uploader] of [
+        [legacyKey, ctx.adminUser.id],
+        [foreignKey, ctx.foreignUser.id],
+      ] as const)
+        await ctx.db.insert(filesSqlite).values({
+          id: crypto.randomUUID(),
+          filename: 'legacy',
+          originalName: 'legacy',
+          path: key,
+          storageKey: key,
+          url: 'https://example.test/file',
+          mimeType: 'image/png',
+          size: 1,
+          communityId: null,
+          uploadedBy: uploader,
+        });
+      await ctx.db.insert(communityArchiveCustodySqlite).values({
+        communityId: ctx.activeComm.id,
+        custodianType: 'community',
+        custodianUserId: ctx.adminUser.id,
+        status: 'destroyed',
+        retentionUntil: ctx.getNow().getTime(),
+        destroyedAt: ctx.getNow().getTime(),
+        destructionAttestationRef: 'attestation-ref',
+        createdAt: 0,
+        updatedAt: 0,
+      });
+      // Both the request write and its immediate sweep fail; the durable DB
+      // request must still acknowledge acceptance and survive a process restart.
+      const write = vi
+        .spyOn(ctx.erasureStore, 'write')
+        .mockRejectedValueOnce(new Error('unavailable'))
+        .mockRejectedValueOnce(new Error('unavailable'));
       const response = await ctx.call('POST', '/v2/community/erasure', {
         cookie,
         body: {
@@ -1382,7 +1420,12 @@ describe('Slice 13b-A/B community sovereignty', () => {
       });
       expect(response.status).toBe(202);
       expect((await response.json()).data.request.state).toBe('requested');
+      expect(write).toHaveBeenCalledTimes(2);
+      write.mockRestore();
+      await ctx.erasureService.sweep(ctx.getNow());
       expect(ctx.objects.has(own)).toBe(false);
+      expect(ctx.objects.has(legacyKey)).toBe(false);
+      expect(ctx.objects.has(foreignKey)).toBe(true);
       expect(ctx.objects.has(foreign)).toBe(true);
       expect(ctx.records.get(ctx.activeComm.id)?.completedAt).toBeNull();
       await expect(
@@ -1414,6 +1457,25 @@ describe('Slice 13b-A/B community sovereignty', () => {
           .where(eq(communitiesSqlite.id, ctx.activeComm.id))
       ).toHaveLength(0);
       expect(ctx.records.get(ctx.activeComm.id)?.outcome).toBe('completed');
+      expect(ctx.records.get(ctx.activeComm.id)?.archiveCustody).toEqual({
+        custodianType: 'community',
+        custodianUserId: ctx.adminUser.id,
+        retentionUntil: ctx.getNow().toISOString(),
+        destructionAttestationRef: 'attestation-ref',
+      });
+      expect(
+        await ctx.db
+          .select()
+          .from(communityArchiveCustodySqlite)
+          .where(
+            eq(communityArchiveCustodySqlite.communityId, ctx.activeComm.id)
+          )
+      ).toHaveLength(0);
+      const remainingFiles = await ctx.db.select().from(filesSqlite);
+      expect(remainingFiles.map((file) => file.storageKey)).toEqual([
+        foreignKey,
+      ]);
+
       await ctx.db.insert(communitiesSqlite).values({
         id: ctx.activeComm.id,
         name: 'Restored',

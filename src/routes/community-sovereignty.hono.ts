@@ -1,8 +1,5 @@
 import type { CommunityErasureService } from '../services/community-erasure.service.js';
-import {
-  redactErasureActor,
-  type ErasureRecordStore,
-} from '../services/erasure-record-store.js';
+import type { ErasureRecordStore } from '../services/erasure-record-store.js';
 /**
  * Hono routes for Slice 13b community sovereignty endpoints
  * (SPEC-V2 §6.2, §6.8, §7 #187; route registry §9).
@@ -51,16 +48,9 @@ export function registerCommunitySovereigntyRoutes(
   app.get('/v2/admin/erasures', async (c) => {
     if (actorOf(c).role !== 'super_admin' || actorOf(c).communityId !== null)
       return c.json({ error: 'Forbidden' }, 403);
-    if (!options.erasureStore)
+    if (!options.erasureService)
       return c.json({ error: 'Service unavailable' }, 503);
-    const records = await options.erasureStore.list();
-    const data = [];
-    for (const record of records) {
-      const redacted = redactErasureActor(record, options.now());
-      if (redacted.requestingActorId !== record.requestingActorId)
-        await options.erasureStore.write(redacted);
-      data.push(redacted);
-    }
+    const data = await options.erasureService.listRecords(options.now());
     return c.json({ data }, 200);
   });
 

@@ -666,7 +666,16 @@ export class CommunitySovereigntyService {
             outcome: 'pending' as const,
           }
         : null;
-    if (erasureRecord) await this.erasureStore.write(erasureRecord);
+    if (erasureRecord) {
+      try {
+        await this.erasureStore.write(erasureRecord);
+      } catch {
+        // The committed requested/executing row is the durable retry queue.
+        // Sweep discovers it and must write the external record before deleting.
+        // eslint-disable-next-line no-console -- content-free retry signal
+        console.warn('maintenance: erasure record write pending retry');
+      }
+    }
     return {
       status: 202,
       body: {

@@ -55,8 +55,10 @@ import type { MediaCleanupCoordinator } from './media-cleanup.service.js';
 import {
   ImportsRepository,
   type CommunityImportContext,
+  type CreatePreviewOutcome,
   type ImportManifestRowRecord,
   type StagedFileInsertInput,
+  type StagedFileVerificationRecord,
 } from '../repositories/imports.repository.js';
 import { MediaWritesRepository } from '../repositories/media-writes.repository.js';
 import { authorizeCommunityWriteCaller } from './community-writes.service.js';
@@ -1264,7 +1266,7 @@ export class ImportsService {
         }
       );
 
-      let outcome;
+      let outcome: CreatePreviewOutcome;
       try {
         outcome = await this.repository.createPreviewManifest({
           communityId: caller.communityId,
@@ -1288,13 +1290,60 @@ export class ImportsService {
           now: requestNow,
           dailyLimitWindow: dailyWindow,
         });
-      } catch (err) {
-        await this.cleanupUploadedStorageKeys(
-          [...activeUploadedKeys],
-          'import_failed',
-          activeUploadedKeys
-        );
-        throw err;
+      } catch {
+        // Guard against lost D1/DB acks where the preview actually committed
+        // before throwing: recover the persisted manifest rather than deleting
+        // live storage bytes, and only delete bytes when absence is verified.
+        let persistedManifest: ImportManifestRowRecord | null;
+        try {
+          persistedManifest = await this.repository.getManifestBySourceFileId(
+            caller.communityId,
+            sourceFileId
+          );
+        } catch {
+          activeUploadedKeys.clear();
+          return { status: 500, body: INTERNAL_ERROR_BODY };
+        }
+
+        if (persistedManifest) {
+          activeUploadedKeys.clear();
+          outcome = { status: 'created', manifest: persistedManifest };
+        } else {
+          let existingFiles: Map<string, StagedFileVerificationRecord>;
+          try {
+            existingFiles = await this.repository.findStagedFilesByIds(
+              caller.communityId,
+              [sourceFileId, ...keptStagedIds]
+            );
+          } catch {
+            activeUploadedKeys.clear();
+            return { status: 500, body: INTERNAL_ERROR_BODY };
+          }
+
+          if (existingFiles.size === 0) {
+            await this.cleanupUploadedStorageKeys(
+              [...activeUploadedKeys],
+              'import_failed',
+              activeUploadedKeys
+            );
+          } else {
+            const persistedKeys = new Set(
+              [...existingFiles.values()].map((row) => row.storageKey)
+            );
+            const unpersistedKeys = [...activeUploadedKeys].filter(
+              (key) => !persistedKeys.has(key)
+            );
+            if (unpersistedKeys.length > 0) {
+              await this.cleanupUploadedStorageKeys(
+                unpersistedKeys,
+                'import_failed',
+                activeUploadedKeys
+              );
+            }
+            activeUploadedKeys.clear();
+          }
+          return { status: 500, body: INTERNAL_ERROR_BODY };
+        }
       }
 
       if (outcome.status === 'forbidden') {
@@ -1320,6 +1369,7 @@ export class ImportsService {
         };
       }
 
+      activeUploadedKeys.clear();
       const detail = serializeImportManifestDetail(
         outcome.manifest,
         d1Enforced

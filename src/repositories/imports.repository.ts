@@ -969,6 +969,23 @@ export class ImportsRepository {
     return rows[0] ? mapManifestRow(rows[0]) : null;
   }
 
+  async getManifestBySourceFileId(
+    communityId: number,
+    sourceFileId: string
+  ): Promise<ImportManifestRowRecord | null> {
+    const rows = await this.db
+      .select(this.manifestSelectColumns())
+      .from(this.tables.importManifests)
+      .where(
+        and(
+          eq(this.tables.importManifests.sourceFileId, sourceFileId),
+          eq(this.tables.importManifests.communityId, communityId)
+        )
+      )
+      .limit(1);
+    return rows[0] ? mapManifestRow(rows[0]) : null;
+  }
+
   async discardManifest(input: {
     communityId: number;
     actorId: number;

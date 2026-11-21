@@ -2,7 +2,7 @@
  * Focused contract, staging-isolation, D1 budget/batch, security, and
  * negative tests for Slice 12 `POST /v2/imports/preview` (#123, #197).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -17,6 +17,7 @@ import {
 import { tablesFor } from '../../src/db/dialect.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
+import { ImportsRepository } from '../../src/repositories/imports.repository.js';
 import { MediaCleanupCoordinator } from '../../src/services/media-cleanup.service.js';
 import type { FoundationStorage } from '../../src/services/hono-foundation.service.js';
 import {
@@ -194,7 +195,13 @@ function buildImportMultipart(options: {
   };
 }
 
-function createRealD1Db(boundParamsOut?: number[]): {
+function createRealD1Db(
+  boundParamsOut?: number[],
+  hooks?: {
+    onBeforeBatch?: () => Promise<void> | void;
+    onAfterBatch?: () => Promise<void> | void;
+  }
+): {
   db: ReturnType<typeof drizzleD1>;
   sqlite: Sqlite.Database;
 } {
@@ -241,7 +248,10 @@ function createRealD1Db(boundParamsOut?: number[]): {
       return stmt;
     },
     async batch(stmts: Array<{ _exec: () => unknown }>) {
-      return d1Sqlite.transaction(() => stmts.map((s) => s._exec()))();
+      await hooks?.onBeforeBatch?.();
+      const results = d1Sqlite.transaction(() => stmts.map((s) => s._exec()))();
+      await hooks?.onAfterBatch?.();
+      return results;
     },
   };
   return { db: drizzleD1(client as unknown as D1Database), sqlite: d1Sqlite };
@@ -1379,5 +1389,384 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
     expect(safeMultiline.canCommit).toBe(true);
     expect(safeMultiline.validRowCount).toBe(1);
     expect(safeMultiline.errorCount).toBe(0);
+  });
+
+  it('recovers persisted previews on post-commit D1 exceptions and cleans bytes only when DB rows are verifiably absent', async () => {
+    let throwBeforeD1Batch: Error | null = null;
+    let throwAfterD1Batch: Error | null = null;
+    const d1 = createRealD1Db(undefined, {
+      onBeforeBatch: async () => {
+        if (throwBeforeD1Batch) {
+          const err = throwBeforeD1Batch;
+          throwBeforeD1Batch = null;
+          throw err;
+        }
+      },
+      onAfterBatch: async () => {
+        if (throwAfterD1Batch) {
+          const err = throwAfterD1Batch;
+          throwAfterD1Batch = null;
+          throw err;
+        }
+      },
+    });
+
+    try {
+      let d1Now = new Date('2026-07-01T23:50:00.000Z');
+      const d1Tables = tablesFor(d1.db);
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+      const [comm] = await d1.db
+        .insert(d1Tables.communities)
+        .values({
+          name: 'D1 Preview Recovery Comm',
+          slug: 'd1-preview-recovery-comm',
+          publicStories: false,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.communities.id });
+      await d1.db.insert(d1Tables.users).values({
+        email: 'd1-preview-ed@example.test',
+        username: 'd1_preview_ed',
+        ...deriveUserIdentityColumns({
+          email: 'd1-preview-ed@example.test',
+          username: 'd1_preview_ed',
+        }),
+        firstName: 'D1',
+        lastName: 'Preview',
+        ...seed,
+        role: 'editor',
+        communityId: comm.id,
+        isActive: true,
+        createdAt: d1Now,
+        updatedAt: d1Now,
+      });
+
+      const d1Mem = createListableMemoryStorage();
+      const d1Cleanup = new MediaCleanupCoordinator(d1.db, d1Mem.storage);
+      const d1App = createHonoApp({
+        repository: new HonoFoundationRepository(d1.db as any),
+        storage: d1Mem.storage,
+        mediaCleanup: d1Cleanup,
+        publicOrigin: API_ORIGIN,
+        corsOrigins: [CLIENT_ORIGIN],
+        secureCookies: false,
+        serverSecret: makeServerSecret(),
+        now: () => d1Now,
+      });
+
+      const loginRes = await d1App.request(`${API_ORIGIN}/v2/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          identifier: 'd1-preview-ed@example.test',
+          communitySlug: 'd1-preview-recovery-comm',
+          derivedKey: TEST_DERIVED_KEY,
+        }),
+      });
+      expect(loginRes.status).toBe(200);
+      const d1Cookie = (loginRes.headers.get('set-cookie') ?? '').split(
+        ';'
+      )[0]!;
+
+      // 1. Pre-commit D1 batch() exception: rows are verifiably absent -> 500 + delete all uploaded bytes
+      const preAbortCsv = 'name,photo\nPre Abort Place,pre-abort.png\n';
+      const preAbortCsvSha = createHash('sha256')
+        .update(preAbortCsv)
+        .digest('hex');
+      const pngSha = createHash('sha256').update(PNG_BYTES).digest('hex');
+      throwBeforeD1Batch = new Error('D1_RPC_CONN_RESET_BEFORE_PREVIEW_SECRET');
+      const preAbortRes = await postPreview(d1App, {
+        cookie: d1Cookie,
+        csvFilename: 'pre-abort.csv',
+        csvText: preAbortCsv,
+        fields: { kind: 'places' },
+        mediaParts: [
+          {
+            filename: 'pre-abort.png',
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          },
+        ],
+      });
+      expect(preAbortRes.status).toBe(500);
+      const preAbortText = await preAbortRes.text();
+      expect(JSON.parse(preAbortText)).toEqual({
+        error: 'Internal server error',
+      });
+      expect(preAbortText).not.toContain(
+        'D1_RPC_CONN_RESET_BEFORE_PREVIEW_SECRET'
+      );
+      expect(preAbortText).not.toContain('communities/');
+      expect(preAbortText).not.toContain(preAbortCsvSha);
+      expect(preAbortText).not.toContain(pngSha);
+      expect(
+        await d1.db
+          .select()
+          .from(d1Tables.importManifests)
+          .where(eq(d1Tables.importManifests.communityId, comm.id))
+      ).toHaveLength(0);
+      expect(
+        await d1.db
+          .select()
+          .from(d1Tables.files)
+          .where(eq(d1Tables.files.communityId, comm.id))
+      ).toHaveLength(0);
+      expect(d1Mem.store.size).toBe(0);
+
+      // 2. Post-commit D1 batch() exception (committed, ack lost):
+      // recovers persisted preview -> 201, keeps all staged + source bytes, commits cleanly.
+      const postCommitCsv =
+        'name,photo\nPost Commit Ack Lost Place,post-commit-ack-lost.png\n';
+      const postCommitCsvSha = createHash('sha256')
+        .update(postCommitCsv)
+        .digest('hex');
+      throwAfterD1Batch = new Error(
+        'D1_RPC_TIMEOUT_AFTER_PREVIEW_COMMIT_SECRET'
+      );
+      const postCommitRes = await postPreview(d1App, {
+        cookie: d1Cookie,
+        csvFilename: 'post-commit-ack-lost.csv',
+        csvText: postCommitCsv,
+        fields: { kind: 'places' },
+        mediaParts: [
+          {
+            filename: 'post-commit-ack-lost.png',
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          },
+        ],
+      });
+      expect(postCommitRes.status).toBe(201);
+      const postCommitText = await postCommitRes.text();
+      expect(postCommitText).not.toContain(
+        'D1_RPC_TIMEOUT_AFTER_PREVIEW_COMMIT_SECRET'
+      );
+      expect(postCommitText).not.toContain('communities/');
+      expect(postCommitText).not.toContain(postCommitCsvSha);
+      expect(postCommitText).not.toContain(pngSha);
+      const postCommitDetail = ImportManifestDetailResponseSchema.parse(
+        JSON.parse(postCommitText)
+      ).data;
+      expect(postCommitDetail.status).toBe('previewed');
+      expect(postCommitDetail.validRowCount).toBe(1);
+      expect(postCommitDetail.canCommit).toBe(true);
+
+      const [recoveredRow] = await d1.db
+        .select()
+        .from(d1Tables.importManifests)
+        .where(
+          and(
+            eq(d1Tables.importManifests.id, postCommitDetail.id),
+            eq(d1Tables.importManifests.communityId, comm.id)
+          )
+        );
+      expect(recoveredRow?.status).toBe('previewed');
+      expect(recoveredRow?.stagedFileIds).toHaveLength(1);
+      const [recoveredSource] = await d1.db
+        .select()
+        .from(d1Tables.files)
+        .where(eq(d1Tables.files.id, recoveredRow!.sourceFileId));
+      const [recoveredStaged] = await d1.db
+        .select()
+        .from(d1Tables.files)
+        .where(eq(d1Tables.files.id, recoveredRow!.stagedFileIds[0]!));
+      expect(Boolean(recoveredSource?.isActive)).toBe(false);
+      expect(Boolean(recoveredStaged?.isActive)).toBe(false);
+      expect(d1Mem.store.size).toBe(2);
+      expect(d1Mem.store.has(recoveredSource!.storageKey!)).toBe(true);
+      expect(d1Mem.store.has(recoveredStaged!.storageKey!)).toBe(true);
+
+      const previewAudits = await d1.db
+        .select()
+        .from(d1Tables.auditEntries)
+        .where(
+          and(
+            eq(d1Tables.auditEntries.communityId, comm.id),
+            eq(d1Tables.auditEntries.action, 'import.preview'),
+            eq(d1Tables.auditEntries.outcome, 'success')
+          )
+        );
+      expect(previewAudits).toHaveLength(1);
+
+      const commitRecoveredRes = await d1App.request(
+        `${API_ORIGIN}/v2/imports/${postCommitDetail.id}/commit`,
+        {
+          method: 'POST',
+          headers: { cookie: d1Cookie, origin: CLIENT_ORIGIN },
+        }
+      );
+      expect(commitRecoveredRes.status).toBe(200);
+      const commitRecoveredDetail = ImportManifestDetailResponseSchema.parse(
+        await commitRecoveredRes.json()
+      ).data;
+      expect(commitRecoveredDetail.status).toBe('committed');
+      expect(commitRecoveredDetail.resultSummary?.createdPlaces).toBe(1);
+      expect(
+        await d1.db
+          .select()
+          .from(d1Tables.places)
+          .where(
+            and(
+              eq(d1Tables.places.communityId, comm.id),
+              eq(d1Tables.places.name, 'Post Commit Ack Lost Place')
+            )
+          )
+      ).toHaveLength(1);
+
+      // 3. Double-fault DB outage: post-commit D1 error AND recovery lookup fails
+      // -> persistence is NOT verifiably absent, so keep bytes + return 500 cleanly.
+      // Advance across UTC midnight within the 12h session window for the 1/day D1 limit.
+      d1Now = new Date('2026-07-02T00:05:00.000Z');
+      throwAfterD1Batch = new Error('D1_PRIMARY_TIMEOUT_SECRET');
+      vi.spyOn(
+        ImportsRepository.prototype,
+        'getManifestBySourceFileId'
+      ).mockRejectedValueOnce(new Error('D1_RECOVERY_LOOKUP_SECRET'));
+      let doubleFaultRes: Response;
+      try {
+        doubleFaultRes = await postPreview(d1App, {
+          cookie: d1Cookie,
+          csvFilename: 'double-fault.csv',
+          csvText: 'name,photo\nDouble Fault Preview Place,double-fault.png\n',
+          fields: { kind: 'places' },
+          mediaParts: [
+            {
+              filename: 'double-fault.png',
+              contentType: 'image/png',
+              bytes: PNG_BYTES,
+            },
+          ],
+        });
+      } finally {
+        vi.restoreAllMocks();
+      }
+      expect(doubleFaultRes.status).toBe(500);
+      const doubleFaultText = await doubleFaultRes.text();
+      expect(JSON.parse(doubleFaultText)).toEqual({
+        error: 'Internal server error',
+      });
+      expect(doubleFaultText).not.toContain('D1_PRIMARY_TIMEOUT_SECRET');
+      expect(doubleFaultText).not.toContain('D1_RECOVERY_LOOKUP_SECRET');
+
+      const allManifestsAfterDoubleFault = await d1.db
+        .select()
+        .from(d1Tables.importManifests)
+        .where(eq(d1Tables.importManifests.communityId, comm.id));
+      const doubleManifest = allManifestsAfterDoubleFault.find(
+        (m) => m.id !== postCommitDetail.id
+      );
+      expect(doubleManifest?.status).toBe('previewed');
+      const [doubleSource] = await d1.db
+        .select()
+        .from(d1Tables.files)
+        .where(eq(d1Tables.files.id, doubleManifest!.sourceFileId));
+      const [doubleStaged] = await d1.db
+        .select()
+        .from(d1Tables.files)
+        .where(eq(d1Tables.files.id, doubleManifest!.stagedFileIds[0]!));
+      expect(d1Mem.store.has(doubleSource!.storageKey!)).toBe(true);
+      expect(d1Mem.store.has(doubleStaged!.storageKey!)).toBe(true);
+
+      const getDoubleRes = await d1App.request(
+        `${API_ORIGIN}/v2/imports/${doubleManifest!.id}`,
+        {
+          method: 'GET',
+          headers: { cookie: d1Cookie },
+        }
+      );
+      expect(getDoubleRes.status).toBe(200);
+      const getDoubleDetail = ImportManifestDetailResponseSchema.parse(
+        await getDoubleRes.json()
+      ).data;
+      expect(getDoubleDetail.status).toBe('previewed');
+
+      const commitDoubleRes = await d1App.request(
+        `${API_ORIGIN}/v2/imports/${doubleManifest!.id}/commit`,
+        {
+          method: 'POST',
+          headers: { cookie: d1Cookie, origin: CLIENT_ORIGIN },
+        }
+      );
+      expect(commitDoubleRes.status).toBe(200);
+      const commitDoubleDetail = ImportManifestDetailResponseSchema.parse(
+        await commitDoubleRes.json()
+      ).data;
+      expect(commitDoubleDetail.status).toBe('committed');
+      expect(commitDoubleDetail.resultSummary?.createdPlaces).toBe(1);
+    } finally {
+      d1.sqlite.close();
+    }
+
+    // 4. Partial file-row persistence without manifest row:
+    // keep bytes for persisted `files` rows and delete only unpersisted keys.
+    const keysBeforePartial = new Set(memStore.keys());
+    let partialSourceFileId = '';
+    let partialSourceStorageKey = '';
+    try {
+      vi.spyOn(
+        ImportsRepository.prototype,
+        'createPreviewManifest'
+      ).mockImplementationOnce(async (input) => {
+        partialSourceFileId = input.sourceFile.id;
+        partialSourceStorageKey = input.sourceFile.storageKey;
+        await db.insert(tables.files).values({
+          id: input.sourceFile.id,
+          filename: input.sourceFile.id,
+          originalName: input.sourceFile.originalName,
+          path: input.sourceFile.storageKey,
+          storageKey: input.sourceFile.storageKey,
+          url: `/v2/media/${input.sourceFile.id}`,
+          mimeType: input.sourceFile.mimeType,
+          size: input.sourceFile.byteSize,
+          byteSize: input.sourceFile.byteSize,
+          checksum: input.sourceFile.checksum,
+          communityId: input.communityId,
+          uploadedBy: input.actorId,
+          metadata: null,
+          culturalRestrictions: null,
+          isActive: false,
+          createdAt: input.now,
+          updatedAt: input.now,
+        });
+        throw new Error('PARTIAL_WRITE_SECRET');
+      });
+
+      const partialRes = await postPreview(app, {
+        cookie: cookies.editor,
+        csvFilename: 'partial-write.csv',
+        csvText: 'name,photo\nPartial Write Place,orphan-media.png\n',
+        fields: { kind: 'places' },
+        mediaParts: [
+          {
+            filename: 'orphan-media.png',
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          },
+        ],
+      });
+      expect(partialRes.status).toBe(500);
+      const partialText = await partialRes.text();
+      expect(JSON.parse(partialText)).toEqual({
+        error: 'Internal server error',
+      });
+      expect(partialText).not.toContain('PARTIAL_WRITE_SECRET');
+
+      const newKeysAfterPartial = [...memStore.keys()].filter(
+        (key) => !keysBeforePartial.has(key)
+      );
+      expect(newKeysAfterPartial).toEqual([partialSourceStorageKey]);
+    } finally {
+      vi.restoreAllMocks();
+      if (partialSourceFileId) {
+        await db
+          .delete(tables.files)
+          .where(eq(tables.files.id, partialSourceFileId));
+      }
+      if (partialSourceStorageKey) {
+        memStore.delete(partialSourceStorageKey);
+      }
+    }
   });
 });

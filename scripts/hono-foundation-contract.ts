@@ -2239,34 +2239,28 @@ export async function runHonoFoundationContract(
       // forms must fail, not pass silently).
       if (dialectOf(database) === 'postgresql') {
         const lockUpgradeAEmail = `upglock-a-${tag}@example.test`;
+        // B is the wrapped (upgrade-eligible) account so the redeem (A
+        // presenting B's cookie) and the upgrade login (B presenting A's
+        // cookie) revoke each other's presented session row and form the
+        // reciprocal A<->B session-lock cycle the deadlock guard must see.
         const lockUpgradeBEmail = `upglock-b-${tag}@example.test`;
-        // A wrapped (upgrade-eligible) account is the one whose login actually
-        // traverses the coupled createSessionWithVerifier path (round 4 item 4).
-        const lockUpgradeWrappedEmail = `upglock-wrapped-${tag}@example.test`;
-        const lockUpgradeAccounts: Array<{ id: number; email: string }> = [];
-        for (const [email, username] of [
-          [lockUpgradeAEmail, `upglock_a_${tag}`],
-          [lockUpgradeBEmail, `upglock_b_${tag}`],
-        ] as const) {
-          const [row] = await db
-            .insert(tables.users)
-            .values({
-              ...userDefaults,
-              email,
-              username,
-              role: 'admin',
-              communityId: communityA,
-            })
-            .returning();
-          userIds.push(row.id);
-          lockUpgradeAccounts.push({ id: row.id, email });
-        }
-        const [lockUpgradeWrappedAccount] = await db
+        const [lockUpgradeAccountA] = await db
           .insert(tables.users)
           .values({
             ...userDefaults,
-            email: lockUpgradeWrappedEmail,
-            username: `upglock_wrapped_${tag}`,
+            email: lockUpgradeAEmail,
+            username: `upglock_a_${tag}`,
+            role: 'admin',
+            communityId: communityA,
+          })
+          .returning();
+        userIds.push(lockUpgradeAccountA.id);
+        const [lockUpgradeAccountB] = await db
+          .insert(tables.users)
+          .values({
+            ...userDefaults,
+            email: lockUpgradeBEmail,
+            username: `upglock_b_${tag}`,
             role: 'admin',
             communityId: communityA,
             passwordAlgorithm: 'client-bcrypt-rails+sha256',
@@ -2275,34 +2269,77 @@ export async function runHonoFoundationContract(
             passwordVerifier: await sha256Hex(wrappedKey),
           })
           .returning();
-        userIds.push(lockUpgradeWrappedAccount.id);
-        const [lockUpgradeAccountA, lockUpgradeAccountB] =
-          lockUpgradeAccounts as [
-            { id: number; email: string },
-            { id: number; email: string },
-          ];
+        userIds.push(lockUpgradeAccountB.id);
         const lockUpgradeCookieA = await login(lockUpgradeAccountA.email);
-        const lockUpgradeCookieB = await login(lockUpgradeAccountB.email);
-        const lockUpgradeCodes: string[] = [];
-        for (const account of [lockUpgradeAccountA, lockUpgradeAccountB]) {
-          const rawCode = toBase64Url(
-            crypto.getRandomValues(new Uint8Array(16))
-          );
-          lockUpgradeCodes.push(rawCode);
-          await db.insert(tables.loginCodes).values({
-            communityId: communityA,
-            userId: account.id,
-            purpose: 'admin_issued',
-            codeHash: await sha256Hex(rawCode),
-            createdBy: account.id,
-            createdAt: instant.getTime(),
-            expiresAt: instant.getTime() + ADMIN_ISSUED_CODE_TTL_MS,
-            usedAt: null,
-            supersededAt: null,
-          });
-        }
+        const oldHashA = await sha256Hex(
+          lockUpgradeCookieA.slice('ts_session='.length)
+        );
+        // Issue B an existing session without upgrading its wrapped verifier
+        // (an admin_issued redeem without a password keeps B upgrade-eligible).
+        const setupCodeB = toBase64Url(
+          crypto.getRandomValues(new Uint8Array(16))
+        );
+        await db.insert(tables.loginCodes).values({
+          communityId: communityA,
+          userId: lockUpgradeAccountB.id,
+          purpose: 'admin_issued',
+          codeHash: await sha256Hex(setupCodeB),
+          createdBy: lockUpgradeAccountB.id,
+          createdAt: instant.getTime(),
+          expiresAt: instant.getTime() + ADMIN_ISSUED_CODE_TTL_MS,
+          usedAt: null,
+          supersededAt: null,
+        });
+        const setupRedeemB = await send(app, '/v2/auth/recovery/redeem', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': '198.51.100.200',
+          },
+          body: JSON.stringify({ code: setupCodeB }),
+        });
+        assert.equal(
+          setupRedeemB.status,
+          200,
+          `setup redeem for wrapped B failed: ${await setupRedeemB.text()}`
+        );
+        const lockUpgradeCookieB = setupRedeemB.headers
+          .get('set-cookie')!
+          .split(';')[0];
+        assert.ok(lockUpgradeCookieB.startsWith('ts_session='));
+        const oldHashB = await sha256Hex(
+          lockUpgradeCookieB.slice('ts_session='.length)
+        );
+        const [seededWrappedB] = await db
+          .select({ passwordAlgorithm: tables.users.passwordAlgorithm })
+          .from(tables.users)
+          .where(eq(tables.users.id, lockUpgradeAccountB.id));
+        assert.equal(
+          seededWrappedB.passwordAlgorithm,
+          'client-bcrypt-rails+sha256',
+          'B must remain wrapped and upgrade-eligible before the race starts'
+        );
+        // Only A carries a redeemable code for the race; A's redeem presents B's cookie.
+        const rawCode = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+        const rawCodeHash = await sha256Hex(rawCode);
+        await db.insert(tables.loginCodes).values({
+          communityId: communityA,
+          userId: lockUpgradeAccountA.id,
+          purpose: 'admin_issued',
+          codeHash: rawCodeHash,
+          createdBy: lockUpgradeAccountA.id,
+          createdAt: instant.getTime(),
+          expiresAt: instant.getTime() + ADMIN_ISSUED_CODE_TTL_MS,
+          usedAt: null,
+          supersededAt: null,
+        });
+        const upgradeSaltB = Buffer.from(
+          crypto.getRandomValues(new Uint8Array(16))
+        ).toString('base64');
+        const upgradedKeyB = toHex(crypto.getRandomValues(new Uint8Array(32)));
+        const upgradedVerifierB = await sha256Hex(upgradedKeyB);
         const redeemWhileUpgradingWith = (
-          rawCode: string,
+          code: string,
           cookie: string,
           ip: string
         ) =>
@@ -2313,7 +2350,7 @@ export async function runHonoFoundationContract(
               cookie,
               'x-forwarded-for': ip,
             },
-            body: JSON.stringify({ code: rawCode }),
+            body: JSON.stringify({ code }),
           });
         const upgradeLoginWith = (cookie: string, identifier: string) =>
           send(app, '/v2/auth/login', {
@@ -2321,18 +2358,16 @@ export async function runHonoFoundationContract(
             headers: {
               'content-type': 'application/json',
               cookie,
-              'x-forwarded-for': '198.51.100.233',
+              'x-forwarded-for': '198.51.100.234',
             },
             body: JSON.stringify({
               identifier,
               derivedKey: wrappedKey,
               upgrade: {
-                algorithm: 'client-argon2id+sha256',
-                salt: Buffer.from(
-                  crypto.getRandomValues(new Uint8Array(16))
-                ).toString('base64'),
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: upgradeSaltB,
                 params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
-                derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+                derivedKey: upgradedKeyB,
               },
             }),
           });
@@ -2343,13 +2378,13 @@ export async function runHonoFoundationContract(
             sql`select id from communities where id = ${communityA} for update`
           );
           pendingRedeem = redeemWhileUpgradingWith(
-            lockUpgradeCodes[0]!,
+            rawCode,
             lockUpgradeCookieB,
             '198.51.100.231'
           );
           pendingUpgrade = upgradeLoginWith(
             lockUpgradeCookieA,
-            lockUpgradeWrappedEmail
+            lockUpgradeAccountB.email
           );
           pendingRedeem.then(ignore, ignore);
           pendingUpgrade.then(ignore, ignore);
@@ -2363,15 +2398,82 @@ export async function runHonoFoundationContract(
           pendingRedeem,
           pendingUpgrade,
         ]);
+        if (redeemResponse.status !== 200) {
+          assert.fail(
+            `cross-user redemption versus password-upgrade login must not deadlock (got ${redeemResponse.status}: ${await redeemResponse.text()})`
+          );
+        }
+        if (upgradeResponse.status !== 200) {
+          assert.fail(
+            `password-upgrade login versus cross-user redemption must not deadlock (got ${upgradeResponse.status}: ${await upgradeResponse.text()})`
+          );
+        }
+        const newCookieA = redeemResponse.headers
+          .get('set-cookie')
+          ?.split(';')[0];
+        const newCookieB = upgradeResponse.headers
+          .get('set-cookie')
+          ?.split(';')[0];
+        assert.ok(
+          newCookieA?.startsWith('ts_session='),
+          'redeem must issue a fresh session cookie for A'
+        );
+        assert.ok(
+          newCookieB?.startsWith('ts_session='),
+          'upgrade login must issue a fresh session cookie for B'
+        );
+        const newHashA = await sha256Hex(
+          newCookieA.slice('ts_session='.length)
+        );
+        const newHashB = await sha256Hex(
+          newCookieB.slice('ts_session='.length)
+        );
+        const [upgradedRowB] = await db
+          .select({
+            passwordAlgorithm: tables.users.passwordAlgorithm,
+            passwordVerifier: tables.users.passwordVerifier,
+          })
+          .from(tables.users)
+          .where(eq(tables.users.id, lockUpgradeAccountB.id));
         assert.equal(
-          redeemResponse.status,
-          200,
-          `cross-user redemption versus password-upgrade login must not deadlock (got ${redeemResponse.status})`
+          upgradedRowB.passwordAlgorithm,
+          ARGON2ID_ALGORITHM,
+          'upgrade login must have traversed createSessionWithVerifier to upgrade B'
         );
         assert.equal(
-          upgradeResponse.status,
-          200,
-          `password-upgrade login versus cross-user redemption must not deadlock (got ${upgradeResponse.status})`
+          upgradedRowB.passwordVerifier,
+          upgradedVerifierB,
+          'upgrade login must persist B’s new Argon2id verifier'
+        );
+        const liveSessionsA = await db
+          .select({ tokenHash: sessions.tokenHash })
+          .from(sessions)
+          .where(eq(sessions.userId, lockUpgradeAccountA.id));
+        assert.equal(
+          liveSessionsA.length,
+          1,
+          'A must have exactly one fresh session after redeem and cross-user revocation'
+        );
+        assert.equal(liveSessionsA[0].tokenHash, newHashA);
+        assert.notEqual(liveSessionsA[0].tokenHash, oldHashA);
+        const liveSessionsB = await db
+          .select({ tokenHash: sessions.tokenHash })
+          .from(sessions)
+          .where(eq(sessions.userId, lockUpgradeAccountB.id));
+        assert.equal(
+          liveSessionsB.length,
+          1,
+          'B must have exactly one fresh session after upgrade login and cross-user revocation'
+        );
+        assert.equal(liveSessionsB[0].tokenHash, newHashB);
+        assert.notEqual(liveSessionsB[0].tokenHash, oldHashB);
+        const [raceCodeRow] = await db
+          .select({ usedAt: tables.loginCodes.usedAt })
+          .from(tables.loginCodes)
+          .where(eq(tables.loginCodes.codeHash, rawCodeHash));
+        assert.ok(
+          raceCodeRow.usedAt !== null,
+          'redeemed race LoginCode must be marked consumed'
         );
       }
       const [wrappedBefore] = await db

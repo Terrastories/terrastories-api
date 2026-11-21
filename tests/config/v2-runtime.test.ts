@@ -731,4 +731,82 @@ describe('V2 runtime configuration gate (#150)', () => {
       expect(v2RuntimeModeNotice(config) ?? '').not.toContain(okSecret);
     });
   });
+
+  describe('V2 installation bootstrap secret (#252, 11b round 5)', () => {
+    it('refuses a short secret padded with spaces to reach 24+ characters', () => {
+      const paddedShort = '   ' + 'b'.repeat(20) + '   ';
+      expect(paddedShort.length).toBeGreaterThanOrEqual(24);
+      expect(paddedShort.trim().length).toBeLessThan(24);
+
+      for (const invoke of [
+        () =>
+          validateWorkerV2Runtime({
+            DB: {},
+            MEDIA: {},
+            PUBLIC_ORIGIN: okOrigin,
+            AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: paddedShort,
+          } as unknown as Parameters<typeof validateWorkerV2Runtime>[0]),
+        () =>
+          validateNodeV2Runtime({
+            NODE_ENV: 'production',
+            HONO_PUBLIC_ORIGIN: okOrigin,
+            AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: paddedShort,
+          }),
+      ]) {
+        const error = refusal(invoke);
+        expect(error.message).toContain('BOOTSTRAP_SECRET');
+        expect(error.message).toContain('24 characters');
+        expect(error.message).not.toContain('bbbb');
+      }
+    });
+
+    it('refuses a whitespace-only value of 24+ spaces', () => {
+      const spacesOnly = ' '.repeat(30);
+
+      for (const invoke of [
+        () =>
+          validateWorkerV2Runtime({
+            DB: {},
+            MEDIA: {},
+            PUBLIC_ORIGIN: okOrigin,
+            AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: spacesOnly,
+          } as unknown as Parameters<typeof validateWorkerV2Runtime>[0]),
+        () =>
+          validateNodeV2Runtime({
+            NODE_ENV: 'production',
+            HONO_PUBLIC_ORIGIN: okOrigin,
+            AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: spacesOnly,
+          }),
+      ]) {
+        const error = refusal(invoke);
+        expect(error.message).toContain('BOOTSTRAP_SECRET');
+        expect(error.message).toContain('required');
+      }
+    });
+
+    it('trims surrounding whitespace on a compliant 24+ character secret', () => {
+      const paddedValid = '  ' + okBootstrapSecret + '  ';
+
+      const workerConfig = validateWorkerV2Runtime({
+        DB: {},
+        MEDIA: {},
+        PUBLIC_ORIGIN: okOrigin,
+        AUTH_SERVER_SECRET: okSecret,
+        BOOTSTRAP_SECRET: paddedValid,
+      } as unknown as Parameters<typeof validateWorkerV2Runtime>[0]);
+      expect(workerConfig.bootstrapSecret).toBe(okBootstrapSecret);
+
+      const nodeConfig = validateNodeV2Runtime({
+        NODE_ENV: 'production',
+        HONO_PUBLIC_ORIGIN: okOrigin,
+        AUTH_SERVER_SECRET: okSecret,
+        BOOTSTRAP_SECRET: paddedValid,
+      });
+      expect(nodeConfig.bootstrapSecret).toBe(okBootstrapSecret);
+    });
+  });
 });

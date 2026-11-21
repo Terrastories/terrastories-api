@@ -303,6 +303,67 @@ describe('GET /v2/bootstrap and POST /v2/bootstrap (Slice 11b-B)', () => {
     expect(await db.select().from(communitiesSqlite)).toHaveLength(0);
   });
 
+  it('keeps refusing the correct secret after the per-IP brake trips', async () => {
+    const { db, postBootstrap, getStatus } = setup();
+    const wrongSecret = makeServerSecret();
+
+    for (let attempt = 0; attempt < AUTH_THROTTLE_MAX_FAILURES; attempt += 1) {
+      const res = await postBootstrap({
+        ...makeValidBootstrapBody().payload,
+        bootstrapSecret: wrongSecret,
+      });
+      expect(res.status).toBe(403);
+    }
+
+    // The brake engaged, but the per-IP window must refuse even a correct
+    // secret with the same uniform 403 a wrong one gets — no oracle.
+    const correctRes = await postBootstrap(makeValidBootstrapBody().payload);
+    expect(correctRes.status).toBe(403);
+    expect(await correctRes.json()).toEqual({ error: 'Forbidden' });
+
+    const audits = await db
+      .select()
+      .from(auditEntriesSqlite)
+      .where(eq(auditEntriesSqlite.action, 'bootstrap.complete'));
+    expect(audits).toHaveLength(1);
+    expect(await (await getStatus()).json()).toEqual({ open: true });
+    expect(await db.select().from(communitiesSqlite)).toHaveLength(0);
+    expect(await db.select().from(usersSqlite)).toHaveLength(0);
+  });
+
+  it('writes exactly one audit row when 5 concurrent closed-installation posts race', async () => {
+    const { db, postBootstrap, currentNow } = setup();
+    await db.insert(communitiesSqlite).values({
+      name: 'Preseeded',
+      slug: 'preseeded',
+      locale: 'en',
+      publicStories: false,
+      isActive: true,
+      createdAt: currentNow(),
+      updatedAt: currentNow(),
+    });
+
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        postBootstrap(makeValidBootstrapBody().payload)
+      )
+    );
+    for (const res of responses) {
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'Forbidden' });
+    }
+
+    // Exactly one of the racing closed-installation attempts claimed the
+    // first-failure audit slot (post-increment election, round 4 item 3).
+    const audits = await db
+      .select()
+      .from(auditEntriesSqlite)
+      .where(eq(auditEntriesSqlite.action, 'bootstrap.complete'));
+    expect(audits).toHaveLength(1);
+    expect(await db.select().from(communitiesSqlite)).toHaveLength(1);
+    expect(await db.select().from(usersSqlite)).toHaveLength(0);
+  });
+
   it('reports open=false and rejects POST /v2/bootstrap when a pre-existing community or user exists', async () => {
     const { db, getStatus, postBootstrap, currentNow } = setup();
     const [comm] = await db

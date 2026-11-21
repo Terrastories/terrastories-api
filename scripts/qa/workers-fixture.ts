@@ -47,10 +47,14 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
   // login bodies: it keys prelogin fakes and AuthThrottle hashes. Built per
   // run, never a literal.
   const serverSecret = toHex(crypto.getRandomValues(new Uint8Array(24)));
-  const mf = startWorkerRuntime(await bundleWorkerModule(WORKER_GATEWAY), {
-    ENVIRONMENT: 'test',
-    AUTH_SERVER_SECRET: serverSecret,
-  });
+  const mf = startWorkerRuntime(
+    await bundleWorkerModule(WORKER_GATEWAY),
+    {
+      ENVIRONMENT: 'test',
+      AUTH_SERVER_SECRET: serverSecret,
+    },
+    { unsafeTriggerHandlers: true }
+  );
   let backend: HonoQaBackend;
   try {
     const d1 = await mf.getD1Database('DB');
@@ -59,6 +63,13 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
     const db = drizzle(d1);
     backend = {
       db,
+      runErasureSweep: async () => {
+        const response = await mf.dispatchFetch(
+          `http://localhost/cdn-cgi/handler/scheduled?cron=*+*+*+*+*&time=${Date.now()}`,
+          { method: 'POST' }
+        );
+        if (response.status !== 200) throw new Error('Erasure cron failed');
+      },
       seedBaseline: () => seedPersonaBaseline(db),
       serverSecret,
       putMedia: (key, bytes) => bucket.put(key, bytes),

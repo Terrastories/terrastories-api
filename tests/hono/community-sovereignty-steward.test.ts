@@ -1,3 +1,9 @@
+import { CommunityErasureService } from '../../src/services/community-erasure.service.js';
+import {
+  verifyErasureRestorePoint,
+  type ErasureRecord,
+  type ErasureRecordStore,
+} from '../../src/services/erasure-record-store.js';
 /**
  * Tests for Slice 13b-A sovereignty read & steward designation:
  * - `GET /v2/community/sovereignty` (active & disabled own-admin; 403 for
@@ -260,10 +266,41 @@ describe('Slice 13b-A/B community sovereignty', () => {
       creds: elderUserCreds,
     });
 
+    const records = new Map<number, ErasureRecord>();
+    const erasureStore: ErasureRecordStore = {
+      list: async () => [...records.values()],
+      write: async (r) => {
+        records.set(r.communityId, structuredClone(r));
+      },
+    };
+    const objects = new Map<string, Uint8Array>();
+    const storage = {
+      read: async () => null,
+      delete: async (key: string) => {
+        objects.delete(key);
+      },
+      list: async (options?: { prefix?: string; limit?: number }) => {
+        const keys = [...objects.keys()]
+          .filter((k) => k.startsWith(options?.prefix ?? ''))
+          .sort();
+        return {
+          entries: keys
+            .slice(0, options?.limit ?? 20)
+            .map((key) => ({ key, uploaded: currentNow })),
+          truncated: keys.length > (options?.limit ?? 20),
+        };
+      },
+    };
+    const erasureService = new CommunityErasureService(
+      new CommunitySovereigntyRepository(db),
+      storage,
+      erasureStore
+    );
     const serverSecret = makeServerSecret();
     const app = createHonoApp({
       repository: new HonoFoundationRepository(db),
-      storage: { read: async () => null },
+      storage,
+      erasureStore,
       serverSecret,
       secureCookies: false,
       publicOrigin: API_ORIGIN,
@@ -325,6 +362,11 @@ describe('Slice 13b-A/B community sovereignty', () => {
 
     return {
       db,
+      records,
+      objects,
+      erasureStore,
+      erasureService,
+      storage,
       app,
       call,
       loginCookie,
@@ -1298,5 +1340,220 @@ describe('Slice 13b-A/B community sovereignty', () => {
         })
       ).status
     ).toBe(202);
+  });
+  for (const d1Batch of [false, true]) {
+    it(`erasure retries bytes before rows, blocks export, survives restart and guards restore (D1=${d1Batch})`, async () => {
+      const ctx = await setup({ d1Batch });
+      const cookie = await ctx.loginCookie(
+        ctx.adminUser.email!,
+        ctx.adminCreds.derivedKey
+      );
+      const own = `communities/${ctx.activeComm.id}/media/test-object`;
+      const foreign = `communities/${ctx.foreignComm.id}/media/test-object`;
+      ctx.objects.set(own, new Uint8Array([1]));
+      ctx.objects.set(foreign, new Uint8Array([2]));
+      expect(
+        (
+          await ctx.call('POST', '/v2/community/erasure', {
+            cookie,
+            body: { confirmFinality: true },
+          })
+        ).status
+      ).toBe(401);
+      expect(
+        (
+          await ctx.call('POST', '/v2/community/erasure', {
+            cookie,
+            body: {
+              confirmFinality: false,
+              currentDerivedKey: ctx.adminCreds.derivedKey,
+            },
+          })
+        ).status
+      ).toBe(400);
+      const response = await ctx.call('POST', '/v2/community/erasure', {
+        cookie,
+        body: {
+          confirmFinality: true,
+          currentDerivedKey: ctx.adminCreds.derivedKey,
+        },
+      });
+      expect(response.status).toBe(202);
+      expect((await response.json()).data.request.state).toBe('requested');
+      expect(ctx.objects.has(own)).toBe(false);
+      expect(ctx.objects.has(foreign)).toBe(true);
+      expect(ctx.records.get(ctx.activeComm.id)?.completedAt).toBeNull();
+      await expect(
+        verifyErasureRestorePoint(ctx.erasureStore, ctx.getNow())
+      ).rejects.toThrow('Restore point');
+      const afterCookie = await ctx.loginCookie(
+        ctx.adminUser.email!,
+        ctx.adminCreds.derivedKey
+      );
+      expect(
+        (
+          await ctx.call('POST', '/v2/community/export', {
+            cookie: afterCookie,
+            body: {},
+          })
+        ).status
+      ).toBe(403);
+      const restarted = new CommunityErasureService(
+        new CommunitySovereigntyRepository(ctx.db),
+        ctx.storage,
+        ctx.erasureStore
+      );
+      await restarted.sweep(ctx.getNow());
+      expect(
+        await ctx.db
+          .select()
+          .from(communitiesSqlite)
+          .where(eq(communitiesSqlite.id, ctx.activeComm.id))
+      ).toHaveLength(0);
+      expect(ctx.records.get(ctx.activeComm.id)?.outcome).toBe('completed');
+      await ctx.db.insert(communitiesSqlite).values({
+        id: ctx.activeComm.id,
+        name: 'Restored',
+        slug: 'restored-erased',
+        isActive: true,
+      });
+      ctx.objects.set(own, new Uint8Array([9]));
+      await restarted.reconcileRestore(ctx.getNow(), ctx.getNow());
+      expect(ctx.objects.has(own)).toBe(false);
+      expect(
+        await ctx.db
+          .select()
+          .from(communitiesSqlite)
+          .where(eq(communitiesSqlite.id, ctx.activeComm.id))
+      ).toHaveLength(0);
+
+      await verifyErasureRestorePoint(ctx.erasureStore, ctx.getNow());
+      await expect(
+        verifyErasureRestorePoint(
+          ctx.erasureStore,
+          new Date(ctx.getNow().getTime() - 1)
+        )
+      ).rejects.toThrow();
+      const systemCookie = await ctx.loginCookie(
+        ctx.superAdmin.email!,
+        ctx.superAdminCreds.derivedKey
+      );
+      const listing = await ctx.call('GET', '/v2/admin/erasures', {
+        cookie: systemCookie,
+      });
+      expect(listing.status).toBe(200);
+      expect((await listing.json()).data[0].requestingActorId).toBe(
+        ctx.adminUser.id
+      );
+      ctx.advanceMs(30 * 86400000);
+      const freshSystemCookie = await ctx.loginCookie(
+        ctx.superAdmin.email!,
+        ctx.superAdminCreds.derivedKey
+      );
+      const redacted = await ctx.call('GET', '/v2/admin/erasures', {
+        cookie: freshSystemCookie,
+      });
+      expect((await redacted.json()).data[0].requestingActorId).toBeNull();
+      expect(ctx.records.get(ctx.activeComm.id)?.requestingActorId).toBeNull();
+    });
+  }
+
+  it('steward erasure stays cancellable until its deadline then starts deletion', async () => {
+    const ctx = await setup();
+    const admin = await ctx.loginCookie(
+      ctx.adminUser.email!,
+      ctx.adminCreds.derivedKey
+    );
+    expect(
+      (
+        await ctx.call('PUT', '/v2/community/steward', {
+          cookie: admin,
+          body: {
+            stewardUserId: ctx.memberUser.id,
+            currentDerivedKey: ctx.adminCreds.derivedKey,
+          },
+        })
+      ).status
+    ).toBe(200);
+    const steward = await ctx.loginCookie(
+      ctx.memberUser.email!,
+      ctx.memberCreds.derivedKey
+    );
+    const body = {
+      confirmFinality: true,
+      currentDerivedKey: ctx.memberCreds.derivedKey,
+    };
+    const notice = await ctx.call('POST', '/v2/community/erasure', {
+      cookie: steward,
+      body,
+    });
+    expect(notice.status).toBe(202);
+    expect((await notice.json()).data.request.state).toBe('notice');
+    expect(ctx.records.size).toBe(0);
+    expect(
+      (
+        await ctx.call('POST', '/v2/community/sovereignty/cancel', {
+          cookie: admin,
+          body: { currentDerivedKey: ctx.adminCreds.derivedKey },
+        })
+      ).status
+    ).toBe(200);
+    expect(
+      (
+        await ctx.call('POST', '/v2/community/erasure', {
+          cookie: steward,
+          body,
+        })
+      ).status
+    ).toBe(202);
+    ctx.advanceMs(7 * 86400000);
+    await ctx.erasureService.sweep(ctx.getNow());
+    expect(ctx.records.get(ctx.activeComm.id)?.requestingActorId).toBe(
+      ctx.memberUser.id
+    );
+    expect(ctx.records.get(ctx.activeComm.id)?.outcome).toBe('completed');
+  });
+
+  it('failed storage deletion retains rows and pending record until a later pass', async () => {
+    const ctx = await setup();
+    const cookie = await ctx.loginCookie(
+      ctx.adminUser.email!,
+      ctx.adminCreds.derivedKey
+    );
+    const key = `communities/${ctx.activeComm.id}/media/interrupted`;
+    ctx.objects.set(key, new Uint8Array([1]));
+    const original = ctx.storage.delete;
+    ctx.storage.delete = async () => {
+      throw new Error('simulated failure');
+    };
+    expect(
+      (
+        await ctx.call('POST', '/v2/community/erasure', {
+          cookie,
+          body: {
+            confirmFinality: true,
+            currentDerivedKey: ctx.adminCreds.derivedKey,
+          },
+        })
+      ).status
+    ).toBe(202);
+    expect(ctx.objects.has(key)).toBe(true);
+    expect(ctx.records.get(ctx.activeComm.id)?.outcome).toBe('pending');
+    expect(
+      await ctx.db
+        .select()
+        .from(usersSqlite)
+        .where(eq(usersSqlite.communityId, ctx.activeComm.id))
+    ).not.toHaveLength(0);
+    await expect(async () => {
+      await ctx.db
+        .update(communitiesSqlite)
+        .set({ isActive: true })
+        .where(eq(communitiesSqlite.id, ctx.activeComm.id));
+    }).rejects.toThrow();
+    ctx.storage.delete = original;
+    await ctx.erasureService.sweep(ctx.getNow());
+    await ctx.erasureService.sweep(ctx.getNow());
+    expect(ctx.records.get(ctx.activeComm.id)?.outcome).toBe('completed');
   });
 });

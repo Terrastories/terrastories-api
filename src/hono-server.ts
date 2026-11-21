@@ -1,3 +1,6 @@
+import { CommunityErasureService } from './services/community-erasure.service.js';
+import { CommunitySovereigntyRepository } from './repositories/community-sovereignty.repository.js';
+import { createNodeErasureRecordStore } from './node-erasure-record-store.js';
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
 import { CommunityExportService } from './services/community-export.service.js';
 import { EXPORT_EXPIRY_GRACE_MS } from './shared/export-policy.js';
@@ -40,7 +43,11 @@ const db = await getDb();
 const storage = await createLocalStorage(
   process.env.HONO_STORAGE_ROOT ?? './uploads'
 );
+const erasureStore = process.env.ERASURE_RECORDS_ROOT
+  ? await createNodeErasureRecordStore(process.env.ERASURE_RECORDS_ROOT)
+  : undefined;
 const app = createHonoApp({
+  erasureStore,
   repository: new HonoFoundationRepository(db),
   // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
   // production-like modes; prelogin fails closed when absent.
@@ -99,7 +106,7 @@ const maintenanceSweepTimers = scheduleMaintenanceSweeps(() => {
   // Each job already catches its own failure; this catch keeps any
   // unexpected throw from becoming an unhandled rejection that ends the
   // process.
-  runMaintenanceSweeps(db, { storage }).catch(() => {
+  runMaintenanceSweeps(db, { storage, erasureStore }).catch(() => {
     // eslint-disable-next-line no-console -- operator channel; content-free
     console.warn('maintenance sweeps: run failed');
   });
@@ -111,7 +118,27 @@ const exportExpiryService = new CommunityExportService(
   new CommunityExportRepository(db),
   storage
 );
+const erasureService = erasureStore
+  ? new CommunityErasureService(
+      new CommunitySovereigntyRepository(db),
+      storage,
+      erasureStore
+    )
+  : undefined;
+let erasureSweepRunning = false;
 const exportExpiryTimer = setInterval(() => {
+  if (erasureService && !erasureSweepRunning) {
+    erasureSweepRunning = true;
+    void erasureService
+      .sweep(new Date())
+      .catch(() => {
+        // eslint-disable-next-line no-console -- content-free operator channel
+        console.warn('maintenance: community erasure sweep failed');
+      })
+      .finally(() => {
+        erasureSweepRunning = false;
+      });
+  }
   void exportExpiryService.cleanupExpiredExports().catch(() => {
     // eslint-disable-next-line no-console -- content-free operator channel
     console.warn('maintenance: expired export sweep failed');

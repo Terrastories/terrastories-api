@@ -1332,6 +1332,13 @@ export class CommunitySovereigntyRepository {
             .where(eq(this.tables.users.id, actorId))
             .for('update');
         }
+        if (actorId === null)
+          await tx
+            .select({ id: this.tables.users.id })
+            .from(this.tables.users)
+            .where(eq(this.tables.users.communityId, communityId))
+            .orderBy(this.tables.users.id)
+            .for('update');
         // A disable trigger deletes all community sessions. Lock them in id order
         // before touching requests, including the step-up session itself.
         await tx
@@ -1429,9 +1436,12 @@ export class CommunitySovereigntyRepository {
     now: Date;
     auditMeta: SovereigntyAuditMeta;
     noticeEndsAt: number | null;
+    kind?: SovereigntyRequestKind;
   }): Promise<SovereigntyRequestRecord | null> {
     const { communityId, actorId, role, requestId, stepUp, now, auditMeta } =
       input;
+    const kind = input.kind ?? 'withdrawal';
+    const erasure = kind === 'erasure';
     const ms = now.getTime();
     const {
       communitySovereigntyRequests: requests,
@@ -1464,7 +1474,7 @@ export class CommunitySovereigntyRepository {
             now,
             auditMeta,
             sql`${gate} and exists (select 1 from community_sovereignty_requests s
-            where s.community_id = ${communityId} and s.kind = 'withdrawal'
+            where s.community_id = ${communityId} and s.kind = ${kind}
               and s.state = 'notice')`
           )
         );
@@ -1493,11 +1503,11 @@ export class CommunitySovereigntyRepository {
           .insert(requests)
           .select(
             sql`select
-        ${requestId}, ${communityId}, ${'withdrawal'}, ${role === 'admin' ? 'completed' : 'notice'},
+        ${requestId}, ${communityId}, ${kind}, ${role === 'admin' ? (erasure ? 'requested' : 'completed') : 'notice'},
         ${actorId}, ${role}, ${ms}, ${input.noticeEndsAt}, ${role === 'admin' ? ms : null},
-        ${null}, ${null}, ${role === 'admin' ? ms : null}, ${ms}
+        ${null}, ${null}, ${role === 'admin' && !erasure ? ms : null}, ${ms}
         where ${gate} and not exists (select 1 from community_sovereignty_requests p
-          where p.community_id = ${communityId} and p.kind = 'withdrawal' and p.state in ('notice','requested','executing'))`
+          where p.community_id = ${communityId} and p.kind = ${kind} and p.state in ('notice','requested','executing'))`
           )
           .returning(),
         this.conditionalAudit(
@@ -1505,8 +1515,12 @@ export class CommunitySovereigntyRepository {
           communityId,
           actorId,
           role === 'admin'
-            ? SOVEREIGNTY_AUDIT_ACTIONS.WITHDRAWAL_COMPLETED
-            : SOVEREIGNTY_AUDIT_ACTIONS.WITHDRAWAL_NOTICE_STARTED,
+            ? erasure
+              ? SOVEREIGNTY_AUDIT_ACTIONS.ERASURE_REQUESTED
+              : SOVEREIGNTY_AUDIT_ACTIONS.WITHDRAWAL_COMPLETED
+            : erasure
+              ? SOVEREIGNTY_AUDIT_ACTIONS.ERASURE_NOTICE_STARTED
+              : SOVEREIGNTY_AUDIT_ACTIONS.WITHDRAWAL_NOTICE_STARTED,
           requestId,
           now,
           auditMeta,
@@ -1736,5 +1750,209 @@ export class CommunitySovereigntyRepository {
       });
     }
     return due.length < limit;
+  }
+  async erasurePending(communityId: number): Promise<boolean> {
+    const r = this.tables.communitySovereigntyRequests;
+    const rows = await this.db
+      .select({ id: r.id })
+      .from(r)
+      .where(
+        and(
+          eq(r.communityId, communityId),
+          eq(r.kind, 'erasure'),
+          inArray(r.state, ['requested', 'executing'])
+        )
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async erasureRestoreBlocked(now: Date): Promise<boolean> {
+    const r = this.tables.communitySovereigntyRequests;
+    const rows = await this.db
+      .select({ id: r.id })
+      .from(r)
+      .where(
+        and(
+          eq(r.kind, 'erasure'),
+          or(
+            inArray(r.state, ['requested', 'executing']),
+            and(
+              eq(r.state, 'notice'),
+              sql`${r.noticeEndsAt} <= ${now.getTime()}`
+            )
+          )
+        )
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async erasureWork(limit = 5): Promise<SovereigntyRequestRecord[]> {
+    const r = this.tables.communitySovereigntyRequests;
+    const rows = await this.db
+      .select()
+      .from(r)
+      .where(
+        and(eq(r.kind, 'erasure'), inArray(r.state, ['requested', 'executing']))
+      )
+      .orderBy(r.requestedAt, r.id)
+      .limit(limit);
+    return rows.map(
+      (row: Parameters<CommunitySovereigntyRepository['toRequestRecord']>[0]) =>
+        this.toRequestRecord(row)
+    );
+  }
+
+  async activateDueErasures(now: Date): Promise<void> {
+    const r = this.tables.communitySovereigntyRequests;
+    const rows = await this.db
+      .select({ id: r.id, communityId: r.communityId })
+      .from(r)
+      .where(
+        and(
+          eq(r.kind, 'erasure'),
+          eq(r.state, 'notice'),
+          sql`${r.noticeEndsAt} <= ${now.getTime()}`
+        )
+      )
+      .orderBy(r.noticeEndsAt, r.id)
+      .limit(5);
+    for (const row of rows)
+      await this.sovereigntyUnit(Number(row.communityId), null, (db) => {
+        const marker = sql`exists (select 1 from community_sovereignty_requests where id=${row.id} and state='requested')`;
+        return [
+          db
+            .update(r)
+            .set({
+              state: 'requested',
+              effectiveAt: sql`${r.noticeEndsAt}`,
+              updatedAt: now.getTime(),
+            })
+            .where(
+              and(
+                eq(r.id, row.id),
+                eq(r.state, 'notice'),
+                sql`${r.noticeEndsAt} <= ${now.getTime()}`
+              )
+            )
+            .returning(),
+          this.conditionalAudit(
+            db,
+            Number(row.communityId),
+            null,
+            SOVEREIGNTY_AUDIT_ACTIONS.ERASURE_REQUESTED,
+            String(row.id),
+            now,
+            { ipAddress: null, userAgent: null },
+            marker
+          ),
+          db
+            .update(this.tables.communities)
+            .set({ isActive: false, updatedAt: now })
+            .where(and(eq(this.tables.communities.id, row.communityId), marker))
+            .returning(),
+        ];
+      });
+  }
+
+  async erasureUploads(communityId: number) {
+    const j = this.tables.exportJobs;
+    return this.db
+      .select({ id: j.id, key: j.zipStorageKey, uploadId: j.zipUploadId })
+      .from(j)
+      .where(and(eq(j.communityId, communityId), isNotNull(j.zipUploadId)))
+      .limit(10) as Promise<
+      Array<{ id: string; key: string | null; uploadId: string | null }>
+    >;
+  }
+
+  async clearErasureUpload(id: string, uploadId: string): Promise<void> {
+    const j = this.tables.exportJobs;
+    await this.db
+      .update(j)
+      .set({ zipUploadId: null })
+      .where(and(eq(j.id, id), eq(j.zipUploadId, uploadId)));
+  }
+
+  async eraseRows(communityId: number, now: Date): Promise<void> {
+    const t = this.tables;
+    await this.sovereigntyUnit(communityId, null, (db) => [
+      // Delete only this community's audit history. Cross-community/system
+      // history survives; only its reference to an erased account is detached.
+      db
+        .delete(t.auditEntries)
+        .where(eq(t.auditEntries.communityId, communityId))
+        .returning({ id: t.auditEntries.id }),
+      db
+        .update(t.auditEntries)
+        .set({ actorId: null })
+        .where(
+          inArray(
+            t.auditEntries.actorId,
+            db
+              .select({ id: t.users.id })
+              .from(t.users)
+              .where(eq(t.users.communityId, communityId))
+          )
+        )
+        .returning({ id: t.auditEntries.id }),
+      db
+        .update(t.files)
+        .set({ uploadedBy: null })
+        .where(
+          inArray(
+            t.files.uploadedBy,
+            db
+              .select({ id: t.users.id })
+              .from(t.users)
+              .where(eq(t.users.communityId, communityId))
+          )
+        )
+        .returning({ id: t.files.id }),
+      ...[
+        t.attachments,
+        t.externalMediaLinks,
+        t.storyPlaces,
+        t.storySpeakers,
+        t.importManifests,
+        t.exportTokens,
+        t.exportJobs,
+        t.communityMapConfigs,
+        t.stories,
+        t.speakers,
+        t.places,
+        t.files,
+        t.themes,
+        t.claimTokens,
+        t.authThrottle,
+        t.loginCodes,
+      ].map((table) =>
+        db
+          .delete(table)
+          .where(eq(table.communityId, communityId))
+          .returning({ communityId: table.communityId })
+      ),
+      db
+        .delete(t.users)
+        .where(eq(t.users.communityId, communityId))
+        .returning({ id: t.users.id }),
+      db
+        .delete(t.communities)
+        .where(eq(t.communities.id, communityId))
+        .returning({ id: t.communities.id }),
+      buildAuditEntryInsert(
+        db,
+        {
+          communityId: null,
+          actorId: null,
+          action: SOVEREIGNTY_AUDIT_ACTIONS.ERASURE_COMPLETED,
+          resourceType: 'system',
+          resourceIds: [communityId],
+          outcome: 'success',
+        },
+        now
+      ).returning(),
+    ]);
   }
 }

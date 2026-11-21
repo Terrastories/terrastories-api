@@ -127,6 +127,13 @@
       "when": 1795608000000,
       "tag": "0017_community_sovereignty",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795608001000,
+      "tag": "0018_erasure_lifecycle_guard",
+      "breakpoints": true
     }
   ]
 }

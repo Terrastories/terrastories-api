@@ -1,3 +1,8 @@
+import type { CommunityErasureService } from '../services/community-erasure.service.js';
+import {
+  redactErasureActor,
+  type ErasureRecordStore,
+} from '../services/erasure-record-store.js';
 /**
  * Hono routes for Slice 13b community sovereignty endpoints
  * (SPEC-V2 §6.2, §6.8, §7 #187; route registry §9).
@@ -20,6 +25,8 @@ export interface CommunitySovereigntyRoutesOptions {
   repository: CommunitySovereigntyRepository;
   authRepository: HonoAuthRepository;
   serverSecret?: string;
+  erasureStore?: ErasureRecordStore;
+  erasureService?: CommunityErasureService;
   ipFor: (c: Context) => string;
   now: () => Date;
 }
@@ -37,8 +44,25 @@ export function registerCommunitySovereigntyRoutes(
   const service = new CommunitySovereigntyService(
     options.repository,
     options.authRepository,
-    options.serverSecret
+    options.serverSecret,
+    options.erasureStore
   );
+
+  app.get('/v2/admin/erasures', async (c) => {
+    if (actorOf(c).role !== 'super_admin' || actorOf(c).communityId !== null)
+      return c.json({ error: 'Forbidden' }, 403);
+    if (!options.erasureStore)
+      return c.json({ error: 'Service unavailable' }, 503);
+    const records = await options.erasureStore.list();
+    const data = [];
+    for (const record of records) {
+      const redacted = redactErasureActor(record, options.now());
+      if (redacted.requestingActorId !== record.requestingActorId)
+        await options.erasureStore.write(redacted);
+      data.push(redacted);
+    }
+    return c.json({ data }, 200);
+  });
 
   app.get('/v2/community/sovereignty', async (c) => {
     const result = await service.getSovereignty(actorOf(c));
@@ -67,6 +91,7 @@ export function registerCommunitySovereigntyRoutes(
     return c.json(result.body, result.status);
   });
   for (const [path, action] of [
+    ['/v2/community/erasure', service.erase.bind(service)],
     ['/v2/community/withdrawal', service.withdraw.bind(service)],
     ['/v2/community/sovereignty/cancel', service.cancel.bind(service)],
   ] as const) {
@@ -84,6 +109,18 @@ export function registerCommunitySovereigntyRoutes(
           userAgent: c.req.header('user-agent'),
         }
       );
+      if (
+        path === '/v2/community/erasure' &&
+        result.status === 202 &&
+        options.erasureService
+      ) {
+        try {
+          await options.erasureService.sweep(options.now());
+        } catch {
+          // eslint-disable-next-line no-console -- content-free retry signal
+          console.warn('maintenance: erasure pending retry');
+        }
+      }
       return c.json(result.body, result.status);
     });
   }

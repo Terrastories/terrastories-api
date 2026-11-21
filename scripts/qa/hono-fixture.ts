@@ -1,3 +1,6 @@
+import { CommunityErasureService } from '../../src/services/community-erasure.service.js';
+import { CommunitySovereigntyRepository } from '../../src/repositories/community-sovereignty.repository.js';
+import type { ErasureRecord } from '../../src/services/erasure-record-store.js';
 /**
  * In-process Hono V2 persona fixture (#199 phase 2).
  *
@@ -107,6 +110,7 @@ import {
   PutCommunityStewardResponseSchema,
   CommunityWithdrawalResponseSchema,
   CancelSovereigntyResponseSchema,
+  CommunityErasureResponseSchema,
 } from '../../src/shared/schemas/community-sovereignty.js';
 import { EXPORT_TOKEN_TTL_MS } from '../../src/shared/export-policy.js';
 import { parseDeterministicZip } from '../../src/shared/utils/deterministic-zip.js';
@@ -308,6 +312,7 @@ export interface HonoQaBackend {
   serverSecret: string;
   putMedia: (key: string, bytes: Uint8Array) => Promise<void>;
   hasMedia?: (key: string) => Promise<boolean>;
+  runErasureSweep?: () => Promise<void>;
   handler: (observeResponseCookies: (response: Response) => void) => Handler;
   routes: Endpoint[];
   close: () => Promise<void>;
@@ -1619,6 +1624,7 @@ export async function createFixture(
     let handler: Handler | undefined;
     let baseUrl: string | undefined;
     let routes: Endpoint[];
+    let erasureSweep = backend?.runErasureSweep;
     if (backend) {
       // The backend states its coverage table; the fixture does not infer
       // one from `backend` presence. Only Workers/workerd runs the served
@@ -1628,7 +1634,41 @@ export async function createFixture(
       routes = backend.routes;
       handler = backend.handler(observeResponseCookies);
     } else {
+      const erasureRecords = new Map<number, ErasureRecord>();
+      erasureSweep = async () => {
+        await new CommunityErasureService(
+          new CommunitySovereigntyRepository(db),
+          {
+            read: async () => null,
+            delete: async (key) => {
+              storage.delete(key);
+            },
+            list: async (options) => {
+              const keys = [...storage.keys()]
+                .filter((k) => k.startsWith(options?.prefix ?? ''))
+                .sort();
+              const page = keys.slice(0, options?.limit ?? 20);
+              return {
+                entries: page.map((key) => ({ key, uploaded: new Date() })),
+                truncated: page.length < keys.length,
+              };
+            },
+          },
+          {
+            list: async () => [...erasureRecords.values()],
+            write: async (r) => {
+              erasureRecords.set(r.communityId, structuredClone(r));
+            },
+          }
+        ).sweep(new Date());
+      };
       const app = createHonoApp({
+        erasureStore: {
+          list: async () => [...erasureRecords.values()],
+          write: async (r) => {
+            erasureRecords.set(r.communityId, structuredClone(r));
+          },
+        },
         repository: new HonoFoundationRepository(db),
         secureCookies: false,
         // The in-process fixture presents `cf-connecting-ip` to isolate buckets.
@@ -1671,6 +1711,16 @@ export async function createFixture(
           },
           async delete(key) {
             storage.delete(key);
+          },
+          async list(options) {
+            const keys = [...storage.keys()]
+              .filter((k) => k.startsWith(options?.prefix ?? ''))
+              .sort();
+            const page = keys.slice(0, options?.limit ?? 20);
+            return {
+              entries: page.map((key) => ({ key, uploaded: new Date() })),
+              truncated: page.length < keys.length,
+            };
           },
         },
       });
@@ -10768,6 +10818,119 @@ export async function createFixture(
                 parsed.data.data.recentRequests.some(
                   (r) =>
                     r.initiatedByRole === 'steward' && r.state === 'completed'
+                )
+              );
+            },
+          },
+          {
+            name: 'community administrator cannot read system erasure records',
+            method: 'GET',
+            path: '/v2/admin/erasures',
+            expected: 403,
+            useSavedCookie: 'sovAdminAfter',
+          },
+          {
+            name: 'system privilege alone cannot erase another community',
+            method: 'POST',
+            path: '/v2/community/erasure',
+            expected: 403,
+            useSavedCookie: 'sovSystem',
+            body: {
+              confirmFinality: true,
+              communityId: foreignCommunityId,
+              currentDerivedKey: superAdminNewKey,
+            },
+          },
+          {
+            name: 'erasure requires explicit finality confirmation',
+            method: 'POST',
+            path: '/v2/community/erasure',
+            expected: 400,
+            useSavedCookie: 'sovAdminAfter',
+            body: { currentDerivedKey: HONO_PERSONA_DERIVED_KEY },
+          },
+          {
+            name: 'withdrawn own administrator requests irreversible erasure',
+            method: 'POST',
+            path: '/v2/community/erasure',
+            expected: 202,
+            useSavedCookie: 'sovAdminAfter',
+            body: {
+              confirmFinality: true,
+              currentDerivedKey: HONO_PERSONA_DERIVED_KEY,
+            },
+            check: (body) => {
+              const parsed = CommunityErasureResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.request.kind === 'erasure' &&
+                parsed.data.data.request.state === 'requested' &&
+                parsed.data.data.status === 'disabled' &&
+                parsed.data.data.erasureRecord?.outcome === 'pending'
+              );
+            },
+          },
+          {
+            name: 'system administrator reads content-free external erasure record',
+            method: 'GET',
+            path: '/v2/admin/erasures',
+            expected: 200,
+            useSavedCookie: 'sovSystem',
+            check: (body) => {
+              const data = (
+                body as {
+                  data?: Array<{
+                    communityId: number;
+                    requestingActorId: number | null;
+                    requestedAt: string;
+                  }>;
+                }
+              ).data;
+              return (
+                Array.isArray(data) &&
+                data.some(
+                  (r) =>
+                    r.communityId === communityId &&
+                    r.requestingActorId === communityUserIds.admin &&
+                    typeof r.requestedAt === 'string'
+                )
+              );
+            },
+          },
+          {
+            name: 'restart-safe erasure removes rows and bytes and retains completion record',
+            method: 'GET',
+            path: '/v2/admin/erasures',
+            expected: 200,
+            useSavedCookie: 'sovSystem',
+            prepare: async () => {
+              if (!erasureSweep)
+                throw new Error('Erasure maintenance seam missing');
+              for (let pass = 0; pass < 12; pass++) await erasureSweep();
+              const remaining = await db
+                .select({ id: communities.id })
+                .from(communities)
+                .where(eq(communities.id, communityId));
+              if (remaining.length)
+                throw new Error('Community erasure did not complete');
+            },
+            check: (body) => {
+              const data = (
+                body as {
+                  data?: Array<{
+                    communityId: number;
+                    outcome: string;
+                    completedAt: string | null;
+                  }>;
+                }
+              ).data;
+              return (
+                Array.isArray(data) &&
+                data.some(
+                  (r) =>
+                    r.communityId === communityId &&
+                    r.outcome === 'completed' &&
+                    r.completedAt !== null
                 )
               );
             },

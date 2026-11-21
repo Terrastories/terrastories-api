@@ -1,3 +1,5 @@
+import { createWorkerErasureRecordStore } from './worker-erasure-record-store.js';
+import { CommunityErasureService } from './services/community-erasure.service.js';
 import type {
   D1Database,
   ExecutionContext,
@@ -33,6 +35,7 @@ import { runMaintenanceSweeps } from './services/maintenance-sweeps.js';
 export interface WorkerBindings {
   DB: D1Database;
   MEDIA: R2Bucket;
+  ERASURE_RECORDS?: R2Bucket;
   /**
    * Runtime mode for the configuration gate (#150). Unset means production —
    * the strictest rules apply; only `development` and `test` relax them.
@@ -139,6 +142,8 @@ export function createWorker() {
       let buffered = 0;
       let totalSize = 0;
       let upload: R2MultipartUpload | null = null;
+      let multipartJournalKey: string | undefined;
+      let multipartFinished = false;
       const uploadedParts: R2UploadedPart[] = [];
       let partNumber = 1;
       try {
@@ -147,6 +152,13 @@ export function createWorker() {
             upload = await bucket.createMultipartUpload(key, {
               httpMetadata,
             });
+            // Persist the upload id before writing any part, including media/import
+            // uploads with no database job. Parts cannot be found by object listing.
+            multipartJournalKey = `${key.split('/').slice(0, 2).join('/')}/.multipart/${crypto.randomUUID()}.json`;
+            await bucket.put(
+              multipartJournalKey,
+              JSON.stringify({ key, uploadId: upload.uploadId })
+            );
             await options?.onMultipartUploadCreated?.(upload.uploadId);
           }
           return upload;
@@ -184,26 +196,65 @@ export function createWorker() {
             httpMetadata,
           });
         } else if (totalSize === 0 && uploadedParts.length === 0) {
-          await (upload as R2MultipartUpload).abort().catch(() => {});
+          await (upload as R2MultipartUpload).abort();
+          multipartFinished = true;
           await bucket.put(key, new Uint8Array(0), { httpMetadata });
         } else {
           if (buffered > 0) {
             await flushPart(buffered);
           }
           await (upload as R2MultipartUpload).complete(uploadedParts);
+          multipartFinished = true;
         }
         return { size: totalSize };
       } catch (error) {
         if (upload) {
-          await (upload as R2MultipartUpload).abort().catch(() => {});
+          try {
+            await (upload as R2MultipartUpload).abort();
+            multipartFinished = true;
+          } catch {
+            /* journal remains for retry */
+          }
         }
         throw error;
       } finally {
         reader.releaseLock();
+        if (multipartFinished && multipartJournalKey)
+          await bucket.delete(multipartJournalKey).catch(() => {});
       }
     },
+    erasureDeleteCost: 3,
     async delete(key) {
       if (!validStorageKey(key)) return;
+      if (
+        /^(?:communities|users)\/[1-9][0-9]*\/\.multipart\/[^/]+\.json$/.test(
+          key
+        )
+      ) {
+        const journal = await bucket.get(key);
+        if (journal) {
+          const data = await journal.json<{ key: string; uploadId: string }>();
+          const prefix = key.split('/').slice(0, 2).join('/') + '/';
+          if (
+            !validStorageKey(data.key) ||
+            !data.key.startsWith(prefix) ||
+            typeof data.uploadId !== 'string' ||
+            !data.uploadId
+          )
+            throw new Error('Invalid multipart journal');
+          try {
+            await bucket.resumeMultipartUpload(data.key, data.uploadId).abort();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : '';
+            if (
+              !/no\s*such\s*upload|not\s*found|does\s*not\s*exist|already\s*(completed|aborted)|10024/i.test(
+                message
+              )
+            )
+              throw error;
+          }
+        }
+      }
       await bucket.delete(key);
     },
     async abortMultipartUpload(key, uploadId) {
@@ -291,6 +342,9 @@ export function createWorker() {
       // workerd sets `cf-connecting-ip` and a client cannot forge it (finding E).
       isWorkers: true,
       storage: createR2Storage(env.MEDIA),
+      erasureStore: env.ERASURE_RECORDS
+        ? createWorkerErasureRecordStore(env.ERASURE_RECORDS)
+        : undefined,
     });
     apps.set(env, app);
     return app;
@@ -360,6 +414,18 @@ export function createWorker() {
           // The minute tick handles notices and export expiry. Keep the larger
           // orphan/metadata sweep hourly and within its existing budget.
           if (_controller.cron === '* * * * *') {
+            if (env.ERASURE_RECORDS) {
+              try {
+                await new CommunityErasureService(
+                  new CommunitySovereigntyRepository(db),
+                  r2Storage,
+                  createWorkerErasureRecordStore(env.ERASURE_RECORDS)
+                ).sweep(scheduledNow(), 15);
+              } catch {
+                // eslint-disable-next-line no-console -- content-free retry signal
+                console.warn('maintenance: community erasure sweep failed');
+              }
+            }
             try {
               await new CommunitySovereigntyRepository(db).applyDueWithdrawals(
                 scheduledNow()

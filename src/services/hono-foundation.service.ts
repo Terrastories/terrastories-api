@@ -98,6 +98,8 @@ export interface FoundationStorage {
     options?: StoragePutOptions
   ): Promise<{ size: number }>;
   delete?(key: string): Promise<void>;
+  /** Worst-case provider operations per erasure delete (multipart journal abort included). */
+  erasureDeleteCost?: number;
   /** Abort an in-flight multipart upload by storage key and upload id (R2). */
   abortMultipartUpload?(key: string, uploadId: string): Promise<void>;
   /**

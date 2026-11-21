@@ -1,3 +1,5 @@
+import { CommunityErasureService } from './services/community-erasure.service.js';
+import type { ErasureRecordStore } from './services/erasure-record-store.js';
 import { sessionLifetime } from './shared/session-policy.js';
 import { registerExploreAdapter } from './explore-adapter.js';
 import { ExploreAdapterRepository } from './repositories/explore-adapter.repository.js';
@@ -66,6 +68,7 @@ export type RequestHandler = (request: Request) => Promise<Response>;
 export interface FoundationOptions {
   repository: HonoFoundationRepository;
   storage: FoundationStorage;
+  erasureStore?: ErasureRecordStore;
   /**
    * Prelogin HMAC key (`AUTH_SERVER_SECRET`). Without it `POST
    * /v2/auth/prelogin` fails closed with 503 instead of answering with a
@@ -273,6 +276,8 @@ export function createHonoApp(options: FoundationOptions) {
       !(await sovereigntyRepository.applyDueWithdrawals(now()))
     )
       return c.json({ error: 'Service unavailable' }, 503);
+    if (c.req.path !== '/health')
+      await sovereigntyRepository.activateDueErasures(now());
     await next();
   });
   app.onError(() =>
@@ -385,6 +390,14 @@ export function createHonoApp(options: FoundationOptions) {
     if (!session) return c.json({ error: 'Unauthorized' }, 401);
     c.set('actor', session.user);
     c.set('sessionKind', session.kind);
+    if (
+      session.user.communityId !== null &&
+      !['/v2/community/sovereignty', '/v2/community/erasure'].includes(
+        c.req.path
+      ) &&
+      (await sovereigntyRepository.erasurePending(session.user.communityId))
+    )
+      return c.json({ error: 'Forbidden' }, 403);
     await next();
     if (
       c.res.status < 400 &&
@@ -582,6 +595,14 @@ export function createHonoApp(options: FoundationOptions) {
   });
   registerCommunitySovereigntyRoutes(app, {
     repository: sovereigntyRepository,
+    erasureStore: options.erasureStore,
+    erasureService: options.erasureStore
+      ? new CommunityErasureService(
+          sovereigntyRepository,
+          options.storage,
+          options.erasureStore
+        )
+      : undefined,
     authRepository,
     serverSecret: options.serverSecret,
     ipFor,

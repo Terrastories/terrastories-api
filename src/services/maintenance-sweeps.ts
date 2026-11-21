@@ -1,3 +1,5 @@
+import { CommunityErasureService } from './community-erasure.service.js';
+import type { ErasureRecordStore } from './erasure-record-store.js';
 /**
  * Scheduled maintenance sweeps for the hourly Workers cron and the Node
  * unref'd interval (§6.7 §6.8): scrub expired audit network metadata, delete
@@ -33,6 +35,7 @@ export interface RunMaintenanceSweepsOptions {
   log?: (message: string) => void;
   /** Storage adapter for per-object expired export artifact cleanup (§7). */
   storage?: FoundationStorage;
+  erasureStore?: ErasureRecordStore;
   /** Optional batch limit for expired export cleanup. */
   exportSweepLimit?: number;
   /** Workers uses its dedicated minute tick to preserve the hourly R2 budget. */
@@ -82,6 +85,17 @@ export async function runMaintenanceSweeps(
     await auth.sweepAuthThrottle(nowMs);
   } catch {
     log('maintenance: auth throttle sweep failed');
+  }
+  if (options.storage && options.erasureStore) {
+    try {
+      await new CommunityErasureService(
+        new CommunitySovereigntyRepository(database),
+        options.storage,
+        options.erasureStore
+      ).sweep(nowDate);
+    } catch {
+      log('maintenance: community erasure sweep failed');
+    }
   }
   if (options.storage) {
     try {

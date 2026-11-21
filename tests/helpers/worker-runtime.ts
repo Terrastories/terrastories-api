@@ -70,7 +70,7 @@ export function startWorkerRuntime(
     compatibilityDate: options.compatibilityDate ?? compatibilityDate,
     compatibilityFlags: options.compatibilityFlags,
     d1Databases: ['DB'],
-    r2Buckets: ['MEDIA'],
+    r2Buckets: ['MEDIA', 'ERASURE_RECORDS'],
     bindings,
     unsafeTriggerHandlers: options.unsafeTriggerHandlers,
   });

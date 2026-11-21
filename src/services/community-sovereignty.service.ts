@@ -1,3 +1,4 @@
+import type { ErasureRecordStore } from './erasure-record-store.js';
 /**
  * Service layer for Slice 13b community sovereignty endpoints
  * (SPEC-V2 §6.2, §6.8, §7 #187; route registry §9).
@@ -36,11 +37,14 @@ import { parseV2Role } from '../shared/authorization/sovereignty-policy.js';
 import {
   SOVEREIGNTY_AUDIT_ACTIONS,
   STEWARD_NOTICE_PERIOD_SECONDS,
+  ERASURE_FINALITY_NOTICE,
   STEWARD_NOTICE_PERIOD_MS,
 } from '../shared/sovereignty-policy.js';
 import {
   PutCommunityStewardRequestSchema,
   CommunityWithdrawalRequestSchema,
+  CommunityErasureRequestSchema,
+  type CommunityErasureResponse,
   CancelSovereigntyRequestSchema,
   type CommunityWithdrawalResponse,
   type CancelSovereigntyResponse,
@@ -154,7 +158,8 @@ export class CommunitySovereigntyService {
   constructor(
     private readonly repository: CommunitySovereigntyRepository,
     private readonly authRepository: HonoAuthRepository,
-    private readonly serverSecret: string | undefined
+    private readonly serverSecret: string | undefined,
+    private readonly erasureStore?: ErasureRecordStore
   ) {}
 
   private async auditSecurityEvent(input: {
@@ -556,6 +561,130 @@ export class CommunitySovereigntyService {
           communityId,
           status: state!.status,
           request: toSovereigntyRequestView(request),
+        },
+      },
+    };
+  }
+
+  /** POST /v2/community/withdrawal; only designated stewards can use a locator. */
+  async erase(
+    actor: FoundationUser,
+    rawBody: unknown,
+    sessionTokenHash: string | undefined,
+    context: SovereigntyRequestContext
+  ): Promise<SovereigntyServiceResult<CommunityErasureResponse>> {
+    const parsed = CommunityErasureRequestSchema.safeParse(rawBody);
+    if (!parsed.success)
+      return {
+        status: 400,
+        body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
+      };
+    if (!this.erasureStore)
+      return { status: 503, body: SERVICE_UNAVAILABLE_BODY };
+    const data = parsed.data;
+    let communityId = actor.communityId;
+    let role: 'admin' | 'steward' =
+      actor.role === 'admin' && communityId !== null ? 'admin' : 'steward';
+    if (communityId !== null) {
+      if (data.communityId !== undefined || data.communitySlug !== undefined)
+        return {
+          status: 400,
+          body: makeValidationErrorBody([
+            {
+              path: 'communityId',
+              message: 'Community comes from the session',
+            },
+          ]),
+        };
+      if (
+        role === 'steward' &&
+        !(await this.repository.findStewardDesignation(actor.id, {
+          communityId,
+        }))
+      )
+        return { status: 403, body: FORBIDDEN_BODY };
+    } else {
+      if (actor.role !== 'super_admin')
+        return { status: 403, body: FORBIDDEN_BODY };
+      if (data.communityId === undefined && data.communitySlug === undefined)
+        return {
+          status: 400,
+          body: makeValidationErrorBody([
+            {
+              path: 'communityId',
+              message: 'An explicit community locator is required',
+            },
+          ]),
+        };
+      const target = await this.repository.findStewardDesignation(
+        actor.id,
+        data
+      );
+      if (!target) return { status: 403, body: FORBIDDEN_BODY };
+      communityId = target.communityId;
+      role = 'steward';
+    }
+    const check = await this.verifyStepUp({
+      actor,
+      currentDerivedKey: data.currentDerivedKey,
+      sessionTokenHash,
+      allowAdminIssuedSession: role === 'admin',
+      auditAction: SOVEREIGNTY_AUDIT_ACTIONS.ERASURE_REQUESTED,
+      auditCommunityId: communityId,
+      context,
+    });
+    if (!check.ok) return { status: check.status, body: check.body };
+    const request = await this.repository.requestWithdrawal({
+      kind: 'erasure',
+      communityId,
+      actorId: actor.id,
+      role,
+      requestId: crypto.randomUUID(),
+      stepUp: check.stepUp,
+      now: context.now,
+      noticeEndsAt:
+        role === 'steward'
+          ? context.now.getTime() + STEWARD_NOTICE_PERIOD_MS
+          : null,
+      auditMeta: {
+        ipAddress: context.clientIp,
+        userAgent: sanitizeUserAgent(context.userAgent),
+      },
+    });
+    if (!request) return { status: 409, body: CONFLICT_BODY };
+    this.authRepository.invalidatePreloginMixCache();
+    await this.resetThrottleBestEffort(check.resetThrottleAccountId, context);
+    const state = await this.repository.getSovereigntyState(communityId);
+    const erasureRecord =
+      role === 'admin'
+        ? {
+            communityId,
+            requestId: request.id,
+            requestingActorId: actor.id,
+            requestedAt: request.requestedAt.toISOString(),
+            completedAt: null,
+            outcome: 'pending' as const,
+          }
+        : null;
+    if (erasureRecord) await this.erasureStore.write(erasureRecord);
+    return {
+      status: 202,
+      body: {
+        data: {
+          communityId,
+          status: state!.status,
+          request: toSovereigntyRequestView(request),
+          finalityNotice: ERASURE_FINALITY_NOTICE,
+          archiveCustody: toArchiveCustodyView(state!.archiveCustody),
+          erasureRecord: erasureRecord
+            ? {
+                communityId,
+                requestId: request.id,
+                requestedAt: erasureRecord.requestedAt,
+                completedAt: null,
+                outcome: erasureRecord.outcome,
+              }
+            : null,
         },
       },
     };

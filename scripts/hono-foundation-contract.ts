@@ -18,10 +18,11 @@ import { createHonoApp } from '../src/hono-app.js';
 import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS_JSON,
+  ADMIN_ISSUED_CODE_TTL_MS,
   AUTH_THROTTLE_MAX_FAILURES,
   authThrottleBackoffMs,
 } from '../src/shared/auth-policy.js';
-import { sha256Hex, toHex } from '../src/shared/auth-crypto.js';
+import { sha256Hex, toBase64Url, toHex } from '../src/shared/auth-crypto.js';
 import { normalizeSearchText } from '../src/shared/utils/search-normalize.js';
 import {
   sessionLifetime,
@@ -722,9 +723,11 @@ export async function runHonoFoundationContract(
       'displayName',
       'email',
       'id',
+      'recoveryCodesConfirmed',
       'role',
       'username',
     ]);
+    assert.equal(nullSuperBody.user.recoveryCodesConfirmed, false);
     assert.equal(nullSuperBody.user.communityId, null);
     assert.equal(nullSuperBody.user.username, `super_${tag}`);
     assert.equal(nullSuperBody.user.displayName, 'Null Super');
@@ -2104,6 +2107,373 @@ export async function runHonoFoundationContract(
           me(deactivationCookie),
           401,
           'the pre-race cookie must stay rejected after re-enable'
+        );
+      }
+      // Slice 11b-A cross-user redemption lock order: A redeems its own
+      // admin-issued code while presenting B's cookie and B does the mirror
+      // image. Both transactions delete the same two session rows, so they
+      // must take them under one deterministic order — otherwise each holds
+      // its own session while waiting for the other's and PG aborts one with a
+      // deadlock. The community row lock below parks both redemptions at the
+      // same point so the session phase really overlaps (a race that never
+      // forms must fail, not pass silently).
+      if (dialectOf(database) === 'postgresql') {
+        const lockAEmail = `redeem-lock-a-${tag}@example.test`;
+        const lockBEmail = `redeem-lock-b-${tag}@example.test`;
+        const lockAccounts: Array<{ id: number; email: string }> = [];
+        for (const [email, username] of [
+          [lockAEmail, `redeem_lock_a_${tag}`],
+          [lockBEmail, `redeem_lock_b_${tag}`],
+        ] as const) {
+          const [row] = await db
+            .insert(tables.users)
+            .values({
+              ...userDefaults,
+              email,
+              username,
+              role: 'admin',
+              communityId: communityA,
+            })
+            .returning();
+          userIds.push(row.id);
+          lockAccounts.push({ id: row.id, email });
+        }
+        const [lockAccountA, lockAccountB] = lockAccounts as [
+          { id: number; email: string },
+          { id: number; email: string },
+        ];
+        const cookieA = await login(lockAccountA.email);
+        const cookieB = await login(lockAccountB.email);
+        const nowMs = instant.getTime();
+        const codes: string[] = [];
+        for (const account of [lockAccountA, lockAccountB]) {
+          const rawCode = toBase64Url(
+            crypto.getRandomValues(new Uint8Array(16))
+          );
+          codes.push(rawCode);
+          await db.insert(tables.loginCodes).values({
+            communityId: communityA,
+            userId: account.id,
+            purpose: 'admin_issued',
+            codeHash: await sha256Hex(rawCode),
+            createdBy: account.id,
+            createdAt: nowMs,
+            expiresAt: nowMs + ADMIN_ISSUED_CODE_TTL_MS,
+            usedAt: null,
+            supersededAt: null,
+          });
+        }
+        const redeemWith = (rawCode: string, cookie: string, ip: string) =>
+          send(app, '/v2/auth/recovery/redeem', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              cookie,
+              'x-forwarded-for': ip,
+            },
+            body: JSON.stringify({ code: rawCode }),
+          });
+        let pendingRedeemA!: Promise<Response>;
+        let pendingRedeemB!: Promise<Response>;
+        await db.transaction(async (tx: any) => {
+          await tx.execute(
+            sql`select id from communities where id = ${communityA} for update`
+          );
+          pendingRedeemA = redeemWith(codes[0]!, cookieB, '198.51.100.230');
+          pendingRedeemB = redeemWith(codes[1]!, cookieA, '198.51.100.231');
+          pendingRedeemA.then(ignore, ignore);
+          pendingRedeemB.then(ignore, ignore);
+          const blocked = await waitForBlocked(tx, 2, Date.now() + 4000);
+          if (blocked < 2)
+            throw new Error(
+              'cross-user redeem race never materialised: both redemptions did not block behind the community lock'
+            );
+        });
+        const [redeemA, redeemB] = await Promise.all([
+          pendingRedeemA,
+          pendingRedeemB,
+        ]);
+        assert.equal(
+          redeemA.status,
+          200,
+          `cross-user redemption must not deadlock (got ${redeemA.status})`
+        );
+        assert.equal(
+          redeemB.status,
+          200,
+          `cross-user redemption must not deadlock (got ${redeemB.status})`
+        );
+        for (const account of [lockAccountA, lockAccountB]) {
+          const live = await db
+            .select({ id: sessions.id })
+            .from(sessions)
+            .where(eq(sessions.userId, account.id));
+          assert.equal(
+            live.length,
+            1,
+            'each redemption must leave exactly one fresh session and revoke the presented cross-user one'
+          );
+        }
+        const lockCodeRows = await db
+          .select({ usedAt: tables.loginCodes.usedAt })
+          .from(tables.loginCodes)
+          .where(eq(tables.loginCodes.communityId, communityA));
+        const consumedCodes = lockCodeRows.filter(
+          (row: { usedAt: unknown }) => row.usedAt !== null
+        );
+        assert.equal(
+          consumedCodes.length,
+          2,
+          'both redeemed admin-issued codes must be consumed exactly once'
+        );
+      }
+      // PR #252 bot finding 2: the password-upgrade login path must take the
+      // same deterministic session-lock order as the redemption path. A
+      // redemption (A presenting B's cookie) deletes A's sessions then B's
+      // presented row while B's password-upgrade login (B presenting A's
+      // cookie) deletes B's sessions then A's presented row; before the
+      // ordered union lock both transactions could hold one session row while
+      // waiting for the other in reverse order and PostgreSQL aborted one
+      // with a deadlock. The community row lock below parks both writers at
+      // the same point so the session phase really overlaps (a race that never
+      // forms must fail, not pass silently).
+      if (dialectOf(database) === 'postgresql') {
+        const lockUpgradeAEmail = `upglock-a-${tag}@example.test`;
+        // B is the wrapped (upgrade-eligible) account so the redeem (A
+        // presenting B's cookie) and the upgrade login (B presenting A's
+        // cookie) revoke each other's presented session row and form the
+        // reciprocal A<->B session-lock cycle the deadlock guard must see.
+        const lockUpgradeBEmail = `upglock-b-${tag}@example.test`;
+        const [lockUpgradeAccountA] = await db
+          .insert(tables.users)
+          .values({
+            ...userDefaults,
+            email: lockUpgradeAEmail,
+            username: `upglock_a_${tag}`,
+            role: 'admin',
+            communityId: communityA,
+          })
+          .returning();
+        userIds.push(lockUpgradeAccountA.id);
+        const [lockUpgradeAccountB] = await db
+          .insert(tables.users)
+          .values({
+            ...userDefaults,
+            email: lockUpgradeBEmail,
+            username: `upglock_b_${tag}`,
+            role: 'admin',
+            communityId: communityA,
+            passwordAlgorithm: 'client-bcrypt-rails+sha256',
+            passwordSalt: 'c2FsdA==',
+            passwordParams: JSON.stringify({ cost: 12 }),
+            passwordVerifier: await sha256Hex(wrappedKey),
+          })
+          .returning();
+        userIds.push(lockUpgradeAccountB.id);
+        const lockUpgradeCookieA = await login(lockUpgradeAccountA.email);
+        const oldHashA = await sha256Hex(
+          lockUpgradeCookieA.slice('ts_session='.length)
+        );
+        // Issue B an existing session without upgrading its wrapped verifier
+        // (an admin_issued redeem without a password keeps B upgrade-eligible).
+        const setupCodeB = toBase64Url(
+          crypto.getRandomValues(new Uint8Array(16))
+        );
+        await db.insert(tables.loginCodes).values({
+          communityId: communityA,
+          userId: lockUpgradeAccountB.id,
+          purpose: 'admin_issued',
+          codeHash: await sha256Hex(setupCodeB),
+          createdBy: lockUpgradeAccountB.id,
+          createdAt: instant.getTime(),
+          expiresAt: instant.getTime() + ADMIN_ISSUED_CODE_TTL_MS,
+          usedAt: null,
+          supersededAt: null,
+        });
+        const setupRedeemB = await send(app, '/v2/auth/recovery/redeem', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': '198.51.100.200',
+          },
+          body: JSON.stringify({ code: setupCodeB }),
+        });
+        assert.equal(
+          setupRedeemB.status,
+          200,
+          `setup redeem for wrapped B failed: ${await setupRedeemB.text()}`
+        );
+        const lockUpgradeCookieB = setupRedeemB.headers
+          .get('set-cookie')!
+          .split(';')[0];
+        assert.ok(lockUpgradeCookieB.startsWith('ts_session='));
+        const oldHashB = await sha256Hex(
+          lockUpgradeCookieB.slice('ts_session='.length)
+        );
+        const [seededWrappedB] = await db
+          .select({ passwordAlgorithm: tables.users.passwordAlgorithm })
+          .from(tables.users)
+          .where(eq(tables.users.id, lockUpgradeAccountB.id));
+        assert.equal(
+          seededWrappedB.passwordAlgorithm,
+          'client-bcrypt-rails+sha256',
+          'B must remain wrapped and upgrade-eligible before the race starts'
+        );
+        // Only A carries a redeemable code for the race; A's redeem presents B's cookie.
+        const rawCode = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+        const rawCodeHash = await sha256Hex(rawCode);
+        await db.insert(tables.loginCodes).values({
+          communityId: communityA,
+          userId: lockUpgradeAccountA.id,
+          purpose: 'admin_issued',
+          codeHash: rawCodeHash,
+          createdBy: lockUpgradeAccountA.id,
+          createdAt: instant.getTime(),
+          expiresAt: instant.getTime() + ADMIN_ISSUED_CODE_TTL_MS,
+          usedAt: null,
+          supersededAt: null,
+        });
+        const upgradeSaltB = Buffer.from(
+          crypto.getRandomValues(new Uint8Array(16))
+        ).toString('base64');
+        const upgradedKeyB = toHex(crypto.getRandomValues(new Uint8Array(32)));
+        const upgradedVerifierB = await sha256Hex(upgradedKeyB);
+        const redeemWhileUpgradingWith = (
+          code: string,
+          cookie: string,
+          ip: string
+        ) =>
+          send(app, '/v2/auth/recovery/redeem', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              cookie,
+              'x-forwarded-for': ip,
+            },
+            body: JSON.stringify({ code }),
+          });
+        const upgradeLoginWith = (cookie: string, identifier: string) =>
+          send(app, '/v2/auth/login', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              cookie,
+              'x-forwarded-for': '198.51.100.234',
+            },
+            body: JSON.stringify({
+              identifier,
+              derivedKey: wrappedKey,
+              upgrade: {
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: upgradeSaltB,
+                params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+                derivedKey: upgradedKeyB,
+              },
+            }),
+          });
+        let pendingRedeem!: Promise<Response>;
+        let pendingUpgrade!: Promise<Response>;
+        await db.transaction(async (tx: any) => {
+          await tx.execute(
+            sql`select id from communities where id = ${communityA} for update`
+          );
+          pendingRedeem = redeemWhileUpgradingWith(
+            rawCode,
+            lockUpgradeCookieB,
+            '198.51.100.231'
+          );
+          pendingUpgrade = upgradeLoginWith(
+            lockUpgradeCookieA,
+            lockUpgradeAccountB.email
+          );
+          pendingRedeem.then(ignore, ignore);
+          pendingUpgrade.then(ignore, ignore);
+          const blocked = await waitForBlocked(tx, 2, Date.now() + 4000);
+          if (blocked < 2)
+            throw new Error(
+              'login-vs-redeem lock race never materialised: the redemption and the upgrade login did not both block behind the community lock'
+            );
+        });
+        const [redeemResponse, upgradeResponse] = await Promise.all([
+          pendingRedeem,
+          pendingUpgrade,
+        ]);
+        if (redeemResponse.status !== 200) {
+          assert.fail(
+            `cross-user redemption versus password-upgrade login must not deadlock (got ${redeemResponse.status}: ${await redeemResponse.text()})`
+          );
+        }
+        if (upgradeResponse.status !== 200) {
+          assert.fail(
+            `password-upgrade login versus cross-user redemption must not deadlock (got ${upgradeResponse.status}: ${await upgradeResponse.text()})`
+          );
+        }
+        const newCookieA = redeemResponse.headers
+          .get('set-cookie')
+          ?.split(';')[0];
+        const newCookieB = upgradeResponse.headers
+          .get('set-cookie')
+          ?.split(';')[0];
+        assert.ok(
+          newCookieA?.startsWith('ts_session='),
+          'redeem must issue a fresh session cookie for A'
+        );
+        assert.ok(
+          newCookieB?.startsWith('ts_session='),
+          'upgrade login must issue a fresh session cookie for B'
+        );
+        const newHashA = await sha256Hex(
+          newCookieA.slice('ts_session='.length)
+        );
+        const newHashB = await sha256Hex(
+          newCookieB.slice('ts_session='.length)
+        );
+        const [upgradedRowB] = await db
+          .select({
+            passwordAlgorithm: tables.users.passwordAlgorithm,
+            passwordVerifier: tables.users.passwordVerifier,
+          })
+          .from(tables.users)
+          .where(eq(tables.users.id, lockUpgradeAccountB.id));
+        assert.equal(
+          upgradedRowB.passwordAlgorithm,
+          ARGON2ID_ALGORITHM,
+          'upgrade login must have traversed createSessionWithVerifier to upgrade B'
+        );
+        assert.equal(
+          upgradedRowB.passwordVerifier,
+          upgradedVerifierB,
+          'upgrade login must persist B’s new Argon2id verifier'
+        );
+        const liveSessionsA = await db
+          .select({ tokenHash: sessions.tokenHash })
+          .from(sessions)
+          .where(eq(sessions.userId, lockUpgradeAccountA.id));
+        assert.equal(
+          liveSessionsA.length,
+          1,
+          'A must have exactly one fresh session after redeem and cross-user revocation'
+        );
+        assert.equal(liveSessionsA[0].tokenHash, newHashA);
+        assert.notEqual(liveSessionsA[0].tokenHash, oldHashA);
+        const liveSessionsB = await db
+          .select({ tokenHash: sessions.tokenHash })
+          .from(sessions)
+          .where(eq(sessions.userId, lockUpgradeAccountB.id));
+        assert.equal(
+          liveSessionsB.length,
+          1,
+          'B must have exactly one fresh session after upgrade login and cross-user revocation'
+        );
+        assert.equal(liveSessionsB[0].tokenHash, newHashB);
+        assert.notEqual(liveSessionsB[0].tokenHash, oldHashB);
+        const [raceCodeRow] = await db
+          .select({ usedAt: tables.loginCodes.usedAt })
+          .from(tables.loginCodes)
+          .where(eq(tables.loginCodes.codeHash, rawCodeHash));
+        assert.ok(
+          raceCodeRow.usedAt !== null,
+          'redeemed race LoginCode must be marked consumed'
         );
       }
       const [wrappedBefore] = await db

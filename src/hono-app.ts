@@ -13,6 +13,15 @@ import { registerMediaRoutes } from './routes/media-writes.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
+import {
+  registerProtectedAuthRecoveryRoutes,
+  registerPublicAuthRecoveryRoutes,
+} from './routes/auth-recovery.hono.js';
+import { registerPublicBootstrapRoutes } from './routes/bootstrap.hono.js';
+import { AuthRecoveryRepository } from './repositories/auth-recovery.repository.js';
+import { AuthRecoveryService } from './services/auth-recovery.service.js';
+import { BootstrapRepository } from './repositories/bootstrap.repository.js';
+import { BootstrapService } from './services/bootstrap.service.js';
 import { MediaCleanupCoordinator } from './services/media-cleanup.service.js';
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
@@ -53,6 +62,13 @@ export interface FoundationOptions {
    * predictable fake (SPEC-V2 §7 step 1).
    */
   serverSecret?: string;
+  /**
+   * Operator-provided installation bootstrap secret (`BOOTSTRAP_SECRET`,
+   * SPEC-V2 §7 "Bootstrap and account lifecycle"). Without it the fresh
+   * installation stays closed for bootstrap and `GET /v2/bootstrap` answers
+   * `open:false` (fail closed; PR #252 bot finding 1).
+   */
+  bootstrapSecret?: string;
   secureCookies?: boolean;
   publicOrigin?: string;
   corsOrigins?: string[];
@@ -70,6 +86,8 @@ export interface FoundationOptions {
   /** The transport's observed peer address, when it can be read (Node socket). */
   clientAddress?: (c: Context) => string | null;
   mediaCleanup?: MediaCleanupCoordinator;
+  /** Optional local CA fingerprint surfaced once on field-kit bootstrap (§7). */
+  fieldKitCaFingerprint?: string;
 }
 const preloginSchema = z
   .object({
@@ -141,10 +159,25 @@ export function createHonoApp(options: FoundationOptions) {
     options.repository,
     options.storage
   );
+  const authRepository = new HonoAuthRepository(options.repository.connection);
   const authService = new HonoAuthService(
-    new HonoAuthRepository(options.repository.connection),
+    authRepository,
     options.repository,
     options.serverSecret
+  );
+  const authRecoveryService = new AuthRecoveryService(
+    new AuthRecoveryRepository(options.repository.connection),
+    authRepository,
+    options.serverSecret
+  );
+  const bootstrapService = new BootstrapService(
+    new BootstrapRepository(options.repository.connection),
+    authRepository,
+    {
+      serverSecret: options.serverSecret,
+      fieldKitCaFingerprint: options.fieldKitCaFingerprint,
+      bootstrapSecret: options.bootstrapSecret,
+    }
   );
   const configuredOrigin =
     options.publicOrigin === undefined
@@ -302,6 +335,21 @@ export function createHonoApp(options: FoundationOptions) {
   );
   // Canonical V2 unauthenticated public routes must register before the
   // `/v2/*` session gate.
+  registerPublicAuthRecoveryRoutes(app, {
+    service: authRecoveryService,
+    ipFor,
+    now,
+    setSessionCookie: (c, token, kind) =>
+      setCookie(c, 'ts_session', token, sessionCookie(kind)),
+    publicUser,
+  });
+  registerPublicBootstrapRoutes(app, {
+    service: bootstrapService,
+    ipFor,
+    now,
+    setSessionCookie: (c, token, kind) =>
+      setCookie(c, 'ts_session', token, sessionCookie(kind)),
+  });
   registerPublicCommunityRoutes(app, {
     repository: new PublicCommunitiesRepository(options.repository.connection),
     storage: options.storage,
@@ -326,7 +374,14 @@ export function createHonoApp(options: FoundationOptions) {
         sessionCookie(session.kind, session.absoluteExpiresAt, now().getTime())
       );
   });
-  app.get('/v2/auth/me', (c) => c.json({ user: publicUser(c.get('actor')) }));
+  app.get('/v2/auth/me', async (c) => {
+    const actor = c.get('actor');
+    const recoveryCodesConfirmed =
+      await options.repository.hasActiveRecoveryCodes(actor.id);
+    return c.json({
+      user: { ...publicUser(actor), recoveryCodesConfirmed },
+    });
+  });
   app.post('/v2/auth/logout', async (c) => {
     const actor = c.get('actor');
     await options.repository.revokeSession(
@@ -448,6 +503,11 @@ export function createHonoApp(options: FoundationOptions) {
     });
     deleteCookie(c, 'ts_session', cookie);
     return c.body(null, 204);
+  });
+  registerProtectedAuthRecoveryRoutes(app, {
+    service: authRecoveryService,
+    ipFor,
+    now,
   });
   const communityReadsRepository = new CommunityReadsRepository(
     options.repository.connection

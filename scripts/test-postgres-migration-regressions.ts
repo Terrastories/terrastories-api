@@ -19,7 +19,7 @@ const previousReleaseFixture = path.join(
   rootDir,
   'tests/fixtures/db/postgres-previous-release.sql'
 );
-const snapshotPath = path.join(migrationsFolder, 'meta/0012_snapshot.json');
+const snapshotPath = path.join(migrationsFolder, 'meta/0013_snapshot.json');
 
 const canonicalUniqueConstraints = [
   'communities_slug_unique',
@@ -675,6 +675,70 @@ async function verifySlice10SessionBackfill(
   assert.equal(Number(small.absolute_expires_at), absoluteLifetime);
 }
 
+async function verifyAuthThrottleClaimKindUpgrade(
+  client: ReturnType<typeof postgres>
+): Promise<void> {
+  await resetDatabase(client);
+  const through0012 = await createPostgresMigrationsFolderThrough(
+    '0012_login_codes_and_claim_tokens'
+  );
+  try {
+    await migrate(drizzle(client), { migrationsFolder: through0012 });
+  } finally {
+    await rm(through0012, { recursive: true, force: true });
+  }
+
+  await client`
+    INSERT INTO communities (id, name, slug, created_at, updated_at)
+    VALUES (1, 'AuthThrottle PG Comm', 'auththrottle-pg-comm', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+  `;
+
+  await client`
+    INSERT INTO auth_throttle (key, kind, community_id, failures, window_started_at, blocked_until)
+    VALUES
+      ('account-key', 'account', 1, 2, 1000, NULL),
+      ('ip-key', 'ip', NULL, 3, 2000, 3000)
+  `;
+
+  await migrate(drizzle(client), { migrationsFolder });
+
+  const rows = await client`
+    SELECT key, kind, community_id, failures, window_started_at, blocked_until
+    FROM auth_throttle
+    ORDER BY key
+  `;
+  assert.equal(
+    rows.length,
+    2,
+    'pre-existing auth_throttle rows must survive 0013'
+  );
+  const accountRow = rows.find((row) => String(row.key) === 'account-key');
+  const ipRow = rows.find((row) => String(row.key) === 'ip-key');
+  assert.ok(accountRow, 'account auth_throttle row must survive 0013');
+  assert.ok(ipRow, 'ip auth_throttle row must survive 0013');
+  assert.equal(String(accountRow.kind), 'account');
+  assert.equal(Number(accountRow.community_id), 1);
+  assert.equal(Number(accountRow.failures), 2);
+  assert.equal(Number(accountRow.window_started_at), 1000);
+  assert.equal(String(ipRow.kind), 'ip');
+  assert.equal(ipRow.community_id, null);
+  assert.equal(Number(ipRow.failures), 3);
+  assert.equal(Number(ipRow.window_started_at), 2000);
+  assert.equal(Number(ipRow.blocked_until), 3000);
+
+  // 0013 must accept the new 'claim' kind (community-scoped).
+  await client`
+    INSERT INTO auth_throttle (key, kind, community_id, failures, window_started_at, blocked_until)
+    VALUES ('claim-key', 'claim', 1, 0, 4000, NULL)
+  `;
+  const claimRows = await client`
+    SELECT key, kind, community_id FROM auth_throttle WHERE key = 'claim-key'
+  `;
+  assert.equal(claimRows.length, 1, "'claim' kind must be accepted after 0013");
+  assert.equal(String(claimRows[0].kind), 'claim');
+  assert.equal(Number(claimRows[0].community_id), 1);
+}
+
 async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   assert.ok(databaseUrl, 'DATABASE_URL is required');
@@ -699,6 +763,8 @@ async function main(): Promise<void> {
     await verifySlice2BackfillAndOrphanUpgrade(client);
     console.log('  6/6 Slice 10 legacy session backfill');
     await verifySlice10SessionBackfill(client);
+    console.log('  7/7 auth_throttle claim kind upgrade');
+    await verifyAuthThrottleClaimKindUpgrade(client);
     console.log('✅ PostgreSQL migration regression gate passed');
   } finally {
     await client.end();

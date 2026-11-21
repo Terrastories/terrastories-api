@@ -13,6 +13,12 @@ const okOrigin = 'https://api.terrastories.org';
 /** A valid prelogin HMAC key for production-like calls (not a literal credential). */
 const okSecret = 'prelogin-hsm-material-9f8e7d6c5b4a3f2';
 
+/**
+ * A valid installation bootstrap secret for production-like calls (not a
+ * literal credential): at least the 24-character minimum, no placeholder.
+ */
+const okBootstrapSecret = 'bootstrap-install-secret-0123456789abcdef';
+
 const refusal = (fn: () => unknown): V2RuntimeConfigError => {
   try {
     fn();
@@ -60,6 +66,7 @@ describe('V2 runtime configuration gate (#150)', () => {
         NODE_ENV: 'production',
         HONO_PUBLIC_ORIGIN: okOrigin,
         AUTH_SERVER_SECRET: okSecret,
+        BOOTSTRAP_SECRET: okBootstrapSecret,
       });
       expect(config.publicOrigin).toBe(okOrigin);
       expect(config.secureCookies).toBe(true);
@@ -147,6 +154,7 @@ describe('V2 runtime configuration gate (#150)', () => {
         HONO_PUBLIC_ORIGIN: 'http://field-kit.local:3000',
         HONO_ALLOW_PLAIN_HTTP: 'true',
         AUTH_SERVER_SECRET: okSecret,
+        BOOTSTRAP_SECRET: okBootstrapSecret,
       });
       expect(config.secureCookies).toBe(false);
     });
@@ -157,6 +165,7 @@ describe('V2 runtime configuration gate (#150)', () => {
         HONO_PUBLIC_ORIGIN: 'https://field-kit.local',
         HONO_ALLOW_PLAIN_HTTP: 'true',
         AUTH_SERVER_SECRET: okSecret,
+        BOOTSTRAP_SECRET: okBootstrapSecret,
       });
       expect(config.secureCookies).toBe(true);
     });
@@ -267,6 +276,7 @@ describe('V2 runtime configuration gate (#150)', () => {
           HONO_PUBLIC_ORIGIN: 'http://[::ffff:6501:203]:3000',
           HONO_ALLOW_PLAIN_HTTP: 'true',
           AUTH_SERVER_SECRET: okSecret,
+          BOOTSTRAP_SECRET: okBootstrapSecret,
         }).publicOrigin
       ).toBe('http://[::ffff:6501:203]:3000');
     });
@@ -346,6 +356,7 @@ describe('V2 runtime configuration gate (#150)', () => {
             NODE_ENV: 'production',
             HONO_PUBLIC_ORIGIN: okOrigin,
             AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: okBootstrapSecret,
           })
         )
       ).toBeUndefined();
@@ -356,6 +367,7 @@ describe('V2 runtime configuration gate (#150)', () => {
             HONO_PUBLIC_ORIGIN: 'http://field-kit.local:3000',
             HONO_ALLOW_PLAIN_HTTP: 'true',
             AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: okBootstrapSecret,
           })
         )
       ).toBeUndefined();
@@ -396,6 +408,7 @@ describe('V2 runtime configuration gate (#150)', () => {
           HONO_PUBLIC_ORIGIN: httpOrigin,
           HONO_ALLOW_PLAIN_HTTP: 'true',
           AUTH_SERVER_SECRET: okSecret,
+          BOOTSTRAP_SECRET: okBootstrapSecret,
         });
         expect(config.httpsRequired).toBe(false);
         expect(config.publicOrigin).toBe(httpOrigin);
@@ -467,6 +480,7 @@ describe('V2 runtime configuration gate (#150)', () => {
           HONO_PUBLIC_ORIGIN: okOrigin,
           HONO_CORS_ORIGINS: '',
           AUTH_SERVER_SECRET: okSecret,
+          BOOTSTRAP_SECRET: okBootstrapSecret,
         }).corsOrigins
       ).toEqual([]);
     });
@@ -482,6 +496,7 @@ describe('V2 runtime configuration gate (#150)', () => {
           NODE_ENV: 'production',
           HONO_PUBLIC_ORIGIN: okOrigin,
           AUTH_SERVER_SECRET: okSecret,
+          BOOTSTRAP_SECRET: okBootstrapSecret,
         }).secureCookies
       ).toBe(true);
     });
@@ -513,6 +528,7 @@ describe('V2 runtime configuration gate (#150)', () => {
         secureCookies: false,
         allowPlainHttp: true,
         authServerSecret: okSecret,
+        bootstrapSecret: okBootstrapSecret,
         names: {
           environment: 'NODE_ENV',
           publicOrigin: 'HONO_PUBLIC_ORIGIN',
@@ -558,6 +574,7 @@ describe('V2 runtime configuration gate (#150)', () => {
         PUBLIC_ORIGIN: okOrigin,
         CORS_ORIGINS: 'https://app.terrastories.org',
         AUTH_SERVER_SECRET: okSecret,
+        BOOTSTRAP_SECRET: okBootstrapSecret,
       });
       expect(config.environment).toBe('production');
       expect(config.httpsRequired).toBe(true);
@@ -706,11 +723,90 @@ describe('V2 runtime configuration gate (#150)', () => {
         NODE_ENV: 'production',
         HONO_PUBLIC_ORIGIN: okOrigin,
         AUTH_SERVER_SECRET: okSecret,
+        BOOTSTRAP_SECRET: okBootstrapSecret,
       });
       expect(config.serverSecret).toBe(okSecret);
       expect(v2RuntimeModeNotice(config)).toBeUndefined();
       // v2RuntimeModeNotice is content-free and never recites the secret.
       expect(v2RuntimeModeNotice(config) ?? '').not.toContain(okSecret);
+    });
+  });
+
+  describe('V2 installation bootstrap secret (#252, 11b round 5)', () => {
+    it('refuses a short secret padded with spaces to reach 24+ characters', () => {
+      const paddedShort = '   ' + 'b'.repeat(20) + '   ';
+      expect(paddedShort.length).toBeGreaterThanOrEqual(24);
+      expect(paddedShort.trim().length).toBeLessThan(24);
+
+      for (const invoke of [
+        () =>
+          validateWorkerV2Runtime({
+            DB: {},
+            MEDIA: {},
+            PUBLIC_ORIGIN: okOrigin,
+            AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: paddedShort,
+          } as unknown as Parameters<typeof validateWorkerV2Runtime>[0]),
+        () =>
+          validateNodeV2Runtime({
+            NODE_ENV: 'production',
+            HONO_PUBLIC_ORIGIN: okOrigin,
+            AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: paddedShort,
+          }),
+      ]) {
+        const error = refusal(invoke);
+        expect(error.message).toContain('BOOTSTRAP_SECRET');
+        expect(error.message).toContain('24 characters');
+        expect(error.message).not.toContain('bbbb');
+      }
+    });
+
+    it('refuses a whitespace-only value of 24+ spaces', () => {
+      const spacesOnly = ' '.repeat(30);
+
+      for (const invoke of [
+        () =>
+          validateWorkerV2Runtime({
+            DB: {},
+            MEDIA: {},
+            PUBLIC_ORIGIN: okOrigin,
+            AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: spacesOnly,
+          } as unknown as Parameters<typeof validateWorkerV2Runtime>[0]),
+        () =>
+          validateNodeV2Runtime({
+            NODE_ENV: 'production',
+            HONO_PUBLIC_ORIGIN: okOrigin,
+            AUTH_SERVER_SECRET: okSecret,
+            BOOTSTRAP_SECRET: spacesOnly,
+          }),
+      ]) {
+        const error = refusal(invoke);
+        expect(error.message).toContain('BOOTSTRAP_SECRET');
+        expect(error.message).toContain('required');
+      }
+    });
+
+    it('trims surrounding whitespace on a compliant 24+ character secret', () => {
+      const paddedValid = '  ' + okBootstrapSecret + '  ';
+
+      const workerConfig = validateWorkerV2Runtime({
+        DB: {},
+        MEDIA: {},
+        PUBLIC_ORIGIN: okOrigin,
+        AUTH_SERVER_SECRET: okSecret,
+        BOOTSTRAP_SECRET: paddedValid,
+      } as unknown as Parameters<typeof validateWorkerV2Runtime>[0]);
+      expect(workerConfig.bootstrapSecret).toBe(okBootstrapSecret);
+
+      const nodeConfig = validateNodeV2Runtime({
+        NODE_ENV: 'production',
+        HONO_PUBLIC_ORIGIN: okOrigin,
+        AUTH_SERVER_SECRET: okSecret,
+        BOOTSTRAP_SECRET: paddedValid,
+      });
+      expect(nodeConfig.bootstrapSecret).toBe(okBootstrapSecret);
     });
   });
 });

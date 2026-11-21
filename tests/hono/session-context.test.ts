@@ -770,6 +770,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
         displayName: 'System Super Admin',
         role: 'super_admin',
         communityId: null,
+        recoveryCodesConfirmed: false,
       },
     });
 
@@ -851,6 +852,7 @@ describe('Slice 3b HonoFoundationRepository & session middleware context (#137)'
         displayName: 'Disabled Admin',
         role: 'admin',
         communityId: disabledCommunity.id,
+        recoveryCodesConfirmed: false,
       },
     });
     expect(

@@ -63,6 +63,7 @@ export const loginCodesPg = pgTable(
   (table) => [
     pgUniqueIndex('login_codes_code_hash_unique').on(table.codeHash),
     pgIndex('login_codes_user_idx').on(table.userId),
+    pgIndex('login_codes_user_purpose_idx').on(table.userId, table.purpose),
     pgIndex('login_codes_community_idx').on(table.communityId),
     pgCheck(
       'login_codes_purpose_check',
@@ -112,6 +113,7 @@ export const loginCodesSqlite = sqliteTable(
   (table) => [
     uniqueIndex('login_codes_code_hash_unique').on(table.codeHash),
     index('login_codes_user_idx').on(table.userId),
+    index('login_codes_user_purpose_idx').on(table.userId, table.purpose),
     index('login_codes_community_idx').on(table.communityId),
     check(
       'login_codes_purpose_check',
@@ -207,5 +209,51 @@ export const claimTokensSqlite = sqliteTable(
       'claim_tokens_consumed_check',
       sql`(${table.consumedBy} IS NULL) OR (${table.consumedAt} IS NOT NULL)`
     ),
+  ]
+);
+
+/**
+ * InstallationBootstrap singleton row (Slice 11b-B, SPEC-V2 §4, §7).
+ *
+ * Permanently closes fresh-installation bootstrap once used (id = 1 enforced
+ * by CHECK constraint). Foreign keys use ON DELETE SET NULL so erasing the
+ * initial community or admin account never reopens installation bootstrap.
+ */
+export const installationBootstrapPg = pgTable(
+  'installation_bootstrap',
+  {
+    id: pgInteger('id').primaryKey().notNull(),
+    setupId: pgText('setup_id').notNull(),
+    communityId: pgInteger('community_id').references(() => communitiesPg.id, {
+      onDelete: 'set null',
+    }),
+    adminUserId: pgInteger('admin_user_id').references(() => usersPg.id, {
+      onDelete: 'set null',
+    }),
+    completedAt: bigint('completed_at', { mode: 'number' }).notNull(),
+  },
+  (table) => [
+    pgCheck('installation_bootstrap_singleton_check', sql`${table.id} = 1`),
+  ]
+);
+
+export const installationBootstrapSqlite = sqliteTable(
+  'installation_bootstrap',
+  {
+    id: integer('id').primaryKey().notNull(),
+    setupId: text('setup_id').notNull(),
+    communityId: integer('community_id').references(
+      () => communitiesSqlite.id,
+      {
+        onDelete: 'set null',
+      }
+    ),
+    adminUserId: integer('admin_user_id').references(() => usersSqlite.id, {
+      onDelete: 'set null',
+    }),
+    completedAt: integer('completed_at').notNull(),
+  },
+  (table) => [
+    check('installation_bootstrap_singleton_check', sql`${table.id} = 1`),
   ]
 );

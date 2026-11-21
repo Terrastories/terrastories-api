@@ -43,6 +43,13 @@ export interface WorkerBindings {
    */
   AUTH_SERVER_SECRET?: string;
   /**
+   * Operator-provided installation bootstrap secret (SPEC-V2 §7
+   * "Bootstrap and account lifecycle"; PR #252 bot finding 1), supplied with
+   * `wrangler secret` put — never a `vars` value. Validated by the runtime gate
+   * in production-like modes; an unset value keeps bootstrap fail-closed.
+   */
+  BOOTSTRAP_SECRET?: string;
+  /**
    * Explicit restore hold for the orphan sweeper. `'true'` pauses sweeping;
    * unset/anything else leaves it running. A storage `system/orphan-sweep-hold`
    * marker pauses it independently of this binding.
@@ -244,6 +251,7 @@ export function createWorker() {
     const app = createHonoApp({
       repository: new HonoFoundationRepository(drizzle(client)),
       serverSecret: runtimeConfig.serverSecret,
+      bootstrapSecret: runtimeConfig.bootstrapSecret,
       publicOrigin: runtimeConfig.publicOrigin,
       corsOrigins: runtimeConfig.corsOrigins,
       // workerd sets `cf-connecting-ip` and a client cannot forge it (finding E).

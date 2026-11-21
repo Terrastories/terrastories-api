@@ -42,6 +42,7 @@ const app = createHonoApp({
   // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
   // production-like modes; prelogin fails closed when absent.
   serverSecret: runtimeConfig.serverSecret,
+  bootstrapSecret: runtimeConfig.bootstrapSecret,
   publicOrigin: runtimeConfig.publicOrigin,
   corsOrigins: runtimeConfig.corsOrigins,
   // HTTP cookies are allowed only for this opt-in loopback development listener.
@@ -56,6 +57,8 @@ const app = createHonoApp({
   trustProxy: /^(1|true|yes)$/i.test(process.env.TRUSTED_PROXY ?? ''),
   trustedProxyHeader: isTrustedProxyHeader(process.env.TRUSTED_PROXY_HEADER),
   clientAddress: (c) => getConnInfo(c).remote.address ?? null,
+  fieldKitCaFingerprint:
+    process.env.FIELD_KIT_CA_FINGERPRINT?.trim() || undefined,
 });
 const server = serve({
   fetch: app.fetch,

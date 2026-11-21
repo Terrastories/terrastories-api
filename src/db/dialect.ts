@@ -36,6 +36,8 @@ import {
   loginCodesSqlite,
   claimTokensPg,
   claimTokensSqlite,
+  installationBootstrapPg,
+  installationBootstrapSqlite,
 } from './schema/login_codes.js';
 import {
   authThrottlePg,
@@ -56,6 +58,7 @@ const sqliteTables = {
   communityMapConfigs: communityMapConfigsSqlite,
   externalMediaLinks: externalMediaLinksSqlite,
   files: filesSqlite,
+  installationBootstrap: installationBootstrapSqlite,
   places: placesSqlite,
   sessions: sessionsSqlite,
   speakers: speakersSqlite,
@@ -76,6 +79,7 @@ const postgresTables = {
   communityMapConfigs: communityMapConfigsPg,
   externalMediaLinks: externalMediaLinksPg,
   files: filesPg,
+  installationBootstrap: installationBootstrapPg,
   places: placesPg,
   sessions: sessionsPg,
   speakers: speakersPg,

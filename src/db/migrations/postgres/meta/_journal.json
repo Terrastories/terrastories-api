@@ -92,6 +92,13 @@
       "when": 1795262400000,
       "tag": "0012_login_codes_and_claim_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1795348800000,
+      "tag": "0013_session_admin_code_step_up_and_login_code_idx",
+      "breakpoints": true
     }
   ]
 }

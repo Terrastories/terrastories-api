@@ -218,6 +218,12 @@ export class HonoFoundationRepository {
     revokedAt?: Date;
     revokedBy?: number;
     /**
+     * Time-bounded one-shot right to generate recovery codes without password
+     * presentation, granted only when establishing a session from an
+     * `admin_issued` LoginCode (SPEC-V2 §6.8, §6.10).
+     */
+    adminCodeStepUpExpiresAt?: Date | null;
+    /**
      * The verifier the session row must see committed before it may consume
      * the login: the verifier the plain path verified against, or the new one
      * just written by the coupled path (§7 step 4). `undefined` disables the
@@ -246,6 +252,9 @@ export class HonoFoundationRepository {
     const absoluteExpiresAt = input.absoluteExpiresAt.getTime();
     const revokedAt = input.revokedAt ? input.revokedAt.getTime() : null;
     const revokedBy = input.revokedAt ? (input.revokedBy ?? user.id) : null;
+    const adminCodeStepUpExpiresAt = input.adminCodeStepUpExpiresAt
+      ? input.adminCodeStepUpExpiresAt.getTime()
+      : null;
     // Anchor the session to the verifier the request verified against — or
     // the one the coupled write just committed — so a lost verifier race
     // yields no session and, in the coupled path, rolls the account back to
@@ -277,6 +286,10 @@ export class HonoFoundationRepository {
       absoluteExpiresAt: sql`${absoluteExpiresAt}`,
       revokedAt: revokedAt === null ? sql`null` : sql`${revokedAt}`,
       revokedBy: revokedBy === null ? sql`null` : sql`${revokedBy}`,
+      adminCodeStepUpExpiresAt:
+        adminCodeStepUpExpiresAt === null
+          ? sql`null`
+          : sql`${adminCodeStepUpExpiresAt}`,
     };
     const verifiedInsert = (database: Executor) => {
       const base = database
@@ -362,6 +375,7 @@ export class HonoFoundationRepository {
     /** Explicit device-session revocation metadata (admin revoke, §6.8). */
     revokedAt?: Date;
     revokedBy?: number;
+    adminCodeStepUpExpiresAt?: Date | null;
     /** Verifier anchor for the session write (§7 step 4). */
     expectedVerifier?: string | null;
   }): Promise<boolean> {
@@ -452,6 +466,7 @@ export class HonoFoundationRepository {
       passwordSalt: string;
       passwordParams: string;
     };
+    adminCodeStepUpExpiresAt?: Date | null;
     /** The verifier read before this write; a stale one loses the race. */
     previousVerifier?: string | null;
   }): Promise<{ established: boolean; verifierWritten: boolean }> {
@@ -583,6 +598,39 @@ export class HonoFoundationRepository {
         return await db.transaction(async (tx: Executor) => {
           // Community → users → sessions before any write (acquireCommunityFirst).
           await acquireCommunityFirst(tx);
+          // Users row before the sessions locks, keeping the one global order
+          // of every coupled-writer path (community → users → sessions) so this
+          // password-upgrade login can never lock after a redemption that took
+          // the same rows in the opposite order.
+          await tx
+            .select({ id: users.id })
+            .from(users)
+            .where(eq(users.id, input.user.id))
+            .for('update')
+            .limit(1);
+          // Take every session row this coupled write will delete under one
+          // `FOR UPDATE` in a single deterministic (ascending id) order before
+          // any write — the same union lock the redemption path takes. A
+          // cross-user upgrade login (B presenting A's cookie) deletes B's
+          // sessions and then A's presented row, so an overlapping redemption
+          // (A presenting B's cookie) must serialize here instead of holding
+          // one row while waiting for the other in reverse order (PR #252 bot
+          // finding 2; SPEC-V2 §6.8).
+          const lockSessions = () =>
+            tx
+              .select({ id: sessions.id })
+              .from(sessions)
+              .where(
+                plan.previousHash === undefined
+                  ? eq(sessions.userId, input.user.id)
+                  : or(
+                      eq(sessions.userId, input.user.id),
+                      eq(sessions.tokenHash, plan.previousHash)
+                    )
+              )
+              .orderBy(sessions.id)
+              .for('update');
+          await lockSessions();
           const updated = await verifierUpdate(tx);
           if (updated.length === 0) throw new SessionGateLost();
           // Explicit revocation: a same-verifier write never fires the
@@ -763,6 +811,27 @@ export class HonoFoundationRepository {
     await this.database
       .delete(this.sessions)
       .where(eq(this.sessions.userId, userId));
+  }
+
+  /**
+   * Whether the account currently holds at least one unconsumed,
+   * unsuperseded `recovery` LoginCode (`GET /v2/auth/me` confirmation flag).
+   */
+  async hasActiveRecoveryCodes(userId: number): Promise<boolean> {
+    const { loginCodes } = this.tables;
+    const rows = await this.database
+      .select({ id: loginCodes.id })
+      .from(loginCodes)
+      .where(
+        and(
+          eq(loginCodes.userId, userId),
+          eq(loginCodes.purpose, 'recovery'),
+          isNull(loginCodes.usedAt),
+          isNull(loginCodes.supersededAt)
+        )
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 
   async brandingFile(

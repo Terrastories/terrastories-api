@@ -238,6 +238,24 @@ export const LOGIN_CODE_ENTROPY_BYTES = 16;
  * that wants less may shrink it here, never grow it past 72h.
  */
 export const ADMIN_ISSUED_CODE_TTL_MS = 72 * 60 * 60 * 1000;
+/** Number of single-use recovery codes generated per recovery sheet (§6.8, §7). */
+export const RECOVERY_CODE_COUNT = 10;
+/**
+ * Minimum length of the operator-provided installation bootstrap secret
+ * (`BOOTSTRAP_SECRET`, SPEC-V2 §7 "Bootstrap and account lifecycle"). A
+ * deployment that cannot supply one at least this long cannot open a fresh
+ * installation for bootstrap (PR #252 bot finding 1: fail closed).
+ */
+export const BOOTSTRAP_SECRET_MIN_LENGTH = 24;
+/** Maximum lifetime of a hosted ClaimToken: 72 hours (§6.8, §7). */
+export const CLAIM_TOKEN_MAX_TTL_MS = 72 * 60 * 60 * 1000;
+/**
+ * Freshness bound for the one-shot verifier-free recovery-code generation
+ * right granted to a session established by redeeming an `admin_issued` code
+ * (SPEC-V2 §6.10 #2). Bounded well below the 12-hour standard session lifetime
+ * and consumed atomically on first use.
+ */
+export const ADMIN_CODE_STEP_UP_TTL_MS = 15 * 60 * 1000;
 
 export type SessionKind = 'standard' | 'device';
 
@@ -544,6 +562,7 @@ export const AUTH_THROTTLE_BACKOFF_MAX_MS = 60 * 60 * 1000;
 /** Keys are keyed hashes; the input prefix keeps kinds from colliding. */
 export const AUTH_THROTTLE_KEY_ACCOUNT = 'account:';
 export const AUTH_THROTTLE_KEY_IP = 'ip:';
+export const AUTH_THROTTLE_KEY_CLAIM = 'claim:';
 
 /**
  * How long a computed prelogin population mix (upgraded/total and the

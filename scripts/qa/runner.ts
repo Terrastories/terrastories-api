@@ -26,6 +26,10 @@ export interface Journey {
   steps: Step[];
   skipped?: string;
   contract?: ContractClass;
+  /** Optional per-journey handler (e.g., an isolated fresh-installation app). */
+  handler?: Handler;
+  /** Optional per-journey HTTP base URL (validated with validateBaseUrl). */
+  baseUrl?: string;
 }
 export interface Exclusion extends Endpoint {
   reason: string;
@@ -116,9 +120,13 @@ export async function runJourneys(options: {
   // into neither summary bucket.
   const isContractClass = (value: unknown): value is ContractClass =>
     value === 'canonical-v2' || value === 'legacy-v1';
+  const journeyBaseUrls = new Map<Journey, URL>();
   for (const journey of options.journeys) {
     if (journey.contract !== undefined && !isContractClass(journey.contract))
       throw new Error(`Invalid contract class on journey '${journey.persona}'`);
+    if (journey.baseUrl !== undefined) {
+      journeyBaseUrls.set(journey, validateBaseUrl(journey.baseUrl));
+    }
     for (const step of journey.steps) {
       if (step.contract !== undefined && !isContractClass(step.contract))
         throw new Error(
@@ -131,7 +139,21 @@ export async function runJourneys(options: {
       ? undefined
       : validateBaseUrl(options.baseUrl);
   const handler = baseUrl ? createHttpHandler(baseUrl) : options.handler;
-  if (!handler) throw new Error('Persona runner requires a handler or baseUrl');
+  const hasRunnableJourney = options.journeys.some(
+    (journey) => !journey.skipped
+  );
+  if (
+    !handler &&
+    (!hasRunnableJourney ||
+      options.journeys.some(
+        (journey) =>
+          !journey.skipped &&
+          journey.handler === undefined &&
+          !journeyBaseUrls.has(journey)
+      ))
+  ) {
+    throw new Error('Persona runner requires a handler or baseUrl');
+  }
   const timeoutMs = validateRequestTimeout(options.requestTimeoutMs ?? 30_000);
   const sessionCookieName = options.sessionCookieName ?? 'sessionId';
   const sessionCookiePrefix = `${sessionCookieName}=`;
@@ -150,6 +172,11 @@ export async function runJourneys(options: {
   }
   for (const journey of options.journeys) {
     if (journey.skipped) continue;
+    const journeyBaseUrl = journeyBaseUrls.get(journey);
+    const journeyHandler =
+      journeyBaseUrl !== undefined
+        ? createHttpHandler(journeyBaseUrl)
+        : (journey.handler ?? handler)!;
     let cookie = '';
     const savedCookies: Record<string, string> = {};
     const ids: Record<string, number | string> = {};
@@ -240,7 +267,7 @@ export async function runJourneys(options: {
           if (step.body !== undefined)
             headers.set('content-type', 'application/json');
           stage = 'Sending request';
-          response = await handler(
+          response = await journeyHandler(
             new Request(`http://qa.invalid${path}`, {
               method: step.method,
               headers,

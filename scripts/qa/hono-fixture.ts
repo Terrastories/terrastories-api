@@ -96,6 +96,10 @@ import {
 } from '../../src/shared/schemas/media-v2.js';
 import { CreateCommunityExportResponseSchema } from '../../src/shared/schemas/community-export.js';
 import {
+  BootstrapResponseSchema,
+  BootstrapStatusResponseSchema,
+} from '../../src/shared/schemas/bootstrap.js';
+import {
   AdminAuditEntryListResponseSchema,
   AdminCommunityListResponseSchema,
   AdminCommunityResponseSchema,
@@ -123,6 +127,7 @@ import {
   ARGON2ID_PARAMS_JSON,
   AUTH_THROTTLE_MAX_FAILURES,
   RAILS_BCRYPT_ALGORITHM,
+  RECOVERY_CODE_COUNT,
 } from '../../src/shared/auth-policy.js';
 import { sha256Hex } from '../../src/shared/auth-crypto.js';
 import type { Endpoint, Handler, Journey, Step } from './runner.js';
@@ -139,6 +144,42 @@ const meUserKeys =
 const invalidCredentials = (body: unknown): boolean =>
   (body as { error?: string }).error === 'Invalid credentials' &&
   Object.keys(body as object).length === 1;
+
+const uniformForbidden = (body: unknown): boolean =>
+  typeof body === 'object' &&
+  body !== null &&
+  Object.keys(body as object).length === 1 &&
+  (body as { error?: unknown }).error === 'Forbidden';
+
+const bootstrapOpenCheck =
+  (expectedOpen: boolean) =>
+  (body: unknown): boolean => {
+    const parsed = BootstrapStatusResponseSchema.safeParse(body);
+    return (
+      parsed.success &&
+      typeof body === 'object' &&
+      body !== null &&
+      Object.keys(body as object).length === 1 &&
+      parsed.data.open === expectedOpen
+    );
+  };
+
+const validRecoverySheet = (codes: unknown): boolean =>
+  Array.isArray(codes) &&
+  codes.length === RECOVERY_CODE_COUNT &&
+  new Set(codes).size === RECOVERY_CODE_COUNT &&
+  codes.every(
+    (code) => typeof code === 'string' && /^[A-Za-z0-9_-]{20,64}$/.test(code)
+  );
+
+const hasSessionCookie = (headers: Headers): boolean =>
+  headers.getSetCookie().some((value) => {
+    const setting = value.split(';')[0]!.trim();
+    return setting.startsWith('ts_session=') && setting !== 'ts_session=';
+  });
+
+const hasNoSessionCookie = (headers: Headers): boolean =>
+  headers.getSetCookie().every((value) => !value.includes('ts_session='));
 
 /**
  * Serialized secrets an auth body must never carry: the live session cookie
@@ -314,6 +355,14 @@ export interface HonoQaBackend {
   hasMedia?: (key: string) => Promise<boolean>;
   runErasureSweep?: () => Promise<void>;
   handler: (observeResponseCookies: (response: Response) => void) => Handler;
+  /**
+   * Isolated fresh-installation runtime with an unseeded migrated database and
+   * its own operator BOOTSTRAP_SECRET for GET/POST /v2/bootstrap QA.
+   */
+  freshBootstrap: {
+    bootstrapSecret: string;
+    handler: (observeResponseCookies: (response: Response) => void) => Handler;
+  };
   routes: Endpoint[];
   close: () => Promise<void>;
 }
@@ -438,6 +487,7 @@ export async function createFixture(
   const {
     attachments,
     auditEntries,
+    claimTokens,
     communities,
     communityMapConfigs,
     communitySovereigntyRequests,
@@ -456,10 +506,23 @@ export async function createFixture(
   const communityMedia =
     dialectOf(db) === 'postgresql' ? communityMediaPg : communityMediaSqlite;
   let server: ReturnType<typeof serve> | undefined;
+  let freshServer: ReturnType<typeof serve> | undefined;
   const closeActiveServer = async () => {
     const activeServer = server;
+    const activeFreshServer = freshServer;
     server = undefined;
-    await closeServer(activeServer);
+    freshServer = undefined;
+    const errors: unknown[] = [];
+    for (const active of [activeServer, activeFreshServer]) {
+      try {
+        await closeServer(active);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1)
+      throw new AggregateError(errors, 'HTTP persona server cleanup failed');
   };
   try {
     const fixtures = await (backend ? backend.seedBaseline() : qa!.seed());
@@ -1623,6 +1686,10 @@ export async function createFixture(
     };
     let handler: Handler | undefined;
     let baseUrl: string | undefined;
+    let freshHandler: Handler | undefined;
+    let freshBaseUrl: string | undefined;
+    let freshBootstrapSecret: string;
+    let ensureFreshBootstrap: () => Promise<unknown>;
     let routes: Endpoint[];
     let erasureSweep = backend?.runErasureSweep;
     if (backend) {
@@ -1633,6 +1700,9 @@ export async function createFixture(
       // backend passes routeTableOf of the app it actually serves.
       routes = backend.routes;
       handler = backend.handler(observeResponseCookies);
+      freshBootstrapSecret = backend.freshBootstrap.bootstrapSecret;
+      freshHandler = backend.freshBootstrap.handler(observeResponseCookies);
+      ensureFreshBootstrap = async () => undefined;
     } else {
       const erasureRecords = new Map<number, ErasureRecord>();
       const erasureFences = new Set<number>();
@@ -1739,6 +1809,28 @@ export async function createFixture(
           },
         },
       });
+      freshBootstrapSecret = toHex(crypto.getRandomValues(new Uint8Array(24)));
+      const freshServerSecret = toHex(
+        crypto.getRandomValues(new Uint8Array(24))
+      );
+      let freshAppPromise:
+        | Promise<ReturnType<typeof createHonoApp>>
+        | undefined;
+      const getFreshApp = () => {
+        freshAppPromise ??= (async () => {
+          const freshDb = await qa!.openFresh();
+          return createHonoApp({
+            repository: new HonoFoundationRepository(freshDb),
+            secureCookies: false,
+            trustProxy: true,
+            serverSecret: freshServerSecret,
+            bootstrapSecret: freshBootstrapSecret,
+            storage: { read: async () => null },
+          });
+        })();
+        return freshAppPromise;
+      };
+      ensureFreshBootstrap = getFreshApp;
       // Coverage comes from the app this fixture actually serves — the
       // default SQLite run and the in-process PostgreSQL run alike (see
       // routeTableOf for the filtering).
@@ -1761,9 +1853,32 @@ export async function createFixture(
         if (!address || typeof address === 'string')
           throw new Error('Failed to bind HTTP persona server address');
         baseUrl = `http://127.0.0.1:${address.port}`;
+
+        freshServer = serve({
+          fetch: async (request) => {
+            const freshApp = await getFreshApp();
+            const response = await freshApp.fetch(request);
+            observeResponseCookies(response);
+            return response;
+          },
+          hostname: '127.0.0.1',
+          port: 0,
+          overrideGlobalObjects: false,
+        });
+        if (!freshServer.listening) await once(freshServer, 'listening');
+        const freshAddress = freshServer.address();
+        if (!freshAddress || typeof freshAddress === 'string')
+          throw new Error('Failed to bind fresh HTTP persona server address');
+        freshBaseUrl = `http://127.0.0.1:${freshAddress.port}`;
       } else {
         handler = async (request) => {
           const response = await app.fetch(request);
+          observeResponseCookies(response);
+          return response;
+        };
+        freshHandler = async (request) => {
+          const freshApp = await getFreshApp();
+          const response = await freshApp.fetch(request);
           observeResponseCookies(response);
           return response;
         };
@@ -6613,6 +6728,186 @@ export async function createFixture(
         };
       });
     let activeAdminExport1ManifestToken = '';
+    let qaClaimBootCommunityId = 0;
+    let qaClaimBootExpiredToken = '';
+    let qaClaimBootExpiredTokenId = 0;
+    let qaClaimBootSupersededToken = '';
+    let qaClaimBootValidToken = '';
+    let qaClaimBootRecoveryCode1 = '';
+    let qaClaimBootThrottleToken = '';
+    let qaClaimBootPerTokenToken = '';
+    const qaClaimBootAdminKey = toHex(
+      crypto.getRandomValues(new Uint8Array(32))
+    );
+    const qaClaimBootRecoveredKey = toHex(
+      crypto.getRandomValues(new Uint8Array(32))
+    );
+    const qaClaimBootThrottleAdminKey = toHex(
+      crypto.getRandomValues(new Uint8Array(32))
+    );
+    const qaClaimBootSalt1 = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    const qaClaimBootSalt2 = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    const qaClaimBootSalt3 = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    const qaClaimBootExpiredBody = {
+      token: '',
+      username: 'qa_claim_expired_admin',
+      email: 'qa-claim-expired-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: qaClaimBootSalt1,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    const qaClaimBootSupersededBody = {
+      token: '',
+      username: 'qa_claim_superseded_admin',
+      email: 'qa-claim-superseded-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: qaClaimBootSalt1,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    const qaClaimBootValidBody = {
+      token: '',
+      username: 'qa_claim_journey_admin',
+      email: 'qa-claim-journey-admin@example.test',
+      displayName: 'QA Claim Journey Admin',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: qaClaimBootSalt1,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: qaClaimBootAdminKey,
+      },
+    };
+    const qaClaimBootReplayBody = {
+      token: '',
+      username: 'qa_claim_replay_admin',
+      email: 'qa-claim-replay-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: qaClaimBootSalt1,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    const qaClaimBootRedeemBody = {
+      code: '',
+      identifier: 'qa-claim-journey-admin@example.test',
+      communitySlug: 'qa-claim-journey',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: qaClaimBootSalt2,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: qaClaimBootRecoveredKey,
+      },
+    };
+    const qaClaimBootThrottleValidBody = {
+      token: '',
+      username: 'qa_claim_throttle_admin',
+      email: 'qa-claim-throttle-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: qaClaimBootSalt3,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: qaClaimBootThrottleAdminKey,
+      },
+    };
+    const qaClaimBootThrottleUnblockedBody = {
+      token: '',
+      username: 'qa_claim_throttle_admin',
+      email: 'qa-claim-throttle-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: qaClaimBootSalt3,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: qaClaimBootThrottleAdminKey,
+      },
+    };
+    const qaClaimBootPerTokenConflictBody = {
+      token: '',
+      username: 'qa_hono_admin',
+      email: credentials.admin.email,
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: qaClaimBootSalt3,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    const qaClaimBootPerTokenFreeBody = {
+      token: '',
+      username: 'qa_claim_pertoken_free',
+      email: 'qa-claim-pertoken-free@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: qaClaimBootSalt3,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    let freshBootstrapCommunityId = 0;
+    let freshBootstrapRecoveryCode1 = '';
+    const freshAdminKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const freshAdminRecoveredKey = toHex(
+      crypto.getRandomValues(new Uint8Array(32))
+    );
+    const freshWrongSecret =
+      (freshBootstrapSecret[0] === 'a' ? 'b' : 'a') +
+      freshBootstrapSecret.slice(1);
+    const freshSalt1 = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    const freshSalt2 = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    const freshBootstrapValidBody = {
+      bootstrapSecret: freshBootstrapSecret,
+      community: {
+        name: 'QA Fresh Bootstrap Community',
+        slug: 'qa-fresh-bootstrap',
+        locale: 'en',
+        visibility: 'private' as const,
+      },
+      admin: {
+        username: 'qa_fresh_admin',
+        email: 'qa-fresh-admin@example.test',
+        displayName: 'QA Fresh Admin',
+        password: {
+          algorithm: ARGON2ID_ALGORITHM,
+          salt: freshSalt1,
+          params: JSON.parse(ARGON2ID_PARAMS_JSON),
+          derivedKey: freshAdminKey,
+        },
+      },
+    };
+    const freshBootstrapWrongBody = {
+      ...freshBootstrapValidBody,
+      bootstrapSecret: freshWrongSecret,
+    };
+    const freshBootstrapMissingBody = {
+      community: freshBootstrapValidBody.community,
+      admin: freshBootstrapValidBody.admin,
+    };
+    const freshBootstrapRedeemBody = {
+      code: '',
+      identifier: 'qa-fresh-admin@example.test',
+      communitySlug: 'qa-fresh-bootstrap',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: freshSalt2,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: freshAdminRecoveredKey,
+      },
+    };
     const journeys: Journey[] = [
       {
         persona: 'anonymous',
@@ -10241,8 +10536,18 @@ export async function createFixture(
               qaValidClaimBody.token = qaClaimToken2;
             },
             body: qaValidClaimBody,
-            checkHeaders: (headers) =>
-              (headers.get('set-cookie') ?? '').includes('ts_session='),
+            check: (body) => {
+              const parsed = BootstrapResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.user.role === 'admin' &&
+                parsed.data.data.user.recoveryCodesConfirmed === true &&
+                validRecoverySheet(parsed.data.data.recoveryCodes.codes) &&
+                !leaksSecret(body, liveSessionCookie) &&
+                !JSON.stringify(body).includes(qaClaimToken2)
+              );
+            },
+            checkHeaders: hasSessionCookie,
           },
           {
             name: 'claimed admin session is active',
@@ -10559,6 +10864,563 @@ export async function createFixture(
             path: '/v2/auth/logout',
             expected: 204,
             useSavedCookie: 'qaSysAdmin',
+          },
+        ],
+      },
+      {
+        persona: 'claim_bootstrap',
+        steps: [
+          {
+            name: 'login as super_admin for claim journey',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.182',
+              'cf-connecting-ip': '203.0.113.182',
+            },
+            body: {
+              identifier: credentials.super_admin.email,
+              derivedKey: superAdminNewKey,
+            },
+            check: ownUser(
+              credentials.super_admin.email,
+              'super_admin',
+              liveSessionCookie,
+              null
+            ),
+          },
+          {
+            name: 'provision hosted community for claim journey',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            saveCookieAs: 'claimJourneySysAdmin',
+            captureId: 'qaClaimJourneyComm',
+            body: { slug: 'qa-claim-journey' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimBootCommunityId = parsed.data.data.id;
+              return (
+                parsed.data.data.slug === 'qa-claim-journey' &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 'issue claim token to expire',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimJourneyComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'claimJourneySysAdmin',
+            body: { ttlSeconds: 3600 },
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimBootExpiredToken = parsed.data.data.token;
+              qaClaimBootExpiredTokenId = parsed.data.data.id;
+              return true;
+            },
+          },
+          {
+            name: 'reject expired claim token uniformly',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.183',
+              'cf-connecting-ip': '203.0.113.183',
+            },
+            prepare: async () => {
+              const expiredAt = Date.now() - 60_000;
+              await db
+                .update(claimTokens)
+                .set({
+                  createdAt: expiredAt - 3_600_000,
+                  expiresAt: expiredAt,
+                })
+                .where(eq(claimTokens.id, qaClaimBootExpiredTokenId));
+              qaClaimBootExpiredBody.token = qaClaimBootExpiredToken;
+            },
+            body: qaClaimBootExpiredBody,
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'issue claim token to be superseded',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimJourneyComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'claimJourneySysAdmin',
+            body: { ttlSeconds: 3600 },
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimBootSupersededToken = parsed.data.data.token;
+              return true;
+            },
+          },
+          {
+            name: 'reissue active claim token superseding previous token',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimJourneyComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'claimJourneySysAdmin',
+            body: { ttlSeconds: 3600 },
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimBootValidToken = parsed.data.data.token;
+              return qaClaimBootValidToken !== qaClaimBootSupersededToken;
+            },
+          },
+          {
+            name: 'reject superseded claim token uniformly',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.183',
+              'cf-connecting-ip': '203.0.113.183',
+            },
+            prepare: () => {
+              qaClaimBootSupersededBody.token = qaClaimBootSupersededToken;
+            },
+            body: qaClaimBootSupersededBody,
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'reject unknown claim token with identical uniform failure',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.183',
+              'cf-connecting-ip': '203.0.113.183',
+            },
+            body: {
+              token: toBase64Url(crypto.getRandomValues(new Uint8Array(32))),
+              username: 'qa_claim_unknown_journey',
+              email: 'qa-claim-unknown-journey@example.test',
+              password: {
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: qaClaimBootSalt1,
+                params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+              },
+            },
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'claim hosted community and receive 10 recovery codes and session',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 201,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.182',
+              'cf-connecting-ip': '203.0.113.182',
+            },
+            prepare: () => {
+              qaClaimBootValidBody.token = qaClaimBootValidToken;
+            },
+            body: qaClaimBootValidBody,
+            check: (body) => {
+              const parsed = BootstrapResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const { community, user, recoveryCodes } = parsed.data.data;
+              if (!validRecoverySheet(recoveryCodes.codes)) return false;
+              qaClaimBootRecoveryCode1 = recoveryCodes.codes[0]!;
+              return (
+                community.id === qaClaimBootCommunityId &&
+                community.slug === 'qa-claim-journey' &&
+                community.status === 'active' &&
+                user.email === 'qa-claim-journey-admin@example.test' &&
+                user.username === 'qa_claim_journey_admin' &&
+                user.role === 'admin' &&
+                user.communityId === qaClaimBootCommunityId &&
+                user.recoveryCodesConfirmed === true &&
+                !leaksSecret(body, liveSessionCookie) &&
+                !JSON.stringify(body).includes(qaClaimBootValidToken)
+              );
+            },
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'verify claimed admin initial session via /v2/auth/me',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'claimJourneyInitialAdmin',
+            check: (body) =>
+              ownMeUser(
+                'qa-claim-journey-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                qaClaimBootCommunityId,
+                true
+              )(body),
+          },
+          {
+            name: 'reject replay of consumed claim token uniformly',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.183',
+              'cf-connecting-ip': '203.0.113.183',
+            },
+            prepare: () => {
+              qaClaimBootReplayBody.token = qaClaimBootValidToken;
+            },
+            body: qaClaimBootReplayBody,
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'logout initial claimed admin session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'claimJourneyInitialAdmin',
+          },
+          {
+            name: 'claimed admin logs in with credentials set at claim',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.182',
+              'cf-connecting-ip': '203.0.113.182',
+            },
+            body: {
+              identifier: 'qa-claim-journey-admin@example.test',
+              communitySlug: 'qa-claim-journey',
+              derivedKey: qaClaimBootAdminKey,
+            },
+            check: (body) =>
+              ownUser(
+                'qa-claim-journey-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                qaClaimBootCommunityId
+              )(body),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'claimed admin reads own community after login',
+            method: 'GET',
+            path: '/v2/community',
+            expected: 200,
+            saveCookieAs: 'claimJourneyLoginSession',
+            check: (body) => {
+              const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.id === qaClaimBootCommunityId &&
+                parsed.data.data.slug === 'qa-claim-journey'
+              );
+            },
+          },
+          {
+            name: 'claimed admin redeems a recovery code returned at claim',
+            method: 'POST',
+            path: '/v2/auth/recovery/redeem',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.182',
+              'cf-connecting-ip': '203.0.113.182',
+            },
+            prepare: () => {
+              qaClaimBootRedeemBody.code = qaClaimBootRecoveryCode1;
+            },
+            body: qaClaimBootRedeemBody,
+            check: (body) =>
+              ownUser(
+                'qa-claim-journey-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                qaClaimBootCommunityId
+              )(body),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'previous claimed admin session is revoked after recovery redeem',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 401,
+            useSavedCookie: 'claimJourneyLoginSession',
+          },
+          {
+            name: 'claimed admin new recovery session is active',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: (body) =>
+              ownMeUser(
+                'qa-claim-journey-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                qaClaimBootCommunityId,
+                true
+              )(body),
+          },
+          {
+            name: 'reject replay of consumed claim recovery code',
+            method: 'POST',
+            path: '/v2/auth/recovery/redeem',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.182',
+              'cf-connecting-ip': '203.0.113.182',
+            },
+            body: qaClaimBootRedeemBody,
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'reject old password of claimed admin after recovery redeem',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.182',
+              'cf-connecting-ip': '203.0.113.182',
+            },
+            body: {
+              identifier: 'qa-claim-journey-admin@example.test',
+              communitySlug: 'qa-claim-journey',
+              derivedKey: qaClaimBootAdminKey,
+            },
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'logout recovered claimed admin session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'claimed admin logs in with new password set via recovery code',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.182',
+              'cf-connecting-ip': '203.0.113.182',
+            },
+            body: {
+              identifier: 'qa-claim-journey-admin@example.test',
+              communitySlug: 'qa-claim-journey',
+              derivedKey: qaClaimBootRecoveredKey,
+            },
+            check: (body) =>
+              ownUser(
+                'qa-claim-journey-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                qaClaimBootCommunityId
+              )(body),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'logout final claimed admin session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'provision hosted community for per-IP claim throttle proof',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            useSavedCookie: 'claimJourneySysAdmin',
+            captureId: 'qaClaimThrottleComm',
+            body: { slug: 'qa-claim-throttle' },
+          },
+          {
+            name: 'issue valid claim token for per-IP throttle proof',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimThrottleComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'claimJourneySysAdmin',
+            body: { ttlSeconds: 3600 },
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimBootThrottleToken = parsed.data.data.token;
+              return true;
+            },
+          },
+          ...Array.from(
+            { length: AUTH_THROTTLE_MAX_FAILURES },
+            (_, attempt) => ({
+              name: `claim per-IP throttle failure ${attempt + 1}`,
+              method: 'POST',
+              path: '/v2/bootstrap/claim',
+              expected: 401,
+              headers: {
+                cookie: '',
+                'x-forwarded-for': '203.0.113.184',
+                'cf-connecting-ip': '203.0.113.184',
+              },
+              body: {
+                token: toBase64Url(crypto.getRandomValues(new Uint8Array(32))),
+                username: `qa_claim_ip_fail_${attempt + 1}`,
+                email: `qa-claim-ip-fail-${attempt + 1}@example.test`,
+                password: {
+                  algorithm: ARGON2ID_ALGORITHM,
+                  salt: qaClaimBootSalt3,
+                  params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                  derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+                },
+              },
+              check: invalidCredentials,
+              checkHeaders: hasNoSessionCookie,
+            })
+          ),
+          {
+            name: 'throttled IP is refused even with a valid unconsumed claim token',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.184',
+              'cf-connecting-ip': '203.0.113.184',
+            },
+            prepare: () => {
+              qaClaimBootThrottleValidBody.token = qaClaimBootThrottleToken;
+            },
+            body: qaClaimBootThrottleValidBody,
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'same valid claim token succeeds from an unthrottled IP',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 201,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.185',
+              'cf-connecting-ip': '203.0.113.185',
+            },
+            prepare: () => {
+              qaClaimBootThrottleUnblockedBody.token = qaClaimBootThrottleToken;
+            },
+            body: qaClaimBootThrottleUnblockedBody,
+            check: (body) => {
+              const parsed = BootstrapResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.community.slug === 'qa-claim-throttle' &&
+                parsed.data.data.user.role === 'admin' &&
+                validRecoverySheet(parsed.data.data.recoveryCodes.codes) &&
+                !leaksSecret(body, liveSessionCookie) &&
+                !JSON.stringify(body).includes(qaClaimBootThrottleToken)
+              );
+            },
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'logout claim throttle admin',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'provision community for per-token claim throttle proof',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            useSavedCookie: 'claimJourneySysAdmin',
+            captureId: 'qaClaimPerTokenComm',
+            body: { slug: 'qa-claim-token-throttle' },
+          },
+          {
+            name: 'issue claim token for per-token throttle proof',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimPerTokenComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'claimJourneySysAdmin',
+            body: { ttlSeconds: 3600 },
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimBootPerTokenToken = parsed.data.data.token;
+              return true;
+            },
+          },
+          ...Array.from(
+            { length: AUTH_THROTTLE_MAX_FAILURES },
+            (_, attempt) => {
+              const ip = `203.0.113.${190 + attempt}`;
+              return {
+                name: `claim per-token throttle failure ${attempt + 1}`,
+                method: 'POST',
+                path: '/v2/bootstrap/claim',
+                expected: 401,
+                headers: {
+                  cookie: '',
+                  'x-forwarded-for': ip,
+                  'cf-connecting-ip': ip,
+                },
+                prepare: () => {
+                  qaClaimBootPerTokenConflictBody.token =
+                    qaClaimBootPerTokenToken;
+                },
+                body: qaClaimBootPerTokenConflictBody,
+                check: invalidCredentials,
+                checkHeaders: hasNoSessionCookie,
+              };
+            }
+          ),
+          {
+            name: 'per-token throttled claim token is refused even with free identity from a fresh IP',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.200',
+              'cf-connecting-ip': '203.0.113.200',
+            },
+            prepare: () => {
+              qaClaimBootPerTokenFreeBody.token = qaClaimBootPerTokenToken;
+            },
+            body: qaClaimBootPerTokenFreeBody,
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'clean up unclaimed per-token throttle community',
+            method: 'DELETE',
+            path: '/v2/admin/communities/{qaClaimPerTokenComm}',
+            expected: 204,
+            useSavedCookie: 'claimJourneySysAdmin',
+          },
+          {
+            name: 'logout super_admin after claim journey',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'claimJourneySysAdmin',
           },
         ],
       },
@@ -10949,6 +11811,299 @@ export async function createFixture(
                 )
               );
             },
+          },
+        ],
+      },
+      {
+        // Slice 11b-B (#188, SPEC-V2 §4, §7): runs on an isolated unseeded
+        // database/runtime with BOOTSTRAP_SECRET configured; must run after all
+        // seeded journeys because PostgreSQL resets the single shared test DB.
+        persona: 'fresh_bootstrap',
+        ...(freshBaseUrl
+          ? { baseUrl: freshBaseUrl }
+          : { handler: freshHandler }),
+        steps: [
+          {
+            name: 'fresh installation reports bootstrap open=true',
+            method: 'GET',
+            path: '/v2/bootstrap',
+            expected: 200,
+            prepare: async () => {
+              await ensureFreshBootstrap();
+            },
+            check: bootstrapOpenCheck(true),
+          },
+          {
+            name: 'reject bootstrap with wrong operator secret uniformly',
+            method: 'POST',
+            path: '/v2/bootstrap',
+            expected: 403,
+            headers: {
+              'x-forwarded-for': '203.0.113.210',
+              'cf-connecting-ip': '203.0.113.210',
+            },
+            body: freshBootstrapWrongBody,
+            check: uniformForbidden,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'reject bootstrap with missing operator secret uniformly',
+            method: 'POST',
+            path: '/v2/bootstrap',
+            expected: 403,
+            headers: {
+              'x-forwarded-for': '203.0.113.210',
+              'cf-connecting-ip': '203.0.113.210',
+            },
+            body: freshBootstrapMissingBody,
+            check: uniformForbidden,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'bootstrap stays open=true after rejected secret attempts',
+            method: 'GET',
+            path: '/v2/bootstrap',
+            expected: 200,
+            check: bootstrapOpenCheck(true),
+          },
+          {
+            name: 'complete fresh installation bootstrap with operator secret',
+            method: 'POST',
+            path: '/v2/bootstrap',
+            expected: 201,
+            headers: {
+              'x-forwarded-for': '203.0.113.211',
+              'cf-connecting-ip': '203.0.113.211',
+            },
+            body: freshBootstrapValidBody,
+            check: (body) => {
+              const parsed = BootstrapResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const { community, user, recoveryCodes } = parsed.data.data;
+              if (!validRecoverySheet(recoveryCodes.codes)) return false;
+              freshBootstrapCommunityId = community.id;
+              freshBootstrapRecoveryCode1 = recoveryCodes.codes[0]!;
+              return (
+                community.slug === 'qa-fresh-bootstrap' &&
+                community.status === 'active' &&
+                user.email === 'qa-fresh-admin@example.test' &&
+                user.username === 'qa_fresh_admin' &&
+                user.role === 'admin' &&
+                user.communityId === community.id &&
+                user.recoveryCodesConfirmed === true &&
+                !leaksSecret(body, liveSessionCookie) &&
+                !JSON.stringify(body).includes(freshBootstrapSecret)
+              );
+            },
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'bootstrap reports open=false immediately after completion',
+            method: 'GET',
+            path: '/v2/bootstrap',
+            expected: 200,
+            headers: { cookie: '' },
+            check: bootstrapOpenCheck(false),
+          },
+          {
+            name: 'reject bootstrap replay with valid operator secret uniformly',
+            method: 'POST',
+            path: '/v2/bootstrap',
+            expected: 403,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.211',
+              'cf-connecting-ip': '203.0.113.211',
+            },
+            body: freshBootstrapValidBody,
+            check: uniformForbidden,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'bootstrapped admin session is active via /v2/auth/me',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'freshBootstrapInitialAdmin',
+            check: (body) =>
+              ownMeUser(
+                'qa-fresh-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId,
+                true
+              )(body),
+          },
+          {
+            name: 'bootstrapped admin reads own community',
+            method: 'GET',
+            path: '/v2/community',
+            expected: 200,
+            check: (body) => {
+              const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.id === freshBootstrapCommunityId &&
+                parsed.data.data.slug === 'qa-fresh-bootstrap'
+              );
+            },
+          },
+          {
+            name: 'logout initial bootstrapped admin session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'bootstrapped admin logs in with credentials set at bootstrap',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.211',
+              'cf-connecting-ip': '203.0.113.211',
+            },
+            body: {
+              identifier: 'qa-fresh-admin@example.test',
+              communitySlug: 'qa-fresh-bootstrap',
+              derivedKey: freshAdminKey,
+            },
+            check: (body) =>
+              ownUser(
+                'qa-fresh-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId
+              )(body),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'save bootstrapped admin login session',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'freshBootstrapLoginSession',
+            check: (body) =>
+              ownMeUser(
+                'qa-fresh-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId,
+                true
+              )(body),
+          },
+          {
+            name: 'bootstrapped admin redeems a recovery code returned at bootstrap',
+            method: 'POST',
+            path: '/v2/auth/recovery/redeem',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.211',
+              'cf-connecting-ip': '203.0.113.211',
+            },
+            prepare: () => {
+              freshBootstrapRedeemBody.code = freshBootstrapRecoveryCode1;
+            },
+            body: freshBootstrapRedeemBody,
+            check: (body) =>
+              ownUser(
+                'qa-fresh-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId
+              )(body),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'previous bootstrapped admin session is revoked after recovery redeem',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 401,
+            useSavedCookie: 'freshBootstrapLoginSession',
+          },
+          {
+            name: 'bootstrapped admin new recovery session is active',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: (body) =>
+              ownMeUser(
+                'qa-fresh-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId,
+                true
+              )(body),
+          },
+          {
+            name: 'reject replay of consumed bootstrap recovery code',
+            method: 'POST',
+            path: '/v2/auth/recovery/redeem',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.211',
+              'cf-connecting-ip': '203.0.113.211',
+            },
+            body: freshBootstrapRedeemBody,
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'reject old bootstrap password after recovery redeem',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.211',
+              'cf-connecting-ip': '203.0.113.211',
+            },
+            body: {
+              identifier: 'qa-fresh-admin@example.test',
+              communitySlug: 'qa-fresh-bootstrap',
+              derivedKey: freshAdminKey,
+            },
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'logout recovered bootstrapped admin session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'bootstrapped admin logs in with new password set via recovery code',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.211',
+              'cf-connecting-ip': '203.0.113.211',
+            },
+            body: {
+              identifier: 'qa-fresh-admin@example.test',
+              communitySlug: 'qa-fresh-bootstrap',
+              derivedKey: freshAdminRecoveredKey,
+            },
+            check: (body) =>
+              ownUser(
+                'qa-fresh-admin@example.test',
+                'admin',
+                liveSessionCookie,
+                freshBootstrapCommunityId
+              )(body),
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'logout final bootstrapped admin session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
           },
         ],
       },

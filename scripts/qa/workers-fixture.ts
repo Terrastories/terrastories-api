@@ -25,6 +25,7 @@ import {
   type HonoQaBackend,
 } from './hono-fixture.js';
 import { seedPersonaBaseline } from './qa-database.js';
+import type { Handler } from './runner.js';
 import { toHex } from '../../src/shared/auth-crypto.js';
 
 /**
@@ -47,20 +48,67 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
   // login bodies: it keys prelogin fakes and AuthThrottle hashes. Built per
   // run, never a literal.
   const serverSecret = toHex(crypto.getRandomValues(new Uint8Array(24)));
+  const freshServerSecret = toHex(crypto.getRandomValues(new Uint8Array(24)));
+  const freshBootstrapSecret = toHex(
+    crypto.getRandomValues(new Uint8Array(24))
+  );
+  const workerScript = await bundleWorkerModule(WORKER_GATEWAY);
   const mf = startWorkerRuntime(
-    await bundleWorkerModule(WORKER_GATEWAY),
+    workerScript,
     {
       ENVIRONMENT: 'test',
       AUTH_SERVER_SECRET: serverSecret,
     },
     { unsafeTriggerHandlers: true }
   );
+  let freshMf: ReturnType<typeof startWorkerRuntime> | undefined;
   let backend: HonoQaBackend;
+  const dispatchTo =
+    (
+      runtime: ReturnType<typeof startWorkerRuntime>,
+      observeResponseCookies: (response: Response) => void
+    ): Handler =>
+    async (request) => {
+      // dispatchFetch parses Miniflare's own undici types, and a
+      // Node-global Request object is a foreign realm to them, so rebuild
+      // the request from its URL and an init the worker accepts.
+      const response = await runtime.dispatchFetch(request.url, {
+        method: request.method,
+        headers: [...request.headers],
+        body: ['GET', 'HEAD'].includes(request.method)
+          ? undefined
+          : await request.arrayBuffer(),
+        signal: request.signal,
+      });
+      observeResponseCookies(response as unknown as Response);
+      return response as unknown as Response;
+    };
+  const disposeRuntimes = async () => {
+    const errors: unknown[] = [];
+    for (const runtime of [mf, freshMf]) {
+      if (!runtime) continue;
+      try {
+        await runtime.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1)
+      throw new AggregateError(errors, 'Workers persona QA cleanup failed');
+  };
   try {
     const d1 = await mf.getD1Database('DB');
     await applyD1Migrations(d1);
     const bucket = await mf.getR2Bucket('MEDIA');
     const db = drizzle(d1);
+    freshMf = startWorkerRuntime(workerScript, {
+      ENVIRONMENT: 'test',
+      AUTH_SERVER_SECRET: freshServerSecret,
+      BOOTSTRAP_SECRET: freshBootstrapSecret,
+    });
+    const freshD1 = await freshMf.getD1Database('DB');
+    await applyD1Migrations(freshD1);
     backend = {
       db,
       runErasureSweep: async () => {
@@ -74,29 +122,21 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       serverSecret,
       putMedia: (key, bytes) => bucket.put(key, bytes),
       hasMedia: async (key) => (await bucket.head(key)) !== null,
-      handler: (observeResponseCookies) => async (request) => {
-        // dispatchFetch parses Miniflare's own undici types, and a
-        // Node-global Request object is a foreign realm to them, so rebuild
-        // the request from its URL and an init the worker accepts.
-        const response = await mf.dispatchFetch(request.url, {
-          method: request.method,
-          headers: [...request.headers],
-          body: ['GET', 'HEAD'].includes(request.method)
-            ? undefined
-            : await request.arrayBuffer(),
-          signal: request.signal,
-        });
-        observeResponseCookies(response as unknown as Response);
-        return response as unknown as Response;
+      handler: (observeResponseCookies) =>
+        dispatchTo(mf, observeResponseCookies),
+      freshBootstrap: {
+        bootstrapSecret: freshBootstrapSecret,
+        handler: (observeResponseCookies) =>
+          dispatchTo(freshMf!, observeResponseCookies),
       },
       // Out of process: the served app's `app.routes` is unreadable from
       // Node, so coverage uses the createHonoApp-derived
       // honoPersonaRouteTable(), not the bundled worker's own table.
       routes: honoPersonaRouteTable(),
-      close: () => mf.dispose(),
+      close: disposeRuntimes,
     };
   } catch (error) {
-    await mf.dispose();
+    await disposeRuntimes().catch(() => undefined);
     throw error;
   }
   // createHonoPersonaFixture owns backend.close from here: it disposes the

@@ -13,6 +13,8 @@ import { registerMediaRoutes } from './routes/media-writes.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
+import { registerCommunityExportRoutes } from './routes/community-export.hono.js';
+import { CommunityExportRepository } from './repositories/community-export.repository.js';
 import {
   registerProtectedAuthRecoveryRoutes,
   registerPublicAuthRecoveryRoutes,
@@ -541,6 +543,12 @@ export function createHonoApp(options: FoundationOptions) {
     repository: new UserManagementRepository(options.repository.connection),
     publicOrigin: configuredOrigin,
     serverSecret: options.serverSecret,
+  });
+  registerCommunityExportRoutes(app, {
+    repository: new CommunityExportRepository(options.repository.connection),
+    storage: options.storage,
+    isWorkers: options.isWorkers,
+    now,
   });
   // Transitional Explore read adapter (#198): Rails-shaped public reads for
   // the existing Explore client; removed once the V2 frontend is canonical.

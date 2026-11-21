@@ -55,6 +55,10 @@ export interface StorageReadResult {
 
 export interface StoragePutOptions {
   contentType?: string;
+  /** Force multipart upload even when stream length is below the default part threshold. */
+  useMultipart?: boolean;
+  /** Invoked as soon as a multipart upload id is created so callers can persist it for restart-safe abort. */
+  onMultipartUploadCreated?: (uploadId: string) => Promise<void> | void;
 }
 
 export interface StorageListEntry {
@@ -94,6 +98,8 @@ export interface FoundationStorage {
     options?: StoragePutOptions
   ): Promise<{ size: number }>;
   delete?(key: string): Promise<void>;
+  /** Abort an in-flight multipart upload by storage key and upload id (R2). */
+  abortMultipartUpload?(key: string, uploadId: string): Promise<void>;
   /**
    * Enumerate stored objects under `prefix` for the restart-safe orphan
    * sweeper. Optional: adapters without listing skip orphan sweeping.

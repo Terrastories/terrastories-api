@@ -87,6 +87,7 @@ import {
   MediaMetadataResponseSchema,
   MediaUploadResponseSchema,
 } from '../../src/shared/schemas/media-v2.js';
+import { CreateCommunityExportResponseSchema } from '../../src/shared/schemas/community-export.js';
 import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import {
@@ -1595,8 +1596,13 @@ export async function createFixture(
               size: bytes.byteLength,
             };
           },
-          async put(key, stream) {
-            const reader = stream.getReader();
+          async put(key, body) {
+            if (body instanceof Uint8Array) {
+              const copy = Uint8Array.from(body);
+              storage.set(key, copy);
+              return { size: copy.byteLength };
+            }
+            const reader = body.getReader();
             const chunks: Uint8Array[] = [];
             let total = 0;
             while (true) {
@@ -1614,6 +1620,7 @@ export async function createFixture(
               offset += chunk.byteLength;
             }
             storage.set(key, merged);
+            return { size: merged.byteLength };
           },
           async delete(key) {
             storage.delete(key);
@@ -6668,6 +6675,36 @@ export async function createFixture(
             path: '/v2/media/not-a-uuid',
             expected: 404,
           },
+          ...(role === 'admin'
+            ? (() => {
+                let qaAdminExportManifestToken = '';
+                return [
+                  {
+                    name: 'export active community',
+                    method: 'POST',
+                    path: '/v2/community/export',
+                    expected: 201,
+                    body: {},
+                    check: (body: unknown) => {
+                      const parsed =
+                        CreateCommunityExportResponseSchema.safeParse(body);
+                      if (!parsed.success) return false;
+                      qaAdminExportManifestToken =
+                        parsed.data.data.artifacts.manifest.token;
+                      return true;
+                    },
+                  },
+                  {
+                    name: 'download exported community manifest',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 200,
+                    prepare: () =>
+                      `/v2/community/export/download/${qaAdminExportManifestToken}`,
+                  },
+                ];
+              })()
+            : []),
           {
             // #188: re-login with the live cookie rotates the session row
             // (same user, unexpired) on every backend — including the atomic

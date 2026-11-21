@@ -23,7 +23,7 @@ import {
 } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
-import { dialectOf, tablesFor, textOrder } from '../db/dialect.js';
+import { dialectOf, tablesFor } from '../db/dialect.js';
 import {
   communityMediaPg,
   communityMediaSqlite,
@@ -347,7 +347,11 @@ export class CommunityExportRepository {
     );
   }
 
-  private buildSnapshotQueries(executor: Executor, communityId: number) {
+  private buildSnapshotQueries(
+    executor: Executor,
+    communityId: number,
+    maxRows?: number
+  ) {
     const {
       communities,
       communityMapConfigs,
@@ -363,6 +367,9 @@ export class CommunityExportRepository {
       auditEntries,
     } = this.tables;
     const communityMedia = this.communityMedia;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bounded = (query: any) =>
+      maxRows !== undefined ? query.limit(maxRows + 1) : query;
 
     return [
       executor
@@ -406,178 +413,202 @@ export class CommunityExportRepository {
         .where(eq(communityMapConfigs.communityId, communityId))
         .limit(1),
       // Explicit safe projection: never select credential or login-tracking columns.
-      executor
-        .select({
-          id: users.id,
-          communityId: users.communityId,
-          email: users.email,
-          username: users.username,
-          displayName: users.displayName,
-          firstName: users.firstName,
-          lastName: users.lastName,
-          role: users.role,
-          isActive: users.isActive,
-          createdAt: users.createdAt,
-          updatedAt: users.updatedAt,
-        })
-        .from(users)
-        .where(eq(users.communityId, communityId))
-        .orderBy(asc(users.id)),
-      executor
-        .select({
-          id: places.id,
-          communityId: places.communityId,
-          name: places.name,
-          description: places.description,
-          descriptionPlain: places.descriptionPlain,
-          typeOfPlace: places.typeOfPlace,
-          region: places.region,
-          latitude: places.latitude,
-          longitude: places.longitude,
-          isRestricted: places.isRestricted,
-          createdAt: places.createdAt,
-          updatedAt: places.updatedAt,
-        })
-        .from(places)
-        .where(eq(places.communityId, communityId))
-        .orderBy(asc(places.id)),
-      executor
-        .select({
-          id: speakers.id,
-          communityId: speakers.communityId,
-          name: speakers.name,
-          birthDate: speakers.birthDate,
-          birthplaceId: speakers.birthplaceId,
-          affiliation: speakers.affiliation,
-          isActive: speakers.isActive,
-          createdAt: speakers.createdAt,
-          updatedAt: speakers.updatedAt,
-        })
-        .from(speakers)
-        .where(eq(speakers.communityId, communityId))
-        .orderBy(asc(speakers.id)),
-      executor
-        .select({
-          id: stories.id,
-          communityId: stories.communityId,
-          title: stories.title,
-          description: stories.description,
-          descriptionPlain: stories.descriptionPlain,
-          slug: stories.slug,
-          privacyLevel: stories.privacyLevel,
-          isRestricted: stories.isRestricted,
-          topic: stories.topic,
-          topicNormalized: stories.topicNormalized,
-          language: stories.language,
-          dateInterviewed: stories.dateInterviewed,
-          interviewLocationId: stories.interviewLocationId,
-          interviewerId: stories.interviewerId,
-          createdBy: stories.createdBy,
-          createdAt: stories.createdAt,
-          updatedAt: stories.updatedAt,
-        })
-        .from(stories)
-        .where(eq(stories.communityId, communityId))
-        .orderBy(asc(stories.id)),
-      executor
-        .select({
-          id: storyPlaces.id,
-          communityId: storyPlaces.communityId,
-          storyId: storyPlaces.storyId,
-          placeId: storyPlaces.placeId,
-          createdAt: storyPlaces.createdAt,
-          updatedAt: storyPlaces.updatedAt,
-        })
-        .from(storyPlaces)
-        .where(eq(storyPlaces.communityId, communityId))
-        .orderBy(asc(storyPlaces.id)),
-      executor
-        .select({
-          id: storySpeakers.id,
-          communityId: storySpeakers.communityId,
-          storyId: storySpeakers.storyId,
-          speakerId: storySpeakers.speakerId,
-          createdAt: storySpeakers.createdAt,
-          updatedAt: storySpeakers.updatedAt,
-        })
-        .from(storySpeakers)
-        .where(eq(storySpeakers.communityId, communityId))
-        .orderBy(asc(storySpeakers.id)),
-      executor
-        .select({
-          id: files.id,
-          communityId: files.communityId,
-          storageKey: files.storageKey,
-          path: files.path,
-          originalName: files.originalName,
-          mimeType: files.mimeType,
-          byteSize: files.byteSize,
-          size: files.size,
-          checksum: files.checksum,
-          uploadedBy: files.uploadedBy,
-          metadata: files.metadata,
-          culturalRestrictions: files.culturalRestrictions,
-          isActive: files.isActive,
-          createdAt: files.createdAt,
-          updatedAt: files.updatedAt,
-        })
-        .from(files)
-        .where(eq(files.communityId, communityId))
-        .orderBy(textOrder(this.dialect, files.id, 'asc')),
-      executor
-        .select({
-          id: attachments.id,
-          communityId: attachments.communityId,
-          fileId: attachments.fileId,
-          ownerType: attachments.ownerType,
-          ownerId: attachments.ownerId,
-          role: attachments.role,
-          ordinal: attachments.ordinal,
-          createdAt: attachments.createdAt,
-        })
-        .from(attachments)
-        .where(eq(attachments.communityId, communityId))
-        .orderBy(asc(attachments.id)),
-      executor
-        .select({
-          id: externalMediaLinks.id,
-          communityId: externalMediaLinks.communityId,
-          storyId: externalMediaLinks.storyId,
-          url: externalMediaLinks.url,
-          ordinal: externalMediaLinks.ordinal,
-          createdAt: externalMediaLinks.createdAt,
-        })
-        .from(externalMediaLinks)
-        .where(eq(externalMediaLinks.communityId, communityId))
-        .orderBy(asc(externalMediaLinks.id)),
-      executor
-        .select({
-          fileId: communityMedia.fileId,
-          communityId: communityMedia.communityId,
-          kind: communityMedia.kind,
-        })
-        .from(communityMedia)
-        .where(eq(communityMedia.communityId, communityId))
-        .orderBy(textOrder(this.dialect, communityMedia.fileId, 'asc')),
-      executor
-        .select({
-          id: auditEntries.id,
-          communityId: auditEntries.communityId,
-          actorId: auditEntries.actorId,
-          action: auditEntries.action,
-          resourceType: auditEntries.resourceType,
-          resourceIds: auditEntries.resourceIds,
-          outcome: auditEntries.outcome,
-          createdAt: auditEntries.createdAt,
-        })
-        .from(auditEntries)
-        .where(
-          and(
-            eq(auditEntries.communityId, communityId),
-            notInArray(auditEntries.action, [...EXPORT_LIFECYCLE_AUDIT_ACTIONS])
+      bounded(
+        executor
+          .select({
+            id: users.id,
+            communityId: users.communityId,
+            email: users.email,
+            username: users.username,
+            displayName: users.displayName,
+            firstName: users.firstName,
+            lastName: users.lastName,
+            role: users.role,
+            isActive: users.isActive,
+            createdAt: users.createdAt,
+            updatedAt: users.updatedAt,
+          })
+          .from(users)
+          .where(eq(users.communityId, communityId))
+          .orderBy(asc(users.id))
+      ),
+      bounded(
+        executor
+          .select({
+            id: places.id,
+            communityId: places.communityId,
+            name: places.name,
+            description: places.description,
+            descriptionPlain: places.descriptionPlain,
+            typeOfPlace: places.typeOfPlace,
+            region: places.region,
+            latitude: places.latitude,
+            longitude: places.longitude,
+            isRestricted: places.isRestricted,
+            createdAt: places.createdAt,
+            updatedAt: places.updatedAt,
+          })
+          .from(places)
+          .where(eq(places.communityId, communityId))
+          .orderBy(asc(places.id))
+      ),
+      bounded(
+        executor
+          .select({
+            id: speakers.id,
+            communityId: speakers.communityId,
+            name: speakers.name,
+            birthDate: speakers.birthDate,
+            birthplaceId: speakers.birthplaceId,
+            affiliation: speakers.affiliation,
+            isActive: speakers.isActive,
+            createdAt: speakers.createdAt,
+            updatedAt: speakers.updatedAt,
+          })
+          .from(speakers)
+          .where(eq(speakers.communityId, communityId))
+          .orderBy(asc(speakers.id))
+      ),
+      bounded(
+        executor
+          .select({
+            id: stories.id,
+            communityId: stories.communityId,
+            title: stories.title,
+            description: stories.description,
+            descriptionPlain: stories.descriptionPlain,
+            slug: stories.slug,
+            privacyLevel: stories.privacyLevel,
+            isRestricted: stories.isRestricted,
+            topic: stories.topic,
+            topicNormalized: stories.topicNormalized,
+            language: stories.language,
+            dateInterviewed: stories.dateInterviewed,
+            interviewLocationId: stories.interviewLocationId,
+            interviewerId: stories.interviewerId,
+            createdBy: stories.createdBy,
+            createdAt: stories.createdAt,
+            updatedAt: stories.updatedAt,
+          })
+          .from(stories)
+          .where(eq(stories.communityId, communityId))
+          .orderBy(asc(stories.id))
+      ),
+      bounded(
+        executor
+          .select({
+            id: storyPlaces.id,
+            communityId: storyPlaces.communityId,
+            storyId: storyPlaces.storyId,
+            placeId: storyPlaces.placeId,
+            createdAt: storyPlaces.createdAt,
+            updatedAt: storyPlaces.updatedAt,
+          })
+          .from(storyPlaces)
+          .where(eq(storyPlaces.communityId, communityId))
+          .orderBy(asc(storyPlaces.id))
+      ),
+      bounded(
+        executor
+          .select({
+            id: storySpeakers.id,
+            communityId: storySpeakers.communityId,
+            storyId: storySpeakers.storyId,
+            speakerId: storySpeakers.speakerId,
+            createdAt: storySpeakers.createdAt,
+            updatedAt: storySpeakers.updatedAt,
+          })
+          .from(storySpeakers)
+          .where(eq(storySpeakers.communityId, communityId))
+          .orderBy(asc(storySpeakers.id))
+      ),
+      bounded(
+        executor
+          .select({
+            id: files.id,
+            communityId: files.communityId,
+            storageKey: files.storageKey,
+            path: files.path,
+            originalName: files.originalName,
+            mimeType: files.mimeType,
+            byteSize: files.byteSize,
+            size: files.size,
+            checksum: files.checksum,
+            uploadedBy: files.uploadedBy,
+            metadata: files.metadata,
+            culturalRestrictions: files.culturalRestrictions,
+            isActive: files.isActive,
+            createdAt: files.createdAt,
+            updatedAt: files.updatedAt,
+          })
+          .from(files)
+          .where(eq(files.communityId, communityId))
+          .orderBy(asc(files.id))
+      ),
+      bounded(
+        executor
+          .select({
+            id: attachments.id,
+            communityId: attachments.communityId,
+            fileId: attachments.fileId,
+            ownerType: attachments.ownerType,
+            ownerId: attachments.ownerId,
+            role: attachments.role,
+            ordinal: attachments.ordinal,
+            createdAt: attachments.createdAt,
+          })
+          .from(attachments)
+          .where(eq(attachments.communityId, communityId))
+          .orderBy(asc(attachments.id))
+      ),
+      bounded(
+        executor
+          .select({
+            id: externalMediaLinks.id,
+            communityId: externalMediaLinks.communityId,
+            storyId: externalMediaLinks.storyId,
+            url: externalMediaLinks.url,
+            ordinal: externalMediaLinks.ordinal,
+            createdAt: externalMediaLinks.createdAt,
+          })
+          .from(externalMediaLinks)
+          .where(eq(externalMediaLinks.communityId, communityId))
+          .orderBy(asc(externalMediaLinks.id))
+      ),
+      bounded(
+        executor
+          .select({
+            fileId: communityMedia.fileId,
+            communityId: communityMedia.communityId,
+            kind: communityMedia.kind,
+          })
+          .from(communityMedia)
+          .where(eq(communityMedia.communityId, communityId))
+          .orderBy(asc(communityMedia.fileId))
+      ),
+      bounded(
+        executor
+          .select({
+            id: auditEntries.id,
+            communityId: auditEntries.communityId,
+            actorId: auditEntries.actorId,
+            action: auditEntries.action,
+            resourceType: auditEntries.resourceType,
+            resourceIds: auditEntries.resourceIds,
+            outcome: auditEntries.outcome,
+            createdAt: auditEntries.createdAt,
+          })
+          .from(auditEntries)
+          .where(
+            and(
+              eq(auditEntries.communityId, communityId),
+              notInArray(auditEntries.action, [
+                ...EXPORT_LIFECYCLE_AUDIT_ACTIONS,
+              ])
+            )
           )
-        )
-        .orderBy(asc(auditEntries.id)),
+          .orderBy(asc(auditEntries.id))
+      ),
     ] as const;
   }
 
@@ -812,12 +843,13 @@ export class CommunityExportRepository {
    * SQLite synchronous transaction).
    */
   async readCommunityExportSnapshot(
-    communityId: number
+    communityId: number,
+    options: { maxRows?: number } = {}
   ): Promise<CommunityExportSnapshot | null> {
     const db = this.db;
     if (typeof db.batch === 'function') {
       const results = (await db.batch(
-        this.buildSnapshotQueries(db, communityId)
+        this.buildSnapshotQueries(db, communityId, options.maxRows)
       )) as unknown[][];
       return this.mapSnapshotResults(communityId, results);
     }
@@ -825,9 +857,13 @@ export class CommunityExportRepository {
     if (this.dialect === 'postgresql') {
       const results = await db.transaction(async (tx: Executor) => {
         await tx.execute(
-          sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`
+          sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`
         );
-        const queries = this.buildSnapshotQueries(tx, communityId);
+        const queries = this.buildSnapshotQueries(
+          tx,
+          communityId,
+          options.maxRows
+        );
         const out: unknown[][] = [];
         for (const query of queries) {
           out.push(await query);
@@ -838,7 +874,9 @@ export class CommunityExportRepository {
     }
 
     const results = db.transaction((tx: Executor) =>
-      this.buildSnapshotQueries(tx, communityId).map((query) => query.all())
+      this.buildSnapshotQueries(tx, communityId, options.maxRows).map((query) =>
+        query.all()
+      )
     );
     return this.mapSnapshotResults(communityId, results);
   }
@@ -956,12 +994,22 @@ export class CommunityExportRepository {
         throw error;
       }
 
-      // Reservation inserted 0 rows: community missing or rate-limit hit.
-      const [commRows, commWindow, acctWindow] = await db.batch([
+      // Reservation inserted 0 rows: community missing, active job, or rate-limit hit.
+      const [commRows, activeRows, commWindow, acctWindow] = await db.batch([
         db
           .select({ id: communities.id })
           .from(communities)
           .where(eq(communities.id, input.communityId))
+          .limit(1),
+        db
+          .select({ id: exportJobs.id })
+          .from(exportJobs)
+          .where(
+            and(
+              eq(exportJobs.communityId, input.communityId),
+              eq(exportJobs.status, 'generating')
+            )
+          )
           .limit(1),
         db
           .select({
@@ -993,6 +1041,11 @@ export class CommunityExportRepository {
 
       if (!commRows[0]) {
         return { status: 'not_found' };
+      }
+
+      if (activeRows[0]) {
+        await writeAuditEntry(db, failureAuditInput, input.now);
+        return { status: 'in_progress' };
       }
 
       const commCount = Number(commWindow[0]?.total ?? 0);
@@ -1414,6 +1467,7 @@ export class CommunityExportRepository {
     }
 
     if (typeof db.batch === 'function') {
+      const { auditEntries } = this.tables;
       const updateStmt = db
         .update(exportJobs)
         .set(patch)
@@ -1429,6 +1483,12 @@ export class CommunityExportRepository {
         select 1 from ${exportJobs}
         where ${exportJobs.id} = ${input.jobId}
           and ${exportJobs.status} = 'failed'
+      ) and not exists (
+        select 1 from ${auditEntries}
+        where ${auditEntries.communityId} = ${input.communityId}
+          and ${auditEntries.action} = 'community.export.generate'
+          and ${auditEntries.resourceType} = 'community_export'
+          and ${auditEntries.resourceIds} = ${JSON.stringify([input.jobId])}
       )`;
       const [updated] = await db.batch([
         updateStmt,
@@ -1691,6 +1751,64 @@ export class CommunityExportRepository {
     return rows.map((row: Record<string, unknown>) => this.mapJobRow(row));
   }
 
+  /**
+   * Atomically fence an export job before deleting its storage objects or
+   * aborting its multipart upload so a concurrent completion to `'ready'`
+   * cannot have its artifacts deleted by a racing cleanup sweep.
+   */
+  async claimJobForCleanup(input: {
+    jobId: string;
+    status: ExportJobStatus;
+    nowMs: number;
+    staleBeforeMs: number;
+  }): Promise<'expired' | 'failed' | null> {
+    const { exportJobs } = this.tables;
+    if (input.status === 'generating') {
+      const updated = await this.db
+        .update(exportJobs)
+        .set({ status: 'failed' })
+        .where(
+          and(
+            eq(exportJobs.id, input.jobId),
+            eq(exportJobs.status, 'generating'),
+            lte(exportJobs.createdAt, input.staleBeforeMs),
+            isNull(exportJobs.cleanedUpAt)
+          )
+        )
+        .returning({ id: exportJobs.id });
+      return Array.isArray(updated) && updated.length > 0 ? 'failed' : null;
+    }
+
+    if (input.status === 'ready') {
+      const updated = await this.db
+        .update(exportJobs)
+        .set({ status: 'expired' })
+        .where(
+          and(
+            eq(exportJobs.id, input.jobId),
+            eq(exportJobs.status, 'ready'),
+            lte(exportJobs.expiresAt, input.nowMs),
+            isNull(exportJobs.cleanedUpAt)
+          )
+        )
+        .returning({ id: exportJobs.id });
+      return Array.isArray(updated) && updated.length > 0 ? 'expired' : null;
+    }
+
+    const rows = await this.db
+      .select({ status: exportJobs.status })
+      .from(exportJobs)
+      .where(
+        and(
+          eq(exportJobs.id, input.jobId),
+          eq(exportJobs.status, input.status),
+          isNull(exportJobs.cleanedUpAt)
+        )
+      )
+      .limit(1);
+    return rows.length > 0 ? (input.status as 'expired' | 'failed') : null;
+  }
+
   async markJobCleanedUp(input: {
     jobId: string;
     nextStatus: 'expired' | 'failed';
@@ -1709,7 +1827,11 @@ export class CommunityExportRepository {
       .update(exportJobs)
       .set(patch)
       .where(
-        and(eq(exportJobs.id, input.jobId), isNull(exportJobs.cleanedUpAt))
+        and(
+          eq(exportJobs.id, input.jobId),
+          isNull(exportJobs.cleanedUpAt),
+          inArray(exportJobs.status, ['expired', 'failed'])
+        )
       );
   }
 

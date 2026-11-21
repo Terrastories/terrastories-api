@@ -86,17 +86,17 @@ const sweepOrphanObjects = () => {
 const orphanSweepTimers = scheduleOrphanSweep(sweepOrphanObjects);
 
 // Maintenance sweeps on the Workers cron cadence: audit IP/UA scrub past the
-// 90-day retention cutoff, expired session rows, and spent non-blocking
-// throttle rows. These jobs touch no bytes — only audit/session/throttle
-// rows — so ORPHAN_SWEEP_PAUSED (the storage-restore hold, which covers byte
-// deletion) deliberately does not pause them. Each job runs in its own
-// try/catch with content-free logging; one failing job never blocks the
-// others. First run after a named delay; unref'd interval.
+// 90-day retention cutoff, expired session rows, spent non-blocking throttle
+// rows, and expired export artifacts past their 15-minute TTL (never master
+// media bytes). So ORPHAN_SWEEP_PAUSED (the storage-restore hold covering
+// unreferenced master media) deliberately does not pause them. Each job runs
+// in its own try/catch with content-free logging; one failing job never
+// blocks the others. First run after a named delay; unref'd interval.
 const maintenanceSweepTimers = scheduleMaintenanceSweeps(() => {
   // Each job already catches its own failure; this catch keeps any
   // unexpected throw from becoming an unhandled rejection that ends the
   // process.
-  runMaintenanceSweeps(db).catch(() => {
+  runMaintenanceSweeps(db, { storage }).catch(() => {
     // eslint-disable-next-line no-console -- operator channel; content-free
     console.warn('maintenance sweeps: run failed');
   });

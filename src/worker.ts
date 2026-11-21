@@ -19,6 +19,7 @@ import {
   MediaCleanupCoordinator,
   WORKER_SWEEP_SUBREQUEST_BUDGET,
 } from './services/media-cleanup.service.js';
+import { WORKER_EXPORT_SWEEP_BATCH_LIMIT } from './shared/export-policy.js';
 import {
   validateWorkerV2Runtime,
   V2RuntimeConfigError,
@@ -138,14 +139,24 @@ export function createWorker() {
       const uploadedParts: R2UploadedPart[] = [];
       let partNumber = 1;
       try {
-        const flushPart = async (length: number) => {
-          const slice = buffer.slice(0, length);
+        const ensureMultipartUpload = async () => {
           if (!upload) {
             upload = await bucket.createMultipartUpload(key, {
               httpMetadata,
             });
+            await options?.onMultipartUploadCreated?.(upload.uploadId);
           }
-          uploadedParts.push(await upload.uploadPart(partNumber++, slice));
+          return upload;
+        };
+        if (options?.useMultipart) {
+          await ensureMultipartUpload();
+        }
+        const flushPart = async (length: number) => {
+          const slice = buffer.slice(0, length);
+          const activeUpload = await ensureMultipartUpload();
+          uploadedParts.push(
+            await activeUpload.uploadPart(partNumber++, slice)
+          );
           buffered = 0;
         };
         while (true) {
@@ -169,6 +180,9 @@ export function createWorker() {
           await bucket.put(key, buffer.slice(0, buffered), {
             httpMetadata,
           });
+        } else if (totalSize === 0 && uploadedParts.length === 0) {
+          await (upload as R2MultipartUpload).abort().catch(() => {});
+          await bucket.put(key, new Uint8Array(0), { httpMetadata });
         } else {
           if (buffered > 0) {
             await flushPart(buffered);
@@ -188,6 +202,23 @@ export function createWorker() {
     async delete(key) {
       if (!validStorageKey(key)) return;
       await bucket.delete(key);
+    },
+    async abortMultipartUpload(key, uploadId) {
+      if (!validStorageKey(key) || !uploadId) return;
+      try {
+        await bucket.resumeMultipartUpload(key, uploadId).abort();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          /no\s*such\s*upload|not\s*found|does\s*not\s*exist|already\s*(completed|aborted)|10024/i.test(
+            message
+          )
+        ) {
+          // Upload may already be completed or aborted; treat missing upload idempotently.
+          return;
+        }
+        throw error;
+      }
     },
     async list(options) {
       const limit = options?.limit ?? 200;
@@ -322,28 +353,28 @@ export function createWorker() {
           const db = drizzle(client);
           const scheduledNow = () =>
             new Date(_controller.scheduledTime || Date.now());
-          const cleanup = new MediaCleanupCoordinator(
-            db,
-            createR2Storage(env.MEDIA),
-            {
-              now: scheduledNow,
-              // Subrequest-budgeted run; the sweeper also honours an
-              // ORPHAN_SWEEP_PAUSED binding / `system/orphan-sweep-hold`
-              // marker for the restore hold.
-              subrequestBudget: WORKER_SWEEP_SUBREQUEST_BUDGET,
-              sweepPaused: envFlagEnabled(env.ORPHAN_SWEEP_PAUSED),
-            }
-          );
+          const r2Storage = createR2Storage(env.MEDIA);
+          const cleanup = new MediaCleanupCoordinator(db, r2Storage, {
+            now: scheduledNow,
+            // Subrequest-budgeted run; the sweeper also honours an
+            // ORPHAN_SWEEP_PAUSED binding / `system/orphan-sweep-hold`
+            // marker for the restore hold.
+            subrequestBudget: WORKER_SWEEP_SUBREQUEST_BUDGET,
+            sweepPaused: envFlagEnabled(env.ORPHAN_SWEEP_PAUSED),
+          });
           try {
             await cleanup.sweepOrphanObjects();
           } catch {
             // eslint-disable-next-line no-console -- workerd's only operator channel
             console.warn('media cleanup: scheduled orphan sweep failed');
           }
-          // Maintenance sweeps: audit IP/UA scrub, expired sessions and spent
-          // throttle rows. Touch no bytes, so ORPHAN_SWEEP_PAUSED does not
-          // pause them; each job runs in its own try/catch.
-          await runMaintenanceSweeps(db, { now: scheduledNow });
+          // Maintenance sweeps: audit IP/UA scrub, expired sessions, spent
+          // throttle rows, and expired export artifact cleanup.
+          await runMaintenanceSweeps(db, {
+            now: scheduledNow,
+            storage: r2Storage,
+            exportSweepLimit: WORKER_EXPORT_SWEEP_BATCH_LIMIT,
+          });
         })()
       );
     },

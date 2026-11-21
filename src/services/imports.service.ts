@@ -268,7 +268,10 @@ function countReferencesInNormalizedData(data: StoredNormalizedImportData): {
   };
 }
 
-function computeManifestPlan(manifest: ImportManifestRowRecord) {
+function computeManifestPlan(
+  manifest: ImportManifestRowRecord,
+  d1Enforced = true
+) {
   const normalizedData = manifest.normalizedRows;
   const manifestPayloadBytes = new TextEncoder().encode(
     JSON.stringify({
@@ -292,15 +295,19 @@ function computeManifestPlan(manifest: ImportManifestRowRecord) {
     manifest.status === 'previewed' &&
     manifest.rowErrors.length === 0 &&
     normalizedData.rows.length > 0 &&
-    plan.summary.withinD1Budget;
+    (!d1Enforced || plan.summary.withinD1Budget);
 
   return { normalizedData, plan, canCommit };
 }
 
 export function serializeImportManifestSummary(
-  manifest: ImportManifestRowRecord
+  manifest: ImportManifestRowRecord,
+  d1Enforced = true
 ): ImportManifestSummary {
-  const { normalizedData, canCommit } = computeManifestPlan(manifest);
+  const { normalizedData, canCommit } = computeManifestPlan(
+    manifest,
+    d1Enforced
+  );
 
   return {
     id: manifest.id,
@@ -323,13 +330,14 @@ export function serializeImportManifestSummary(
 }
 
 export function serializeImportManifestDetail(
-  manifest: ImportManifestRowRecord
+  manifest: ImportManifestRowRecord,
+  d1Enforced = true
 ): ImportManifestDetail {
-  const { normalizedData, plan } = computeManifestPlan(manifest);
+  const { normalizedData, plan } = computeManifestPlan(manifest, d1Enforced);
   const mediaCounts = countReferencesInNormalizedData(normalizedData);
 
   return {
-    ...serializeImportManifestSummary(manifest),
+    ...serializeImportManifestSummary(manifest, d1Enforced),
     mappings: manifest.mappings.headerMappings,
     unmappedHeaders: manifest.mappings.unmappedHeaders,
     duplicateStrategy: manifest.mappings.duplicateStrategy,
@@ -1155,7 +1163,10 @@ export class ImportsService {
         };
       }
 
-      const detail = serializeImportManifestDetail(outcome.manifest);
+      const detail = serializeImportManifestDetail(
+        outcome.manifest,
+        d1Enforced
+      );
       const checked = ImportManifestDetailResponseSchema.safeParse({
         data: detail,
       });
@@ -1236,12 +1247,13 @@ export class ImportsService {
       };
     }
 
+    const d1Enforced = this.isD1Enforced();
     const { rows, total } = await this.repository.listManifests(
       caller.communityId,
       parsed.data
     );
     const checked = ImportManifestListResponseSchema.safeParse({
-      data: rows.map(serializeImportManifestSummary),
+      data: rows.map((row) => serializeImportManifestSummary(row, d1Enforced)),
       meta: {
         total,
         limit: parsed.data.limit,
@@ -1290,7 +1302,7 @@ export class ImportsService {
     }
 
     const checked = ImportManifestDetailResponseSchema.safeParse({
-      data: serializeImportManifestDetail(manifest),
+      data: serializeImportManifestDetail(manifest, this.isD1Enforced()),
     });
     if (!checked.success) {
       return { status: 500, body: INTERNAL_ERROR_BODY };
@@ -1345,14 +1357,389 @@ export class ImportsService {
       };
     }
 
-    await this.cleanup.deleteFilesBestEffort(outcome.removedFiles);
+    await this.cleanup.deleteFilesBestEffort(
+      outcome.removedFiles,
+      'import_discarded'
+    );
     const checked = ImportManifestDetailResponseSchema.safeParse({
-      data: serializeImportManifestDetail(outcome.manifest),
+      data: serializeImportManifestDetail(
+        outcome.manifest,
+        this.isD1Enforced()
+      ),
     });
     if (!checked.success) {
       return { status: 500, body: INTERNAL_ERROR_BODY };
     }
     return { status: 200, body: checked.data };
+  }
+
+  private async verifyStagedMediaChecksum(
+    storageKey: string,
+    expectedByteSize: number,
+    expectedChecksum: string
+  ): Promise<boolean> {
+    if (!/^[0-9a-f]{64}$/i.test(expectedChecksum)) {
+      return false;
+    }
+    let stored: Awaited<ReturnType<FoundationStorage['read']>>;
+    try {
+      stored = await this.storage.read(storageKey);
+    } catch {
+      return false;
+    }
+    if (!stored) return false;
+
+    const hasher = new StreamingSha256();
+    let totalBytes = 0;
+
+    if (stored.body instanceof Uint8Array) {
+      totalBytes = stored.body.byteLength;
+      hasher.update(stored.body);
+    } else {
+      const reader = stored.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength > 0) {
+            totalBytes += value.byteLength;
+            hasher.update(value);
+          }
+        }
+      } catch {
+        await reader.cancel().catch(() => {});
+        return false;
+      } finally {
+        reader.releaseLock();
+      }
+    }
+
+    return (
+      totalBytes === expectedByteSize &&
+      hasher.digestHex().toLowerCase() === expectedChecksum.toLowerCase()
+    );
+  }
+
+  async commitImport(
+    actor: FoundationUser,
+    rawId: string
+  ): Promise<
+    ImportServiceResult<z.infer<typeof ImportManifestDetailResponseSchema>>
+  > {
+    const caller = await authorizeCommunityWriteCaller(this.repository, actor, [
+      'editor',
+      'admin',
+    ]);
+    if (!caller) {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+
+    if (!isDatabaseIdString(rawId)) {
+      return {
+        status: 400,
+        body: makeValidationErrorBody([
+          {
+            path: 'id',
+            message: 'Import manifest ID must be a positive integer',
+          },
+        ]),
+      };
+    }
+
+    const manifestId = Number(rawId);
+    const d1Enforced = this.isD1Enforced();
+    const serializeManifest = (
+      manifest: ImportManifestRowRecord
+    ): ImportServiceResult<
+      z.infer<typeof ImportManifestDetailResponseSchema>
+    > => {
+      const checked = ImportManifestDetailResponseSchema.safeParse({
+        data: serializeImportManifestDetail(manifest, d1Enforced),
+      });
+      if (!checked.success) {
+        return { status: 500, body: INTERNAL_ERROR_BODY };
+      }
+      return { status: 200, body: checked.data };
+    };
+
+    const manifest = await this.repository.getManifestById(
+      caller.communityId,
+      manifestId
+    );
+    if (!manifest) {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+
+    if (manifest.status === 'committed') {
+      return serializeManifest(manifest);
+    }
+    if (manifest.status === 'discarded') {
+      return {
+        status: 409,
+        body: { error: 'Discarded import manifest cannot be committed' },
+      };
+    }
+    if (manifest.status === 'failed') {
+      return {
+        status: 409,
+        body: {
+          error:
+            'Failed import manifest cannot be committed; start a new preview',
+        },
+      };
+    }
+
+    if (manifest.rowErrors.length > 0) {
+      return {
+        status: 422,
+        body: {
+          error:
+            'Import manifest has validation errors and cannot be committed',
+          code: 'import_not_committable',
+        },
+      };
+    }
+    if (manifest.normalizedRows.rows.length === 0) {
+      return {
+        status: 422,
+        body: {
+          error: 'Import manifest contains no rows to commit',
+          code: 'import_not_committable',
+        },
+      };
+    }
+
+    const { plan } = computeManifestPlan(manifest, d1Enforced);
+    if (d1Enforced && !plan.summary.withinD1Budget) {
+      return {
+        status: 422,
+        body: {
+          error: plan.violations[0]!.message,
+          code: 'd1_budget_exceeded',
+          details: {
+            commitPlan: plan.summary,
+            violations: plan.violations,
+            alternatives: D1_BUDGET_ALTERNATIVES_MESSAGE,
+          },
+        },
+      };
+    }
+
+    const requestNow = this.now();
+    const dailyWindow = d1Enforced ? utcDayWindowMs(requestNow) : null;
+    if (dailyWindow) {
+      const hitDaily = await this.repository.hasCommittedImportInWindow(
+        dailyWindow.startMs,
+        dailyWindow.endMs
+      );
+      if (hitDaily) {
+        const latest = await this.repository.getManifestById(
+          caller.communityId,
+          manifestId
+        );
+        if (latest?.status === 'committed') {
+          return serializeManifest(latest);
+        }
+        return {
+          status: 429,
+          body: {
+            error: `Daily D1 import limit of 1 committed import per UTC day reached. ${D1_BUDGET_ALTERNATIVES_MESSAGE}`,
+            code: 'd1_daily_import_limit',
+          },
+        };
+      }
+    }
+
+    const failAndCleanup = async (): Promise<
+      ImportServiceResult<z.infer<typeof ImportManifestDetailResponseSchema>>
+    > => {
+      const failOutcome = await this.repository.failManifest({
+        communityId: caller.communityId,
+        actorId: caller.actorId,
+        manifestId,
+        now: requestNow,
+      });
+      if (failOutcome.status === 'already_committed') {
+        return serializeManifest(failOutcome.manifest);
+      }
+      if (failOutcome.status === 'not_found') {
+        return { status: 404, body: NOT_FOUND_BODY };
+      }
+      if (failOutcome.status === 'forbidden') {
+        return { status: 403, body: FORBIDDEN_BODY };
+      }
+      if (failOutcome.status === 'failed') {
+        await this.cleanup.deleteFilesBestEffort(
+          failOutcome.removedFiles,
+          'import_failed'
+        );
+        return {
+          status: 409,
+          body: {
+            error: 'Import commit failed; no records were applied',
+            code: 'import_commit_failed',
+          },
+        };
+      }
+      return {
+        status: 409,
+        body: {
+          error:
+            failOutcome.manifest.status === 'discarded'
+              ? 'Discarded import manifest cannot be committed'
+              : 'Failed import manifest cannot be committed; start a new preview',
+        },
+      };
+    };
+
+    // Re-verify existing referenced media files before commit.
+    const existingFileIds = Array.from(
+      new Set(
+        manifest.normalizedRows.rows.flatMap((row) =>
+          row.attachments
+            .filter((att) => !att.stagedByManifest)
+            .map((att) => att.fileId)
+        )
+      )
+    );
+    if (existingFileIds.length > 0) {
+      const foundExisting = await this.repository.findCommunityFilesByIds(
+        caller.communityId,
+        existingFileIds
+      );
+      for (const fileId of existingFileIds) {
+        const dbFile = foundExisting.get(fileId);
+        if (!dbFile) {
+          const latest = await this.repository.getManifestById(
+            caller.communityId,
+            manifestId
+          );
+          if (latest?.status === 'committed') return serializeManifest(latest);
+          if (latest?.status === 'discarded') {
+            return {
+              status: 409,
+              body: { error: 'Discarded import manifest cannot be committed' },
+            };
+          }
+          return failAndCleanup();
+        }
+        const reuse = await this.mediaRepository.authorizeAttachReuse({
+          actor,
+          communityId: caller.communityId,
+          file: { id: dbFile.id, uploadedBy: dbFile.uploadedBy },
+        });
+        if (!reuse.ok) {
+          if (
+            caller.role !== 'admin' &&
+            manifest.createdBy !== caller.actorId
+          ) {
+            return { status: 403, body: FORBIDDEN_BODY };
+          }
+          return failAndCleanup();
+        }
+      }
+    }
+
+    // Verify staged media rows and checksums against stored bytes before commit.
+    const stagedMediaIds = Array.from(new Set(manifest.stagedFileIds))
+      .filter((id) => id !== manifest.sourceFileId)
+      .sort();
+    if (stagedMediaIds.length > 0) {
+      const stagedRows = await this.repository.findStagedFilesByIds(
+        caller.communityId,
+        stagedMediaIds
+      );
+      let stagedInvalid = false;
+      for (const fileId of stagedMediaIds) {
+        const row = stagedRows.get(fileId);
+        if (
+          !row ||
+          row.isActive ||
+          row.culturalRestrictions !== null ||
+          row.checksum === null
+        ) {
+          stagedInvalid = true;
+          break;
+        }
+        const bytesOk = await this.verifyStagedMediaChecksum(
+          row.storageKey,
+          row.byteSize,
+          row.checksum
+        );
+        if (!bytesOk) {
+          stagedInvalid = true;
+          break;
+        }
+      }
+      if (stagedInvalid) {
+        const latest = await this.repository.getManifestById(
+          caller.communityId,
+          manifestId
+        );
+        if (latest?.status === 'committed') {
+          return serializeManifest(latest);
+        }
+        if (latest?.status === 'discarded') {
+          return {
+            status: 409,
+            body: { error: 'Discarded import manifest cannot be committed' },
+          };
+        }
+        if (latest?.status === 'failed') {
+          return {
+            status: 409,
+            body: {
+              error:
+                'Failed import manifest cannot be committed; start a new preview',
+            },
+          };
+        }
+        return failAndCleanup();
+      }
+    }
+
+    const commitOutcome = await this.repository.commitManifest({
+      communityId: caller.communityId,
+      actorId: caller.actorId,
+      manifest,
+      now: requestNow,
+      dailyLimitWindow: dailyWindow,
+    });
+
+    if (
+      commitOutcome.status === 'committed' ||
+      commitOutcome.status === 'already_committed'
+    ) {
+      return serializeManifest(commitOutcome.manifest);
+    }
+    if (commitOutcome.status === 'not_found') {
+      return { status: 404, body: NOT_FOUND_BODY };
+    }
+    if (commitOutcome.status === 'forbidden') {
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    if (commitOutcome.status === 'daily_limit') {
+      return {
+        status: 429,
+        body: {
+          error: `Daily D1 import limit of 1 committed import per UTC day reached. ${D1_BUDGET_ALTERNATIVES_MESSAGE}`,
+          code: 'd1_daily_import_limit',
+        },
+      };
+    }
+    if (commitOutcome.status === 'conflict') {
+      return {
+        status: 409,
+        body: {
+          error:
+            commitOutcome.manifest.status === 'discarded'
+              ? 'Discarded import manifest cannot be committed'
+              : 'Failed import manifest cannot be committed; start a new preview',
+        },
+      };
+    }
+
+    return failAndCleanup();
   }
 
   private validateAndNormalizeRows(input: {

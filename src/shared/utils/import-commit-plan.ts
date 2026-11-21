@@ -11,6 +11,7 @@
  */
 import type {
   ImportCommitPlanSummary,
+  ImportResultSummary,
   StoredNormalizedImportData,
 } from '../schemas/imports.js';
 
@@ -100,8 +101,8 @@ const FILE_INSERT_PARAMS_PER_ROW = 17;
 const MANIFEST_INSERT_SQL_BYTES = 360;
 const MANIFEST_COMMIT_SQL_BYTES = 260;
 const AUDIT_INSERT_SQL_BYTES = 220;
-const PLACE_INSERT_SQL_BYTES = 240;
-const SPEAKER_INSERT_SQL_BYTES = 220;
+export const PLACE_INSERT_SQL_BYTES = 240;
+export const SPEAKER_INSERT_SQL_BYTES = 220;
 const STORY_INSERT_SQL_BYTES = 340;
 const STORY_EDGE_SQL_BYTES = 220;
 const ATTACHMENT_INSERT_SQL_BYTES = 240;
@@ -110,7 +111,7 @@ const ACTIVATE_FILES_SQL_BYTES = 180;
 
 /** Staged file inserts run 1 row per preview batch statement (19 params <= 100). */
 export const PREVIEW_FILES_INSERT_CHUNK = 1;
-/** Max file IDs per activation UPDATE statement (1 + 80 = 81 <= 100). */
+/** Max file IDs per activation UPDATE statement (80 + 10 = 90 <= 100). */
 export const COMMIT_FILE_ACTIVATE_CHUNK = 80;
 /** Max places per multi-row INSERT statement (9 * 10 = 90 <= 100). */
 export const COMMIT_PLACE_INSERT_CHUNK = 9;
@@ -132,6 +133,125 @@ export function utcDayWindowMs(now: Date): { startMs: number; endMs: number } {
   return { startMs, endMs: startMs + 24 * 60 * 60 * 1000 };
 }
 
+export function estimateRelatedRecordBytes(item: { name: string }): number {
+  return serializedParamBytes(item.name) + 64;
+}
+
+export function estimatePlaceRowBytes(row: {
+  name: string;
+  description: string | null;
+  descriptionPlain: string | null;
+  typeOfPlace: string | null;
+  region: string | null;
+  latitude: number | null;
+  longitude: number | null;
+}): number {
+  return estimateInsertStatementBytes(64, [
+    row.name,
+    row.description,
+    row.descriptionPlain,
+    row.typeOfPlace,
+    row.region,
+    row.latitude,
+    row.longitude,
+  ]);
+}
+
+export function estimateSpeakerRowBytes(row: {
+  name: string;
+  birthDate: string | null;
+  affiliation: string | null;
+  birthplaceRef:
+    | { kind: 'existing'; id: number }
+    | { kind: 'create'; name: string; normalizedName: string }
+    | null;
+}): number {
+  return estimateInsertStatementBytes(64, [
+    row.name,
+    row.birthDate,
+    row.affiliation,
+    row.birthplaceRef?.kind === 'existing'
+      ? row.birthplaceRef.id
+      : (row.birthplaceRef?.name ?? null),
+  ]);
+}
+
+export function computeImportResultSummary(
+  normalizedData: StoredNormalizedImportData
+): ImportResultSummary {
+  let createdAttachments = 0;
+  for (const row of normalizedData.rows) {
+    createdAttachments += row.attachments.length;
+  }
+
+  let createdStoryPlaces = 0;
+  let createdStorySpeakers = 0;
+  let createdExternalLinks = 0;
+  if (normalizedData.kind === 'stories') {
+    for (const row of normalizedData.rows) {
+      createdStoryPlaces += row.placeRefs.length;
+      createdStorySpeakers += row.speakerRefs.length;
+      createdExternalLinks += row.externalMediaLinks.length;
+    }
+  }
+
+  return {
+    createdPlaces:
+      normalizedData.relatedPlacesToCreate.length +
+      (normalizedData.kind === 'places' ? normalizedData.rows.length : 0),
+    createdSpeakers:
+      normalizedData.relatedSpeakersToCreate.length +
+      (normalizedData.kind === 'speakers' ? normalizedData.rows.length : 0),
+    createdStories:
+      normalizedData.kind === 'stories' ? normalizedData.rows.length : 0,
+    createdStoryPlaces,
+    createdStorySpeakers,
+    createdAttachments,
+    createdExternalLinks,
+    skippedDuplicates: normalizedData.skippedDuplicates,
+  };
+}
+
+export function chunkImportItemsByBudget<T>(
+  items: ReadonlyArray<T>,
+  maxRowsPerStmt: number,
+  maxParamsPerStmt: number,
+  paramsPerRow: number,
+  sqlOverheadBytes: number,
+  rowBytesFn: (item: T) => number
+): T[][] {
+  if (items.length === 0) return [];
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  let batchParams = 0;
+  let batchBytes = sqlOverheadBytes;
+
+  const flush = () => {
+    if (current.length === 0) return;
+    chunks.push(current);
+    current = [];
+    batchParams = 0;
+    batchBytes = sqlOverheadBytes;
+  };
+
+  for (const item of items) {
+    const itemBytes = rowBytesFn(item);
+    const exceedsCount = current.length >= maxRowsPerStmt;
+    const exceedsParams = batchParams + paramsPerRow > maxParamsPerStmt;
+    const exceedsBytes =
+      current.length > 0 && batchBytes + itemBytes > D1_MAX_STATEMENT_BYTES;
+
+    if (exceedsCount || exceedsParams || exceedsBytes) {
+      flush();
+    }
+    current.push(item);
+    batchParams += paramsPerRow;
+    batchBytes += itemBytes;
+  }
+  flush();
+  return chunks;
+}
+
 function chunkIntoMultiRowStatements<T>(
   items: ReadonlyArray<T>,
   maxRowsPerStmt: number,
@@ -142,41 +262,25 @@ function chunkIntoMultiRowStatements<T>(
   label: string,
   rowsWrittenPerItem: number
 ): PlannedStatementMetric[] {
-  if (items.length === 0) return [];
-  const out: PlannedStatementMetric[] = [];
-  let batchCount = 0;
-  let batchParams = 0;
-  let batchBytes = sqlOverheadBytes;
-
-  const flush = () => {
-    if (batchCount === 0) return;
-    out.push({
-      label,
-      boundParams: batchParams,
-      statementBytes: batchBytes,
-      estimatedRowsWritten: batchCount * rowsWrittenPerItem,
-    });
-    batchCount = 0;
-    batchParams = 0;
-    batchBytes = sqlOverheadBytes;
-  };
-
-  for (const item of items) {
-    const itemBytes = rowBytesFn(item);
-    const exceedsCount = batchCount >= maxRowsPerStmt;
-    const exceedsParams = batchParams + paramsPerRow > maxParamsPerStmt;
-    const exceedsBytes =
-      batchCount > 0 && batchBytes + itemBytes > D1_MAX_STATEMENT_BYTES;
-
-    if (exceedsCount || exceedsParams || exceedsBytes) {
-      flush();
+  return chunkImportItemsByBudget(
+    items,
+    maxRowsPerStmt,
+    maxParamsPerStmt,
+    paramsPerRow,
+    sqlOverheadBytes,
+    rowBytesFn
+  ).map((chunk) => {
+    let statementBytes = sqlOverheadBytes;
+    for (const item of chunk) {
+      statementBytes += rowBytesFn(item);
     }
-    batchCount += 1;
-    batchParams += paramsPerRow;
-    batchBytes += itemBytes;
-  }
-  flush();
-  return out;
+    return {
+      label,
+      boundParams: chunk.length * paramsPerRow,
+      statementBytes,
+      estimatedRowsWritten: chunk.length * rowsWrittenPerItem,
+    };
+  });
 }
 
 /**
@@ -241,7 +345,7 @@ export function planImportCommit(input: {
         D1_MAX_BOUND_PARAMS_PER_STATEMENT,
         10,
         PLACE_INSERT_SQL_BYTES,
-        (place) => serializedParamBytes(place.name) + 64,
+        estimateRelatedRecordBytes,
         'commit.related_places',
         D1_ROW_WRITE_COSTS.placeInsert
       )
@@ -256,7 +360,7 @@ export function planImportCommit(input: {
         D1_MAX_BOUND_PARAMS_PER_STATEMENT,
         8,
         SPEAKER_INSERT_SQL_BYTES,
-        (speaker) => serializedParamBytes(speaker.name) + 64,
+        estimateRelatedRecordBytes,
         'commit.related_speakers',
         D1_ROW_WRITE_COSTS.speakerInsert
       )
@@ -278,16 +382,7 @@ export function planImportCommit(input: {
         D1_MAX_BOUND_PARAMS_PER_STATEMENT,
         10,
         PLACE_INSERT_SQL_BYTES,
-        (row) =>
-          estimateInsertStatementBytes(64, [
-            row.name,
-            row.description,
-            row.descriptionPlain,
-            row.typeOfPlace,
-            row.region,
-            row.latitude,
-            row.longitude,
-          ]),
+        estimatePlaceRowBytes,
         'commit.places',
         D1_ROW_WRITE_COSTS.placeInsert
       )
@@ -296,7 +391,7 @@ export function planImportCommit(input: {
     for (const row of attachedPlaces) {
       commitStatements.push({
         label: 'commit.place_with_attachments',
-        boundParams: 12,
+        boundParams: 16,
         statementBytes: estimateInsertStatementBytes(PLACE_INSERT_SQL_BYTES, [
           row.name,
           row.description,
@@ -334,15 +429,7 @@ export function planImportCommit(input: {
         D1_MAX_BOUND_PARAMS_PER_STATEMENT,
         8,
         SPEAKER_INSERT_SQL_BYTES,
-        (row) =>
-          estimateInsertStatementBytes(64, [
-            row.name,
-            row.birthDate,
-            row.affiliation,
-            row.birthplaceRef?.kind === 'existing'
-              ? row.birthplaceRef.id
-              : (row.birthplaceRef?.name ?? null),
-          ]),
+        estimateSpeakerRowBytes,
         'commit.speakers',
         D1_ROW_WRITE_COSTS.speakerInsert
       )
@@ -351,7 +438,7 @@ export function planImportCommit(input: {
     for (const row of attachedSpeakers) {
       commitStatements.push({
         label: 'commit.speaker_with_attachments',
-        boundParams: 10,
+        boundParams: 16,
         statementBytes: estimateInsertStatementBytes(SPEAKER_INSERT_SQL_BYTES, [
           row.name,
           row.birthDate,
@@ -377,7 +464,7 @@ export function planImportCommit(input: {
     for (const row of normalizedData.rows) {
       commitStatements.push({
         label: 'commit.story',
-        boundParams: 16,
+        boundParams: 28,
         statementBytes: estimateInsertStatementBytes(STORY_INSERT_SQL_BYTES, [
           row.title,
           row.slug,
@@ -456,7 +543,7 @@ export function planImportCommit(input: {
     const chunk = input.stagedFileIds.slice(i, i + COMMIT_FILE_ACTIVATE_CHUNK);
     commitStatements.push({
       label: 'commit.activate_staged_files',
-      boundParams: chunk.length + 2,
+      boundParams: chunk.length + 10,
       statementBytes: ACTIVATE_FILES_SQL_BYTES + chunk.length * 40,
       estimatedRowsWritten:
         chunk.length * D1_ROW_WRITE_COSTS.filesActivateUpdate,
@@ -465,14 +552,14 @@ export function planImportCommit(input: {
 
   commitStatements.push({
     label: 'commit.import_manifest_status',
-    boundParams: 7,
+    boundParams: 12,
     statementBytes: MANIFEST_COMMIT_SQL_BYTES + 256,
     estimatedRowsWritten: D1_ROW_WRITE_COSTS.importManifestCommitUpdate,
   });
 
   commitStatements.push({
     label: 'commit.audit_entry',
-    boundParams: 10,
+    boundParams: 14,
     statementBytes: AUDIT_INSERT_SQL_BYTES,
     estimatedRowsWritten: D1_ROW_WRITE_COSTS.auditEntryInsert,
   });

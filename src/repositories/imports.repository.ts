@@ -13,6 +13,7 @@
  */
 import {
   and,
+  asc,
   desc,
   eq,
   inArray,
@@ -33,8 +34,30 @@ import type {
   ImportResultSummary,
   ImportRowError,
   ImportStoredMappings,
+  NormalizedPlaceRow,
+  NormalizedSpeakerRow,
+  NormalizedStoryRow,
   StoredNormalizedImportData,
 } from '../shared/schemas/imports.js';
+import { storyVisibilityToPhysical } from '../policy/canonical-state.js';
+import {
+  isForeignKeyConstraintError,
+  isNotNullConstraintError,
+} from './community-writes.repository.js';
+import {
+  COMMIT_CHILD_ROW_CHUNK,
+  COMMIT_FILE_ACTIVATE_CHUNK,
+  COMMIT_PLACE_INSERT_CHUNK,
+  COMMIT_SPEAKER_INSERT_CHUNK,
+  D1_MAX_BOUND_PARAMS_PER_STATEMENT,
+  PLACE_INSERT_SQL_BYTES,
+  SPEAKER_INSERT_SQL_BYTES,
+  chunkImportItemsByBudget,
+  computeImportResultSummary,
+  estimatePlaceRowBytes,
+  estimateRelatedRecordBytes,
+  estimateSpeakerRowBytes,
+} from '../shared/utils/import-commit-plan.js';
 import {
   lockFileRowsForCleanup,
   toFileByteCleanups,
@@ -43,7 +66,70 @@ import {
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
 
 const D1_FILE_LOOKUP_CHUNK = 80;
+const D1_ENTITY_LOOKUP_CHUNK = 80;
 const READABLE_PRIVACY_LEVELS = ['public', 'members_only', 'editors'] as const;
+
+function isUniqueConstraintError(
+  err: unknown,
+  seen: Set<unknown> = new Set()
+): boolean {
+  if (!err || typeof err !== 'object' || seen.has(err)) return false;
+  seen.add(err);
+  const { code, message, cause } = err as {
+    code?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  };
+  if (code === '23505' || code === 'SQLITE_CONSTRAINT_UNIQUE') {
+    return true;
+  }
+  if (
+    typeof message === 'string' &&
+    message.includes('UNIQUE constraint failed')
+  ) {
+    return true;
+  }
+  return cause ? isUniqueConstraintError(cause, seen) : false;
+}
+
+function isCheckConstraintError(
+  err: unknown,
+  seen: Set<unknown> = new Set()
+): boolean {
+  if (!err || typeof err !== 'object' || seen.has(err)) return false;
+  seen.add(err);
+  const { code, message, cause } = err as {
+    code?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  };
+  if (code === '23514' || code === 'SQLITE_CONSTRAINT_CHECK') {
+    return true;
+  }
+  if (
+    typeof message === 'string' &&
+    message.includes('CHECK constraint failed')
+  ) {
+    return true;
+  }
+  return cause ? isCheckConstraintError(cause, seen) : false;
+}
+
+class RollbackReferenceError extends Error {
+  constructor() {
+    super('Import reference invalid during commit');
+    this.name = 'RollbackReferenceError';
+  }
+}
+
+export interface StagedFileVerificationRecord {
+  id: string;
+  storageKey: string;
+  checksum: string | null;
+  byteSize: number;
+  isActive: boolean;
+  culturalRestrictions: unknown;
+}
 
 export interface StagedFileInsertInput {
   id: string;
@@ -103,6 +189,26 @@ export type DiscardManifestOutcome =
   | { status: 'forbidden' }
   | { status: 'conflict' };
 
+export type CommitManifestOutcome =
+  | { status: 'committed'; manifest: ImportManifestRowRecord }
+  | { status: 'already_committed'; manifest: ImportManifestRowRecord }
+  | { status: 'not_found' }
+  | { status: 'forbidden' }
+  | { status: 'conflict'; manifest: ImportManifestRowRecord }
+  | { status: 'daily_limit' }
+  | { status: 'failed_reference' };
+
+export type FailManifestOutcome =
+  | {
+      status: 'failed';
+      manifest: ImportManifestRowRecord;
+      removedFiles: FileByteCleanup[];
+    }
+  | { status: 'already_committed'; manifest: ImportManifestRowRecord }
+  | { status: 'already_terminal'; manifest: ImportManifestRowRecord }
+  | { status: 'not_found' }
+  | { status: 'forbidden' };
+
 export interface CommunityImportContext {
   places: Array<{ id: number; name: string }>;
   speakers: Array<{ id: number; name: string }>;
@@ -160,9 +266,9 @@ function mapManifestRow(row: {
 function buildImportAuditEntry(input: {
   communityId: number;
   actorId: number;
-  action: 'import.preview' | 'import.discard';
+  action: 'import.preview' | 'import.discard' | 'import.commit';
   manifestId: number;
-  outcome: 'success' | 'denied';
+  outcome: 'success' | 'denied' | 'failed';
 }) {
   return validateContentFreeAuditEntry({
     communityId: input.communityId,
@@ -333,6 +439,55 @@ export class ImportsRepository {
           mimeType: row.mimeType,
           originalName: row.originalName,
           uploadedBy: row.uploadedBy === null ? null : Number(row.uploadedBy),
+        });
+      }
+    }
+    return map;
+  }
+
+  async findStagedFilesByIds(
+    communityId: number,
+    fileIds: ReadonlyArray<string>
+  ): Promise<Map<string, StagedFileVerificationRecord>> {
+    const unique = Array.from(new Set(fileIds)).sort();
+    const map = new Map<string, StagedFileVerificationRecord>();
+    for (let i = 0; i < unique.length; i += D1_FILE_LOOKUP_CHUNK) {
+      const chunk = unique.slice(i, i + D1_FILE_LOOKUP_CHUNK);
+      const rows = await this.db
+        .select({
+          id: this.tables.files.id,
+          storageKey: this.tables.files.storageKey,
+          path: this.tables.files.path,
+          checksum: this.tables.files.checksum,
+          byteSize: this.tables.files.byteSize,
+          size: this.tables.files.size,
+          isActive: this.tables.files.isActive,
+          culturalRestrictions: this.tables.files.culturalRestrictions,
+        })
+        .from(this.tables.files)
+        .where(
+          and(
+            inArray(this.tables.files.id, chunk),
+            eq(this.tables.files.communityId, communityId)
+          )
+        );
+      for (const row of rows as Array<{
+        id: string;
+        storageKey: string | null;
+        path: string;
+        checksum: string | null;
+        byteSize: number | null;
+        size: number;
+        isActive: boolean | number;
+        culturalRestrictions: unknown;
+      }>) {
+        map.set(row.id, {
+          id: row.id,
+          storageKey: row.storageKey ?? row.path,
+          checksum: row.checksum ?? null,
+          byteSize: Number(row.byteSize ?? row.size),
+          isActive: row.isActive === true || row.isActive === 1,
+          culturalRestrictions: row.culturalRestrictions ?? null,
         });
       }
     }
@@ -1252,6 +1407,2218 @@ export class ImportsRepository {
 
       return {
         status: 'discarded',
+        manifest: mapManifestRow(updated),
+        removedFiles: toFileByteCleanups(removedRows),
+      };
+    });
+  }
+
+  private collectCommitReferences(normalizedData: StoredNormalizedImportData): {
+    existingPlaceIds: number[];
+    existingSpeakerIds: number[];
+    existingFileIds: string[];
+    stagedAttachmentFileIds: string[];
+    relatedPlaceNameByNorm: Map<string, string>;
+    relatedSpeakerNameByNorm: Map<string, string>;
+  } {
+    const placeIds = new Set<number>();
+    const speakerIds = new Set<number>();
+    const existingFiles = new Set<string>();
+    const stagedFiles = new Set<string>();
+
+    const relatedPlaceNameByNorm = new Map(
+      normalizedData.relatedPlacesToCreate.map((p) => [
+        p.normalizedName,
+        p.name,
+      ])
+    );
+    const relatedSpeakerNameByNorm = new Map(
+      normalizedData.relatedSpeakersToCreate.map((s) => [
+        s.normalizedName,
+        s.name,
+      ])
+    );
+
+    const recordAttachmentFiles = (
+      attachments: ReadonlyArray<{
+        fileId: string;
+        stagedByManifest: boolean;
+      }>
+    ) => {
+      for (const att of attachments) {
+        if (att.stagedByManifest) {
+          stagedFiles.add(att.fileId);
+        } else {
+          existingFiles.add(att.fileId);
+        }
+      }
+    };
+
+    if (normalizedData.kind === 'places') {
+      for (const row of normalizedData.rows) {
+        recordAttachmentFiles(row.attachments);
+      }
+    } else if (normalizedData.kind === 'speakers') {
+      for (const row of normalizedData.rows) {
+        if (row.birthplaceRef?.kind === 'existing') {
+          placeIds.add(row.birthplaceRef.id);
+        }
+        recordAttachmentFiles(row.attachments);
+      }
+    } else {
+      for (const row of normalizedData.rows) {
+        if (row.interviewLocationRef?.kind === 'existing') {
+          placeIds.add(row.interviewLocationRef.id);
+        }
+        if (row.interviewerRef?.kind === 'existing') {
+          speakerIds.add(row.interviewerRef.id);
+        }
+        for (const ref of row.placeRefs) {
+          if (ref.kind === 'existing') placeIds.add(ref.id);
+        }
+        for (const ref of row.speakerRefs) {
+          if (ref.kind === 'existing') speakerIds.add(ref.id);
+        }
+        recordAttachmentFiles(row.attachments);
+      }
+    }
+
+    return {
+      existingPlaceIds: [...placeIds].sort((a, b) => a - b),
+      existingSpeakerIds: [...speakerIds].sort((a, b) => a - b),
+      existingFileIds: [...existingFiles].sort(),
+      stagedAttachmentFileIds: [...stagedFiles].sort(),
+      relatedPlaceNameByNorm,
+      relatedSpeakerNameByNorm,
+    };
+  }
+
+  private buildCommitEntityPayloads(input: {
+    communityId: number;
+    actorId: number;
+    normalizedData: StoredNormalizedImportData;
+    now: Date;
+  }) {
+    const { communityId, actorId, normalizedData, now } = input;
+    return {
+      relatedPlaces: normalizedData.relatedPlacesToCreate.map((p) => ({
+        communityId,
+        name: p.name,
+        description: null,
+        descriptionPlain: null,
+        typeOfPlace: null,
+        region: null,
+        latitude: null,
+        longitude: null,
+        isRestricted: false,
+        createdAt: now,
+        updatedAt: now,
+      })),
+      relatedSpeakers: normalizedData.relatedSpeakersToCreate.map((sp) => ({
+        communityId,
+        name: sp.name,
+        birthDate: null,
+        birthplaceId: null,
+        affiliation: null,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      })),
+      buildPlaces: () =>
+        (normalizedData.kind === 'places' ? normalizedData.rows : []).map(
+          (row: NormalizedPlaceRow) => ({
+            communityId,
+            name: row.name,
+            description: row.description,
+            descriptionPlain: row.descriptionPlain,
+            typeOfPlace: row.typeOfPlace,
+            region: row.region,
+            latitude: row.latitude,
+            longitude: row.longitude,
+            isRestricted: false,
+            createdAt: now,
+            updatedAt: now,
+          })
+        ),
+      buildSpeakers: (
+        resolvePlaceRef: (
+          ref:
+            | { kind: 'existing'; id: number }
+            | { kind: 'create'; name: string; normalizedName: string }
+            | null
+        ) => number | null
+      ) =>
+        (normalizedData.kind === 'speakers' ? normalizedData.rows : []).map(
+          (row: NormalizedSpeakerRow) => ({
+            communityId,
+            name: row.name,
+            birthDate: row.birthDate,
+            birthplaceId: resolvePlaceRef(row.birthplaceRef),
+            affiliation: row.affiliation,
+            isActive: true,
+            createdAt: now,
+            updatedAt: now,
+          })
+        ),
+      buildStories: (
+        resolvePlaceRef: (
+          ref:
+            | { kind: 'existing'; id: number }
+            | { kind: 'create'; name: string; normalizedName: string }
+            | null
+        ) => number | null,
+        resolveSpeakerRef: (
+          ref:
+            | { kind: 'existing'; id: number }
+            | { kind: 'create'; name: string; normalizedName: string }
+            | null
+        ) => number | null
+      ) =>
+        (normalizedData.kind === 'stories' ? normalizedData.rows : []).map(
+          (row: NormalizedStoryRow) => {
+            const physical = storyVisibilityToPhysical(row.visibility);
+            return {
+              title: row.title,
+              description: row.description,
+              descriptionPlain: row.descriptionPlain,
+              slug: row.slug,
+              communityId,
+              createdBy: actorId,
+              isRestricted: physical.isRestricted,
+              privacyLevel: physical.privacyLevel,
+              topic: row.topic,
+              topicNormalized: row.topicNormalized,
+              language: row.language,
+              dateInterviewed: row.dateInterviewed
+                ? new Date(row.dateInterviewed)
+                : null,
+              interviewLocationId: resolvePlaceRef(row.interviewLocationRef),
+              interviewerId: resolveSpeakerRef(row.interviewerRef),
+              createdAt: now,
+              updatedAt: now,
+            };
+          }
+        ),
+      collectEntityAttachments: (
+        ownerType: 'place' | 'speaker',
+        ownerIds: ReadonlyArray<number>
+      ) => {
+        const out: Array<{
+          communityId: number;
+          fileId: string;
+          ownerType: 'place' | 'speaker' | 'story';
+          ownerId: number;
+          role: string;
+          ordinal: number;
+          createdAt: Date;
+        }> = [];
+        normalizedData.rows.forEach((row, idx) => {
+          const ownerId = ownerIds[idx]!;
+          for (const att of row.attachments) {
+            out.push({
+              communityId,
+              fileId: att.fileId,
+              ownerType,
+              ownerId,
+              role: att.role,
+              ordinal: att.ordinal,
+              createdAt: now,
+            });
+          }
+        });
+        return out;
+      },
+      collectStoryChildren: (
+        storyIds: ReadonlyArray<number>,
+        resolvePlaceRef: (
+          ref:
+            | { kind: 'existing'; id: number }
+            | { kind: 'create'; name: string; normalizedName: string }
+            | null
+        ) => number | null,
+        resolveSpeakerRef: (
+          ref:
+            | { kind: 'existing'; id: number }
+            | { kind: 'create'; name: string; normalizedName: string }
+            | null
+        ) => number | null
+      ) => {
+        const storyPlacesToInsert: Array<{
+          communityId: number;
+          storyId: number;
+          placeId: number;
+          sortOrder: number;
+          createdAt: Date;
+          updatedAt: Date;
+        }> = [];
+        const storySpeakersToInsert: Array<{
+          communityId: number;
+          storyId: number;
+          speakerId: number;
+          sortOrder: number;
+          createdAt: Date;
+          updatedAt: Date;
+        }> = [];
+        const attachmentsToInsert: Array<{
+          communityId: number;
+          fileId: string;
+          ownerType: 'place' | 'speaker' | 'story';
+          ownerId: number;
+          role: string;
+          ordinal: number;
+          createdAt: Date;
+        }> = [];
+        const externalLinksToInsert: Array<{
+          communityId: number;
+          storyId: number;
+          url: string;
+          ordinal: number;
+          createdAt: Date;
+        }> = [];
+
+        if (normalizedData.kind === 'stories') {
+          normalizedData.rows.forEach((row, idx) => {
+            const storyId = storyIds[idx]!;
+            row.placeRefs.forEach((ref, sortOrder) => {
+              storyPlacesToInsert.push({
+                communityId,
+                storyId,
+                placeId: resolvePlaceRef(ref)!,
+                sortOrder,
+                createdAt: now,
+                updatedAt: now,
+              });
+            });
+            row.speakerRefs.forEach((ref, sortOrder) => {
+              storySpeakersToInsert.push({
+                communityId,
+                storyId,
+                speakerId: resolveSpeakerRef(ref)!,
+                sortOrder,
+                createdAt: now,
+                updatedAt: now,
+              });
+            });
+            for (const att of row.attachments) {
+              attachmentsToInsert.push({
+                communityId,
+                fileId: att.fileId,
+                ownerType: 'story',
+                ownerId: storyId,
+                role: att.role,
+                ordinal: att.ordinal,
+                createdAt: now,
+              });
+            }
+            row.externalMediaLinks.forEach((url, ordinal) => {
+              externalLinksToInsert.push({
+                communityId,
+                storyId,
+                url,
+                ordinal,
+                createdAt: now,
+              });
+            });
+          });
+        }
+
+        return {
+          storyPlacesToInsert,
+          storySpeakersToInsert,
+          attachmentsToInsert,
+          externalLinksToInsert,
+        };
+      },
+    };
+  }
+
+  private resolveCanonicalPlaceCreateName(
+    ref: { kind: 'create'; name: string; normalizedName: string },
+    map: ReadonlyMap<string, string>
+  ): string {
+    return map.get(ref.normalizedName) ?? ref.name;
+  }
+
+  private resolveCanonicalSpeakerCreateName(
+    ref: { kind: 'create'; name: string; normalizedName: string },
+    map: ReadonlyMap<string, string>
+  ): string {
+    return map.get(ref.normalizedName) ?? ref.name;
+  }
+
+  async commitManifest(input: {
+    communityId: number;
+    actorId: number;
+    manifest: ImportManifestRowRecord;
+    now: Date;
+    dailyLimitWindow: { startMs: number; endMs: number } | null;
+  }): Promise<CommitManifestOutcome> {
+    const { manifest, now } = input;
+    const nowMs = now.getTime();
+    const isPg = dialectOf(this.connection) === 'postgresql';
+    const normalizedData = manifest.normalizedRows;
+    const resultSummary = computeImportResultSummary(normalizedData);
+    const refs = this.collectCommitReferences(normalizedData);
+    const stagedMediaIds = Array.from(new Set(manifest.stagedFileIds))
+      .filter((id) => id !== manifest.sourceFileId)
+      .sort();
+
+    for (const attStagedId of refs.stagedAttachmentFileIds) {
+      if (!stagedMediaIds.includes(attStagedId)) {
+        return { status: 'failed_reference' };
+      }
+    }
+
+    const audit = buildImportAuditEntry({
+      communityId: input.communityId,
+      actorId: input.actorId,
+      action: 'import.commit',
+      manifestId: manifest.id,
+      outcome: 'success',
+    });
+
+    if (this.hasD1Batch()) {
+      const guardSql = input.dailyLimitWindow
+        ? sql`im.id = ${manifest.id}
+              AND im.community_id = ${input.communityId}
+              AND im.status = 'previewed'
+              AND EXISTS (
+                SELECT 1 FROM communities c
+                WHERE c.id = im.community_id AND c.is_active = 1
+              )
+              AND EXISTS (
+                SELECT 1 FROM users u
+                WHERE u.id = ${input.actorId}
+                  AND u.community_id = im.community_id
+                  AND u.is_active = 1
+                  AND u.role IN ('editor', 'admin')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM import_manifests im2
+                WHERE im2.status = 'committed'
+                  AND im2.committed_at >= ${input.dailyLimitWindow.startMs}
+                  AND im2.committed_at < ${input.dailyLimitWindow.endMs}
+              )`
+        : sql`im.id = ${manifest.id}
+              AND im.community_id = ${input.communityId}
+              AND im.status = 'previewed'
+              AND EXISTS (
+                SELECT 1 FROM communities c
+                WHERE c.id = im.community_id AND c.is_active = 1
+              )
+              AND EXISTS (
+                SELECT 1 FROM users u
+                WHERE u.id = ${input.actorId}
+                  AND u.community_id = im.community_id
+                  AND u.is_active = 1
+                  AND u.role IN ('editor', 'admin')
+              )`;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const statements: any[] = [];
+
+      // 1. Related places
+      const relatedPlaceChunks = chunkImportItemsByBudget(
+        normalizedData.relatedPlacesToCreate,
+        COMMIT_PLACE_INSERT_CHUNK,
+        D1_MAX_BOUND_PARAMS_PER_STATEMENT,
+        10,
+        PLACE_INSERT_SQL_BYTES,
+        estimateRelatedRecordBytes
+      );
+      for (const chunk of relatedPlaceChunks) {
+        const unionValues = sql.join(
+          chunk.map((p) => sql`SELECT ${p.name} AS name`),
+          sql` UNION ALL `
+        );
+        statements.push(
+          this.db.insert(this.tables.places).select(sql`
+            SELECT NULL, v.name, NULL, NULL, im.community_id, NULL, NULL, NULL, NULL, '[]', NULL, NULL, 0, ${nowMs}, ${nowMs}
+            FROM (${unionValues}) AS v
+            JOIN import_manifests im ON ${guardSql}
+          `)
+        );
+      }
+
+      // 2. Related speakers
+      const relatedSpeakerChunks = chunkImportItemsByBudget(
+        normalizedData.relatedSpeakersToCreate,
+        COMMIT_SPEAKER_INSERT_CHUNK,
+        D1_MAX_BOUND_PARAMS_PER_STATEMENT,
+        8,
+        SPEAKER_INSERT_SQL_BYTES,
+        estimateRelatedRecordBytes
+      );
+      for (const chunk of relatedSpeakerChunks) {
+        const unionValues = sql.join(
+          chunk.map((sp) => sql`SELECT ${sp.name} AS name`),
+          sql` UNION ALL `
+        );
+        statements.push(
+          this.db.insert(this.tables.speakers).select(sql`
+            SELECT NULL, v.name, NULL, im.community_id, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, 1, ${nowMs}, ${nowMs}
+            FROM (${unionValues}) AS v
+            JOIN import_manifests im ON ${guardSql}
+          `)
+        );
+      }
+
+      const pushD1OwnerAttachments = (
+        ownerType: 'place' | 'speaker' | 'story',
+        ownerSubquerySql: ReturnType<typeof sql>,
+        attachments: ReadonlyArray<{
+          fileId: string;
+          role: string;
+          ordinal: number;
+          stagedByManifest: boolean;
+        }>
+      ) => {
+        for (let i = 0; i < attachments.length; i += COMMIT_CHILD_ROW_CHUNK) {
+          const chunk = attachments.slice(i, i + COMMIT_CHILD_ROW_CHUNK);
+          const unionValues = sql.join(
+            chunk.map(
+              (att) =>
+                sql`SELECT ${att.fileId} AS file_id, ${att.role} AS role, ${att.ordinal} AS ordinal, ${att.stagedByManifest ? 1 : 0} AS staged`
+            ),
+            sql` UNION ALL `
+          );
+          statements.push(
+            this.db.insert(this.tables.attachments).select(sql`
+              SELECT NULL, im.community_id, f.id, ${ownerType}, owner.id, v.role, v.ordinal, NULL, NULL, NULL, NULL, NULL, NULL,
+                CASE WHEN f.id IS NOT NULL AND owner.id IS NOT NULL THEN ${nowMs} ELSE NULL END
+              FROM (${unionValues}) AS v
+              JOIN import_manifests im ON ${guardSql}
+              LEFT JOIN (${ownerSubquerySql}) owner ON 1 = 1
+              LEFT JOIN files f
+                ON f.id = v.file_id
+               AND f.community_id = im.community_id
+               AND f.cultural_restrictions IS NULL
+               AND ((v.staged = 1 AND f.is_active = 0) OR (v.staged = 0 AND f.is_active = 1))
+            `)
+          );
+        }
+      };
+
+      // 3. Primary rows and child records
+      if (normalizedData.kind === 'places') {
+        const plainPlaces = normalizedData.rows.filter(
+          (r) => r.attachments.length === 0
+        );
+        const attachedPlaces = normalizedData.rows.filter(
+          (r) => r.attachments.length > 0
+        );
+        const plainPlaceChunks = chunkImportItemsByBudget(
+          plainPlaces,
+          COMMIT_PLACE_INSERT_CHUNK,
+          D1_MAX_BOUND_PARAMS_PER_STATEMENT,
+          10,
+          PLACE_INSERT_SQL_BYTES,
+          estimatePlaceRowBytes
+        );
+        for (const chunk of plainPlaceChunks) {
+          const unionValues = sql.join(
+            chunk.map(
+              (row) =>
+                sql`SELECT ${row.name} AS name, ${row.description} AS description, ${row.descriptionPlain} AS description_plain, ${row.latitude} AS latitude, ${row.longitude} AS longitude, ${row.typeOfPlace} AS type_of_place, ${row.region} AS region`
+            ),
+            sql` UNION ALL `
+          );
+          statements.push(
+            this.db.insert(this.tables.places).select(sql`
+              SELECT NULL, v.name, v.description, v.description_plain, im.community_id, v.latitude, v.longitude, v.type_of_place, v.region, '[]', NULL, NULL, 0, ${nowMs}, ${nowMs}
+              FROM (${unionValues}) AS v
+              JOIN import_manifests im ON ${guardSql}
+            `)
+          );
+        }
+
+        for (const row of attachedPlaces) {
+          statements.push(
+            this.db.insert(this.tables.places).select(sql`
+              SELECT NULL, ${row.name}, ${row.description}, ${row.descriptionPlain}, im.community_id, ${row.latitude}, ${row.longitude}, ${row.typeOfPlace}, ${row.region}, '[]', NULL, NULL, 0, ${nowMs}, ${nowMs}
+              FROM import_manifests im
+              WHERE ${guardSql}
+            `)
+          );
+          pushD1OwnerAttachments(
+            'place',
+            sql`SELECT MAX(id) AS id FROM places WHERE community_id = ${input.communityId} AND name = ${row.name} AND created_at = ${nowMs} AND is_restricted = 0`,
+            row.attachments
+          );
+        }
+      } else if (normalizedData.kind === 'speakers') {
+        const plainSpeakers = normalizedData.rows.filter(
+          (r) => r.attachments.length === 0
+        );
+        const attachedSpeakers = normalizedData.rows.filter(
+          (r) => r.attachments.length > 0
+        );
+        const plainSpeakerChunks = chunkImportItemsByBudget(
+          plainSpeakers,
+          COMMIT_SPEAKER_INSERT_CHUNK,
+          D1_MAX_BOUND_PARAMS_PER_STATEMENT,
+          8,
+          SPEAKER_INSERT_SQL_BYTES,
+          estimateSpeakerRowBytes
+        );
+        for (const chunk of plainSpeakerChunks) {
+          const unionValues = sql.join(
+            chunk.map((row) => {
+              const bpExistingId =
+                row.birthplaceRef?.kind === 'existing'
+                  ? row.birthplaceRef.id
+                  : null;
+              const bpCreateName =
+                row.birthplaceRef?.kind === 'create'
+                  ? this.resolveCanonicalPlaceCreateName(
+                      row.birthplaceRef,
+                      refs.relatedPlaceNameByNorm
+                    )
+                  : null;
+              return sql`SELECT ${row.name} AS name, ${row.birthDate} AS birth_date, ${row.affiliation} AS affiliation, ${bpExistingId} AS bp_existing_id, ${bpCreateName} AS bp_create_name`;
+            }),
+            sql` UNION ALL `
+          );
+          statements.push(
+            this.db.insert(this.tables.speakers).select(sql`
+              SELECT NULL, v.name, NULL,
+                CASE
+                  WHEN v.bp_existing_id IS NOT NULL AND bp_e.id IS NULL THEN NULL
+                  WHEN v.bp_create_name IS NOT NULL AND bp_c.id IS NULL THEN NULL
+                  ELSE im.community_id
+                END,
+                NULL, NULL, NULL, v.birth_date,
+                COALESCE(bp_e.id, bp_c.id),
+                v.affiliation, 0, NULL, 1, ${nowMs}, ${nowMs}
+              FROM (${unionValues}) AS v
+              JOIN import_manifests im ON ${guardSql}
+              LEFT JOIN places bp_e
+                ON bp_e.community_id = im.community_id
+               AND bp_e.id = v.bp_existing_id
+               AND bp_e.is_restricted = 0
+              LEFT JOIN (
+                SELECT name, MAX(id) AS id
+                FROM places
+                WHERE community_id = ${input.communityId}
+                  AND created_at = ${nowMs}
+                  AND is_restricted = 0
+                GROUP BY name
+              ) bp_c
+                ON bp_c.name = v.bp_create_name
+            `)
+          );
+        }
+
+        for (const row of attachedSpeakers) {
+          const bpExistingId =
+            row.birthplaceRef?.kind === 'existing'
+              ? row.birthplaceRef.id
+              : null;
+          const bpCreateName =
+            row.birthplaceRef?.kind === 'create'
+              ? this.resolveCanonicalPlaceCreateName(
+                  row.birthplaceRef,
+                  refs.relatedPlaceNameByNorm
+                )
+              : null;
+          statements.push(
+            this.db.insert(this.tables.speakers).select(sql`
+              SELECT NULL, ${row.name}, NULL,
+                CASE
+                  WHEN ${bpExistingId} IS NOT NULL AND bp_e.id IS NULL THEN NULL
+                  WHEN ${bpCreateName} IS NOT NULL AND bp_c.id IS NULL THEN NULL
+                  ELSE im.community_id
+                END,
+                NULL, NULL, NULL, ${row.birthDate},
+                COALESCE(bp_e.id, bp_c.id),
+                ${row.affiliation}, 0, NULL, 1, ${nowMs}, ${nowMs}
+              FROM import_manifests im
+              LEFT JOIN places bp_e
+                ON bp_e.community_id = im.community_id
+               AND bp_e.id = ${bpExistingId}
+               AND bp_e.is_restricted = 0
+              LEFT JOIN (
+                SELECT name, MAX(id) AS id
+                FROM places
+                WHERE community_id = ${input.communityId}
+                  AND created_at = ${nowMs}
+                  AND is_restricted = 0
+                GROUP BY name
+              ) bp_c
+                ON bp_c.name = ${bpCreateName}
+              WHERE ${guardSql}
+            `)
+          );
+          pushD1OwnerAttachments(
+            'speaker',
+            sql`SELECT MAX(id) AS id FROM speakers WHERE community_id = ${input.communityId} AND name = ${row.name} AND created_at = ${nowMs}`,
+            row.attachments
+          );
+        }
+      } else {
+        for (const row of normalizedData.rows) {
+          const physical = storyVisibilityToPhysical(row.visibility);
+          const dateInterviewedMs = row.dateInterviewed
+            ? new Date(row.dateInterviewed).getTime()
+            : null;
+
+          const extraJoins: Array<ReturnType<typeof sql>> = [];
+          const communityChecks: Array<ReturnType<typeof sql>> = [];
+          let locExpr = sql`NULL`;
+          let spkExpr = sql`NULL`;
+
+          if (row.interviewLocationRef?.kind === 'existing') {
+            const locId = row.interviewLocationRef.id;
+            extraJoins.push(
+              sql`LEFT JOIN places loc_e ON loc_e.community_id = im.community_id AND loc_e.id = ${locId} AND loc_e.is_restricted = 0`
+            );
+            communityChecks.push(sql`WHEN loc_e.id IS NULL THEN NULL`);
+            locExpr = sql`loc_e.id`;
+          } else if (row.interviewLocationRef?.kind === 'create') {
+            const locName = this.resolveCanonicalPlaceCreateName(
+              row.interviewLocationRef,
+              refs.relatedPlaceNameByNorm
+            );
+            extraJoins.push(
+              sql`LEFT JOIN (SELECT MAX(id) AS id FROM places WHERE community_id = ${input.communityId} AND name = ${locName} AND created_at = ${nowMs} AND is_restricted = 0) loc_c ON 1 = 1`
+            );
+            communityChecks.push(sql`WHEN loc_c.id IS NULL THEN NULL`);
+            locExpr = sql`loc_c.id`;
+          }
+
+          if (row.interviewerRef?.kind === 'existing') {
+            const spkId = row.interviewerRef.id;
+            extraJoins.push(
+              sql`LEFT JOIN speakers spk_e ON spk_e.community_id = im.community_id AND spk_e.id = ${spkId}`
+            );
+            communityChecks.push(sql`WHEN spk_e.id IS NULL THEN NULL`);
+            spkExpr = sql`spk_e.id`;
+          } else if (row.interviewerRef?.kind === 'create') {
+            const spkName = this.resolveCanonicalSpeakerCreateName(
+              row.interviewerRef,
+              refs.relatedSpeakerNameByNorm
+            );
+            extraJoins.push(
+              sql`LEFT JOIN (SELECT MAX(id) AS id FROM speakers WHERE community_id = ${input.communityId} AND name = ${spkName} AND created_at = ${nowMs}) spk_c ON 1 = 1`
+            );
+            communityChecks.push(sql`WHEN spk_c.id IS NULL THEN NULL`);
+            spkExpr = sql`spk_c.id`;
+          }
+
+          const guardedCommunityExpr =
+            communityChecks.length === 0
+              ? sql`im.community_id`
+              : sql`CASE ${sql.join(communityChecks, sql` `)} ELSE im.community_id END`;
+          const joinsSql =
+            extraJoins.length === 0 ? sql`` : sql.join(extraJoins, sql` `);
+
+          statements.push(
+            this.db.insert(this.tables.stories).select(sql`
+              SELECT NULL, ${row.title}, ${row.description}, ${row.descriptionPlain}, ${row.slug},
+                ${guardedCommunityExpr},
+                ${input.actorId}, 0, ${physical.privacyLevel}, ${row.topic}, ${row.topicNormalized},
+                '[]', NULL, NULL, ${row.language}, '[]', ${dateInterviewedMs},
+                ${locExpr}, ${spkExpr}, ${nowMs}, ${nowMs}
+              FROM import_manifests im
+              ${joinsSql}
+              WHERE ${guardSql}
+            `)
+          );
+
+          const storyOwnerSubquery = sql`SELECT MAX(id) AS id FROM stories WHERE community_id = ${input.communityId} AND slug = ${row.slug} AND created_at = ${nowMs}`;
+
+          for (
+            let i = 0;
+            i < row.placeRefs.length;
+            i += COMMIT_CHILD_ROW_CHUNK
+          ) {
+            const chunk = row.placeRefs.slice(i, i + COMMIT_CHILD_ROW_CHUNK);
+            const unionValues = sql.join(
+              chunk.map((ref, idx) => {
+                const sortOrder = i + idx;
+                const existingId = ref.kind === 'existing' ? ref.id : null;
+                const createName =
+                  ref.kind === 'create'
+                    ? this.resolveCanonicalPlaceCreateName(
+                        ref,
+                        refs.relatedPlaceNameByNorm
+                      )
+                    : null;
+                return sql`SELECT ${sortOrder} AS sort_order, ${existingId} AS existing_id, ${createName} AS create_name`;
+              }),
+              sql` UNION ALL `
+            );
+            statements.push(
+              this.db.insert(this.tables.storyPlaces).select(sql`
+                SELECT NULL, im.community_id, owner.id, COALESCE(pe.id, pc.id), NULL, v.sort_order, ${nowMs}, ${nowMs}
+                FROM (${unionValues}) AS v
+                JOIN import_manifests im ON ${guardSql}
+                LEFT JOIN (${storyOwnerSubquery}) owner ON 1 = 1
+                LEFT JOIN places pe
+                  ON pe.community_id = im.community_id
+                 AND pe.id = v.existing_id
+                 AND pe.is_restricted = 0
+                LEFT JOIN (
+                  SELECT name, MAX(id) AS id
+                  FROM places
+                  WHERE community_id = ${input.communityId}
+                    AND created_at = ${nowMs}
+                    AND is_restricted = 0
+                  GROUP BY name
+                ) pc
+                  ON pc.name = v.create_name
+              `)
+            );
+          }
+
+          for (
+            let i = 0;
+            i < row.speakerRefs.length;
+            i += COMMIT_CHILD_ROW_CHUNK
+          ) {
+            const chunk = row.speakerRefs.slice(i, i + COMMIT_CHILD_ROW_CHUNK);
+            const unionValues = sql.join(
+              chunk.map((ref, idx) => {
+                const sortOrder = i + idx;
+                const existingId = ref.kind === 'existing' ? ref.id : null;
+                const createName =
+                  ref.kind === 'create'
+                    ? this.resolveCanonicalSpeakerCreateName(
+                        ref,
+                        refs.relatedSpeakerNameByNorm
+                      )
+                    : null;
+                return sql`SELECT ${sortOrder} AS sort_order, ${existingId} AS existing_id, ${createName} AS create_name`;
+              }),
+              sql` UNION ALL `
+            );
+            statements.push(
+              this.db.insert(this.tables.storySpeakers).select(sql`
+                SELECT NULL, im.community_id, owner.id, COALESCE(spe.id, spc.id), NULL, v.sort_order, ${nowMs}, ${nowMs}
+                FROM (${unionValues}) AS v
+                JOIN import_manifests im ON ${guardSql}
+                LEFT JOIN (${storyOwnerSubquery}) owner ON 1 = 1
+                LEFT JOIN speakers spe
+                  ON spe.community_id = im.community_id
+                 AND spe.id = v.existing_id
+                LEFT JOIN (
+                  SELECT name, MAX(id) AS id
+                  FROM speakers
+                  WHERE community_id = ${input.communityId}
+                    AND created_at = ${nowMs}
+                  GROUP BY name
+                ) spc
+                  ON spc.name = v.create_name
+              `)
+            );
+          }
+
+          pushD1OwnerAttachments('story', storyOwnerSubquery, row.attachments);
+
+          for (
+            let i = 0;
+            i < row.externalMediaLinks.length;
+            i += COMMIT_CHILD_ROW_CHUNK
+          ) {
+            const chunk = row.externalMediaLinks.slice(
+              i,
+              i + COMMIT_CHILD_ROW_CHUNK
+            );
+            const unionValues = sql.join(
+              chunk.map(
+                (url, idx) => sql`SELECT ${url} AS url, ${i + idx} AS ordinal`
+              ),
+              sql` UNION ALL `
+            );
+            statements.push(
+              this.db.insert(this.tables.externalMediaLinks).select(sql`
+                SELECT NULL, im.community_id, owner.id, v.url, v.ordinal, ${nowMs}
+                FROM (${unionValues}) AS v
+                JOIN import_manifests im ON ${guardSql}
+                LEFT JOIN (${storyOwnerSubquery}) owner ON 1 = 1
+              `)
+            );
+          }
+        }
+      }
+
+      // 4. Activate staged media files
+      for (
+        let i = 0;
+        i < stagedMediaIds.length;
+        i += COMMIT_FILE_ACTIVATE_CHUNK
+      ) {
+        const chunk = stagedMediaIds.slice(i, i + COMMIT_FILE_ACTIVATE_CHUNK);
+        statements.push(
+          this.db
+            .update(this.tables.files)
+            .set({ isActive: true, updatedAt: now })
+            .where(
+              and(
+                inArray(this.tables.files.id, chunk),
+                eq(this.tables.files.communityId, input.communityId),
+                eq(this.tables.files.isActive, false),
+                sql`EXISTS (SELECT 1 FROM import_manifests im WHERE ${guardSql})`
+              )
+            )
+        );
+      }
+
+      // 5. Content-free audit entry (before manifest status flips)
+      statements.push(
+        this.db.insert(this.tables.auditEntries).select(
+          this.db
+            .select({
+              id: sql`NULL`.as('id'),
+              communityId: this.tables.importManifests.communityId,
+              actorId: sql`${audit.actorId}`.as('actor_id'),
+              action: sql`${audit.action}`.as('action'),
+              resourceType: sql`${audit.resourceType}`.as('resource_type'),
+              resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+                'resource_ids'
+              ),
+              outcome: sql`${audit.outcome}`.as('outcome'),
+              ipAddress: sql`NULL`.as('ip_address'),
+              userAgent: sql`NULL`.as('user_agent'),
+              createdAt: sql`${nowMs}`.as('created_at'),
+            })
+            .from(this.tables.importManifests)
+            .where(
+              sql`${this.tables.importManifests.id} = ${manifest.id}
+                  AND ${this.tables.importManifests.communityId} = ${input.communityId}
+                  AND ${this.tables.importManifests.status} = 'previewed'
+                  AND EXISTS (SELECT 1 FROM communities c WHERE c.id = ${this.tables.importManifests.communityId} AND c.is_active = 1)
+                  AND EXISTS (SELECT 1 FROM users u WHERE u.id = ${input.actorId} AND u.community_id = ${this.tables.importManifests.communityId} AND u.is_active = 1 AND u.role IN ('editor', 'admin'))
+                  ${
+                    input.dailyLimitWindow
+                      ? sql`AND NOT EXISTS (SELECT 1 FROM import_manifests im2 WHERE im2.status = 'committed' AND im2.committed_at >= ${input.dailyLimitWindow.startMs} AND im2.committed_at < ${input.dailyLimitWindow.endMs})`
+                      : sql``
+                  }`
+            )
+        )
+      );
+
+      // 6. Conditional manifest status flip (last statement in batch)
+      const updateManifestIdx = statements.length;
+      statements.push(
+        this.db
+          .update(this.tables.importManifests)
+          .set({
+            status: 'committed',
+            resultSummary: resultSummary as unknown as Record<string, unknown>,
+            committedAt: nowMs,
+          })
+          .where(
+            and(
+              eq(this.tables.importManifests.id, manifest.id),
+              eq(this.tables.importManifests.communityId, input.communityId),
+              eq(this.tables.importManifests.status, 'previewed'),
+              sql`EXISTS (SELECT 1 FROM communities c WHERE c.id = ${input.communityId} AND c.is_active = 1)`,
+              sql`EXISTS (SELECT 1 FROM users u WHERE u.id = ${input.actorId} AND u.community_id = ${input.communityId} AND u.is_active = 1 AND u.role IN ('editor', 'admin'))`,
+              ...(input.dailyLimitWindow
+                ? [
+                    sql`NOT EXISTS (
+                      SELECT 1 FROM import_manifests im2
+                      WHERE im2.status = 'committed'
+                        AND im2.committed_at >= ${input.dailyLimitWindow.startMs}
+                        AND im2.committed_at < ${input.dailyLimitWindow.endMs}
+                    )`,
+                  ]
+                : [])
+            )
+          )
+          .returning(this.manifestSelectColumns())
+      );
+
+      let results: unknown[];
+      try {
+        results = await this.db.batch(statements);
+      } catch (err) {
+        if (
+          isNotNullConstraintError(err) ||
+          isForeignKeyConstraintError(err) ||
+          isUniqueConstraintError(err) ||
+          isCheckConstraintError(err)
+        ) {
+          return { status: 'failed_reference' };
+        }
+        throw err;
+      }
+
+      const updatedRows = results[updateManifestIdx];
+      const updated = Array.isArray(updatedRows) ? updatedRows[0] : undefined;
+      if (updated) {
+        return {
+          status: 'committed',
+          manifest: mapManifestRow(updated),
+        };
+      }
+
+      const commActive = await this.activeCommunityExists(input.communityId);
+      if (!commActive) return { status: 'forbidden' };
+      const actorRows = await this.db
+        .select({ role: this.tables.users.role })
+        .from(this.tables.users)
+        .where(
+          and(
+            eq(this.tables.users.id, input.actorId),
+            eq(this.tables.users.communityId, input.communityId),
+            eq(this.tables.users.isActive, true),
+            inArray(this.tables.users.role, ['editor', 'admin'])
+          )
+        )
+        .limit(1);
+      if (actorRows.length === 0) return { status: 'forbidden' };
+
+      const after = await this.getManifestById(input.communityId, manifest.id);
+      if (!after) return { status: 'not_found' };
+      if (after.status === 'committed') {
+        return { status: 'already_committed', manifest: after };
+      }
+      if (after.status === 'discarded' || after.status === 'failed') {
+        return { status: 'conflict', manifest: after };
+      }
+      if (input.dailyLimitWindow) {
+        const hitDaily = await this.hasCommittedImportInWindow(
+          input.dailyLimitWindow.startMs,
+          input.dailyLimitWindow.endMs
+        );
+        if (hitDaily) return { status: 'daily_limit' };
+      }
+      return { status: 'conflict', manifest: after };
+    }
+
+    if (isPg) {
+      try {
+        return await this.db.transaction(async (tx: typeof this.db) => {
+          // Canonical PG lock order: communities (FOR SHARE) -> advisory -> users (FOR SHARE)
+          // -> import_manifests (FOR UPDATE) -> places (FOR SHARE sorted) -> speakers (FOR SHARE sorted) -> files (FOR UPDATE sorted)
+          const [comm] = await tx
+            .select({ id: this.tables.communities.id })
+            .from(this.tables.communities)
+            .where(
+              and(
+                eq(this.tables.communities.id, input.communityId),
+                eq(this.tables.communities.isActive, true)
+              )
+            )
+            .for('share');
+          if (!comm) return { status: 'forbidden' };
+
+          if (input.dailyLimitWindow) {
+            await tx.execute(
+              sql`select pg_advisory_xact_lock(hashtext('import:daily:' || ${String(input.dailyLimitWindow.startMs)}))`
+            );
+          }
+
+          const [actorRow] = await tx
+            .select({ role: this.tables.users.role })
+            .from(this.tables.users)
+            .where(
+              and(
+                eq(this.tables.users.id, input.actorId),
+                eq(this.tables.users.communityId, input.communityId),
+                eq(this.tables.users.isActive, true),
+                inArray(this.tables.users.role, ['editor', 'admin'])
+              )
+            )
+            .for('share');
+          if (!actorRow) return { status: 'forbidden' };
+
+          const [manifestRow] = await tx
+            .select(this.manifestSelectColumns())
+            .from(this.tables.importManifests)
+            .where(
+              and(
+                eq(this.tables.importManifests.id, manifest.id),
+                eq(this.tables.importManifests.communityId, input.communityId)
+              )
+            )
+            .for('update');
+          if (!manifestRow) return { status: 'not_found' };
+
+          const currentManifest = mapManifestRow(manifestRow);
+          if (currentManifest.status === 'committed') {
+            return { status: 'already_committed', manifest: currentManifest };
+          }
+          if (currentManifest.status !== 'previewed') {
+            return { status: 'conflict', manifest: currentManifest };
+          }
+          if (input.dailyLimitWindow) {
+            const hitDaily = await this.hasCommittedImportInWindow(
+              input.dailyLimitWindow.startMs,
+              input.dailyLimitWindow.endMs,
+              tx
+            );
+            if (hitDaily) return { status: 'daily_limit' };
+          }
+
+          // Validate & lock referenced existing places
+          if (refs.existingPlaceIds.length > 0) {
+            const foundPlaces = new Set<number>();
+            for (
+              let i = 0;
+              i < refs.existingPlaceIds.length;
+              i += D1_ENTITY_LOOKUP_CHUNK
+            ) {
+              const chunk = refs.existingPlaceIds.slice(
+                i,
+                i + D1_ENTITY_LOOKUP_CHUNK
+              );
+              const rows = await tx
+                .select({ id: this.tables.places.id })
+                .from(this.tables.places)
+                .where(
+                  and(
+                    eq(this.tables.places.communityId, input.communityId),
+                    eq(this.tables.places.isRestricted, false),
+                    inArray(this.tables.places.id, chunk)
+                  )
+                )
+                .orderBy(asc(this.tables.places.id))
+                .for('share');
+              for (const r of rows as Array<{ id: number }>) {
+                foundPlaces.add(Number(r.id));
+              }
+            }
+            if (refs.existingPlaceIds.some((id) => !foundPlaces.has(id))) {
+              return { status: 'failed_reference' };
+            }
+          }
+
+          // Validate & lock referenced existing speakers
+          if (refs.existingSpeakerIds.length > 0) {
+            const foundSpeakers = new Set<number>();
+            for (
+              let i = 0;
+              i < refs.existingSpeakerIds.length;
+              i += D1_ENTITY_LOOKUP_CHUNK
+            ) {
+              const chunk = refs.existingSpeakerIds.slice(
+                i,
+                i + D1_ENTITY_LOOKUP_CHUNK
+              );
+              const rows = await tx
+                .select({ id: this.tables.speakers.id })
+                .from(this.tables.speakers)
+                .where(
+                  and(
+                    eq(this.tables.speakers.communityId, input.communityId),
+                    inArray(this.tables.speakers.id, chunk)
+                  )
+                )
+                .orderBy(asc(this.tables.speakers.id))
+                .for('share');
+              for (const r of rows as Array<{ id: number }>) {
+                foundSpeakers.add(Number(r.id));
+              }
+            }
+            if (refs.existingSpeakerIds.some((id) => !foundSpeakers.has(id))) {
+              return { status: 'failed_reference' };
+            }
+          }
+
+          // Validate & lock all referenced files (staged + existing) sorted
+          const allFileIds = Array.from(
+            new Set([...stagedMediaIds, ...refs.existingFileIds])
+          ).sort();
+          const lockedFiles = new Map<
+            string,
+            { isActive: boolean; culturalRestrictions: unknown }
+          >();
+          for (let i = 0; i < allFileIds.length; i += D1_FILE_LOOKUP_CHUNK) {
+            const chunk = allFileIds.slice(i, i + D1_FILE_LOOKUP_CHUNK);
+            const rows = await tx
+              .select({
+                id: this.tables.files.id,
+                isActive: this.tables.files.isActive,
+                culturalRestrictions: this.tables.files.culturalRestrictions,
+              })
+              .from(this.tables.files)
+              .where(
+                and(
+                  eq(this.tables.files.communityId, input.communityId),
+                  inArray(this.tables.files.id, chunk)
+                )
+              )
+              .orderBy(asc(this.tables.files.id))
+              .for('update');
+            for (const r of rows as Array<{
+              id: string;
+              isActive: boolean;
+              culturalRestrictions: unknown;
+            }>) {
+              lockedFiles.set(r.id, {
+                isActive: Boolean(r.isActive),
+                culturalRestrictions: r.culturalRestrictions ?? null,
+              });
+            }
+          }
+          for (const id of stagedMediaIds) {
+            const f = lockedFiles.get(id);
+            if (!f || f.isActive || f.culturalRestrictions !== null) {
+              return { status: 'failed_reference' };
+            }
+          }
+          for (const id of refs.existingFileIds) {
+            const f = lockedFiles.get(id);
+            if (!f || !f.isActive || f.culturalRestrictions !== null) {
+              return { status: 'failed_reference' };
+            }
+          }
+
+          // Insert related places and speakers first
+          const payloads = this.buildCommitEntityPayloads({
+            communityId: input.communityId,
+            actorId: input.actorId,
+            normalizedData,
+            now,
+          });
+
+          const createdPlaceByNorm = new Map<string, number>();
+          if (payloads.relatedPlaces.length > 0) {
+            const insertedPlaces = await tx
+              .insert(this.tables.places)
+              .values(payloads.relatedPlaces)
+              .returning({ id: this.tables.places.id });
+            normalizedData.relatedPlacesToCreate.forEach((p, idx) => {
+              createdPlaceByNorm.set(
+                p.normalizedName,
+                Number(insertedPlaces[idx]!.id)
+              );
+            });
+          }
+
+          const createdSpeakerByNorm = new Map<string, number>();
+          if (payloads.relatedSpeakers.length > 0) {
+            const insertedSpeakers = await tx
+              .insert(this.tables.speakers)
+              .values(payloads.relatedSpeakers)
+              .returning({ id: this.tables.speakers.id });
+            normalizedData.relatedSpeakersToCreate.forEach((sp, idx) => {
+              createdSpeakerByNorm.set(
+                sp.normalizedName,
+                Number(insertedSpeakers[idx]!.id)
+              );
+            });
+          }
+
+          const resolvePlaceRef = (
+            ref:
+              | { kind: 'existing'; id: number }
+              | { kind: 'create'; name: string; normalizedName: string }
+              | null
+          ): number | null => {
+            if (!ref) return null;
+            if (ref.kind === 'existing') return ref.id;
+            const id = createdPlaceByNorm.get(ref.normalizedName);
+            if (id === undefined) throw new RollbackReferenceError();
+            return id;
+          };
+
+          const resolveSpeakerRef = (
+            ref:
+              | { kind: 'existing'; id: number }
+              | { kind: 'create'; name: string; normalizedName: string }
+              | null
+          ): number | null => {
+            if (!ref) return null;
+            if (ref.kind === 'existing') return ref.id;
+            const id = createdSpeakerByNorm.get(ref.normalizedName);
+            if (id === undefined) throw new RollbackReferenceError();
+            return id;
+          };
+
+          let attachmentsToInsert: Array<{
+            communityId: number;
+            fileId: string;
+            ownerType: 'place' | 'speaker' | 'story';
+            ownerId: number;
+            role: string;
+            ordinal: number;
+            createdAt: Date;
+          }> = [];
+
+          if (normalizedData.kind === 'places') {
+            const placeValues = payloads.buildPlaces();
+            if (placeValues.length > 0) {
+              const inserted = await tx
+                .insert(this.tables.places)
+                .values(placeValues)
+                .returning({ id: this.tables.places.id });
+              attachmentsToInsert = payloads.collectEntityAttachments(
+                'place',
+                inserted.map((r: { id: number }) => Number(r.id))
+              );
+            }
+          } else if (normalizedData.kind === 'speakers') {
+            const speakerValues = payloads.buildSpeakers(resolvePlaceRef);
+            if (speakerValues.length > 0) {
+              const inserted = await tx
+                .insert(this.tables.speakers)
+                .values(speakerValues)
+                .returning({ id: this.tables.speakers.id });
+              attachmentsToInsert = payloads.collectEntityAttachments(
+                'speaker',
+                inserted.map((r: { id: number }) => Number(r.id))
+              );
+            }
+          } else {
+            const storyValues = payloads.buildStories(
+              resolvePlaceRef,
+              resolveSpeakerRef
+            );
+            if (storyValues.length > 0) {
+              const insertedStories = await tx
+                .insert(this.tables.stories)
+                .values(storyValues)
+                .returning({ id: this.tables.stories.id });
+              const children = payloads.collectStoryChildren(
+                insertedStories.map((r: { id: number }) => Number(r.id)),
+                resolvePlaceRef,
+                resolveSpeakerRef
+              );
+              attachmentsToInsert = children.attachmentsToInsert;
+              if (children.storyPlacesToInsert.length > 0) {
+                await tx
+                  .insert(this.tables.storyPlaces)
+                  .values(children.storyPlacesToInsert);
+              }
+              if (children.storySpeakersToInsert.length > 0) {
+                await tx
+                  .insert(this.tables.storySpeakers)
+                  .values(children.storySpeakersToInsert);
+              }
+              if (children.externalLinksToInsert.length > 0) {
+                await tx
+                  .insert(this.tables.externalMediaLinks)
+                  .values(children.externalLinksToInsert);
+              }
+            }
+          }
+
+          if (attachmentsToInsert.length > 0) {
+            await tx
+              .insert(this.tables.attachments)
+              .values(attachmentsToInsert);
+          }
+
+          if (stagedMediaIds.length > 0) {
+            let activatedCount = 0;
+            for (
+              let i = 0;
+              i < stagedMediaIds.length;
+              i += COMMIT_FILE_ACTIVATE_CHUNK
+            ) {
+              const chunk = stagedMediaIds.slice(
+                i,
+                i + COMMIT_FILE_ACTIVATE_CHUNK
+              );
+              const activated = await tx
+                .update(this.tables.files)
+                .set({ isActive: true, updatedAt: now })
+                .where(
+                  and(
+                    inArray(this.tables.files.id, chunk),
+                    eq(this.tables.files.communityId, input.communityId),
+                    eq(this.tables.files.isActive, false)
+                  )
+                )
+                .returning({ id: this.tables.files.id });
+              activatedCount += activated.length;
+            }
+            if (activatedCount !== stagedMediaIds.length) {
+              throw new RollbackReferenceError();
+            }
+          }
+
+          const [updated] = await tx
+            .update(this.tables.importManifests)
+            .set({
+              status: 'committed',
+              resultSummary: resultSummary as unknown as Record<
+                string,
+                unknown
+              >,
+              committedAt: nowMs,
+            })
+            .where(
+              and(
+                eq(this.tables.importManifests.id, manifest.id),
+                eq(this.tables.importManifests.communityId, input.communityId),
+                eq(this.tables.importManifests.status, 'previewed')
+              )
+            )
+            .returning(this.manifestSelectColumns());
+          if (!updated) throw new RollbackReferenceError();
+
+          await tx.insert(this.tables.auditEntries).values({
+            ...audit,
+            createdAt: now,
+          });
+
+          return {
+            status: 'committed',
+            manifest: mapManifestRow(updated),
+          };
+        });
+      } catch (err) {
+        if (
+          err instanceof RollbackReferenceError ||
+          isNotNullConstraintError(err) ||
+          isForeignKeyConstraintError(err) ||
+          isUniqueConstraintError(err) ||
+          isCheckConstraintError(err)
+        ) {
+          return { status: 'failed_reference' };
+        }
+        throw err;
+      }
+    }
+
+    // better-sqlite3 synchronous transaction
+    try {
+      return this.db.transaction(
+        (tx: typeof this.db): CommitManifestOutcome => {
+          const comm = tx
+            .select({ id: this.tables.communities.id })
+            .from(this.tables.communities)
+            .where(
+              and(
+                eq(this.tables.communities.id, input.communityId),
+                eq(this.tables.communities.isActive, true)
+              )
+            )
+            .limit(1)
+            .all()[0];
+          if (!comm) return { status: 'forbidden' };
+
+          const actorRow = tx
+            .select({ role: this.tables.users.role })
+            .from(this.tables.users)
+            .where(
+              and(
+                eq(this.tables.users.id, input.actorId),
+                eq(this.tables.users.communityId, input.communityId),
+                eq(this.tables.users.isActive, true),
+                inArray(this.tables.users.role, ['editor', 'admin'])
+              )
+            )
+            .limit(1)
+            .all()[0];
+          if (!actorRow) return { status: 'forbidden' };
+
+          const manifestRow = tx
+            .select(this.manifestSelectColumns())
+            .from(this.tables.importManifests)
+            .where(
+              and(
+                eq(this.tables.importManifests.id, manifest.id),
+                eq(this.tables.importManifests.communityId, input.communityId)
+              )
+            )
+            .limit(1)
+            .all()[0];
+          if (!manifestRow) return { status: 'not_found' };
+
+          const currentManifest = mapManifestRow(manifestRow);
+          if (currentManifest.status === 'committed') {
+            return { status: 'already_committed', manifest: currentManifest };
+          }
+          if (currentManifest.status !== 'previewed') {
+            return { status: 'conflict', manifest: currentManifest };
+          }
+          if (input.dailyLimitWindow) {
+            const hitDaily = tx
+              .select({ id: this.tables.importManifests.id })
+              .from(this.tables.importManifests)
+              .where(
+                and(
+                  eq(this.tables.importManifests.status, 'committed'),
+                  gte(
+                    this.tables.importManifests.committedAt,
+                    input.dailyLimitWindow.startMs
+                  ),
+                  lt(
+                    this.tables.importManifests.committedAt,
+                    input.dailyLimitWindow.endMs
+                  )
+                )
+              )
+              .limit(1)
+              .all();
+            if (hitDaily.length > 0) return { status: 'daily_limit' };
+          }
+
+          // Validate referenced places, speakers, and files synchronously
+          if (refs.existingPlaceIds.length > 0) {
+            const foundPlaces = new Set<number>();
+            for (
+              let i = 0;
+              i < refs.existingPlaceIds.length;
+              i += D1_ENTITY_LOOKUP_CHUNK
+            ) {
+              const chunk = refs.existingPlaceIds.slice(
+                i,
+                i + D1_ENTITY_LOOKUP_CHUNK
+              );
+              const rows = tx
+                .select({ id: this.tables.places.id })
+                .from(this.tables.places)
+                .where(
+                  and(
+                    eq(this.tables.places.communityId, input.communityId),
+                    eq(this.tables.places.isRestricted, false),
+                    inArray(this.tables.places.id, chunk)
+                  )
+                )
+                .all() as Array<{ id: number }>;
+              for (const r of rows) foundPlaces.add(Number(r.id));
+            }
+            if (refs.existingPlaceIds.some((id) => !foundPlaces.has(id))) {
+              return { status: 'failed_reference' };
+            }
+          }
+
+          if (refs.existingSpeakerIds.length > 0) {
+            const foundSpeakers = new Set<number>();
+            for (
+              let i = 0;
+              i < refs.existingSpeakerIds.length;
+              i += D1_ENTITY_LOOKUP_CHUNK
+            ) {
+              const chunk = refs.existingSpeakerIds.slice(
+                i,
+                i + D1_ENTITY_LOOKUP_CHUNK
+              );
+              const rows = tx
+                .select({ id: this.tables.speakers.id })
+                .from(this.tables.speakers)
+                .where(
+                  and(
+                    eq(this.tables.speakers.communityId, input.communityId),
+                    inArray(this.tables.speakers.id, chunk)
+                  )
+                )
+                .all() as Array<{ id: number }>;
+              for (const r of rows) foundSpeakers.add(Number(r.id));
+            }
+            if (refs.existingSpeakerIds.some((id) => !foundSpeakers.has(id))) {
+              return { status: 'failed_reference' };
+            }
+          }
+
+          const allFileIds = Array.from(
+            new Set([...stagedMediaIds, ...refs.existingFileIds])
+          ).sort();
+          const foundFiles = new Map<
+            string,
+            { isActive: boolean; culturalRestrictions: unknown }
+          >();
+          for (let i = 0; i < allFileIds.length; i += D1_FILE_LOOKUP_CHUNK) {
+            const chunk = allFileIds.slice(i, i + D1_FILE_LOOKUP_CHUNK);
+            const rows = tx
+              .select({
+                id: this.tables.files.id,
+                isActive: this.tables.files.isActive,
+                culturalRestrictions: this.tables.files.culturalRestrictions,
+              })
+              .from(this.tables.files)
+              .where(
+                and(
+                  eq(this.tables.files.communityId, input.communityId),
+                  inArray(this.tables.files.id, chunk)
+                )
+              )
+              .all() as Array<{
+              id: string;
+              isActive: boolean | number;
+              culturalRestrictions: unknown;
+            }>;
+            for (const r of rows) {
+              foundFiles.set(r.id, {
+                isActive: r.isActive === true || r.isActive === 1,
+                culturalRestrictions: r.culturalRestrictions ?? null,
+              });
+            }
+          }
+          for (const id of stagedMediaIds) {
+            const f = foundFiles.get(id);
+            if (!f || f.isActive || f.culturalRestrictions !== null) {
+              return { status: 'failed_reference' };
+            }
+          }
+          for (const id of refs.existingFileIds) {
+            const f = foundFiles.get(id);
+            if (!f || !f.isActive || f.culturalRestrictions !== null) {
+              return { status: 'failed_reference' };
+            }
+          }
+
+          const payloads = this.buildCommitEntityPayloads({
+            communityId: input.communityId,
+            actorId: input.actorId,
+            normalizedData,
+            now,
+          });
+
+          const createdPlaceByNorm = new Map<string, number>();
+          if (payloads.relatedPlaces.length > 0) {
+            const insertedPlaces = tx
+              .insert(this.tables.places)
+              .values(payloads.relatedPlaces)
+              .returning({ id: this.tables.places.id })
+              .all() as Array<{ id: number }>;
+            normalizedData.relatedPlacesToCreate.forEach((p, idx) => {
+              createdPlaceByNorm.set(
+                p.normalizedName,
+                Number(insertedPlaces[idx]!.id)
+              );
+            });
+          }
+
+          const createdSpeakerByNorm = new Map<string, number>();
+          if (payloads.relatedSpeakers.length > 0) {
+            const insertedSpeakers = tx
+              .insert(this.tables.speakers)
+              .values(payloads.relatedSpeakers)
+              .returning({ id: this.tables.speakers.id })
+              .all() as Array<{ id: number }>;
+            normalizedData.relatedSpeakersToCreate.forEach((sp, idx) => {
+              createdSpeakerByNorm.set(
+                sp.normalizedName,
+                Number(insertedSpeakers[idx]!.id)
+              );
+            });
+          }
+
+          const resolvePlaceRef = (
+            ref:
+              | { kind: 'existing'; id: number }
+              | { kind: 'create'; name: string; normalizedName: string }
+              | null
+          ): number | null => {
+            if (!ref) return null;
+            if (ref.kind === 'existing') return ref.id;
+            const id = createdPlaceByNorm.get(ref.normalizedName);
+            if (id === undefined) throw new RollbackReferenceError();
+            return id;
+          };
+
+          const resolveSpeakerRef = (
+            ref:
+              | { kind: 'existing'; id: number }
+              | { kind: 'create'; name: string; normalizedName: string }
+              | null
+          ): number | null => {
+            if (!ref) return null;
+            if (ref.kind === 'existing') return ref.id;
+            const id = createdSpeakerByNorm.get(ref.normalizedName);
+            if (id === undefined) throw new RollbackReferenceError();
+            return id;
+          };
+
+          let attachmentsToInsert: Array<{
+            communityId: number;
+            fileId: string;
+            ownerType: 'place' | 'speaker' | 'story';
+            ownerId: number;
+            role: string;
+            ordinal: number;
+            createdAt: Date;
+          }> = [];
+
+          if (normalizedData.kind === 'places') {
+            const placeValues = payloads.buildPlaces();
+            if (placeValues.length > 0) {
+              const inserted = tx
+                .insert(this.tables.places)
+                .values(placeValues)
+                .returning({ id: this.tables.places.id })
+                .all() as Array<{ id: number }>;
+              attachmentsToInsert = payloads.collectEntityAttachments(
+                'place',
+                inserted.map((r) => Number(r.id))
+              );
+            }
+          } else if (normalizedData.kind === 'speakers') {
+            const speakerValues = payloads.buildSpeakers(resolvePlaceRef);
+            if (speakerValues.length > 0) {
+              const inserted = tx
+                .insert(this.tables.speakers)
+                .values(speakerValues)
+                .returning({ id: this.tables.speakers.id })
+                .all() as Array<{ id: number }>;
+              attachmentsToInsert = payloads.collectEntityAttachments(
+                'speaker',
+                inserted.map((r) => Number(r.id))
+              );
+            }
+          } else {
+            const storyValues = payloads.buildStories(
+              resolvePlaceRef,
+              resolveSpeakerRef
+            );
+            if (storyValues.length > 0) {
+              const insertedStories = tx
+                .insert(this.tables.stories)
+                .values(storyValues)
+                .returning({ id: this.tables.stories.id })
+                .all() as Array<{ id: number }>;
+              const children = payloads.collectStoryChildren(
+                insertedStories.map((r) => Number(r.id)),
+                resolvePlaceRef,
+                resolveSpeakerRef
+              );
+              attachmentsToInsert = children.attachmentsToInsert;
+              if (children.storyPlacesToInsert.length > 0) {
+                tx.insert(this.tables.storyPlaces)
+                  .values(children.storyPlacesToInsert)
+                  .run();
+              }
+              if (children.storySpeakersToInsert.length > 0) {
+                tx.insert(this.tables.storySpeakers)
+                  .values(children.storySpeakersToInsert)
+                  .run();
+              }
+              if (children.externalLinksToInsert.length > 0) {
+                tx.insert(this.tables.externalMediaLinks)
+                  .values(children.externalLinksToInsert)
+                  .run();
+              }
+            }
+          }
+
+          if (attachmentsToInsert.length > 0) {
+            tx.insert(this.tables.attachments)
+              .values(attachmentsToInsert)
+              .run();
+          }
+
+          if (stagedMediaIds.length > 0) {
+            let activatedCount = 0;
+            for (
+              let i = 0;
+              i < stagedMediaIds.length;
+              i += COMMIT_FILE_ACTIVATE_CHUNK
+            ) {
+              const chunk = stagedMediaIds.slice(
+                i,
+                i + COMMIT_FILE_ACTIVATE_CHUNK
+              );
+              const activated = tx
+                .update(this.tables.files)
+                .set({ isActive: true, updatedAt: now })
+                .where(
+                  and(
+                    inArray(this.tables.files.id, chunk),
+                    eq(this.tables.files.communityId, input.communityId),
+                    eq(this.tables.files.isActive, false)
+                  )
+                )
+                .returning({ id: this.tables.files.id })
+                .all() as Array<{ id: string }>;
+              activatedCount += activated.length;
+            }
+            if (activatedCount !== stagedMediaIds.length) {
+              throw new RollbackReferenceError();
+            }
+          }
+
+          const updated = tx
+            .update(this.tables.importManifests)
+            .set({
+              status: 'committed',
+              resultSummary: resultSummary as unknown as Record<
+                string,
+                unknown
+              >,
+              committedAt: nowMs,
+            })
+            .where(
+              and(
+                eq(this.tables.importManifests.id, manifest.id),
+                eq(this.tables.importManifests.communityId, input.communityId),
+                eq(this.tables.importManifests.status, 'previewed')
+              )
+            )
+            .returning(this.manifestSelectColumns())
+            .all()[0];
+          if (!updated) throw new RollbackReferenceError();
+
+          tx.insert(this.tables.auditEntries)
+            .values({
+              ...audit,
+              createdAt: now,
+            })
+            .run();
+
+          return {
+            status: 'committed',
+            manifest: mapManifestRow(updated),
+          };
+        }
+      );
+    } catch (err) {
+      if (
+        err instanceof RollbackReferenceError ||
+        isNotNullConstraintError(err) ||
+        isForeignKeyConstraintError(err) ||
+        isUniqueConstraintError(err) ||
+        isCheckConstraintError(err)
+      ) {
+        return { status: 'failed_reference' };
+      }
+      throw err;
+    }
+  }
+
+  async failManifest(input: {
+    communityId: number;
+    actorId: number;
+    manifestId: number;
+    now: Date;
+  }): Promise<FailManifestOutcome> {
+    const now = input.now;
+    const nowMs = now.getTime();
+    const isPg = dialectOf(this.connection) === 'postgresql';
+    const audit = buildImportAuditEntry({
+      communityId: input.communityId,
+      actorId: input.actorId,
+      action: 'import.commit',
+      manifestId: input.manifestId,
+      outcome: 'failed',
+    });
+
+    if (this.hasD1Batch()) {
+      const existing = await this.getManifestById(
+        input.communityId,
+        input.manifestId
+      );
+      if (!existing) return { status: 'not_found' };
+      if (existing.status === 'committed') {
+        return { status: 'already_committed', manifest: existing };
+      }
+      if (existing.status !== 'previewed') {
+        return { status: 'already_terminal', manifest: existing };
+      }
+
+      const activeCommunityGuard = sql`EXISTS (
+        SELECT 1 FROM communities c
+        WHERE c.id = ${input.communityId} AND c.is_active = 1
+      )`;
+      const activeActorGuard = sql`EXISTS (
+        SELECT 1 FROM users u
+        WHERE u.id = ${input.actorId}
+          AND u.community_id = ${input.communityId}
+          AND u.is_active = 1
+          AND u.role IN ('editor', 'admin')
+      )`;
+      const previewedManifestGuard = sql`EXISTS (
+        SELECT 1 FROM import_manifests im
+        WHERE im.id = ${input.manifestId}
+          AND im.community_id = ${input.communityId}
+          AND im.status = 'previewed'
+          AND ${activeActorGuard}
+          AND ${activeCommunityGuard}
+      )`;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const statements: any[] = [];
+      const stagedIds = Array.from(new Set(existing.stagedFileIds))
+        .filter((id) => id !== existing.sourceFileId)
+        .sort();
+      const deleteBatchIndexes: number[] = [];
+      for (let i = 0; i < stagedIds.length; i += 70) {
+        const chunk = stagedIds.slice(i, i + 70);
+        deleteBatchIndexes.push(statements.length);
+        statements.push(
+          this.db
+            .delete(this.tables.files)
+            .where(
+              and(
+                inArray(this.tables.files.id, chunk),
+                eq(this.tables.files.communityId, input.communityId),
+                eq(this.tables.files.isActive, false),
+                previewedManifestGuard,
+                notExists(
+                  this.db
+                    .select({ id: this.tables.attachments.id })
+                    .from(this.tables.attachments)
+                    .where(
+                      eq(this.tables.attachments.fileId, this.tables.files.id)
+                    )
+                ),
+                notExists(
+                  this.db
+                    .select({ id: this.tables.importManifests.id })
+                    .from(this.tables.importManifests)
+                    .where(
+                      eq(
+                        this.tables.importManifests.sourceFileId,
+                        this.tables.files.id
+                      )
+                    )
+                )
+              )
+            )
+            .returning({
+              id: this.tables.files.id,
+              storageKey: this.tables.files.storageKey,
+              path: this.tables.files.path,
+            })
+        );
+      }
+
+      statements.push(
+        this.db.insert(this.tables.auditEntries).select(
+          this.db
+            .select({
+              id: sql`NULL`.as('id'),
+              communityId: this.tables.importManifests.communityId,
+              actorId: sql`${audit.actorId}`.as('actor_id'),
+              action: sql`${audit.action}`.as('action'),
+              resourceType: sql`${audit.resourceType}`.as('resource_type'),
+              resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+                'resource_ids'
+              ),
+              outcome: sql`${audit.outcome}`.as('outcome'),
+              ipAddress: sql`NULL`.as('ip_address'),
+              userAgent: sql`NULL`.as('user_agent'),
+              createdAt: sql`${nowMs}`.as('created_at'),
+            })
+            .from(this.tables.importManifests)
+            .where(
+              and(
+                eq(this.tables.importManifests.id, input.manifestId),
+                eq(this.tables.importManifests.communityId, input.communityId),
+                eq(this.tables.importManifests.status, 'previewed'),
+                activeActorGuard,
+                activeCommunityGuard
+              )
+            )
+        )
+      );
+
+      const updateIdx = statements.length;
+      statements.push(
+        this.db
+          .update(this.tables.importManifests)
+          .set({ status: 'failed' })
+          .where(
+            and(
+              eq(this.tables.importManifests.id, input.manifestId),
+              eq(this.tables.importManifests.communityId, input.communityId),
+              eq(this.tables.importManifests.status, 'previewed'),
+              activeActorGuard,
+              activeCommunityGuard
+            )
+          )
+          .returning(this.manifestSelectColumns())
+      );
+
+      const results = await this.db.batch(statements);
+      const updatedRows = results[updateIdx];
+      const updated = Array.isArray(updatedRows) ? updatedRows[0] : undefined;
+      if (!updated) {
+        const commActive = await this.activeCommunityExists(input.communityId);
+        if (!commActive) return { status: 'forbidden' };
+        const actorRows = await this.db
+          .select({ role: this.tables.users.role })
+          .from(this.tables.users)
+          .where(
+            and(
+              eq(this.tables.users.id, input.actorId),
+              eq(this.tables.users.communityId, input.communityId),
+              eq(this.tables.users.isActive, true),
+              inArray(this.tables.users.role, ['editor', 'admin'])
+            )
+          )
+          .limit(1);
+        if (actorRows.length === 0) return { status: 'forbidden' };
+        const after = await this.getManifestById(
+          input.communityId,
+          input.manifestId
+        );
+        if (!after) return { status: 'not_found' };
+        if (after.status === 'committed') {
+          return { status: 'already_committed', manifest: after };
+        }
+        return { status: 'already_terminal', manifest: after };
+      }
+
+      const deletedFileRows: Array<{
+        id: string;
+        storageKey?: string | null;
+        storage_key?: string | null;
+        path: string;
+      }> = [];
+      for (const idx of deleteBatchIndexes) {
+        if (Array.isArray(results[idx])) {
+          deletedFileRows.push(...results[idx]);
+        }
+      }
+
+      return {
+        status: 'failed',
+        manifest: mapManifestRow(updated),
+        removedFiles: toFileByteCleanups(deletedFileRows),
+      };
+    }
+
+    if (isPg) {
+      return this.db.transaction(async (tx: typeof this.db) => {
+        const [comm] = await tx
+          .select({ id: this.tables.communities.id })
+          .from(this.tables.communities)
+          .where(
+            and(
+              eq(this.tables.communities.id, input.communityId),
+              eq(this.tables.communities.isActive, true)
+            )
+          )
+          .for('share');
+        if (!comm) return { status: 'forbidden' };
+
+        const [actorRow] = await tx
+          .select({ role: this.tables.users.role })
+          .from(this.tables.users)
+          .where(
+            and(
+              eq(this.tables.users.id, input.actorId),
+              eq(this.tables.users.communityId, input.communityId),
+              eq(this.tables.users.isActive, true),
+              inArray(this.tables.users.role, ['editor', 'admin'])
+            )
+          )
+          .for('share');
+        if (!actorRow) return { status: 'forbidden' };
+
+        const [manifestRow] = await tx
+          .select(this.manifestSelectColumns())
+          .from(this.tables.importManifests)
+          .where(
+            and(
+              eq(this.tables.importManifests.id, input.manifestId),
+              eq(this.tables.importManifests.communityId, input.communityId)
+            )
+          )
+          .for('update');
+        if (!manifestRow) return { status: 'not_found' };
+
+        const current = mapManifestRow(manifestRow);
+        if (current.status === 'committed') {
+          return { status: 'already_committed', manifest: current };
+        }
+        if (current.status !== 'previewed') {
+          return { status: 'already_terminal', manifest: current };
+        }
+
+        const [updated] = await tx
+          .update(this.tables.importManifests)
+          .set({ status: 'failed' })
+          .where(
+            and(
+              eq(this.tables.importManifests.id, input.manifestId),
+              eq(this.tables.importManifests.communityId, input.communityId),
+              eq(this.tables.importManifests.status, 'previewed')
+            )
+          )
+          .returning(this.manifestSelectColumns());
+        if (!updated) {
+          return { status: 'already_terminal', manifest: current };
+        }
+
+        const stagedIds = Array.from(
+          new Set(parseJsonColumn<string[]>(manifestRow.stagedFileIds))
+        )
+          .filter((id) => id !== manifestRow.sourceFileId)
+          .sort();
+        const lockedIds = await lockFileRowsForCleanup(
+          tx,
+          this.connection,
+          stagedIds
+        );
+        const removedRows: Array<{
+          id: string;
+          storageKey: string | null;
+          path: string;
+        }> = [];
+        for (let i = 0; i < lockedIds.length; i += 80) {
+          const chunk = lockedIds.slice(i, i + 80);
+          const deleted = await tx
+            .delete(this.tables.files)
+            .where(
+              and(
+                inArray(this.tables.files.id, chunk),
+                eq(this.tables.files.communityId, input.communityId),
+                eq(this.tables.files.isActive, false),
+                notExists(
+                  tx
+                    .select({ id: this.tables.attachments.id })
+                    .from(this.tables.attachments)
+                    .where(
+                      eq(this.tables.attachments.fileId, this.tables.files.id)
+                    )
+                ),
+                notExists(
+                  tx
+                    .select({ id: this.tables.importManifests.id })
+                    .from(this.tables.importManifests)
+                    .where(
+                      eq(
+                        this.tables.importManifests.sourceFileId,
+                        this.tables.files.id
+                      )
+                    )
+                )
+              )
+            )
+            .returning({
+              id: this.tables.files.id,
+              storageKey: this.tables.files.storageKey,
+              path: this.tables.files.path,
+            });
+          removedRows.push(...deleted);
+        }
+
+        await tx.insert(this.tables.auditEntries).values({
+          ...audit,
+          createdAt: now,
+        });
+
+        return {
+          status: 'failed',
+          manifest: mapManifestRow(updated),
+          removedFiles: toFileByteCleanups(removedRows),
+        };
+      });
+    }
+
+    return this.db.transaction((tx: typeof this.db) => {
+      const comm = tx
+        .select({ id: this.tables.communities.id })
+        .from(this.tables.communities)
+        .where(
+          and(
+            eq(this.tables.communities.id, input.communityId),
+            eq(this.tables.communities.isActive, true)
+          )
+        )
+        .limit(1)
+        .all()[0];
+      if (!comm) return { status: 'forbidden' };
+
+      const actorRow = tx
+        .select({ role: this.tables.users.role })
+        .from(this.tables.users)
+        .where(
+          and(
+            eq(this.tables.users.id, input.actorId),
+            eq(this.tables.users.communityId, input.communityId),
+            eq(this.tables.users.isActive, true),
+            inArray(this.tables.users.role, ['editor', 'admin'])
+          )
+        )
+        .limit(1)
+        .all()[0];
+      if (!actorRow) return { status: 'forbidden' };
+
+      const manifestRow = tx
+        .select(this.manifestSelectColumns())
+        .from(this.tables.importManifests)
+        .where(
+          and(
+            eq(this.tables.importManifests.id, input.manifestId),
+            eq(this.tables.importManifests.communityId, input.communityId)
+          )
+        )
+        .limit(1)
+        .all()[0];
+      if (!manifestRow) return { status: 'not_found' };
+
+      const current = mapManifestRow(manifestRow);
+      if (current.status === 'committed') {
+        return { status: 'already_committed', manifest: current };
+      }
+      if (current.status !== 'previewed') {
+        return { status: 'already_terminal', manifest: current };
+      }
+
+      const updated = tx
+        .update(this.tables.importManifests)
+        .set({ status: 'failed' })
+        .where(
+          and(
+            eq(this.tables.importManifests.id, input.manifestId),
+            eq(this.tables.importManifests.communityId, input.communityId),
+            eq(this.tables.importManifests.status, 'previewed')
+          )
+        )
+        .returning(this.manifestSelectColumns())
+        .all()[0];
+      if (!updated) {
+        return { status: 'already_terminal', manifest: current };
+      }
+
+      const stagedIds = Array.from(
+        new Set(parseJsonColumn<string[]>(manifestRow.stagedFileIds))
+      )
+        .filter((id) => id !== manifestRow.sourceFileId)
+        .sort();
+      const removedRows: Array<{
+        id: string;
+        storageKey: string | null;
+        path: string;
+      }> = [];
+      for (let i = 0; i < stagedIds.length; i += 80) {
+        const chunk = stagedIds.slice(i, i + 80);
+        const deleted = tx
+          .delete(this.tables.files)
+          .where(
+            and(
+              inArray(this.tables.files.id, chunk),
+              eq(this.tables.files.communityId, input.communityId),
+              eq(this.tables.files.isActive, false),
+              notExists(
+                tx
+                  .select({ id: this.tables.attachments.id })
+                  .from(this.tables.attachments)
+                  .where(
+                    eq(this.tables.attachments.fileId, this.tables.files.id)
+                  )
+              ),
+              notExists(
+                tx
+                  .select({ id: this.tables.importManifests.id })
+                  .from(this.tables.importManifests)
+                  .where(
+                    eq(
+                      this.tables.importManifests.sourceFileId,
+                      this.tables.files.id
+                    )
+                  )
+              )
+            )
+          )
+          .returning({
+            id: this.tables.files.id,
+            storageKey: this.tables.files.storageKey,
+            path: this.tables.files.path,
+          })
+          .all();
+        removedRows.push(...deleted);
+      }
+
+      tx.insert(this.tables.auditEntries)
+        .values({
+          ...audit,
+          createdAt: now,
+        })
+        .run();
+
+      return {
+        status: 'failed',
         manifest: mapManifestRow(updated),
         removedFiles: toFileByteCleanups(removedRows),
       };

@@ -7323,6 +7323,59 @@ export async function createFixture(
               );
             },
           },
+          {
+            name: 'preview CSV places import manifest for commit',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportCommitManifest',
+            ...qaMultipart({
+              filename: 'qa-places-commit.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,region\nQA Import Committed Place,South\n'
+              ),
+              fields: { kind: 'places' },
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true
+              );
+            },
+          },
+          {
+            name: 'commit previewed import manifest',
+            method: 'POST',
+            path: '/v2/imports/{qaImportCommitManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.canCommit === false &&
+                parsed.data.data.resultSummary?.createdPlaces === 1 &&
+                parsed.data.data.committedAt !== null
+              );
+            },
+          },
+          {
+            name: 're-commit committed import manifest idempotently',
+            method: 'POST',
+            path: '/v2/imports/{qaImportCommitManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.resultSummary?.createdPlaces === 1
+              );
+            },
+          },
           // The real-HTTP transport cannot send an 11 MiB body and keep the
           // connection reusable after the server answers 413 without draining
           // it; the 100 MiB Content-Length cap and the per-category cap are
@@ -7801,6 +7854,12 @@ export async function createFixture(
             name: 'reject import manifest detail for a viewer',
             method: 'GET',
             path: '/v2/imports/1',
+            expected: 403,
+          },
+          {
+            name: 'reject import manifest commit for a viewer',
+            method: 'POST',
+            path: '/v2/imports/1/commit',
             expected: 403,
           },
           {

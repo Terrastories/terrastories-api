@@ -405,15 +405,13 @@ export class MediaCleanupCoordinator {
 
   /** Delete bytes for files whose `files` rows were removed in a commit. */
   async deleteFilesBestEffort(
-    files: ReadonlyArray<FileByteCleanup>
+    files: ReadonlyArray<FileByteCleanup>,
+    reason: MediaCleanupReason = 'file_deleted'
   ): Promise<{ deletedCount: number; failedCount: number }> {
     let deletedCount = 0;
     let failedCount = 0;
     for (const file of files) {
-      const ok = await this.deleteStorageBestEffort(
-        file.storageKey,
-        'file_deleted'
-      );
+      const ok = await this.deleteStorageBestEffort(file.storageKey, reason);
       if (ok) deletedCount++;
       else failedCount++;
     }

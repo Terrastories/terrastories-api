@@ -3,6 +3,7 @@
  * - POST /v2/imports/preview
  * - GET /v2/imports
  * - GET /v2/imports/:id
+ * - POST /v2/imports/:id/commit
  * - DELETE /v2/imports/:id
  */
 import type { Context, Hono } from 'hono';
@@ -59,6 +60,11 @@ export function registerImportRoutes(
 
   app.get('/v2/imports/:id', async (c) => {
     const result = await service.getImport(actorOf(c), c.req.param('id'));
+    return respondImportResult(c, result);
+  });
+
+  app.post('/v2/imports/:id/commit', async (c) => {
+    const result = await service.commitImport(actorOf(c), c.req.param('id'));
     return respondImportResult(c, result);
   });
 

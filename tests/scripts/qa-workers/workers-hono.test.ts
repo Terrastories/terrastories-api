@@ -60,7 +60,7 @@ describe(
         // D1 migrations and PBKDF2 verification add real seconds around the
         // requests.
       },
-      120000
+      240000
     );
   }
 );

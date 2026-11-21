@@ -110,6 +110,10 @@ export const baseCommunitySchema = z.object({
       'Slug can only contain lowercase letters, numbers, and hyphens'
     )
     .refine(
+      (slug) => !slug.startsWith('deprovisioned-'),
+      'Slug uses the reserved deprovisioned namespace'
+    )
+    .refine(
       (slug) => !slug.startsWith('-') && !slug.endsWith('-'),
       'Slug cannot start or end with hyphens'
     )
@@ -307,6 +311,10 @@ export const slugAvailabilitySchema = z
       .regex(
         /^[a-z0-9-]+$/,
         'Slug can only contain lowercase letters, numbers, and hyphens'
+      )
+      .refine(
+        (slug) => !slug.startsWith('deprovisioned-'),
+        'Slug uses the reserved deprovisioned namespace'
       )
       .refine(
         (slug) => !slug.startsWith('-') && !slug.endsWith('-'),

@@ -64,6 +64,10 @@ const createCommunitySchema = z
         /^[a-z0-9-]+$/,
         'Slug can only contain lowercase letters, numbers, and hyphens'
       )
+      .refine(
+        (slug) => !slug.startsWith('deprovisioned-'),
+        'Slug uses the reserved deprovisioned namespace'
+      )
       .optional(),
     publicStories: z.boolean().default(false),
     locale: z

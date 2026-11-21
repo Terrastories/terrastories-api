@@ -88,7 +88,14 @@ export async function getCommunitiesTable() {
 export const insertCommunitySchema = createInsertSchema(communitiesPg, {
   name: z.string().min(1, 'Name is required').max(100, 'Name too long'),
   description: z.string().max(1000, 'Description too long').optional(),
-  slug: z.string().min(1, 'Slug is required').max(50, 'Slug too long'),
+  slug: z
+    .string()
+    .min(1, 'Slug is required')
+    .max(50, 'Slug too long')
+    .refine(
+      (slug) => !slug.startsWith('deprovisioned-'),
+      'Slug uses the reserved deprovisioned namespace'
+    ),
   locale: z.string().min(2).max(5).default('en'),
   culturalSettings: z
     .string()

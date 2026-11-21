@@ -118,6 +118,7 @@ export function deriveBootstrapSlug(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .slice(0, 60)
     .replace(/^-+|-+$/g, '');
+  if (base.startsWith('deprovisioned-')) return `community-${base}`;
   return base.length > 0 ? base : 'community';
 }
 

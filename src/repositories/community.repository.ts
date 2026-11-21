@@ -217,6 +217,11 @@ export class CommunityRepository {
       // Remove leading/trailing hyphens
       .replace(/^-|-$/g, '');
 
+    // Generated slugs must also stay outside the lifecycle tombstone namespace.
+    if (baseSlug.startsWith('deprovisioned-')) {
+      baseSlug = `community-${baseSlug}`;
+    }
+
     // Ensure minimum length
     if (baseSlug.length < 3) {
       baseSlug = `community-${baseSlug}`;

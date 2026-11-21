@@ -1049,6 +1049,80 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
     }
   });
 
+  it('reserves tombstone slugs and skips existing legacy collisions atomically', async () => {
+    for (const useD1Batch of [false, true]) {
+      const { db, request, roleCookies } = await setup({ useD1Batch });
+      expect(
+        (
+          await request('POST', '/v2/admin/communities', {
+            cookie: roleCookies.super_admin,
+            body: { slug: 'deprovisioned-123' },
+          })
+        ).status
+      ).toBe(400);
+      const response = await request('POST', '/v2/admin/communities', {
+        cookie: roleCookies.super_admin,
+        body: { slug: 'collision-target' },
+      });
+      expect(response.status).toBe(201);
+      const id = AdminCommunityResponseSchema.parse(await response.json()).data
+        .id;
+      for (const suffix of ['', '-2']) {
+        await db.insert(communitiesSqlite).values({
+          name: 'Legacy collision',
+          slug: `deprovisioned-${id}${suffix}`,
+        });
+      }
+      expect(
+        (
+          await request('DELETE', `/v2/admin/communities/${id}`, {
+            cookie: roleCookies.super_admin,
+          })
+        ).status
+      ).toBe(204);
+      const [row] = await db
+        .select()
+        .from(communitiesSqlite)
+        .where(eq(communitiesSqlite.id, id));
+      expect(row.slug).toBe(`deprovisioned-${id}-3`);
+      expect(row.deprovisionedAt).not.toBeNull();
+    }
+  });
+
+  it('rolls back deprovision when all 100 tombstone candidates are occupied', async () => {
+    for (const useD1Batch of [false, true]) {
+      const { db, superAdmin, currentNow } = await setup({ useD1Batch });
+      const [target] = await db
+        .insert(communitiesSqlite)
+        .values({
+          name: 'exhausted-target',
+          slug: 'exhausted-target',
+        })
+        .returning();
+      await db.insert(communitiesSqlite).values(
+        Array.from({ length: 100 }, (_, index) => ({
+          name: 'Legacy collision',
+          slug: `deprovisioned-${target.id}${index ? `-${index + 1}` : ''}`,
+        }))
+      );
+      const before = await db.select().from(auditEntriesSqlite);
+      await expect(
+        new AdminRepository(db).deprovisionCommunityAtomically({
+          communityId: target.id,
+          actorId: superAdmin.id,
+          now: currentNow(),
+        })
+      ).rejects.toThrow();
+      const [row] = await db
+        .select()
+        .from(communitiesSqlite)
+        .where(eq(communitiesSqlite.id, target.id));
+      expect(row.slug).toBe(target.slug);
+      expect(row.deprovisionedAt).toBeNull();
+      expect(await db.select().from(auditEntriesSqlite)).toEqual(before);
+    }
+  });
+
   it('deprovisions empty unclaimed communities (including pre-claim tokens, throttles, and pre-claim audits), allows slug reuse, refuses non-empty/claimed, and rolls back on audit failure', async () => {
     for (const useD1Batch of [false, true]) {
       const {

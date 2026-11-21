@@ -28,6 +28,7 @@ export const AdminCommunityClaimStatusSchema = z.enum([
   'claim_pending',
   'claimed',
   'orphaned',
+  'deprovisioned',
 ]);
 export type AdminCommunityClaimStatus = z.infer<
   typeof AdminCommunityClaimStatusSchema

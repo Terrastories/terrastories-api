@@ -4,11 +4,17 @@ import path from 'node:path';
 
 const rootDir = process.cwd();
 
+interface SnapshotColumn {
+  name?: string;
+  notNull?: boolean;
+}
+
 interface SnapshotIndex {
   name?: string;
 }
 
 interface SnapshotTable {
+  columns?: Record<string, SnapshotColumn>;
   indexes?: Record<string, SnapshotIndex>;
 }
 
@@ -16,16 +22,17 @@ interface Snapshot {
   tables?: Record<string, SnapshotTable>;
 }
 
-async function assertAuthIndexesInSnapshot(
+async function assertSnapshotMetadata(
   label: string,
   snapshotPath: string,
-  tableKey: string
+  usersTableKey: string,
+  communitiesTableKey: string
 ): Promise<void> {
   const snapshot = JSON.parse(
     await readFile(path.join(rootDir, snapshotPath), 'utf8')
   ) as Snapshot;
-  const table = snapshot.tables?.[tableKey];
-  assert.ok(table, `${label} snapshot must contain ${tableKey}`);
+  const table = snapshot.tables?.[usersTableKey];
+  assert.ok(table, `${label} snapshot must contain ${usersTableKey}`);
 
   const indexNames = Object.values(table.indexes ?? {})
     .map((index) => index.name)
@@ -44,19 +51,37 @@ async function assertAuthIndexesInSnapshot(
       `${label} snapshot must declare applied authentication index ${expected}`
     );
   }
+
+  const communitiesTable = snapshot.tables?.[communitiesTableKey];
+  assert.ok(
+    communitiesTable,
+    `${label} snapshot must contain ${communitiesTableKey}`
+  );
+  const deprovisionedAtCol = communitiesTable.columns?.deprovisioned_at;
+  assert.ok(
+    deprovisionedAtCol,
+    `${label} snapshot must declare communities.deprovisioned_at`
+  );
+  assert.equal(
+    deprovisionedAtCol.notNull,
+    false,
+    `${label} snapshot communities.deprovisioned_at must be nullable`
+  );
 }
 
 async function main(): Promise<void> {
   console.log('🧭 Migration metadata regression gate');
-  await assertAuthIndexesInSnapshot(
+  await assertSnapshotMetadata(
     'SQLite',
-    'src/db/migrations/meta/0014_snapshot.json',
-    'users'
+    'src/db/migrations/meta/0015_snapshot.json',
+    'users',
+    'communities'
   );
-  await assertAuthIndexesInSnapshot(
+  await assertSnapshotMetadata(
     'PostgreSQL',
-    'src/db/migrations/postgres/meta/0013_snapshot.json',
-    'public.users'
+    'src/db/migrations/postgres/meta/0014_snapshot.json',
+    'public.users',
+    'public.communities'
   );
   console.log('✅ Migration metadata regression gate passed');
 }

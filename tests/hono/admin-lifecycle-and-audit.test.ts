@@ -1147,39 +1147,68 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
         .where(eq(auditEntriesSqlite.communityId, commId));
       expect(preClaimAuditsBefore).toHaveLength(3);
 
-      // Deprovision succeeds 204 and clears community + tokens + claim throttle,
-      // while preserving append-only pre-claim audit rows re-scoped to communityId=null
-      // (keeping ipAddress/userAgent) and writing system.community.deprovision.
+      // Logical deprovision retains community-owned security history unchanged.
       const delRes = await request(
         'DELETE',
         `/v2/admin/communities/${commId}`,
         { cookie: roleCookies.super_admin }
       );
       expect(delRes.status).toBe(204);
-      expect(
-        await db
-          .select()
-          .from(communitiesSqlite)
-          .where(eq(communitiesSqlite.id, commId))
-      ).toHaveLength(0);
-      expect(
-        await db
-          .select()
-          .from(claimTokensSqlite)
-          .where(eq(claimTokensSqlite.communityId, commId))
-      ).toHaveLength(0);
-      expect(
-        await db
-          .select()
-          .from(authThrottleSqlite)
-          .where(eq(authThrottleSqlite.communityId, commId))
-      ).toHaveLength(0);
+      const [tombstone] = await db
+        .select()
+        .from(communitiesSqlite)
+        .where(eq(communitiesSqlite.id, commId));
+      expect(tombstone).toMatchObject({
+        isActive: false,
+        deprovisionedAt: currentNow().getTime(),
+        slug: `deprovisioned-${commId}`,
+      });
+      const tokensAfter = await db
+        .select()
+        .from(claimTokensSqlite)
+        .where(eq(claimTokensSqlite.communityId, commId));
+      expect(tokensAfter).toHaveLength(2);
+      expect(tokensAfter.every((row) => row.supersededAt !== null)).toBe(true);
       expect(
         await db
           .select()
           .from(auditEntriesSqlite)
           .where(eq(auditEntriesSqlite.communityId, commId))
-      ).toHaveLength(0);
+      ).toEqual(preClaimAuditsBefore);
+      expect(
+        (
+          await request('DELETE', `/v2/admin/communities/${commId}`, {
+            cookie: roleCookies.super_admin,
+          })
+        ).status
+      ).toBe(409);
+      expect(
+        (
+          await request('PATCH', `/v2/admin/communities/${commId}/status`, {
+            cookie: roleCookies.super_admin,
+            body: { status: 'active' },
+          })
+        ).status
+      ).toBe(409);
+      expect(
+        (
+          await request(
+            'POST',
+            `/v2/admin/communities/${commId}/claim-tokens`,
+            { cookie: roleCookies.super_admin }
+          )
+        ).status
+      ).toBe(409);
+      const listed = AdminCommunityListResponseSchema.parse(
+        await (
+          await request('GET', '/v2/admin/communities?limit=100', {
+            cookie: roleCookies.super_admin,
+          })
+        ).json()
+      );
+      expect(listed.data.find((row) => row.id === commId)?.claimStatus).toBe(
+        'deprovisioned'
+      );
 
       const allAuditsAfter = await db.select().from(auditEntriesSqlite);
       const preservedIds = new Set(preClaimAuditsBefore.map((row) => row.id));
@@ -1190,7 +1219,7 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
       for (const before of preClaimAuditsBefore) {
         const after = preservedAfter.find((row) => row.id === before.id);
         expect(after).toBeDefined();
-        expect(after?.communityId).toBeNull();
+        expect(after?.communityId).toBe(commId);
         expect(after?.actorId).toBe(before.actorId);
         expect(after?.action).toBe(before.action);
         expect(after?.resourceType).toBe(before.resourceType);
@@ -1210,7 +1239,8 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
       expect(leakedProbeAudit?.userAgent).toBe('LeakedTokenProbe/1.0');
 
       const deprovAudits = allAuditsAfter.filter(
-        (e) => e.action === 'system.community.deprovision'
+        (e) =>
+          e.action === 'system.community.deprovision' && e.outcome === 'success'
       );
       expect(deprovAudits).toHaveLength(1);
       expect(deprovAudits[0]?.communityId).toBeNull();
@@ -1226,15 +1256,9 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
       const surfacedProbe = sysAuditRead.data.find(
         (row) => row.id === leakedProbeAudit!.id
       );
-      expect(surfacedProbe).toMatchObject({
-        communityId: null,
-        action: 'claim_token.consume',
-        resourceType: 'claim_token',
-        resourceIds: [t2.id],
-        outcome: 'failure',
-        ipAddress: '203.0.113.99',
-        userAgent: 'LeakedTokenProbe/1.0',
-      });
+      expect(surfacedProbe).toBeUndefined();
+      expect(deprovAudits[0]?.ipAddress).toBeNull();
+      expect(deprovAudits[0]?.userAgent).toBeNull();
 
       // Old token t1/t2 no longer resolves; same slug can be reprovisioned
       const staleClaim = await app.request(`${API_ORIGIN}/v2/bootstrap/claim`, {
@@ -1595,7 +1619,7 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
     const commId = AdminCommunityResponseSchema.parse(await prov.json()).data
       .id;
 
-    // Issue claim token on commId (later deprovisioned -> re-scoped to communityId=null)
+    // Issue claim token on commId (later tombstoned, retaining community-scoped audits)
     const tokRes = await request(
       'POST',
       `/v2/admin/communities/${commId}/claim-tokens`,
@@ -1665,7 +1689,7 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
           row.resourceIds.includes(liveTokenData.id)
       )
     ).toBe(false);
-    // Deprovisioned community's claim_token.issue row WAS preserved & re-scoped
+    // Deprovisioned community claim audits remain excluded
     expect(
       allParsed.data.some(
         (row) =>
@@ -1673,7 +1697,7 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
           row.communityId === null &&
           row.resourceIds.includes(deprovTokenData.id)
       )
-    ).toBe(true);
+    ).toBe(false);
 
     // Verify deterministic createdAt DESC, id DESC ordering
     for (let i = 1; i < allParsed.data.length; i++) {
@@ -1687,10 +1711,8 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
     }
     expect(allParsed.data[0]?.action).toBe('system.community.deprovision');
     expect(allParsed.data[1]?.action).toBe('system.community.status.disabled');
-    expect(allParsed.data[2]?.action).toBe('claim_token.issue');
-    expect(allParsed.data[2]?.resourceIds).toEqual([deprovTokenData.id]);
-    expect(allParsed.data[3]?.action).toBe('system.community.provision');
-    expect(allParsed.data[3]?.resourceIds).toEqual([commId]);
+    expect(allParsed.data[2]?.action).toBe('system.community.provision');
+    expect(allParsed.data[2]?.resourceIds).toEqual([commId]);
 
     // Paginate limit=1 offset=1
     const page2 = AdminAuditEntryListResponseSchema.parse(
@@ -1897,7 +1919,7 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
     ).toBe(200);
   });
 
-  it('returns uniform 401 and records per-IP throttle + system bootstrap.claim failure audit when community is deprovisioned mid-claim', async () => {
+  it('returns uniform 401 and records per-IP throttle + community claim failure audit when community is deprovisioned mid-claim', async () => {
     const { db, superAdmin, roleCookies, request, currentNow } = await setup();
     const provRes = await request('POST', '/v2/admin/communities', {
       cookie: roleCookies.super_admin,
@@ -1960,8 +1982,8 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
       await db.select().from(auditEntriesSqlite)
     ).filter(
       (e) =>
-        e.communityId === null &&
-        e.action === 'bootstrap.claim' &&
+        e.communityId === commId &&
+        e.action === 'claim_token.consume' &&
         e.outcome === 'failure'
     );
     expect(bootstrapFailAudits).toHaveLength(1);

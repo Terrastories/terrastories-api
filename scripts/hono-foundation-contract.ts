@@ -91,7 +91,12 @@ export async function runHonoFoundationContract(
   ): Promise<number> => {
     for (;;) {
       const blocked = await tx.execute(
-        sql`select pid from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid))`
+        sql`with recursive blocked(pid) as (
+          select pid from pg_stat_activity where pg_backend_pid() = any(pg_blocking_pids(pid))
+          union
+          select activity.pid from pg_stat_activity activity
+          join blocked on blocked.pid = any(pg_blocking_pids(activity.pid))
+        ) select pid from blocked`
       );
       const rows = Array.isArray(blocked)
         ? blocked
@@ -3629,6 +3634,7 @@ export async function runHonoFoundationContract(
     const deprovId = (
       (await deprovCreateRes.json()) as { data: { id: number } }
     ).data.id;
+    communityIds.push(deprovId);
     const deprovTokRes = await send(
       app,
       `/v2/admin/communities/${deprovId}/claim-tokens`,
@@ -3662,6 +3668,10 @@ export async function runHonoFoundationContract(
       }),
       401
     );
+    const preDeprovisionAudits = await db
+      .select()
+      .from(tables.auditEntries)
+      .where(eq(tables.auditEntries.communityId, deprovId));
     await status(
       send(app, `/v2/admin/communities/${deprovId}`, {
         method: 'DELETE',
@@ -3669,6 +3679,42 @@ export async function runHonoFoundationContract(
       }),
       204
     );
+    const [tombstone] = await db
+      .select()
+      .from(tables.communities)
+      .where(eq(tables.communities.id, deprovId));
+    assert.equal(tombstone.isActive, false);
+    assert.ok(tombstone.deprovisionedAt > 0);
+    assert.equal(tombstone.slug, `deprovisioned-${deprovId}`);
+    assert.deepEqual(
+      await db
+        .select()
+        .from(tables.auditEntries)
+        .where(eq(tables.auditEntries.communityId, deprovId)),
+      preDeprovisionAudits
+    );
+    const [deadToken] = await db
+      .select()
+      .from(tables.claimTokens)
+      .where(eq(tables.claimTokens.id, deprovTokId));
+    assert.ok(deadToken.supersededAt > 0);
+    for (const [method, suffix, body] of [
+      ['DELETE', '', undefined],
+      ['PATCH', '/status', { status: 'active' }],
+      ['POST', '/claim-tokens', undefined],
+    ] as const) {
+      await status(
+        send(app, `/v2/admin/communities/${deprovId}${suffix}`, {
+          method,
+          headers: {
+            cookie: saNullCookie,
+            ...(body ? { 'content-type': 'application/json' } : {}),
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        }),
+        409
+      );
+    }
     const reprovRes = await send(app, '/v2/admin/communities', {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie: saNullCookie },
@@ -3680,7 +3726,7 @@ export async function runHonoFoundationContract(
     communityIds.push(reprovId);
 
     // System audit read: only communityId===null entries, zero live-community claim_token leaks,
-    // preserved re-scoped deprovision pre-claim entries (keeping ip/UA), 400 on ?communityId=...
+    // excludes tombstoned community claim entries, 400 on ?communityId=...
     await status(
       send(app, `/v2/admin/audit-entries?communityId=${provCommId}`, {
         headers: { cookie: saNullCookie },
@@ -3724,26 +3770,15 @@ export async function runHonoFoundationContract(
       false,
       'live community claim_token entries must never leak into system audit read'
     );
-    assert.ok(
+    assert.equal(
       sysAuditBody.data.some(
         (row) =>
-          row.action === 'claim_token.issue' &&
+          row.action.startsWith('claim_token.') &&
           row.resourceIds.includes(deprovTokId)
       ),
-      'deprovisioned pre-claim claim_token.issue must survive with communityId=null'
+      false,
+      'tombstoned community claim audits must stay community-scoped'
     );
-    const preservedProbeAudit = sysAuditBody.data.find(
-      (row) =>
-        row.action === 'claim_token.consume' &&
-        row.outcome === 'failure' &&
-        row.resourceIds.includes(deprovTokId)
-    );
-    assert.ok(
-      preservedProbeAudit,
-      'deprovisioned failed claim_token.consume probe must survive with communityId=null'
-    );
-    assert.equal(preservedProbeAudit.ipAddress, '198.51.100.245');
-    assert.equal(preservedProbeAudit.userAgent, 'ContractLeakedProbe/1.0');
     for (const expectedAction of [
       'system.community.provision',
       'system.community.status.disabled',
@@ -3777,32 +3812,50 @@ export async function runHonoFoundationContract(
       const raceTok3 = (
         (await raceTokRes3.json()) as { data: { token: string } }
       ).data.token;
-      const [claimRaceRes, deprovRaceRes] = await Promise.all([
-        send(app, '/v2/bootstrap/claim', {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-forwarded-for': '198.51.100.246',
-          },
-          body: JSON.stringify({
-            token: raceTok3,
-            username: `par_dep_${tag.slice(0, 8)}`,
-            email: `par-deprov-${tag}@example.test`,
-            password: {
-              algorithm: ARGON2ID_ALGORITHM,
-              salt: stretchedSalt,
-              params: JSON.parse(ARGON2ID_PARAMS_JSON),
-              derivedKey: makeDerivedKey(),
+      communityIds.push(raceComm3Id);
+      let pendingRace!: Promise<Response[]>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .select({ id: tables.communities.id })
+          .from(tables.communities)
+          .where(eq(tables.communities.id, raceComm3Id))
+          .for('update');
+        pendingRace = Promise.all([
+          send(app, '/v2/bootstrap/claim', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-forwarded-for': '198.51.100.246',
             },
+            body: JSON.stringify({
+              token: raceTok3,
+              username: `par_dep_${tag.slice(0, 8)}`,
+              email: `par-deprov-${tag}@example.test`,
+              password: {
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: stretchedSalt,
+                params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                derivedKey: makeDerivedKey(),
+              },
+            }),
           }),
-        }),
-        send(app, `/v2/admin/communities/${raceComm3Id}`, {
-          method: 'DELETE',
-          headers: { cookie: saNullCookie },
-        }),
-      ]);
+          send(app, `/v2/admin/communities/${raceComm3Id}`, {
+            method: 'DELETE',
+            headers: { cookie: saNullCookie },
+          }),
+        ]);
+        void pendingRace.then(ignore, ignore);
+        assert.ok(
+          (await waitForBlocked(tx, 2, Date.now() + 4000)) >= 2,
+          'claim/deprovision race must block both contenders on community lock'
+        );
+      });
+      const [claimRaceRes, deprovRaceRes] = await withDeadline(
+        pendingRace,
+        10000,
+        'claim/deprovision contention'
+      );
       if (claimRaceRes.status === 201) {
-        communityIds.push(raceComm3Id);
         const claimRaceJson = (await claimRaceRes.json()) as {
           data: { user: { id: number } };
         };

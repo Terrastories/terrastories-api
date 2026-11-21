@@ -42,18 +42,15 @@ describe('0014 migration: sessions step-up column and login_codes (user_id, purp
       const db = drizzle(sqlite);
       const t = tablesFor(db);
       const now = new Date('2026-06-01T12:00:00.000Z');
-      const [comm] = await db
-        .insert(t.communities)
-        .values({
-          name: 'Mig Alpha',
-          slug: 'mig-alpha',
-          locale: 'en',
-          publicStories: false,
-          isActive: true,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning({ id: t.communities.id });
+      // Seed the historical schema with SQL, independent of later Drizzle columns.
+      const comm = sqlite
+        .prepare(
+          `INSERT INTO communities (name, slug, locale, public_stories, is_active, created_at, updated_at)
+        VALUES (?, ?, 'en', 0, 1, ?, ?) RETURNING id`
+        )
+        .get('Mig Alpha', 'mig-alpha', now.getTime(), now.getTime()) as {
+        id: number;
+      };
       const passwordHash = await hash(
         toHex(crypto.getRandomValues(new Uint8Array(16))),
         4

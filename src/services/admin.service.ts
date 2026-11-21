@@ -296,6 +296,9 @@ export class AdminService {
       return { status: 404, body: NOT_FOUND_BODY };
     }
 
+    if (result.outcome === 'conflict')
+      return { status: 409, body: CONFLICT_BODY };
+
     return {
       status: 200,
       body: {

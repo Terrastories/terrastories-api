@@ -743,9 +743,9 @@ function verifySqliteSchema(sqlite: Database.Database): void {
     assert.equal(Number(lookup.unique), 0, `${expectedIdx} must be non-unique`);
   }
 
-  // #189 Slice 1b: nullable content columns & relaxed V2 nullability.
+  // #189 Slice 1b + PR #257: nullable content columns & relaxed V2 nullability.
   for (const [table, nullableCols] of [
-    ['communities', ['description_plain']],
+    ['communities', ['description_plain', 'deprovisioned_at']],
     [
       'stories',
       ['created_by', 'topic', 'topic_normalized', 'description_plain'],
@@ -1146,7 +1146,7 @@ function verifySqlitePreservation(
 
 async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   const columns = await client.unsafe(
-    `SELECT table_name, column_name, column_default, data_type, datetime_precision
+    `SELECT table_name, column_name, column_default, data_type, datetime_precision, is_nullable
      FROM information_schema.columns
      WHERE table_schema = 'public'`
   );
@@ -1156,6 +1156,7 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   for (const required of [
     'communities.country',
     'communities.beta',
+    'communities.deprovisioned_at',
     'users.reset_password_token',
     'users.reset_password_sent_at',
     'users.remember_created_at',
@@ -1165,6 +1166,21 @@ async function verifyPostgresSchema(client: PostgresClient): Promise<void> {
   ]) {
     assert.ok(names.has(required), `missing ${required}`);
   }
+  const deprovCol = columns.find(
+    (row: any) =>
+      row.table_name === 'communities' && row.column_name === 'deprovisioned_at'
+  );
+  assert.ok(deprovCol, 'missing communities.deprovisioned_at');
+  assert.equal(
+    String(deprovCol.data_type),
+    'bigint',
+    'communities.deprovisioned_at must be bigint'
+  );
+  assert.equal(
+    String(deprovCol.is_nullable),
+    'YES',
+    'communities.deprovisioned_at must be nullable'
+  );
   assert.equal(names.has('places.location'), false);
 
   // S3: coordinates must be 8-byte doubles on PostgreSQL, matching SQLite
@@ -2481,7 +2497,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0014_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0015_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2878,6 +2894,7 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0012_auth_throttle_and_session_lifetimes.sql',
       '0013_login_codes_and_claim_tokens.sql',
       '0014_session_admin_code_step_up_and_login_code_idx.sql',
+      '0015_communities_deprovisioned_at.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')

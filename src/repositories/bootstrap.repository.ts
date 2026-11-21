@@ -221,6 +221,7 @@ export function communityUnclaimedAndEmptySql(
     exists (
       select 1 from communities c_empty
       where c_empty.id = ${communityIdExpr}
+        and c_empty.deprovisioned_at is null
         and c_empty.name = c_empty.slug
         and c_empty.locale = 'en'
         and c_empty.description is null
@@ -285,6 +286,7 @@ export async function isCommunityUnclaimedAndEmpty(
       and(
         eq(communities.id, communityId),
         eq(communities.name, communities.slug),
+        isNull(communities.deprovisionedAt),
         eq(communities.locale, 'en'),
         isNull(communities.description),
         isNull(communities.descriptionPlain),
@@ -414,6 +416,7 @@ export function isCommunityUnclaimedAndEmptySync(
       and(
         eq(communities.id, communityId),
         eq(communities.name, communities.slug),
+        isNull(communities.deprovisionedAt),
         eq(communities.locale, 'en'),
         isNull(communities.description),
         isNull(communities.descriptionPlain),
@@ -786,7 +789,7 @@ export class BootstrapRepository {
             ${null}, ${input.community.name}, ${input.community.description},
             ${input.community.descriptionPlain}, ${input.community.slug},
             ${publicStoriesInt}, ${input.community.locale}, ${null}, 1,
-            ${input.community.country}, 0, ${nowMs}, ${nowMs}
+            ${input.community.country}, 0, ${nowMs}, ${nowMs}, ${null}
           where ${wonGate}`
         )
         .returning({

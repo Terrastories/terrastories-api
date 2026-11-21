@@ -8688,10 +8688,10 @@ export async function createFixture(
             useSavedCookie: 'qaSysAdmin',
           },
           {
-            name: 'deprovisioned community returns 404 on status toggle',
+            name: 'deprovisioned community returns 409 on status toggle',
             method: 'PATCH',
             path: '/v2/admin/communities/{qaDeprovComm}/status',
-            expected: 404,
+            expected: 409,
             useSavedCookie: 'qaSysAdmin',
             body: { status: 'disabled' },
           },
@@ -8821,9 +8821,9 @@ export async function createFixture(
                 return false;
               }
               if (
-                !rows.some(
+                rows.some(
                   (e) =>
-                    e.action === 'claim_token.issue' &&
+                    e.action.startsWith('claim_token.') &&
                     e.resourceIds.includes(qaDeprovTokenId)
                 )
               ) {

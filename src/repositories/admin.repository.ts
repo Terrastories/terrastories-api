@@ -16,7 +16,6 @@ import {
   eq,
   inArray,
   isNull,
-  or,
   sql,
   type SQL,
 } from 'drizzle-orm';
@@ -78,6 +77,7 @@ export interface UpdateCommunityStatusInput {
 
 export type UpdateCommunityStatusResult =
   | { outcome: 'updated'; community: OperationalCommunityRow }
+  | { outcome: 'conflict' }
   | { outcome: 'not_found' }
   | { outcome: 'authority_lost' };
 
@@ -147,6 +147,7 @@ export class AdminRepository {
     nowMs: number
   ): SQL<AdminCommunityClaimStatus> {
     return sql<AdminCommunityClaimStatus>`case
+      when exists (select 1 from communities c_tombstone where c_tombstone.id = ${communityIdExpr} and c_tombstone.deprovisioned_at is not null) then 'deprovisioned'
       when ${communityHasOrHadAdminSql(communityIdExpr)} then 'claimed'
       when not ${communityUnclaimedAndEmptySql(communityIdExpr)} then 'orphaned'
       when exists (
@@ -178,7 +179,8 @@ export class AdminRepository {
       claimStatus:
         claimStatus === 'claim_pending' ||
         claimStatus === 'claimed' ||
-        claimStatus === 'orphaned'
+        claimStatus === 'orphaned' ||
+        claimStatus === 'deprovisioned'
           ? claimStatus
           : 'unclaimed',
       createdAt: toDate(row.createdAt),
@@ -269,7 +271,7 @@ export class AdminRepository {
         .select(
           sql`select
             ${null}, ${input.slug}, ${null}, ${null}, ${input.slug},
-            0, ${'en'}, ${null}, 1, ${null}, 0, ${nowMs}, ${nowMs}
+            0, ${'en'}, ${null}, 1, ${null}, 0, ${nowMs}, ${nowMs}, ${null}
           where ${actorGuard}`
         )
         .returning({
@@ -510,7 +512,13 @@ export class AdminRepository {
       const updateCommStmt = db
         .update(communities)
         .set({ isActive: nextIsActive, updatedAt: input.now })
-        .where(and(eq(communities.id, input.communityId), actorGuard))
+        .where(
+          and(
+            eq(communities.id, input.communityId),
+            isNull(communities.deprovisionedAt),
+            actorGuard
+          )
+        )
         .returning({
           id: communities.id,
           slug: communities.slug,
@@ -527,7 +535,7 @@ export class AdminRepository {
           ${auditTemplate.outcome}, ${auditTemplate.ipAddress},
           ${auditTemplate.userAgent}, ${nowMs}
         from communities c
-        where c.id = ${input.communityId}
+        where c.id = ${input.communityId} and c.deprovisioned_at is null
           and ${actorGuard}`
       );
 
@@ -545,7 +553,7 @@ export class AdminRepository {
                 isNull(claimTokens.consumedAt),
                 isNull(claimTokens.supersededAt),
                 actorGuard,
-                sql`exists (select 1 from communities c where c.id = ${input.communityId})`
+                sql`exists (select 1 from communities c where c.id = ${input.communityId} and c.deprovisioned_at is null)`
               )
             )
         );
@@ -560,7 +568,7 @@ export class AdminRepository {
               and(
                 sql`${sessions.userId} in (select id from users where community_id = ${input.communityId})`,
                 actorGuard,
-                sql`exists (select 1 from communities c where c.id = ${input.communityId})`
+                sql`exists (select 1 from communities c where c.id = ${input.communityId} and c.deprovisioned_at is null)`
               )
             )
         );
@@ -593,7 +601,15 @@ export class AdminRepository {
         )
         .limit(1);
       if (!actorRow) return { outcome: 'authority_lost' };
-      return { outcome: 'not_found' };
+      const [community] = await db
+        .select({
+          id: communities.id,
+          deprovisionedAt: communities.deprovisionedAt,
+        })
+        .from(communities)
+        .where(eq(communities.id, input.communityId))
+        .limit(1);
+      return { outcome: community ? 'conflict' : 'not_found' };
     }
 
     if (dialectOf(db) === 'postgresql') {
@@ -601,12 +617,17 @@ export class AdminRepository {
         async (tx: Executor): Promise<UpdateCommunityStatusResult> => {
           // Lock order: communities (FOR UPDATE) -> actor users (FOR SHARE) -> claim_tokens -> sessions.
           const [existingComm] = await tx
-            .select({ id: communities.id })
+            .select({
+              id: communities.id,
+              deprovisionedAt: communities.deprovisionedAt,
+            })
             .from(communities)
             .where(eq(communities.id, input.communityId))
             .for('update')
             .limit(1);
           if (!existingComm) return { outcome: 'not_found' };
+          if (existingComm.deprovisionedAt !== null)
+            return { outcome: 'conflict' };
 
           const [actorRow] = await tx
             .select({ id: users.id })
@@ -696,12 +717,16 @@ export class AdminRepository {
     // better-sqlite3 synchronous transaction: callback MUST NOT return a Promise.
     return db.transaction((tx: Executor): UpdateCommunityStatusResult => {
       const existingComm = tx
-        .select({ id: communities.id })
+        .select({
+          id: communities.id,
+          deprovisionedAt: communities.deprovisionedAt,
+        })
         .from(communities)
         .where(eq(communities.id, input.communityId))
         .limit(1)
         .all()[0];
       if (!existingComm) return { outcome: 'not_found' };
+      if (existingComm.deprovisionedAt !== null) return { outcome: 'conflict' };
 
       const actorRow = tx
         .select({ id: users.id })
@@ -789,15 +814,7 @@ export class AdminRepository {
     });
   }
 
-  /**
-   * Atomically deprovision a still-empty, never-administered community
-   * (SPEC-V2 §7). `AuditEntry` is append-only (§6.8): pre-claim
-   * `claim_token.issue` and failed `claim_token.consume` rows are preserved by
-   * re-scoping their `communityId` to `null` (keeping `ipAddress`, `userAgent`,
-   * and all other fields intact) in the same atomic unit that removes claim
-   * throttles, unconsumed claim tokens, and the community row, and writes the
-   * system-level `system.community.deprovision` entry (`communityId: null`).
-   */
+  /** Logically deprovision an unclaimed empty community, preserving all audit rows. */
   async deprovisionCommunityAtomically(
     input: DeprovisionCommunityInput
   ): Promise<DeprovisionCommunityResult> {
@@ -814,16 +831,15 @@ export class AdminRepository {
       });
 
     const db = this.db;
-    const { communities, users, claimTokens, authThrottle, auditEntries } =
+    const { communities, users, claimTokens, sessions, auditEntries } =
       this.tables;
     const nowMs = input.now.getTime();
-    const preClaimAuditFilter = or(
-      eq(auditEntries.action, 'claim_token.issue'),
-      and(
-        eq(auditEntries.action, 'claim_token.consume'),
-        eq(auditEntries.outcome, 'failure')
-      )
-    );
+    const tombstone = {
+      isActive: false,
+      deprovisionedAt: nowMs,
+      slug: `deprovisioned-${input.communityId}`,
+      updatedAt: input.now,
+    };
 
     if (typeof db.batch === 'function') {
       const actorGuard = sql`exists (
@@ -837,15 +853,6 @@ export class AdminRepository {
         and exists (select 1 from communities c where c.id = ${input.communityId})
         and ${communityUnclaimedAndEmptySql(input.communityId)}`;
 
-      // Order is load-bearing on D1:
-      // 1. Insert the system audit row while `communities` still exists so the
-      //    guarded SELECT finds `c.id` and `eligibleGuard` still passes.
-      // 2. Preserve append-only pre-claim audit entries by re-scoping them to
-      //    system (`community_id = NULL`, keeping `ip_address`/`user_agent`) so
-      //    the `ON DELETE NO ACTION` FK allows deleting the community in step 5
-      //    while `eligibleGuard` remains satisfied for steps 3-5.
-      // 3-4. Delete claim throttles and unconsumed claim tokens.
-      // 5. Delete the community row last.
       const insertAuditStmt = db.insert(auditEntries).select(
         sql`select
           ${null}, ${null}, ${input.actorId}, ${auditTemplate.action},
@@ -858,54 +865,38 @@ export class AdminRepository {
           and ${communityUnclaimedAndEmptySql(input.communityId)}`
       );
 
-      const rescopePreClaimAuditsStmt = db
-        .update(auditEntries)
-        .set({ communityId: null })
-        .where(
-          and(
-            eq(auditEntries.communityId, input.communityId),
-            preClaimAuditFilter,
-            eligibleGuard
-          )
-        );
-
-      const deleteClaimThrottleStmt = db
-        .delete(authThrottle)
-        .where(
-          and(
-            eq(authThrottle.communityId, input.communityId),
-            eq(authThrottle.kind, 'claim'),
-            eligibleGuard
-          )
-        );
-
-      const deleteUnconsumedTokensStmt = db
-        .delete(claimTokens)
+      const supersedeTokensStmt = db
+        .update(claimTokens)
+        .set({ supersededAt: nowMs })
         .where(
           and(
             eq(claimTokens.communityId, input.communityId),
             isNull(claimTokens.consumedAt),
+            isNull(claimTokens.supersededAt),
             eligibleGuard
           )
         );
-
-      const deleteCommunityStmt = db
-        .delete(communities)
+      const purgeSessionsStmt = db
+        .delete(sessions)
+        .where(
+          and(
+            sql`${sessions.userId} in (select id from users where community_id = ${input.communityId})`,
+            eligibleGuard
+          )
+        );
+      // Tombstone last: eligibility must hold for every preceding statement.
+      const tombstoneStmt = db
+        .update(communities)
+        .set(tombstone)
         .where(and(eq(communities.id, input.communityId), eligibleGuard))
         .returning({ id: communities.id });
-
       const results = (await db.batch([
         insertAuditStmt,
-        rescopePreClaimAuditsStmt,
-        deleteClaimThrottleStmt,
-        deleteUnconsumedTokensStmt,
-        deleteCommunityStmt,
+        supersedeTokensStmt,
+        purgeSessionsStmt,
+        tombstoneStmt,
       ])) as Array<Array<Record<string, unknown>>>;
-
-      const deleted = results[4] ?? [];
-      if (deleted.length > 0) {
-        return { outcome: 'deprovisioned' };
-      }
+      if (results[3]?.length) return { outcome: 'deprovisioned' };
 
       const [actorRow, commRow] = await Promise.all([
         db
@@ -963,32 +954,23 @@ export class AdminRepository {
           }
 
           await tx
-            .update(auditEntries)
-            .set({ communityId: null })
-            .where(
-              and(
-                eq(auditEntries.communityId, input.communityId),
-                preClaimAuditFilter
-              )
-            );
-          await tx
-            .delete(authThrottle)
-            .where(
-              and(
-                eq(authThrottle.communityId, input.communityId),
-                eq(authThrottle.kind, 'claim')
-              )
-            );
-          await tx
-            .delete(claimTokens)
+            .update(claimTokens)
+            .set({ supersededAt: nowMs })
             .where(
               and(
                 eq(claimTokens.communityId, input.communityId),
-                isNull(claimTokens.consumedAt)
+                isNull(claimTokens.consumedAt),
+                isNull(claimTokens.supersededAt)
               )
             );
           await tx
-            .delete(communities)
+            .delete(sessions)
+            .where(
+              sql`${sessions.userId} in (select id from users where community_id = ${input.communityId})`
+            );
+          await tx
+            .update(communities)
+            .set(tombstone)
             .where(eq(communities.id, input.communityId));
 
           await buildAuditEntryInsert(
@@ -1040,32 +1022,25 @@ export class AdminRepository {
         return { outcome: 'conflict' };
       }
 
-      tx.update(auditEntries)
-        .set({ communityId: null })
-        .where(
-          and(
-            eq(auditEntries.communityId, input.communityId),
-            preClaimAuditFilter
-          )
-        )
-        .run();
-      tx.delete(authThrottle)
-        .where(
-          and(
-            eq(authThrottle.communityId, input.communityId),
-            eq(authThrottle.kind, 'claim')
-          )
-        )
-        .run();
-      tx.delete(claimTokens)
+      tx.update(claimTokens)
+        .set({ supersededAt: nowMs })
         .where(
           and(
             eq(claimTokens.communityId, input.communityId),
-            isNull(claimTokens.consumedAt)
+            isNull(claimTokens.consumedAt),
+            isNull(claimTokens.supersededAt)
           )
         )
         .run();
-      tx.delete(communities).where(eq(communities.id, input.communityId)).run();
+      tx.delete(sessions)
+        .where(
+          sql`${sessions.userId} in (select id from users where community_id = ${input.communityId})`
+        )
+        .run();
+      tx.update(communities)
+        .set(tombstone)
+        .where(eq(communities.id, input.communityId))
+        .run();
 
       buildAuditEntryInsert(
         tx,
@@ -1087,9 +1062,7 @@ export class AdminRepository {
   }
 
   /**
-   * Read system-level `AuditEntry` records (`communityId IS NULL`, including
-   * append-only pre-claim audit entries re-scoped on deprovision of an
-   * unclaimed community) in deterministic `createdAt DESC, id DESC` order.
+   * Read system-level `AuditEntry` records (`communityId IS NULL` only) in deterministic `createdAt DESC, id DESC` order.
    * Never returns live community audit rows (`communityId IS NOT NULL`). Uses
    * `idx_audit_entries_community_created_at`.
    */

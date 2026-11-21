@@ -168,6 +168,47 @@ describe('CSV parser and formula-injection guards', () => {
     expect((emptyHeaderErr as CsvParseError).code).toBe('empty_header');
   });
 
+  it('preserves quoted empty records ("") instead of skipping them as blank lines', () => {
+    expect(parseCsvText('name\nGood\n""\n').rows).toEqual([
+      { rowNumber: 1, csvLine: 2, cells: ['Good'] },
+      { rowNumber: 2, csvLine: 3, cells: [''] },
+    ]);
+
+    expect(parseCsvText('name\nGood\n""').rows).toEqual([
+      { rowNumber: 1, csvLine: 2, cells: ['Good'] },
+      { rowNumber: 2, csvLine: 3, cells: [''] },
+    ]);
+
+    expect(parseCsvText('name\nGood\n""\n\n').rows).toEqual([
+      { rowNumber: 1, csvLine: 2, cells: ['Good'] },
+      { rowNumber: 2, csvLine: 3, cells: [''] },
+    ]);
+
+    expect(parseCsvText('name\nGood\n\n""\n').rows).toEqual([
+      { rowNumber: 1, csvLine: 2, cells: ['Good'] },
+      { rowNumber: 2, csvLine: 3, cells: [''] },
+      { rowNumber: 3, csvLine: 4, cells: [''] },
+    ]);
+
+    let mismatchErr: unknown;
+    try {
+      parseCsvText('name,region\nGood,North\n""\n');
+    } catch (err) {
+      mismatchErr = err;
+    }
+    expect(mismatchErr).toBeInstanceOf(CsvParseError);
+    expect((mismatchErr as CsvParseError).code).toBe('column_count_mismatch');
+
+    let quotedEmptyHeaderErr: unknown;
+    try {
+      parseCsvText('""\nGood\n');
+    } catch (err) {
+      quotedEmptyHeaderErr = err;
+    }
+    expect(quotedEmptyHeaderErr).toBeInstanceOf(CsvParseError);
+    expect((quotedEmptyHeaderErr as CsvParseError).code).toBe('empty_header');
+  });
+
   it('detects and neutralizes spreadsheet formula prefixes', () => {
     for (const bad of [
       '=cmd|"/c calc"!A0',

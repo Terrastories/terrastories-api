@@ -117,6 +117,7 @@ export function parseCsvText(
   let inQuotes = false;
   let justClosedQuote = false;
   let atCellStart = true;
+  let recordHasQuotedField = false;
   let currentLine = 1;
   let recordStartLine = 1;
 
@@ -221,8 +222,11 @@ export function parseCsvText(
   const pushRecord = (endIdx: number) => {
     pushCell(endIdx);
     const cells = rowCells;
+    const hadQuotedField = recordHasQuotedField;
     rowCells = [];
-    const isBlankLine = cells.length === 1 && cells[0] === '';
+    recordHasQuotedField = false;
+    const isBlankLine =
+      !hadQuotedField && cells.length === 1 && cells[0] === '';
 
     if (headers === null) {
       if (isBlankLine) {
@@ -330,6 +334,7 @@ export function parseCsvText(
     if (atCellStart && ch === '"') {
       inQuotes = true;
       atCellStart = false;
+      recordHasQuotedField = true;
       segmentStart = i + 1;
       continue;
     }

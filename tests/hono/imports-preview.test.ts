@@ -1866,4 +1866,29 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
       .where(eq(tables.importManifests.id, manyErrorsData.id));
     expect(persistedManyErrors?.rowErrors).toHaveLength(MAX_IMPORT_ROW_ERRORS);
   });
+
+  it('preserves a quoted empty row ("") in one-column CSV instead of silently dropping it as a blank line', async () => {
+    const res = await postPreview(app, {
+      cookie: cookies.editor,
+      csvFilename: 'quoted-empty-row.csv',
+      csvText: 'name\nGood Place\n""\n',
+      fields: { kind: 'places' },
+    });
+    expect(res.status).toBe(201);
+    const data = ImportManifestDetailResponseSchema.parse(
+      await res.json()
+    ).data;
+    expect(data.rowCount).toBe(2);
+    expect(data.validRowCount).toBe(1);
+    expect(data.errorCount).toBe(1);
+    expect(data.canCommit).toBe(false);
+    expect(data.rowErrors).toEqual([
+      {
+        row: 2,
+        field: 'name',
+        code: 'missing_required',
+        message: expect.any(String),
+      },
+    ]);
+  });
 });

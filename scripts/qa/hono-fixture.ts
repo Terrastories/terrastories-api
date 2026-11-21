@@ -4392,11 +4392,23 @@ export async function createFixture(
     let qaClaimToken2 = '';
     let qaClaimToken2Id = 0;
     let qaDeprovTokenId = 0;
+    let qaDisabledToken = '';
     const qaAdminClaimedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
     const qaSupersededClaimBody = {
       token: '',
       username: 'qa_superseded_admin',
       email: 'qa-superseded-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: verifierSalt,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    const qaDisabledClaimBody = {
+      token: '',
+      username: 'qa_disabled_revive_admin',
+      email: 'qa-disabled-revive@example.test',
       password: {
         algorithm: ARGON2ID_ALGORITHM,
         salt: verifierSalt,
@@ -8691,6 +8703,85 @@ export async function createFixture(
             useSavedCookie: 'qaSysAdmin',
             captureId: 'qaReprovComm',
             body: { slug: 'qa-admin-deprov' },
+          },
+          {
+            name: 'issue claim token on reprovisioned community before disable',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaReprovComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaDisabledToken = parsed.data.data.token;
+              return true;
+            },
+          },
+          {
+            name: 'disable reprovisioned community supersedes token and hides claim_pending',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaReprovComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'disabled' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'disabled' &&
+                parsed.data.data.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 'list shows disabled unclaimed community without claim_pending',
+            method: 'GET',
+            path: '/v2/admin/communities?limit=100',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = AdminCommunityListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const entry = parsed.data.data.find(
+                (c) => c.slug === 'qa-admin-deprov'
+              );
+              return (
+                entry?.status === 'disabled' &&
+                entry?.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 're-enable reprovisioned community does not restore claim_pending',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaReprovComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'active' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 'pre-disable claim token stays rejected after re-enable',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.145',
+              'cf-connecting-ip': '203.0.113.145',
+            },
+            prepare: () => {
+              qaDisabledClaimBody.token = qaDisabledToken;
+            },
+            body: qaDisabledClaimBody,
+            check: invalidCredentials,
           },
           {
             name: 'clean up reprovisioned community',

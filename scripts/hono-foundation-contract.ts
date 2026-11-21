@@ -3818,6 +3818,123 @@ export async function runHonoFoundationContract(
       }
     }
 
+    // Slice 14 disabling supersedes outstanding claim tokens and hides claim_pending (SQLite + PostgreSQL):
+    const disClaimCommRes = await send(app, '/v2/admin/communities', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: saNullCookie },
+      body: JSON.stringify({ slug: `disable-claim-${tag}` }),
+    });
+    assert.equal(disClaimCommRes.status, 201);
+    const disClaimCommId = (
+      (await disClaimCommRes.json()) as { data: { id: number } }
+    ).data.id;
+    const disTok1Res = await send(
+      app,
+      `/v2/admin/communities/${disClaimCommId}/claim-tokens`,
+      { method: 'POST', headers: { cookie: saNullCookie } }
+    );
+    assert.equal(disTok1Res.status, 201);
+    const disTok1 = ((await disTok1Res.json()) as { data: { token: string } })
+      .data.token;
+
+    const disPendingList = (await (
+      await send(app, '/v2/admin/communities?limit=100&offset=0', {
+        headers: { cookie: saNullCookie },
+      })
+    ).json()) as { data: Array<{ id: number; claimStatus: string }> };
+    assert.equal(
+      disPendingList.data.find((c) => c.id === disClaimCommId)?.claimStatus,
+      'claim_pending'
+    );
+
+    const disToggleRes = await send(
+      app,
+      `/v2/admin/communities/${disClaimCommId}/status`,
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ status: 'disabled' }),
+      }
+    );
+    assert.equal(disToggleRes.status, 200);
+    assert.equal(
+      ((await disToggleRes.json()) as { data: { claimStatus: string } }).data
+        .claimStatus,
+      'unclaimed'
+    );
+    const disListAfterDisable = (await (
+      await send(app, '/v2/admin/communities?limit=100&offset=0', {
+        headers: { cookie: saNullCookie },
+      })
+    ).json()) as { data: Array<{ id: number; claimStatus: string }> };
+    assert.equal(
+      disListAfterDisable.data.find((c) => c.id === disClaimCommId)
+        ?.claimStatus,
+      'unclaimed'
+    );
+
+    const reEnableRes = await send(
+      app,
+      `/v2/admin/communities/${disClaimCommId}/status`,
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({ status: 'active' }),
+      }
+    );
+    assert.equal(reEnableRes.status, 200);
+    assert.equal(
+      ((await reEnableRes.json()) as { data: { claimStatus: string } }).data
+        .claimStatus,
+      'unclaimed'
+    );
+
+    // Re-enabling must never revive the superseded pre-disable token.
+    await status(
+      send(app, '/v2/bootstrap/claim', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': '198.51.100.220',
+        },
+        body: JSON.stringify({
+          token: disTok1,
+          username: `dis_revive_${tag.slice(0, 8)}`,
+          email: `dis-revive-${tag}@example.test`,
+          password: {
+            algorithm: ARGON2ID_ALGORITHM,
+            salt: stretchedSalt,
+            params: JSON.parse(ARGON2ID_PARAMS_JSON),
+            derivedKey: makeDerivedKey(),
+          },
+        }),
+      }),
+      401
+    );
+
+    const disTok2Res = await send(
+      app,
+      `/v2/admin/communities/${disClaimCommId}/claim-tokens`,
+      { method: 'POST', headers: { cookie: saNullCookie } }
+    );
+    assert.equal(disTok2Res.status, 201);
+    const disListReissued = (await (
+      await send(app, '/v2/admin/communities?limit=100&offset=0', {
+        headers: { cookie: saNullCookie },
+      })
+    ).json()) as { data: Array<{ id: number; claimStatus: string }> };
+    assert.equal(
+      disListReissued.data.find((c) => c.id === disClaimCommId)?.claimStatus,
+      'claim_pending'
+    );
+    await status(
+      send(app, `/v2/admin/communities/${disClaimCommId}`, {
+        method: 'DELETE',
+        headers: { cookie: saNullCookie },
+      }),
+      204
+    );
+
     // Slice 14 descriptive community-row content guard (SQLite + PostgreSQL):
     // a community holding any non-default descriptive/publication/legacy field
     // on the communities row itself with zero child rows must report

@@ -149,7 +149,9 @@ export class AdminRepository {
       when not ${communityUnclaimedAndEmptySql(communityIdExpr)} then 'claimed'
       when exists (
         select 1 from claim_tokens ct
+        inner join communities c_active on c_active.id = ct.community_id
         where ct.community_id = ${communityIdExpr}
+          and c_active.is_active
           and ct.consumed_at is null
           and ct.superseded_at is null
           and ct.expires_at > ${nowMs}
@@ -461,10 +463,11 @@ export class AdminRepository {
 
   /**
    * Atomically update a community's operational lifecycle `status`
-   * (`active | disabled`), purge every session of that community when setting
-   * `disabled` (SPEC-V2 §6.2, §6.8), and write the content-free system
-   * `AuditEntry` in the same atomic unit. Never reads or writes descriptive
-   * community fields or content.
+   * (`active | disabled`), purge every session of that community and supersede
+   * outstanding unconsumed `ClaimToken`s when setting `disabled` (SPEC-V2
+   * §6.2, §6.8, §7 — re-enabling never revives pre-disable tokens), and write
+   * the content-free system `AuditEntry` in the same atomic unit. Never reads
+   * or writes descriptive community fields or content.
    */
   async setCommunityStatusAtomically(
     input: UpdateCommunityStatusInput
@@ -486,7 +489,8 @@ export class AdminRepository {
       });
 
     const db = this.db;
-    const { communities, users, sessions, auditEntries } = this.tables;
+    const { communities, users, sessions, claimTokens, auditEntries } =
+      this.tables;
     const nextIsActive = communityStatusToPhysical(input.status);
     const nowMs = input.now.getTime();
 
@@ -523,7 +527,27 @@ export class AdminRepository {
           and ${actorGuard}`
       );
 
-      const statements: unknown[] = [updateCommStmt];
+      const statements: unknown[] = [];
+      if (input.status === 'disabled') {
+        // Supersede before `updateCommStmt` so its RETURNING projection sees
+        // both `is_active = 0` and `superseded_at` set.
+        statements.push(
+          db
+            .update(claimTokens)
+            .set({ supersededAt: nowMs })
+            .where(
+              and(
+                eq(claimTokens.communityId, input.communityId),
+                isNull(claimTokens.consumedAt),
+                isNull(claimTokens.supersededAt),
+                actorGuard,
+                sql`exists (select 1 from communities c where c.id = ${input.communityId})`
+              )
+            )
+        );
+      }
+      const updateIdx = statements.length;
+      statements.push(updateCommStmt);
       if (input.status === 'disabled') {
         statements.push(
           db
@@ -542,7 +566,7 @@ export class AdminRepository {
       const results = (await db.batch(statements)) as Array<
         Array<Record<string, unknown>>
       >;
-      const commRow = results[0]?.[0];
+      const commRow = results[updateIdx]?.[0];
       if (commRow) {
         return {
           outcome: 'updated',
@@ -571,7 +595,7 @@ export class AdminRepository {
     if (dialectOf(db) === 'postgresql') {
       return db.transaction(
         async (tx: Executor): Promise<UpdateCommunityStatusResult> => {
-          // Lock order: communities (FOR UPDATE) -> actor users (FOR SHARE) -> sessions.
+          // Lock order: communities (FOR UPDATE) -> actor users (FOR SHARE) -> claim_tokens -> sessions.
           const [existingComm] = await tx
             .select({ id: communities.id })
             .from(communities)
@@ -608,6 +632,16 @@ export class AdminRepository {
             });
 
           if (input.status === 'disabled') {
+            await tx
+              .update(claimTokens)
+              .set({ supersededAt: nowMs })
+              .where(
+                and(
+                  eq(claimTokens.communityId, input.communityId),
+                  isNull(claimTokens.consumedAt),
+                  isNull(claimTokens.supersededAt)
+                )
+              );
             await tx
               .delete(sessions)
               .where(
@@ -694,6 +728,16 @@ export class AdminRepository {
         .all();
 
       if (input.status === 'disabled') {
+        tx.update(claimTokens)
+          .set({ supersededAt: nowMs })
+          .where(
+            and(
+              eq(claimTokens.communityId, input.communityId),
+              isNull(claimTokens.consumedAt),
+              isNull(claimTokens.supersededAt)
+            )
+          )
+          .run();
         tx.delete(sessions)
           .where(
             inArray(

@@ -55,6 +55,7 @@ import {
 import { sha256Hex } from '../../src/shared/auth-crypto.js';
 import {
   AdminAuditEntryListResponseSchema,
+  AdminCommunityListResponseSchema,
   AdminCommunityResponseSchema,
   ClaimTokenIssuedResponseSchema,
 } from '../../src/shared/schemas/admin.js';
@@ -744,6 +745,259 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
       expect(
         (await broken.db.select().from(sessionsSqlite)).length
       ).toBeGreaterThan(0);
+    }
+  });
+
+  it('supersedes outstanding claim tokens on disable, never reports claim_pending while disabled, never revives tokens on re-enable, and rolls back supersession on audit failure', async () => {
+    for (const useD1Batch of [false, true]) {
+      const {
+        db,
+        app,
+        superAdmin,
+        roleCookies,
+        request,
+        advanceMs,
+        currentNow,
+      } = await setup({ useD1Batch });
+
+      const provRes = await request('POST', '/v2/admin/communities', {
+        cookie: roleCookies.super_admin,
+        body: { slug: 'disable-pending-comm' },
+      });
+      expect(provRes.status).toBe(201);
+      const commId = AdminCommunityResponseSchema.parse(await provRes.json())
+        .data.id;
+
+      const tok1Res = await request(
+        'POST',
+        `/v2/admin/communities/${commId}/claim-tokens`,
+        { cookie: roleCookies.super_admin }
+      );
+      expect(tok1Res.status).toBe(201);
+      const tok1 = ClaimTokenIssuedResponseSchema.parse(
+        await tok1Res.json()
+      ).data;
+
+      const pendingList = AdminCommunityListResponseSchema.parse(
+        await (
+          await request('GET', '/v2/admin/communities?limit=100', {
+            cookie: roleCookies.super_admin,
+          })
+        ).json()
+      );
+      expect(pendingList.data.find((c) => c.id === commId)?.claimStatus).toBe(
+        'claim_pending'
+      );
+
+      // Disable community -> supersedes outstanding claim tokens and reports unclaimed (not claim_pending)
+      advanceMs(2000);
+      const disableTimeMs = currentNow().getTime();
+      const disRes = await request(
+        'PATCH',
+        `/v2/admin/communities/${commId}/status`,
+        {
+          cookie: roleCookies.super_admin,
+          body: { status: 'disabled' },
+        }
+      );
+      expect(disRes.status).toBe(200);
+      const disParsed = AdminCommunityResponseSchema.parse(await disRes.json());
+      expect(disParsed.data.status).toBe('disabled');
+      expect(disParsed.data.claimStatus).toBe('unclaimed');
+
+      const disList = AdminCommunityListResponseSchema.parse(
+        await (
+          await request('GET', '/v2/admin/communities?limit=100', {
+            cookie: roleCookies.super_admin,
+          })
+        ).json()
+      );
+      expect(disList.data.find((c) => c.id === commId)?.claimStatus).toBe(
+        'unclaimed'
+      );
+
+      const [tok1Row] = await db
+        .select()
+        .from(claimTokensSqlite)
+        .where(eq(claimTokensSqlite.id, tok1.id));
+      expect(tok1Row?.supersededAt).toBe(disableTimeMs);
+      expect(tok1Row?.consumedAt).toBeNull();
+
+      // Token rejected while disabled
+      expect(
+        (
+          await app.request(`${API_ORIGIN}/v2/bootstrap/claim`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'cf-connecting-ip': '203.0.113.170',
+            },
+            body: JSON.stringify({
+              token: tok1.token,
+              username: 'disabled_claim_attempt',
+              email: 'disabled-claim@example.test',
+              password: makePasswordPayload(),
+            }),
+          })
+        ).status
+      ).toBe(401);
+
+      // Re-enable -> claimStatus remains unclaimed and superseded token stays dead (never revived)
+      advanceMs(2000);
+      const actRes = await request(
+        'PATCH',
+        `/v2/admin/communities/${commId}/status`,
+        {
+          cookie: roleCookies.super_admin,
+          body: { status: 'active' },
+        }
+      );
+      expect(actRes.status).toBe(200);
+      expect(
+        AdminCommunityResponseSchema.parse(await actRes.json()).data.claimStatus
+      ).toBe('unclaimed');
+
+      const [tok1AfterEnable] = await db
+        .select()
+        .from(claimTokensSqlite)
+        .where(eq(claimTokensSqlite.id, tok1.id));
+      expect(tok1AfterEnable?.supersededAt).toBe(disableTimeMs);
+
+      expect(
+        (
+          await app.request(`${API_ORIGIN}/v2/bootstrap/claim`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'cf-connecting-ip': '203.0.113.171',
+            },
+            body: JSON.stringify({
+              token: tok1.token,
+              username: 'revived_claim_attempt',
+              email: 'revived-claim@example.test',
+              password: makePasswordPayload(),
+            }),
+          })
+        ).status
+      ).toBe(401);
+
+      // Issuing a fresh token after re-enable works and claims cleanly
+      const tok2Res = await request(
+        'POST',
+        `/v2/admin/communities/${commId}/claim-tokens`,
+        { cookie: roleCookies.super_admin }
+      );
+      expect(tok2Res.status).toBe(201);
+      const tok2 = ClaimTokenIssuedResponseSchema.parse(
+        await tok2Res.json()
+      ).data;
+      const reissuedList = AdminCommunityListResponseSchema.parse(
+        await (
+          await request('GET', '/v2/admin/communities?limit=100', {
+            cookie: roleCookies.super_admin,
+          })
+        ).json()
+      );
+      expect(reissuedList.data.find((c) => c.id === commId)?.claimStatus).toBe(
+        'claim_pending'
+      );
+      expect(
+        (
+          await app.request(`${API_ORIGIN}/v2/bootstrap/claim`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'cf-connecting-ip': '203.0.113.172',
+            },
+            body: JSON.stringify({
+              token: tok2.token,
+              username: 'fresh_reissued_admin',
+              email: 'fresh-reissued@example.test',
+              password: makePasswordPayload(),
+            }),
+          })
+        ).status
+      ).toBe(201);
+
+      // Even if a disabled community holds an out-of-band unsuperseded live token in DB,
+      // claimStatus never reports claim_pending while disabled.
+      const now = currentNow();
+      const nowMs = now.getTime();
+      const [outOfBandDisabled] = await db
+        .insert(communitiesSqlite)
+        .values({
+          name: 'oob-disabled-comm',
+          slug: 'oob-disabled-comm',
+          locale: 'en',
+          publicStories: false,
+          beta: false,
+          isActive: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      await db.insert(claimTokensSqlite).values({
+        communityId: outOfBandDisabled.id,
+        tokenHash: await sha256Hex('oob-raw-token'),
+        issuedBy: superAdmin.id,
+        createdAt: nowMs,
+        expiresAt: nowMs + 3_600_000,
+        consumedAt: null,
+        consumedBy: null,
+        supersededAt: null,
+      });
+      const oobList = AdminCommunityListResponseSchema.parse(
+        await (
+          await request('GET', '/v2/admin/communities?limit=100', {
+            cookie: roleCookies.super_admin,
+          })
+        ).json()
+      );
+      expect(
+        oobList.data.find((c) => c.id === outOfBandDisabled.id)?.claimStatus
+      ).toBe('unclaimed');
+    }
+
+    // Audit trigger abort rolls back token supersession alongside status update
+    for (const useD1Batch of [false, true]) {
+      const broken = await setup({ useD1Batch });
+      const provRes = await broken.request('POST', '/v2/admin/communities', {
+        cookie: broken.roleCookies.super_admin,
+        body: { slug: 'rollback-disable-token' },
+      });
+      const cid = AdminCommunityResponseSchema.parse(await provRes.json()).data
+        .id;
+      const tokRes = await broken.request(
+        'POST',
+        `/v2/admin/communities/${cid}/claim-tokens`,
+        { cookie: broken.roleCookies.super_admin }
+      );
+      const tok = ClaimTokenIssuedResponseSchema.parse(
+        await tokRes.json()
+      ).data;
+
+      broken.sqlite.exec(
+        "CREATE TRIGGER fail_audit BEFORE INSERT ON audit_entries BEGIN SELECT RAISE(ABORT, 'audit-boom'); END;"
+      );
+      const disRes = await broken.request(
+        'PATCH',
+        `/v2/admin/communities/${cid}/status`,
+        {
+          cookie: broken.roleCookies.super_admin,
+          body: { status: 'disabled' },
+        }
+      );
+      expect(disRes.status).toBe(503);
+      const [commAfter] = await broken.db
+        .select()
+        .from(communitiesSqlite)
+        .where(eq(communitiesSqlite.id, cid));
+      expect(commAfter?.isActive).toBe(true);
+      const [tokAfter] = await broken.db
+        .select()
+        .from(claimTokensSqlite)
+        .where(eq(claimTokensSqlite.id, tok.id));
+      expect(tokAfter?.supersededAt).toBeNull();
     }
   });
 

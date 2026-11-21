@@ -800,7 +800,8 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
       );
       expect(refusedRes.status).toBe(409);
 
-      // Audits carry communityId = commId, never token or tokenHash
+      // Audits carry communityId = commId, never token or tokenHash.
+      // Failed issuance records resourceIds: [] (never communityId as a claim_token id).
       const issueAudits = (
         await db
           .select()
@@ -812,6 +813,30 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
         'success',
         'success',
         'failure',
+      ]);
+      expect(
+        issueAudits.map((e) => ({
+          communityId: e.communityId,
+          resourceType: e.resourceType,
+          resourceIds: e.resourceIds,
+        }))
+      ).toEqual([
+        {
+          communityId: commId,
+          resourceType: 'claim_token',
+          resourceIds: [tok1.id],
+        },
+        {
+          communityId: commId,
+          resourceType: 'claim_token',
+          resourceIds: [tok2.id],
+        },
+        {
+          communityId: commId,
+          resourceType: 'claim_token',
+          resourceIds: [tok3.id],
+        },
+        { communityId: commId, resourceType: 'claim_token', resourceIds: [] },
       ]);
       const serialized = JSON.stringify(issueAudits);
       for (const tok of [tok1.token, tok2.token, tok3.token]) {
@@ -866,6 +891,16 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
         )
       ).status
     ).toBe(409);
+    const disabledFailureAudits = (
+      await db
+        .select()
+        .from(auditEntriesSqlite)
+        .where(eq(auditEntriesSqlite.communityId, disabledEmpty.id))
+    ).filter((e) => e.action === 'claim_token.issue');
+    expect(disabledFailureAudits).toHaveLength(1);
+    expect(disabledFailureAudits[0]?.outcome).toBe('failure');
+    expect(disabledFailureAudits[0]?.resourceType).toBe('claim_token');
+    expect(disabledFailureAudits[0]?.resourceIds).toEqual([]);
 
     // Bootstrapped community (even if users were absent)
     const bootstrappedComm = await makeEmptyCommunity('bootstrapped-comm');
@@ -1089,6 +1124,8 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
       ).filter((e) => e.action === 'claim_token.issue');
       expect(failureAudits).toHaveLength(1);
       expect(failureAudits[0]?.outcome).toBe('failure');
+      expect(failureAudits[0]?.resourceType).toBe('claim_token');
+      expect(failureAudits[0]?.resourceIds).toEqual([]);
     }
 
     // Audit failure rollback on issueClaimTokenAtomically (direct SQLite + D1 batch)
@@ -1205,6 +1242,8 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
         ).filter((e) => e.action === 'claim_token.issue');
         expect(failureAudits).toHaveLength(1);
         expect(failureAudits[0]?.outcome).toBe('failure');
+        expect(failureAudits[0]?.resourceType).toBe('claim_token');
+        expect(failureAudits[0]?.resourceIds).toEqual([]);
 
         const listRes = await requestAdmin(
           'GET',

@@ -233,12 +233,14 @@ export class AdminService {
       return { status: 404, body: NOT_FOUND_BODY };
     }
     if (outcome.outcome === 'conflict') {
+      // No claim_tokens row was created on conflict, so resourceIds stays empty
+      // while communityId identifies the community.
       await this.auditFailureBestEffort({
         communityId,
         actorId: actor.id,
         action: 'claim_token.issue',
         resourceType: 'claim_token',
-        resourceIds: [communityId],
+        resourceIds: [],
         now,
       });
       return { status: 409, body: CONFLICT_BODY };

@@ -3397,6 +3397,18 @@ export async function runHonoFoundationContract(
       }),
       409
     );
+    const failedIssueAudits = (
+      await db
+        .select()
+        .from(tables.auditEntries)
+        .where(eq(tables.auditEntries.communityId, provCommId))
+    ).filter(
+      (e: { action: string; outcome: string }) =>
+        e.action === 'claim_token.issue' && e.outcome === 'failure'
+    );
+    assert.equal(failedIssueAudits.length, 1);
+    assert.equal(failedIssueAudits[0]?.resourceType, 'claim_token');
+    assert.deepEqual(failedIssueAudits[0]?.resourceIds, []);
 
     if (dialectOf(database) === 'postgresql') {
       // PG race 1: lock interposition — issueClaimToken waiting behind an

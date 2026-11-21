@@ -42,6 +42,7 @@ import {
   validateContentFreeAuditEntry,
   type ValidatedAuditEntryRecord,
 } from '../shared/utils/audit-entry.js';
+import { ExportLimitExceededError } from '../shared/utils/deterministic-zip.js';
 import { parseJsonColumn } from '../shared/utils/canonical-json.js';
 import {
   buildAuditEntryInsert,
@@ -310,12 +311,6 @@ function normalizeResourceIds(value: unknown): AuditResourceId[] {
   );
 }
 
-const RATE_LIMITED_JOB_STATUSES: readonly ExportJobStatus[] = [
-  'generating',
-  'ready',
-  'expired',
-];
-
 export class CommunityExportRepository {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly db: any;
@@ -352,7 +347,8 @@ export class CommunityExportRepository {
   private buildSnapshotQueries(
     executor: Executor,
     communityId: number,
-    maxRows?: number
+    maxRows?: number,
+    maxBytes?: number
   ) {
     const {
       communities,
@@ -374,7 +370,7 @@ export class CommunityExportRepository {
     const bounded = (query: any) =>
       maxRows !== undefined ? query.limit(maxRows + 1) : query;
 
-    return [
+    const queries = [
       executor
         .select({
           id: communities.id,
@@ -620,6 +616,42 @@ export class CommunityExportRepository {
           .orderBy(asc(auditEntries.id))
       ),
     ] as const;
+    if (maxBytes === undefined) return queries;
+
+    // Keep the size guard and reads in the SAME transaction / D1 batch.
+    // SQL measures UTF-8 bytes without fetching text into the isolate. A
+    // concurrent edit cannot pass a preflight then expand the snapshot.
+    const sizes = queries.map((query, index) => {
+      const rows = query.as(`export_size_${index}`);
+      const fields = Object.keys(query.getSelectedFields()).map(
+        (key) => rows[key]
+      );
+      const lengths = fields.map((field) =>
+        this.dialect === 'postgresql'
+          ? sql`coalesce(octet_length(cast(${field} as text)), 0)`
+          : sql`coalesce(length(cast(${field} as blob)), 0)`
+      );
+      return sql`(select coalesce(sum(${sql.join(lengths, sql` + `)}), 0) from ${rows})`;
+    });
+    const total = sql`(${sql.join(sizes, sql` + `)})`;
+    const sizeQuery = executor
+      .select({ byteSize: total })
+      .from(this.tables.communities)
+      .where(eq(this.tables.communities.id, communityId))
+      .limit(1);
+    return [
+      sizeQuery,
+      ...queries.map((query, index) => {
+        const rows = query.as(`export_rows_${index}`);
+        const fields = Object.fromEntries(
+          Object.keys(query.getSelectedFields()).map((key) => [key, rows[key]])
+        );
+        return executor
+          .select(fields)
+          .from(rows)
+          .where(sql`${total} <= ${maxBytes}`);
+      }),
+    ];
   }
 
   private mapSnapshotResults(
@@ -882,14 +914,33 @@ export class CommunityExportRepository {
    */
   async readCommunityExportSnapshot(
     communityId: number,
-    options: { maxRows?: number } = {}
+    options: { maxRows?: number; maxBytes?: number } = {}
   ): Promise<CommunityExportSnapshot | null> {
     const db = this.db;
+    const mapResults = (results: unknown[][]) => {
+      if (options.maxBytes !== undefined) {
+        const size =
+          (results[0]?.[0] as { byteSize?: number } | undefined)?.byteSize ?? 0;
+        if (Number(size) > options.maxBytes) {
+          throw new ExportLimitExceededError(
+            'maxManifestBytes',
+            'Export snapshot text exceeds manifest size limit'
+          );
+        }
+        return this.mapSnapshotResults(communityId, results.slice(1));
+      }
+      return this.mapSnapshotResults(communityId, results);
+    };
     if (typeof db.batch === 'function') {
       const results = (await db.batch(
-        this.buildSnapshotQueries(db, communityId, options.maxRows)
+        this.buildSnapshotQueries(
+          db,
+          communityId,
+          options.maxRows,
+          options.maxBytes
+        )
       )) as unknown[][];
-      return this.mapSnapshotResults(communityId, results);
+      return mapResults(results);
     }
 
     if (this.dialect === 'postgresql') {
@@ -900,7 +951,8 @@ export class CommunityExportRepository {
         const queries = this.buildSnapshotQueries(
           tx,
           communityId,
-          options.maxRows
+          options.maxRows,
+          options.maxBytes
         );
         const out: unknown[][] = [];
         for (const query of queries) {
@@ -908,15 +960,18 @@ export class CommunityExportRepository {
         }
         return out;
       });
-      return this.mapSnapshotResults(communityId, results);
+      return mapResults(results);
     }
 
     const results = db.transaction((tx: Executor) =>
-      this.buildSnapshotQueries(tx, communityId, options.maxRows).map((query) =>
-        query.all()
-      )
+      this.buildSnapshotQueries(
+        tx,
+        communityId,
+        options.maxRows,
+        options.maxBytes
+      ).map((query) => query.all())
     );
-    return this.mapSnapshotResults(communityId, results);
+    return mapResults(results);
   }
 
   /**
@@ -978,13 +1033,11 @@ export class CommunityExportRepository {
         select count(*) from ${exportJobs}
         where ${exportJobs.communityId} = ${input.communityId}
           and ${exportJobs.createdAt} >= ${input.windowStartMs}
-          and ${exportJobs.status} in ('generating', 'ready', 'expired')
       )`;
       const accountCountSub = sql`(
         select count(*) from ${exportJobs}
         where ${exportJobs.requestedBy} = ${input.requestedBy}
           and ${exportJobs.createdAt} >= ${input.windowStartMs}
-          and ${exportJobs.status} in ('generating', 'ready', 'expired')
       )`;
 
       const conditionalReserve = db
@@ -1058,8 +1111,7 @@ export class CommunityExportRepository {
           .where(
             and(
               eq(exportJobs.communityId, input.communityId),
-              gte(exportJobs.createdAt, input.windowStartMs),
-              inArray(exportJobs.status, [...RATE_LIMITED_JOB_STATUSES])
+              gte(exportJobs.createdAt, input.windowStartMs)
             )
           ),
         db
@@ -1071,8 +1123,7 @@ export class CommunityExportRepository {
           .where(
             and(
               eq(exportJobs.requestedBy, input.requestedBy),
-              gte(exportJobs.createdAt, input.windowStartMs),
-              inArray(exportJobs.status, [...RATE_LIMITED_JOB_STATUSES])
+              gte(exportJobs.createdAt, input.windowStartMs)
             )
           ),
       ]);
@@ -1145,8 +1196,7 @@ export class CommunityExportRepository {
           .where(
             and(
               eq(exportJobs.communityId, input.communityId),
-              gte(exportJobs.createdAt, input.windowStartMs),
-              inArray(exportJobs.status, [...RATE_LIMITED_JOB_STATUSES])
+              gte(exportJobs.createdAt, input.windowStartMs)
             )
           );
         const [acctStats] = await tx
@@ -1158,8 +1208,7 @@ export class CommunityExportRepository {
           .where(
             and(
               eq(exportJobs.requestedBy, input.requestedBy),
-              gte(exportJobs.createdAt, input.windowStartMs),
-              inArray(exportJobs.status, [...RATE_LIMITED_JOB_STATUSES])
+              gte(exportJobs.createdAt, input.windowStartMs)
             )
           );
 
@@ -1235,8 +1284,7 @@ export class CommunityExportRepository {
         .where(
           and(
             eq(exportJobs.communityId, input.communityId),
-            gte(exportJobs.createdAt, input.windowStartMs),
-            inArray(exportJobs.status, [...RATE_LIMITED_JOB_STATUSES])
+            gte(exportJobs.createdAt, input.windowStartMs)
           )
         )
         .get();
@@ -1249,8 +1297,7 @@ export class CommunityExportRepository {
         .where(
           and(
             eq(exportJobs.requestedBy, input.requestedBy),
-            gte(exportJobs.createdAt, input.windowStartMs),
-            inArray(exportJobs.status, [...RATE_LIMITED_JOB_STATUSES])
+            gte(exportJobs.createdAt, input.windowStartMs)
           )
         )
         .get();
@@ -1294,14 +1341,14 @@ export class CommunityExportRepository {
     });
   }
 
-  async recordZipUploadId(jobId: string, uploadId: string): Promise<void> {
+  async recordZipUploadId(jobId: string, uploadId: string): Promise<boolean> {
     const { exportJobs } = this.tables;
-    await this.db
+    const updated = await this.db
       .update(exportJobs)
       .set({ zipUploadId: uploadId })
-      .where(
-        and(eq(exportJobs.id, jobId), eq(exportJobs.status, 'generating'))
-      );
+      .where(and(eq(exportJobs.id, jobId), eq(exportJobs.status, 'generating')))
+      .returning({ id: exportJobs.id });
+    return updated.length > 0;
   }
 
   /**
@@ -1498,6 +1545,7 @@ export class CommunityExportRepository {
 
     const patch: Record<string, unknown> = {
       status: 'failed',
+      completedAt: input.now.getTime(),
       cleanedUpAt: input.cleanedUpAtMs,
     };
     if (input.clearUploadId) {
@@ -1513,7 +1561,7 @@ export class CommunityExportRepository {
           and(
             eq(exportJobs.id, input.jobId),
             eq(exportJobs.communityId, input.communityId),
-            eq(exportJobs.status, 'generating')
+            inArray(exportJobs.status, ['generating', 'failed'])
           )
         )
         .returning({ id: exportJobs.id });
@@ -1544,7 +1592,7 @@ export class CommunityExportRepository {
             and(
               eq(exportJobs.id, input.jobId),
               eq(exportJobs.communityId, input.communityId),
-              eq(exportJobs.status, 'generating')
+              inArray(exportJobs.status, ['generating', 'failed'])
             )
           )
           .returning({ id: exportJobs.id });
@@ -1562,7 +1610,7 @@ export class CommunityExportRepository {
           and(
             eq(exportJobs.id, input.jobId),
             eq(exportJobs.communityId, input.communityId),
-            eq(exportJobs.status, 'generating')
+            inArray(exportJobs.status, ['generating', 'failed'])
           )
         )
         .returning({ id: exportJobs.id })
@@ -1783,7 +1831,11 @@ export class CommunityExportRepository {
           )
         )
       )
-      .orderBy(asc(exportJobs.expiresAt), asc(exportJobs.createdAt))
+      .orderBy(
+        sql`case when ${exportJobs.status} = 'failed' and ${exportJobs.completedAt} is null then 1 else 0 end`,
+        asc(exportJobs.expiresAt),
+        asc(exportJobs.createdAt)
+      )
       .limit(input.limit);
 
     return rows.map((row: Record<string, unknown>) => this.mapJobRow(row));
@@ -1856,7 +1908,9 @@ export class CommunityExportRepository {
     const { exportJobs } = this.tables;
     const patch: Record<string, unknown> = {
       status: input.nextStatus,
-      cleanedUpAt: input.cleanedUpAtMs,
+      // A reclaimed writer may still be uploading. Only its failure acknowledgement
+      // (completedAt) proves it has stopped; crashes remain retryable.
+      cleanedUpAt: sql`case when ${exportJobs.status} = 'failed' and ${exportJobs.completedAt} is null then null else cast(${input.cleanedUpAtMs} as bigint) end`,
     };
     if (input.clearUploadId) {
       patch.zipUploadId = null;

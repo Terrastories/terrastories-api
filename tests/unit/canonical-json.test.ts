@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   canonicalJsonStringify,
+  canonicalJsonByteLength,
+  CanonicalJsonLimitError,
   canonicalJsonValue,
   parseJsonColumn,
 } from '../../src/shared/utils/canonical-json.js';
@@ -36,6 +38,46 @@ describe('canonical-json', () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     expect(canonicalJsonStringify({ bad: Number.NaN, inf: Infinity })).toBe(
       '{"bad":null,"inf":null}\n'
+    );
+  });
+
+  it('counts exact UTF-8 and escaped JSON bytes and accepts the exact boundary', () => {
+    const value = {
+      text: 'á中😀\n\t\u0001"\\\ud800',
+      omitted: undefined,
+      values: [
+        null,
+        undefined,
+        -0,
+        Infinity,
+        123n,
+        new Date('2026-01-01'),
+        new Date(NaN),
+      ],
+    };
+    const expected = new TextEncoder().encode(
+      canonicalJsonStringify(value)
+    ).byteLength;
+    expect(canonicalJsonByteLength(value)).toBe(expected);
+    expect(canonicalJsonStringify(value, expected)).toBe(
+      canonicalJsonStringify(value)
+    );
+    expect(() => canonicalJsonStringify(value, expected - 1)).toThrow(
+      CanonicalJsonLimitError
+    );
+  });
+
+  it('stops at the byte budget before touching subsequent large rows', () => {
+    const rows = [
+      { description: 'x'.repeat(20_000) },
+      {
+        get description(): string {
+          throw new Error('must not materialize next row');
+        },
+      },
+    ];
+    expect(() => canonicalJsonStringify(rows, 1000)).toThrow(
+      CanonicalJsonLimitError
     );
   });
 

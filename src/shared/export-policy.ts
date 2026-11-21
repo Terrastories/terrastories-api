@@ -16,6 +16,9 @@ export const COMMUNITY_EXPORT_SCHEMA_VERSION = 'v2-launch-2026-11';
 /** Lifetime of single-artifact download tokens and generated export objects (15 minutes). */
 export const EXPORT_TOKEN_TTL_MS = 15 * 60 * 1000;
 
+/** Healthy-storage expiry sweep cadence / maximum scheduling grace (1 minute). */
+export const EXPORT_EXPIRY_GRACE_MS = 60 * 1000;
+
 /** Entropy of each single-artifact download token in bytes (256 bits). */
 export const EXPORT_TOKEN_ENTROPY_BYTES = 32;
 
@@ -82,6 +85,7 @@ export interface ExportLimits {
   maxFiles: number;
   maxMediaBytes: number;
   maxArchiveBytes: number;
+  maxManifestBytes: number;
 }
 
 export interface ExportRateLimits {
@@ -97,6 +101,7 @@ export function exportLimitsForProfile(isWorkers: boolean): ExportLimits {
       maxFiles: WORKERS_EXPORT_MAX_FILES,
       maxMediaBytes: WORKERS_EXPORT_MAX_MEDIA_BYTES,
       maxArchiveBytes: WORKERS_EXPORT_MAX_ARCHIVE_BYTES,
+      maxManifestBytes: 8 * 1024 * 1024,
     };
   }
   return {
@@ -104,6 +109,7 @@ export function exportLimitsForProfile(isWorkers: boolean): ExportLimits {
     maxFiles: Number.MAX_SAFE_INTEGER,
     maxMediaBytes: NODE_EXPORT_MAX_ARCHIVE_BYTES,
     maxArchiveBytes: NODE_EXPORT_MAX_ARCHIVE_BYTES,
+    maxManifestBytes: 64 * 1024 * 1024,
   };
 }
 

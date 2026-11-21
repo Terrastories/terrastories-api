@@ -1,3 +1,6 @@
+import { CommunityExportRepository } from './repositories/community-export.repository.js';
+import { CommunityExportService } from './services/community-export.service.js';
+import { EXPORT_EXPIRY_GRACE_MS } from './shared/export-policy.js';
 /** Opt-in Node coexistence listener; never imported by the Fastify entrypoint. */
 import { serve } from '@hono/node-server';
 import { getConnInfo } from '@hono/node-server/conninfo';
@@ -102,10 +105,25 @@ const maintenanceSweepTimers = scheduleMaintenanceSweeps(() => {
   });
 });
 
+// Restart fallback: persisted exports are reclaimed within one minute of boot
+// or expiry, independently of the larger hourly maintenance jobs.
+const exportExpiryService = new CommunityExportService(
+  new CommunityExportRepository(db),
+  storage
+);
+const exportExpiryTimer = setInterval(() => {
+  void exportExpiryService.cleanupExpiredExports().catch(() => {
+    // eslint-disable-next-line no-console -- content-free operator channel
+    console.warn('maintenance: expired export sweep failed');
+  });
+}, EXPORT_EXPIRY_GRACE_MS);
+exportExpiryTimer.unref();
+
 let shuttingDown = false;
 const shutdown = () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearInterval(exportExpiryTimer);
   clearTimeout(orphanSweepTimers.first);
   clearInterval(orphanSweepTimers.interval);
   clearTimeout(maintenanceSweepTimers.first);

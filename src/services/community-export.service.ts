@@ -39,6 +39,7 @@ import {
   EXPORT_TOKEN_ENTROPY_BYTES,
   EXPORT_TOKEN_PATTERN,
   EXPORT_TOKEN_TTL_MS,
+  EXPORT_EXPIRY_GRACE_MS,
   exportArchivePathForFile,
   exportArtifactStorageKeys,
   exportLimitsForProfile,
@@ -110,6 +111,8 @@ function authorizeCommunityAdmin(
   return { actorId: actor.id, communityId: actor.communityId };
 }
 
+class ExportWriterFencedError extends Error {}
+
 export class CommunityExportService {
   private readonly isWorkers: boolean;
   private readonly now: () => Date;
@@ -126,6 +129,8 @@ export class CommunityExportService {
     const defaults = exportLimitsForProfile(this.isWorkers);
     this.limits = {
       maxRows: options.limits?.maxRows ?? defaults.maxRows,
+      maxManifestBytes:
+        options.limits?.maxManifestBytes ?? defaults.maxManifestBytes,
       maxFiles: options.limits?.maxFiles ?? defaults.maxFiles,
       maxMediaBytes: options.limits?.maxMediaBytes ?? defaults.maxMediaBytes,
       maxArchiveBytes:
@@ -207,13 +212,14 @@ export class CommunityExportService {
     }
 
     let activeUploadId: string | null = null;
-    let zipWritten = false;
-    let manifestWritten = false;
 
     try {
       const snapshot = await this.repository.readCommunityExportSnapshot(
         caller.communityId,
-        { maxRows: this.isWorkers ? this.limits.maxRows : undefined }
+        {
+          maxRows: this.isWorkers ? this.limits.maxRows : undefined,
+          maxBytes: this.limits.maxManifestBytes,
+        }
       );
       if (!snapshot) {
         throw new Error('Community missing during export snapshot');
@@ -276,11 +282,12 @@ export class CommunityExportService {
         useMultipart: this.isWorkers,
         onMultipartUploadCreated: async (uploadId) => {
           activeUploadId = uploadId;
-          await this.repository.recordZipUploadId(jobId, uploadId);
+          if (!(await this.repository.recordZipUploadId(jobId, uploadId))) {
+            throw new ExportWriterFencedError();
+          }
         },
       });
       activeUploadId = null;
-      zipWritten = true;
 
       const zipSummary = await zipSummaryPromise;
       const manifestBuilt = buildCommunityExportManifest(
@@ -290,7 +297,8 @@ export class CommunityExportService {
           checksum: zipSummary.archiveChecksum,
           byteSize: zipSummary.archiveByteSize,
           fileCount: zipSummary.entries.length,
-        }
+        },
+        Math.min(this.limits.maxManifestBytes, this.limits.maxArchiveBytes)
       );
 
       if (manifestBuilt.byteSize > this.limits.maxArchiveBytes) {
@@ -303,7 +311,6 @@ export class CommunityExportService {
       await this.storage.put(manifestStorageKey, manifestBuilt.bytes, {
         contentType: 'application/json; charset=utf-8',
       });
-      manifestWritten = true;
 
       const manifestToken = toHex(
         globalThis.crypto.getRandomValues(
@@ -340,10 +347,10 @@ export class CommunityExportService {
       });
 
       if (!completed) {
-        await this.deleteObjectBestEffort(manifestStorageKey);
-        await this.deleteObjectBestEffort(zipStorageKey);
-        return { status: 409, body: CONFLICT_BODY };
+        throw new ExportWriterFencedError();
       }
+
+      if (!this.isWorkers) this.scheduleExpiry(caller.communityId, expiresAtMs);
 
       return {
         status: 201,
@@ -375,7 +382,7 @@ export class CommunityExportService {
         },
       };
     } catch (error) {
-      let allCleaned = true;
+      let allCleaned = !activeUploadId || !!this.storage.abortMultipartUpload;
       if (activeUploadId && this.storage.abortMultipartUpload) {
         try {
           await this.storage.abortMultipartUpload(
@@ -386,17 +393,10 @@ export class CommunityExportService {
           allCleaned = false;
         }
       }
-      if (this.storage.delete) {
-        if (zipWritten) {
-          const ok = await this.deleteObjectBestEffort(zipStorageKey);
-          if (!ok) allCleaned = false;
-        } else {
-          await this.deleteObjectBestEffort(zipStorageKey);
-        }
-        if (manifestWritten) {
-          const ok = await this.deleteObjectBestEffort(manifestStorageKey);
-          if (!ok) allCleaned = false;
-        }
+      // A put may have persisted bytes before throwing. Delete both keys even
+      // when no successful put was observed, and persist every deletion failure.
+      for (const key of [zipStorageKey, manifestStorageKey]) {
+        if (!(await this.deleteObjectBestEffort(key))) allCleaned = false;
       }
 
       const failTime = this.now();
@@ -411,6 +411,9 @@ export class CommunityExportService {
         })
         .catch(() => {});
 
+      if (error instanceof ExportWriterFencedError) {
+        return { status: 409, body: CONFLICT_BODY };
+      }
       if (error instanceof ExportLimitExceededError) {
         return {
           status: 422,
@@ -438,6 +441,10 @@ export class CommunityExportService {
     if (!caller) {
       return jsonErrorResponse(403, FORBIDDEN_BODY);
     }
+
+    await this.cleanupExpiredExports({ communityId: caller.communityId }).catch(
+      () => {}
+    );
 
     if (!EXPORT_TOKEN_PATTERN.test(rawToken)) {
       return jsonErrorResponse(404, NOT_FOUND_BODY);
@@ -664,6 +671,9 @@ export class CommunityExportService {
           allSucceeded = false;
           abortSucceeded = false;
         }
+      } else {
+        allSucceeded = false;
+        abortSucceeded = false;
       }
     }
 
@@ -685,8 +695,31 @@ export class CommunityExportService {
     return allSucceeded ? 'cleaned' : 'failed';
   }
 
+  private scheduleExpiry(communityId: number, expiresAtMs: number): void {
+    const timer = setTimeout(
+      async () => {
+        try {
+          const result = await this.cleanupExpiredExports({ communityId });
+          if (result.failedCount > 0) {
+            this.scheduleExpiry(
+              communityId,
+              this.now().getTime() + EXPORT_EXPIRY_GRACE_MS
+            );
+          }
+        } catch {
+          this.scheduleExpiry(
+            communityId,
+            this.now().getTime() + EXPORT_EXPIRY_GRACE_MS
+          );
+        }
+      },
+      Math.max(0, expiresAtMs - this.now().getTime())
+    );
+    (timer as unknown as { unref?: () => void }).unref?.();
+  }
+
   private async deleteObjectBestEffort(storageKey: string): Promise<boolean> {
-    if (!this.storage.delete) return true;
+    if (!this.storage.delete) return false;
     try {
       await this.storage.delete(storageKey);
       return true;

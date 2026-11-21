@@ -32,7 +32,11 @@ import {
   COMMUNITY_EXPORT_SCHEMA_VERSION,
   exportArchivePathForFile,
 } from '../shared/export-policy.js';
-import { canonicalJsonStringify } from '../shared/utils/canonical-json.js';
+import { ExportLimitExceededError } from '../shared/utils/deterministic-zip.js';
+import {
+  canonicalJsonStringify,
+  CanonicalJsonLimitError,
+} from '../shared/utils/canonical-json.js';
 import { StreamingSha256 } from '../shared/utils/sha256-stream.js';
 
 export interface VerifiedExportFile {
@@ -258,7 +262,8 @@ export function countSnapshotRows(snapshot: CommunityExportSnapshot): number {
 export function buildCommunityExportManifest(
   snapshot: CommunityExportSnapshot,
   verifiedFiles: ReadonlyArray<VerifiedExportFile>,
-  mediaArchive: { checksum: string; byteSize: number; fileCount: number }
+  mediaArchive: { checksum: string; byteSize: number; fileCount: number },
+  maxBytes = Infinity
 ): BuiltCommunityExportManifest {
   const verifiedById = new Map<string, VerifiedExportFile>();
   for (const vf of verifiedFiles) {
@@ -467,7 +472,18 @@ export function buildCommunityExportManifest(
     })),
   };
 
-  const jsonText = canonicalJsonStringify(manifest);
+  let jsonText: string;
+  try {
+    jsonText = canonicalJsonStringify(manifest, maxBytes);
+  } catch (error) {
+    if (error instanceof CanonicalJsonLimitError) {
+      throw new ExportLimitExceededError(
+        'maxManifestBytes',
+        'Export manifest exceeds size limit'
+      );
+    }
+    throw error;
+  }
   const bytes = new TextEncoder().encode(jsonText);
   const checksum = new StreamingSha256().update(bytes).digestHex();
 

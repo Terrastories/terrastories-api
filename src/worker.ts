@@ -25,6 +25,8 @@ import {
   V2RuntimeConfigError,
   v2RuntimeModeNotice,
 } from './config/v2-runtime.js';
+import { CommunityExportRepository } from './repositories/community-export.repository.js';
+import { CommunityExportService } from './services/community-export.service.js';
 import { runMaintenanceSweeps } from './services/maintenance-sweeps.js';
 
 export interface WorkerBindings {
@@ -354,6 +356,26 @@ export function createWorker() {
           const scheduledNow = () =>
             new Date(_controller.scheduledTime || Date.now());
           const r2Storage = createR2Storage(env.MEDIA);
+          // The minute tick is dedicated to export expiry. Keep the larger
+          // orphan/metadata sweep hourly and within its existing budget.
+          if (_controller.cron === '* * * * *') {
+            try {
+              await new CommunityExportService(
+                new CommunityExportRepository(db),
+                r2Storage,
+                {
+                  isWorkers: true,
+                  now: scheduledNow,
+                }
+              ).cleanupExpiredExports({
+                limit: WORKER_EXPORT_SWEEP_BATCH_LIMIT,
+              });
+            } catch {
+              // eslint-disable-next-line no-console -- content-free operator channel
+              console.warn('maintenance: expired export sweep failed');
+            }
+            return;
+          }
           const cleanup = new MediaCleanupCoordinator(db, r2Storage, {
             now: scheduledNow,
             // Subrequest-budgeted run; the sweeper also honours an
@@ -373,7 +395,11 @@ export function createWorker() {
           await runMaintenanceSweeps(db, {
             now: scheduledNow,
             storage: r2Storage,
-            exportSweepLimit: WORKER_EXPORT_SWEEP_BATCH_LIMIT,
+            // The hourly orphan run spends up to 40 subrequests and metadata
+            // uses 3. One export costs at most 6 (lookup, claim, abort, two
+            // deletes, finalize), keeping the combined invocation below 50.
+            // The dedicated minute tick handles the larger export batch.
+            exportSweepLimit: 1,
           });
         })()
       );

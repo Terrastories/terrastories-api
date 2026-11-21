@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -641,6 +641,142 @@ describe('Slice 13a community export endpoints', () => {
     expect(firstRes.status).toBe(201);
   });
 
+  it('counts failed generations against both account and community quotas', async () => {
+    const env = await setupEnv();
+    const cookie1 = await env.loginAs('admin1@c1.test');
+    const cookie2 = await env.loginAs('admin2@c1.test');
+    env.testStorage.setFailOnStreamReadKey(env.file1Key);
+    for (let i = 0; i < EXPORT_RATE_LIMIT_PER_COMMUNITY; i += 1) {
+      const cookie = i < EXPORT_RATE_LIMIT_PER_ACCOUNT ? cookie1 : cookie2;
+      expect(
+        (
+          await env.app.request(`${API_ORIGIN}/v2/community/export`, {
+            method: 'POST',
+            headers: { cookie },
+          })
+        ).status
+      ).toBe(503);
+    }
+    for (const cookie of [cookie1, cookie2]) {
+      const res = await env.app.request(`${API_ORIGIN}/v2/community/export`, {
+        method: 'POST',
+        headers: { cookie },
+      });
+      expect(res.status).toBe(429);
+      expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
+    }
+  });
+
+  it('cleans expired community exports even when a download token is malformed', async () => {
+    const env = await setupEnv({ isWorkers: true });
+    const cookie = await env.loginAs('admin1@c1.test');
+    expect(
+      (
+        await env.app.request(`${API_ORIGIN}/v2/community/export`, {
+          method: 'POST',
+          headers: { cookie },
+        })
+      ).status
+    ).toBe(201);
+    env.advanceMs(EXPORT_TOKEN_TTL_MS);
+    expect(
+      (
+        await env.app.request(
+          `${API_ORIGIN}/v2/community/export/download/bad`,
+          {
+            headers: { cookie },
+          }
+        )
+      ).status
+    ).toBe(404);
+    expect(
+      [...env.testStorage.objects.keys()].filter((key) =>
+        key.includes('/exports/')
+      )
+    ).toEqual([]);
+  });
+
+  it('expires Node artifacts without a download or subsequent export request', async () => {
+    const env = await setupEnv();
+    const cookie = await env.loginAs('admin1@c1.test');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      expect(
+        (
+          await env.app.request(`${API_ORIGIN}/v2/community/export`, {
+            method: 'POST',
+            headers: { cookie },
+          })
+        ).status
+      ).toBe(201);
+      env.advanceMs(EXPORT_TOKEN_TTL_MS);
+      await vi.advanceTimersByTimeAsync(EXPORT_TOKEN_TTL_MS);
+      expect(
+        [...env.testStorage.objects.keys()].filter((key) =>
+          key.includes('/exports/')
+        )
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects large descriptions in SQL before fetching or serializing the snapshot', async () => {
+    const env = await setupEnv({ isWorkers: true });
+    const repo = new CommunityExportRepository(env.db);
+    env.db
+      .update(env.tables.communities)
+      .set({ description: '中'.repeat(20_000) })
+      .where(eq(env.tables.communities.id, 1))
+      .run();
+    await expect(
+      repo.readCommunityExportSnapshot(1, { maxBytes: 40_000 })
+    ).rejects.toMatchObject({ limitName: 'maxManifestBytes' });
+    const [actor] = await new HonoFoundationRepository(env.db).candidates(
+      'admin1@c1.test'
+    );
+    const service = new CommunityExportService(repo, env.testStorage.storage, {
+      isWorkers: true,
+      now: () => T0,
+      limits: { maxManifestBytes: 40_000 },
+    });
+    const res = await service.createExport(actor!);
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      code: 'export_limit_exceeded',
+      error: expect.stringContaining('maxManifestBytes'),
+    });
+    expect(
+      [...env.testStorage.objects.keys()].filter((key) =>
+        key.includes('/exports/')
+      )
+    ).toEqual([]);
+  });
+
+  it('rejects thousands of long descriptions before materializing the snapshot', async () => {
+    const env = await setupEnv({ isWorkers: true });
+    const description = 'x'.repeat(20_000);
+    const rows = Array.from({ length: 1000 }, (_, i) => ({
+      communityId: 1,
+      name: `Large place ${i}`,
+      description,
+      createdAt: T0,
+      updatedAt: T0,
+    }));
+    for (let i = 0; i < rows.length; i += 20) {
+      env.db
+        .insert(env.tables.places)
+        .values(rows.slice(i, i + 20))
+        .run();
+    }
+    await expect(
+      new CommunityExportRepository(env.db).readCommunityExportSnapshot(1, {
+        maxRows: 10_000,
+        maxBytes: 8 * 1024 * 1024,
+      })
+    ).rejects.toMatchObject({ limitName: 'maxManifestBytes' });
+  });
+
   it('enforces per-account and per-community rate limits and resets after the window', async () => {
     const env = await setupEnv();
     const admin1Cookie = await env.loginAs('admin1@c1.test');
@@ -886,11 +1022,19 @@ describe('Slice 13a community export endpoints', () => {
       )
     ).toBe(true);
 
+    const staleJob = envA.db.select().from(envA.tables.exportJobs).get()!;
+    expect(staleJob.cleanedUpAt).toBeNull();
+    envA.testStorage.setDeleteFailureKey(staleJob.zipStorageKey);
     envA.testStorage.clearReadBarrier();
     releaseA();
     const resA = await exportPromiseA;
     expect(resA.status).toBe(409);
 
+    expect((await repoA.findJobById(staleJob.id))?.cleanedUpAt).toBeNull();
+    expect(envA.testStorage.objects.has(staleJob.zipStorageKey!)).toBe(true);
+    envA.testStorage.setDeleteFailureKey(null);
+    await svcA.cleanupExpiredExports();
+    expect((await repoA.findJobById(staleJob.id))?.cleanedUpAt).not.toBeNull();
     for (const key of envA.testStorage.objects.keys()) {
       expect(key).not.toContain('/exports/');
     }

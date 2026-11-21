@@ -1006,7 +1006,7 @@ it('streams community export via R2 multipart upload, serves authenticated downl
     // Advance scheduled cron past token TTL so scheduled cleanup deletes objects.
     const futureMs = new Date(exportPayload.data.expiresAt).getTime() + 60_000;
     const schedRes = await mf.dispatchFetch(
-      `http://localhost/cdn-cgi/handler/scheduled?cron=0+*+*+*+*&time=${futureMs}`,
+      `http://localhost/cdn-cgi/handler/scheduled?cron=*+*+*+*+*&time=${futureMs}`,
       { method: 'POST' }
     );
     expect(schedRes.status).toBe(200);
@@ -1021,6 +1021,34 @@ it('streams community export via R2 multipart upload, serves authenticated downl
         `communities/1/exports/${exportPayload.data.exportId}/media.zip`
       )
     ).toBeNull();
+
+    // Failed generations consume the account quota on real D1, too.
+    for (let i = 0; i < 4; i += 1) {
+      await db
+        .prepare(
+          `INSERT INTO export_jobs
+        (id, community_id, requested_by, status, manifest_storage_key, zip_storage_key, created_at, expires_at, completed_at, cleaned_up_at)
+        VALUES (?, 1, 1, 'failed', ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          `failed-${i}`,
+          `communities/1/exports/failed-${i}/manifest.json`,
+          `communities/1/exports/failed-${i}/media.zip`,
+          Date.now(),
+          Date.now() + 900000,
+          Date.now(),
+          Date.now()
+        )
+        .run();
+    }
+    expect(
+      (
+        await mf.dispatchFetch('https://worker.test/v2/community/export', {
+          method: 'POST',
+          headers: { cookie },
+        })
+      ).status
+    ).toBe(429);
   } finally {
     await mf.dispose();
   }

@@ -391,17 +391,19 @@ export function parseCsvText(
 }
 
 /**
- * Detect dangerous spreadsheet formula prefixes (`=`, `+`, `-`, `@`, or
- * leading tab/CR/whitespace followed by one of those operators).
+ * Detect dangerous spreadsheet formula prefixes (`=`, `+`, `-`, `@`),
+ * including after any leading newline or whitespace (`\n`, `\r`, `\t`,
+ * spaces, Unicode whitespace) such as quoted multiline cells `"\n=1+1"`.
  * Callers must apply this to text fields only, never numeric coordinates.
  */
 export function hasCsvFormulaPrefix(value: string): boolean {
-  return /^(?:[=@+\-]|[\t\r\u000b\u000c ]+[=@+\-])/.test(value);
+  return /^\s*[=@+\-]/.test(value);
 }
 
 /**
  * Neutralize a CSV cell value for export by prefixing a leading apostrophe
- * when it starts with a formula operator or whitespace + formula operator.
+ * when it starts with a formula operator or leading newline/whitespace
+ * followed by a formula operator.
  */
 export function neutralizeCsvFormulaCell(value: string): string {
   return hasCsvFormulaPrefix(value) ? `'${value}` : value;

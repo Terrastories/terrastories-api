@@ -1306,4 +1306,78 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
     expect(storyWire).not.toContain('sourceFileId');
     expect(storyWire).not.toContain(existingOwnFileId);
   });
+
+  it('rejects formula prefixes after leading LF/CRLF/whitespace in quoted multiline cells on places and stories previews', async () => {
+    const placesFormulaCsv =
+      'name,description\n' +
+      '"Multiline LF","' +
+      '\n=1+1' +
+      '"\n' +
+      '"Multiline CRLF","' +
+      "\r\n+cmd|'/c calc'!A0" +
+      '"\n' +
+      '"Multiline Mixed","' +
+      ' \n\t@SUM(1,2)' +
+      '"\n';
+    const badPlacesRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: placesFormulaCsv,
+      fields: { kind: 'places' },
+    });
+    expect(badPlacesRes.status).toBe(201);
+    const badPlaces = ImportManifestDetailResponseSchema.parse(
+      await badPlacesRes.json()
+    ).data;
+    expect(badPlaces.canCommit).toBe(false);
+    expect(badPlaces.validRowCount).toBe(0);
+    expect(badPlaces.rowErrors).toHaveLength(3);
+    expect(
+      badPlaces.rowErrors.every(
+        (e) => e.field === 'description' && e.code === 'formula_injection'
+      )
+    ).toBe(true);
+
+    const storiesFormulaCsv =
+      'title,visibility,description\n' +
+      '"Story LF",community,"' +
+      '\n=1+1' +
+      '"\n' +
+      '"Story CRLF",editors,"' +
+      "\r\n+cmd|'/c calc'!A0" +
+      '"\n' +
+      '"Story Mixed",public,"' +
+      ' \n\t@SUM(1,2)' +
+      '"\n';
+    const badStoriesRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: storiesFormulaCsv,
+      fields: { kind: 'stories' },
+    });
+    expect(badStoriesRes.status).toBe(201);
+    const badStories = ImportManifestDetailResponseSchema.parse(
+      await badStoriesRes.json()
+    ).data;
+    expect(badStories.canCommit).toBe(false);
+    expect(badStories.validRowCount).toBe(0);
+    expect(badStories.rowErrors).toHaveLength(3);
+    expect(
+      badStories.rowErrors.every(
+        (e) => e.field === 'description' && e.code === 'formula_injection'
+      )
+    ).toBe(true);
+
+    const safeMultilineRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText:
+        'name,description\n"Safe Multiline Place","\n<p>Safe valley notes</p>"\n',
+      fields: { kind: 'places' },
+    });
+    expect(safeMultilineRes.status).toBe(201);
+    const safeMultiline = ImportManifestDetailResponseSchema.parse(
+      await safeMultilineRes.json()
+    ).data;
+    expect(safeMultiline.canCommit).toBe(true);
+    expect(safeMultiline.validRowCount).toBe(1);
+    expect(safeMultiline.errorCount).toBe(0);
+  });
 });

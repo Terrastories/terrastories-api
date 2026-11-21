@@ -174,13 +174,30 @@ describe('CSV parser and formula-injection guards', () => {
       '@SUM(1,2)',
       '\t=1+1',
       '\r+1',
+      '\n=1+1',
+      '\r\n=1+1',
+      ' \n\t+1+1',
+      '\n-2+3',
+      '\n@SUM(1,2)',
+      '\v=1+1',
+      '\f=1+1',
+      '\u00a0=1+1',
       '  =HYPERLINK("http://x")',
     ]) {
       expect(hasCsvFormulaPrefix(bad)).toBe(true);
       expect(neutralizeCsvFormulaCell(bad)).toBe(`'${bad}`);
     }
 
-    for (const safe of ['River Bend', 'A + B', '2026-06-01', '<p>Hello</p>']) {
+    for (const safe of [
+      'River Bend',
+      'A + B',
+      '2026-06-01',
+      '<p>Hello</p>',
+      '\nRiver Bend',
+      '\r\n<p>Safe</p>',
+      'Line 1\nLine 2',
+      '  Normal text',
+    ]) {
       expect(hasCsvFormulaPrefix(safe)).toBe(false);
       expect(neutralizeCsvFormulaCell(safe)).toBe(safe);
     }

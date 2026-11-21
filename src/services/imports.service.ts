@@ -1858,6 +1858,7 @@ export class ImportsService {
     const commitOutcome = await this.repository.commitManifest({
       communityId: caller.communityId,
       actorId: caller.actorId,
+      actor,
       manifest,
       now: requestNow,
       dailyLimitWindow: dailyWindow,

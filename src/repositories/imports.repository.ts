@@ -32,6 +32,12 @@ import type {
   ImportManifestStatus,
 } from '../db/schema/import_manifests.js';
 import type {
+  AttachmentOwnerType,
+  AttachmentRole,
+} from '../db/schema/attachments.js';
+import type { FoundationUser } from './hono-foundation.repository.js';
+import { MediaWritesRepository } from './media-writes.repository.js';
+import type {
   ImportResultSummary,
   ImportRowError,
   ImportStoredMappings,
@@ -289,10 +295,12 @@ export class ImportsRepository {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly db: any;
   private readonly tables;
+  private readonly mediaRepository: MediaWritesRepository;
 
   constructor(readonly connection: Database | DrizzleD1Database) {
     this.db = connection;
     this.tables = tablesFor(connection);
+    this.mediaRepository = new MediaWritesRepository(connection);
   }
 
   private tableColumnBound(
@@ -1768,9 +1776,160 @@ export class ImportsRepository {
     return map.get(ref.normalizedName) ?? ref.name;
   }
 
+  private authorizeExistingFileReuseSqlite(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+    input: {
+      communityId: number;
+      actorId: number;
+      actorRole: 'editor' | 'admin';
+      fileId: string;
+      uploadedBy: number | null;
+    }
+  ): boolean {
+    const existingRows = tx
+      .select({
+        ownerType: this.tables.attachments.ownerType,
+        ownerId: this.tables.attachments.ownerId,
+        role: this.tables.attachments.role,
+      })
+      .from(this.tables.attachments)
+      .where(
+        and(
+          eq(this.tables.attachments.fileId, input.fileId),
+          eq(this.tables.attachments.communityId, input.communityId)
+        )
+      )
+      .all() as Array<{
+      ownerType: AttachmentOwnerType | null;
+      ownerId: number | null;
+      role: AttachmentRole | null;
+    }>;
+
+    if (existingRows.length === 0) {
+      if (input.uploadedBy !== null && input.uploadedBy === input.actorId) {
+        return true;
+      }
+      return input.actorRole === 'admin';
+    }
+
+    for (const row of existingRows) {
+      if (!row.ownerType || row.ownerId === null || !row.role) {
+        return false;
+      }
+      if (row.ownerType === 'story') {
+        if (row.role !== 'story_media') return false;
+        const found = tx
+          .select({ id: this.tables.stories.id })
+          .from(this.tables.stories)
+          .where(
+            and(
+              eq(this.tables.stories.id, row.ownerId),
+              eq(this.tables.stories.communityId, input.communityId),
+              eq(this.tables.stories.isRestricted, false),
+              inArray(this.tables.stories.privacyLevel, [
+                ...READABLE_PRIVACY_LEVELS,
+              ])
+            )
+          )
+          .limit(1)
+          .all();
+        if (found.length === 0) return false;
+        continue;
+      }
+      if (row.ownerType === 'place') {
+        if (row.role !== 'place_photo' && row.role !== 'place_name_audio') {
+          return false;
+        }
+        const found = tx
+          .select({ id: this.tables.places.id })
+          .from(this.tables.places)
+          .where(
+            and(
+              eq(this.tables.places.id, row.ownerId),
+              eq(this.tables.places.communityId, input.communityId),
+              eq(this.tables.places.isRestricted, false)
+            )
+          )
+          .limit(1)
+          .all();
+        if (found.length === 0) return false;
+        continue;
+      }
+      if (row.ownerType === 'speaker') {
+        if (row.role !== 'speaker_photo') return false;
+        const found = tx
+          .select({ id: this.tables.speakers.id })
+          .from(this.tables.speakers)
+          .where(
+            and(
+              eq(this.tables.speakers.id, row.ownerId),
+              eq(this.tables.speakers.communityId, input.communityId)
+            )
+          )
+          .limit(1)
+          .all();
+        if (found.length === 0) return false;
+        continue;
+      }
+      if (row.ownerType === 'user') {
+        if (row.role !== 'user_photo') return false;
+        if (input.actorRole !== 'admin' && input.actorId !== row.ownerId) {
+          return false;
+        }
+        const found = tx
+          .select({ id: this.tables.users.id })
+          .from(this.tables.users)
+          .where(
+            and(
+              eq(this.tables.users.id, row.ownerId),
+              eq(this.tables.users.communityId, input.communityId),
+              eq(this.tables.users.isActive, true)
+            )
+          )
+          .limit(1)
+          .all();
+        if (found.length === 0) return false;
+        continue;
+      }
+      if (row.ownerType === 'community') {
+        if (input.actorRole !== 'admin') return false;
+        if (row.ownerId !== input.communityId) return false;
+        if (
+          row.role !== 'community_display_image' &&
+          row.role !== 'community_background_image' &&
+          row.role !== 'sponsor_logo'
+        ) {
+          return false;
+        }
+        continue;
+      }
+      if (row.ownerType === 'map_config') {
+        if (input.actorRole !== 'admin') return false;
+        if (row.ownerId !== input.communityId || row.role !== 'static_map') {
+          return false;
+        }
+        const found = tx
+          .select({ communityId: this.tables.communityMapConfigs.communityId })
+          .from(this.tables.communityMapConfigs)
+          .where(
+            eq(this.tables.communityMapConfigs.communityId, input.communityId)
+          )
+          .limit(1)
+          .all();
+        if (found.length === 0) return false;
+        continue;
+      }
+      return false;
+    }
+
+    return true;
+  }
+
   async commitManifest(input: {
     communityId: number;
     actorId: number;
+    actor: FoundationUser;
     manifest: ImportManifestRowRecord;
     now: Date;
     dailyLimitWindow: { startMs: number; endMs: number } | null;
@@ -1910,12 +2069,109 @@ export class ImportsRepository {
                 CASE WHEN f.id IS NOT NULL AND owner.id IS NOT NULL THEN ${nowMs} ELSE NULL END
               FROM (${unionValues}) AS v
               JOIN import_manifests im ON ${guardSql}
+              JOIN users actor_u
+                ON actor_u.id = ${input.actorId}
+               AND actor_u.community_id = im.community_id
+               AND actor_u.is_active = 1
+               AND actor_u.role IN ('editor', 'admin')
               LEFT JOIN (${ownerSubquerySql}) owner ON 1 = 1
               LEFT JOIN files f
                 ON f.id = v.file_id
                AND f.community_id = im.community_id
                AND f.cultural_restrictions IS NULL
-               AND ((v.staged = 1 AND f.is_active = 0) OR (v.staged = 0 AND f.is_active = 1))
+               AND (
+                 (v.staged = 1 AND f.is_active = 0)
+                 OR (
+                   v.staged = 0
+                   AND f.is_active = 1
+                   AND (
+                     (
+                       NOT EXISTS (
+                         SELECT 1 FROM attachments ea
+                         WHERE ea.file_id = f.id
+                           AND ea.community_id = im.community_id
+                       )
+                       AND (f.uploaded_by = actor_u.id OR actor_u.role = 'admin')
+                     )
+                     OR (
+                       EXISTS (
+                         SELECT 1 FROM attachments ea
+                         WHERE ea.file_id = f.id
+                           AND ea.community_id = im.community_id
+                       )
+                       AND NOT EXISTS (
+                         SELECT 1 FROM attachments ea
+                         WHERE ea.file_id = f.id
+                           AND ea.community_id = im.community_id
+                           AND (
+                             ea.owner_type IS NULL
+                             OR ea.owner_id IS NULL
+                             OR ea.role IS NULL
+                             OR NOT (
+                               (
+                                 ea.owner_type = 'story'
+                                 AND ea.role = 'story_media'
+                                 AND EXISTS (
+                                   SELECT 1 FROM stories st
+                                   WHERE st.id = ea.owner_id
+                                     AND st.community_id = im.community_id
+                                     AND st.is_restricted = 0
+                                     AND st.privacy_level IN ('public', 'members_only', 'editors')
+                                 )
+                               )
+                               OR (
+                                 ea.owner_type = 'place'
+                                 AND ea.role IN ('place_photo', 'place_name_audio')
+                                 AND EXISTS (
+                                   SELECT 1 FROM places pl
+                                   WHERE pl.id = ea.owner_id
+                                     AND pl.community_id = im.community_id
+                                     AND pl.is_restricted = 0
+                                 )
+                               )
+                               OR (
+                                 ea.owner_type = 'speaker'
+                                 AND ea.role = 'speaker_photo'
+                                 AND EXISTS (
+                                   SELECT 1 FROM speakers sp
+                                   WHERE sp.id = ea.owner_id
+                                     AND sp.community_id = im.community_id
+                                 )
+                               )
+                               OR (
+                                 ea.owner_type = 'user'
+                                 AND ea.role = 'user_photo'
+                                 AND (actor_u.role = 'admin' OR actor_u.id = ea.owner_id)
+                                 AND EXISTS (
+                                   SELECT 1 FROM users u2
+                                   WHERE u2.id = ea.owner_id
+                                     AND u2.community_id = im.community_id
+                                     AND u2.is_active = 1
+                                 )
+                               )
+                               OR (
+                                 ea.owner_type = 'community'
+                                 AND actor_u.role = 'admin'
+                                 AND ea.owner_id = im.community_id
+                                 AND ea.role IN ('community_display_image', 'community_background_image', 'sponsor_logo')
+                               )
+                               OR (
+                                 ea.owner_type = 'map_config'
+                                 AND actor_u.role = 'admin'
+                                 AND ea.owner_id = im.community_id
+                                 AND ea.role = 'static_map'
+                                 AND EXISTS (
+                                   SELECT 1 FROM community_map_configs mc
+                                   WHERE mc.community_id = im.community_id
+                                 )
+                               )
+                             )
+                           )
+                       )
+                     )
+                   )
+                 )
+               )
             `)
           );
         }
@@ -2362,6 +2618,52 @@ export class ImportsRepository {
           isUniqueConstraintError(err) ||
           isCheckConstraintError(err)
         ) {
+          if (
+            isNotNullConstraintError(err) &&
+            refs.existingFileIds.length > 0 &&
+            manifest.createdBy !== input.actorId
+          ) {
+            const actorRows = await this.db
+              .select({ role: this.tables.users.role })
+              .from(this.tables.users)
+              .where(
+                and(
+                  eq(this.tables.users.id, input.actorId),
+                  eq(this.tables.users.communityId, input.communityId),
+                  eq(this.tables.users.isActive, true),
+                  inArray(this.tables.users.role, ['editor', 'admin'])
+                )
+              )
+              .limit(1);
+            const liveActorRow = actorRows[0] as { role: string } | undefined;
+            if (!liveActorRow) {
+              return { status: 'forbidden' };
+            }
+            if (liveActorRow.role !== 'admin') {
+              const liveActor: FoundationUser = {
+                ...input.actor,
+                id: input.actorId,
+                role: liveActorRow.role as FoundationUser['role'],
+                communityId: input.communityId,
+              };
+              const dbFiles = await this.findCommunityFilesByIds(
+                input.communityId,
+                refs.existingFileIds
+              );
+              for (const fileId of refs.existingFileIds) {
+                const f = dbFiles.get(fileId);
+                if (!f) continue;
+                const reuse = await this.mediaRepository.authorizeAttachReuse({
+                  actor: liveActor,
+                  communityId: input.communityId,
+                  file: { id: fileId, uploadedBy: f.uploadedBy },
+                });
+                if (!reuse.ok) {
+                  return { status: 'forbidden' };
+                }
+              }
+            }
+          }
           return { status: 'failed_reference' };
         }
         throw err;
@@ -2546,7 +2848,11 @@ export class ImportsRepository {
           ).sort();
           const lockedFiles = new Map<
             string,
-            { isActive: boolean; culturalRestrictions: unknown }
+            {
+              isActive: boolean;
+              culturalRestrictions: unknown;
+              uploadedBy: number | null;
+            }
           >();
           for (let i = 0; i < allFileIds.length; i += D1_FILE_LOOKUP_CHUNK) {
             const chunk = allFileIds.slice(i, i + D1_FILE_LOOKUP_CHUNK);
@@ -2555,6 +2861,7 @@ export class ImportsRepository {
                 id: this.tables.files.id,
                 isActive: this.tables.files.isActive,
                 culturalRestrictions: this.tables.files.culturalRestrictions,
+                uploadedBy: this.tables.files.uploadedBy,
               })
               .from(this.tables.files)
               .where(
@@ -2569,10 +2876,12 @@ export class ImportsRepository {
               id: string;
               isActive: boolean;
               culturalRestrictions: unknown;
+              uploadedBy: number | null;
             }>) {
               lockedFiles.set(r.id, {
                 isActive: Boolean(r.isActive),
                 culturalRestrictions: r.culturalRestrictions ?? null,
+                uploadedBy: r.uploadedBy === null ? null : Number(r.uploadedBy),
               });
             }
           }
@@ -2582,9 +2891,32 @@ export class ImportsRepository {
               return { status: 'failed_reference' };
             }
           }
+          const liveActor: FoundationUser = {
+            ...input.actor,
+            id: input.actorId,
+            role: actorRow.role as FoundationUser['role'],
+            communityId: input.communityId,
+          };
           for (const id of refs.existingFileIds) {
             const f = lockedFiles.get(id);
             if (!f || !f.isActive || f.culturalRestrictions !== null) {
+              return { status: 'failed_reference' };
+            }
+            // Revalidate reuse inside the atomic write unit under files FOR
+            // UPDATE (without acquiring owner locks that could invert lock order).
+            const reuse = await this.mediaRepository.authorizeAttachReuse({
+              actor: liveActor,
+              communityId: input.communityId,
+              file: { id, uploadedBy: f.uploadedBy },
+              executor: tx,
+            });
+            if (!reuse.ok) {
+              if (
+                actorRow.role !== 'admin' &&
+                currentManifest.createdBy !== input.actorId
+              ) {
+                return { status: 'forbidden' };
+              }
               return { status: 'failed_reference' };
             }
           }
@@ -2983,7 +3315,11 @@ export class ImportsRepository {
           ).sort();
           const foundFiles = new Map<
             string,
-            { isActive: boolean; culturalRestrictions: unknown }
+            {
+              isActive: boolean;
+              culturalRestrictions: unknown;
+              uploadedBy: number | null;
+            }
           >();
           for (let i = 0; i < allFileIds.length; i += D1_FILE_LOOKUP_CHUNK) {
             const chunk = allFileIds.slice(i, i + D1_FILE_LOOKUP_CHUNK);
@@ -2992,6 +3328,7 @@ export class ImportsRepository {
                 id: this.tables.files.id,
                 isActive: this.tables.files.isActive,
                 culturalRestrictions: this.tables.files.culturalRestrictions,
+                uploadedBy: this.tables.files.uploadedBy,
               })
               .from(this.tables.files)
               .where(
@@ -3004,11 +3341,13 @@ export class ImportsRepository {
               id: string;
               isActive: boolean | number;
               culturalRestrictions: unknown;
+              uploadedBy: number | null;
             }>;
             for (const r of rows) {
               foundFiles.set(r.id, {
                 isActive: r.isActive === true || r.isActive === 1,
                 culturalRestrictions: r.culturalRestrictions ?? null,
+                uploadedBy: r.uploadedBy === null ? null : Number(r.uploadedBy),
               });
             }
           }
@@ -3021,6 +3360,22 @@ export class ImportsRepository {
           for (const id of refs.existingFileIds) {
             const f = foundFiles.get(id);
             if (!f || !f.isActive || f.culturalRestrictions !== null) {
+              return { status: 'failed_reference' };
+            }
+            const reuseOk = this.authorizeExistingFileReuseSqlite(tx, {
+              communityId: input.communityId,
+              actorId: input.actorId,
+              actorRole: actorRow.role as 'editor' | 'admin',
+              fileId: id,
+              uploadedBy: f.uploadedBy,
+            });
+            if (!reuseOk) {
+              if (
+                actorRow.role !== 'admin' &&
+                currentManifest.createdBy !== input.actorId
+              ) {
+                return { status: 'forbidden' };
+              }
               return { status: 'failed_reference' };
             }
           }

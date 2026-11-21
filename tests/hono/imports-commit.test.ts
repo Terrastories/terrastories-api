@@ -2141,4 +2141,460 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
       bulkSqlite.close();
     }
   }, 30_000);
+
+  it('revalidates media-reuse authorization inside the atomic commit write across SQLite interleaving and D1 batch', async () => {
+    const [viewerRow] = await db
+      .select({ id: tables.users.id })
+      .from(tables.users)
+      .where(eq(tables.users.email, 'cmt-viewer@example.test'));
+    const viewerId = viewerRow!.id;
+
+    // 1. SQLite deterministic interleaving: admin attaches existing file to viewer's
+    // user_photo while editorA's commit is awaiting staged checksum verification.
+    const uploadExisting = async (cookie: string, filename: string) => {
+      const mp = buildImportMultipart({
+        mediaParts: [
+          {
+            fieldName: 'file',
+            filename,
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          },
+        ],
+      });
+      const res = await app.request(`${API_ORIGIN}/v2/media`, {
+        method: 'POST',
+        headers: {
+          cookie,
+          origin: CLIENT_ORIGIN,
+          'content-type': mp.contentTypeHeader,
+        },
+        body: mp.body,
+        duplex: 'half',
+      } as RequestInit);
+      expect(res.status).toBe(201);
+      return MediaUploadResponseSchema.parse(await res.json()).data.id;
+    };
+
+    const raceExistingId = await uploadExisting(
+      cookies.editorA,
+      'sqlite-race-existing.png'
+    );
+    let hookAction: (() => Promise<void>) | null = null;
+    const hookedStorage: FoundationStorage = {
+      read: async (key, range) => {
+        if (hookAction) {
+          const act = hookAction;
+          hookAction = null;
+          await act();
+        }
+        const entry = memStore.get(key);
+        if (!entry) return null;
+        return {
+          size: entry.bytes.byteLength,
+          body: range
+            ? entry.bytes.subarray(range.start, range.end + 1)
+            : entry.bytes,
+        };
+      },
+      put: async (key, stream, opts) => {
+        const reader = stream.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            total += value.byteLength;
+          }
+        }
+        const merged = new Uint8Array(total);
+        let pos = 0;
+        for (const c of chunks) {
+          merged.set(c, pos);
+          pos += c.byteLength;
+        }
+        memStore.set(key, {
+          bytes: merged,
+          contentType: opts.contentType,
+          uploaded: new Date('2026-06-01T12:00:00.000Z'),
+        });
+      },
+      delete: async (key) => {
+        memStore.delete(key);
+      },
+      list: async (options) => {
+        const prefix = options?.prefix ?? '';
+        const entries = [...memStore.entries()]
+          .filter(([k]) => k.startsWith(prefix))
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([k, entry]) => ({ key: k, uploaded: entry.uploaded }));
+        return { entries, truncated: false };
+      },
+    };
+    const raceApp = createHonoApp({
+      repository: new HonoFoundationRepository(db),
+      storage: hookedStorage,
+      mediaCleanup: new MediaCleanupCoordinator(db, hookedStorage),
+      publicOrigin: API_ORIGIN,
+      corsOrigins: [CLIENT_ORIGIN],
+      secureCookies: false,
+      serverSecret: makeServerSecret(),
+      now: () => currentNow,
+    });
+
+    const racePreview = await createPreviewOnApp(raceApp, cookies.editorA, {
+      kind: 'places',
+      csvFilename: 'sqlite-reuse-race.csv',
+      csvText: `name,photo\nSQLite Reuse Race 1,${raceExistingId}\nSQLite Reuse Race 2,race-staged.png\n`,
+      mediaParts: [
+        {
+          filename: 'race-staged.png',
+          contentType: 'image/png',
+          bytes: PNG_BYTES,
+        },
+      ],
+    });
+    const [raceRowBefore] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, racePreview.id));
+    const [raceStagedFile] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, raceRowBefore!.stagedFileIds[0]!));
+    const [raceSourceFile] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, raceRowBefore!.sourceFileId));
+
+    hookAction = async () => {
+      const attachRes = await app.request(`${API_ORIGIN}/v2/attachments`, {
+        method: 'POST',
+        headers: {
+          cookie: cookies.admin,
+          origin: CLIENT_ORIGIN,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          fileId: raceExistingId,
+          ownerType: 'user',
+          ownerId: viewerId,
+          role: 'user_photo',
+        }),
+      });
+      expect(attachRes.status).toBe(201);
+    };
+
+    const raceCommitRes = await commitOnApp(
+      raceApp,
+      cookies.editorA,
+      racePreview.id
+    );
+    expect(raceCommitRes.status).toBe(409);
+    expect(((await raceCommitRes.json()) as { code: string }).code).toBe(
+      'import_commit_failed'
+    );
+
+    const [raceRowAfter] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, racePreview.id));
+    expect(raceRowAfter?.status).toBe('failed');
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, raceStagedFile!.id))
+    ).toHaveLength(0);
+    expect(memStore.has(raceStagedFile!.storageKey!)).toBe(false);
+    expect(memStore.has(raceSourceFile!.storageKey!)).toBe(true);
+    expect(
+      await db
+        .select()
+        .from(tables.places)
+        .where(eq(tables.places.name, 'SQLite Reuse Race 1'))
+    ).toHaveLength(0);
+    const raceAttachmentsAfter = await db
+      .select()
+      .from(tables.attachments)
+      .where(eq(tables.attachments.fileId, raceExistingId));
+    expect(raceAttachmentsAfter).toHaveLength(1);
+    expect(raceAttachmentsAfter[0]!.ownerType).toBe('user');
+    expect(raceAttachmentsAfter[0]!.ownerId).toBe(viewerId);
+    const raceFailAudits = (
+      await db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, ids.ownCommunity),
+            eq(tables.auditEntries.action, 'import.commit'),
+            eq(tables.auditEntries.outcome, 'failed')
+          )
+        )
+    ).filter((a) =>
+      JSON.stringify(a.resourceIds).includes(String(racePreview.id))
+    );
+    expect(raceFailAudits).toHaveLength(1);
+
+    // 2. Non-creator editorB interleaving: initially reusable (place_photo), then
+    // admin adds viewer's user_photo while editorB verifies staged checksum -> 403
+    // without failing editorA's manifest or wiping staged bytes.
+    const sharedFileId = await uploadExisting(
+      cookies.editorA,
+      'sqlite-noncreator-race.png'
+    );
+    const placeAttachRes = await app.request(`${API_ORIGIN}/v2/attachments`, {
+      method: 'POST',
+      headers: {
+        cookie: cookies.editorA,
+        origin: CLIENT_ORIGIN,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        fileId: sharedFileId,
+        ownerType: 'place',
+        ownerId: ids.existingOwnPlace,
+        role: 'place_photo',
+      }),
+    });
+    expect(placeAttachRes.status).toBe(201);
+
+    const nonCreatorPreview = await createPreviewOnApp(
+      raceApp,
+      cookies.editorA,
+      {
+        kind: 'places',
+        csvFilename: 'noncreator-race.csv',
+        csvText: `name,photo\nNonCreator Race Place,${sharedFileId}\nNonCreator Race Staged,nc-staged.png\n`,
+        mediaParts: [
+          {
+            filename: 'nc-staged.png',
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          },
+        ],
+      }
+    );
+    const [ncRowBefore] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, nonCreatorPreview.id));
+    const [ncStagedFile] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, ncRowBefore!.stagedFileIds[0]!));
+
+    hookAction = async () => {
+      const attachRes = await app.request(`${API_ORIGIN}/v2/attachments`, {
+        method: 'POST',
+        headers: {
+          cookie: cookies.admin,
+          origin: CLIENT_ORIGIN,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          fileId: sharedFileId,
+          ownerType: 'user',
+          ownerId: viewerId,
+          role: 'user_photo',
+        }),
+      });
+      expect(attachRes.status).toBe(201);
+    };
+
+    const ncCommitRes = await commitOnApp(
+      raceApp,
+      cookies.editorB,
+      nonCreatorPreview.id
+    );
+    expect(ncCommitRes.status).toBe(403);
+    const [ncRowAfter] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, nonCreatorPreview.id));
+    expect(ncRowAfter?.status).toBe('previewed');
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, ncStagedFile!.id))
+    ).toHaveLength(1);
+    expect(memStore.has(ncStagedFile!.storageKey!)).toBe(true);
+    expect(
+      await db
+        .select()
+        .from(tables.places)
+        .where(eq(tables.places.name, 'NonCreator Race Place'))
+    ).toHaveLength(0);
+
+    // 3. D1 atomic batch race: right before batch() runs, a user_photo attachment
+    // is inserted on the referenced existing file -> D1 attachment SQL fails closed,
+    // rolls back the whole batch, cleans staged bytes, and keeps params <= 100.
+    let interposeUserPhoto: (() => Promise<void>) | null = null;
+    const d1BoundParams: number[] = [];
+    const d1 = createRealD1Db({
+      boundParamsOut: d1BoundParams,
+      onBeforeBatch: async () => {
+        if (interposeUserPhoto) {
+          const fn = interposeUserPhoto;
+          interposeUserPhoto = null;
+          await fn();
+        }
+      },
+    });
+    try {
+      const d1Now = new Date('2026-06-28T12:00:00.000Z');
+      const d1Tables = tablesFor(d1.db);
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+      const [comm] = await d1.db
+        .insert(d1Tables.communities)
+        .values({
+          name: 'D1 Reuse Race Comm',
+          slug: 'd1-reuse-race-comm',
+          publicStories: true,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.communities.id });
+      const [d1Editor] = await d1.db
+        .insert(d1Tables.users)
+        .values({
+          email: 'd1-reuse-ed@example.test',
+          username: 'd1_reuse_ed',
+          ...deriveUserIdentityColumns({
+            email: 'd1-reuse-ed@example.test',
+            username: 'd1_reuse-ed',
+          }),
+          firstName: 'D1',
+          lastName: 'Editor',
+          ...seed,
+          role: 'editor',
+          communityId: comm.id,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.users.id });
+      const [d1Viewer] = await d1.db
+        .insert(d1Tables.users)
+        .values({
+          email: 'd1-reuse-vw@example.test',
+          username: 'd1_reuse_vw',
+          ...deriveUserIdentityColumns({
+            email: 'd1-reuse-vw@example.test',
+            username: 'd1_reuse_vw',
+          }),
+          firstName: 'D1',
+          lastName: 'Viewer',
+          ...seed,
+          role: 'viewer',
+          communityId: comm.id,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.users.id });
+      const d1Mem = createListableMemoryStorage();
+      const d1App = createHonoApp({
+        repository: new HonoFoundationRepository(d1.db as any),
+        storage: d1Mem.storage,
+        mediaCleanup: new MediaCleanupCoordinator(d1.db, d1Mem.storage),
+        publicOrigin: API_ORIGIN,
+        corsOrigins: [CLIENT_ORIGIN],
+        secureCookies: false,
+        serverSecret: makeServerSecret(),
+        now: () => d1Now,
+      });
+      const d1EdCookie = await loginOnApp(
+        d1App,
+        d1.db,
+        'd1-reuse-ed@example.test',
+        comm.id,
+        true
+      );
+      const d1UpMp = buildImportMultipart({
+        mediaParts: [
+          {
+            fieldName: 'file',
+            filename: 'd1-reuse-existing.png',
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          },
+        ],
+      });
+      const d1UpRes = await d1App.request(`${API_ORIGIN}/v2/media`, {
+        method: 'POST',
+        headers: {
+          cookie: d1EdCookie,
+          origin: CLIENT_ORIGIN,
+          'content-type': d1UpMp.contentTypeHeader,
+        },
+        body: d1UpMp.body,
+        duplex: 'half',
+      } as RequestInit);
+      expect(d1UpRes.status).toBe(201);
+      const d1ExistingId = MediaUploadResponseSchema.parse(await d1UpRes.json())
+        .data.id;
+
+      const d1Preview = await createPreviewOnApp(d1App, d1EdCookie, {
+        kind: 'places',
+        csvFilename: 'd1-reuse-race.csv',
+        csvText: `name,photo\nD1 Reuse Race 1,${d1ExistingId}\nD1 Reuse Race 2,d1-staged-race.png\n`,
+        mediaParts: [
+          {
+            filename: 'd1-staged-race.png',
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          },
+        ],
+      });
+      const [d1ManifestBefore] = await d1.db
+        .select()
+        .from(d1Tables.importManifests)
+        .where(eq(d1Tables.importManifests.id, d1Preview.id));
+      const [d1StagedFile] = await d1.db
+        .select()
+        .from(d1Tables.files)
+        .where(eq(d1Tables.files.id, d1ManifestBefore!.stagedFileIds[0]!));
+
+      interposeUserPhoto = async () => {
+        await d1.db.insert(d1Tables.attachments).values({
+          communityId: comm.id,
+          fileId: d1ExistingId,
+          ownerType: 'user',
+          ownerId: d1Viewer.id,
+          role: 'user_photo',
+          ordinal: 0,
+          createdAt: d1Now,
+        });
+      };
+      void d1Editor;
+
+      d1BoundParams.length = 0;
+      const d1RaceRes = await commitOnApp(d1App, d1EdCookie, d1Preview.id);
+      expect(d1RaceRes.status).toBe(409);
+      expect(((await d1RaceRes.json()) as { code: string }).code).toBe(
+        'import_commit_failed'
+      );
+      expect(Math.max(...d1BoundParams)).toBeLessThanOrEqual(100);
+      const [d1ManifestAfter] = await d1.db
+        .select()
+        .from(d1Tables.importManifests)
+        .where(eq(d1Tables.importManifests.id, d1Preview.id));
+      expect(d1ManifestAfter?.status).toBe('failed');
+      expect(d1Mem.store.has(d1StagedFile!.storageKey!)).toBe(false);
+      expect(
+        await d1.db
+          .select()
+          .from(d1Tables.places)
+          .where(eq(d1Tables.places.communityId, comm.id))
+      ).toHaveLength(0);
+    } finally {
+      d1.sqlite.close();
+    }
+  });
 });

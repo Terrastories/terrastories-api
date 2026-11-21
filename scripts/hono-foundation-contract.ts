@@ -1539,6 +1539,114 @@ export async function runHonoFoundationContract(
       assert.ok(!serialized.includes(adminEmail));
     }
 
+    const importStorageMap = new Map<
+      string,
+      { bytes: Uint8Array; contentType?: string; uploaded: Date }
+    >();
+    const importStorage = {
+      read: async (
+        storageKey: string,
+        range?: { start: number; end: number }
+      ) => {
+        const entry = importStorageMap.get(storageKey);
+        if (!entry) return null;
+        return {
+          size: entry.bytes.byteLength,
+          body: range
+            ? entry.bytes.subarray(range.start, range.end + 1)
+            : entry.bytes,
+        };
+      },
+      put: async (
+        storageKey: string,
+        stream: ReadableStream<Uint8Array>,
+        opts: { contentType?: string }
+      ) => {
+        const reader = stream.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            total += value.byteLength;
+          }
+        }
+        const merged = new Uint8Array(total);
+        let pos = 0;
+        for (const chunk of chunks) {
+          merged.set(chunk, pos);
+          pos += chunk.byteLength;
+        }
+        importStorageMap.set(storageKey, {
+          bytes: merged,
+          contentType: opts.contentType,
+          uploaded: instant,
+        });
+      },
+      delete: async (storageKey: string) => {
+        importStorageMap.delete(storageKey);
+      },
+      list: async (opts?: { prefix?: string }) => {
+        const prefix = opts?.prefix ?? '';
+        const entries = [...importStorageMap.entries()]
+          .filter(([key]) => key.startsWith(prefix))
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, entry]) => ({ key, uploaded: entry.uploaded }));
+        return { entries, truncated: false };
+      },
+    };
+    const importApp = createHonoApp({
+      ...options,
+      storage: importStorage,
+      mediaCleanup: new MediaCleanupCoordinator(database, importStorage),
+    });
+    const buildImportMultipart = (opts: {
+      kind?: 'places' | 'speakers' | 'stories';
+      csvFilename?: string;
+      csvText?: string;
+      mediaParts?: Array<{
+        fieldName?: string;
+        filename: string;
+        contentType: string;
+        bytes: Uint8Array;
+      }>;
+    }) => {
+      const boundary = `contract-imp-${crypto.randomUUID()}`;
+      const parts: Buffer[] = [];
+      if (opts.kind !== undefined) {
+        parts.push(
+          Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="kind"\r\n\r\n${opts.kind}\r\n`
+          )
+        );
+      }
+      if (opts.csvText !== undefined) {
+        parts.push(
+          Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${opts.csvFilename ?? 'import.csv'}"\r\nContent-Type: text/csv\r\n\r\n` +
+              opts.csvText +
+              '\r\n'
+          )
+        );
+      }
+      for (const mediaPart of opts.mediaParts ?? []) {
+        parts.push(
+          Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="${mediaPart.fieldName ?? 'media'}"; filename="${mediaPart.filename}"\r\nContent-Type: ${mediaPart.contentType}\r\n\r\n`
+          ),
+          Buffer.from(mediaPart.bytes),
+          Buffer.from('\r\n')
+        );
+      }
+      parts.push(Buffer.from(`--${boundary}--\r\n`));
+      return {
+        body: Buffer.concat(parts),
+        contentType: `multipart/form-data; boundary=${boundary}`,
+      };
+    };
+
     if (dialectOf(database) === 'postgresql') {
       // PostgreSQL SELECT ... FOR UPDATE race (#145): concurrent toggle waiting
       // on a committed visibility flip must observe the updated visibility and
@@ -3190,93 +3298,197 @@ export async function runHonoFoundationContract(
         403,
         `a viewer attaching onto a story answers the target verdict 403 on PG as on D1/SQLite (${await viewerReuse.text()})`
       );
+
+      // Slice 12 PG race: media-reuse authorization must be revalidated INSIDE
+      // the commit transaction under the files FOR UPDATE lock. An admin
+      // attaching the referenced file as another user's user_photo while the
+      // editor's import commit blocks behind the file lock must fail closed
+      // with 409, mark the manifest failed, clean staged bytes, and emit a
+      // failure audit without creating any imported places.
+      const racePngBytes = Uint8Array.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+      ]);
+      const uploadForm = buildImportMultipart({
+        mediaParts: [
+          {
+            fieldName: 'file',
+            filename: 'pg-race-reuse.png',
+            contentType: 'image/png',
+            bytes: racePngBytes,
+          },
+        ],
+      });
+      const raceUploadRes = await send(importApp, '/v2/media', {
+        method: 'POST',
+        headers: {
+          cookie: editorCookie,
+          'content-type': uploadForm.contentType,
+        },
+        body: uploadForm.body,
+      });
+      assert.equal(
+        raceUploadRes.status,
+        201,
+        `editor media upload for PG import race must succeed (${await raceUploadRes.clone().text()})`
+      );
+      const raceFileId = (
+        (await raceUploadRes.json()) as { data: { id: string } }
+      ).data.id;
+      fileIds.push(raceFileId);
+
+      const racePreviewForm = buildImportMultipart({
+        kind: 'places',
+        csvFilename: 'pg-reuse-race.csv',
+        csvText: `name,photo\nPG Reuse Race One,${raceFileId}\nPG Reuse Race Two,staged-pg-race.png\n`,
+        mediaParts: [
+          {
+            filename: 'staged-pg-race.png',
+            contentType: 'image/png',
+            bytes: racePngBytes,
+          },
+        ],
+      });
+      const racePreviewRes = await send(importApp, '/v2/imports/preview', {
+        method: 'POST',
+        headers: {
+          cookie: editorCookie,
+          'content-type': racePreviewForm.contentType,
+        },
+        body: racePreviewForm.body,
+      });
+      assert.equal(
+        racePreviewRes.status,
+        201,
+        `PG reuse-race preview must succeed (${await racePreviewRes.clone().text()})`
+      );
+      const raceManifestId = (
+        (await racePreviewRes.json()) as { data: { id: number } }
+      ).data.id;
+      const [raceManifestRow] = await db
+        .select()
+        .from(tables.importManifests)
+        .where(eq(tables.importManifests.id, raceManifestId));
+      const raceStagedId = (raceManifestRow!.stagedFileIds as string[])[0]!;
+      const [raceStagedRow] = await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, raceStagedId));
+      const [raceSourceRow] = await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, raceManifestRow!.sourceFileId));
+      const raceStagedKey = String(
+        raceStagedRow!.storageKey ?? raceStagedRow!.path
+      );
+      const raceSourceKey = String(
+        raceSourceRow!.storageKey ?? raceSourceRow!.path
+      );
+
+      let pendingRaceCommit!: Promise<Response>;
+      await db.transaction(async (tx: any) => {
+        await tx
+          .select({ id: tables.files.id })
+          .from(tables.files)
+          .where(eq(tables.files.id, raceFileId))
+          .for('update');
+        await tx.insert(tables.attachments).values({
+          communityId: communityA,
+          fileId: raceFileId,
+          ownerType: 'user',
+          ownerId: viewerId,
+          role: 'user_photo',
+          ordinal: 0,
+          createdAt: instant,
+        });
+        pendingRaceCommit = send(
+          importApp,
+          `/v2/imports/${raceManifestId}/commit`,
+          {
+            method: 'POST',
+            headers: { cookie: editorCookie },
+          }
+        );
+        void pendingRaceCommit.then(ignore, ignore);
+        const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
+        if (blocked < 1) {
+          throw new Error(
+            'import media-reuse race never materialised: commit did not block behind files lock'
+          );
+        }
+      });
+
+      const raceCommitRes = await withDeadline(
+        pendingRaceCommit,
+        10_000,
+        'pg import media-reuse race commit'
+      );
+      assert.equal(
+        raceCommitRes.status,
+        409,
+        `import commit racing user_photo attachment must fail closed with 409 (${await raceCommitRes.clone().text()})`
+      );
+      const raceCommitBody = (await raceCommitRes.json()) as { code?: string };
+      assert.equal(raceCommitBody.code, 'import_commit_failed');
+
+      const [raceManifestAfter] = await db
+        .select()
+        .from(tables.importManifests)
+        .where(eq(tables.importManifests.id, raceManifestId));
+      assert.equal(raceManifestAfter?.status, 'failed');
+      assert.equal(
+        (
+          await db
+            .select({ id: tables.files.id })
+            .from(tables.files)
+            .where(eq(tables.files.id, raceStagedId))
+        ).length,
+        0
+      );
+      assert.equal(importStorageMap.has(raceStagedKey), false);
+      assert.equal(importStorageMap.has(raceSourceKey), true);
+      assert.equal(
+        (
+          await db
+            .select({ id: tables.places.id })
+            .from(tables.places)
+            .where(
+              and(
+                eq(tables.places.communityId, communityA),
+                like(tables.places.name, 'PG Reuse Race %')
+              )
+            )
+        ).length,
+        0
+      );
+      const raceFileAtts = await db
+        .select()
+        .from(tables.attachments)
+        .where(eq(tables.attachments.fileId, raceFileId));
+      assert.equal(raceFileAtts.length, 1);
+      assert.equal(raceFileAtts[0]!.ownerType, 'user');
+      assert.equal(raceFileAtts[0]!.ownerId, viewerId);
+      const raceFailAudits = (
+        await db
+          .select()
+          .from(tables.auditEntries)
+          .where(
+            and(
+              eq(tables.auditEntries.communityId, communityA),
+              eq(tables.auditEntries.action, 'import.commit'),
+              eq(tables.auditEntries.outcome, 'failed')
+            )
+          )
+      ).filter((row: any) =>
+        JSON.stringify(row.resourceIds).includes(String(raceManifestId))
+      );
+      assert.equal(raceFailAudits.length, 1);
     }
 
     // Slice 12 bounded CSV import: 5,000-row places and 5,000-row stories
     // commits must chunk multi-row inserts below the driver parameter limits
     // on both SQLite (32,766) and PostgreSQL (65,534; 5,000 stories = 80,000).
-    const importStorageMap = new Map<
-      string,
-      { bytes: Uint8Array; contentType?: string; uploaded: Date }
-    >();
-    const importStorage = {
-      read: async (
-        storageKey: string,
-        range?: { start: number; end: number }
-      ) => {
-        const entry = importStorageMap.get(storageKey);
-        if (!entry) return null;
-        return {
-          size: entry.bytes.byteLength,
-          body: range
-            ? entry.bytes.subarray(range.start, range.end + 1)
-            : entry.bytes,
-        };
-      },
-      put: async (
-        storageKey: string,
-        stream: ReadableStream<Uint8Array>,
-        opts: { contentType?: string }
-      ) => {
-        const reader = stream.getReader();
-        const chunks: Uint8Array[] = [];
-        let total = 0;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            chunks.push(value);
-            total += value.byteLength;
-          }
-        }
-        const merged = new Uint8Array(total);
-        let pos = 0;
-        for (const chunk of chunks) {
-          merged.set(chunk, pos);
-          pos += chunk.byteLength;
-        }
-        importStorageMap.set(storageKey, {
-          bytes: merged,
-          contentType: opts.contentType,
-          uploaded: instant,
-        });
-      },
-      delete: async (storageKey: string) => {
-        importStorageMap.delete(storageKey);
-      },
-      list: async (opts?: { prefix?: string }) => {
-        const prefix = opts?.prefix ?? '';
-        const entries = [...importStorageMap.entries()]
-          .filter(([key]) => key.startsWith(prefix))
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([key, entry]) => ({ key, uploaded: entry.uploaded }));
-        return { entries, truncated: false };
-      },
-    };
-    const importApp = createHonoApp({
-      ...options,
-      storage: importStorage,
-      mediaCleanup: new MediaCleanupCoordinator(database, importStorage),
-    });
-    const buildImportMultipart = (opts: {
-      kind: 'places' | 'speakers' | 'stories';
-      csvFilename: string;
-      csvText: string;
-    }) => {
-      const boundary = `contract-imp-${crypto.randomUUID()}`;
-      const body = Buffer.concat([
-        Buffer.from(
-          `--${boundary}\r\nContent-Disposition: form-data; name="kind"\r\n\r\n${opts.kind}\r\n` +
-            `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${opts.csvFilename}"\r\nContent-Type: text/csv\r\n\r\n` +
-            opts.csvText +
-            `\r\n--${boundary}--\r\n`
-        ),
-      ]);
-      return {
-        body,
-        contentType: `multipart/form-data; boundary=${boundary}`,
-      };
-    };
     const importEditorCookie = await login(editorEmail);
     const bulkPlacesCsv =
       'name,region\n' +

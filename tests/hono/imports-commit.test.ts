@@ -24,11 +24,17 @@ import {
   ORPHAN_SWEEP_GRACE_MS,
 } from '../../src/services/media-cleanup.service.js';
 import type { FoundationStorage } from '../../src/services/hono-foundation.service.js';
-import { ImportManifestDetailResponseSchema } from '../../src/shared/schemas/imports.js';
+import {
+  ImportManifestDetailResponseSchema,
+  ImportManifestListResponseSchema,
+} from '../../src/shared/schemas/imports.js';
 import { MediaUploadResponseSchema } from '../../src/shared/schemas/media-v2.js';
 import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
-import { planImportCommit } from '../../src/shared/utils/import-commit-plan.js';
+import {
+  D1_MAX_STATEMENT_BYTES,
+  planImportCommit,
+} from '../../src/shared/utils/import-commit-plan.js';
 
 const sqlite = new Sqlite(':memory:');
 sqlite.pragma('foreign_keys = ON');
@@ -1650,6 +1656,7 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
       csvText: manyStoriesCsv,
     });
     expect(oversizedPreview.commitPlan.withinD1Budget).toBe(false);
+    expect(oversizedPreview.canCommit).toBe(true);
 
     // Committing on D1-enforced app fails closed with 422 d1_budget_exceeded without touching rows
     const budgetRes = await commitOnApp(
@@ -1716,5 +1723,247 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
     expect(serializedAudits).not.toContain(sensitiveDesc);
     expect(serializedAudits).not.toContain(stagedFileRow!.storageKey!);
     expect(serializedAudits).not.toContain(stagedFileRow!.checksum!);
+  });
+
+  it('allows 1,000 valid places over 100 KB D1 statement budget on Node while gating canCommit and rejecting on D1-enforced runtimes', async () => {
+    const placesCsv =
+      'name,region,description\n' +
+      Array.from(
+        { length: 1_000 },
+        (_, i) =>
+          `Valid Bulk Place ${i + 1},Basin,"<p>Bulk description entry ${i + 1}</p>"`
+      ).join('\n') +
+      '\n';
+
+    // 1. Node / non-D1 mode: preview reports D1 diagnostics (withinD1Budget=false) with canCommit=true
+    const nodePreview = await createPreviewOnApp(app, cookies.editorA, {
+      kind: 'places',
+      csvFilename: 'bulk-1000-places.csv',
+      csvText: placesCsv,
+    });
+    expect(nodePreview.validRowCount).toBe(1_000);
+    expect(nodePreview.errorCount).toBe(0);
+    expect(nodePreview.commitPlan.withinD1Budget).toBe(false);
+    expect(nodePreview.commitPlan.maxStatementBytes).toBeGreaterThan(
+      D1_MAX_STATEMENT_BYTES
+    );
+    expect(nodePreview.canCommit).toBe(true);
+
+    const nodeDetailRes = await app.request(
+      `${API_ORIGIN}/v2/imports/${nodePreview.id}`,
+      { headers: { cookie: cookies.editorA } }
+    );
+    expect(nodeDetailRes.status).toBe(200);
+    const nodeDetail = ImportManifestDetailResponseSchema.parse(
+      await nodeDetailRes.json()
+    ).data;
+    expect(nodeDetail.canCommit).toBe(true);
+    expect(nodeDetail.commitPlan.withinD1Budget).toBe(false);
+
+    const nodeListRes = await app.request(`${API_ORIGIN}/v2/imports?limit=50`, {
+      headers: { cookie: cookies.editorA },
+    });
+    expect(nodeListRes.status).toBe(200);
+    const nodeList = ImportManifestListResponseSchema.parse(
+      await nodeListRes.json()
+    ).data;
+    expect(nodeList.find((m) => m.id === nodePreview.id)?.canCommit).toBe(true);
+
+    // 2. D1-enforced mode (enforceD1Budget=true and isWorkers=true): reports canCommit=false and rejects commit 422
+    const d1BudgetMem = createListableMemoryStorage();
+    const d1EnforcedApp = createHonoApp({
+      repository: new HonoFoundationRepository(db),
+      storage: d1BudgetMem.storage,
+      mediaCleanup: new MediaCleanupCoordinator(db, d1BudgetMem.storage),
+      publicOrigin: API_ORIGIN,
+      corsOrigins: [CLIENT_ORIGIN],
+      secureCookies: false,
+      serverSecret: makeServerSecret(),
+      now: () => currentNow,
+      enforceD1Budget: true,
+    });
+    const workersModeApp = createHonoApp({
+      repository: new HonoFoundationRepository(db),
+      storage: d1BudgetMem.storage,
+      mediaCleanup: new MediaCleanupCoordinator(db, d1BudgetMem.storage),
+      publicOrigin: API_ORIGIN,
+      corsOrigins: [CLIENT_ORIGIN],
+      secureCookies: false,
+      serverSecret: makeServerSecret(),
+      now: () => currentNow,
+      isWorkers: true,
+    });
+
+    for (const enforcedApp of [d1EnforcedApp, workersModeApp]) {
+      const enforcedDetailRes = await enforcedApp.request(
+        `${API_ORIGIN}/v2/imports/${nodePreview.id}`,
+        { headers: { cookie: cookies.editorA } }
+      );
+      expect(enforcedDetailRes.status).toBe(200);
+      const enforcedDetail = ImportManifestDetailResponseSchema.parse(
+        await enforcedDetailRes.json()
+      ).data;
+      expect(enforcedDetail.canCommit).toBe(false);
+      expect(enforcedDetail.commitPlan.withinD1Budget).toBe(false);
+
+      const enforcedListRes = await enforcedApp.request(
+        `${API_ORIGIN}/v2/imports?limit=50`,
+        { headers: { cookie: cookies.editorA } }
+      );
+      expect(enforcedListRes.status).toBe(200);
+      const enforcedList = ImportManifestListResponseSchema.parse(
+        await enforcedListRes.json()
+      ).data;
+      expect(enforcedList.find((m) => m.id === nodePreview.id)?.canCommit).toBe(
+        false
+      );
+
+      const rejectedCommit = await commitOnApp(
+        enforcedApp,
+        cookies.editorA,
+        nodePreview.id
+      );
+      expect(rejectedCommit.status).toBe(422);
+      const rejectedBody = (await rejectedCommit.json()) as {
+        code: string;
+        details: {
+          commitPlan: { withinD1Budget: boolean; maxStatementBytes: number };
+          violations: Array<{ limit: string }>;
+          alternatives: string;
+        };
+      };
+      expect(rejectedBody.code).toBe('d1_budget_exceeded');
+      expect(rejectedBody.details.commitPlan.withinD1Budget).toBe(false);
+      expect(rejectedBody.details.commitPlan.maxStatementBytes).toBeGreaterThan(
+        D1_MAX_STATEMENT_BYTES
+      );
+      expect(
+        rejectedBody.details.violations.some(
+          (v) => v.limit === 'max_statement_bytes'
+        )
+      ).toBe(true);
+      expect(rejectedBody.details.alternatives).toContain('field kit');
+    }
+
+    // 3. Commit on Node succeeds atomically and inserts all 1,000 places via chunked inserts
+    const nodeCommitRes = await commitOnApp(
+      app,
+      cookies.editorA,
+      nodePreview.id
+    );
+    expect(nodeCommitRes.status).toBe(200);
+    const nodeCommitted = ImportManifestDetailResponseSchema.parse(
+      await nodeCommitRes.json()
+    ).data;
+    expect(nodeCommitted.status).toBe('committed');
+    expect(nodeCommitted.canCommit).toBe(false);
+    expect(nodeCommitted.resultSummary?.createdPlaces).toBe(1_000);
+
+    const insertedPlaces = await db
+      .select({ id: tables.places.id })
+      .from(tables.places)
+      .where(
+        and(
+          eq(tables.places.communityId, ids.ownCommunity),
+          eq(tables.places.region, 'Basin')
+        )
+      );
+    expect(insertedPlaces).toHaveLength(1_000);
+
+    // 4. Real D1 driver rejects preview of those 1,000 places with 422 d1_budget_exceeded and zero storage leftovers
+    const d1 = createRealD1Db();
+    try {
+      const d1Now = new Date('2026-06-25T12:00:00.000Z');
+      const d1Tables = tablesFor(d1.db);
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+      const [comm] = await d1.db
+        .insert(d1Tables.communities)
+        .values({
+          name: 'D1 Bulk Budget Comm',
+          slug: 'd1-bulk-budget-comm',
+          publicStories: true,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.communities.id });
+      await d1.db.insert(d1Tables.users).values({
+        email: 'd1-bulk@example.test',
+        username: 'd1_bulk',
+        ...deriveUserIdentityColumns({
+          email: 'd1-bulk@example.test',
+          username: 'd1_bulk',
+        }),
+        firstName: 'Bulk',
+        lastName: 'Editor',
+        ...seed,
+        role: 'editor',
+        communityId: comm.id,
+        isActive: true,
+        createdAt: d1Now,
+        updatedAt: d1Now,
+      });
+
+      const d1Mem = createListableMemoryStorage();
+      const d1App = createHonoApp({
+        repository: new HonoFoundationRepository(d1.db as any),
+        storage: d1Mem.storage,
+        mediaCleanup: new MediaCleanupCoordinator(d1.db, d1Mem.storage),
+        publicOrigin: API_ORIGIN,
+        corsOrigins: [CLIENT_ORIGIN],
+        secureCookies: false,
+        serverSecret: makeServerSecret(),
+        now: () => d1Now,
+      });
+      const d1Cookie = await loginOnApp(
+        d1App,
+        d1.db,
+        'd1-bulk@example.test',
+        comm.id,
+        true
+      );
+
+      const mp = buildImportMultipart({
+        csvFilename: 'd1-bulk-1000-places.csv',
+        csvText: placesCsv,
+        fields: { kind: 'places' },
+      });
+      const d1PreviewRes = await d1App.request(
+        `${API_ORIGIN}/v2/imports/preview`,
+        {
+          method: 'POST',
+          headers: {
+            cookie: d1Cookie,
+            origin: CLIENT_ORIGIN,
+            'content-type': mp.contentTypeHeader,
+          },
+          body: mp.body,
+          duplex: 'half',
+        } as RequestInit
+      );
+      expect(d1PreviewRes.status).toBe(422);
+      const d1PreviewErr = (await d1PreviewRes.json()) as {
+        code: string;
+        details: {
+          commitPlan: { withinD1Budget: boolean; maxStatementBytes: number };
+          violations: Array<{ limit: string }>;
+          alternatives: string;
+        };
+      };
+      expect(d1PreviewErr.code).toBe('d1_budget_exceeded');
+      expect(d1PreviewErr.details.commitPlan.withinD1Budget).toBe(false);
+      expect(d1PreviewErr.details.commitPlan.maxStatementBytes).toBeGreaterThan(
+        D1_MAX_STATEMENT_BYTES
+      );
+      expect(
+        d1PreviewErr.details.violations.some(
+          (v) => v.limit === 'max_statement_bytes'
+        )
+      ).toBe(true);
+      expect(d1PreviewErr.details.alternatives).toContain('field kit');
+      expect(d1Mem.store.size).toBe(0);
+    } finally {
+      d1.sqlite.close();
+    }
   });
 });

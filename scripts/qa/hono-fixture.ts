@@ -7723,6 +7723,7 @@ export async function createFixture(
                       ImportManifestDetailResponseSchema.safeParse(body);
                     return (
                       parsed.success &&
+                      parsed.data.data.canCommit === true &&
                       parsed.data.data.commitPlan.withinD1Budget === false &&
                       parsed.data.data.commitPlan.statementCount > 1000
                     );

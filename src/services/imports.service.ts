@@ -275,7 +275,7 @@ function countReferencesInNormalizedData(data: StoredNormalizedImportData): {
 
 function computeManifestPlan(
   manifest: ImportManifestRowRecord,
-  d1Enforced = true
+  d1Enforced = false
 ) {
   const normalizedData = manifest.normalizedRows;
   const manifestPayloadBytes = new TextEncoder().encode(
@@ -307,7 +307,7 @@ function computeManifestPlan(
 
 export function serializeImportManifestSummary(
   manifest: ImportManifestRowRecord,
-  d1Enforced = true
+  d1Enforced = false
 ): ImportManifestSummary {
   const { normalizedData, canCommit } = computeManifestPlan(
     manifest,
@@ -483,7 +483,7 @@ function summarizeRelatedRecords(normalizedData: StoredNormalizedImportData): {
 
 export function serializeImportManifestDetail(
   manifest: ImportManifestRowRecord,
-  d1Enforced = true
+  d1Enforced = false
 ): ImportManifestDetail {
   const { normalizedData, plan } = computeManifestPlan(manifest, d1Enforced);
   const mediaCounts = countReferencesInNormalizedData(normalizedData);

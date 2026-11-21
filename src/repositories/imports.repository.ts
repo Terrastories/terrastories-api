@@ -67,6 +67,7 @@ import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
 
 const D1_FILE_LOOKUP_CHUNK = 80;
 const D1_ENTITY_LOOKUP_CHUNK = 80;
+const NODE_BULK_INSERT_CHUNK = 250;
 const READABLE_PRIVACY_LEVELS = ['public', 'members_only', 'editors'] as const;
 
 function isUniqueConstraintError(
@@ -2577,10 +2578,20 @@ export class ImportsRepository {
 
           const createdPlaceByNorm = new Map<string, number>();
           if (payloads.relatedPlaces.length > 0) {
-            const insertedPlaces = await tx
-              .insert(this.tables.places)
-              .values(payloads.relatedPlaces)
-              .returning({ id: this.tables.places.id });
+            const insertedPlaces: Array<{ id: number }> = [];
+            for (
+              let i = 0;
+              i < payloads.relatedPlaces.length;
+              i += NODE_BULK_INSERT_CHUNK
+            ) {
+              const rows = await tx
+                .insert(this.tables.places)
+                .values(
+                  payloads.relatedPlaces.slice(i, i + NODE_BULK_INSERT_CHUNK)
+                )
+                .returning({ id: this.tables.places.id });
+              insertedPlaces.push(...rows);
+            }
             normalizedData.relatedPlacesToCreate.forEach((p, idx) => {
               createdPlaceByNorm.set(
                 p.normalizedName,
@@ -2591,10 +2602,20 @@ export class ImportsRepository {
 
           const createdSpeakerByNorm = new Map<string, number>();
           if (payloads.relatedSpeakers.length > 0) {
-            const insertedSpeakers = await tx
-              .insert(this.tables.speakers)
-              .values(payloads.relatedSpeakers)
-              .returning({ id: this.tables.speakers.id });
+            const insertedSpeakers: Array<{ id: number }> = [];
+            for (
+              let i = 0;
+              i < payloads.relatedSpeakers.length;
+              i += NODE_BULK_INSERT_CHUNK
+            ) {
+              const rows = await tx
+                .insert(this.tables.speakers)
+                .values(
+                  payloads.relatedSpeakers.slice(i, i + NODE_BULK_INSERT_CHUNK)
+                )
+                .returning({ id: this.tables.speakers.id });
+              insertedSpeakers.push(...rows);
+            }
             normalizedData.relatedSpeakersToCreate.forEach((sp, idx) => {
               createdSpeakerByNorm.set(
                 sp.normalizedName,
@@ -2642,10 +2663,18 @@ export class ImportsRepository {
           if (normalizedData.kind === 'places') {
             const placeValues = payloads.buildPlaces();
             if (placeValues.length > 0) {
-              const inserted = await tx
-                .insert(this.tables.places)
-                .values(placeValues)
-                .returning({ id: this.tables.places.id });
+              const inserted: Array<{ id: number }> = [];
+              for (
+                let i = 0;
+                i < placeValues.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
+                const rows = await tx
+                  .insert(this.tables.places)
+                  .values(placeValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .returning({ id: this.tables.places.id });
+                inserted.push(...rows);
+              }
               attachmentsToInsert = payloads.collectEntityAttachments(
                 'place',
                 inserted.map((r: { id: number }) => Number(r.id))
@@ -2654,10 +2683,18 @@ export class ImportsRepository {
           } else if (normalizedData.kind === 'speakers') {
             const speakerValues = payloads.buildSpeakers(resolvePlaceRef);
             if (speakerValues.length > 0) {
-              const inserted = await tx
-                .insert(this.tables.speakers)
-                .values(speakerValues)
-                .returning({ id: this.tables.speakers.id });
+              const inserted: Array<{ id: number }> = [];
+              for (
+                let i = 0;
+                i < speakerValues.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
+                const rows = await tx
+                  .insert(this.tables.speakers)
+                  .values(speakerValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .returning({ id: this.tables.speakers.id });
+                inserted.push(...rows);
+              }
               attachmentsToInsert = payloads.collectEntityAttachments(
                 'speaker',
                 inserted.map((r: { id: number }) => Number(r.id))
@@ -2669,38 +2706,77 @@ export class ImportsRepository {
               resolveSpeakerRef
             );
             if (storyValues.length > 0) {
-              const insertedStories = await tx
-                .insert(this.tables.stories)
-                .values(storyValues)
-                .returning({ id: this.tables.stories.id });
+              const insertedStories: Array<{ id: number }> = [];
+              for (
+                let i = 0;
+                i < storyValues.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
+                const rows = await tx
+                  .insert(this.tables.stories)
+                  .values(storyValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .returning({ id: this.tables.stories.id });
+                insertedStories.push(...rows);
+              }
               const children = payloads.collectStoryChildren(
                 insertedStories.map((r: { id: number }) => Number(r.id)),
                 resolvePlaceRef,
                 resolveSpeakerRef
               );
               attachmentsToInsert = children.attachmentsToInsert;
-              if (children.storyPlacesToInsert.length > 0) {
+              for (
+                let i = 0;
+                i < children.storyPlacesToInsert.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
                 await tx
                   .insert(this.tables.storyPlaces)
-                  .values(children.storyPlacesToInsert);
+                  .values(
+                    children.storyPlacesToInsert.slice(
+                      i,
+                      i + NODE_BULK_INSERT_CHUNK
+                    )
+                  );
               }
-              if (children.storySpeakersToInsert.length > 0) {
+              for (
+                let i = 0;
+                i < children.storySpeakersToInsert.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
                 await tx
                   .insert(this.tables.storySpeakers)
-                  .values(children.storySpeakersToInsert);
+                  .values(
+                    children.storySpeakersToInsert.slice(
+                      i,
+                      i + NODE_BULK_INSERT_CHUNK
+                    )
+                  );
               }
-              if (children.externalLinksToInsert.length > 0) {
+              for (
+                let i = 0;
+                i < children.externalLinksToInsert.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
                 await tx
                   .insert(this.tables.externalMediaLinks)
-                  .values(children.externalLinksToInsert);
+                  .values(
+                    children.externalLinksToInsert.slice(
+                      i,
+                      i + NODE_BULK_INSERT_CHUNK
+                    )
+                  );
               }
             }
           }
 
-          if (attachmentsToInsert.length > 0) {
+          for (
+            let i = 0;
+            i < attachmentsToInsert.length;
+            i += NODE_BULK_INSERT_CHUNK
+          ) {
             await tx
               .insert(this.tables.attachments)
-              .values(attachmentsToInsert);
+              .values(attachmentsToInsert.slice(i, i + NODE_BULK_INSERT_CHUNK));
           }
 
           if (stagedMediaIds.length > 0) {
@@ -2964,11 +3040,21 @@ export class ImportsRepository {
 
           const createdPlaceByNorm = new Map<string, number>();
           if (payloads.relatedPlaces.length > 0) {
-            const insertedPlaces = tx
-              .insert(this.tables.places)
-              .values(payloads.relatedPlaces)
-              .returning({ id: this.tables.places.id })
-              .all() as Array<{ id: number }>;
+            const insertedPlaces: Array<{ id: number }> = [];
+            for (
+              let i = 0;
+              i < payloads.relatedPlaces.length;
+              i += NODE_BULK_INSERT_CHUNK
+            ) {
+              const rows = tx
+                .insert(this.tables.places)
+                .values(
+                  payloads.relatedPlaces.slice(i, i + NODE_BULK_INSERT_CHUNK)
+                )
+                .returning({ id: this.tables.places.id })
+                .all() as Array<{ id: number }>;
+              insertedPlaces.push(...rows);
+            }
             normalizedData.relatedPlacesToCreate.forEach((p, idx) => {
               createdPlaceByNorm.set(
                 p.normalizedName,
@@ -2979,11 +3065,21 @@ export class ImportsRepository {
 
           const createdSpeakerByNorm = new Map<string, number>();
           if (payloads.relatedSpeakers.length > 0) {
-            const insertedSpeakers = tx
-              .insert(this.tables.speakers)
-              .values(payloads.relatedSpeakers)
-              .returning({ id: this.tables.speakers.id })
-              .all() as Array<{ id: number }>;
+            const insertedSpeakers: Array<{ id: number }> = [];
+            for (
+              let i = 0;
+              i < payloads.relatedSpeakers.length;
+              i += NODE_BULK_INSERT_CHUNK
+            ) {
+              const rows = tx
+                .insert(this.tables.speakers)
+                .values(
+                  payloads.relatedSpeakers.slice(i, i + NODE_BULK_INSERT_CHUNK)
+                )
+                .returning({ id: this.tables.speakers.id })
+                .all() as Array<{ id: number }>;
+              insertedSpeakers.push(...rows);
+            }
             normalizedData.relatedSpeakersToCreate.forEach((sp, idx) => {
               createdSpeakerByNorm.set(
                 sp.normalizedName,
@@ -3031,11 +3127,19 @@ export class ImportsRepository {
           if (normalizedData.kind === 'places') {
             const placeValues = payloads.buildPlaces();
             if (placeValues.length > 0) {
-              const inserted = tx
-                .insert(this.tables.places)
-                .values(placeValues)
-                .returning({ id: this.tables.places.id })
-                .all() as Array<{ id: number }>;
+              const inserted: Array<{ id: number }> = [];
+              for (
+                let i = 0;
+                i < placeValues.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
+                const rows = tx
+                  .insert(this.tables.places)
+                  .values(placeValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .returning({ id: this.tables.places.id })
+                  .all() as Array<{ id: number }>;
+                inserted.push(...rows);
+              }
               attachmentsToInsert = payloads.collectEntityAttachments(
                 'place',
                 inserted.map((r) => Number(r.id))
@@ -3044,11 +3148,19 @@ export class ImportsRepository {
           } else if (normalizedData.kind === 'speakers') {
             const speakerValues = payloads.buildSpeakers(resolvePlaceRef);
             if (speakerValues.length > 0) {
-              const inserted = tx
-                .insert(this.tables.speakers)
-                .values(speakerValues)
-                .returning({ id: this.tables.speakers.id })
-                .all() as Array<{ id: number }>;
+              const inserted: Array<{ id: number }> = [];
+              for (
+                let i = 0;
+                i < speakerValues.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
+                const rows = tx
+                  .insert(this.tables.speakers)
+                  .values(speakerValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .returning({ id: this.tables.speakers.id })
+                  .all() as Array<{ id: number }>;
+                inserted.push(...rows);
+              }
               attachmentsToInsert = payloads.collectEntityAttachments(
                 'speaker',
                 inserted.map((r) => Number(r.id))
@@ -3060,38 +3172,77 @@ export class ImportsRepository {
               resolveSpeakerRef
             );
             if (storyValues.length > 0) {
-              const insertedStories = tx
-                .insert(this.tables.stories)
-                .values(storyValues)
-                .returning({ id: this.tables.stories.id })
-                .all() as Array<{ id: number }>;
+              const insertedStories: Array<{ id: number }> = [];
+              for (
+                let i = 0;
+                i < storyValues.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
+                const rows = tx
+                  .insert(this.tables.stories)
+                  .values(storyValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .returning({ id: this.tables.stories.id })
+                  .all() as Array<{ id: number }>;
+                insertedStories.push(...rows);
+              }
               const children = payloads.collectStoryChildren(
                 insertedStories.map((r) => Number(r.id)),
                 resolvePlaceRef,
                 resolveSpeakerRef
               );
               attachmentsToInsert = children.attachmentsToInsert;
-              if (children.storyPlacesToInsert.length > 0) {
+              for (
+                let i = 0;
+                i < children.storyPlacesToInsert.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
                 tx.insert(this.tables.storyPlaces)
-                  .values(children.storyPlacesToInsert)
+                  .values(
+                    children.storyPlacesToInsert.slice(
+                      i,
+                      i + NODE_BULK_INSERT_CHUNK
+                    )
+                  )
                   .run();
               }
-              if (children.storySpeakersToInsert.length > 0) {
+              for (
+                let i = 0;
+                i < children.storySpeakersToInsert.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
                 tx.insert(this.tables.storySpeakers)
-                  .values(children.storySpeakersToInsert)
+                  .values(
+                    children.storySpeakersToInsert.slice(
+                      i,
+                      i + NODE_BULK_INSERT_CHUNK
+                    )
+                  )
                   .run();
               }
-              if (children.externalLinksToInsert.length > 0) {
+              for (
+                let i = 0;
+                i < children.externalLinksToInsert.length;
+                i += NODE_BULK_INSERT_CHUNK
+              ) {
                 tx.insert(this.tables.externalMediaLinks)
-                  .values(children.externalLinksToInsert)
+                  .values(
+                    children.externalLinksToInsert.slice(
+                      i,
+                      i + NODE_BULK_INSERT_CHUNK
+                    )
+                  )
                   .run();
               }
             }
           }
 
-          if (attachmentsToInsert.length > 0) {
+          for (
+            let i = 0;
+            i < attachmentsToInsert.length;
+            i += NODE_BULK_INSERT_CHUNK
+          ) {
             tx.insert(this.tables.attachments)
-              .values(attachmentsToInsert)
+              .values(attachmentsToInsert.slice(i, i + NODE_BULK_INSERT_CHUNK))
               .run();
           }
 

@@ -546,7 +546,7 @@ export function createHonoApp(options: FoundationOptions) {
     storage: options.storage,
     cleanup: mediaCleanup,
     now,
-    enforceD1Budget: options.enforceD1Budget,
+    enforceD1Budget: options.enforceD1Budget ?? options.isWorkers,
   });
   registerUserManagementRoutes(app, {
     repository: new UserManagementRepository(options.repository.connection),

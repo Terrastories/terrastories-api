@@ -2294,8 +2294,13 @@ export async function runHonoFoundationContract(
         let pendingRedeemA!: Promise<Response>;
         let pendingRedeemB!: Promise<Response>;
         await db.transaction(async (tx: any) => {
+          // Park both redemptions at session-lock acquisition (#255): the
+          // community lock is FOR SHARE so both pass it concurrently, then
+          // both queue on the session rows this transaction holds. Releasing
+          // the rows lets each take its first lock at once, so an unsafe
+          // (own-session-first) order deadlocks deterministically.
           await tx.execute(
-            sql`select id from communities where id = ${communityA} for update`
+            sql`select id from sessions where user_id in (${lockAccountA.id}, ${lockAccountB.id}) order by id for update`
           );
           pendingRedeemA = redeemWith(codes[0]!, cookieB, '198.51.100.230');
           pendingRedeemB = redeemWith(codes[1]!, cookieA, '198.51.100.231');
@@ -2304,7 +2309,7 @@ export async function runHonoFoundationContract(
           const blocked = await waitForBlocked(tx, 2, Date.now() + 4000);
           if (blocked < 2)
             throw new Error(
-              'cross-user redeem race never materialised: both redemptions did not block behind the community lock'
+              'cross-user redeem race never materialised: both redemptions did not block behind the session locks'
             );
         });
         const [redeemA, redeemB] = await Promise.all([

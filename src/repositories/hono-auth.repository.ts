@@ -644,7 +644,8 @@ export class HonoAuthRepository {
           windowStartedAt: sql`case when ${windowExpired} then ${now} else ${throttle.windowStartedAt} end`,
           blockedUntil,
         },
-      });
+      })
+      .returning({ failures: throttle.failures });
   }
 
   /**
@@ -656,7 +657,7 @@ export class HonoAuthRepository {
   async recordLoginFailure(
     input: ThrottleIncrement,
     secret: string
-  ): Promise<void> {
+  ): Promise<number> {
     const ipKey = await this.ipThrottleKey(input.clientIp, secret);
     const accountKey = input.account
       ? await this.accountThrottleKey(input.account.id, secret)
@@ -684,20 +685,40 @@ export class HonoAuthRepository {
     };
     const db = this.db;
     if (typeof db.batch === 'function') {
-      await db.batch(statementsFor(db));
-      return;
+      const results = await db.batch(statementsFor(db));
+      const ipRows = results[results.length - 1] as Array<{
+        failures: number | string;
+      }>;
+      return Number(ipRows?.[0]?.failures ?? 1);
     }
     if (dialectOf(this.connection) === 'postgresql') {
+      let ipFailures = 1;
       await db.transaction(async (tx: typeof db) => {
-        for (const statement of statementsFor(tx)) await statement;
+        const statements = statementsFor(tx);
+        for (const statement of statements) {
+          const result = await statement;
+          const rows = Array.isArray(result) ? result : [result];
+          const last = rows[rows.length - 1];
+          if (last && last.failures !== undefined)
+            ipFailures = Number(last.failures);
+        }
       });
-      return;
+      return ipFailures;
     }
     // better-sqlite3 (drizzle "sync" mode) exposes only synchronous
     // transactions; the callback runs inline, nothing to await or call.
+    let ipFailures = 1;
     db.transaction((tx: typeof db) => {
-      for (const statement of statementsFor(tx)) statement.run();
+      const statements = statementsFor(tx);
+      for (const statement of statements) {
+        const result = statement.all();
+        const rows = Array.isArray(result) ? result : [result];
+        const last = rows[rows.length - 1];
+        if (last && last.failures !== undefined)
+          ipFailures = Number(last.failures);
+      }
     });
+    return ipFailures;
   }
 
   /**

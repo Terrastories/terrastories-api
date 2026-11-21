@@ -119,15 +119,13 @@ export class BootstrapService {
       return { status: 403, body: FORBIDDEN_BODY };
     }
     const nowMs = context.now.getTime();
-    const ipBlocked = await this.authRepo.throttleState(
-      await this.authRepo.ipThrottleKey(context.clientIp, secret),
-      nowMs
-    );
+    const ipKey = await this.authRepo.ipThrottleKey(context.clientIp, secret);
+    const ipBlocked = await this.authRepo.throttleState(ipKey, nowMs);
     if (ipBlocked.blocked) {
       // A throttled address is refused before any audit row is written.
       return { status: 403, body: FORBIDDEN_BODY };
     }
-    await this.authRepo.recordLoginFailure(
+    const failures = await this.authRepo.recordLoginFailure(
       {
         account: null,
         clientIp: context.clientIp,
@@ -135,9 +133,10 @@ export class BootstrapService {
       },
       secret
     );
-    if (ipBlocked.failures === 0) {
+    if (failures === 1) {
       // First failure of the window only: later failures in the same window
-      // are throttle state, not new audit facts.
+      // are throttle state, not new audit facts. Elected from the post-increment
+      // count so concurrent first failures cannot all audit (round 4 item 3).
       await this.auditFailure({
         communityId: null,
         action: 'bootstrap.complete',

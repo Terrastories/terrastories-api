@@ -29,6 +29,7 @@ export const DEFAULT_IMPORT_PAGE_LIMIT = 20;
 export const MAX_IMPORT_PAGE_LIMIT = 100;
 export const MAX_IMPORT_PREVIEW_SAMPLE_ROWS = 25;
 export const MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS = 240;
+export const MAX_IMPORT_ROW_ERRORS = 1_000;
 
 export const ALLOWED_CSV_MIME_TYPES: ReadonlySet<string> = new Set([
   'text/csv',
@@ -284,6 +285,9 @@ export type StoredNormalizedImportData =
       relatedSpeakersToCreate: RelatedSpeakerToCreate[];
       skippedDuplicates: number;
       audienceCounts: null;
+      validRowCount?: number;
+      totalErrorCount?: number;
+      rowErrorsTruncated?: boolean;
     }
   | {
       kind: 'speakers';
@@ -292,6 +296,9 @@ export type StoredNormalizedImportData =
       relatedSpeakersToCreate: RelatedSpeakerToCreate[];
       skippedDuplicates: number;
       audienceCounts: null;
+      validRowCount?: number;
+      totalErrorCount?: number;
+      rowErrorsTruncated?: boolean;
     }
   | {
       kind: 'stories';
@@ -300,6 +307,9 @@ export type StoredNormalizedImportData =
       relatedSpeakersToCreate: RelatedSpeakerToCreate[];
       skippedDuplicates: number;
       audienceCounts: { public: number; community: number; editors: number };
+      validRowCount?: number;
+      totalErrorCount?: number;
+      rowErrorsTruncated?: boolean;
     };
 
 export const ImportCommitPlanSummarySchema = z
@@ -479,7 +489,8 @@ export const ImportManifestDetailSchema = ImportManifestSummarySchema.extend({
   audienceMapping: AudienceMappingSchema.nullable(),
   duplicateStrategy: DuplicateStrategySchema,
   skippedDuplicateCount: z.number().int().min(0),
-  rowErrors: z.array(ImportRowErrorSchema),
+  rowErrors: z.array(ImportRowErrorSchema).max(MAX_IMPORT_ROW_ERRORS),
+  rowErrorsTruncated: z.boolean(),
   mediaSummary: ImportMediaSummarySchema,
   audienceSummary: ImportAudienceSummarySchema.nullable(),
   relatedRecords: ImportRelatedRecordsSummarySchema,

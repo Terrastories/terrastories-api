@@ -31,6 +31,7 @@ import {
   MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS,
   MAX_IMPORT_PREVIEW_SAMPLE_ROWS,
   MAX_IMPORT_REQUEST_BYTES,
+  MAX_IMPORT_ROW_ERRORS,
   MAX_IMPORT_STORY_EDGES_PER_ROW,
   type AudienceMapping,
   type DuplicateStrategy,
@@ -213,18 +214,26 @@ function buildUniqueStorySlug(title: string): string {
   return base.length > 0 ? `${base}-${suffix}` : `story-${suffix}`;
 }
 
-function splitPipeOrSemicolonList(raw: string): string[] {
-  return raw
-    .split(/[|;\n]/)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
-}
+const PIPE_LIST_TOKEN_PATTERN = /[^|;\n]+/;
+const ID_LIST_TOKEN_PATTERN = /[^,|;\n]+/;
 
-function splitIdList(raw: string): string[] {
-  return raw
-    .split(/[,|;\n]/)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+function splitBoundedTokens(
+  raw: string,
+  tokenPattern: RegExp,
+  maxTokens: number
+): { tokens: string[]; exceeded: boolean } {
+  const tokens: string[] = [];
+  const pattern = new RegExp(tokenPattern.source, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(raw)) !== null) {
+    const trimmed = match[0].trim();
+    if (trimmed.length === 0) continue;
+    tokens.push(trimmed);
+    if (tokens.length > maxTokens) {
+      return { tokens: [], exceeded: true };
+    }
+  }
+  return { tokens, exceeded: false };
 }
 
 function parseFiniteCoordinate(raw: string): number | null {
@@ -298,20 +307,25 @@ function computeManifestPlan(
     manifestPayloadBytes,
     sourceFilePayloadBytes,
   });
+  const totalErrorCount =
+    normalizedData.totalErrorCount ?? manifest.rowErrors.length;
+  const validRowCount =
+    normalizedData.validRowCount ?? normalizedData.rows.length;
   const canCommit =
     manifest.status === 'previewed' &&
+    totalErrorCount === 0 &&
     manifest.rowErrors.length === 0 &&
-    normalizedData.rows.length > 0 &&
+    validRowCount > 0 &&
     (!d1Enforced || plan.summary.withinD1Budget);
 
-  return { normalizedData, plan, canCommit };
+  return { normalizedData, plan, canCommit, totalErrorCount, validRowCount };
 }
 
 export function serializeImportManifestSummary(
   manifest: ImportManifestRowRecord,
   d1Enforced = false
 ): ImportManifestSummary {
-  const { normalizedData, canCommit } = computeManifestPlan(
+  const { canCommit, totalErrorCount, validRowCount } = computeManifestPlan(
     manifest,
     d1Enforced
   );
@@ -323,8 +337,8 @@ export function serializeImportManifestSummary(
     createdBy: manifest.createdBy,
     sourceFileName: manifest.sourceFileName,
     rowCount: manifest.rowCount,
-    validRowCount: normalizedData.rows.length,
-    errorCount: manifest.rowErrors.length,
+    validRowCount,
+    errorCount: totalErrorCount,
     stagedMediaCount: manifest.stagedFileIds.length,
     canCommit,
     resultSummary: manifest.resultSummary,
@@ -487,10 +501,18 @@ export function serializeImportManifestDetail(
   manifest: ImportManifestRowRecord,
   d1Enforced = false
 ): ImportManifestDetail {
-  const { normalizedData, plan } = computeManifestPlan(manifest, d1Enforced);
+  const { normalizedData, plan, totalErrorCount } = computeManifestPlan(
+    manifest,
+    d1Enforced
+  );
   const mediaCounts = countReferencesInNormalizedData(normalizedData);
   const { previewRows, previewRowsTruncated } =
     projectPreviewRows(normalizedData);
+  const boundedRowErrors = manifest.rowErrors.slice(0, MAX_IMPORT_ROW_ERRORS);
+  const rowErrorsTruncated =
+    Boolean(normalizedData.rowErrorsTruncated) ||
+    totalErrorCount > boundedRowErrors.length ||
+    manifest.rowErrors.length > MAX_IMPORT_ROW_ERRORS;
 
   return {
     ...serializeImportManifestSummary(manifest, d1Enforced),
@@ -502,7 +524,8 @@ export function serializeImportManifestDetail(
         : null,
     duplicateStrategy: manifest.mappings.duplicateStrategy,
     skippedDuplicateCount: normalizedData.skippedDuplicates,
-    rowErrors: manifest.rowErrors,
+    rowErrors: boundedRowErrors,
+    rowErrorsTruncated,
     mediaSummary: {
       stagedCount: manifest.stagedFileIds.length,
       existingReferencedCount: mediaCounts.existingCount,
@@ -1158,10 +1181,16 @@ export class ImportsService {
 
       const candidateUuids: string[] = [];
       for (const row of csvUpload.parsed.rows) {
-        for (const field of ['photo', 'nameAudio', 'media']) {
+        for (const [field, cap] of [
+          ['photo', kind === 'places' ? MAX_IMPORT_MEDIA_REFS_PER_ROW : 1],
+          ['nameAudio', 1],
+          ['media', MAX_IMPORT_MEDIA_REFS_PER_ROW],
+        ] as const) {
           const val = readCell(row.cells, field);
           if (!val) continue;
-          for (const ref of splitPipeOrSemicolonList(val)) {
+          const refs = splitBoundedTokens(val, PIPE_LIST_TOKEN_PATTERN, cap);
+          if (refs.exceeded) continue;
+          for (const ref of refs.tokens) {
             if (UUID_REGEX.test(ref)) candidateUuids.push(ref);
           }
         }
@@ -1696,7 +1725,9 @@ export class ImportsService {
       };
     }
 
-    if (manifest.rowErrors.length > 0) {
+    const totalErrorCount =
+      manifest.normalizedRows.totalErrorCount ?? manifest.rowErrors.length;
+    if (totalErrorCount > 0 || manifest.rowErrors.length > 0) {
       return {
         status: 422,
         body: {
@@ -2052,6 +2083,23 @@ export class ImportsService {
     const relatedPlacesMap = new Map<string, RelatedPlaceToCreate>();
     const relatedSpeakersMap = new Map<string, RelatedSpeakerToCreate>();
     const rowErrors: ImportRowError[] = [];
+    let totalErrorCount = 0;
+    let rowErrorsTruncated = false;
+    const recordRowErrors = (errs: ReadonlyArray<ImportRowError>) => {
+      if (errs.length === 0) return;
+      totalErrorCount += errs.length;
+      if (rowErrors.length >= MAX_IMPORT_ROW_ERRORS) {
+        rowErrorsTruncated = true;
+        return;
+      }
+      const remaining = MAX_IMPORT_ROW_ERRORS - rowErrors.length;
+      if (errs.length > remaining) {
+        rowErrors.push(...errs.slice(0, remaining));
+        rowErrorsTruncated = true;
+        return;
+      }
+      rowErrors.push(...errs);
+    };
     const referencedStagedIds = new Set<string>();
     let skippedDuplicates = 0;
 
@@ -2404,8 +2452,12 @@ export class ImportsService {
         const attachments: NormalizedPlaceRow['attachments'] = [];
         const rawPhotos = (input.readCell(row.cells, 'photo') ?? '').trim();
         if (rawPhotos.length > 0) {
-          const refs = splitPipeOrSemicolonList(rawPhotos);
-          if (refs.length > MAX_IMPORT_MEDIA_REFS_PER_ROW) {
+          const photoSplit = splitBoundedTokens(
+            rawPhotos,
+            PIPE_LIST_TOKEN_PATTERN,
+            MAX_IMPORT_MEDIA_REFS_PER_ROW
+          );
+          if (photoSplit.exceeded) {
             errs.push({
               row: row.rowNumber,
               field: 'photo',
@@ -2413,7 +2465,7 @@ export class ImportsService {
               message: `At most ${MAX_IMPORT_MEDIA_REFS_PER_ROW} media references allowed per row`,
             });
           } else {
-            refs.forEach((ref, ordinal) => {
+            photoSplit.tokens.forEach((ref, ordinal) => {
               const resolved = resolveMediaToken(
                 row.rowNumber,
                 'photo',
@@ -2436,19 +2488,23 @@ export class ImportsService {
 
         const rawAudio = (input.readCell(row.cells, 'nameAudio') ?? '').trim();
         if (rawAudio.length > 0) {
-          const refs = splitPipeOrSemicolonList(rawAudio);
-          if (refs.length > 1) {
+          const audioSplit = splitBoundedTokens(
+            rawAudio,
+            PIPE_LIST_TOKEN_PATTERN,
+            1
+          );
+          if (audioSplit.exceeded) {
             errs.push({
               row: row.rowNumber,
               field: 'nameAudio',
               code: 'too_many_refs',
               message: 'At most 1 place name audio reference allowed per row',
             });
-          } else if (refs[0]) {
+          } else if (audioSplit.tokens[0]) {
             const resolved = resolveMediaToken(
               row.rowNumber,
               'nameAudio',
-              refs[0],
+              audioSplit.tokens[0],
               'place_name_audio',
               0,
               errs
@@ -2465,7 +2521,7 @@ export class ImportsService {
         }
 
         if (errs.length > 0) {
-          rowErrors.push(...errs);
+          recordRowErrors(errs);
           continue;
         }
 
@@ -2495,6 +2551,9 @@ export class ImportsService {
           relatedSpeakersToCreate: [],
           skippedDuplicates,
           audienceCounts: null,
+          validRowCount: placeRows.length,
+          totalErrorCount,
+          rowErrorsTruncated,
         },
         rowErrors,
         referencedStagedIds,
@@ -2618,19 +2677,23 @@ export class ImportsService {
         const attachments: NormalizedSpeakerRow['attachments'] = [];
         const rawPhoto = (input.readCell(row.cells, 'photo') ?? '').trim();
         if (rawPhoto.length > 0) {
-          const refs = splitPipeOrSemicolonList(rawPhoto);
-          if (refs.length > 1) {
+          const photoSplit = splitBoundedTokens(
+            rawPhoto,
+            PIPE_LIST_TOKEN_PATTERN,
+            1
+          );
+          if (photoSplit.exceeded) {
             errs.push({
               row: row.rowNumber,
               field: 'photo',
               code: 'too_many_refs',
               message: 'At most 1 speaker photo reference allowed per row',
             });
-          } else if (refs[0]) {
+          } else if (photoSplit.tokens[0]) {
             const resolved = resolveMediaToken(
               row.rowNumber,
               'photo',
-              refs[0],
+              photoSplit.tokens[0],
               'speaker_photo',
               0,
               errs
@@ -2647,7 +2710,7 @@ export class ImportsService {
         }
 
         if (errs.length > 0) {
-          rowErrors.push(...errs);
+          recordRowErrors(errs);
           continue;
         }
 
@@ -2680,6 +2743,9 @@ export class ImportsService {
           relatedSpeakersToCreate: [],
           skippedDuplicates,
           audienceCounts: null,
+          validRowCount: speakerRows.length,
+          totalErrorCount,
+          rowErrorsTruncated,
         },
         rowErrors,
         referencedStagedIds,
@@ -2688,6 +2754,16 @@ export class ImportsService {
 
     // Stories import
     const storyRows: NormalizedStoryRow[] = [];
+    const seenSlugs = new Set<string>();
+    const allocateUniqueStorySlug = (title: string): string => {
+      for (;;) {
+        const candidate = buildUniqueStorySlug(title);
+        if (!seenSlugs.has(candidate)) {
+          seenSlugs.add(candidate);
+          return candidate;
+        }
+      }
+    };
     const audienceCounts = { public: 0, community: 0, editors: 0 };
 
     for (const row of input.rows) {
@@ -2929,26 +3005,63 @@ export class ImportsService {
       const rawPlaceNames = (
         input.readCell(row.cells, 'placeNames') ?? ''
       ).trim();
-      for (const idToken of splitIdList(rawPlaceIds)) {
-        const ref = resolvePlaceById(row.rowNumber, 'placeIds', idToken, errs);
-        if (ref) placeRefs.push(ref);
-      }
-      for (const nameToken of splitPipeOrSemicolonList(rawPlaceNames)) {
-        const ref = resolvePlaceByName(
-          row.rowNumber,
-          'placeNames',
-          nameToken,
-          errs
-        );
-        if (ref) placeRefs.push(ref);
-      }
-      if (placeRefs.length > MAX_IMPORT_STORY_EDGES_PER_ROW) {
+      const placeIdSplit = splitBoundedTokens(
+        rawPlaceIds,
+        ID_LIST_TOKEN_PATTERN,
+        MAX_IMPORT_STORY_EDGES_PER_ROW
+      );
+      const placeNameSplit = splitBoundedTokens(
+        rawPlaceNames,
+        PIPE_LIST_TOKEN_PATTERN,
+        MAX_IMPORT_STORY_EDGES_PER_ROW
+      );
+      if (placeIdSplit.exceeded) {
         errs.push({
           row: row.rowNumber,
           field: 'placeIds',
           code: 'too_many_refs',
           message: `At most ${MAX_IMPORT_STORY_EDGES_PER_ROW} place associations allowed per story`,
         });
+      }
+      if (placeNameSplit.exceeded) {
+        errs.push({
+          row: row.rowNumber,
+          field: 'placeNames',
+          code: 'too_many_refs',
+          message: `At most ${MAX_IMPORT_STORY_EDGES_PER_ROW} place associations allowed per story`,
+        });
+      }
+      if (!placeIdSplit.exceeded && !placeNameSplit.exceeded) {
+        if (
+          placeIdSplit.tokens.length + placeNameSplit.tokens.length >
+          MAX_IMPORT_STORY_EDGES_PER_ROW
+        ) {
+          errs.push({
+            row: row.rowNumber,
+            field: placeIdSplit.tokens.length > 0 ? 'placeIds' : 'placeNames',
+            code: 'too_many_refs',
+            message: `At most ${MAX_IMPORT_STORY_EDGES_PER_ROW} place associations allowed per story`,
+          });
+        } else {
+          for (const idToken of placeIdSplit.tokens) {
+            const ref = resolvePlaceById(
+              row.rowNumber,
+              'placeIds',
+              idToken,
+              errs
+            );
+            if (ref) placeRefs.push(ref);
+          }
+          for (const nameToken of placeNameSplit.tokens) {
+            const ref = resolvePlaceByName(
+              row.rowNumber,
+              'placeNames',
+              nameToken,
+              errs
+            );
+            if (ref) placeRefs.push(ref);
+          }
+        }
       }
 
       const speakerRefs: NormalizedStoryRow['speakerRefs'] = [];
@@ -2958,25 +3071,17 @@ export class ImportsService {
       const rawSpeakerNames = (
         input.readCell(row.cells, 'speakerNames') ?? ''
       ).trim();
-      for (const idToken of splitIdList(rawSpeakerIds)) {
-        const ref = resolveSpeakerById(
-          row.rowNumber,
-          'speakerIds',
-          idToken,
-          errs
-        );
-        if (ref) speakerRefs.push(ref);
-      }
-      for (const nameToken of splitPipeOrSemicolonList(rawSpeakerNames)) {
-        const ref = resolveSpeakerByName(
-          row.rowNumber,
-          'speakerNames',
-          nameToken,
-          errs
-        );
-        if (ref) speakerRefs.push(ref);
-      }
-      if (speakerRefs.length > MAX_IMPORT_STORY_EDGES_PER_ROW) {
+      const speakerIdSplit = splitBoundedTokens(
+        rawSpeakerIds,
+        ID_LIST_TOKEN_PATTERN,
+        MAX_IMPORT_STORY_EDGES_PER_ROW
+      );
+      const speakerNameSplit = splitBoundedTokens(
+        rawSpeakerNames,
+        PIPE_LIST_TOKEN_PATTERN,
+        MAX_IMPORT_STORY_EDGES_PER_ROW
+      );
+      if (speakerIdSplit.exceeded) {
         errs.push({
           row: row.rowNumber,
           field: 'speakerIds',
@@ -2984,12 +3089,57 @@ export class ImportsService {
           message: `At most ${MAX_IMPORT_STORY_EDGES_PER_ROW} speaker associations allowed per story`,
         });
       }
+      if (speakerNameSplit.exceeded) {
+        errs.push({
+          row: row.rowNumber,
+          field: 'speakerNames',
+          code: 'too_many_refs',
+          message: `At most ${MAX_IMPORT_STORY_EDGES_PER_ROW} speaker associations allowed per story`,
+        });
+      }
+      if (!speakerIdSplit.exceeded && !speakerNameSplit.exceeded) {
+        if (
+          speakerIdSplit.tokens.length + speakerNameSplit.tokens.length >
+          MAX_IMPORT_STORY_EDGES_PER_ROW
+        ) {
+          errs.push({
+            row: row.rowNumber,
+            field:
+              speakerIdSplit.tokens.length > 0 ? 'speakerIds' : 'speakerNames',
+            code: 'too_many_refs',
+            message: `At most ${MAX_IMPORT_STORY_EDGES_PER_ROW} speaker associations allowed per story`,
+          });
+        } else {
+          for (const idToken of speakerIdSplit.tokens) {
+            const ref = resolveSpeakerById(
+              row.rowNumber,
+              'speakerIds',
+              idToken,
+              errs
+            );
+            if (ref) speakerRefs.push(ref);
+          }
+          for (const nameToken of speakerNameSplit.tokens) {
+            const ref = resolveSpeakerByName(
+              row.rowNumber,
+              'speakerNames',
+              nameToken,
+              errs
+            );
+            if (ref) speakerRefs.push(ref);
+          }
+        }
+      }
 
       const attachments: NormalizedStoryRow['attachments'] = [];
       const rawMedia = (input.readCell(row.cells, 'media') ?? '').trim();
       if (rawMedia.length > 0) {
-        const refs = splitPipeOrSemicolonList(rawMedia);
-        if (refs.length > MAX_IMPORT_MEDIA_REFS_PER_ROW) {
+        const mediaSplit = splitBoundedTokens(
+          rawMedia,
+          PIPE_LIST_TOKEN_PATTERN,
+          MAX_IMPORT_MEDIA_REFS_PER_ROW
+        );
+        if (mediaSplit.exceeded) {
           errs.push({
             row: row.rowNumber,
             field: 'media',
@@ -2997,7 +3147,7 @@ export class ImportsService {
             message: `At most ${MAX_IMPORT_MEDIA_REFS_PER_ROW} media references allowed per story`,
           });
         } else {
-          refs.forEach((ref, ordinal) => {
+          mediaSplit.tokens.forEach((ref, ordinal) => {
             const resolved = resolveMediaToken(
               row.rowNumber,
               'media',
@@ -3023,8 +3173,12 @@ export class ImportsService {
         input.readCell(row.cells, 'externalMediaLinks') ?? ''
       ).trim();
       if (rawLinks.length > 0) {
-        const links = splitPipeOrSemicolonList(rawLinks);
-        if (links.length > MAX_IMPORT_EXTERNAL_LINKS_PER_ROW) {
+        const linksSplit = splitBoundedTokens(
+          rawLinks,
+          PIPE_LIST_TOKEN_PATTERN,
+          MAX_IMPORT_EXTERNAL_LINKS_PER_ROW
+        );
+        if (linksSplit.exceeded) {
           errs.push({
             row: row.rowNumber,
             field: 'externalMediaLinks',
@@ -3032,7 +3186,7 @@ export class ImportsService {
             message: `At most ${MAX_IMPORT_EXTERNAL_LINKS_PER_ROW} external media links allowed per story`,
           });
         } else {
-          for (const link of links) {
+          for (const link of linksSplit.tokens) {
             if (hasCsvFormulaPrefix(link)) {
               errs.push({
                 row: row.rowNumber,
@@ -3056,7 +3210,7 @@ export class ImportsService {
       }
 
       if (errs.length > 0 || visibility === null) {
-        rowErrors.push(...errs);
+        recordRowErrors(errs);
         continue;
       }
 
@@ -3098,7 +3252,7 @@ export class ImportsService {
       storyRows.push({
         rowNumber: row.rowNumber,
         title: rawTitle,
-        slug: buildUniqueStorySlug(rawTitle),
+        slug: allocateUniqueStorySlug(rawTitle),
         description,
         descriptionPlain,
         visibility,
@@ -3123,6 +3277,9 @@ export class ImportsService {
         relatedSpeakersToCreate: [...relatedSpeakersMap.values()],
         skippedDuplicates,
         audienceCounts,
+        validRowCount: storyRows.length,
+        totalErrorCount,
+        rowErrorsTruncated,
       },
       rowErrors,
       referencedStagedIds,

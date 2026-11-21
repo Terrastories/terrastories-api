@@ -25,6 +25,8 @@ import {
   MAX_IMPORT_CSV_BYTES,
   MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS,
   MAX_IMPORT_PREVIEW_SAMPLE_ROWS,
+  MAX_IMPORT_ROW_ERRORS,
+  MAX_IMPORT_STORY_EDGES_PER_ROW,
 } from '../../src/shared/schemas/imports.js';
 import { MediaUploadResponseSchema } from '../../src/shared/schemas/media-v2.js';
 import {
@@ -1768,5 +1770,100 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
         memStore.delete(partialSourceStorageKey);
       }
     }
+  });
+
+  it('rejects oversized per-row reference cells before resolving tokens and caps stored/returned rowErrors at MAX_IMPORT_ROW_ERRORS', async () => {
+    // 1. 40,000 invalid IDs in place_ids and speaker_ids (~79,999 chars <= MAX_CSV_CELL_LENGTH),
+    // plus a pair where place_ids (60) + place_names (60) exceeds MAX_IMPORT_STORY_EDGES_PER_ROW (100).
+    const fortyThousandInvalidIds = Array.from(
+      { length: 40_000 },
+      () => '9'
+    ).join(',');
+    expect(fortyThousandInvalidIds.length).toBeLessThanOrEqual(80_000);
+    const sixtyIds = Array.from({ length: 60 }, (_, i) => String(i + 1)).join(
+      ','
+    );
+    const sixtyNames = Array.from({ length: 60 }, (_, i) => `Place ${i}`).join(
+      '|'
+    );
+
+    const overflowCsv =
+      'title,visibility,place_ids,place_names,speaker_ids,speaker_names\n' +
+      `Overflow Places,community,"${fortyThousandInvalidIds}",,,\n` +
+      `Overflow Speakers,community,,,"${fortyThousandInvalidIds}",\n` +
+      `Overflow Combined Places,community,"${sixtyIds}","${sixtyNames}",,\n`;
+
+    const overflowRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvFilename: 'overflow-refs.csv',
+      csvText: overflowCsv,
+      fields: { kind: 'stories' },
+    });
+    expect(overflowRes.status).toBe(201);
+    const overflowData = ImportManifestDetailResponseSchema.parse(
+      await overflowRes.json()
+    ).data;
+    expect(overflowData.canCommit).toBe(false);
+    expect(overflowData.rowErrorsTruncated).toBe(false);
+    expect(overflowData.errorCount).toBe(3);
+    expect(overflowData.rowErrors).toHaveLength(3);
+    expect(overflowData.rowErrors).toEqual([
+      {
+        row: 1,
+        field: 'placeIds',
+        code: 'too_many_refs',
+        message: expect.stringContaining(
+          String(MAX_IMPORT_STORY_EDGES_PER_ROW)
+        ),
+      },
+      {
+        row: 2,
+        field: 'speakerIds',
+        code: 'too_many_refs',
+        message: expect.stringContaining(
+          String(MAX_IMPORT_STORY_EDGES_PER_ROW)
+        ),
+      },
+      {
+        row: 3,
+        field: 'placeIds',
+        code: 'too_many_refs',
+        message: expect.stringContaining(
+          String(MAX_IMPORT_STORY_EDGES_PER_ROW)
+        ),
+      },
+    ]);
+
+    // 2. 1,250 invalid rows -> rowErrors capped at MAX_IMPORT_ROW_ERRORS (1,000) with rowErrorsTruncated=true
+    const manyErrorsCsv =
+      'title,visibility\n' +
+      Array.from(
+        { length: 1_250 },
+        (_, i) => `Bad Audience Story ${i + 1},unknown_group_${i + 1}`
+      ).join('\n') +
+      '\n';
+
+    const manyErrorsRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvFilename: 'many-row-errors.csv',
+      csvText: manyErrorsCsv,
+      fields: { kind: 'stories' },
+    });
+    expect(manyErrorsRes.status).toBe(201);
+    const manyErrorsData = ImportManifestDetailResponseSchema.parse(
+      await manyErrorsRes.json()
+    ).data;
+    expect(manyErrorsData.canCommit).toBe(false);
+    expect(manyErrorsData.rowCount).toBe(1_250);
+    expect(manyErrorsData.validRowCount).toBe(0);
+    expect(manyErrorsData.errorCount).toBe(1_250);
+    expect(manyErrorsData.rowErrorsTruncated).toBe(true);
+    expect(manyErrorsData.rowErrors).toHaveLength(MAX_IMPORT_ROW_ERRORS);
+
+    const [persistedManyErrors] = await db
+      .select({ rowErrors: tables.importManifests.rowErrors })
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, manyErrorsData.id));
+    expect(persistedManyErrors?.rowErrors).toHaveLength(MAX_IMPORT_ROW_ERRORS);
   });
 });

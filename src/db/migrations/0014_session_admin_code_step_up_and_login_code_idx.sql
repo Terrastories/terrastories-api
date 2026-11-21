@@ -1,7 +1,8 @@
 -- Issue #188 / Slice 11b-A: one-shot fresh admin_issued step-up expiry on
 -- sessions (SPEC-V2 §6.8, §6.10) and composite (user_id, purpose) index on
 -- login_codes for GET /v2/auth/me recovery-code check and superseding.
--- Purely additive; no table rebuild, no PRAGMA (D1-safe).
+-- Includes a table rebuild of auth_throttle to add the 'claim' kind and the
+-- community-scoped constraint; no PRAGMA (D1-safe).
 
 ALTER TABLE `sessions` ADD `admin_code_step_up_expires_at` integer;
 --> statement-breakpoint

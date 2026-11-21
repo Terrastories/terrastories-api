@@ -514,6 +514,18 @@ export class BootstrapService {
         claimTokenId: claimRow.id,
         tokenHash,
         communityId: claimRow.communityId,
+        community: {
+          id: claimRow.communityId,
+          name: claimRow.communityName,
+          slug: claimRow.communitySlug,
+          description: claimRow.communityDescription,
+          locale: claimRow.communityLocale,
+          country: claimRow.communityCountry,
+          publicStories: claimRow.communityPublicStories,
+          isActive: claimRow.communityIsActive,
+          createdAt: claimRow.communityCreatedAt,
+          updatedAt: claimRow.communityUpdatedAt,
+        },
         admin: {
           username,
           usernameNormalized,

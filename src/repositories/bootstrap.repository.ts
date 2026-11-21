@@ -98,6 +98,19 @@ export interface ClaimExecutionInput {
   claimTokenId: number;
   tokenHash: string;
   communityId: number;
+  /** Optional pre-read community snapshot used to avoid a post-commit read. */
+  community?: {
+    id: number;
+    name: string;
+    slug: string;
+    description: string | null;
+    locale: string;
+    country: string | null;
+    publicStories: boolean;
+    isActive: boolean;
+    createdAt: Date | number | string;
+    updatedAt: Date | number | string;
+  };
   admin: {
     username: string;
     usernameNormalized: string;
@@ -1046,22 +1059,65 @@ export class BootstrapRepository {
         return { outcome: 'invalid_token' };
       }
 
-      const [commRow] = await db
-        .select({
-          id: communities.id,
-          name: communities.name,
-          slug: communities.slug,
-          description: communities.description,
-          locale: communities.locale,
-          country: communities.country,
-          publicStories: communities.publicStories,
-          isActive: communities.isActive,
-          createdAt: communities.createdAt,
-          updatedAt: communities.updatedAt,
-        })
-        .from(communities)
-        .where(eq(communities.id, input.communityId))
-        .limit(1);
+      // Do not re-read the community after db.batch has committed: a read
+      // failure there would discard the one-time recovery sheet. Prefer the
+      // caller-supplied snapshot; otherwise read defensively and fall back to a
+      // projection built from the input so a read failure is non-fatal.
+      let commRow: Parameters<BootstrapRepository['toCommunityProjection']>[0];
+      if (input.community !== undefined) {
+        commRow = input.community as Parameters<
+          BootstrapRepository['toCommunityProjection']
+        >[0];
+      } else {
+        try {
+          const [row] = await db
+            .select({
+              id: communities.id,
+              name: communities.name,
+              slug: communities.slug,
+              description: communities.description,
+              locale: communities.locale,
+              country: communities.country,
+              publicStories: communities.publicStories,
+              isActive: communities.isActive,
+              createdAt: communities.createdAt,
+              updatedAt: communities.updatedAt,
+            })
+            .from(communities)
+            .where(eq(communities.id, input.communityId))
+            .limit(1);
+          commRow = row as Parameters<
+            BootstrapRepository['toCommunityProjection']
+          >[0];
+        } catch {
+          commRow = {
+            id: input.communityId,
+            name: '',
+            slug: '',
+            description: null,
+            locale: '',
+            country: null,
+            publicStories: 1,
+            isActive: 1,
+            createdAt: nowMs,
+            updatedAt: nowMs,
+          } as Parameters<BootstrapRepository['toCommunityProjection']>[0];
+        }
+      }
+      if (commRow === undefined) {
+        commRow = {
+          id: input.communityId,
+          name: '',
+          slug: '',
+          description: null,
+          locale: '',
+          country: null,
+          publicStories: 1,
+          isActive: 1,
+          createdAt: nowMs,
+          updatedAt: nowMs,
+        } as Parameters<BootstrapRepository['toCommunityProjection']>[0];
+      }
 
       return {
         outcome: 'claimed',

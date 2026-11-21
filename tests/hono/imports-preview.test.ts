@@ -35,6 +35,10 @@ import {
 } from '../../src/shared/utils/csv-parser.js';
 import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
+import {
+  D1_MAX_STATEMENT_BYTES,
+  planImportCommit,
+} from '../../src/shared/utils/import-commit-plan.js';
 
 const sqlite = new Sqlite(':memory:');
 sqlite.pragma('foreign_keys = ON');
@@ -202,6 +206,7 @@ function createRealD1Db(
   hooks?: {
     onBeforeBatch?: () => Promise<void> | void;
     onAfterBatch?: () => Promise<void> | void;
+    recordedStatementsOut?: Array<{ sql: string; params: unknown[] }>;
   }
 ): {
   db: ReturnType<typeof drizzleD1>;
@@ -235,6 +240,10 @@ function createRealD1Db(
         },
         _exec() {
           boundParamsOut?.push(params.length);
+          hooks?.recordedStatementsOut?.push({
+            sql: query,
+            params: [...params],
+          });
           const prepared = d1Sqlite.prepare(query);
           if (prepared.reader) {
             return { results: prepared.all(...params) };
@@ -1890,5 +1899,194 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
         message: expect.any(String),
       },
     ]);
+  });
+
+  it('bounds every real Drizzle-compiled D1 statement size and rejects near-100 KiB story descriptions at preview', async () => {
+    const recordedStatements: Array<{ sql: string; params: unknown[] }> = [];
+    const d1 = createRealD1Db(undefined, {
+      recordedStatementsOut: recordedStatements,
+    });
+    try {
+      const d1Now = new Date('2026-06-15T12:00:00.000Z');
+      const d1Tables = tablesFor(d1.db);
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+      const [comm] = await d1.db
+        .insert(d1Tables.communities)
+        .values({
+          name: 'D1 Size Comm',
+          slug: 'd1-size-comm',
+          publicStories: false,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.communities.id });
+      await d1.db.insert(d1Tables.users).values({
+        email: 'd1-size@example.test',
+        username: 'd1_size',
+        ...deriveUserIdentityColumns({
+          email: 'd1-size@example.test',
+          username: 'd1_size',
+        }),
+        firstName: 'Size',
+        lastName: 'Editor',
+        ...seed,
+        role: 'editor',
+        communityId: comm.id,
+        isActive: true,
+        createdAt: d1Now,
+        updatedAt: d1Now,
+      });
+
+      const d1Mem = createListableMemoryStorage();
+      const d1App = createHonoApp({
+        repository: new HonoFoundationRepository(d1.db),
+        storage: d1Mem.storage,
+        mediaCleanup: new MediaCleanupCoordinator(d1.db, d1Mem.storage),
+        publicOrigin: API_ORIGIN,
+        corsOrigins: [CLIENT_ORIGIN],
+        secureCookies: false,
+        serverSecret: makeServerSecret(),
+        now: () => d1Now,
+      });
+      const loginRes = await d1App.request(`${API_ORIGIN}/v2/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          identifier: 'd1-size@example.test',
+          communitySlug: 'd1-size-comm',
+          derivedKey: TEST_DERIVED_KEY,
+        }),
+      });
+      expect(loginRes.status).toBe(200);
+      const d1Cookie = (loginRes.headers.get('set-cookie') ?? '').split(
+        ';'
+      )[0]!;
+
+      // 1. Over-boundary story description (~100.6 KiB across description + descriptionPlain):
+      // valid (< 20,000 code points), yet real D1 story INSERT exceeds 102,400 bytes -> 422 at preview.
+      const overDesc = 'ᐊ'.repeat(16_770);
+      const overRes = await postPreview(d1App, {
+        cookie: d1Cookie,
+        csvFilename: 'over-100k-story.csv',
+        csvText:
+          'title,visibility,description,interview_location_name,interviewer_name\n' +
+          `Boundary Story,community,"<p>${overDesc}</p>",New Boundary Place,New Boundary Speaker\n`,
+        fields: { kind: 'stories' },
+      });
+      expect(overRes.status).toBe(422);
+      const overBody = (await overRes.json()) as {
+        code: string;
+        details: {
+          violations: Array<{ limit: string }>;
+          commitPlan: { maxStatementBytes: number };
+        };
+      };
+      expect(overBody.code).toBe('d1_budget_exceeded');
+      expect(overBody.details.commitPlan.maxStatementBytes).toBeGreaterThan(
+        D1_MAX_STATEMENT_BYTES
+      );
+      expect(overBody.details.violations.map((v) => v.limit)).toContain(
+        'max_statement_bytes'
+      );
+      expect(d1Mem.store.size).toBe(0);
+
+      // 2. Just below the boundary: preview succeeds (201), commits (200),
+      // and every planned statement size >= actual compiled SQL + bound param bytes.
+      const safeDesc = 'ᐊ'.repeat(16_600);
+      recordedStatements.length = 0;
+      const underRes = await postPreview(d1App, {
+        cookie: d1Cookie,
+        csvFilename: 'under-100k-story.csv',
+        csvText:
+          'title,visibility,description,interview_location_name,interviewer_name,place_names,speaker_names,media,external_media_links\n' +
+          `Safe Boundary Story,community,"<p>${safeDesc}</p>",Safe Loc,Safe Spk,Safe Loc,Safe Spk,safe-pic.png,https://example.org/safe\n`,
+        fields: { kind: 'stories' },
+        mediaParts: [
+          {
+            filename: 'safe-pic.png',
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          },
+        ],
+      });
+      expect(underRes.status).toBe(201);
+      const underDetail = ImportManifestDetailResponseSchema.parse(
+        await underRes.json()
+      ).data;
+      expect(underDetail.commitPlan.withinD1Budget).toBe(true);
+
+      const previewActualStmts = [...recordedStatements];
+      recordedStatements.length = 0;
+
+      const commitRes = await d1App.request(
+        `${API_ORIGIN}/v2/imports/${underDetail.id}/commit`,
+        {
+          method: 'POST',
+          headers: { cookie: d1Cookie, origin: CLIENT_ORIGIN },
+        }
+      );
+      expect(commitRes.status).toBe(200);
+      const commitActualStmts = [...recordedStatements];
+
+      const [manifestRow] = await d1.db
+        .select()
+        .from(d1Tables.importManifests)
+        .where(eq(d1Tables.importManifests.id, underDetail.id));
+      const enc = new TextEncoder();
+      const manifestPayloadBytes = enc.encode(
+        JSON.stringify({
+          mappings: manifestRow!.mappings,
+          normalizedRows: manifestRow!.normalizedRows,
+          rowErrors: manifestRow!.rowErrors,
+          stagedFileIds: manifestRow!.stagedFileIds,
+        })
+      ).byteLength;
+      const sourceFilePayloadBytes =
+        400 +
+        enc.encode(manifestRow!.sourceFileName ?? 'import.csv').byteLength;
+      const plan = planImportCommit({
+        normalizedData: manifestRow!.normalizedRows as never,
+        stagedFileIds: manifestRow!.stagedFileIds,
+        manifestPayloadBytes,
+        sourceFilePayloadBytes,
+      });
+
+      const actualStmtBytes = (stmt: { sql: string; params: unknown[] }) =>
+        enc.encode(stmt.sql).byteLength +
+        stmt.params.reduce<number>(
+          (sum, val) =>
+            sum +
+            2 +
+            (val === null || val === undefined
+              ? 4
+              : typeof val === 'string'
+                ? enc.encode(val).byteLength
+                : String(val).length),
+          0
+        );
+
+      expect(previewActualStmts).toHaveLength(plan.previewStatements.length);
+      for (let i = 0; i < previewActualStmts.length; i++) {
+        expect(
+          plan.previewStatements[i]!.statementBytes
+        ).toBeGreaterThanOrEqual(actualStmtBytes(previewActualStmts[i]!));
+        expect(plan.previewStatements[i]!.boundParams).toBeGreaterThanOrEqual(
+          previewActualStmts[i]!.params.length
+        );
+      }
+
+      expect(commitActualStmts).toHaveLength(plan.commitStatements.length);
+      for (let i = 0; i < commitActualStmts.length; i++) {
+        expect(plan.commitStatements[i]!.statementBytes).toBeGreaterThanOrEqual(
+          actualStmtBytes(commitActualStmts[i]!)
+        );
+        expect(plan.commitStatements[i]!.boundParams).toBeGreaterThanOrEqual(
+          commitActualStmts[i]!.params.length
+        );
+      }
+    } finally {
+      d1.sqlite.close();
+    }
   });
 });

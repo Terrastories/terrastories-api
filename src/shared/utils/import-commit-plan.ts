@@ -103,18 +103,30 @@ function estimateInsertStatementBytes(
   return total;
 }
 
-const FILE_INSERT_SQL_BYTES = 340;
-const FILE_INSERT_PARAMS_PER_ROW = 17;
-const MANIFEST_INSERT_SQL_BYTES = 360;
-const MANIFEST_COMMIT_SQL_BYTES = 260;
-const AUDIT_INSERT_SQL_BYTES = 220;
-export const PLACE_INSERT_SQL_BYTES = 240;
-export const SPEAKER_INSERT_SQL_BYTES = 220;
-const STORY_INSERT_SQL_BYTES = 340;
-const STORY_EDGE_SQL_BYTES = 220;
-const ATTACHMENT_INSERT_SQL_BYTES = 3_600;
-const EXTERNAL_LINK_INSERT_SQL_BYTES = 200;
-const ACTIVATE_FILES_SQL_BYTES = 180;
+// Conservative SQL skeleton byte sizes derived directly from the Drizzle-compiled
+// SQL in `src/repositories/imports.repository.ts` (including `guardSql` with
+// `dailyLimitWindow`, full column lists, join subqueries, and a safety margin
+// so `planImportCommit` never underestimates a real D1 statement).
+const FILE_INSERT_SQL_BYTES = 1_250;
+const FILE_INSERT_PARAMS_PER_ROW = 19;
+const MANIFEST_INSERT_SQL_BYTES = 1_000;
+const MANIFEST_COMMIT_SQL_BYTES = 1_000;
+const PREVIEW_AUDIT_SQL_BYTES = 650;
+const COMMIT_AUDIT_SQL_BYTES = 1_100;
+export const PLACE_INSERT_SQL_BYTES = 1_400;
+export const SPEAKER_INSERT_SQL_BYTES = 2_030;
+const STORY_INSERT_SQL_BYTES = 1_450;
+const STORY_EXISTING_JOIN_SQL_BYTES = 130;
+const STORY_CREATE_JOIN_SQL_BYTES = 200;
+const STORY_EDGE_SQL_BYTES = 1_750;
+const ATTACHMENT_INSERT_SQL_BYTES = 6_450;
+const EXTERNAL_LINK_INSERT_SQL_BYTES = 1_250;
+const ACTIVATE_FILES_SQL_BYTES = 1_050;
+// Fixed bound scalar values carried by every guarded D1 commit statement
+// (`guardSql`: manifestId, communityId, actorId, startMs, endMs, plus `nowMs` timestamps).
+const D1_GUARD_PARAM_BYTES = 96;
+const D1_SAMPLE_ID = 2_147_483_647;
+const D1_SAMPLE_TS_MS = 9_999_999_999_999;
 
 /** Staged file inserts run 1 row per preview batch statement (19 params <= 100). */
 export const PREVIEW_FILES_INSERT_CHUNK = 1;
@@ -141,7 +153,8 @@ export function utcDayWindowMs(now: Date): { startMs: number; endMs: number } {
 }
 
 export function estimateRelatedRecordBytes(item: { name: string }): number {
-  return serializedParamBytes(item.name) + 64;
+  // Each UNION ALL SELECT adds ~35 bytes of SQL syntax plus the bound name.
+  return serializedParamBytes(item.name) + 80;
 }
 
 export function estimatePlaceRowBytes(row: {
@@ -153,7 +166,8 @@ export function estimatePlaceRowBytes(row: {
   latitude: number | null;
   longitude: number | null;
 }): number {
-  return estimateInsertStatementBytes(64, [
+  // Each UNION ALL SELECT row adds ~133 bytes of SQL syntax (`? AS name, ...`).
+  return estimateInsertStatementBytes(160, [
     row.name,
     row.description,
     row.descriptionPlain,
@@ -173,13 +187,13 @@ export function estimateSpeakerRowBytes(row: {
     | { kind: 'create'; name: string; normalizedName: string }
     | null;
 }): number {
-  return estimateInsertStatementBytes(64, [
+  // Each UNION ALL SELECT row adds ~121 bytes of SQL syntax + 5 bound values.
+  return estimateInsertStatementBytes(150, [
     row.name,
     row.birthDate,
     row.affiliation,
-    row.birthplaceRef?.kind === 'existing'
-      ? row.birthplaceRef.id
-      : (row.birthplaceRef?.name ?? null),
+    row.birthplaceRef?.kind === 'existing' ? row.birthplaceRef.id : null,
+    row.birthplaceRef?.kind === 'create' ? row.birthplaceRef.name : null,
   ]);
 }
 
@@ -303,7 +317,9 @@ function chunkIntoMultiRowStatements<T>(
   sqlOverheadBytes: number,
   rowBytesFn: (item: T) => number,
   label: string,
-  rowsWrittenPerItem: number
+  rowsWrittenPerItem: number,
+  boundParamsFn: (chunkLength: number) => number = (chunkLength) =>
+    chunkLength * paramsPerRow
 ): PlannedStatementMetric[] {
   return chunkImportItemsByBudget(
     items,
@@ -319,7 +335,7 @@ function chunkIntoMultiRowStatements<T>(
     }
     return {
       label,
-      boundParams: chunk.length * paramsPerRow,
+      boundParams: boundParamsFn(chunk.length),
       statementBytes,
       estimatedRowsWritten: chunk.length * rowsWrittenPerItem,
     };
@@ -344,7 +360,7 @@ export function planImportCommit(input: {
   previewStatements.push({
     label: 'preview.source_file',
     boundParams: FILE_INSERT_PARAMS_PER_ROW + 2,
-    statementBytes: input.sourceFilePayloadBytes,
+    statementBytes: FILE_INSERT_SQL_BYTES + input.sourceFilePayloadBytes,
     estimatedRowsWritten: D1_ROW_WRITE_COSTS.filesInsert,
   });
 
@@ -357,7 +373,7 @@ export function planImportCommit(input: {
     previewStatements.push({
       label: 'preview.staged_files',
       boundParams: chunk.length * FILE_INSERT_PARAMS_PER_ROW + 2,
-      statementBytes: FILE_INSERT_SQL_BYTES + chunk.length * 420,
+      statementBytes: FILE_INSERT_SQL_BYTES + chunk.length * 460,
       estimatedRowsWritten: chunk.length * D1_ROW_WRITE_COSTS.filesInsert,
     });
   }
@@ -372,13 +388,22 @@ export function planImportCommit(input: {
   previewStatements.push({
     label: 'preview.audit_entry',
     boundParams: 10,
-    statementBytes: AUDIT_INSERT_SQL_BYTES,
+    statementBytes: PREVIEW_AUDIT_SQL_BYTES + 140,
     estimatedRowsWritten: D1_ROW_WRITE_COSTS.auditEntryInsert,
   });
 
   // 2. Commit writes: related records first, then primary rows & children,
   // staged File activations, ImportManifest result update, and commit audit.
   const { normalizedData } = input;
+  const relatedPlaceNameByNorm = new Map(
+    normalizedData.relatedPlacesToCreate.map((p) => [p.normalizedName, p.name])
+  );
+  const relatedSpeakerNameByNorm = new Map(
+    normalizedData.relatedSpeakersToCreate.map((s) => [
+      s.normalizedName,
+      s.name,
+    ])
+  );
 
   if (normalizedData.relatedPlacesToCreate.length > 0) {
     commitStatements.push(
@@ -390,7 +415,8 @@ export function planImportCommit(input: {
         PLACE_INSERT_SQL_BYTES,
         estimateRelatedRecordBytes,
         'commit.related_places',
-        D1_ROW_WRITE_COSTS.placeInsert
+        D1_ROW_WRITE_COSTS.placeInsert,
+        (chunkLength) => 7 + chunkLength
       )
     );
   }
@@ -405,7 +431,8 @@ export function planImportCommit(input: {
         SPEAKER_INSERT_SQL_BYTES,
         estimateRelatedRecordBytes,
         'commit.related_speakers',
-        D1_ROW_WRITE_COSTS.speakerInsert
+        D1_ROW_WRITE_COSTS.speakerInsert,
+        (chunkLength) => 7 + chunkLength
       )
     );
   }
@@ -427,7 +454,8 @@ export function planImportCommit(input: {
         PLACE_INSERT_SQL_BYTES,
         estimatePlaceRowBytes,
         'commit.places',
-        D1_ROW_WRITE_COSTS.placeInsert
+        D1_ROW_WRITE_COSTS.placeInsert,
+        (chunkLength) => 7 + chunkLength * 7
       )
     );
 
@@ -443,6 +471,8 @@ export function planImportCommit(input: {
           row.region,
           row.latitude,
           row.longitude,
+          D1_SAMPLE_TS_MS,
+          D1_SAMPLE_TS_MS,
         ]),
         estimatedRowsWritten: D1_ROW_WRITE_COSTS.placeInsert,
       });
@@ -450,8 +480,13 @@ export function planImportCommit(input: {
         const chunk = row.attachments.slice(i, i + COMMIT_CHILD_ROW_CHUNK);
         commitStatements.push({
           label: 'commit.place_attachments',
-          boundParams: chunk.length * 6 + 4,
-          statementBytes: ATTACHMENT_INSERT_SQL_BYTES + chunk.length * 140,
+          boundParams: 11 + chunk.length * 4,
+          statementBytes:
+            ATTACHMENT_INSERT_SQL_BYTES +
+            D1_GUARD_PARAM_BYTES +
+            serializedParamBytes(row.name) +
+            2 +
+            chunk.length * 140,
           estimatedRowsWritten:
             chunk.length * D1_ROW_WRITE_COSTS.attachmentInsert,
         });
@@ -474,11 +509,23 @@ export function planImportCommit(input: {
         SPEAKER_INSERT_SQL_BYTES,
         estimateSpeakerRowBytes,
         'commit.speakers',
-        D1_ROW_WRITE_COSTS.speakerInsert
+        D1_ROW_WRITE_COSTS.speakerInsert,
+        (chunkLength) => 9 + chunkLength * 5
       )
     );
 
     for (const row of attachedSpeakers) {
+      const bpParams: unknown[] =
+        row.birthplaceRef?.kind === 'existing'
+          ? [row.birthplaceRef.id]
+          : row.birthplaceRef?.kind === 'create'
+            ? [
+                D1_SAMPLE_ID,
+                relatedPlaceNameByNorm.get(row.birthplaceRef.normalizedName) ??
+                  row.birthplaceRef.name,
+                D1_SAMPLE_TS_MS,
+              ]
+            : [];
       commitStatements.push({
         label: 'commit.speaker_with_attachments',
         boundParams: 16,
@@ -486,9 +533,9 @@ export function planImportCommit(input: {
           row.name,
           row.birthDate,
           row.affiliation,
-          row.birthplaceRef?.kind === 'existing'
-            ? row.birthplaceRef.id
-            : (row.birthplaceRef?.name ?? null),
+          ...bpParams,
+          D1_SAMPLE_TS_MS,
+          D1_SAMPLE_TS_MS,
         ]),
         estimatedRowsWritten: D1_ROW_WRITE_COSTS.speakerInsert,
       });
@@ -496,8 +543,13 @@ export function planImportCommit(input: {
         const chunk = row.attachments.slice(i, i + COMMIT_CHILD_ROW_CHUNK);
         commitStatements.push({
           label: 'commit.speaker_attachments',
-          boundParams: chunk.length * 6 + 4,
-          statementBytes: ATTACHMENT_INSERT_SQL_BYTES + chunk.length * 140,
+          boundParams: 11 + chunk.length * 4,
+          statementBytes:
+            ATTACHMENT_INSERT_SQL_BYTES +
+            D1_GUARD_PARAM_BYTES +
+            serializedParamBytes(row.name) +
+            2 +
+            chunk.length * 140,
           estimatedRowsWritten:
             chunk.length * D1_ROW_WRITE_COSTS.attachmentInsert,
         });
@@ -505,29 +557,96 @@ export function planImportCommit(input: {
     }
   } else {
     for (const row of normalizedData.rows) {
+      const physicalPrivacyLevel =
+        row.visibility === 'community' ? 'members_only' : row.visibility;
+      const dateInterviewedMs = row.dateInterviewed
+        ? new Date(row.dateInterviewed).getTime()
+        : null;
+      let storySkeletonBytes = STORY_INSERT_SQL_BYTES;
+      let storyBoundParams = 17;
+      const storyValues: unknown[] = [
+        row.title,
+        row.description,
+        row.descriptionPlain,
+        row.slug,
+        D1_SAMPLE_ID, // actorId
+        physicalPrivacyLevel,
+        row.topic,
+        row.topicNormalized,
+        row.language,
+        dateInterviewedMs,
+        D1_SAMPLE_TS_MS, // createdAt
+        D1_SAMPLE_TS_MS, // updatedAt
+        // guardSql (manifestId, communityId, actorId, windowStart, windowEnd)
+        D1_SAMPLE_ID,
+        D1_SAMPLE_ID,
+        D1_SAMPLE_ID,
+        D1_SAMPLE_TS_MS,
+        D1_SAMPLE_TS_MS,
+      ];
+
+      if (row.interviewLocationRef?.kind === 'existing') {
+        storySkeletonBytes += STORY_EXISTING_JOIN_SQL_BYTES;
+        storyBoundParams += 1;
+        storyValues.push(row.interviewLocationRef.id);
+      } else if (row.interviewLocationRef?.kind === 'create') {
+        storySkeletonBytes += STORY_CREATE_JOIN_SQL_BYTES;
+        storyBoundParams += 3;
+        storyValues.push(
+          D1_SAMPLE_ID,
+          relatedPlaceNameByNorm.get(row.interviewLocationRef.normalizedName) ??
+            row.interviewLocationRef.name,
+          D1_SAMPLE_TS_MS
+        );
+      }
+
+      if (row.interviewerRef?.kind === 'existing') {
+        storySkeletonBytes += STORY_EXISTING_JOIN_SQL_BYTES;
+        storyBoundParams += 1;
+        storyValues.push(row.interviewerRef.id);
+      } else if (row.interviewerRef?.kind === 'create') {
+        storySkeletonBytes += STORY_CREATE_JOIN_SQL_BYTES;
+        storyBoundParams += 3;
+        storyValues.push(
+          D1_SAMPLE_ID,
+          relatedSpeakerNameByNorm.get(row.interviewerRef.normalizedName) ??
+            row.interviewerRef.name,
+          D1_SAMPLE_TS_MS
+        );
+      }
+
       commitStatements.push({
         label: 'commit.story',
-        boundParams: 28,
-        statementBytes: estimateInsertStatementBytes(STORY_INSERT_SQL_BYTES, [
-          row.title,
-          row.slug,
-          row.description,
-          row.descriptionPlain,
-          row.visibility,
-          row.topic,
-          row.topicNormalized,
-          row.language,
-          row.dateInterviewed,
-        ]),
+        boundParams: storyBoundParams,
+        statementBytes: estimateInsertStatementBytes(
+          storySkeletonBytes,
+          storyValues
+        ),
         estimatedRowsWritten: D1_ROW_WRITE_COSTS.storyInsert,
       });
 
+      const storyOwnerSubqueryParamBytes =
+        serializedParamBytes(row.slug) + 2 + 48;
+
       for (let i = 0; i < row.placeRefs.length; i += COMMIT_CHILD_ROW_CHUNK) {
         const chunk = row.placeRefs.slice(i, i + COMMIT_CHILD_ROW_CHUNK);
+        const edgeValues = chunk.flatMap((ref, idx) => [
+          i + idx,
+          ref.kind === 'existing' ? ref.id : null,
+          ref.kind === 'create'
+            ? (relatedPlaceNameByNorm.get(ref.normalizedName) ?? ref.name)
+            : null,
+        ]);
         commitStatements.push({
           label: 'commit.story_places',
-          boundParams: chunk.length * 5 + 3,
-          statementBytes: STORY_EDGE_SQL_BYTES + chunk.length * 90,
+          boundParams: 12 + chunk.length * 3,
+          statementBytes: estimateInsertStatementBytes(
+            STORY_EDGE_SQL_BYTES +
+              D1_GUARD_PARAM_BYTES +
+              storyOwnerSubqueryParamBytes +
+              chunk.length * 120,
+            edgeValues
+          ),
           estimatedRowsWritten:
             chunk.length * D1_ROW_WRITE_COSTS.storyPlaceInsert,
         });
@@ -535,10 +654,23 @@ export function planImportCommit(input: {
 
       for (let i = 0; i < row.speakerRefs.length; i += COMMIT_CHILD_ROW_CHUNK) {
         const chunk = row.speakerRefs.slice(i, i + COMMIT_CHILD_ROW_CHUNK);
+        const edgeValues = chunk.flatMap((ref, idx) => [
+          i + idx,
+          ref.kind === 'existing' ? ref.id : null,
+          ref.kind === 'create'
+            ? (relatedSpeakerNameByNorm.get(ref.normalizedName) ?? ref.name)
+            : null,
+        ]);
         commitStatements.push({
           label: 'commit.story_speakers',
-          boundParams: chunk.length * 5 + 3,
-          statementBytes: STORY_EDGE_SQL_BYTES + chunk.length * 90,
+          boundParams: 12 + chunk.length * 3,
+          statementBytes: estimateInsertStatementBytes(
+            STORY_EDGE_SQL_BYTES +
+              D1_GUARD_PARAM_BYTES +
+              storyOwnerSubqueryParamBytes +
+              chunk.length * 120,
+            edgeValues
+          ),
           estimatedRowsWritten:
             chunk.length * D1_ROW_WRITE_COSTS.storySpeakerInsert,
         });
@@ -548,8 +680,12 @@ export function planImportCommit(input: {
         const chunk = row.attachments.slice(i, i + COMMIT_CHILD_ROW_CHUNK);
         commitStatements.push({
           label: 'commit.story_attachments',
-          boundParams: chunk.length * 6 + 3,
-          statementBytes: ATTACHMENT_INSERT_SQL_BYTES + chunk.length * 140,
+          boundParams: 11 + chunk.length * 4,
+          statementBytes:
+            ATTACHMENT_INSERT_SQL_BYTES +
+            D1_GUARD_PARAM_BYTES +
+            storyOwnerSubqueryParamBytes +
+            chunk.length * 140,
           estimatedRowsWritten:
             chunk.length * D1_ROW_WRITE_COSTS.attachmentInsert,
         });
@@ -566,9 +702,12 @@ export function planImportCommit(input: {
         );
         commitStatements.push({
           label: 'commit.story_external_links',
-          boundParams: chunk.length * 4 + 3,
+          boundParams: 9 + chunk.length * 2,
           statementBytes: estimateInsertStatementBytes(
-            EXTERNAL_LINK_INSERT_SQL_BYTES,
+            EXTERNAL_LINK_INSERT_SQL_BYTES +
+              D1_GUARD_PARAM_BYTES +
+              storyOwnerSubqueryParamBytes +
+              chunk.length * 56,
             chunk
           ),
           estimatedRowsWritten:
@@ -587,24 +726,24 @@ export function planImportCommit(input: {
     commitStatements.push({
       label: 'commit.activate_staged_files',
       boundParams: chunk.length + 10,
-      statementBytes: ACTIVATE_FILES_SQL_BYTES + chunk.length * 40,
+      statementBytes: ACTIVATE_FILES_SQL_BYTES + chunk.length * 42 + 128,
       estimatedRowsWritten:
         chunk.length * D1_ROW_WRITE_COSTS.filesActivateUpdate,
     });
   }
 
   commitStatements.push({
-    label: 'commit.import_manifest_status',
-    boundParams: 12,
-    statementBytes: MANIFEST_COMMIT_SQL_BYTES + 256,
-    estimatedRowsWritten: D1_ROW_WRITE_COSTS.importManifestCommitUpdate,
+    label: 'commit.audit_entry',
+    boundParams: 14,
+    statementBytes: COMMIT_AUDIT_SQL_BYTES + 150,
+    estimatedRowsWritten: D1_ROW_WRITE_COSTS.auditEntryInsert,
   });
 
   commitStatements.push({
-    label: 'commit.audit_entry',
-    boundParams: 14,
-    statementBytes: AUDIT_INSERT_SQL_BYTES,
-    estimatedRowsWritten: D1_ROW_WRITE_COSTS.auditEntryInsert,
+    label: 'commit.import_manifest_status',
+    boundParams: 12,
+    statementBytes: MANIFEST_COMMIT_SQL_BYTES + 280,
+    estimatedRowsWritten: D1_ROW_WRITE_COSTS.importManifestCommitUpdate,
   });
 
   const allStatements = [...previewStatements, ...commitStatements];

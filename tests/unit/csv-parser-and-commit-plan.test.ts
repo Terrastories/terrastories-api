@@ -435,6 +435,94 @@ describe('D1 commit-plan budget validator', () => {
     expect(rowsViolation?.message).toContain(D1_BUDGET_ALTERNATIVES_MESSAGE);
   });
 
+  it('rejects a story description near the 100 KiB boundary once SQL template, joins, and all bound values are counted', () => {
+    // 16,770 3-byte UTF-8 code points (< 20,000 safe-description limit):
+    // `<p>...</p>` (50,317 B) + plain (50,310 B) = 100,627 B.
+    // Under the old 340-byte allowance this passed (< 102,400 B), while the
+    // real Drizzle story INSERT + joins + all bound params exceeds 100 KiB.
+    const boundaryText = 'ᐊ'.repeat(16_770);
+    const overBoundaryStory: NormalizedStoryRow = {
+      rowNumber: 1,
+      title: 'Near-100 KiB Boundary Story',
+      slug: 'near-100kib-boundary-story-0123456789ab',
+      description: `<p>${boundaryText}</p>`,
+      descriptionPlain: boundaryText,
+      visibility: 'community',
+      topic: 'Oral History',
+      topicNormalized: 'oral history',
+      language: 'en',
+      dateInterviewed: '2026-06-15T00:00:00.000Z',
+      interviewLocationRef: {
+        kind: 'create',
+        name: 'Boundary Landing',
+        normalizedName: 'boundary landing',
+      },
+      interviewerRef: {
+        kind: 'create',
+        name: 'Boundary Narrator',
+        normalizedName: 'boundary narrator',
+      },
+      placeRefs: [],
+      speakerRefs: [],
+      attachments: [],
+      externalMediaLinks: [],
+    };
+    const overPlan = planImportCommit({
+      normalizedData: {
+        kind: 'stories',
+        rows: [overBoundaryStory],
+        relatedPlacesToCreate: [
+          { name: 'Boundary Landing', normalizedName: 'boundary landing' },
+        ],
+        relatedSpeakersToCreate: [
+          { name: 'Boundary Narrator', normalizedName: 'boundary narrator' },
+        ],
+        skippedDuplicates: 0,
+        audienceCounts: { public: 0, community: 1, editors: 0 },
+      },
+      stagedFileIds: [],
+      manifestPayloadBytes: 101_050,
+      sourceFilePayloadBytes: 420,
+    });
+    const overStoryStmt = overPlan.commitStatements.find(
+      (s) => s.label === 'commit.story'
+    );
+    expect(overStoryStmt?.statementBytes).toBeGreaterThan(
+      D1_MAX_STATEMENT_BYTES
+    );
+    expect(overPlan.summary.withinD1Budget).toBe(false);
+    expect(overPlan.violations.map((v) => v.limit)).toContain(
+      'max_statement_bytes'
+    );
+
+    // Just below the boundary fits cleanly within 100 KiB.
+    const safeText = 'ᐊ'.repeat(16_600);
+    const underBoundaryStory: NormalizedStoryRow = {
+      ...overBoundaryStory,
+      description: `<p>${safeText}</p>`,
+      descriptionPlain: safeText,
+    };
+    const underPlan = planImportCommit({
+      normalizedData: {
+        kind: 'stories',
+        rows: [underBoundaryStory],
+        relatedPlacesToCreate: [
+          { name: 'Boundary Landing', normalizedName: 'boundary landing' },
+        ],
+        relatedSpeakersToCreate: [
+          { name: 'Boundary Narrator', normalizedName: 'boundary narrator' },
+        ],
+        skippedDuplicates: 0,
+        audienceCounts: { public: 0, community: 1, editors: 0 },
+      },
+      stagedFileIds: [],
+      manifestPayloadBytes: 100_050,
+      sourceFilePayloadBytes: 420,
+    });
+    expect(underPlan.summary.withinD1Budget).toBe(true);
+    expect(underPlan.violations).toEqual([]);
+  });
+
   it('computes exact UTC day windows', () => {
     const d = new Date('2026-11-21T23:59:59.999Z');
     const win = utcDayWindowMs(d);

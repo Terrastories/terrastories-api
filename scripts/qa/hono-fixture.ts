@@ -82,6 +82,10 @@ import {
   StoryWriteResponseSchema,
 } from '../../src/shared/schemas/story-writes.js';
 import {
+  ImportManifestDetailResponseSchema,
+  ImportManifestListResponseSchema,
+} from '../../src/shared/schemas/imports.js';
+import {
   AttachmentListResponseSchema,
   AttachmentResponseSchema,
   MediaMetadataResponseSchema,
@@ -288,6 +292,7 @@ export interface HonoQaBackend {
    */
   serverSecret: string;
   putMedia: (key: string, bytes: Uint8Array) => Promise<void>;
+  hasMedia?: (key: string) => Promise<boolean>;
   handler: (observeResponseCookies: (response: Response) => void) => Handler;
   routes: Endpoint[];
   close: () => Promise<void>;
@@ -406,6 +411,10 @@ export async function createFixture(
     : async (key, bytes) => {
         storage.set(key, bytes);
       };
+  const hasMedia: (key: string) => Promise<boolean> = backend?.hasMedia
+    ? backend.hasMedia
+    : async (key) => storage.has(key);
+  const isD1Backend = typeof (db as { batch?: unknown }).batch === 'function';
   const {
     attachments,
     auditEntries,
@@ -418,6 +427,7 @@ export async function createFixture(
     storyPlaces,
     storySpeakers,
     files,
+    importManifests,
     loginCodes,
   } = tablesFor(db);
   const communityMedia =
@@ -5487,6 +5497,11 @@ export async function createFixture(
       contentType: string;
       bytes: Uint8Array;
       fields?: Record<string, string>;
+      mediaParts?: Array<{
+        filename: string;
+        contentType: string;
+        bytes: Uint8Array;
+      }>;
     }): { rawBody: Uint8Array; headers: Record<string, string> } => {
       const boundary = `qa-bound-${Math.random().toString(16).slice(2)}`;
       const enc = new TextEncoder();
@@ -5504,6 +5519,14 @@ export async function createFixture(
         )
       );
       chunks.push(options.bytes);
+      for (const media of options.mediaParts ?? []) {
+        chunks.push(
+          enc.encode(
+            `\r\n--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="${media.filename}"\r\nContent-Type: ${media.contentType}\r\n\r\n`
+          )
+        );
+        chunks.push(media.bytes);
+      }
       chunks.push(enc.encode(`\r\n--${boundary}--\r\n`));
       const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
       const rawBody = new Uint8Array(total);
@@ -5592,6 +5615,121 @@ export async function createFixture(
     let qaViewerAttId = 0;
     let qaMemberFileId = '';
     let qaSuperPhotoId = '';
+
+    // Slice 12 CSV import QA fixtures and helpers (#123): seeded foreign
+    // previewed manifest (keeps committed_at NULL so D1's daily commit limit
+    // stays unoccupied) plus state tracked across media_editor -> media_admin.
+    const [foreignImportManifest] = await db
+      .insert(importManifests)
+      .values({
+        communityId: foreignCommunityId,
+        kind: 'places',
+        status: 'previewed',
+        createdBy: null,
+        sourceFileName: 'foreign-qa.csv',
+        sourceFileId: foreignFileId,
+        mappings: {
+          headerMappings: { name: 'name' },
+          unmappedHeaders: [],
+          duplicateStrategy: 'error',
+        },
+        normalizedRows: {
+          kind: 'places',
+          rows: [],
+          relatedPlacesToCreate: [],
+          relatedSpeakersToCreate: [],
+          skippedDuplicates: 0,
+          audienceCounts: null,
+        },
+        rowCount: 0,
+        rowErrors: [],
+        stagedFileIds: [],
+        resultSummary: null,
+        committedAt: null,
+        createdAt: Date.now(),
+      })
+      .returning();
+    let qaImportDiscardManifestId = 0;
+    let qaDiscardStagedFileId = '';
+    let qaDiscardStagedStorageKey = '';
+    let qaDiscardSourceFileId = '';
+    let qaDiscardSourceStorageKey = '';
+    let qaImportUnknownAudienceId = 0;
+    let qaImportPlacesManifestId = 0;
+    let qaCommittedPlacesAt = '';
+    let qaCommittedPlacesSummaryJson = '';
+    let qaImportStoriesManifestId = 0;
+    const qaD1BudgetCsv =
+      'title,visibility\n' +
+      Array.from(
+        { length: 1005 },
+        (_, i) => `QA Budget Row ${i + 1},community`
+      ).join('\n') +
+      '\n';
+    const parseJsonArray = <T>(value: unknown): T[] => {
+      if (Array.isArray(value)) return value as T[];
+      if (typeof value === 'string') {
+        const parsed: unknown = JSON.parse(value);
+        return Array.isArray(parsed) ? (parsed as T[]) : [];
+      }
+      return [];
+    };
+    const backdateCommittedImportsForD1 = async (): Promise<void> => {
+      if (!isD1Backend) return;
+      const yesterdayMs = Date.now() - 25 * 60 * 60 * 1000;
+      await db
+        .update(importManifests)
+        .set({ committedAt: yesterdayMs })
+        .where(
+          and(
+            eq(importManifests.communityId, mediaCommunity.id),
+            eq(importManifests.status, 'committed')
+          )
+        );
+    };
+    const forbiddenImportSteps = (roleLabel: string): Step[] => [
+      {
+        name: `reject CSV import preview for ${roleLabel}`,
+        method: 'POST',
+        path: '/v2/imports/preview',
+        expected: 403,
+        ...qaMultipart({
+          filename: 'qa-places-denied.csv',
+          contentType: 'text/csv',
+          bytes: new TextEncoder().encode('name\nDenied\n'),
+          fields: { kind: 'places' },
+        }),
+        check: forbiddenCheck,
+      },
+      {
+        name: `reject import manifest list for ${roleLabel}`,
+        method: 'GET',
+        path: '/v2/imports',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: `reject import manifest detail for ${roleLabel}`,
+        method: 'GET',
+        path: '/v2/imports/1',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: `reject import manifest commit for ${roleLabel}`,
+        method: 'POST',
+        path: '/v2/imports/1/commit',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: `reject import manifest discard for ${roleLabel}`,
+        method: 'DELETE',
+        path: '/v2/imports/1',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+    ];
 
     // Slice 11a (#188): the device-session revoke path is only known once
     // the list step ran, so `prepare` returns it for this run (the runner
@@ -7066,6 +7204,7 @@ export async function createFixture(
           ...publicCommunitiesWithSession,
           ...forbiddenCommunityReadSteps,
           ...forbiddenCommunityWriteSteps,
+          ...forbiddenImportSteps('super_admin'),
           {
             // Null-community super_admin cannot read any community branding
             // asset via /v2/media/:id, even an active public community's file.
@@ -7525,6 +7664,7 @@ export async function createFixture(
           ...forbiddenCommunityReadSteps,
           ...forbiddenCommunityWriteSteps,
           ...forbiddenAdminSteps,
+          ...forbiddenImportSteps('disabled admin'),
           {
             name: 'reset recovered disabled admin password (assisted)',
             method: 'POST',
@@ -7737,6 +7877,729 @@ export async function createFixture(
               contentType: 'audio/mpeg',
               bytes: mediaPngBytes,
             }),
+          },
+          {
+            name: 'preview CSV places import with staged media for discard',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportDiscardManifest',
+            ...qaMultipart({
+              filename: 'qa-places-discard.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,region,photo\nQA Import Discard Place,North,qa-discard-pic.png\n'
+              ),
+              fields: { kind: 'places' },
+              mediaParts: [
+                {
+                  filename: 'qa-discard-pic.png',
+                  contentType: 'image/png',
+                  bytes: mediaPngBytes,
+                },
+              ],
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaImportDiscardManifestId = parsed.data.data.id;
+              return (
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true &&
+                parsed.data.data.rowCount === 1 &&
+                parsed.data.data.stagedMediaCount === 1 &&
+                parsed.data.data.mediaSummary.stagedCount === 1 &&
+                !JSON.stringify(body).includes('storageKey')
+              );
+            },
+          },
+          {
+            name: 'withhold pre-commit import staged media from /v2/media/:id',
+            method: 'GET',
+            path: '/v2/media/pending',
+            expected: 404,
+            prepare: async () => {
+              const [manifestRow] = await db
+                .select({
+                  stagedFileIds: importManifests.stagedFileIds,
+                  sourceFileId: importManifests.sourceFileId,
+                })
+                .from(importManifests)
+                .where(eq(importManifests.id, qaImportDiscardManifestId))
+                .limit(1);
+              if (!manifestRow) {
+                throw new Error('Missing discard manifest row in DB');
+              }
+              const stagedIds = parseJsonArray<string>(
+                manifestRow.stagedFileIds
+              );
+              if (stagedIds.length !== 1) {
+                throw new Error(
+                  `Expected 1 staged file ID on discard manifest, got ${stagedIds.length}`
+                );
+              }
+              qaDiscardStagedFileId = stagedIds[0]!;
+              qaDiscardSourceFileId = manifestRow.sourceFileId;
+              const [sourceRow] = await db
+                .select({ storageKey: files.storageKey, path: files.path })
+                .from(files)
+                .where(eq(files.id, qaDiscardSourceFileId))
+                .limit(1);
+              if (!sourceRow) {
+                throw new Error('Missing source CSV file row in files table');
+              }
+              qaDiscardSourceStorageKey =
+                sourceRow.storageKey ?? sourceRow.path;
+              const [fileRow] = await db
+                .select({ storageKey: files.storageKey, path: files.path })
+                .from(files)
+                .where(eq(files.id, qaDiscardStagedFileId))
+                .limit(1);
+              if (!fileRow) {
+                throw new Error('Missing staged file row in files table');
+              }
+              qaDiscardStagedStorageKey = fileRow.storageKey ?? fileRow.path;
+              if (!(await hasMedia(qaDiscardStagedStorageKey))) {
+                throw new Error(
+                  'Expected staged media bytes in storage before discard'
+                );
+              }
+              return `/v2/media/${qaDiscardStagedFileId}`;
+            },
+          },
+          {
+            name: 'list own-community import manifests',
+            method: 'GET',
+            path: '/v2/imports',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.some(
+                  (item) => item.id === qaImportDiscardManifestId
+                ) &&
+                !parsed.data.data.some(
+                  (item) => item.id === foreignImportManifest.id
+                )
+              );
+            },
+          },
+          {
+            name: 'get previewed import manifest detail',
+            method: 'GET',
+            path: '/v2/imports/{qaImportDiscardManifest}',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.stagedMediaCount === 1
+              );
+            },
+          },
+          {
+            name: 'discard previewed import manifest',
+            method: 'DELETE',
+            path: '/v2/imports/{qaImportDiscardManifest}',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'discarded' &&
+                parsed.data.data.canCommit === false
+              );
+            },
+          },
+          {
+            name: 'reject commit of discarded manifest and confirm staged bytes removed',
+            method: 'POST',
+            path: '/v2/imports/{qaImportDiscardManifest}/commit',
+            expected: 409,
+            prepare: async () => {
+              const stagedRows = await db
+                .select({ id: files.id })
+                .from(files)
+                .where(eq(files.id, qaDiscardStagedFileId))
+                .limit(1);
+              if (stagedRows.length !== 0) {
+                throw new Error(
+                  'Staged file row was not deleted on manifest discard'
+                );
+              }
+              if (await hasMedia(qaDiscardStagedStorageKey)) {
+                throw new Error(
+                  'Staged media bytes remained in storage after manifest discard'
+                );
+              }
+              if (await hasMedia(qaDiscardSourceStorageKey)) {
+                throw new Error(
+                  'Source CSV bytes remained in storage after manifest discard'
+                );
+              }
+              const sourceRows = await db
+                .select({ id: files.id, isActive: files.isActive })
+                .from(files)
+                .where(eq(files.id, qaDiscardSourceFileId))
+                .limit(1);
+              if (
+                sourceRows.length !== 1 ||
+                sourceRows[0]!.isActive !== false
+              ) {
+                throw new Error(
+                  'Source CSV file row should remain inactive after manifest discard'
+                );
+              }
+            },
+          },
+          {
+            name: 'preview stories CSV with unknown audience (never coerce to public)',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportUnknownAudience',
+            ...qaMultipart({
+              filename: 'qa-unknown-audience.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'title,visibility\nQA Bad Audience Story,secret_elders\n'
+              ),
+              fields: { kind: 'stories' },
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaImportUnknownAudienceId = parsed.data.data.id;
+              return (
+                parsed.data.data.validRowCount === 0 &&
+                parsed.data.data.errorCount >= 1 &&
+                parsed.data.data.canCommit === false &&
+                parsed.data.data.audienceSummary?.public === 0 &&
+                parsed.data.data.rowErrors.some(
+                  (err) =>
+                    err.field === 'visibility' &&
+                    err.code === 'unknown_audience'
+                )
+              );
+            },
+          },
+          {
+            name: 'reject commit of manifest containing unknown audience row error',
+            method: 'POST',
+            path: '/v2/imports/{qaImportUnknownAudience}/commit',
+            expected: 422,
+            check: (body) =>
+              (body as { code?: unknown })?.code === 'import_not_committable',
+          },
+          {
+            name: 'preview places CSV referencing missing media file',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            ...qaMultipart({
+              filename: 'qa-missing-media.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,photo\nQA Missing Media Place,missing-asset.png\n'
+              ),
+              fields: { kind: 'places' },
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.canCommit === false &&
+                parsed.data.data.rowErrors.some(
+                  (err) => err.field === 'photo' && err.code === 'missing_media'
+                )
+              );
+            },
+          },
+          {
+            name: 'preview stories CSV rejecting cross-community place, speaker, and file refs',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            ...qaMultipart({
+              filename: 'qa-cross-community.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                `title,visibility,place_ids,speaker_ids,media\nQA Cross Tenant Story,community,${publicPlace.id},${speaker.id},${foreignFileId}\n`
+              ),
+              fields: { kind: 'stories' },
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const codes = new Set(
+                parsed.data.data.rowErrors.map((err) => err.code)
+              );
+              return (
+                parsed.data.data.canCommit === false &&
+                codes.has('missing_place') &&
+                codes.has('missing_speaker') &&
+                codes.has('missing_media')
+              );
+            },
+          },
+          {
+            name: 'reject malformed CSV upload on preview',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 400,
+            ...qaMultipart({
+              filename: 'qa-malformed.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,region\n"unclosed place,North\n'
+              ),
+              fields: { kind: 'places' },
+            }),
+          },
+          ...(isD1Backend
+            ? [
+                {
+                  name: 'reject preview exceeding D1 statement budget with actionable diagnostics',
+                  method: 'POST',
+                  path: '/v2/imports/preview',
+                  expected: 422,
+                  ...qaMultipart({
+                    filename: 'qa-d1-budget.csv',
+                    contentType: 'text/csv',
+                    bytes: new TextEncoder().encode(qaD1BudgetCsv),
+                    fields: { kind: 'stories' },
+                  }),
+                  check: (body: unknown) => {
+                    const err = body as {
+                      code?: unknown;
+                      details?: {
+                        commitPlan?: {
+                          withinD1Budget?: unknown;
+                          statementCount?: unknown;
+                        };
+                        violations?: Array<{ limit?: unknown }>;
+                        alternatives?: unknown;
+                      };
+                    };
+                    return (
+                      err?.code === 'd1_budget_exceeded' &&
+                      err.details?.commitPlan?.withinD1Budget === false &&
+                      typeof err.details?.commitPlan?.statementCount ===
+                        'number' &&
+                      err.details.commitPlan.statementCount > 1000 &&
+                      (err.details?.violations?.some(
+                        (v) => v.limit === 'max_statements'
+                      ) ??
+                        false) &&
+                      typeof err.details?.alternatives === 'string' &&
+                      err.details.alternatives
+                        .toLowerCase()
+                        .includes('field kit')
+                    );
+                  },
+                },
+              ]
+            : [
+                {
+                  name: 'preview over-budget CSV on Node reports withinD1Budget=false diagnostics',
+                  method: 'POST',
+                  path: '/v2/imports/preview',
+                  expected: 201,
+                  captureId: 'qaImportD1BudgetManifest',
+                  ...qaMultipart({
+                    filename: 'qa-d1-budget.csv',
+                    contentType: 'text/csv',
+                    bytes: new TextEncoder().encode(qaD1BudgetCsv),
+                    fields: { kind: 'stories' },
+                  }),
+                  check: (body: unknown) => {
+                    const parsed =
+                      ImportManifestDetailResponseSchema.safeParse(body);
+                    return (
+                      parsed.success &&
+                      parsed.data.data.canCommit === true &&
+                      parsed.data.data.commitPlan.withinD1Budget === false &&
+                      parsed.data.data.commitPlan.statementCount > 1000
+                    );
+                  },
+                },
+                {
+                  name: 'discard oversized D1-budget preview manifest on Node',
+                  method: 'DELETE',
+                  path: '/v2/imports/{qaImportD1BudgetManifest}',
+                  expected: 200,
+                },
+              ]),
+          {
+            name: 'preview places CSV import with staged photo and name audio',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportPlacesManifest',
+            ...qaMultipart({
+              filename: 'qa-places-commit.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,region,latitude,longitude,photo,name_audio\nQA Imported Place,Highlands,-3.41,-60.41,qa-place-pic.png,qa-place-audio.wav\n'
+              ),
+              fields: { kind: 'places' },
+              mediaParts: [
+                {
+                  filename: 'qa-place-pic.png',
+                  contentType: 'image/png',
+                  bytes: mediaPngBytes,
+                },
+                {
+                  filename: 'qa-place-audio.wav',
+                  contentType: 'audio/wav',
+                  bytes: mediaWavBytes,
+                },
+              ],
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaImportPlacesManifestId = parsed.data.data.id;
+              return (
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true &&
+                parsed.data.data.stagedMediaCount === 2 &&
+                parsed.data.data.mediaSummary.stagedCount === 2 &&
+                parsed.data.data.mediaSummary.totalAttachmentRefs === 2
+              );
+            },
+          },
+          {
+            name: 'commit places import manifest atomically',
+            method: 'POST',
+            path: '/v2/imports/{qaImportPlacesManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaCommittedPlacesAt = parsed.data.data.committedAt ?? '';
+              qaCommittedPlacesSummaryJson = JSON.stringify(
+                parsed.data.data.resultSummary
+              );
+              return (
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.canCommit === false &&
+                parsed.data.data.committedAt !== null &&
+                parsed.data.data.resultSummary?.createdPlaces === 1 &&
+                parsed.data.data.resultSummary?.createdAttachments === 2 &&
+                parsed.data.data.resultSummary?.createdSpeakers === 0 &&
+                parsed.data.data.resultSummary?.createdStories === 0
+              );
+            },
+          },
+          {
+            name: 're-commit committed places manifest idempotently',
+            method: 'POST',
+            path: '/v2/imports/{qaImportPlacesManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.committedAt === qaCommittedPlacesAt &&
+                JSON.stringify(parsed.data.data.resultSummary) ===
+                  qaCommittedPlacesSummaryJson
+              );
+            },
+          },
+          {
+            name: 'read activated staged media after places import commit',
+            method: 'GET',
+            path: '/v2/media/pending',
+            expected: 200,
+            prepare: async () => {
+              const [row] = await db
+                .select({ stagedFileIds: importManifests.stagedFileIds })
+                .from(importManifests)
+                .where(eq(importManifests.id, qaImportPlacesManifestId))
+                .limit(1);
+              const fileId = parseJsonArray<string>(row?.stagedFileIds)[0];
+              if (!fileId) {
+                throw new Error('Missing activated staged file ID');
+              }
+              return `/v2/media/${fileId}`;
+            },
+          },
+          {
+            name: 'confirm imported place and attached media in GET /v2/places',
+            method: 'GET',
+            path: '/v2/places',
+            expected: 200,
+            check: (body) => {
+              const parsed = PublicPlacesListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.some(
+                  (place) =>
+                    place.name === 'QA Imported Place' &&
+                    place.region === 'Highlands' &&
+                    place.photos.length === 1 &&
+                    place.placenameAudio !== null
+                )
+              );
+            },
+          },
+          ...(isD1Backend
+            ? [
+                {
+                  name: 'enforce D1 1-import-per-UTC-day limit after committed import',
+                  method: 'POST',
+                  path: '/v2/imports/preview',
+                  expected: 429,
+                  ...qaMultipart({
+                    filename: 'qa-daily-limit.csv',
+                    contentType: 'text/csv',
+                    bytes: new TextEncoder().encode(
+                      'name\nQA Daily Limit Blocked\n'
+                    ),
+                    fields: { kind: 'places' },
+                  }),
+                  check: (body: unknown) =>
+                    (body as { code?: unknown })?.code ===
+                    'd1_daily_import_limit',
+                },
+              ]
+            : []),
+          {
+            name: 'preview speakers CSV import with related birthplace and staged photo',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportSpeakersManifest',
+            prepare: backdateCommittedImportsForD1,
+            ...qaMultipart({
+              filename: 'qa-speakers-commit.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,birthplace_name,affiliation,photo\nQA Imported Speaker,QA Imported Birthplace,QA Guild,qa-speaker-pic.png\n'
+              ),
+              fields: { kind: 'speakers' },
+              mediaParts: [
+                {
+                  filename: 'qa-speaker-pic.png',
+                  contentType: 'image/png',
+                  bytes: mediaPngBytes,
+                },
+              ],
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true &&
+                parsed.data.data.relatedRecords.placesToCreateCount === 1 &&
+                parsed.data.data.stagedMediaCount === 1
+              );
+            },
+          },
+          {
+            name: 'commit speakers import manifest atomically',
+            method: 'POST',
+            path: '/v2/imports/{qaImportSpeakersManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.resultSummary?.createdPlaces === 1 &&
+                parsed.data.data.resultSummary?.createdSpeakers === 1 &&
+                parsed.data.data.resultSummary?.createdAttachments === 1
+              );
+            },
+          },
+          {
+            name: 'confirm imported speaker, birthplace, and photo in GET /v2/speakers',
+            method: 'GET',
+            path: '/v2/speakers',
+            expected: 200,
+            check: (body) => {
+              const parsed = PublicSpeakersListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.some(
+                  (spk) =>
+                    spk.name === 'QA Imported Speaker' &&
+                    spk.affiliation === 'QA Guild' &&
+                    spk.birthplace?.name === 'QA Imported Birthplace' &&
+                    spk.photo !== null
+                )
+              );
+            },
+          },
+          {
+            name: 'preview stories CSV with audienceMapping, related edges, staged media, and external link',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportStoriesManifest',
+            prepare: backdateCommittedImportsForD1,
+            ...qaMultipart({
+              filename: 'qa-stories-commit.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                `title,visibility,topic,language,place_ids,place_names,speaker_ids,speaker_names,media,external_media_links\nQA Imported Story,community-circle,Oral History,en,"${mediaPlace.id},${mediaPlace.id}",QA Imported Story Place,${mediaSpeaker.id},QA Imported Story Speaker,qa-story-pic.png,https://media.example.test/qa-import/1\n`
+              ),
+              fields: {
+                kind: 'stories',
+                audienceMapping: JSON.stringify({
+                  'community-circle': 'community',
+                }),
+              },
+              mediaParts: [
+                {
+                  filename: 'qa-story-pic.png',
+                  contentType: 'image/png',
+                  bytes: mediaPngBytes,
+                },
+              ],
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaImportStoriesManifestId = parsed.data.data.id;
+              return (
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true &&
+                parsed.data.data.audienceMapping?.['community-circle'] ===
+                  'community' &&
+                parsed.data.data.audienceSummary?.public === 0 &&
+                parsed.data.data.audienceSummary?.community === 1 &&
+                parsed.data.data.audienceSummary?.editors === 0 &&
+                parsed.data.data.relatedRecords.resolvedPlacesCount === 1 &&
+                parsed.data.data.relatedRecords.placesToCreateCount === 1 &&
+                parsed.data.data.relatedRecords.resolvedSpeakersCount === 1 &&
+                parsed.data.data.relatedRecords.speakersToCreateCount === 1 &&
+                parsed.data.data.previewRows.length === 1 &&
+                parsed.data.data.previewRowsTruncated === false &&
+                parsed.data.data.stagedMediaCount === 1
+              );
+            },
+          },
+          {
+            name: 'commit stories import manifest atomically with edge multiplicity',
+            method: 'POST',
+            path: '/v2/imports/{qaImportStoriesManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.resultSummary?.createdStories === 1 &&
+                parsed.data.data.resultSummary?.createdPlaces === 1 &&
+                parsed.data.data.resultSummary?.createdSpeakers === 1 &&
+                parsed.data.data.resultSummary?.createdStoryPlaces === 3 &&
+                parsed.data.data.resultSummary?.createdStorySpeakers === 2 &&
+                parsed.data.data.resultSummary?.createdAttachments === 1 &&
+                parsed.data.data.resultSummary?.createdExternalLinks === 1
+              );
+            },
+          },
+          {
+            name: 'confirm imported story edges, media, and external link in GET /v2/stories',
+            method: 'GET',
+            path: '/v2/stories',
+            expected: 200,
+            check: (body) => {
+              const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const imported = parsed.data.data.stories.find(
+                (story) => story.title === 'QA Imported Story'
+              );
+              return (
+                imported !== undefined &&
+                imported.visibility === 'community' &&
+                imported.attachments.length === 1 &&
+                imported.externalMediaLinks.length === 1 &&
+                imported.places.some((p) => p.id === mediaPlace.id) &&
+                imported.places.some(
+                  (p) => p.name === 'QA Imported Story Place'
+                ) &&
+                imported.speakers.some((s) => s.id === mediaSpeaker.id) &&
+                imported.speakers.some(
+                  (s) => s.name === 'QA Imported Story Speaker'
+                )
+              );
+            },
+          },
+          {
+            name: 'filter committed import manifests and verify content-free import audits',
+            method: 'GET',
+            path: '/v2/imports?status=committed',
+            expected: 200,
+            prepare: async () => {
+              const entries = await db
+                .select()
+                .from(auditEntries)
+                .where(
+                  and(
+                    eq(auditEntries.communityId, mediaCommunity.id),
+                    eq(auditEntries.resourceType, 'import_manifest')
+                  )
+                )
+                .orderBy(asc(auditEntries.id));
+              const actions = new Set(entries.map((entry) => entry.action));
+              for (const required of [
+                'import.preview',
+                'import.discard',
+                'import.commit',
+              ]) {
+                if (!actions.has(required)) {
+                  throw new Error(`Missing audit action ${required}`);
+                }
+              }
+              const forbiddenAuditTokens = [
+                'QA Imported Place',
+                'QA Imported Speaker',
+                'QA Imported Story',
+                'QA Bad Audience Story',
+                'qa-place-pic.png',
+                'qa-discard-pic.png',
+                'https://media.example.test/qa-import/1',
+                ...HONO_PERSONA_CULTURAL_STRINGS,
+              ];
+              for (const entry of entries) {
+                validateContentFreeAuditEntry({
+                  communityId: entry.communityId,
+                  actorId: entry.actorId,
+                  action: entry.action,
+                  resourceType: entry.resourceType,
+                  resourceIds: parseJsonArray<number | string>(
+                    entry.resourceIds
+                  ),
+                  outcome: entry.outcome,
+                  ipAddress: entry.ipAddress,
+                  userAgent: entry.userAgent,
+                });
+                const serialized = JSON.stringify(entry);
+                for (const token of forbiddenAuditTokens) {
+                  if (serialized.includes(token)) {
+                    throw new Error(
+                      `Import audit entry leaked row/content token "${token}"`
+                    );
+                  }
+                }
+              }
+            },
+            check: (body) => {
+              const parsed = ImportManifestListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.length === 3 &&
+                parsed.data.meta.total === 3 &&
+                parsed.data.data.every((item) => item.status === 'committed')
+              );
+            },
           },
           // The real-HTTP transport cannot send an 11 MiB body and keep the
           // connection reusable after the server answers 413 without draining
@@ -8113,6 +8976,75 @@ export async function createFixture(
             expected: 204,
           },
           {
+            name: 'admin lists own-community import manifests excluding foreign tenant',
+            method: 'GET',
+            path: '/v2/imports',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.some(
+                  (item) => item.id === qaImportStoriesManifestId
+                ) &&
+                !parsed.data.data.some(
+                  (item) => item.id === foreignImportManifest.id
+                )
+              );
+            },
+          },
+          {
+            name: 'admin reads editor committed import manifest detail',
+            method: 'GET',
+            path: '/v2/imports/pending',
+            expected: 200,
+            prepare: () => `/v2/imports/${qaImportStoriesManifestId}`,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.kind === 'stories'
+              );
+            },
+          },
+          {
+            name: 'admin discards editor previewed import manifest',
+            method: 'DELETE',
+            path: '/v2/imports/pending',
+            expected: 200,
+            prepare: () => `/v2/imports/${qaImportUnknownAudienceId}`,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'discarded' &&
+                parsed.data.data.canCommit === false
+              );
+            },
+          },
+          {
+            name: 'admin gets 404 reading cross-community import manifest detail',
+            method: 'GET',
+            path: `/v2/imports/${foreignImportManifest.id}`,
+            expected: 404,
+            check: publicNotFoundCheck,
+          },
+          {
+            name: 'admin gets 404 committing cross-community import manifest',
+            method: 'POST',
+            path: `/v2/imports/${foreignImportManifest.id}/commit`,
+            expected: 404,
+            check: publicNotFoundCheck,
+          },
+          {
+            name: 'admin gets 404 discarding cross-community import manifest',
+            method: 'DELETE',
+            path: `/v2/imports/${foreignImportManifest.id}`,
+            expected: 404,
+            check: publicNotFoundCheck,
+          },
+          {
             name: 'logout',
             method: 'POST',
             path: '/v2/auth/logout',
@@ -8194,6 +9126,7 @@ export async function createFixture(
               attachmentIds: [1],
             },
           },
+          ...forbiddenImportSteps('viewer'),
           {
             name: 'logout',
             method: 'POST',
@@ -8268,6 +9201,7 @@ export async function createFixture(
             path: `/v2/media/${mediaGuardedFileId}`,
             expected: 403,
           },
+          ...forbiddenImportSteps('member'),
           {
             name: 'logout',
             method: 'POST',
@@ -8369,6 +9303,7 @@ export async function createFixture(
             path: '/v2/media/{qaSuperPhoto}',
             expected: 200,
           },
+          ...forbiddenImportSteps('super_admin'),
           {
             name: 'logout',
             method: 'POST',

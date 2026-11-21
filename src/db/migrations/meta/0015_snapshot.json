@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "cc7aadfd-d064-4834-b0de-cae6b76f832b",
+  "id": "140e8110-7b0a-485d-b892-2285ff495d03",
   "prevId": "d94cecd1-baac-4b5a-800a-7f64f599c8f1",
   "tables": {
     "attachments": {
@@ -362,13 +362,6 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false
-        },
-        "deprovisioned_at": {
-          "name": "deprovisioned_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
           "autoincrement": false
         }
       },
@@ -2470,6 +2463,193 @@
         "installation_bootstrap_singleton_check": {
           "name": "installation_bootstrap_singleton_check",
           "value": "\"installation_bootstrap\".\"id\" = 1"
+        }
+      }
+    },
+    "import_manifests": {
+      "name": "import_manifests",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "community_id": {
+          "name": "community_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'previewed'"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_file_name": {
+          "name": "source_file_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_file_id": {
+          "name": "source_file_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mappings": {
+          "name": "mappings",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "normalized_rows": {
+          "name": "normalized_rows",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "row_count": {
+          "name": "row_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "row_errors": {
+          "name": "row_errors",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "staged_file_ids": {
+          "name": "staged_file_ids",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "result_summary": {
+          "name": "result_summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "committed_at": {
+          "name": "committed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "import_manifests_community_created_idx": {
+          "name": "import_manifests_community_created_idx",
+          "columns": ["community_id", "created_at", "id"],
+          "isUnique": false
+        },
+        "import_manifests_community_status_idx": {
+          "name": "import_manifests_community_status_idx",
+          "columns": ["community_id", "status", "created_at"],
+          "isUnique": false
+        },
+        "import_manifests_status_committed_at_idx": {
+          "name": "import_manifests_status_committed_at_idx",
+          "columns": ["status", "committed_at"],
+          "isUnique": false
+        },
+        "import_manifests_source_file_idx": {
+          "name": "import_manifests_source_file_idx",
+          "columns": ["source_file_id"],
+          "isUnique": false
+        },
+        "import_manifests_created_by_idx": {
+          "name": "import_manifests_created_by_idx",
+          "columns": ["created_by"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "import_manifests_community_id_communities_id_fk": {
+          "name": "import_manifests_community_id_communities_id_fk",
+          "tableFrom": "import_manifests",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "import_manifests_created_by_users_id_fk": {
+          "name": "import_manifests_created_by_users_id_fk",
+          "tableFrom": "import_manifests",
+          "tableTo": "users",
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "import_manifests_source_file_community_fk": {
+          "name": "import_manifests_source_file_community_fk",
+          "tableFrom": "import_manifests",
+          "tableTo": "files",
+          "columnsFrom": ["community_id", "source_file_id"],
+          "columnsTo": ["community_id", "id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "import_manifests_kind_check": {
+          "name": "import_manifests_kind_check",
+          "value": "\"import_manifests\".\"kind\" in ('places', 'speakers', 'stories')"
+        },
+        "import_manifests_status_check": {
+          "name": "import_manifests_status_check",
+          "value": "\"import_manifests\".\"status\" in ('previewed', 'committed', 'failed', 'discarded')"
+        },
+        "import_manifests_row_count_check": {
+          "name": "import_manifests_row_count_check",
+          "value": "\"import_manifests\".\"row_count\" >= 0"
+        },
+        "import_manifests_committed_at_check": {
+          "name": "import_manifests_committed_at_check",
+          "value": "(\"import_manifests\".\"status\" = 'committed' AND \"import_manifests\".\"committed_at\" IS NOT NULL) OR (\"import_manifests\".\"status\" <> 'committed' AND \"import_manifests\".\"committed_at\" IS NULL)"
         }
       }
     }

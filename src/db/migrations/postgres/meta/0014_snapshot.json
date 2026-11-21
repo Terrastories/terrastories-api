@@ -1,5 +1,5 @@
 {
-  "id": "812b55ea-0399-4a3f-96fd-4865443b5f86",
+  "id": "3242555b-294c-4ee6-ac23-5d84d57a6087",
   "prevId": "d5ee40a0-24fb-4616-80c1-a11840767dc3",
   "version": "7",
   "dialect": "postgresql",
@@ -411,12 +411,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "deprovisioned_at": {
-          "name": "deprovisioned_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -2879,6 +2873,261 @@
         }
       },
       "schema": "",
+      "isRLSEnabled": false
+    },
+    "public.import_manifests": {
+      "name": "import_manifests",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "community_id": {
+          "name": "community_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'previewed'"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_file_name": {
+          "name": "source_file_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_file_id": {
+          "name": "source_file_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mappings": {
+          "name": "mappings",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "normalized_rows": {
+          "name": "normalized_rows",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "row_count": {
+          "name": "row_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "row_errors": {
+          "name": "row_errors",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "staged_file_ids": {
+          "name": "staged_file_ids",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "result_summary": {
+          "name": "result_summary",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "committed_at": {
+          "name": "committed_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "import_manifests_community_created_idx": {
+          "name": "import_manifests_community_created_idx",
+          "columns": [
+            {
+              "expression": "community_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "import_manifests_community_status_idx": {
+          "name": "import_manifests_community_status_idx",
+          "columns": [
+            {
+              "expression": "community_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "import_manifests_status_committed_at_idx": {
+          "name": "import_manifests_status_committed_at_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "committed_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "import_manifests_source_file_idx": {
+          "name": "import_manifests_source_file_idx",
+          "columns": [
+            {
+              "expression": "source_file_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "import_manifests_created_by_idx": {
+          "name": "import_manifests_created_by_idx",
+          "columns": [
+            {
+              "expression": "created_by",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "import_manifests_community_id_communities_id_fk": {
+          "name": "import_manifests_community_id_communities_id_fk",
+          "tableFrom": "import_manifests",
+          "tableTo": "communities",
+          "columnsFrom": ["community_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "import_manifests_created_by_users_id_fk": {
+          "name": "import_manifests_created_by_users_id_fk",
+          "tableFrom": "import_manifests",
+          "tableTo": "users",
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "import_manifests_source_file_community_fk": {
+          "name": "import_manifests_source_file_community_fk",
+          "tableFrom": "import_manifests",
+          "tableTo": "files",
+          "columnsFrom": ["community_id", "source_file_id"],
+          "columnsTo": ["community_id", "id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "import_manifests_kind_check": {
+          "name": "import_manifests_kind_check",
+          "value": "\"import_manifests\".\"kind\" in ('places', 'speakers', 'stories')"
+        },
+        "import_manifests_status_check": {
+          "name": "import_manifests_status_check",
+          "value": "\"import_manifests\".\"status\" in ('previewed', 'committed', 'failed', 'discarded')"
+        },
+        "import_manifests_row_count_check": {
+          "name": "import_manifests_row_count_check",
+          "value": "\"import_manifests\".\"row_count\" >= 0"
+        },
+        "import_manifests_committed_at_check": {
+          "name": "import_manifests_committed_at_check",
+          "value": "(\"import_manifests\".\"status\" = 'committed' AND \"import_manifests\".\"committed_at\" IS NOT NULL) OR (\"import_manifests\".\"status\" <> 'committed' AND \"import_manifests\".\"committed_at\" IS NULL)"
+        }
+      },
       "isRLSEnabled": false
     }
   },

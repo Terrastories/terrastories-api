@@ -8,9 +8,9 @@ import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { eq } from 'drizzle-orm';
 import { tablesFor } from '../../src/db/dialect.js';
 
-describe('0015 migration: communities.deprovisioned_at nullable column', () => {
+describe('0016 migration: communities.deprovisioned_at nullable column', () => {
   it('adds nullable deprovisioned_at over existing community rows and persists ms epoch tombstones', async () => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'ts-0015-mig-'));
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'ts-0016-mig-'));
     try {
       const sqlite = new Sqlite(path.join(tmpDir, 'upgrade.db'));
       sqlite.pragma('foreign_keys = ON');
@@ -31,6 +31,7 @@ describe('0015 migration: communities.deprovisioned_at nullable column', () => {
         '0012_auth_throttle_and_session_lifetimes.sql',
         '0013_login_codes_and_claim_tokens.sql',
         '0014_session_admin_code_step_up_and_login_code_idx.sql',
+        '0015_import_manifests.sql',
       ];
       for (const file of preFiles) {
         const sqlText = readFileSync(path.join(migrationsDir, file), 'utf8');
@@ -43,15 +44,15 @@ describe('0015 migration: communities.deprovisioned_at nullable column', () => {
       sqlite
         .prepare(
           `INSERT INTO communities (name, slug, locale, public_stories, is_active, beta, created_at, updated_at)
-           VALUES ('Pre 0015', 'pre-0015', 'en', 0, 1, 0, ?, ?)`
+           VALUES ('Pre 0016', 'pre-0016', 'en', 0, 1, 0, ?, ?)`
         )
         .run(nowMs, nowMs);
 
-      const sql0015 = readFileSync(
-        path.join(migrationsDir, '0015_communities_deprovisioned_at.sql'),
+      const sql0016 = readFileSync(
+        path.join(migrationsDir, '0016_communities_deprovisioned_at.sql'),
         'utf8'
       );
-      for (const stmt of sql0015.split('--> statement-breakpoint')) {
+      for (const stmt of sql0016.split('--> statement-breakpoint')) {
         if (stmt.trim()) sqlite.exec(stmt);
       }
 
@@ -71,7 +72,7 @@ describe('0015 migration: communities.deprovisioned_at nullable column', () => {
           deprovisionedAt: t.communities.deprovisionedAt,
         })
         .from(t.communities)
-        .where(eq(t.communities.slug, 'pre-0015'));
+        .where(eq(t.communities.slug, 'pre-0016'));
       expect(existing).toBeDefined();
       expect(existing?.deprovisionedAt).toBeNull();
 
@@ -87,7 +88,7 @@ describe('0015 migration: communities.deprovisioned_at nullable column', () => {
       expect(updated?.deprovisionedAt).toBe(nowMs + 5000);
       sqlite.close();
 
-      // Fresh migrate() through 0015 also succeeds.
+      // Fresh migrate() through 0016 also succeeds.
       const freshSqlite = new Sqlite(path.join(tmpDir, 'fresh.db'));
       freshSqlite.pragma('foreign_keys = ON');
       const freshDb = drizzle(freshSqlite);

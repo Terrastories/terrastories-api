@@ -839,16 +839,23 @@ export class AdminRepository {
     // unit rather than committing cleanup/audit without a tombstone.
     // Only the base slug is bound; fixed numeric SQL keeps this below D1's
     // per-statement bound-parameter limit even with all 100 candidates.
-    const ordinals = Array.from({ length: 100 }, (_, index) =>
-      sql.raw(`select ${index + 1} as ordinal`)
+    // D1 limits compound SELECT terms: use a 10 × 10 product rather than
+    // a 100-way UNION ALL, while retaining the same bounded candidate set.
+    const digits = Array.from({ length: 10 }, (_, index) =>
+      sql.raw(`(${index})`)
     );
+    const digitSet = sql.join(digits, sql`, `);
     const baseSlug = `deprovisioned-${input.communityId}`;
     const tombstoneSlug = sql`(
+      with digits(digit) as (values ${digitSet})
       select candidate from (
         select ${baseSlug} ||
           case when ordinal = 1 then '' else '-' || cast(ordinal as text) end
           as candidate, ordinal
-        from (${sql.join(ordinals, sql` union all `)}) as attempts
+        from (
+          select tens.digit * 10 + units.digit + 1 as ordinal
+          from digits as tens cross join digits as units
+        ) as attempts
       ) as candidates
       where not exists (select 1 from communities occupied where occupied.slug = candidate)
       order by ordinal limit 1

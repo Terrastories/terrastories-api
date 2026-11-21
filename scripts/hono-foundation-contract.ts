@@ -2227,6 +2227,135 @@ export async function runHonoFoundationContract(
           'both redeemed admin-issued codes must be consumed exactly once'
         );
       }
+      // PR #252 bot finding 2: the password-upgrade login path must take the
+      // same deterministic session-lock order as the redemption path. A
+      // redemption (A presenting B's cookie) deletes A's sessions then B's
+      // presented row while B's password-upgrade login (B presenting A's
+      // cookie) deletes B's sessions then A's presented row; before the
+      // ordered union lock both transactions could hold one session row while
+      // waiting for the other in reverse order and PostgreSQL aborted one
+      // with a deadlock. The community row lock below parks both writers at
+      // the same point so the session phase really overlaps (a race that never
+      // forms must fail, not pass silently).
+      if (dialectOf(database) === 'postgresql') {
+        const lockUpgradeAEmail = `upglock-a-${tag}@example.test`;
+        const lockUpgradeBEmail = `upglock-b-${tag}@example.test`;
+        const lockUpgradeAccounts: Array<{ id: number; email: string }> = [];
+        for (const [email, username] of [
+          [lockUpgradeAEmail, `upglock_a_${tag}`],
+          [lockUpgradeBEmail, `upglock_b_${tag}`],
+        ] as const) {
+          const [row] = await db
+            .insert(tables.users)
+            .values({
+              ...userDefaults,
+              email,
+              username,
+              role: 'admin',
+              communityId: communityA,
+            })
+            .returning();
+          userIds.push(row.id);
+          lockUpgradeAccounts.push({ id: row.id, email });
+        }
+        const [lockUpgradeAccountA, lockUpgradeAccountB] =
+          lockUpgradeAccounts as [
+            { id: number; email: string },
+            { id: number; email: string },
+          ];
+        const lockUpgradeCookieA = await login(lockUpgradeAccountA.email);
+        const lockUpgradeCookieB = await login(lockUpgradeAccountB.email);
+        const lockUpgradeCodes: string[] = [];
+        for (const account of [lockUpgradeAccountA, lockUpgradeAccountB]) {
+          const rawCode = toBase64Url(
+            crypto.getRandomValues(new Uint8Array(16))
+          );
+          lockUpgradeCodes.push(rawCode);
+          await db.insert(tables.loginCodes).values({
+            communityId: communityA,
+            userId: account.id,
+            purpose: 'admin_issued',
+            codeHash: await sha256Hex(rawCode),
+            createdBy: account.id,
+            createdAt: instant.getTime(),
+            expiresAt: instant.getTime() + ADMIN_ISSUED_CODE_TTL_MS,
+            usedAt: null,
+            supersededAt: null,
+          });
+        }
+        const redeemWhileUpgradingWith = (
+          rawCode: string,
+          cookie: string,
+          ip: string
+        ) =>
+          send(app, '/v2/auth/recovery/redeem', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              cookie,
+              'x-forwarded-for': ip,
+            },
+            body: JSON.stringify({ code: rawCode }),
+          });
+        const upgradeLoginWith = (cookie: string, identifier: string) =>
+          send(app, '/v2/auth/login', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              cookie,
+              'x-forwarded-for': '198.51.100.233',
+            },
+            body: JSON.stringify({
+              identifier,
+              derivedKey: stretchedKey,
+              upgrade: {
+                algorithm: 'client-argon2id+sha256',
+                salt: Buffer.from(
+                  crypto.getRandomValues(new Uint8Array(16))
+                ).toString('base64'),
+                params: { memoryKiB: 19 * 1024, iterations: 2, parallelism: 1 },
+                derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+              },
+            }),
+          });
+        let pendingRedeem!: Promise<Response>;
+        let pendingUpgrade!: Promise<Response>;
+        await db.transaction(async (tx: any) => {
+          await tx.execute(
+            sql`select id from communities where id = ${communityA} for update`
+          );
+          pendingRedeem = redeemWhileUpgradingWith(
+            lockUpgradeCodes[0]!,
+            lockUpgradeCookieB,
+            '198.51.100.231'
+          );
+          pendingUpgrade = upgradeLoginWith(
+            lockUpgradeCookieA,
+            lockUpgradeBEmail
+          );
+          pendingRedeem.then(ignore, ignore);
+          pendingUpgrade.then(ignore, ignore);
+          const blocked = await waitForBlocked(tx, 2, Date.now() + 4000);
+          if (blocked < 2)
+            throw new Error(
+              'login-vs-redeem lock race never materialised: the redemption and the upgrade login did not both block behind the community lock'
+            );
+        });
+        const [redeemResponse, upgradeResponse] = await Promise.all([
+          pendingRedeem,
+          pendingUpgrade,
+        ]);
+        assert.equal(
+          redeemResponse.status,
+          200,
+          `cross-user redemption versus password-upgrade login must not deadlock (got ${redeemResponse.status})`
+        );
+        assert.equal(
+          upgradeResponse.status,
+          200,
+          `password-upgrade login versus cross-user redemption must not deadlock (got ${upgradeResponse.status})`
+        );
+      }
       const [wrappedBefore] = await db
         .select()
         .from(tables.users)

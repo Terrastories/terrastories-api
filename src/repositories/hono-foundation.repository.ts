@@ -598,6 +598,39 @@ export class HonoFoundationRepository {
         return await db.transaction(async (tx: Executor) => {
           // Community → users → sessions before any write (acquireCommunityFirst).
           await acquireCommunityFirst(tx);
+          // Users row before the sessions locks, keeping the one global order
+          // of every coupled-writer path (community → users → sessions) so this
+          // password-upgrade login can never lock after a redemption that took
+          // the same rows in the opposite order.
+          await tx
+            .select({ id: users.id })
+            .from(users)
+            .where(eq(users.id, input.user.id))
+            .for('update')
+            .limit(1);
+          // Take every session row this coupled write will delete under one
+          // `FOR UPDATE` in a single deterministic (ascending id) order before
+          // any write — the same union lock the redemption path takes. A
+          // cross-user upgrade login (B presenting A's cookie) deletes B's
+          // sessions and then A's presented row, so an overlapping redemption
+          // (A presenting B's cookie) must serialize here instead of holding
+          // one row while waiting for the other in reverse order (PR #252 bot
+          // finding 2; SPEC-V2 §6.8).
+          const lockSessions = () =>
+            tx
+              .select({ id: sessions.id })
+              .from(sessions)
+              .where(
+                plan.previousHash === undefined
+                  ? eq(sessions.userId, input.user.id)
+                  : or(
+                      eq(sessions.userId, input.user.id),
+                      eq(sessions.tokenHash, plan.previousHash)
+                    )
+              )
+              .orderBy(sessions.id)
+              .for('update');
+          await lockSessions();
           const updated = await verifierUpdate(tx);
           if (updated.length === 0) throw new SessionGateLost();
           // Explicit revocation: a same-verifier write never fires the

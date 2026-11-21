@@ -635,6 +635,60 @@ describe('Slice 13a deterministic community export manifest builder', () => {
     expect(built.jsonText).not.toContain('super@system.test');
   });
 
+  it.each([true, false])(
+    'exports import manifests with their source and staged files (active=%s)',
+    async (communityIsActive) => {
+      const { db, repo, verifiedFiles, mediaArchive, ids, t1 } =
+        await seedRichCommunity({ communityIsActive });
+      const tables = tablesFor(db);
+      const own = {
+        id: 901,
+        communityId: 1,
+        kind: 'stories' as const,
+        status: 'committed' as const,
+        createdBy: 10,
+        sourceFileName: 'source.csv',
+        sourceFileId: ids.stagingFileId,
+        mappings: { title: 'Title' },
+        normalizedRows: { rows: [{ title: 'Imported story' }] },
+        rowCount: 1,
+        rowErrors: [],
+        stagedFileIds: [ids.attachedFileId],
+        resultSummary: { created: 1 },
+        committedAt: t1.getTime(),
+        createdAt: t1.getTime(),
+      };
+      db.insert(tables.importManifests)
+        .values([
+          own,
+          {
+            ...own,
+            id: 902,
+            communityId: 2,
+            createdBy: 20,
+            sourceFileId: ids.foreignFileId,
+          },
+        ])
+        .run();
+      const snapshot = await repo.readCommunityExportSnapshot(1);
+      const first = buildCommunityExportManifest(
+        snapshot!,
+        verifiedFiles,
+        mediaArchive
+      );
+      expect(first.manifest.importManifests).toEqual([own]);
+      expect(first.manifest.files.map((file) => file.id)).toEqual(
+        expect.arrayContaining([own.sourceFileId, ...own.stagedFileIds])
+      );
+      const second = buildCommunityExportManifest(
+        (await repo.readCommunityExportSnapshot(1))!,
+        verifiedFiles,
+        mediaArchive
+      );
+      expect(second.bytes).toEqual(first.bytes);
+    }
+  );
+
   it('produces byte-identical re-exports even after export-lifecycle audit entries are written, and supports disabled communities', async () => {
     const { db, repo, verifiedFiles, mediaArchive, t1 } =
       await seedRichCommunity({

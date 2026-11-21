@@ -791,4 +791,56 @@ describe('contract classification and HTTP baseUrl transport', () => {
       );
     }
   }, 15_000);
+
+  it('supports binary response verification via checkBytes and fails closed on mismatch', async () => {
+    const routes = [{ method: 'GET', path: '/artifact' }];
+    const expected = new Uint8Array([1, 2, 3, 4]);
+    const okReport = await runJourneys({
+      contract: 'canonical-v2',
+      routes,
+      journeys: [
+        {
+          persona: 'admin',
+          steps: [
+            {
+              name: 'verify bytes',
+              method: 'GET',
+              path: '/artifact',
+              expected: 200,
+              checkBytes: (bytes) =>
+                bytes.byteLength === expected.byteLength &&
+                bytes.every((b, idx) => b === expected[idx]),
+            },
+          ],
+        },
+      ],
+      handler: async () => new Response(expected),
+    });
+    expect(okReport.pass).toBe(true);
+
+    const failReport = await runJourneys({
+      contract: 'canonical-v2',
+      routes,
+      journeys: [
+        {
+          persona: 'admin',
+          steps: [
+            {
+              name: 'reject wrong bytes',
+              method: 'GET',
+              path: '/artifact',
+              expected: 200,
+              checkBytes: () => false,
+            },
+          ],
+        },
+      ],
+      handler: async () => new Response(expected),
+    });
+    expect(failReport.pass).toBe(false);
+    expect(failReport.results[0]).toMatchObject({
+      pass: false,
+      failure: 'body-mismatch',
+    });
+  });
 });

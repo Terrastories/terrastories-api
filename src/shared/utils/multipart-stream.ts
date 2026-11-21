@@ -15,12 +15,19 @@ export class MultipartStreamError extends Error {
       | 'field_too_large'
       | 'missing_file'
       | 'duplicate_file'
-      | 'too_many_fields',
+      | 'too_many_fields'
+      | 'too_many_files',
     message: string
   ) {
     super(message);
     this.name = 'MultipartStreamError';
   }
+}
+
+export interface MultipartImportParseResult<TCsvResult, TMediaResult> {
+  fields: Map<string, string>;
+  csvResult: TCsvResult;
+  mediaResults: TMediaResult[];
 }
 
 export interface MultipartFilePart<TResult> {
@@ -488,6 +495,214 @@ export async function parseMultipartMediaStream<TResult>(
       throw new MultipartStreamError('missing_file', 'Missing uploaded file');
     }
     return { fields, fileResult };
+  } catch (error) {
+    await reader.cancel();
+    throw error;
+  } finally {
+    reader.release();
+  }
+}
+
+/**
+ * Streaming multipart parser for bounded CSV imports: accepts text fields,
+ * one required `file` CSV part, and 0..N `media` file parts without buffering
+ * the entire multipart request in memory.
+ */
+export async function parseMultipartImportStream<TCsvResult, TMediaResult>(
+  body: ReadableStream<Uint8Array> | null,
+  contentTypeHeader: string | undefined,
+  options: {
+    maxRequestBytes: number;
+    maxMediaFiles: number;
+    maxTextFields?: number;
+    maxTextFieldBytes?: number;
+    onCsvPart: (part: MultipartFilePart<TCsvResult>) => Promise<void>;
+    onMediaPart: (part: MultipartFilePart<TMediaResult>) => Promise<void>;
+  }
+): Promise<MultipartImportParseResult<TCsvResult, TMediaResult>> {
+  const boundary = extractMultipartBoundary(contentTypeHeader);
+  if (!boundary) {
+    throw new MultipartStreamError(
+      'invalid_content_type',
+      'Expected multipart/form-data with boundary'
+    );
+  }
+  if (!body) {
+    throw new MultipartStreamError(
+      'malformed_multipart',
+      'Missing request body'
+    );
+  }
+
+  const maxTextFields = options.maxTextFields ?? MAX_TEXT_FIELDS;
+  const maxTextFieldBytes = options.maxTextFieldBytes ?? 64 * 1024;
+  const reader = new BufferedMultipartReader(body, options.maxRequestBytes);
+  const boundaryDelim = encoder.encode(`\r\n--${boundary}`);
+  const fields = new Map<string, string>();
+  let hasCsv = false;
+  let hasCsvResult = false;
+  let csvResult!: TCsvResult;
+  const mediaResults: TMediaResult[] = [];
+
+  try {
+    await reader.consumeInitialBoundary(boundary);
+    while (true) {
+      const headers = await reader.readPartHeaders();
+      if (
+        headers.filename === undefined &&
+        headers.name !== 'file' &&
+        headers.name !== 'media'
+      ) {
+        if (fields.size >= maxTextFields) {
+          throw new MultipartStreamError(
+            'too_many_fields',
+            'Too many form fields'
+          );
+        }
+        if (fields.has(headers.name)) {
+          throw new MultipartStreamError(
+            'malformed_multipart',
+            `Duplicate form field: ${headers.name}`
+          );
+        }
+        const chunks: Uint8Array[] = [];
+        let fieldBytes = 0;
+        let streamDone = false;
+        while (true) {
+          const {
+            chunk,
+            partDone,
+            streamDone: done,
+          } = await reader.readPartChunk(boundaryDelim);
+          fieldBytes += chunk.byteLength;
+          if (fieldBytes > maxTextFieldBytes) {
+            throw new MultipartStreamError(
+              'field_too_large',
+              'Form field exceeds maximum size'
+            );
+          }
+          if (chunk.byteLength > 0) chunks.push(chunk);
+          if (partDone) {
+            streamDone = done;
+            break;
+          }
+        }
+        const merged =
+          chunks.length === 1
+            ? chunks[0]!
+            : chunks.reduce((acc, c) => concatBytes(acc, c), new Uint8Array(0));
+        fields.set(headers.name, decoder.decode(merged));
+        if (streamDone) break;
+        continue;
+      }
+
+      if (headers.filename === undefined) {
+        throw new MultipartStreamError(
+          'malformed_multipart',
+          'File part must include a filename'
+        );
+      }
+
+      if (headers.name !== 'file' && headers.name !== 'media') {
+        throw new MultipartStreamError(
+          'malformed_multipart',
+          'Unexpected file part field name'
+        );
+      }
+
+      const isCsv = headers.name === 'file';
+      if (isCsv && hasCsv) {
+        throw new MultipartStreamError(
+          'duplicate_file',
+          'Only one CSV file part is allowed'
+        );
+      }
+      if (!isCsv && mediaResults.length >= options.maxMediaFiles) {
+        throw new MultipartStreamError(
+          'too_many_files',
+          `At most ${options.maxMediaFiles} staged media files are allowed`
+        );
+      }
+
+      let partFinished = false;
+      let reachedStreamEnd = false;
+      const partStream = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (partFinished) {
+            controller.close();
+            return;
+          }
+          try {
+            const { chunk, partDone, streamDone } =
+              await reader.readPartChunk(boundaryDelim);
+            if (chunk.byteLength > 0) {
+              controller.enqueue(chunk);
+            }
+            if (partDone) {
+              partFinished = true;
+              reachedStreamEnd = streamDone;
+              controller.close();
+            }
+          } catch (error) {
+            controller.error(error);
+          }
+        },
+        async cancel() {
+          partFinished = true;
+          await reader.cancel();
+        },
+      });
+
+      if (isCsv) {
+        hasCsv = true;
+        await options.onCsvPart({
+          name: headers.name,
+          filename: headers.filename,
+          contentType: headers.contentType,
+          fieldsSoFar: fields,
+          stream: partStream,
+          finish: (result) => {
+            hasCsvResult = true;
+            csvResult = result;
+          },
+        });
+      } else {
+        let hasMediaResult = false;
+        let mediaResult!: TMediaResult;
+        await options.onMediaPart({
+          name: headers.name,
+          filename: headers.filename,
+          contentType: headers.contentType,
+          fieldsSoFar: fields,
+          stream: partStream,
+          finish: (result) => {
+            hasMediaResult = true;
+            mediaResult = result;
+          },
+        });
+        if (hasMediaResult) {
+          mediaResults.push(mediaResult);
+        }
+      }
+
+      if (!partFinished) {
+        const drain = partStream.getReader();
+        try {
+          while (!(await drain.read()).done) {
+            // Drain remaining unread part bytes cleanly up to boundary.
+          }
+        } finally {
+          drain.releaseLock();
+        }
+      }
+
+      if (reachedStreamEnd) break;
+    }
+
+    if (!hasCsv || !hasCsvResult) {
+      throw new MultipartStreamError('missing_file', 'Missing uploaded CSV');
+    }
+    return { fields, csvResult, mediaResults };
   } catch (error) {
     await reader.cancel();
     throw error;

@@ -166,7 +166,7 @@ const BODY_SCHEMAS = {
         type: 'string',
         minLength: 3,
         maxLength: 50,
-        pattern: '^[a-z0-9-]+$',
+        pattern: '^(?!deprovisioned-)[a-z0-9-]+$',
       },
       locale: {
         type: 'string',

@@ -247,6 +247,10 @@ export const RECOVERY_CODE_COUNT = 10;
  * installation for bootstrap (PR #252 bot finding 1: fail closed).
  */
 export const BOOTSTRAP_SECRET_MIN_LENGTH = 24;
+/** Bytes of CSPRNG entropy in every issued ClaimToken (§6.8: >= 100 bits, 256-bit reference shape). */
+export const CLAIM_TOKEN_ENTROPY_BYTES = 32;
+/** Minimum configurable lifetime of a hosted ClaimToken: 60 seconds. */
+export const CLAIM_TOKEN_MIN_TTL_MS = 60 * 1000;
 /** Maximum lifetime of a hosted ClaimToken: 72 hours (§6.8, §7). */
 export const CLAIM_TOKEN_MAX_TTL_MS = 72 * 60 * 60 * 1000;
 /**

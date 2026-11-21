@@ -51,6 +51,10 @@ import {
   exportTokensPg,
   exportTokensSqlite,
 } from './schema/community_exports.js';
+import {
+  importManifestsPg,
+  importManifestsSqlite,
+} from './schema/import_manifests.js';
 
 export type Dialect = 'postgresql' | 'sqlite';
 
@@ -66,6 +70,7 @@ const sqliteTables = {
   communityMapConfigs: communityMapConfigsSqlite,
   externalMediaLinks: externalMediaLinksSqlite,
   files: filesSqlite,
+  importManifests: importManifestsSqlite,
   installationBootstrap: installationBootstrapSqlite,
   places: placesSqlite,
   sessions: sessionsSqlite,
@@ -89,6 +94,7 @@ const postgresTables = {
   communityMapConfigs: communityMapConfigsPg,
   externalMediaLinks: externalMediaLinksPg,
   files: filesPg,
+  importManifests: importManifestsPg,
   installationBootstrap: installationBootstrapPg,
   places: placesPg,
   sessions: sessionsPg,

@@ -32,6 +32,7 @@ import type {
   ExportJobStatus,
   ExportTokenArtifact,
 } from '../db/schema/community_exports.js';
+import type { ImportManifest } from '../db/schema/import_manifests.js';
 import type { AuditResourceId } from '../db/schema/audit_entries.js';
 import {
   EXPORT_LIFECYCLE_AUDIT_ACTIONS,
@@ -230,6 +231,7 @@ export interface CommunityExportSnapshot {
   attachments: ExportAttachmentRow[];
   externalMediaLinks: ExportExternalMediaLinkRow[];
   legacyCommunityMedia: ExportLegacyCommunityMediaRow[];
+  importManifests: ImportManifest[];
   auditEntries: ExportAuditEntryRow[];
 }
 
@@ -364,6 +366,7 @@ export class CommunityExportRepository {
       files,
       attachments,
       externalMediaLinks,
+      importManifests,
       auditEntries,
     } = this.tables;
     const communityMedia = this.communityMedia;
@@ -588,6 +591,13 @@ export class CommunityExportRepository {
       ),
       bounded(
         executor
+          .select()
+          .from(importManifests)
+          .where(eq(importManifests.communityId, communityId))
+          .orderBy(asc(importManifests.id))
+      ),
+      bounded(
+        executor
           .select({
             id: auditEntries.id,
             communityId: auditEntries.communityId,
@@ -629,8 +639,10 @@ export class CommunityExportRepository {
       attRows,
       emlRows,
       cmRows,
+      importRows,
       auditRows,
     ] = results as [
+      Array<Record<string, unknown>>,
       Array<Record<string, unknown>>,
       Array<Record<string, unknown>>,
       Array<Record<string, unknown>>,
@@ -823,6 +835,32 @@ export class CommunityExportRepository {
         .sort((a, b) =>
           a.fileId < b.fileId ? -1 : a.fileId > b.fileId ? 1 : 0
         ),
+      importManifests: importRows.map((row) => ({
+        id: Number(row.id),
+        communityId,
+        kind: row.kind as ImportManifest['kind'],
+        status: row.status as ImportManifest['status'],
+        createdBy: toOptionalNumber(row.createdBy),
+        sourceFileName:
+          row.sourceFileName === null ? null : String(row.sourceFileName),
+        sourceFileId: String(row.sourceFileId),
+        mappings: parseJsonColumn(row.mappings) as ImportManifest['mappings'],
+        normalizedRows: parseJsonColumn(
+          row.normalizedRows
+        ) as ImportManifest['normalizedRows'],
+        rowCount: Number(row.rowCount),
+        rowErrors: parseJsonColumn(
+          row.rowErrors
+        ) as ImportManifest['rowErrors'],
+        stagedFileIds: parseJsonColumn(
+          row.stagedFileIds
+        ) as ImportManifest['stagedFileIds'],
+        resultSummary: parseJsonColumn(
+          row.resultSummary
+        ) as ImportManifest['resultSummary'],
+        committedAt: toOptionalNumber(row.committedAt),
+        createdAt: Number(row.createdAt),
+      })),
       auditEntries: auditRows.map((row) => ({
         id: Number(row.id),
         communityId,

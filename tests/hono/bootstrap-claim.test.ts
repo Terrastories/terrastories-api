@@ -185,7 +185,7 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
       const [comm] = await db
         .insert(communitiesSqlite)
         .values({
-          name: `Provisioned ${slug}`,
+          name: slug,
           slug,
           locale: 'en',
           publicStories: false,
@@ -1224,6 +1224,94 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
       ),
     ]);
     expect([uRes1.status, uRes2.status].sort()).toEqual([201, 401]);
+  });
+
+  it('rejects claim across SQLite and D1 db.batch() when the community row carries descriptive/non-default fields (including custom name or locale) without child rows, while allowing provisioning defaults', async () => {
+    for (const useD1Batch of [false, true]) {
+      const ctx = await setup({ useD1Batch });
+      const {
+        db,
+        currentNow,
+        createProvisionedCommunity,
+        insertClaimToken,
+        postClaim,
+      } = ctx;
+      const descriptiveMutations: Array<
+        [string, Partial<typeof communitiesSqlite.$inferInsert>]
+      > = [
+        ['name', { name: 'Custom Community Display Name' }],
+        ['locale', { locale: 'pt-BR' }],
+        ['description', { description: '<p>Private community intro</p>' }],
+        ['descriptionPlain', { descriptionPlain: 'Private community intro' }],
+        ['country', { country: 'BR' }],
+        ['culturalSettings', { culturalSettings: '{"legacy":true}' }],
+        ['publicStories', { publicStories: true }],
+        ['beta', { beta: true }],
+      ];
+
+      for (let i = 0; i < descriptiveMutations.length; i += 1) {
+        const [label, patch] = descriptiveMutations[i]!;
+        const comm = await createProvisionedCommunity(
+          `desc-${label.toLowerCase()}-${useD1Batch ? 'd1' : 'sq'}`
+        );
+        const tok = await insertClaimToken(comm.id);
+        await db
+          .update(communitiesSqlite)
+          .set(patch)
+          .where(eq(communitiesSqlite.id, comm.id));
+
+        const res = await postClaim(
+          {
+            token: tok.raw,
+            username: `desc_admin_${i}`,
+            email: `desc-${i}@claim.example.test`,
+            password: makePasswordPayload(),
+          },
+          { 'cf-connecting-ip': `203.0.113.${210 + i}` }
+        );
+        expect(res.status, `expected 401 for ${label}`).toBe(401);
+        expect(await res.json()).toEqual({ error: 'Invalid credentials' });
+        expect(
+          await db
+            .select()
+            .from(usersSqlite)
+            .where(eq(usersSqlite.communityId, comm.id))
+        ).toHaveLength(0);
+        const [tokenRow] = await db
+          .select()
+          .from(claimTokensSqlite)
+          .where(eq(claimTokensSqlite.id, tok.row.id));
+        expect(tokenRow?.consumedAt).toBeNull();
+      }
+
+      // Provisioning defaults (name === slug, locale === 'en', null descriptive fields, active lifecycle)
+      // remain claimable.
+      const defaultSlug = `clean-default-${useD1Batch ? 'd1' : 'sq'}`;
+      const [cleanDefaultComm] = await db
+        .insert(communitiesSqlite)
+        .values({
+          name: defaultSlug,
+          slug: defaultSlug,
+          locale: 'en',
+          publicStories: false,
+          beta: false,
+          isActive: true,
+          createdAt: currentNow(),
+          updatedAt: currentNow(),
+        })
+        .returning();
+      const cleanTok = await insertClaimToken(cleanDefaultComm.id);
+      const okRes = await postClaim(
+        {
+          token: cleanTok.raw,
+          username: `clean_default_admin_${useD1Batch ? 'd1' : 'sq'}`,
+          email: `clean-default-${useD1Batch ? 'd1' : 'sq'}@claim.example.test`,
+          password: makePasswordPayload(),
+        },
+        { 'cf-connecting-ip': '203.0.113.220' }
+      );
+      expect(okRes.status).toBe(201);
+    }
   });
 
   it('rolls back all claim writes when audit fails and emits strictly content-free audit entries', async () => {

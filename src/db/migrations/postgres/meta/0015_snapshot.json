@@ -1,6 +1,6 @@
 {
-  "id": "7e23e007-f4cd-445a-8061-2db1efaea735",
-  "prevId": "d5ee40a0-24fb-4616-80c1-a11840767dc3",
+  "id": "812b55ea-0399-4a3f-96fd-4865443b5f86",
+  "prevId": "3242555b-294c-4ee6-ac23-5d84d57a6087",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -411,6 +411,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "deprovisioned_at": {
+          "name": "deprovisioned_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -1611,21 +1617,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "story_places_community_id_idx": {
-          "name": "story_places_community_id_idx",
-          "columns": [
-            {
-              "expression": "community_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -1722,21 +1713,6 @@
             },
             {
               "expression": "speaker_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "story_speakers_community_id_idx": {
-          "name": "story_speakers_community_id_idx",
-          "columns": [
-            {
-              "expression": "community_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2269,23 +2245,7 @@
           "notNull": true
         }
       },
-      "indexes": {
-        "community_media_community_id_idx": {
-          "name": "community_media_community_id_idx",
-          "columns": [
-            {
-              "expression": "community_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "community_media_community_id_communities_id_fk": {
           "name": "community_media_community_id_communities_id_fk",
@@ -2921,214 +2881,8 @@
       "schema": "",
       "isRLSEnabled": false
     },
-    "public.export_jobs": {
-      "name": "export_jobs",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "community_id": {
-          "name": "community_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "requested_by": {
-          "name": "requested_by",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "manifest_storage_key": {
-          "name": "manifest_storage_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "manifest_byte_size": {
-          "name": "manifest_byte_size",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "manifest_checksum": {
-          "name": "manifest_checksum",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "zip_storage_key": {
-          "name": "zip_storage_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "zip_byte_size": {
-          "name": "zip_byte_size",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "zip_checksum": {
-          "name": "zip_checksum",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "zip_upload_id": {
-          "name": "zip_upload_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "completed_at": {
-          "name": "completed_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "cleaned_up_at": {
-          "name": "cleaned_up_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "export_jobs_active_community_unique": {
-          "name": "export_jobs_active_community_unique",
-          "columns": [
-            {
-              "expression": "community_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"export_jobs\".\"status\" = 'generating'",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "export_jobs_community_created_idx": {
-          "name": "export_jobs_community_created_idx",
-          "columns": [
-            {
-              "expression": "community_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "export_jobs_requested_by_created_idx": {
-          "name": "export_jobs_requested_by_created_idx",
-          "columns": [
-            {
-              "expression": "requested_by",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "export_jobs_cleanup_idx": {
-          "name": "export_jobs_cleanup_idx",
-          "columns": [
-            {
-              "expression": "expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"export_jobs\".\"cleaned_up_at\" IS NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "export_jobs_community_id_communities_id_fk": {
-          "name": "export_jobs_community_id_communities_id_fk",
-          "tableFrom": "export_jobs",
-          "tableTo": "communities",
-          "columnsFrom": ["community_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "export_jobs_requested_by_users_id_fk": {
-          "name": "export_jobs_requested_by_users_id_fk",
-          "tableFrom": "export_jobs",
-          "tableTo": "users",
-          "columnsFrom": ["requested_by"],
-          "columnsTo": ["id"],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "export_jobs_status_check": {
-          "name": "export_jobs_status_check",
-          "value": "\"export_jobs\".\"status\" in ('generating', 'ready', 'failed', 'expired')"
-        },
-        "export_jobs_expiry_check": {
-          "name": "export_jobs_expiry_check",
-          "value": "\"export_jobs\".\"expires_at\" > \"export_jobs\".\"created_at\""
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.export_tokens": {
-      "name": "export_tokens",
+    "public.import_manifests": {
+      "name": "import_manifests",
       "schema": "",
       "columns": {
         "id": {
@@ -3137,97 +2891,110 @@
           "primaryKey": true,
           "notNull": true
         },
-        "job_id": {
-          "name": "job_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "community_id": {
           "name": "community_id",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
         },
-        "requested_by": {
-          "name": "requested_by",
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'previewed'"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_file_name": {
+          "name": "source_file_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_file_id": {
+          "name": "source_file_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mappings": {
+          "name": "mappings",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "normalized_rows": {
+          "name": "normalized_rows",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "row_count": {
+          "name": "row_count",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
         },
-        "artifact": {
-          "name": "artifact",
-          "type": "text",
+        "row_errors": {
+          "name": "row_errors",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": true
         },
-        "token_hash": {
-          "name": "token_hash",
-          "type": "text",
+        "staged_file_ids": {
+          "name": "staged_file_ids",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": true
+        },
+        "result_summary": {
+          "name": "result_summary",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "committed_at": {
+          "name": "committed_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
           "type": "bigint",
           "primaryKey": false,
           "notNull": true
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "downloaded_at": {
-          "name": "downloaded_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
-        "export_tokens_token_hash_unique": {
-          "name": "export_tokens_token_hash_unique",
+        "import_manifests_community_created_idx": {
+          "name": "import_manifests_community_created_idx",
           "columns": [
             {
-              "expression": "token_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "export_tokens_job_artifact_unique": {
-          "name": "export_tokens_job_artifact_unique",
-          "columns": [
-            {
-              "expression": "job_id",
+              "expression": "community_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             },
             {
-              "expression": "artifact",
+              "expression": "created_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "export_tokens_community_idx": {
-          "name": "export_tokens_community_idx",
-          "columns": [
+            },
             {
-              "expression": "community_id",
+              "expression": "id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3238,11 +3005,74 @@
           "method": "btree",
           "with": {}
         },
-        "export_tokens_expires_idx": {
-          "name": "export_tokens_expires_idx",
+        "import_manifests_community_status_idx": {
+          "name": "import_manifests_community_status_idx",
           "columns": [
             {
-              "expression": "expires_at",
+              "expression": "community_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "import_manifests_status_committed_at_idx": {
+          "name": "import_manifests_status_committed_at_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "committed_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "import_manifests_source_file_idx": {
+          "name": "import_manifests_source_file_idx",
+          "columns": [
+            {
+              "expression": "source_file_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "import_manifests_created_by_idx": {
+          "name": "import_manifests_created_by_idx",
+          "columns": [
+            {
+              "expression": "created_by",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3255,31 +3085,31 @@
         }
       },
       "foreignKeys": {
-        "export_tokens_job_id_export_jobs_id_fk": {
-          "name": "export_tokens_job_id_export_jobs_id_fk",
-          "tableFrom": "export_tokens",
-          "tableTo": "export_jobs",
-          "columnsFrom": ["job_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "export_tokens_community_id_communities_id_fk": {
-          "name": "export_tokens_community_id_communities_id_fk",
-          "tableFrom": "export_tokens",
+        "import_manifests_community_id_communities_id_fk": {
+          "name": "import_manifests_community_id_communities_id_fk",
+          "tableFrom": "import_manifests",
           "tableTo": "communities",
           "columnsFrom": ["community_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "export_tokens_requested_by_users_id_fk": {
-          "name": "export_tokens_requested_by_users_id_fk",
-          "tableFrom": "export_tokens",
+        "import_manifests_created_by_users_id_fk": {
+          "name": "import_manifests_created_by_users_id_fk",
+          "tableFrom": "import_manifests",
           "tableTo": "users",
-          "columnsFrom": ["requested_by"],
+          "columnsFrom": ["created_by"],
           "columnsTo": ["id"],
-          "onDelete": "cascade",
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "import_manifests_source_file_community_fk": {
+          "name": "import_manifests_source_file_community_fk",
+          "tableFrom": "import_manifests",
+          "tableTo": "files",
+          "columnsFrom": ["community_id", "source_file_id"],
+          "columnsTo": ["community_id", "id"],
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
@@ -3287,13 +3117,21 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "export_tokens_artifact_check": {
-          "name": "export_tokens_artifact_check",
-          "value": "\"export_tokens\".\"artifact\" in ('manifest', 'media_zip')"
+        "import_manifests_kind_check": {
+          "name": "import_manifests_kind_check",
+          "value": "\"import_manifests\".\"kind\" in ('places', 'speakers', 'stories')"
         },
-        "export_tokens_expiry_check": {
-          "name": "export_tokens_expiry_check",
-          "value": "\"export_tokens\".\"expires_at\" > \"export_tokens\".\"created_at\""
+        "import_manifests_status_check": {
+          "name": "import_manifests_status_check",
+          "value": "\"import_manifests\".\"status\" in ('previewed', 'committed', 'failed', 'discarded')"
+        },
+        "import_manifests_row_count_check": {
+          "name": "import_manifests_row_count_check",
+          "value": "\"import_manifests\".\"row_count\" >= 0"
+        },
+        "import_manifests_committed_at_check": {
+          "name": "import_manifests_committed_at_check",
+          "value": "(\"import_manifests\".\"status\" = 'committed' AND \"import_manifests\".\"committed_at\" IS NOT NULL) OR (\"import_manifests\".\"status\" <> 'committed' AND \"import_manifests\".\"committed_at\" IS NULL)"
         }
       },
       "isRLSEnabled": false

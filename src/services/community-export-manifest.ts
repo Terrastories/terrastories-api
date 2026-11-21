@@ -205,9 +205,8 @@ export interface CommunityExportManifest {
     communityId: number;
     kind: string;
   }>;
-  // Slice 12 populates `import_manifests` once merged; staged CSV and media
-  // bytes in `files` are already captured in `files` and the media ZIP.
-  importManifests: unknown[];
+  // Source CSV and staged media bytes are captured in files and the media ZIP.
+  importManifests: CommunityExportSnapshot['importManifests'];
   auditEntries: Array<{
     id: number;
     communityId: number;
@@ -251,6 +250,7 @@ export function countSnapshotRows(snapshot: CommunityExportSnapshot): number {
     snapshot.attachments.length +
     snapshot.externalMediaLinks.length +
     snapshot.legacyCommunityMedia.length +
+    snapshot.importManifests.length +
     snapshot.auditEntries.length
   );
 }
@@ -454,7 +454,7 @@ export function buildCommunityExportManifest(
         communityId: row.communityId,
         kind: row.kind,
       })),
-    importManifests: [],
+    importManifests: [...snapshot.importManifests].sort(byNumericId),
     auditEntries: [...snapshot.auditEntries].sort(byNumericId).map((entry) => ({
       id: entry.id,
       communityId: entry.communityId,

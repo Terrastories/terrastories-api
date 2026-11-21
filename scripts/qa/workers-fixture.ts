@@ -62,6 +62,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
       seedBaseline: () => seedPersonaBaseline(db),
       serverSecret,
       putMedia: (key, bytes) => bucket.put(key, bytes),
+      hasMedia: async (key) => (await bucket.head(key)) !== null,
       handler: (observeResponseCookies) => async (request) => {
         // dispatchFetch parses Miniflare's own undici types, and a
         // Node-global Request object is a foreign realm to them, so rebuild

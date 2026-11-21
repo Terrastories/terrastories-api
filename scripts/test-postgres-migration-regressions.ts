@@ -19,7 +19,7 @@ const previousReleaseFixture = path.join(
   rootDir,
   'tests/fixtures/db/postgres-previous-release.sql'
 );
-const snapshotPath = path.join(migrationsFolder, 'meta/0015_snapshot.json');
+const snapshotPath = path.join(migrationsFolder, 'meta/0016_snapshot.json');
 
 const canonicalUniqueConstraints = [
   'communities_slug_unique',

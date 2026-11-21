@@ -2,7 +2,7 @@
 -- plus community_id lookup indexes on story_places, story_speakers, and
 -- community_media (SPEC-V2 §7).
 --
--- Numbered 0015 (leaving PG 0014 for parallel Slice 12 import_manifests).
+-- Numbered 0016 after Slice 12 imports and Slice 14 deprovisioning.
 -- Millisecond Unix epoch bigint timestamps throughout (#192).
 
 CREATE TABLE "export_jobs" (

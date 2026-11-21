@@ -4,12 +4,14 @@ import { ExploreAdapterRepository } from './repositories/explore-adapter.reposit
 import { CommunityReadsRepository } from './repositories/community-reads.repository.js';
 import { CommunityWritesRepository } from './repositories/community-writes.repository.js';
 import { MediaWritesRepository } from './repositories/media-writes.repository.js';
+import { ImportsRepository } from './repositories/imports.repository.js';
 import { PublicCommunitiesRepository } from './repositories/public-communities.repository.js';
 import { StoryWritesRepository } from './repositories/story-writes.repository.js';
 import { UserManagementRepository } from './repositories/user-management.repository.js';
 import { registerCommunityReadRoutes } from './routes/community-reads.hono.js';
 import { registerCommunityWriteRoutes } from './routes/community-writes.hono.js';
 import { registerMediaRoutes } from './routes/media-writes.hono.js';
+import { registerImportRoutes } from './routes/imports.hono.js';
 import { registerPublicCommunityRoutes } from './routes/public-communities.hono.js';
 import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
@@ -17,6 +19,8 @@ import { registerCommunityExportRoutes } from './routes/community-export.hono.js
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
 import { registerCommunityAuditRoutes } from './routes/community-audit.hono.js';
 import { CommunityAuditRepository } from './repositories/community-audit.repository.js';
+import { registerAdminRoutes } from './routes/admin.hono.js';
+import { AdminRepository } from './repositories/admin.repository.js';
 import {
   registerProtectedAuthRecoveryRoutes,
   registerPublicAuthRecoveryRoutes,
@@ -92,6 +96,8 @@ export interface FoundationOptions {
   mediaCleanup?: MediaCleanupCoordinator;
   /** Optional local CA fingerprint surfaced once on field-kit bootstrap (§7). */
   fieldKitCaFingerprint?: string;
+  /** Enforce D1 commit-plan budgets and 1/UTC-day import cap even outside D1. */
+  enforceD1Budget?: boolean;
 }
 const preloginSchema = z
   .object({
@@ -174,8 +180,11 @@ export function createHonoApp(options: FoundationOptions) {
     authRepository,
     options.serverSecret
   );
+  const bootstrapRepository = new BootstrapRepository(
+    options.repository.connection
+  );
   const bootstrapService = new BootstrapService(
-    new BootstrapRepository(options.repository.connection),
+    bootstrapRepository,
     authRepository,
     {
       serverSecret: options.serverSecret,
@@ -541,6 +550,13 @@ export function createHonoApp(options: FoundationOptions) {
     cleanup: mediaCleanup,
     publicOrigin: configuredOrigin,
   });
+  registerImportRoutes(app, {
+    repository: new ImportsRepository(options.repository.connection),
+    storage: options.storage,
+    cleanup: mediaCleanup,
+    now,
+    enforceD1Budget: options.enforceD1Budget ?? options.isWorkers,
+  });
   registerUserManagementRoutes(app, {
     repository: new UserManagementRepository(options.repository.connection),
     publicOrigin: configuredOrigin,
@@ -554,6 +570,11 @@ export function createHonoApp(options: FoundationOptions) {
   });
   registerCommunityAuditRoutes(app, {
     repository: new CommunityAuditRepository(options.repository.connection),
+  });
+  registerAdminRoutes(app, {
+    repository: new AdminRepository(options.repository.connection),
+    bootstrapRepository,
+    now,
   });
   // Transitional Explore read adapter (#198): Rails-shaped public reads for
   // the existing Explore client; removed once the V2 frontend is canonical.

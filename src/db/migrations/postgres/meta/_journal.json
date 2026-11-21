@@ -101,10 +101,24 @@
       "breakpoints": true
     },
     {
+      "idx": 14,
+      "version": "7",
+      "when": 1795435200000,
+      "tag": "0014_import_manifests",
+      "breakpoints": true
+    },
+    {
       "idx": 15,
       "version": "7",
+      "when": 1795435201000,
+      "tag": "0015_communities_deprovisioned_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
       "when": 1795521600000,
-      "tag": "0015_community_export_jobs_and_tokens",
+      "tag": "0016_community_export_jobs_and_tokens",
       "breakpoints": true
     }
   ]

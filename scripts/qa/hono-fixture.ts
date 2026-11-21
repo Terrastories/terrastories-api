@@ -82,12 +82,26 @@ import {
   StoryWriteResponseSchema,
 } from '../../src/shared/schemas/story-writes.js';
 import {
+  ImportManifestDetailResponseSchema,
+  ImportManifestListResponseSchema,
+} from '../../src/shared/schemas/imports.js';
+import {
   AttachmentListResponseSchema,
   AttachmentResponseSchema,
   MediaMetadataResponseSchema,
   MediaUploadResponseSchema,
 } from '../../src/shared/schemas/media-v2.js';
 import { CreateCommunityExportResponseSchema } from '../../src/shared/schemas/community-export.js';
+import {
+  AdminAuditEntryListResponseSchema,
+  AdminCommunityListResponseSchema,
+  AdminCommunityResponseSchema,
+  ClaimTokenIssuedResponseSchema,
+} from '../../src/shared/schemas/admin.js';
+import { CommunityAuditEntriesListResponseSchema } from '../../src/shared/schemas/community-audit.js';
+import { EXPORT_TOKEN_TTL_MS } from '../../src/shared/export-policy.js';
+import { parseDeterministicZip } from '../../src/shared/utils/deterministic-zip.js';
+import { StreamingSha256 } from '../../src/shared/utils/sha256-stream.js';
 import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import {
@@ -218,6 +232,7 @@ export const HONO_PERSONA_CULTURAL_STRINGS: readonly string[] = [
   'QA members-only topic',
   'QA inactive community story',
   'QA inactive community story description',
+  'QA inactive restricted story',
   'QA private community story',
   'QA private community story description',
   'QA public place',
@@ -283,6 +298,7 @@ export interface HonoQaBackend {
    */
   serverSecret: string;
   putMedia: (key: string, bytes: Uint8Array) => Promise<void>;
+  hasMedia?: (key: string) => Promise<boolean>;
   handler: (observeResponseCookies: (response: Response) => void) => Handler;
   routes: Endpoint[];
   close: () => Promise<void>;
@@ -401,11 +417,17 @@ export async function createFixture(
     : async (key, bytes) => {
         storage.set(key, bytes);
       };
+  const hasMedia: (key: string) => Promise<boolean> = backend?.hasMedia
+    ? backend.hasMedia
+    : async (key) => storage.has(key);
+  const isD1Backend = typeof (db as { batch?: unknown }).batch === 'function';
   const {
     attachments,
     auditEntries,
     communities,
     communityMapConfigs,
+    exportJobs,
+    exportTokens,
     users,
     places,
     speakers,
@@ -413,6 +435,7 @@ export async function createFixture(
     storyPlaces,
     storySpeakers,
     files,
+    importManifests,
     loginCodes,
   } = tablesFor(db);
   const communityMedia =
@@ -1133,6 +1156,20 @@ export async function createFixture(
           description: 'QA private community story description',
         },
       ])
+      .returning();
+    // Separate statement keeps D1 bound parameters below 100.
+    const [inactiveRestrictedStory] = await db
+      .insert(stories)
+      .values({
+        // #162 hidden row in disabled community: verified present in
+        // disabled-community export manifest (§7).
+        title: 'QA inactive restricted story',
+        slug: 'qa-hono-inactive-restricted',
+        communityId: inactiveCommunity.id,
+        createdBy: disabledSeededAdmin!.id,
+        privacyLevel: 'editors',
+        isRestricted: true,
+      })
       .returning();
     // Rails-shaped lists join places and speakers, so the public story stays
     // visible. The restricted place is evidenced by a public story too, so
@@ -4302,6 +4339,132 @@ export async function createFixture(
         check: forbiddenCheck,
       },
     ];
+    const unauthAdminSteps: Step[] = [
+      {
+        name: 'require auth on admin communities list',
+        method: 'GET',
+        path: '/v2/admin/communities',
+        expected: 401,
+      },
+      {
+        name: 'require auth on admin community provision',
+        method: 'POST',
+        path: '/v2/admin/communities',
+        expected: 401,
+        body: { slug: 'qa-unauth-provision' },
+      },
+      {
+        name: 'require auth on admin claim-token issuance',
+        method: 'POST',
+        path: `/v2/admin/communities/${communityId}/claim-tokens`,
+        expected: 401,
+      },
+      {
+        name: 'require auth on admin community status toggle',
+        method: 'PATCH',
+        path: `/v2/admin/communities/${communityId}/status`,
+        expected: 401,
+        body: { status: 'disabled' },
+      },
+      {
+        name: 'require auth on admin community deprovision',
+        method: 'DELETE',
+        path: `/v2/admin/communities/${communityId}`,
+        expected: 401,
+      },
+      {
+        name: 'require auth on admin system audit entries',
+        method: 'GET',
+        path: '/v2/admin/audit-entries',
+        expected: 401,
+      },
+    ];
+    const forbiddenAdminSteps: Step[] = [
+      {
+        name: 'deny admin communities list for community role',
+        method: 'GET',
+        path: '/v2/admin/communities',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin community provision for community role',
+        method: 'POST',
+        path: '/v2/admin/communities',
+        expected: 403,
+        body: { slug: 'qa-denied-provision' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin claim-token issuance for community role',
+        method: 'POST',
+        path: `/v2/admin/communities/${communityId}/claim-tokens`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin community status toggle for community role',
+        method: 'PATCH',
+        path: `/v2/admin/communities/${communityId}/status`,
+        expected: 403,
+        body: { status: 'disabled' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin community deprovision for community role',
+        method: 'DELETE',
+        path: `/v2/admin/communities/${communityId}`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin system audit entries for community role',
+        method: 'GET',
+        path: '/v2/admin/audit-entries',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+    ];
+    let qaClaimToken1 = '';
+    let qaClaimToken1Id = 0;
+    let qaClaimToken2 = '';
+    let qaClaimToken2Id = 0;
+    let qaDeprovTokenId = 0;
+    let qaDisabledToken = '';
+    const qaAdminClaimedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const qaSupersededClaimBody = {
+      token: '',
+      username: 'qa_superseded_admin',
+      email: 'qa-superseded-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: verifierSalt,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    const qaDisabledClaimBody = {
+      token: '',
+      username: 'qa_disabled_revive_admin',
+      email: 'qa-disabled-revive@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: verifierSalt,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    const qaValidClaimBody = {
+      token: '',
+      username: 'qa_claimed_admin',
+      email: 'qa-claimed-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: verifierSalt,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: qaAdminClaimedKey,
+      },
+    };
     const validationFieldCheck =
       (expectedPath: string, noEchoToken?: string) => (body: unknown) => {
         const parsed = V2ValidationErrorResponseSchema.safeParse(body);
@@ -5362,6 +5525,11 @@ export async function createFixture(
       contentType: string;
       bytes: Uint8Array;
       fields?: Record<string, string>;
+      mediaParts?: Array<{
+        filename: string;
+        contentType: string;
+        bytes: Uint8Array;
+      }>;
     }): { rawBody: Uint8Array; headers: Record<string, string> } => {
       const boundary = `qa-bound-${Math.random().toString(16).slice(2)}`;
       const enc = new TextEncoder();
@@ -5379,6 +5547,14 @@ export async function createFixture(
         )
       );
       chunks.push(options.bytes);
+      for (const media of options.mediaParts ?? []) {
+        chunks.push(
+          enc.encode(
+            `\r\n--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="${media.filename}"\r\nContent-Type: ${media.contentType}\r\n\r\n`
+          )
+        );
+        chunks.push(media.bytes);
+      }
       chunks.push(enc.encode(`\r\n--${boundary}--\r\n`));
       const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
       const rawBody = new Uint8Array(total);
@@ -5451,6 +5627,11 @@ export async function createFixture(
       },
     };
     let userManagedSessionHandle = '';
+    const qaSuperDeniedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const qaSuperDeniedSalt = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    let qaSuperDeniedSessionHandle = '';
     let qaStageFileId = '';
     let qaStageFile2Id = '';
     let qaAudioFileId = '';
@@ -5462,6 +5643,121 @@ export async function createFixture(
     let qaViewerAttId = 0;
     let qaMemberFileId = '';
     let qaSuperPhotoId = '';
+
+    // Slice 12 CSV import QA fixtures and helpers (#123): seeded foreign
+    // previewed manifest (keeps committed_at NULL so D1's daily commit limit
+    // stays unoccupied) plus state tracked across media_editor -> media_admin.
+    const [foreignImportManifest] = await db
+      .insert(importManifests)
+      .values({
+        communityId: foreignCommunityId,
+        kind: 'places',
+        status: 'previewed',
+        createdBy: null,
+        sourceFileName: 'foreign-qa.csv',
+        sourceFileId: foreignFileId,
+        mappings: {
+          headerMappings: { name: 'name' },
+          unmappedHeaders: [],
+          duplicateStrategy: 'error',
+        },
+        normalizedRows: {
+          kind: 'places',
+          rows: [],
+          relatedPlacesToCreate: [],
+          relatedSpeakersToCreate: [],
+          skippedDuplicates: 0,
+          audienceCounts: null,
+        },
+        rowCount: 0,
+        rowErrors: [],
+        stagedFileIds: [],
+        resultSummary: null,
+        committedAt: null,
+        createdAt: Date.now(),
+      })
+      .returning();
+    let qaImportDiscardManifestId = 0;
+    let qaDiscardStagedFileId = '';
+    let qaDiscardStagedStorageKey = '';
+    let qaDiscardSourceFileId = '';
+    let qaDiscardSourceStorageKey = '';
+    let qaImportUnknownAudienceId = 0;
+    let qaImportPlacesManifestId = 0;
+    let qaCommittedPlacesAt = '';
+    let qaCommittedPlacesSummaryJson = '';
+    let qaImportStoriesManifestId = 0;
+    const qaD1BudgetCsv =
+      'title,visibility\n' +
+      Array.from(
+        { length: 1005 },
+        (_, i) => `QA Budget Row ${i + 1},community`
+      ).join('\n') +
+      '\n';
+    const parseJsonArray = <T>(value: unknown): T[] => {
+      if (Array.isArray(value)) return value as T[];
+      if (typeof value === 'string') {
+        const parsed: unknown = JSON.parse(value);
+        return Array.isArray(parsed) ? (parsed as T[]) : [];
+      }
+      return [];
+    };
+    const backdateCommittedImportsForD1 = async (): Promise<void> => {
+      if (!isD1Backend) return;
+      const yesterdayMs = Date.now() - 25 * 60 * 60 * 1000;
+      await db
+        .update(importManifests)
+        .set({ committedAt: yesterdayMs })
+        .where(
+          and(
+            eq(importManifests.communityId, mediaCommunity.id),
+            eq(importManifests.status, 'committed')
+          )
+        );
+    };
+    const forbiddenImportSteps = (roleLabel: string): Step[] => [
+      {
+        name: `reject CSV import preview for ${roleLabel}`,
+        method: 'POST',
+        path: '/v2/imports/preview',
+        expected: 403,
+        ...qaMultipart({
+          filename: 'qa-places-denied.csv',
+          contentType: 'text/csv',
+          bytes: new TextEncoder().encode('name\nDenied\n'),
+          fields: { kind: 'places' },
+        }),
+        check: forbiddenCheck,
+      },
+      {
+        name: `reject import manifest list for ${roleLabel}`,
+        method: 'GET',
+        path: '/v2/imports',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: `reject import manifest detail for ${roleLabel}`,
+        method: 'GET',
+        path: '/v2/imports/1',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: `reject import manifest commit for ${roleLabel}`,
+        method: 'POST',
+        path: '/v2/imports/1/commit',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: `reject import manifest discard for ${roleLabel}`,
+        method: 'DELETE',
+        path: '/v2/imports/1',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+    ];
 
     // Slice 11a (#188): the device-session revoke path is only known once
     // the list step ran, so `prepare` returns it for this run (the runner
@@ -6176,6 +6472,7 @@ export async function createFixture(
         expected: 204,
       },
     ];
+    let activeAdminExport1ManifestToken = '';
     const journeys: Journey[] = [
       {
         persona: 'anonymous',
@@ -6280,6 +6577,26 @@ export async function createFixture(
             name: 'require auth on v2 speakers reads',
             method: 'GET',
             path: '/v2/speakers',
+            expected: 401,
+          },
+          ...unauthAdminSteps,
+          {
+            name: 'require auth on v2 community export',
+            method: 'POST',
+            path: '/v2/community/export',
+            expected: 401,
+            body: {},
+          },
+          {
+            name: 'require auth on v2 community export download',
+            method: 'GET',
+            path: `/v2/community/export/download/${'a'.repeat(64)}`,
+            expected: 401,
+          },
+          {
+            name: 'require auth on v2 community audit entries',
+            method: 'GET',
+            path: '/v2/community/audit-entries',
             expected: 401,
           },
           {
@@ -6644,6 +6961,7 @@ export async function createFixture(
             ? [...exploreWithSession, ...publicCommunitiesWithSession]
             : []),
           ...communityReadsStepsFor(role),
+          ...forbiddenAdminSteps,
           ...(role === 'viewer' || role === 'member'
             ? forbiddenCommunityWriteSteps
             : []),
@@ -6675,9 +6993,44 @@ export async function createFixture(
             path: '/v2/media/not-a-uuid',
             expected: 404,
           },
+          ...(role !== 'admin'
+            ? [
+                {
+                  name: 'deny community export for non-admin role',
+                  method: 'POST',
+                  path: '/v2/community/export',
+                  expected: 403,
+                  body: {},
+                  check: forbiddenCheck,
+                },
+                {
+                  name: 'deny export download for non-admin role',
+                  method: 'GET',
+                  path: `/v2/community/export/download/${'a'.repeat(64)}`,
+                  expected: 403,
+                  check: forbiddenCheck,
+                },
+                {
+                  name: 'deny community audit entries for non-admin role',
+                  method: 'GET',
+                  path: '/v2/community/audit-entries',
+                  expected: 403,
+                  check: forbiddenCheck,
+                },
+              ]
+            : []),
           ...(role === 'admin'
             ? (() => {
-                let qaAdminExportManifestToken = '';
+                let exportId1 = '';
+                let manifestToken1 = '';
+                let zipToken1 = '';
+                let manifestChecksum1 = '';
+                let zipChecksum1 = '';
+                let manifestBytes1 = new Uint8Array(0);
+                let zipBytes1 = new Uint8Array(0);
+                let exportId2 = '';
+                let manifestToken2 = '';
+                let zipToken2 = '';
                 return [
                   {
                     name: 'export active community',
@@ -6689,8 +7042,15 @@ export async function createFixture(
                       const parsed =
                         CreateCommunityExportResponseSchema.safeParse(body);
                       if (!parsed.success) return false;
-                      qaAdminExportManifestToken =
+                      exportId1 = parsed.data.data.exportId;
+                      manifestToken1 =
                         parsed.data.data.artifacts.manifest.token;
+                      zipToken1 = parsed.data.data.artifacts.mediaZip.token;
+                      manifestChecksum1 =
+                        parsed.data.data.artifacts.manifest.checksum;
+                      zipChecksum1 =
+                        parsed.data.data.artifacts.mediaZip.checksum;
+                      activeAdminExport1ManifestToken = manifestToken1;
                       return true;
                     },
                   },
@@ -6700,13 +7060,256 @@ export async function createFixture(
                     path: '/v2/community/export/download/pending',
                     expected: 200,
                     prepare: () =>
-                      `/v2/community/export/download/${qaAdminExportManifestToken}`,
+                      `/v2/community/export/download/${manifestToken1}`,
+                    checkHeaders: (headers: Headers) =>
+                      headers.get('cache-control') === 'no-store' &&
+                      headers.get('x-content-type-options') === 'nosniff' &&
+                      (headers.get('content-disposition') ?? '').includes(
+                        'attachment'
+                      ),
+                    checkBytes: (bytes: Uint8Array) => {
+                      if (
+                        new StreamingSha256().update(bytes).digestHex() !==
+                        manifestChecksum1
+                      ) {
+                        return false;
+                      }
+                      const text = new TextDecoder().decode(bytes);
+                      if (
+                        text.includes('passwordVerifier') ||
+                        text.includes('passwordHash') ||
+                        text.includes('passwordSalt') ||
+                        text.includes('passwordParams')
+                      ) {
+                        return false;
+                      }
+                      const manifest = JSON.parse(text) as {
+                        community?: { id?: number; status?: string };
+                        stories?: Array<{
+                          id: number;
+                          isRestricted?: boolean;
+                          privacyLevel?: string;
+                        }>;
+                        files?: Array<{ id: string }>;
+                        auditEntries?: Array<{ action: string }>;
+                      };
+                      const hasRestricted =
+                        manifest.stories?.some(
+                          (s) =>
+                            s.id === restrictedStory.id &&
+                            s.isRestricted === true
+                        ) ?? false;
+                      const hasUnknown =
+                        manifest.stories?.some(
+                          (s) =>
+                            s.id === unknownStory.id &&
+                            s.privacyLevel === 'unknown'
+                        ) ?? false;
+                      const hasReadableFile =
+                        manifest.files?.some((f) => f.id === readableFileId) ??
+                        false;
+                      const excludesExportLifecycle =
+                        manifest.auditEntries?.every(
+                          (e) => !e.action.startsWith('community.export.')
+                        ) ?? false;
+                      manifestBytes1 = bytes;
+                      return (
+                        manifest.community?.id === communityId &&
+                        manifest.community?.status === 'active' &&
+                        hasRestricted &&
+                        hasUnknown &&
+                        hasReadableFile &&
+                        excludesExportLifecycle
+                      );
+                    },
                   },
                   {
-                    name: 'read own community audit entries',
+                    name: 'download exported community media zip',
                     method: 'GET',
-                    path: '/v2/community/audit-entries',
+                    path: '/v2/community/export/download/pending',
                     expected: 200,
+                    prepare: () => `/v2/community/export/download/${zipToken1}`,
+                    checkHeaders: (headers: Headers) =>
+                      headers.get('cache-control') === 'no-store' &&
+                      (headers.get('content-disposition') ?? '').includes(
+                        'attachment'
+                      ),
+                    checkBytes: (bytes: Uint8Array) => {
+                      if (
+                        new StreamingSha256().update(bytes).digestHex() !==
+                        zipChecksum1
+                      ) {
+                        return false;
+                      }
+                      const entries = parseDeterministicZip(bytes);
+                      zipBytes1 = bytes;
+                      return entries.some(
+                        (e) => e.path === `media/${readableFileId}`
+                      );
+                    },
+                  },
+                  {
+                    name: 're-export active community deterministically',
+                    method: 'POST',
+                    path: '/v2/community/export',
+                    expected: 201,
+                    body: {},
+                    check: (body: unknown) => {
+                      const parsed =
+                        CreateCommunityExportResponseSchema.safeParse(body);
+                      if (!parsed.success) return false;
+                      exportId2 = parsed.data.data.exportId;
+                      manifestToken2 =
+                        parsed.data.data.artifacts.manifest.token;
+                      zipToken2 = parsed.data.data.artifacts.mediaZip.token;
+                      return (
+                        exportId2 !== exportId1 &&
+                        manifestToken2 !== manifestToken1 &&
+                        zipToken2 !== zipToken1 &&
+                        parsed.data.data.artifacts.manifest.checksum ===
+                          manifestChecksum1 &&
+                        parsed.data.data.artifacts.mediaZip.checksum ===
+                          zipChecksum1
+                      );
+                    },
+                  },
+                  {
+                    name: 'verify byte-identical re-exported manifest',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 200,
+                    prepare: () =>
+                      `/v2/community/export/download/${manifestToken2}`,
+                    checkBytes: (bytes: Uint8Array) =>
+                      bytes.byteLength === manifestBytes1.byteLength &&
+                      bytes.every((b, idx) => b === manifestBytes1[idx]),
+                  },
+                  {
+                    name: 'verify byte-identical re-exported media zip',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 200,
+                    prepare: () => `/v2/community/export/download/${zipToken2}`,
+                    checkBytes: (bytes: Uint8Array) =>
+                      bytes.byteLength === zipBytes1.byteLength &&
+                      bytes.every((b, idx) => b === zipBytes1[idx]),
+                  },
+                  {
+                    name: 'expire export tokens and trigger per-object cleanup on download',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 404,
+                    prepare: async () => {
+                      const manifestKey = `communities/${communityId}/exports/${exportId2}/manifest.json`;
+                      const zipKey = `communities/${communityId}/exports/${exportId2}/media.zip`;
+                      if (!(await hasMedia(manifestKey))) {
+                        throw new Error(
+                          'Expected manifest object to exist before expiry'
+                        );
+                      }
+                      if (!(await hasMedia(zipKey))) {
+                        throw new Error(
+                          'Expected ZIP object to exist before expiry'
+                        );
+                      }
+                      const pastNow = Date.now() - 60_000;
+                      const pastCreated = pastNow - 2 * EXPORT_TOKEN_TTL_MS;
+                      await db
+                        .update(exportJobs)
+                        .set({ createdAt: pastCreated, expiresAt: pastNow })
+                        .where(eq(exportJobs.id, exportId2));
+                      await db
+                        .update(exportTokens)
+                        .set({ createdAt: pastCreated, expiresAt: pastNow })
+                        .where(eq(exportTokens.jobId, exportId2));
+                      return `/v2/community/export/download/${manifestToken2}`;
+                    },
+                  },
+                  {
+                    name: 'verify expired export artifacts deleted and second token fails',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 404,
+                    prepare: async () => {
+                      const manifestKey = `communities/${communityId}/exports/${exportId2}/manifest.json`;
+                      const zipKey = `communities/${communityId}/exports/${exportId2}/media.zip`;
+                      if (await hasMedia(manifestKey)) {
+                        throw new Error(
+                          'Expected expired manifest object to be deleted'
+                        );
+                      }
+                      if (await hasMedia(zipKey)) {
+                        throw new Error(
+                          'Expected expired ZIP object to be deleted'
+                        );
+                      }
+                      const [jobRow] = await db
+                        .select({
+                          status: exportJobs.status,
+                          cleanedUpAt: exportJobs.cleanedUpAt,
+                        })
+                        .from(exportJobs)
+                        .where(eq(exportJobs.id, exportId2))
+                        .limit(1);
+                      if (
+                        !jobRow ||
+                        jobRow.status !== 'expired' ||
+                        jobRow.cleanedUpAt === null
+                      ) {
+                        throw new Error(
+                          'Expected expired export job to record cleanup completion'
+                        );
+                      }
+                      return `/v2/community/export/download/${zipToken2}`;
+                    },
+                  },
+                  {
+                    name: 'read own community audit entries without cultural content',
+                    method: 'GET',
+                    path: '/v2/community/audit-entries?limit=10&offset=0',
+                    expected: 200,
+                    check: (body: unknown) => {
+                      const parsed =
+                        CommunityAuditEntriesListResponseSchema.safeParse(body);
+                      if (!parsed.success) return false;
+                      const text = JSON.stringify(body);
+                      return (
+                        parsed.data.data.every(
+                          (entry) => entry.communityId === communityId
+                        ) &&
+                        !HONO_PERSONA_CULTURAL_STRINGS.some((s) =>
+                          text.includes(s)
+                        ) &&
+                        !leaksSecret(body, liveSessionCookie)
+                      );
+                    },
+                  },
+                  {
+                    name: 'filter own community audit entries by export action',
+                    method: 'GET',
+                    path: '/v2/community/audit-entries?action=community.export.generate',
+                    expected: 200,
+                    check: (body: unknown) => {
+                      const parsed =
+                        CommunityAuditEntriesListResponseSchema.safeParse(body);
+                      if (!parsed.success) return false;
+                      return (
+                        parsed.data.data.length >= 1 &&
+                        parsed.data.data.every(
+                          (entry) =>
+                            entry.communityId === communityId &&
+                            entry.action === 'community.export.generate' &&
+                            entry.ipAddress === null &&
+                            entry.userAgent === null
+                        )
+                      );
+                    },
+                  },
+                  {
+                    name: 'reject caller communityId override on audit entries',
+                    method: 'GET',
+                    path: `/v2/community/audit-entries?communityId=${foreignCommunityId}`,
+                    expected: 400,
                   },
                 ];
               })()
@@ -6807,6 +7410,34 @@ export async function createFixture(
             ? [
                 ...privateAdminCommunityWriteSteps,
                 ...privateAdminUserManagementSteps,
+                {
+                  name: 'deny cross-community export download token',
+                  method: 'GET',
+                  path: '/v2/community/export/download/pending',
+                  expected: 404,
+                  prepare: () =>
+                    `/v2/community/export/download/${activeAdminExport1ManifestToken}`,
+                },
+                {
+                  name: 'read private community audit entries strictly scoped',
+                  method: 'GET',
+                  path: '/v2/community/audit-entries',
+                  expected: 200,
+                  check: (body: unknown) => {
+                    const parsed =
+                      CommunityAuditEntriesListResponseSchema.safeParse(body);
+                    if (!parsed.success) return false;
+                    const text = JSON.stringify(body);
+                    return (
+                      parsed.data.data.every(
+                        (entry) => entry.communityId === privateCommunityId
+                      ) &&
+                      !HONO_PERSONA_CULTURAL_STRINGS.some((s) =>
+                        text.includes(s)
+                      )
+                    );
+                  },
+                },
               ]
             : []),
           {
@@ -6970,6 +7601,7 @@ export async function createFixture(
           ...publicCommunitiesWithSession,
           ...forbiddenCommunityReadSteps,
           ...forbiddenCommunityWriteSteps,
+          ...forbiddenImportSteps('super_admin'),
           {
             // Null-community super_admin cannot read any community branding
             // asset via /v2/media/:id, even an active public community's file.
@@ -6993,10 +7625,369 @@ export async function createFixture(
             expected: 404,
           },
           {
+            name: 'deny community export for super_admin',
+            method: 'POST',
+            path: '/v2/community/export',
+            expected: 403,
+            body: {},
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny export download for super_admin',
+            method: 'GET',
+            path: `/v2/community/export/download/${'a'.repeat(64)}`,
+            expected: 403,
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny community audit entries for super_admin',
+            method: 'GET',
+            path: '/v2/community/audit-entries',
+            expected: 403,
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 users list',
+            method: 'GET',
+            path: '/v2/users',
+            expected: 403,
+            saveCookieAs: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          // Establish a real device session on a real community account so
+          // super_admin denials across every /v2/users/* endpoint hit real
+          // records and prove rejected mutations leave credentials, roles,
+          // and sessions unchanged.
+          {
+            name: 'establish target community member device session for super_admin denial checks',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: '' },
+            body: {
+              identifier: userCommunityCredentials.member.email,
+              derivedKey,
+              communitySlug: 'qa-user-management-community',
+              deviceSession: true,
+            },
+            check: ownUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          {
+            name: 'save target community member device session cookie',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'qaTargetMemberDevice',
+            check: ownMeUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id,
+              false
+            ),
+          },
+          {
+            name: 'login target community admin to capture real device session handle',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: '' },
+            body: {
+              identifier: userCommunityCredentials.admin.email,
+              derivedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: ownUser(
+              userCommunityCredentials.admin.email,
+              'admin',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          {
+            name: 'capture target community member device session handle',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}/sessions`,
+            expected: 200,
+            saveCookieAs: 'qaTargetAdmin',
+            check: (body) => {
+              const rows = (
+                body as {
+                  data?: Array<{ handle?: unknown; kind?: unknown }>;
+                }
+              )?.data;
+              if (!Array.isArray(rows) || rows.length !== 1) return false;
+              const session = rows[0]!;
+              if (
+                session.kind !== 'device' ||
+                typeof session.handle !== 'string' ||
+                session.handle.length !== 22
+              ) {
+                return false;
+              }
+              qaSuperDeniedSessionHandle = session.handle;
+              return true;
+            },
+          },
+          {
+            name: 'deny v2 user detail',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user create',
+            method: 'POST',
+            path: '/v2/users',
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            body: {
+              username: 'qa_super_denied_user',
+              email: 'qa-super-denied-user@example.test',
+              displayName: 'Denied By Policy',
+              role: 'admin',
+              password: {
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: qaSuperDeniedSalt,
+                params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                derivedKey: qaSuperDeniedKey,
+              },
+            },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user update',
+            method: 'PATCH',
+            path: `/v2/users/${userCommunityIds.member}`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            body: {
+              role: 'admin',
+              status: 'disabled',
+              displayName: 'Tampered By Super Admin',
+            },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user password reset',
+            method: 'POST',
+            path: `/v2/users/${userCommunityIds.member}/password-reset`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            body: {
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: qaSuperDeniedSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: qaSuperDeniedKey,
+            },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user login-code issuance',
+            method: 'POST',
+            path: `/v2/users/${userCommunityIds.member}/login-codes`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user sessions list',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}/sessions`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user session revoke',
+            method: 'DELETE',
+            path: '/v2/users/pending',
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            prepare: () =>
+              `/v2/users/${userCommunityIds.member}/sessions/${qaSuperDeniedSessionHandle}`,
+            check: forbiddenCheck,
+          },
+          {
+            name: 'target member device session survives rejected super_admin mutations',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            useSavedCookie: 'qaTargetMemberDevice',
+            check: ownMeUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id,
+              false
+            ),
+          },
+          {
+            name: 'rejected super_admin user create left no account',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.142',
+              'cf-connecting-ip': '203.0.113.142',
+            },
+            body: {
+              identifier: 'qa-super-denied-user@example.test',
+              derivedKey: qaSuperDeniedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: invalidCredentials,
+          },
+          {
+            name: 'rejected super_admin password reset did not replace credentials',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.143',
+              'cf-connecting-ip': '203.0.113.143',
+            },
+            body: {
+              identifier: userCommunityCredentials.member.email,
+              derivedKey: qaSuperDeniedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: invalidCredentials,
+          },
+          {
+            name: 'target member original credentials still authenticate with unchanged role',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: '' },
+            body: {
+              identifier: userCommunityCredentials.member.email,
+              derivedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: ownUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          {
+            name: 'logout verification member session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'target community user list unchanged after super_admin denials',
+            method: 'GET',
+            path: '/v2/users',
+            expected: 200,
+            useSavedCookie: 'qaTargetAdmin',
+            check: (body) => {
+              const parsed = body as {
+                data?: Array<{ email?: unknown }>;
+                meta?: { total?: number };
+              };
+              return (
+                parsed?.meta?.total === 3 &&
+                Array.isArray(parsed?.data) &&
+                parsed.data.length === 3 &&
+                !parsed.data.some(
+                  (row) => row.email === 'qa-super-denied-user@example.test'
+                )
+              );
+            },
+          },
+          {
+            name: 'target member profile and role unchanged after super_admin denials',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}`,
+            expected: 200,
+            useSavedCookie: 'qaTargetAdmin',
+            check: (body) => {
+              const data = (
+                body as {
+                  data?: {
+                    id?: unknown;
+                    email?: unknown;
+                    role?: unknown;
+                    status?: unknown;
+                    displayName?: unknown;
+                  };
+                }
+              )?.data;
+              return (
+                !!data &&
+                data.id === userCommunityIds.member &&
+                data.email === userCommunityCredentials.member.email &&
+                data.role === 'member' &&
+                data.status === 'active' &&
+                data.displayName === null
+              );
+            },
+          },
+          {
+            name: 'target member device session unchanged after super_admin denials',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}/sessions`,
+            expected: 200,
+            useSavedCookie: 'qaTargetAdmin',
+            check: (body) => {
+              const rows = (
+                body as { data?: Array<{ handle?: unknown; kind?: unknown }> }
+              )?.data;
+              return (
+                Array.isArray(rows) &&
+                rows.length === 1 &&
+                rows[0]?.handle === qaSuperDeniedSessionHandle &&
+                rows[0]?.kind === 'device'
+              );
+            },
+          },
+          {
+            name: 'logout target community admin helper session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'qaTargetAdmin',
+          },
+          {
+            name: 'logout target community member helper device session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'qaTargetMemberDevice',
+          },
+          {
+            name: 'deny community media metadata',
+            method: 'GET',
+            path: `/v2/media/${readableFileId}/metadata`,
+            expected: 404,
+            useSavedCookie: 'qaSuperAdmin',
+          },
+          {
+            name: 'deny community media delete',
+            method: 'DELETE',
+            path: `/v2/media/${readableFileId}`,
+            expected: 404,
+            useSavedCookie: 'qaSuperAdmin',
+          },
+          {
             name: 'logout',
             method: 'POST',
             path: '/v2/auth/logout',
             expected: 204,
+            useSavedCookie: 'qaSuperAdmin',
           },
         ],
       },
@@ -7091,6 +8082,168 @@ export async function createFixture(
           },
           ...forbiddenCommunityReadSteps,
           ...forbiddenCommunityWriteSteps,
+          ...forbiddenAdminSteps,
+          ...forbiddenImportSteps('disabled admin'),
+          ...(() => {
+            let disabledManifestToken1 = '';
+            let disabledZipToken1 = '';
+            let disabledManifestChecksum1 = '';
+            let disabledZipChecksum1 = '';
+            let disabledManifestBytes1 = new Uint8Array(0);
+            let disabledZipBytes1 = new Uint8Array(0);
+            let disabledManifestToken2 = '';
+            let disabledZipToken2 = '';
+            return [
+              {
+                name: 'export disabled community as own admin',
+                method: 'POST',
+                path: '/v2/community/export',
+                expected: 201,
+                body: {},
+                check: (body: unknown) => {
+                  const parsed =
+                    CreateCommunityExportResponseSchema.safeParse(body);
+                  if (!parsed.success) return false;
+                  disabledManifestToken1 =
+                    parsed.data.data.artifacts.manifest.token;
+                  disabledZipToken1 = parsed.data.data.artifacts.mediaZip.token;
+                  disabledManifestChecksum1 =
+                    parsed.data.data.artifacts.manifest.checksum;
+                  disabledZipChecksum1 =
+                    parsed.data.data.artifacts.mediaZip.checksum;
+                  return true;
+                },
+              },
+              {
+                name: 'download disabled community manifest including #162 rows',
+                method: 'GET',
+                path: '/v2/community/export/download/pending',
+                expected: 200,
+                prepare: () =>
+                  `/v2/community/export/download/${disabledManifestToken1}`,
+                checkHeaders: (headers: Headers) =>
+                  headers.get('cache-control') === 'no-store' &&
+                  (headers.get('content-disposition') ?? '').includes(
+                    'attachment'
+                  ),
+                checkBytes: (bytes: Uint8Array) => {
+                  if (
+                    new StreamingSha256().update(bytes).digestHex() !==
+                    disabledManifestChecksum1
+                  ) {
+                    return false;
+                  }
+                  const manifest = JSON.parse(
+                    new TextDecoder().decode(bytes)
+                  ) as {
+                    community?: { id?: number; status?: string };
+                    stories?: Array<{
+                      id: number;
+                      isRestricted?: boolean;
+                      privacyLevel?: string;
+                    }>;
+                    files?: Array<{ id: string }>;
+                  };
+                  disabledManifestBytes1 = bytes;
+                  const hasPublicDisabled =
+                    manifest.stories?.some((s) => s.id === inactiveStory.id) ??
+                    false;
+                  const hasRestrictedDisabled =
+                    manifest.stories?.some(
+                      (s) =>
+                        s.id === inactiveRestrictedStory.id &&
+                        s.isRestricted === true &&
+                        s.privacyLevel === 'editors'
+                    ) ?? false;
+                  const hasDisabledFile =
+                    manifest.files?.some((f) => f.id === inactiveFileId) ??
+                    false;
+                  return (
+                    manifest.community?.id === inactiveCommunity.id &&
+                    manifest.community?.status === 'disabled' &&
+                    hasPublicDisabled &&
+                    hasRestrictedDisabled &&
+                    hasDisabledFile
+                  );
+                },
+              },
+              {
+                name: 'download disabled community media zip',
+                method: 'GET',
+                path: '/v2/community/export/download/pending',
+                expected: 200,
+                prepare: () =>
+                  `/v2/community/export/download/${disabledZipToken1}`,
+                checkBytes: (bytes: Uint8Array) => {
+                  if (
+                    new StreamingSha256().update(bytes).digestHex() !==
+                    disabledZipChecksum1
+                  ) {
+                    return false;
+                  }
+                  const entries = parseDeterministicZip(bytes);
+                  disabledZipBytes1 = bytes;
+                  return entries.some(
+                    (e) => e.path === `media/${inactiveFileId}`
+                  );
+                },
+              },
+              {
+                name: 're-export disabled community deterministically',
+                method: 'POST',
+                path: '/v2/community/export',
+                expected: 201,
+                body: {},
+                check: (body: unknown) => {
+                  const parsed =
+                    CreateCommunityExportResponseSchema.safeParse(body);
+                  if (!parsed.success) return false;
+                  disabledManifestToken2 =
+                    parsed.data.data.artifacts.manifest.token;
+                  disabledZipToken2 = parsed.data.data.artifacts.mediaZip.token;
+                  return (
+                    parsed.data.data.artifacts.manifest.checksum ===
+                      disabledManifestChecksum1 &&
+                    parsed.data.data.artifacts.mediaZip.checksum ===
+                      disabledZipChecksum1
+                  );
+                },
+              },
+              {
+                name: 'verify byte-identical disabled community manifest',
+                method: 'GET',
+                path: '/v2/community/export/download/pending',
+                expected: 200,
+                prepare: () =>
+                  `/v2/community/export/download/${disabledManifestToken2}`,
+                checkBytes: (bytes: Uint8Array) =>
+                  bytes.byteLength === disabledManifestBytes1.byteLength &&
+                  bytes.every(
+                    (byte, index) => byte === disabledManifestBytes1[index]
+                  ),
+              },
+              {
+                name: 'verify byte-identical disabled community media zip',
+                method: 'GET',
+                path: '/v2/community/export/download/pending',
+                expected: 200,
+                prepare: () =>
+                  `/v2/community/export/download/${disabledZipToken2}`,
+                checkBytes: (bytes: Uint8Array) =>
+                  bytes.byteLength === disabledZipBytes1.byteLength &&
+                  bytes.every(
+                    (byte, index) => byte === disabledZipBytes1[index]
+                  ),
+              },
+              {
+                name: 'deny community audit entries while community is disabled',
+                method: 'GET',
+                path: '/v2/community/audit-entries',
+                expected: 403,
+                check: forbiddenCheck,
+              },
+            ];
+          })(),
           {
             name: 'reset recovered disabled admin password (assisted)',
             method: 'POST',
@@ -7303,6 +8456,729 @@ export async function createFixture(
               contentType: 'audio/mpeg',
               bytes: mediaPngBytes,
             }),
+          },
+          {
+            name: 'preview CSV places import with staged media for discard',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportDiscardManifest',
+            ...qaMultipart({
+              filename: 'qa-places-discard.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,region,photo\nQA Import Discard Place,North,qa-discard-pic.png\n'
+              ),
+              fields: { kind: 'places' },
+              mediaParts: [
+                {
+                  filename: 'qa-discard-pic.png',
+                  contentType: 'image/png',
+                  bytes: mediaPngBytes,
+                },
+              ],
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaImportDiscardManifestId = parsed.data.data.id;
+              return (
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true &&
+                parsed.data.data.rowCount === 1 &&
+                parsed.data.data.stagedMediaCount === 1 &&
+                parsed.data.data.mediaSummary.stagedCount === 1 &&
+                !JSON.stringify(body).includes('storageKey')
+              );
+            },
+          },
+          {
+            name: 'withhold pre-commit import staged media from /v2/media/:id',
+            method: 'GET',
+            path: '/v2/media/pending',
+            expected: 404,
+            prepare: async () => {
+              const [manifestRow] = await db
+                .select({
+                  stagedFileIds: importManifests.stagedFileIds,
+                  sourceFileId: importManifests.sourceFileId,
+                })
+                .from(importManifests)
+                .where(eq(importManifests.id, qaImportDiscardManifestId))
+                .limit(1);
+              if (!manifestRow) {
+                throw new Error('Missing discard manifest row in DB');
+              }
+              const stagedIds = parseJsonArray<string>(
+                manifestRow.stagedFileIds
+              );
+              if (stagedIds.length !== 1) {
+                throw new Error(
+                  `Expected 1 staged file ID on discard manifest, got ${stagedIds.length}`
+                );
+              }
+              qaDiscardStagedFileId = stagedIds[0]!;
+              qaDiscardSourceFileId = manifestRow.sourceFileId;
+              const [sourceRow] = await db
+                .select({ storageKey: files.storageKey, path: files.path })
+                .from(files)
+                .where(eq(files.id, qaDiscardSourceFileId))
+                .limit(1);
+              if (!sourceRow) {
+                throw new Error('Missing source CSV file row in files table');
+              }
+              qaDiscardSourceStorageKey =
+                sourceRow.storageKey ?? sourceRow.path;
+              const [fileRow] = await db
+                .select({ storageKey: files.storageKey, path: files.path })
+                .from(files)
+                .where(eq(files.id, qaDiscardStagedFileId))
+                .limit(1);
+              if (!fileRow) {
+                throw new Error('Missing staged file row in files table');
+              }
+              qaDiscardStagedStorageKey = fileRow.storageKey ?? fileRow.path;
+              if (!(await hasMedia(qaDiscardStagedStorageKey))) {
+                throw new Error(
+                  'Expected staged media bytes in storage before discard'
+                );
+              }
+              return `/v2/media/${qaDiscardStagedFileId}`;
+            },
+          },
+          {
+            name: 'list own-community import manifests',
+            method: 'GET',
+            path: '/v2/imports',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.some(
+                  (item) => item.id === qaImportDiscardManifestId
+                ) &&
+                !parsed.data.data.some(
+                  (item) => item.id === foreignImportManifest.id
+                )
+              );
+            },
+          },
+          {
+            name: 'get previewed import manifest detail',
+            method: 'GET',
+            path: '/v2/imports/{qaImportDiscardManifest}',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.stagedMediaCount === 1
+              );
+            },
+          },
+          {
+            name: 'discard previewed import manifest',
+            method: 'DELETE',
+            path: '/v2/imports/{qaImportDiscardManifest}',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'discarded' &&
+                parsed.data.data.canCommit === false
+              );
+            },
+          },
+          {
+            name: 'reject commit of discarded manifest and confirm staged bytes removed',
+            method: 'POST',
+            path: '/v2/imports/{qaImportDiscardManifest}/commit',
+            expected: 409,
+            prepare: async () => {
+              const stagedRows = await db
+                .select({ id: files.id })
+                .from(files)
+                .where(eq(files.id, qaDiscardStagedFileId))
+                .limit(1);
+              if (stagedRows.length !== 0) {
+                throw new Error(
+                  'Staged file row was not deleted on manifest discard'
+                );
+              }
+              if (await hasMedia(qaDiscardStagedStorageKey)) {
+                throw new Error(
+                  'Staged media bytes remained in storage after manifest discard'
+                );
+              }
+              if (await hasMedia(qaDiscardSourceStorageKey)) {
+                throw new Error(
+                  'Source CSV bytes remained in storage after manifest discard'
+                );
+              }
+              const sourceRows = await db
+                .select({ id: files.id, isActive: files.isActive })
+                .from(files)
+                .where(eq(files.id, qaDiscardSourceFileId))
+                .limit(1);
+              if (
+                sourceRows.length !== 1 ||
+                sourceRows[0]!.isActive !== false
+              ) {
+                throw new Error(
+                  'Source CSV file row should remain inactive after manifest discard'
+                );
+              }
+            },
+          },
+          {
+            name: 'preview stories CSV with unknown audience (never coerce to public)',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportUnknownAudience',
+            ...qaMultipart({
+              filename: 'qa-unknown-audience.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'title,visibility\nQA Bad Audience Story,secret_elders\n'
+              ),
+              fields: { kind: 'stories' },
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaImportUnknownAudienceId = parsed.data.data.id;
+              return (
+                parsed.data.data.validRowCount === 0 &&
+                parsed.data.data.errorCount >= 1 &&
+                parsed.data.data.canCommit === false &&
+                parsed.data.data.audienceSummary?.public === 0 &&
+                parsed.data.data.rowErrors.some(
+                  (err) =>
+                    err.field === 'visibility' &&
+                    err.code === 'unknown_audience'
+                )
+              );
+            },
+          },
+          {
+            name: 'reject commit of manifest containing unknown audience row error',
+            method: 'POST',
+            path: '/v2/imports/{qaImportUnknownAudience}/commit',
+            expected: 422,
+            check: (body) =>
+              (body as { code?: unknown })?.code === 'import_not_committable',
+          },
+          {
+            name: 'preview places CSV referencing missing media file',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            ...qaMultipart({
+              filename: 'qa-missing-media.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,photo\nQA Missing Media Place,missing-asset.png\n'
+              ),
+              fields: { kind: 'places' },
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.canCommit === false &&
+                parsed.data.data.rowErrors.some(
+                  (err) => err.field === 'photo' && err.code === 'missing_media'
+                )
+              );
+            },
+          },
+          {
+            name: 'preview stories CSV rejecting cross-community place, speaker, and file refs',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            ...qaMultipart({
+              filename: 'qa-cross-community.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                `title,visibility,place_ids,speaker_ids,media\nQA Cross Tenant Story,community,${publicPlace.id},${speaker.id},${foreignFileId}\n`
+              ),
+              fields: { kind: 'stories' },
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const codes = new Set(
+                parsed.data.data.rowErrors.map((err) => err.code)
+              );
+              return (
+                parsed.data.data.canCommit === false &&
+                codes.has('missing_place') &&
+                codes.has('missing_speaker') &&
+                codes.has('missing_media')
+              );
+            },
+          },
+          {
+            name: 'reject malformed CSV upload on preview',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 400,
+            ...qaMultipart({
+              filename: 'qa-malformed.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,region\n"unclosed place,North\n'
+              ),
+              fields: { kind: 'places' },
+            }),
+          },
+          ...(isD1Backend
+            ? [
+                {
+                  name: 'reject preview exceeding D1 statement budget with actionable diagnostics',
+                  method: 'POST',
+                  path: '/v2/imports/preview',
+                  expected: 422,
+                  ...qaMultipart({
+                    filename: 'qa-d1-budget.csv',
+                    contentType: 'text/csv',
+                    bytes: new TextEncoder().encode(qaD1BudgetCsv),
+                    fields: { kind: 'stories' },
+                  }),
+                  check: (body: unknown) => {
+                    const err = body as {
+                      code?: unknown;
+                      details?: {
+                        commitPlan?: {
+                          withinD1Budget?: unknown;
+                          statementCount?: unknown;
+                        };
+                        violations?: Array<{ limit?: unknown }>;
+                        alternatives?: unknown;
+                      };
+                    };
+                    return (
+                      err?.code === 'd1_budget_exceeded' &&
+                      err.details?.commitPlan?.withinD1Budget === false &&
+                      typeof err.details?.commitPlan?.statementCount ===
+                        'number' &&
+                      err.details.commitPlan.statementCount > 1000 &&
+                      (err.details?.violations?.some(
+                        (v) => v.limit === 'max_statements'
+                      ) ??
+                        false) &&
+                      typeof err.details?.alternatives === 'string' &&
+                      err.details.alternatives
+                        .toLowerCase()
+                        .includes('field kit')
+                    );
+                  },
+                },
+              ]
+            : [
+                {
+                  name: 'preview over-budget CSV on Node reports withinD1Budget=false diagnostics',
+                  method: 'POST',
+                  path: '/v2/imports/preview',
+                  expected: 201,
+                  captureId: 'qaImportD1BudgetManifest',
+                  ...qaMultipart({
+                    filename: 'qa-d1-budget.csv',
+                    contentType: 'text/csv',
+                    bytes: new TextEncoder().encode(qaD1BudgetCsv),
+                    fields: { kind: 'stories' },
+                  }),
+                  check: (body: unknown) => {
+                    const parsed =
+                      ImportManifestDetailResponseSchema.safeParse(body);
+                    return (
+                      parsed.success &&
+                      parsed.data.data.canCommit === true &&
+                      parsed.data.data.commitPlan.withinD1Budget === false &&
+                      parsed.data.data.commitPlan.statementCount > 1000
+                    );
+                  },
+                },
+                {
+                  name: 'discard oversized D1-budget preview manifest on Node',
+                  method: 'DELETE',
+                  path: '/v2/imports/{qaImportD1BudgetManifest}',
+                  expected: 200,
+                },
+              ]),
+          {
+            name: 'preview places CSV import with staged photo and name audio',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportPlacesManifest',
+            ...qaMultipart({
+              filename: 'qa-places-commit.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,region,latitude,longitude,photo,name_audio\nQA Imported Place,Highlands,-3.41,-60.41,qa-place-pic.png,qa-place-audio.wav\n'
+              ),
+              fields: { kind: 'places' },
+              mediaParts: [
+                {
+                  filename: 'qa-place-pic.png',
+                  contentType: 'image/png',
+                  bytes: mediaPngBytes,
+                },
+                {
+                  filename: 'qa-place-audio.wav',
+                  contentType: 'audio/wav',
+                  bytes: mediaWavBytes,
+                },
+              ],
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaImportPlacesManifestId = parsed.data.data.id;
+              return (
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true &&
+                parsed.data.data.stagedMediaCount === 2 &&
+                parsed.data.data.mediaSummary.stagedCount === 2 &&
+                parsed.data.data.mediaSummary.totalAttachmentRefs === 2
+              );
+            },
+          },
+          {
+            name: 'commit places import manifest atomically',
+            method: 'POST',
+            path: '/v2/imports/{qaImportPlacesManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaCommittedPlacesAt = parsed.data.data.committedAt ?? '';
+              qaCommittedPlacesSummaryJson = JSON.stringify(
+                parsed.data.data.resultSummary
+              );
+              return (
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.canCommit === false &&
+                parsed.data.data.committedAt !== null &&
+                parsed.data.data.resultSummary?.createdPlaces === 1 &&
+                parsed.data.data.resultSummary?.createdAttachments === 2 &&
+                parsed.data.data.resultSummary?.createdSpeakers === 0 &&
+                parsed.data.data.resultSummary?.createdStories === 0
+              );
+            },
+          },
+          {
+            name: 're-commit committed places manifest idempotently',
+            method: 'POST',
+            path: '/v2/imports/{qaImportPlacesManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.committedAt === qaCommittedPlacesAt &&
+                JSON.stringify(parsed.data.data.resultSummary) ===
+                  qaCommittedPlacesSummaryJson
+              );
+            },
+          },
+          {
+            name: 'read activated staged media after places import commit',
+            method: 'GET',
+            path: '/v2/media/pending',
+            expected: 200,
+            prepare: async () => {
+              const [row] = await db
+                .select({ stagedFileIds: importManifests.stagedFileIds })
+                .from(importManifests)
+                .where(eq(importManifests.id, qaImportPlacesManifestId))
+                .limit(1);
+              const fileId = parseJsonArray<string>(row?.stagedFileIds)[0];
+              if (!fileId) {
+                throw new Error('Missing activated staged file ID');
+              }
+              return `/v2/media/${fileId}`;
+            },
+          },
+          {
+            name: 'confirm imported place and attached media in GET /v2/places',
+            method: 'GET',
+            path: '/v2/places',
+            expected: 200,
+            check: (body) => {
+              const parsed = PublicPlacesListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.some(
+                  (place) =>
+                    place.name === 'QA Imported Place' &&
+                    place.region === 'Highlands' &&
+                    place.photos.length === 1 &&
+                    place.placenameAudio !== null
+                )
+              );
+            },
+          },
+          ...(isD1Backend
+            ? [
+                {
+                  name: 'enforce D1 1-import-per-UTC-day limit after committed import',
+                  method: 'POST',
+                  path: '/v2/imports/preview',
+                  expected: 429,
+                  ...qaMultipart({
+                    filename: 'qa-daily-limit.csv',
+                    contentType: 'text/csv',
+                    bytes: new TextEncoder().encode(
+                      'name\nQA Daily Limit Blocked\n'
+                    ),
+                    fields: { kind: 'places' },
+                  }),
+                  check: (body: unknown) =>
+                    (body as { code?: unknown })?.code ===
+                    'd1_daily_import_limit',
+                },
+              ]
+            : []),
+          {
+            name: 'preview speakers CSV import with related birthplace and staged photo',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportSpeakersManifest',
+            prepare: backdateCommittedImportsForD1,
+            ...qaMultipart({
+              filename: 'qa-speakers-commit.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                'name,birthplace_name,affiliation,photo\nQA Imported Speaker,QA Imported Birthplace,QA Guild,qa-speaker-pic.png\n'
+              ),
+              fields: { kind: 'speakers' },
+              mediaParts: [
+                {
+                  filename: 'qa-speaker-pic.png',
+                  contentType: 'image/png',
+                  bytes: mediaPngBytes,
+                },
+              ],
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true &&
+                parsed.data.data.relatedRecords.placesToCreateCount === 1 &&
+                parsed.data.data.stagedMediaCount === 1
+              );
+            },
+          },
+          {
+            name: 'commit speakers import manifest atomically',
+            method: 'POST',
+            path: '/v2/imports/{qaImportSpeakersManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.resultSummary?.createdPlaces === 1 &&
+                parsed.data.data.resultSummary?.createdSpeakers === 1 &&
+                parsed.data.data.resultSummary?.createdAttachments === 1
+              );
+            },
+          },
+          {
+            name: 'confirm imported speaker, birthplace, and photo in GET /v2/speakers',
+            method: 'GET',
+            path: '/v2/speakers',
+            expected: 200,
+            check: (body) => {
+              const parsed = PublicSpeakersListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.some(
+                  (spk) =>
+                    spk.name === 'QA Imported Speaker' &&
+                    spk.affiliation === 'QA Guild' &&
+                    spk.birthplace?.name === 'QA Imported Birthplace' &&
+                    spk.photo !== null
+                )
+              );
+            },
+          },
+          {
+            name: 'preview stories CSV with audienceMapping, related edges, staged media, and external link',
+            method: 'POST',
+            path: '/v2/imports/preview',
+            expected: 201,
+            captureId: 'qaImportStoriesManifest',
+            prepare: backdateCommittedImportsForD1,
+            ...qaMultipart({
+              filename: 'qa-stories-commit.csv',
+              contentType: 'text/csv',
+              bytes: new TextEncoder().encode(
+                `title,visibility,topic,language,place_ids,place_names,speaker_ids,speaker_names,media,external_media_links\nQA Imported Story,community-circle,Oral History,en,"${mediaPlace.id},${mediaPlace.id}",QA Imported Story Place,${mediaSpeaker.id},QA Imported Story Speaker,qa-story-pic.png,https://media.example.test/qa-import/1\n`
+              ),
+              fields: {
+                kind: 'stories',
+                audienceMapping: JSON.stringify({
+                  'community-circle': 'community',
+                }),
+              },
+              mediaParts: [
+                {
+                  filename: 'qa-story-pic.png',
+                  contentType: 'image/png',
+                  bytes: mediaPngBytes,
+                },
+              ],
+            }),
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaImportStoriesManifestId = parsed.data.data.id;
+              return (
+                parsed.data.data.status === 'previewed' &&
+                parsed.data.data.canCommit === true &&
+                parsed.data.data.audienceMapping?.['community-circle'] ===
+                  'community' &&
+                parsed.data.data.audienceSummary?.public === 0 &&
+                parsed.data.data.audienceSummary?.community === 1 &&
+                parsed.data.data.audienceSummary?.editors === 0 &&
+                parsed.data.data.relatedRecords.resolvedPlacesCount === 1 &&
+                parsed.data.data.relatedRecords.placesToCreateCount === 1 &&
+                parsed.data.data.relatedRecords.resolvedSpeakersCount === 1 &&
+                parsed.data.data.relatedRecords.speakersToCreateCount === 1 &&
+                parsed.data.data.previewRows.length === 1 &&
+                parsed.data.data.previewRowsTruncated === false &&
+                parsed.data.data.stagedMediaCount === 1
+              );
+            },
+          },
+          {
+            name: 'commit stories import manifest atomically with edge multiplicity',
+            method: 'POST',
+            path: '/v2/imports/{qaImportStoriesManifest}/commit',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.resultSummary?.createdStories === 1 &&
+                parsed.data.data.resultSummary?.createdPlaces === 1 &&
+                parsed.data.data.resultSummary?.createdSpeakers === 1 &&
+                parsed.data.data.resultSummary?.createdStoryPlaces === 3 &&
+                parsed.data.data.resultSummary?.createdStorySpeakers === 2 &&
+                parsed.data.data.resultSummary?.createdAttachments === 1 &&
+                parsed.data.data.resultSummary?.createdExternalLinks === 1
+              );
+            },
+          },
+          {
+            name: 'confirm imported story edges, media, and external link in GET /v2/stories',
+            method: 'GET',
+            path: '/v2/stories',
+            expected: 200,
+            check: (body) => {
+              const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const imported = parsed.data.data.stories.find(
+                (story) => story.title === 'QA Imported Story'
+              );
+              return (
+                imported !== undefined &&
+                imported.visibility === 'community' &&
+                imported.attachments.length === 1 &&
+                imported.externalMediaLinks.length === 1 &&
+                imported.places.some((p) => p.id === mediaPlace.id) &&
+                imported.places.some(
+                  (p) => p.name === 'QA Imported Story Place'
+                ) &&
+                imported.speakers.some((s) => s.id === mediaSpeaker.id) &&
+                imported.speakers.some(
+                  (s) => s.name === 'QA Imported Story Speaker'
+                )
+              );
+            },
+          },
+          {
+            name: 'filter committed import manifests and verify content-free import audits',
+            method: 'GET',
+            path: '/v2/imports?status=committed',
+            expected: 200,
+            prepare: async () => {
+              const entries = await db
+                .select()
+                .from(auditEntries)
+                .where(
+                  and(
+                    eq(auditEntries.communityId, mediaCommunity.id),
+                    eq(auditEntries.resourceType, 'import_manifest')
+                  )
+                )
+                .orderBy(asc(auditEntries.id));
+              const actions = new Set(entries.map((entry) => entry.action));
+              for (const required of [
+                'import.preview',
+                'import.discard',
+                'import.commit',
+              ]) {
+                if (!actions.has(required)) {
+                  throw new Error(`Missing audit action ${required}`);
+                }
+              }
+              const forbiddenAuditTokens = [
+                'QA Imported Place',
+                'QA Imported Speaker',
+                'QA Imported Story',
+                'QA Bad Audience Story',
+                'qa-place-pic.png',
+                'qa-discard-pic.png',
+                'https://media.example.test/qa-import/1',
+                ...HONO_PERSONA_CULTURAL_STRINGS,
+              ];
+              for (const entry of entries) {
+                validateContentFreeAuditEntry({
+                  communityId: entry.communityId,
+                  actorId: entry.actorId,
+                  action: entry.action,
+                  resourceType: entry.resourceType,
+                  resourceIds: parseJsonArray<number | string>(
+                    entry.resourceIds
+                  ),
+                  outcome: entry.outcome,
+                  ipAddress: entry.ipAddress,
+                  userAgent: entry.userAgent,
+                });
+                const serialized = JSON.stringify(entry);
+                for (const token of forbiddenAuditTokens) {
+                  if (serialized.includes(token)) {
+                    throw new Error(
+                      `Import audit entry leaked row/content token "${token}"`
+                    );
+                  }
+                }
+              }
+            },
+            check: (body) => {
+              const parsed = ImportManifestListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.length === 3 &&
+                parsed.data.meta.total === 3 &&
+                parsed.data.data.every((item) => item.status === 'committed')
+              );
+            },
           },
           // The real-HTTP transport cannot send an 11 MiB body and keep the
           // connection reusable after the server answers 413 without draining
@@ -7679,6 +9555,75 @@ export async function createFixture(
             expected: 204,
           },
           {
+            name: 'admin lists own-community import manifests excluding foreign tenant',
+            method: 'GET',
+            path: '/v2/imports',
+            expected: 200,
+            check: (body) => {
+              const parsed = ImportManifestListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.some(
+                  (item) => item.id === qaImportStoriesManifestId
+                ) &&
+                !parsed.data.data.some(
+                  (item) => item.id === foreignImportManifest.id
+                )
+              );
+            },
+          },
+          {
+            name: 'admin reads editor committed import manifest detail',
+            method: 'GET',
+            path: '/v2/imports/pending',
+            expected: 200,
+            prepare: () => `/v2/imports/${qaImportStoriesManifestId}`,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'committed' &&
+                parsed.data.data.kind === 'stories'
+              );
+            },
+          },
+          {
+            name: 'admin discards editor previewed import manifest',
+            method: 'DELETE',
+            path: '/v2/imports/pending',
+            expected: 200,
+            prepare: () => `/v2/imports/${qaImportUnknownAudienceId}`,
+            check: (body) => {
+              const parsed = ImportManifestDetailResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'discarded' &&
+                parsed.data.data.canCommit === false
+              );
+            },
+          },
+          {
+            name: 'admin gets 404 reading cross-community import manifest detail',
+            method: 'GET',
+            path: `/v2/imports/${foreignImportManifest.id}`,
+            expected: 404,
+            check: publicNotFoundCheck,
+          },
+          {
+            name: 'admin gets 404 committing cross-community import manifest',
+            method: 'POST',
+            path: `/v2/imports/${foreignImportManifest.id}/commit`,
+            expected: 404,
+            check: publicNotFoundCheck,
+          },
+          {
+            name: 'admin gets 404 discarding cross-community import manifest',
+            method: 'DELETE',
+            path: `/v2/imports/${foreignImportManifest.id}`,
+            expected: 404,
+            check: publicNotFoundCheck,
+          },
+          {
             name: 'logout',
             method: 'POST',
             path: '/v2/auth/logout',
@@ -7760,6 +9705,7 @@ export async function createFixture(
               attachmentIds: [1],
             },
           },
+          ...forbiddenImportSteps('viewer'),
           {
             name: 'logout',
             method: 'POST',
@@ -7834,6 +9780,7 @@ export async function createFixture(
             path: `/v2/media/${mediaGuardedFileId}`,
             expected: 403,
           },
+          ...forbiddenImportSteps('member'),
           {
             name: 'logout',
             method: 'POST',
@@ -7935,6 +9882,7 @@ export async function createFixture(
             path: '/v2/media/{qaSuperPhoto}',
             expected: 200,
           },
+          ...forbiddenImportSteps('super_admin'),
           {
             name: 'logout',
             method: 'POST',
@@ -7974,6 +9922,471 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/logout',
             expected: 204,
+          },
+        ],
+      },
+      {
+        // Slice 14 system administration lifecycle (#188, SPEC-V2 §6.2, §6.8, §7):
+        // super_admin lists operational communities, provisions empty hosted
+        // community, issues & reissues ClaimToken, verifies claim_pending and
+        // post-claim refusal, toggles status (disabling purges sessions, active
+        // restores), deprovisions & reprovisions unclaimed community, and reads
+        // content-free system audit entries (communityId IS NULL).
+        persona: 'admin_lifecycle',
+        steps: [
+          {
+            name: 'login as super_admin',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              'x-forwarded-for': '203.0.113.140',
+              'cf-connecting-ip': '203.0.113.140',
+            },
+            body: {
+              identifier: credentials.super_admin.email,
+              derivedKey: superAdminNewKey,
+            },
+            check: ownUser(
+              credentials.super_admin.email,
+              'super_admin',
+              liveSessionCookie,
+              null
+            ),
+          },
+          {
+            name: 'list operational communities without descriptive fields',
+            method: 'GET',
+            path: '/v2/admin/communities',
+            expected: 200,
+            saveCookieAs: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = AdminCommunityListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const text = JSON.stringify(body);
+              return (
+                !text.includes('"name"') &&
+                !text.includes('"description"') &&
+                !text.includes('"visibility"') &&
+                !text.includes('"locale"') &&
+                !text.includes('"country"') &&
+                !HONO_PERSONA_CULTURAL_STRINGS.some((s) => text.includes(s))
+              );
+            },
+          },
+          {
+            name: 'reject descriptive fields on admin community provision',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 400,
+            body: { slug: 'qa-admin-bad', name: 'Forbidden Descriptive Name' },
+          },
+          {
+            name: 'provision empty hosted community',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            captureId: 'qaClaimedComm',
+            body: { slug: 'qa-admin-claimed' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.slug === 'qa-admin-claimed' &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 'issue first claim token',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimedComm}/claim-tokens',
+            expected: 201,
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimToken1 = parsed.data.data.token;
+              qaClaimToken1Id = parsed.data.data.id;
+              return true;
+            },
+          },
+          {
+            name: 'reissue claim token superseding earlier token',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimedComm}/claim-tokens',
+            expected: 201,
+            body: { ttlSeconds: 3600 },
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimToken2 = parsed.data.data.token;
+              qaClaimToken2Id = parsed.data.data.id;
+              return qaClaimToken2 !== qaClaimToken1;
+            },
+          },
+          {
+            name: 'observe claim_pending status in operational list',
+            method: 'GET',
+            path: '/v2/admin/communities?limit=100',
+            expected: 200,
+            check: (body) => {
+              const parsed = AdminCommunityListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const entry = parsed.data.data.find(
+                (c) => c.slug === 'qa-admin-claimed'
+              );
+              return entry?.claimStatus === 'claim_pending';
+            },
+          },
+          {
+            name: 'reject superseded claim token',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.140',
+              'cf-connecting-ip': '203.0.113.140',
+            },
+            prepare: () => {
+              qaSupersededClaimBody.token = qaClaimToken1;
+            },
+            body: qaSupersededClaimBody,
+            check: invalidCredentials,
+          },
+          {
+            name: 'claim provisioned community with valid token',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 201,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.140',
+              'cf-connecting-ip': '203.0.113.140',
+            },
+            prepare: () => {
+              qaValidClaimBody.token = qaClaimToken2;
+            },
+            body: qaValidClaimBody,
+            checkHeaders: (headers) =>
+              (headers.get('set-cookie') ?? '').includes('ts_session='),
+          },
+          {
+            name: 'claimed admin session is active',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'qaClaimedAdmin',
+            check: ownMeUser(
+              'qa-claimed-admin@example.test',
+              'admin',
+              liveSessionCookie,
+              undefined,
+              true
+            ),
+          },
+          {
+            name: 'refuse claim-token issuance after claim',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimedComm}/claim-tokens',
+            expected: 409,
+            useSavedCookie: 'qaSysAdmin',
+          },
+          {
+            name: 'refuse deprovision of claimed community',
+            method: 'DELETE',
+            path: '/v2/admin/communities/{qaClaimedComm}',
+            expected: 409,
+            useSavedCookie: 'qaSysAdmin',
+          },
+          {
+            name: 'disable claimed community and purge its sessions',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaClaimedComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'disabled' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'disabled' &&
+                parsed.data.data.claimStatus === 'claimed'
+              );
+            },
+          },
+          {
+            name: 'claimed admin session is purged after disable',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 401,
+            useSavedCookie: 'qaClaimedAdmin',
+          },
+          {
+            name: 'restore claimed community to active',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaClaimedComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'active' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.claimStatus === 'claimed'
+              );
+            },
+          },
+          {
+            name: 'claimed admin logs back in after restore',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.141',
+              'cf-connecting-ip': '203.0.113.141',
+            },
+            body: {
+              identifier: 'qa-claimed-admin@example.test',
+              communitySlug: 'qa-admin-claimed',
+              derivedKey: qaAdminClaimedKey,
+            },
+            check: ownUser(
+              'qa-claimed-admin@example.test',
+              'admin',
+              liveSessionCookie
+            ),
+          },
+          {
+            name: 'restored community serves claimed admin',
+            method: 'GET',
+            path: '/v2/community',
+            expected: 200,
+          },
+          {
+            name: 'logout restored claimed admin',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'provision empty community for deprovision',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            useSavedCookie: 'qaSysAdmin',
+            captureId: 'qaDeprovComm',
+            body: { slug: 'qa-admin-deprov' },
+          },
+          {
+            name: 'issue claim token before deprovision',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaDeprovComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaDeprovTokenId = parsed.data.data.id;
+              return true;
+            },
+          },
+          {
+            name: 'deprovision unclaimed empty community',
+            method: 'DELETE',
+            path: '/v2/admin/communities/{qaDeprovComm}',
+            expected: 204,
+            useSavedCookie: 'qaSysAdmin',
+          },
+          {
+            name: 'deprovisioned community returns 409 on status toggle',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaDeprovComm}/status',
+            expected: 409,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'disabled' },
+          },
+          {
+            name: 'reprovision same slug after deprovision',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            useSavedCookie: 'qaSysAdmin',
+            captureId: 'qaReprovComm',
+            body: { slug: 'qa-admin-deprov' },
+          },
+          {
+            name: 'issue claim token on reprovisioned community before disable',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaReprovComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaDisabledToken = parsed.data.data.token;
+              return true;
+            },
+          },
+          {
+            name: 'disable reprovisioned community supersedes token and hides claim_pending',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaReprovComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'disabled' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'disabled' &&
+                parsed.data.data.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 'list shows disabled unclaimed community without claim_pending',
+            method: 'GET',
+            path: '/v2/admin/communities?limit=100',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = AdminCommunityListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const entry = parsed.data.data.find(
+                (c) => c.slug === 'qa-admin-deprov'
+              );
+              return (
+                entry?.status === 'disabled' &&
+                entry?.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 're-enable reprovisioned community does not restore claim_pending',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaReprovComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'active' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 'pre-disable claim token stays rejected after re-enable',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.145',
+              'cf-connecting-ip': '203.0.113.145',
+            },
+            prepare: () => {
+              qaDisabledClaimBody.token = qaDisabledToken;
+            },
+            body: qaDisabledClaimBody,
+            check: invalidCredentials,
+          },
+          {
+            name: 'clean up reprovisioned community',
+            method: 'DELETE',
+            path: '/v2/admin/communities/{qaReprovComm}',
+            expected: 204,
+            useSavedCookie: 'qaSysAdmin',
+          },
+          {
+            name: 'read system-only audit entries without community or secret leaks',
+            method: 'GET',
+            path: '/v2/admin/audit-entries?limit=100',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = AdminAuditEntryListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const rows = parsed.data.data;
+              if (!rows.every((e) => e.communityId === null)) return false;
+              if (
+                rows.some(
+                  (e) =>
+                    e.action === 'claim_token.consume' &&
+                    e.outcome === 'success'
+                )
+              ) {
+                return false;
+              }
+              if (
+                rows.some(
+                  (e) =>
+                    e.action.startsWith('claim_token.') &&
+                    (e.resourceIds.includes(qaClaimToken1Id) ||
+                      e.resourceIds.includes(qaClaimToken2Id))
+                )
+              ) {
+                return false;
+              }
+              if (
+                rows.some(
+                  (e) =>
+                    e.action.startsWith('claim_token.') &&
+                    e.resourceIds.includes(qaDeprovTokenId)
+                )
+              ) {
+                return false;
+              }
+              const requiredActions = [
+                'system.community.provision',
+                'system.community.status.disabled',
+                'system.community.status.active',
+                'system.community.deprovision',
+              ];
+              if (
+                !requiredActions.every((action) =>
+                  rows.some((e) => e.action === action)
+                )
+              ) {
+                return false;
+              }
+              const text = JSON.stringify(body);
+              return (
+                !text.includes(qaClaimToken1) &&
+                !text.includes(qaClaimToken2) &&
+                !HONO_PERSONA_CULTURAL_STRINGS.some((s) => text.includes(s))
+              );
+            },
+          },
+          {
+            name: 'filter system audit entries by action',
+            method: 'GET',
+            path: '/v2/admin/audit-entries?action=system.community.deprovision',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = AdminAuditEntryListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.length >= 2 &&
+                parsed.data.data.every(
+                  (e) => e.action === 'system.community.deprovision'
+                )
+              );
+            },
+          },
+          {
+            name: 'logout super_admin',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'qaSysAdmin',
           },
         ],
       },

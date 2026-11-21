@@ -1414,6 +1414,7 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
         .from(d1Tables.importManifests)
         .where(eq(d1Tables.importManifests.id, storyPreview.id));
       const plannedStory = planImportCommit({
+        sourceFileName: 'import.csv',
         normalizedData: storyRow!.normalizedRows as any,
         stagedFileIds: storyRow!.stagedFileIds,
         manifestPayloadBytes: 1000,
@@ -1464,6 +1465,7 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
         .from(d1Tables.importManifests)
         .where(eq(d1Tables.importManifests.id, placesPreview.id));
       const plannedPlaces = planImportCommit({
+        sourceFileName: 'import.csv',
         normalizedData: placesRow!.normalizedRows as any,
         stagedFileIds: placesRow!.stagedFileIds,
         manifestPayloadBytes: 1000,
@@ -1498,6 +1500,7 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
         .from(d1Tables.importManifests)
         .where(eq(d1Tables.importManifests.id, speakersPreview.id));
       const plannedSpeakers = planImportCommit({
+        sourceFileName: 'import.csv',
         normalizedData: speakersRow!.normalizedRows as any,
         stagedFileIds: speakersRow!.stagedFileIds,
         manifestPayloadBytes: 1000,

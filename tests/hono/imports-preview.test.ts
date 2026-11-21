@@ -2014,6 +2014,80 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
       );
       expect(d1Mem.store.size).toBe(0);
 
+      // Reproduce the review's three-place manifest boundary with a 180-byte
+      // source filename. Tune the JSON payload independently of planner output.
+      const placeDescriptions = [16_000, 16_000, 16_000];
+      const placesCsv = () =>
+        'name,description\n' +
+        placeDescriptions
+          .map((length, i) => `Boundary Place ${i},${'x'.repeat(length)}\n`)
+          .join('');
+      recordedStatements.length = 0;
+      const baselineRes = await postPreview(d1App, {
+        cookie: d1Cookie,
+        csvFilename: 'x'.repeat(176) + '.csv',
+        csvText: placesCsv(),
+        fields: { kind: 'places' },
+      });
+      expect(baselineRes.status).toBe(201);
+      const baseline = ImportManifestDetailResponseSchema.parse(
+        await baselineRes.json()
+      ).data;
+      const [baselineRow] = await d1.db
+        .select()
+        .from(d1Tables.importManifests)
+        .where(eq(d1Tables.importManifests.id, baseline.id));
+      const baselinePayloadBytes = new TextEncoder().encode(
+        JSON.stringify({
+          mappings: baselineRow!.mappings,
+          normalizedRows: baselineRow!.normalizedRows,
+          rowErrors: baselineRow!.rowErrors,
+          stagedFileIds: baselineRow!.stagedFileIds,
+        })
+      ).byteLength;
+      const baselinePlan = planImportCommit({
+        normalizedData: baselineRow!.normalizedRows as never,
+        stagedFileIds: baselineRow!.stagedFileIds,
+        sourceFileName: baselineRow!.sourceFileName,
+        manifestPayloadBytes: baselinePayloadBytes,
+        sourceFilePayloadBytes: 580,
+      });
+      const manifestStatement = recordedStatements[1]!;
+      const actualManifestBytes =
+        new TextEncoder().encode(manifestStatement.sql).byteLength +
+        manifestStatement.params.reduce<number>(
+          (sum, value) =>
+            sum +
+            2 +
+            (value === null
+              ? 4
+              : new TextEncoder().encode(String(value)).byteLength),
+          0
+        );
+      expect(
+        baselinePlan.previewStatements[1]!.statementBytes
+      ).toBeGreaterThanOrEqual(actualManifestBytes);
+
+      // Each added ASCII character is bound twice: HTML and plain text.
+      placeDescriptions[2]! += Math.floor((101_371 - baselinePayloadBytes) / 2);
+      const filenameBoundaryRes = await postPreview(d1App, {
+        cookie: d1Cookie,
+        csvFilename: 'x'.repeat(176) + '.csv',
+        csvText: placesCsv(),
+        fields: { kind: 'places' },
+      });
+      expect(filenameBoundaryRes.status).toBe(422);
+      const filenameBoundaryBody = (await filenameBoundaryRes.json()) as {
+        code: string;
+        details: { violations: Array<{ limit: string }> };
+      };
+      expect(filenameBoundaryBody.code).toBe('d1_budget_exceeded');
+      expect(
+        filenameBoundaryBody.details.violations.map((v) => v.limit)
+      ).toContain('max_statement_bytes');
+      // Rejection leaves only the baseline CSV, with no new manifest/files.
+      expect(d1Mem.store.size).toBe(1);
+
       // 2. Just below the boundary: preview succeeds (201), commits (200),
       // and every planned statement size >= actual compiled SQL + bound param bytes.
       const safeDesc = 'ᐊ'.repeat(16_600);
@@ -2071,6 +2145,7 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
       const plan = planImportCommit({
         normalizedData: manifestRow!.normalizedRows as never,
         stagedFileIds: manifestRow!.stagedFileIds,
+        sourceFileName: manifestRow!.sourceFileName,
         manifestPayloadBytes,
         sourceFilePayloadBytes,
       });

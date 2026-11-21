@@ -248,6 +248,35 @@ describe('CSV parser and formula-injection guards', () => {
 });
 
 describe('D1 commit-plan budget validator', () => {
+  it('counts the separately bound source filename at the manifest size boundary', () => {
+    const plan = planImportCommit({
+      normalizedData: {
+        kind: 'places',
+        rows: [],
+        relatedPlacesToCreate: [],
+        relatedSpeakersToCreate: [],
+        skippedDuplicates: 0,
+        audienceCounts: null,
+      },
+      stagedFileIds: [],
+      sourceFileName: 'x'.repeat(176) + '.csv',
+      manifestPayloadBytes: 101_371,
+      sourceFilePayloadBytes: 580,
+    });
+    // Review reproducer: real SQL + params was 102,409 bytes, while the
+    // former estimate was 102,371 and incorrectly admitted the preview.
+    const manifest = plan.previewStatements.find(
+      (s) => s.label === 'preview.import_manifest'
+    )!;
+    expect(manifest.statementBytes).toBeGreaterThanOrEqual(
+      101_371 + 1_000 + 180
+    );
+    expect(plan.summary.withinD1Budget).toBe(false);
+    expect(plan.violations.map((v) => v.limit)).toContain(
+      'max_statement_bytes'
+    );
+  });
+
   it('accepts a valid bounded plan within D1 limits', () => {
     const rows: NormalizedPlaceRow[] = [
       {
@@ -264,6 +293,7 @@ describe('D1 commit-plan budget validator', () => {
       },
     ];
     const plan = planImportCommit({
+      sourceFileName: 'import.csv',
       normalizedData: {
         kind: 'places',
         rows,
@@ -315,6 +345,7 @@ describe('D1 commit-plan budget validator', () => {
       })
     );
     const plan = planImportCommit({
+      sourceFileName: 'import.csv',
       normalizedData: {
         kind: 'stories',
         rows: stories,
@@ -359,6 +390,7 @@ describe('D1 commit-plan budget validator', () => {
     };
 
     const bigStmtPlan = planImportCommit({
+      sourceFileName: 'import.csv',
       normalizedData: {
         kind: 'stories',
         rows: [bigStory],
@@ -408,6 +440,7 @@ describe('D1 commit-plan budget validator', () => {
       })
     );
     const heavyPlan = planImportCommit({
+      sourceFileName: 'import.csv',
       normalizedData: {
         kind: 'stories',
         rows: heavyStories,
@@ -468,6 +501,7 @@ describe('D1 commit-plan budget validator', () => {
       externalMediaLinks: [],
     };
     const overPlan = planImportCommit({
+      sourceFileName: 'import.csv',
       normalizedData: {
         kind: 'stories',
         rows: [overBoundaryStory],
@@ -503,6 +537,7 @@ describe('D1 commit-plan budget validator', () => {
       descriptionPlain: safeText,
     };
     const underPlan = planImportCommit({
+      sourceFileName: 'import.csv',
       normalizedData: {
         kind: 'stories',
         rows: [underBoundaryStory],

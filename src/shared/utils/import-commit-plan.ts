@@ -103,6 +103,8 @@ function estimateInsertStatementBytes(
   return total;
 }
 
+// File metadata allowances include the sanitized originalName (180 ASCII
+// bytes), repeated storage keys/UUIDs, URL, MIME type and checksum.
 // Conservative SQL skeleton byte sizes derived directly from the Drizzle-compiled
 // SQL in `src/repositories/imports.repository.ts` (including `guardSql` with
 // `dailyLimitWindow`, full column lists, join subqueries, and a safety margin
@@ -349,6 +351,7 @@ function chunkIntoMultiRowStatements<T>(
 export function planImportCommit(input: {
   normalizedData: StoredNormalizedImportData;
   stagedFileIds: ReadonlyArray<string>;
+  sourceFileName: string | null;
   manifestPayloadBytes: number;
   sourceFilePayloadBytes: number;
 }): ImportCommitPlanResult {
@@ -360,7 +363,8 @@ export function planImportCommit(input: {
   previewStatements.push({
     label: 'preview.source_file',
     boundParams: FILE_INSERT_PARAMS_PER_ROW + 2,
-    statementBytes: FILE_INSERT_SQL_BYTES + input.sourceFilePayloadBytes,
+    statementBytes:
+      FILE_INSERT_SQL_BYTES + input.sourceFilePayloadBytes + 1_024,
     estimatedRowsWritten: D1_ROW_WRITE_COSTS.filesInsert,
   });
 
@@ -373,7 +377,7 @@ export function planImportCommit(input: {
     previewStatements.push({
       label: 'preview.staged_files',
       boundParams: chunk.length * FILE_INSERT_PARAMS_PER_ROW + 2,
-      statementBytes: FILE_INSERT_SQL_BYTES + chunk.length * 460,
+      statementBytes: FILE_INSERT_SQL_BYTES + chunk.length * 1_536,
       estimatedRowsWritten: chunk.length * D1_ROW_WRITE_COSTS.filesInsert,
     });
   }
@@ -381,7 +385,11 @@ export function planImportCommit(input: {
   previewStatements.push({
     label: 'preview.import_manifest',
     boundParams: 16,
-    statementBytes: MANIFEST_INSERT_SQL_BYTES + input.manifestPayloadBytes,
+    statementBytes:
+      MANIFEST_INSERT_SQL_BYTES +
+      input.manifestPayloadBytes +
+      serializedParamBytes(input.sourceFileName ?? 'import.csv') +
+      2,
     estimatedRowsWritten: D1_ROW_WRITE_COSTS.importManifestInsert,
   });
 
@@ -486,7 +494,16 @@ export function planImportCommit(input: {
             D1_GUARD_PARAM_BYTES +
             serializedParamBytes(row.name) +
             2 +
-            chunk.length * 140,
+            estimateInsertStatementBytes(
+              0,
+              chunk.flatMap((att) => [
+                att.fileId,
+                att.role,
+                att.ordinal,
+                att.stagedByManifest ? 1 : 0,
+              ])
+            ) +
+            chunk.length * 100,
           estimatedRowsWritten:
             chunk.length * D1_ROW_WRITE_COSTS.attachmentInsert,
         });
@@ -523,6 +540,8 @@ export function planImportCommit(input: {
                 D1_SAMPLE_ID,
                 relatedPlaceNameByNorm.get(row.birthplaceRef.normalizedName) ??
                   row.birthplaceRef.name,
+                relatedPlaceNameByNorm.get(row.birthplaceRef.normalizedName) ??
+                  row.birthplaceRef.name,
                 D1_SAMPLE_TS_MS,
               ]
             : [];
@@ -549,7 +568,16 @@ export function planImportCommit(input: {
             D1_GUARD_PARAM_BYTES +
             serializedParamBytes(row.name) +
             2 +
-            chunk.length * 140,
+            estimateInsertStatementBytes(
+              0,
+              chunk.flatMap((att) => [
+                att.fileId,
+                att.role,
+                att.ordinal,
+                att.stagedByManifest ? 1 : 0,
+              ])
+            ) +
+            chunk.length * 100,
           estimatedRowsWritten:
             chunk.length * D1_ROW_WRITE_COSTS.attachmentInsert,
         });
@@ -685,7 +713,16 @@ export function planImportCommit(input: {
             ATTACHMENT_INSERT_SQL_BYTES +
             D1_GUARD_PARAM_BYTES +
             storyOwnerSubqueryParamBytes +
-            chunk.length * 140,
+            estimateInsertStatementBytes(
+              0,
+              chunk.flatMap((att) => [
+                att.fileId,
+                att.role,
+                att.ordinal,
+                att.stagedByManifest ? 1 : 0,
+              ])
+            ) +
+            chunk.length * 100,
           estimatedRowsWritten:
             chunk.length * D1_ROW_WRITE_COSTS.attachmentInsert,
         });
@@ -708,7 +745,7 @@ export function planImportCommit(input: {
               D1_GUARD_PARAM_BYTES +
               storyOwnerSubqueryParamBytes +
               chunk.length * 56,
-            chunk
+            chunk.flatMap((url, idx) => [url, i + idx])
           ),
           estimatedRowsWritten:
             chunk.length * D1_ROW_WRITE_COSTS.externalMediaLinkInsert,
@@ -726,7 +763,10 @@ export function planImportCommit(input: {
     commitStatements.push({
       label: 'commit.activate_staged_files',
       boundParams: chunk.length + 10,
-      statementBytes: ACTIVATE_FILES_SQL_BYTES + chunk.length * 42 + 128,
+      statementBytes: estimateInsertStatementBytes(
+        ACTIVATE_FILES_SQL_BYTES + 128,
+        chunk
+      ),
       estimatedRowsWritten:
         chunk.length * D1_ROW_WRITE_COSTS.filesActivateUpdate,
     });
@@ -742,10 +782,20 @@ export function planImportCommit(input: {
   commitStatements.push({
     label: 'commit.import_manifest_status',
     boundParams: 12,
-    statementBytes: MANIFEST_COMMIT_SQL_BYTES + 280,
+    statementBytes: estimateInsertStatementBytes(MANIFEST_COMMIT_SQL_BYTES, [
+      'committed',
+      computeImportResultSummary(normalizedData),
+    ]),
     estimatedRowsWritten: D1_ROW_WRITE_COSTS.importManifestCommitUpdate,
   });
 
+  // SQL skeleton allowances cover syntax. Reserve bytes independently for
+  // every fixed scalar binding (IDs, timestamps, flags, counters and guards),
+  // even where a variable-value estimate already included that binding.
+  // Sixteen bytes covers safe-integer/timestamp text; skeletons cover framing.
+  for (const statement of [...previewStatements, ...commitStatements]) {
+    statement.statementBytes += statement.boundParams * 16;
+  }
   const allStatements = [...previewStatements, ...commitStatements];
   const statementCount = allStatements.length;
   let maxBoundParams = 0;

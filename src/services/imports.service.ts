@@ -291,6 +291,7 @@ function computeManifestPlan(
   const plan = planImportCommit({
     normalizedData,
     stagedFileIds: manifest.stagedFileIds,
+    sourceFileName: manifest.sourceFileName,
     manifestPayloadBytes,
     sourceFilePayloadBytes,
   });
@@ -1211,6 +1212,7 @@ export class ImportsService {
       const plan = planImportCommit({
         normalizedData,
         stagedFileIds: keptStagedIds,
+        sourceFileName: csvUpload.originalName,
         manifestPayloadBytes,
         sourceFilePayloadBytes,
       });

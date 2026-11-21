@@ -4388,7 +4388,10 @@ export async function createFixture(
       },
     ];
     let qaClaimToken1 = '';
+    let qaClaimToken1Id = 0;
     let qaClaimToken2 = '';
+    let qaClaimToken2Id = 0;
+    let qaDeprovTokenId = 0;
     const qaAdminClaimedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
     const qaSupersededClaimBody = {
       token: '',
@@ -8478,6 +8481,7 @@ export async function createFixture(
               const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
               if (!parsed.success) return false;
               qaClaimToken1 = parsed.data.data.token;
+              qaClaimToken1Id = parsed.data.data.id;
               return true;
             },
           },
@@ -8491,6 +8495,7 @@ export async function createFixture(
               const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
               if (!parsed.success) return false;
               qaClaimToken2 = parsed.data.data.token;
+              qaClaimToken2Id = parsed.data.data.id;
               return qaClaimToken2 !== qaClaimToken1;
             },
           },
@@ -8656,6 +8661,12 @@ export async function createFixture(
             path: '/v2/admin/communities/{qaDeprovComm}/claim-tokens',
             expected: 201,
             useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaDeprovTokenId = parsed.data.data.id;
+              return true;
+            },
           },
           {
             name: 'deprovision unclaimed empty community',
@@ -8699,7 +8710,32 @@ export async function createFixture(
               if (!parsed.success) return false;
               const rows = parsed.data.data;
               if (!rows.every((e) => e.communityId === null)) return false;
-              if (rows.some((e) => e.action.startsWith('claim_token.'))) {
+              if (
+                rows.some(
+                  (e) =>
+                    e.action === 'claim_token.consume' &&
+                    e.outcome === 'success'
+                )
+              ) {
+                return false;
+              }
+              if (
+                rows.some(
+                  (e) =>
+                    e.action.startsWith('claim_token.') &&
+                    (e.resourceIds.includes(qaClaimToken1Id) ||
+                      e.resourceIds.includes(qaClaimToken2Id))
+                )
+              ) {
+                return false;
+              }
+              if (
+                !rows.some(
+                  (e) =>
+                    e.action === 'claim_token.issue' &&
+                    e.resourceIds.includes(qaDeprovTokenId)
+                )
+              ) {
                 return false;
               }
               const requiredActions = [

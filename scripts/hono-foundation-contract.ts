@@ -3307,8 +3307,11 @@ export async function runHonoFoundationContract(
       }
     );
     assert.equal(issue1Res.status, 201);
-    const tok1 = ((await issue1Res.json()) as { data: { token: string } }).data
-      .token;
+    const issue1Data = (
+      (await issue1Res.json()) as { data: { id: number; token: string } }
+    ).data;
+    const tok1Id = issue1Data.id;
+    const tok1 = issue1Data.token;
 
     const issue2Res = await send(
       app,
@@ -3320,8 +3323,11 @@ export async function runHonoFoundationContract(
       }
     );
     assert.equal(issue2Res.status, 201);
-    const tok2 = ((await issue2Res.json()) as { data: { token: string } }).data
-      .token;
+    const issue2Data = (
+      (await issue2Res.json()) as { data: { id: number; token: string } }
+    ).data;
+    const tok2Id = issue2Data.id;
+    const tok2 = issue2Data.token;
 
     const listPending = (await (
       await send(app, `/v2/admin/communities?limit=100&offset=0`, {
@@ -3629,15 +3635,18 @@ export async function runHonoFoundationContract(
       { method: 'POST', headers: { cookie: saNullCookie } }
     );
     assert.equal(deprovTokRes.status, 201);
-    const deprovTok = (
-      (await deprovTokRes.json()) as { data: { token: string } }
-    ).data.token;
+    const deprovTokData = (
+      (await deprovTokRes.json()) as { data: { id: number; token: string } }
+    ).data;
+    const deprovTokId = deprovTokData.id;
+    const deprovTok = deprovTokData.token;
     await status(
       send(app, '/v2/bootstrap/claim', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           'x-forwarded-for': '198.51.100.245',
+          'user-agent': 'ContractLeakedProbe/1.0',
         },
         body: JSON.stringify({
           token: deprovTok,
@@ -3670,7 +3679,8 @@ export async function runHonoFoundationContract(
       .id;
     communityIds.push(reprovId);
 
-    // System audit read: only communityId===null entries, zero claim_token.* leaks, 400 on ?communityId=...
+    // System audit read: only communityId===null entries, zero live-community claim_token leaks,
+    // preserved re-scoped deprovision pre-claim entries (keeping ip/UA), 400 on ?communityId=...
     await status(
       send(app, `/v2/admin/audit-entries?communityId=${provCommId}`, {
         headers: { cookie: saNullCookie },
@@ -3684,17 +3694,56 @@ export async function runHonoFoundationContract(
     );
     assert.equal(sysAuditRes.status, 200);
     const sysAuditBody = (await sysAuditRes.json()) as {
-      data: Array<{ communityId: unknown; action: string }>;
+      data: Array<{
+        communityId: unknown;
+        action: string;
+        outcome: string;
+        resourceIds: Array<number | string>;
+        ipAddress: string | null;
+        userAgent: string | null;
+      }>;
     };
     assert.ok(
       sysAuditBody.data.every((row) => row.communityId === null),
       'GET /v2/admin/audit-entries must return only communityId=null rows'
     );
     assert.equal(
-      sysAuditBody.data.some((row) => row.action.startsWith('claim_token.')),
+      sysAuditBody.data.some(
+        (row) =>
+          row.action === 'claim_token.consume' && row.outcome === 'success'
+      ),
       false,
-      'community claim_token entries must never leak into system audit read'
+      'successful community claim_token.consume must never leak into system audit read'
     );
+    assert.equal(
+      sysAuditBody.data.some(
+        (row) =>
+          row.action.startsWith('claim_token.') &&
+          (row.resourceIds.includes(tok1Id) || row.resourceIds.includes(tok2Id))
+      ),
+      false,
+      'live community claim_token entries must never leak into system audit read'
+    );
+    assert.ok(
+      sysAuditBody.data.some(
+        (row) =>
+          row.action === 'claim_token.issue' &&
+          row.resourceIds.includes(deprovTokId)
+      ),
+      'deprovisioned pre-claim claim_token.issue must survive with communityId=null'
+    );
+    const preservedProbeAudit = sysAuditBody.data.find(
+      (row) =>
+        row.action === 'claim_token.consume' &&
+        row.outcome === 'failure' &&
+        row.resourceIds.includes(deprovTokId)
+    );
+    assert.ok(
+      preservedProbeAudit,
+      'deprovisioned failed claim_token.consume probe must survive with communityId=null'
+    );
+    assert.equal(preservedProbeAudit.ipAddress, '198.51.100.245');
+    assert.equal(preservedProbeAudit.userAgent, 'ContractLeakedProbe/1.0');
     for (const expectedAction of [
       'system.community.provision',
       'system.community.status.disabled',

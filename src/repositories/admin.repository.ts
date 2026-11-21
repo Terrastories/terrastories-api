@@ -743,10 +743,12 @@ export class AdminRepository {
 
   /**
    * Atomically deprovision a still-empty, never-administered community
-   * (SPEC-V2 §7). Removes any pre-claim audit entries, claim throttles, and
-   * unconsumed claim tokens in the same unit as the community delete, and
-   * records a system-level `system.community.deprovision` audit entry
-   * (`communityId: null`).
+   * (SPEC-V2 §7). `AuditEntry` is append-only (§6.8): pre-claim
+   * `claim_token.issue` and failed `claim_token.consume` rows are preserved by
+   * re-scoping their `communityId` to `null` (keeping `ipAddress`, `userAgent`,
+   * and all other fields intact) in the same atomic unit that removes claim
+   * throttles, unconsumed claim tokens, and the community row, and writes the
+   * system-level `system.community.deprovision` entry (`communityId: null`).
    */
   async deprovisionCommunityAtomically(
     input: DeprovisionCommunityInput
@@ -790,9 +792,12 @@ export class AdminRepository {
       // Order is load-bearing on D1:
       // 1. Insert the system audit row while `communities` still exists so the
       //    guarded SELECT finds `c.id` and `eligibleGuard` still passes.
-      // 2. Delete pre-claim community audit entries (ON DELETE NO ACTION),
-      //    claim throttles, and unconsumed claim tokens.
-      // 3. Delete the community row last.
+      // 2. Preserve append-only pre-claim audit entries by re-scoping them to
+      //    system (`community_id = NULL`, keeping `ip_address`/`user_agent`) so
+      //    the `ON DELETE NO ACTION` FK allows deleting the community in step 5
+      //    while `eligibleGuard` remains satisfied for steps 3-5.
+      // 3-4. Delete claim throttles and unconsumed claim tokens.
+      // 5. Delete the community row last.
       const insertAuditStmt = db.insert(auditEntries).select(
         sql`select
           ${null}, ${null}, ${input.actorId}, ${auditTemplate.action},
@@ -805,8 +810,9 @@ export class AdminRepository {
           and ${communityUnclaimedAndEmptySql(input.communityId)}`
       );
 
-      const deletePreClaimAuditsStmt = db
-        .delete(auditEntries)
+      const rescopePreClaimAuditsStmt = db
+        .update(auditEntries)
+        .set({ communityId: null })
         .where(
           and(
             eq(auditEntries.communityId, input.communityId),
@@ -842,7 +848,7 @@ export class AdminRepository {
 
       const results = (await db.batch([
         insertAuditStmt,
-        deletePreClaimAuditsStmt,
+        rescopePreClaimAuditsStmt,
         deleteClaimThrottleStmt,
         deleteUnconsumedTokensStmt,
         deleteCommunityStmt,
@@ -909,7 +915,8 @@ export class AdminRepository {
           }
 
           await tx
-            .delete(auditEntries)
+            .update(auditEntries)
+            .set({ communityId: null })
             .where(
               and(
                 eq(auditEntries.communityId, input.communityId),
@@ -985,7 +992,8 @@ export class AdminRepository {
         return { outcome: 'conflict' };
       }
 
-      tx.delete(auditEntries)
+      tx.update(auditEntries)
+        .set({ communityId: null })
         .where(
           and(
             eq(auditEntries.communityId, input.communityId),
@@ -1031,9 +1039,11 @@ export class AdminRepository {
   }
 
   /**
-   * Read system-level `AuditEntry` records (`communityId IS NULL`) in
-   * deterministic `createdAt DESC, id DESC` order. Never returns community
-   * audit rows. Uses `idx_audit_entries_community_created_at`.
+   * Read system-level `AuditEntry` records (`communityId IS NULL`, including
+   * append-only pre-claim audit entries re-scoped on deprovision of an
+   * unclaimed community) in deterministic `createdAt DESC, id DESC` order.
+   * Never returns live community audit rows (`communityId IS NOT NULL`). Uses
+   * `idx_audit_entries_community_created_at`.
    */
   async listSystemAuditEntries(
     input: ListSystemAuditEntriesInput

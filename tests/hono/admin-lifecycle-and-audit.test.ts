@@ -812,6 +812,7 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
         headers: {
           'content-type': 'application/json',
           'cf-connecting-ip': '203.0.113.99',
+          'user-agent': 'LeakedTokenProbe/1.0',
         },
         body: JSON.stringify({
           token: t2.token,
@@ -838,16 +839,15 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
             .where(eq(authThrottleSqlite.communityId, commId))
         ).length
       ).toBe(1);
-      expect(
-        (
-          await db
-            .select()
-            .from(auditEntriesSqlite)
-            .where(eq(auditEntriesSqlite.communityId, commId))
-        ).length
-      ).toBe(3);
+      const preClaimAuditsBefore = await db
+        .select()
+        .from(auditEntriesSqlite)
+        .where(eq(auditEntriesSqlite.communityId, commId));
+      expect(preClaimAuditsBefore).toHaveLength(3);
 
-      // Deprovision succeeds 204 and clears community + pre-claim records, while leaving system audit
+      // Deprovision succeeds 204 and clears community + tokens + claim throttle,
+      // while preserving append-only pre-claim audit rows re-scoped to communityId=null
+      // (keeping ipAddress/userAgent) and writing system.community.deprovision.
       const delRes = await request(
         'DELETE',
         `/v2/admin/communities/${commId}`,
@@ -879,12 +879,60 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
           .where(eq(auditEntriesSqlite.communityId, commId))
       ).toHaveLength(0);
 
-      const deprovAudits = (await db.select().from(auditEntriesSqlite)).filter(
+      const allAuditsAfter = await db.select().from(auditEntriesSqlite);
+      const preservedIds = new Set(preClaimAuditsBefore.map((row) => row.id));
+      const preservedAfter = allAuditsAfter.filter((row) =>
+        preservedIds.has(row.id)
+      );
+      expect(preservedAfter).toHaveLength(3);
+      for (const before of preClaimAuditsBefore) {
+        const after = preservedAfter.find((row) => row.id === before.id);
+        expect(after).toBeDefined();
+        expect(after?.communityId).toBeNull();
+        expect(after?.actorId).toBe(before.actorId);
+        expect(after?.action).toBe(before.action);
+        expect(after?.resourceType).toBe(before.resourceType);
+        expect(after?.resourceIds).toEqual(before.resourceIds);
+        expect(after?.outcome).toBe(before.outcome);
+        expect(after?.ipAddress).toBe(before.ipAddress);
+        expect(after?.userAgent).toBe(before.userAgent);
+        expect(after?.createdAt.getTime()).toBe(before.createdAt.getTime());
+      }
+      const leakedProbeAudit = preservedAfter.find(
+        (row) => row.action === 'claim_token.consume'
+      );
+      expect(leakedProbeAudit?.outcome).toBe('failure');
+      expect(leakedProbeAudit?.resourceType).toBe('claim_token');
+      expect(leakedProbeAudit?.resourceIds).toEqual([t2.id]);
+      expect(leakedProbeAudit?.ipAddress).toBe('203.0.113.99');
+      expect(leakedProbeAudit?.userAgent).toBe('LeakedTokenProbe/1.0');
+
+      const deprovAudits = allAuditsAfter.filter(
         (e) => e.action === 'system.community.deprovision'
       );
       expect(deprovAudits).toHaveLength(1);
       expect(deprovAudits[0]?.communityId).toBeNull();
       expect(deprovAudits[0]?.resourceIds).toEqual([commId]);
+
+      const sysAuditRead = AdminAuditEntryListResponseSchema.parse(
+        await (
+          await request('GET', '/v2/admin/audit-entries?limit=100', {
+            cookie: roleCookies.super_admin,
+          })
+        ).json()
+      );
+      const surfacedProbe = sysAuditRead.data.find(
+        (row) => row.id === leakedProbeAudit!.id
+      );
+      expect(surfacedProbe).toMatchObject({
+        communityId: null,
+        action: 'claim_token.consume',
+        resourceType: 'claim_token',
+        resourceIds: [t2.id],
+        outcome: 'failure',
+        ipAddress: '203.0.113.99',
+        userAgent: 'LeakedTokenProbe/1.0',
+      });
 
       // Old token t1/t2 no longer resolves; same slug can be reprovisioned
       const staleClaim = await app.request(`${API_ORIGIN}/v2/bootstrap/claim`, {
@@ -1219,6 +1267,24 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
       },
     ]);
 
+    // Provision a second live community with a claim token (must NOT leak!)
+    const liveProv = await request('POST', '/v2/admin/communities', {
+      cookie: roleCookies.super_admin,
+      body: { slug: 'live-unclaimed-audit-comm' },
+    });
+    expect(liveProv.status).toBe(201);
+    const liveCommId = AdminCommunityResponseSchema.parse(await liveProv.json())
+      .data.id;
+    const liveTokRes = await request(
+      'POST',
+      `/v2/admin/communities/${liveCommId}/claim-tokens`,
+      { cookie: roleCookies.super_admin }
+    );
+    expect(liveTokRes.status).toBe(201);
+    const liveTokenData = ClaimTokenIssuedResponseSchema.parse(
+      await liveTokRes.json()
+    ).data;
+
     // Trigger system lifecycle entries + tie-timestamp system entries
     const prov = await request('POST', '/v2/admin/communities', {
       cookie: roleCookies.super_admin,
@@ -1227,16 +1293,17 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
     const commId = AdminCommunityResponseSchema.parse(await prov.json()).data
       .id;
 
-    // Issue claim token (writes community audit entry claim_token.issue, must NOT leak)
+    // Issue claim token on commId (later deprovisioned -> re-scoped to communityId=null)
     const tokRes = await request(
       'POST',
       `/v2/admin/communities/${commId}/claim-tokens`,
       { cookie: roleCookies.super_admin }
     );
     expect(tokRes.status).toBe(201);
-    const issuedToken = ClaimTokenIssuedResponseSchema.parse(
+    const deprovTokenData = ClaimTokenIssuedResponseSchema.parse(
       await tokRes.json()
-    ).data.token;
+    ).data;
+    const issuedToken = deprovTokenData.token;
 
     // Identical timestamp tie-break across system.community.status.disabled + deprovision
     await request('PATCH', `/v2/admin/communities/${commId}/status`, {
@@ -1277,9 +1344,10 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
     expect(allText).not.toContain('Protected cultural narrative');
     expect(allText).not.toContain(issuedToken);
     expect(allText).not.toContain(await sha256Hex(issuedToken));
+    expect(allText).not.toContain(liveTokenData.token);
+    expect(allText).not.toContain(await sha256Hex(liveTokenData.token));
     expect(allText).not.toContain('story.create');
     expect(allText).not.toContain('community.visibility.public');
-    expect(allText).not.toContain('claim_token.issue');
 
     const allParsed = AdminAuditEntryListResponseSchema.parse(
       JSON.parse(allText)
@@ -1287,6 +1355,23 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
     for (const row of allParsed.data) {
       expect(row.communityId).toBeNull();
     }
+    // Live community's claim_token.issue row NEVER leaks into system audit read
+    expect(
+      allParsed.data.some(
+        (row) =>
+          row.action.startsWith('claim_token.') &&
+          row.resourceIds.includes(liveTokenData.id)
+      )
+    ).toBe(false);
+    // Deprovisioned community's claim_token.issue row WAS preserved & re-scoped
+    expect(
+      allParsed.data.some(
+        (row) =>
+          row.action === 'claim_token.issue' &&
+          row.communityId === null &&
+          row.resourceIds.includes(deprovTokenData.id)
+      )
+    ).toBe(true);
 
     // Verify deterministic createdAt DESC, id DESC ordering
     for (let i = 1; i < allParsed.data.length; i++) {
@@ -1300,7 +1385,10 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
     }
     expect(allParsed.data[0]?.action).toBe('system.community.deprovision');
     expect(allParsed.data[1]?.action).toBe('system.community.status.disabled');
-    expect(allParsed.data[2]?.action).toBe('system.community.provision');
+    expect(allParsed.data[2]?.action).toBe('claim_token.issue');
+    expect(allParsed.data[2]?.resourceIds).toEqual([deprovTokenData.id]);
+    expect(allParsed.data[3]?.action).toBe('system.community.provision');
+    expect(allParsed.data[3]?.resourceIds).toEqual([commId]);
 
     // Paginate limit=1 offset=1
     const page2 = AdminAuditEntryListResponseSchema.parse(

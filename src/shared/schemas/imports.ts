@@ -277,40 +277,169 @@ export interface NormalizedStoryRow {
   externalMediaLinks: string[];
 }
 
+export interface NormalizedMediaCounts {
+  stagedCount: number;
+  existingCount: number;
+  totalRefs: number;
+}
+
+export interface NormalizedRelatedCounts {
+  resolvedPlacesCount: number;
+  placesToCreateCount: number;
+  resolvedSpeakersCount: number;
+  speakersToCreateCount: number;
+}
+
+interface StoredNormalizedImportMetadata {
+  validRowCount?: number;
+  totalErrorCount?: number;
+  rowErrorsTruncated?: boolean;
+  cleared?: boolean;
+  mediaCounts?: NormalizedMediaCounts;
+  relatedCounts?: NormalizedRelatedCounts;
+}
+
 export type StoredNormalizedImportData =
-  | {
+  | ({
       kind: 'places';
       rows: NormalizedPlaceRow[];
       relatedPlacesToCreate: RelatedPlaceToCreate[];
       relatedSpeakersToCreate: RelatedSpeakerToCreate[];
       skippedDuplicates: number;
       audienceCounts: null;
-      validRowCount?: number;
-      totalErrorCount?: number;
-      rowErrorsTruncated?: boolean;
-    }
-  | {
+    } & StoredNormalizedImportMetadata)
+  | ({
       kind: 'speakers';
       rows: NormalizedSpeakerRow[];
       relatedPlacesToCreate: RelatedPlaceToCreate[];
       relatedSpeakersToCreate: RelatedSpeakerToCreate[];
       skippedDuplicates: number;
       audienceCounts: null;
-      validRowCount?: number;
-      totalErrorCount?: number;
-      rowErrorsTruncated?: boolean;
-    }
-  | {
+    } & StoredNormalizedImportMetadata)
+  | ({
       kind: 'stories';
       rows: NormalizedStoryRow[];
       relatedPlacesToCreate: RelatedPlaceToCreate[];
       relatedSpeakersToCreate: RelatedSpeakerToCreate[];
       skippedDuplicates: number;
       audienceCounts: { public: number; community: number; editors: number };
-      validRowCount?: number;
-      totalErrorCount?: number;
-      rowErrorsTruncated?: boolean;
+    } & StoredNormalizedImportMetadata);
+
+export function countNormalizedMediaRefs(
+  data: StoredNormalizedImportData
+): NormalizedMediaCounts {
+  if (data.mediaCounts) {
+    return data.mediaCounts;
+  }
+  const stagedIds = new Set<string>();
+  const existingIds = new Set<string>();
+  let totalRefs = 0;
+
+  for (const row of data.rows) {
+    for (const att of row.attachments) {
+      totalRefs += 1;
+      if (att.stagedByManifest) {
+        stagedIds.add(att.fileId);
+      } else {
+        existingIds.add(att.fileId);
+      }
+    }
+  }
+  return {
+    stagedCount: stagedIds.size,
+    existingCount: existingIds.size,
+    totalRefs,
+  };
+}
+
+export function summarizeNormalizedRelatedRecords(
+  data: StoredNormalizedImportData
+): NormalizedRelatedCounts {
+  if (data.relatedCounts) {
+    return data.relatedCounts;
+  }
+  const resolvedPlaceIds = new Set<number>();
+  const resolvedSpeakerIds = new Set<number>();
+
+  if (data.kind === 'speakers') {
+    for (const row of data.rows) {
+      if (row.birthplaceRef?.kind === 'existing') {
+        resolvedPlaceIds.add(row.birthplaceRef.id);
+      }
+    }
+  } else if (data.kind === 'stories') {
+    for (const row of data.rows) {
+      if (row.interviewLocationRef?.kind === 'existing') {
+        resolvedPlaceIds.add(row.interviewLocationRef.id);
+      }
+      for (const ref of row.placeRefs) {
+        if (ref.kind === 'existing') resolvedPlaceIds.add(ref.id);
+      }
+      if (row.interviewerRef?.kind === 'existing') {
+        resolvedSpeakerIds.add(row.interviewerRef.id);
+      }
+      for (const ref of row.speakerRefs) {
+        if (ref.kind === 'existing') resolvedSpeakerIds.add(ref.id);
+      }
+    }
+  }
+
+  return {
+    resolvedPlacesCount: resolvedPlaceIds.size,
+    placesToCreateCount: data.relatedPlacesToCreate.length,
+    resolvedSpeakersCount: resolvedSpeakerIds.size,
+    speakersToCreateCount: data.relatedSpeakersToCreate.length,
+  };
+}
+
+/**
+ * Strip row payloads from `normalized_rows` when an import manifest is
+ * discarded or fails while keeping aggregate counts and summary metadata.
+ */
+export function clearNormalizedImportData(
+  data: StoredNormalizedImportData
+): StoredNormalizedImportData {
+  const validRowCount = data.validRowCount ?? data.rows.length;
+  const mediaCounts = countNormalizedMediaRefs(data);
+  const relatedCounts = summarizeNormalizedRelatedRecords(data);
+  const shared = {
+    relatedPlacesToCreate: [] as RelatedPlaceToCreate[],
+    relatedSpeakersToCreate: [] as RelatedSpeakerToCreate[],
+    skippedDuplicates: data.skippedDuplicates,
+    validRowCount,
+    ...(data.totalErrorCount !== undefined
+      ? { totalErrorCount: data.totalErrorCount }
+      : {}),
+    ...(data.rowErrorsTruncated !== undefined
+      ? { rowErrorsTruncated: data.rowErrorsTruncated }
+      : {}),
+    cleared: true,
+    mediaCounts,
+    relatedCounts,
+  };
+  if (data.kind === 'stories') {
+    return {
+      ...shared,
+      kind: 'stories',
+      rows: [],
+      audienceCounts: data.audienceCounts,
     };
+  }
+  if (data.kind === 'speakers') {
+    return {
+      ...shared,
+      kind: 'speakers',
+      rows: [],
+      audienceCounts: null,
+    };
+  }
+  return {
+    ...shared,
+    kind: 'places',
+    rows: [],
+    audienceCounts: null,
+  };
+}
 
 export const ImportCommitPlanSummarySchema = z
   .object({

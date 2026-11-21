@@ -25,6 +25,7 @@
 import {
   and,
   eq,
+  exists,
   inArray,
   isNull,
   lte,
@@ -903,6 +904,10 @@ export class MediaCleanupCoordinator {
     keys: ReadonlyArray<string>
   ): Promise<Set<string>> {
     const tables = tablesFor(this.connection);
+    const communityMedia =
+      dialectOf(this.connection) === 'postgresql'
+        ? communityMediaPg
+        : communityMediaSqlite;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = this.connection as any;
     const referenced = new Set<string>();
@@ -915,9 +920,54 @@ export class MediaCleanupCoordinator {
         })
         .from(tables.files)
         .where(
-          or(
-            inArray(tables.files.storageKey, chunk),
-            inArray(tables.files.path, chunk)
+          and(
+            or(
+              inArray(tables.files.storageKey, chunk),
+              inArray(tables.files.path, chunk)
+            ),
+            // Keep bytes protected unless the row is an inactive source CSV
+            // whose only remaining reference is a discarded or failed manifest
+            // (the composite FK prevents deleting the `files` row, so the
+            // sweeper reclaims those bytes while protecting active files and
+            // previewed/committed manifests).
+            or(
+              eq(tables.files.isActive, true),
+              sql`NOT EXISTS (
+                SELECT 1 FROM import_manifests im
+                WHERE im.source_file_id = ${tables.files.id}
+                  AND im.status IN ('discarded', 'failed')
+              )`,
+              sql`EXISTS (
+                SELECT 1 FROM import_manifests im
+                WHERE im.source_file_id = ${tables.files.id}
+                  AND im.status IN ('previewed', 'committed')
+              )`,
+              exists(
+                db
+                  .select({ id: tables.attachments.id })
+                  .from(tables.attachments)
+                  .where(eq(tables.attachments.fileId, tables.files.id))
+              ),
+              exists(
+                db
+                  .select({
+                    communityId: tables.communityMapConfigs.communityId,
+                  })
+                  .from(tables.communityMapConfigs)
+                  .where(
+                    eq(
+                      tables.communityMapConfigs.staticMapFileId,
+                      tables.files.id
+                    )
+                  )
+              ),
+              exists(
+                db
+                  .select({ fileId: communityMedia.fileId })
+                  .from(communityMedia)
+                  .where(eq(communityMedia.fileId, tables.files.id))
+              )
+            )
           )
         )) as Array<{ storageKey: string | null; path: string }>;
       for (const row of rows) {

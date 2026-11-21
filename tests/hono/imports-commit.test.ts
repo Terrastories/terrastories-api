@@ -987,7 +987,7 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
       'import_commit_failed'
     );
 
-    // Zero partial records created; manifest marked failed; staged bytes & file row gone; source CSV preserved
+    // Zero partial records created; manifest marked failed; normalizedRows cleared; staged & source CSV bytes gone (FK row kept inactive)
     expect(
       await db
         .select()
@@ -1007,7 +1007,7 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
         .where(eq(tables.files.id, driftStagedFile!.id))
     ).toHaveLength(0);
     expect(memStore.has(driftStagedFile!.storageKey!)).toBe(false);
-    expect(memStore.has(driftSourceFile!.storageKey!)).toBe(true);
+    expect(memStore.has(driftSourceFile!.storageKey!)).toBe(false);
 
     const [driftRowAfter] = await db
       .select()
@@ -1016,6 +1016,13 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
     expect(driftRowAfter?.status).toBe('failed');
     expect(driftRowAfter?.committedAt).toBeNull();
     expect(driftRowAfter?.resultSummary).toBeNull();
+    expect(
+      (driftRowAfter?.normalizedRows as { rows?: unknown[] })?.rows
+    ).toEqual([]);
+    expect(
+      (driftRowAfter?.normalizedRows as { validRowCount?: number })
+        ?.validRowCount
+    ).toBe(1);
 
     // Re-committing failed manifest is rejected 409
     expect(
@@ -1121,7 +1128,21 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
     ).toHaveLength(0);
     expect(failMem.store.has(flakyFile!.storageKey!)).toBe(true);
 
-    // Recovered sweeper removes aged orphaned bytes while preserving sourceFileId bytes
+    // Recovered sweeper removes aged orphaned staged media AND failed source CSV bytes while preserving previewed/committed source CSV bytes
+    const keepPreviewed = await createPreviewOnApp(flakyApp, cookies.editorA, {
+      kind: 'places',
+      csvFilename: 'keep-previewed-fail.csv',
+      csvText: 'name\nKeep Previewed After Fail\n',
+    });
+    const [keepPreviewedRow] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, keepPreviewed.id));
+    const [keepPreviewedSource] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, keepPreviewedRow!.sourceFileId));
+
     const recoveredCleanup = new MediaCleanupCoordinator(db, failMem.storage, {
       now: () =>
         new Date(
@@ -1132,7 +1153,8 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
     });
     await recoveredCleanup.sweepOrphanObjects();
     expect(failMem.store.has(flakyFile!.storageKey!)).toBe(false);
-    expect(failMem.store.has(flakySource!.storageKey!)).toBe(true);
+    expect(failMem.store.has(flakySource!.storageKey!)).toBe(false);
+    expect(failMem.store.has(keepPreviewedSource!.storageKey!)).toBe(true);
   });
 
   it('executes single bounded D1 batch() matching planImportCommit and enforces 1/UTC-day commit limit (429) and rollback on D1 reference drift', async () => {
@@ -2315,7 +2337,10 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
         .where(eq(tables.files.id, raceStagedFile!.id))
     ).toHaveLength(0);
     expect(memStore.has(raceStagedFile!.storageKey!)).toBe(false);
-    expect(memStore.has(raceSourceFile!.storageKey!)).toBe(true);
+    expect(memStore.has(raceSourceFile!.storageKey!)).toBe(false);
+    expect(
+      (raceRowAfter?.normalizedRows as { rows?: unknown[] })?.rows
+    ).toEqual([]);
     expect(
       await db
         .select()
@@ -2660,7 +2685,10 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
         .where(eq(tables.files.id, injStaged!.id))
     ).toHaveLength(0);
     expect(memStore.has(injStaged!.storageKey!)).toBe(false);
-    expect(memStore.has(injSource!.storageKey!)).toBe(true);
+    expect(memStore.has(injSource!.storageKey!)).toBe(false);
+    expect((injRowAfter?.normalizedRows as { rows?: unknown[] })?.rows).toEqual(
+      []
+    );
     expect(
       await db
         .select()

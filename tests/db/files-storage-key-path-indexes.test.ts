@@ -11,8 +11,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { inArray, or } from 'drizzle-orm';
+import { and, eq, exists, inArray, or, sql } from 'drizzle-orm';
 import { tablesFor } from '../../src/db/dialect.js';
+import { communityMediaSqlite } from '../../src/db/schema/sessions.js';
 import { ORPHAN_SWEEP_REFERENCE_CHUNK } from '../../src/services/media-cleanup.service.js';
 
 const sqlite = new Sqlite(':memory:');
@@ -78,9 +79,49 @@ describe('Slice 9 files.storage_key/path indexes (#140)', () => {
       })
       .from(tables.files)
       .where(
-        or(
-          inArray(tables.files.storageKey, chunk),
-          inArray(tables.files.path, chunk)
+        and(
+          or(
+            inArray(tables.files.storageKey, chunk),
+            inArray(tables.files.path, chunk)
+          ),
+          or(
+            eq(tables.files.isActive, true),
+            sql`NOT EXISTS (
+              SELECT 1 FROM import_manifests im
+              WHERE im.source_file_id = ${tables.files.id}
+                AND im.status IN ('discarded', 'failed')
+            )`,
+            sql`EXISTS (
+              SELECT 1 FROM import_manifests im
+              WHERE im.source_file_id = ${tables.files.id}
+                AND im.status IN ('previewed', 'committed')
+            )`,
+            exists(
+              db
+                .select({ id: tables.attachments.id })
+                .from(tables.attachments)
+                .where(eq(tables.attachments.fileId, tables.files.id))
+            ),
+            exists(
+              db
+                .select({
+                  communityId: tables.communityMapConfigs.communityId,
+                })
+                .from(tables.communityMapConfigs)
+                .where(
+                  eq(
+                    tables.communityMapConfigs.staticMapFileId,
+                    tables.files.id
+                  )
+                )
+            ),
+            exists(
+              db
+                .select({ fileId: communityMediaSqlite.fileId })
+                .from(communityMediaSqlite)
+                .where(eq(communityMediaSqlite.fileId, tables.files.id))
+            )
+          )
         )
       )
       .toSQL();
@@ -89,8 +130,10 @@ describe('Slice 9 files.storage_key/path indexes (#140)', () => {
       .all(...query.params) as Array<{ detail: string }>;
     const details = plan.map((row) => row.detail);
     expect(
-      details.every((detail) => !/SCAN files/i.test(detail)),
-      `query plan must not scan files: ${details.join(' | ')}`
+      details.every(
+        (detail) => !/SCAN (?:files|import_manifests)/i.test(detail)
+      ),
+      `query plan must not scan files or import_manifests: ${details.join(' | ')}`
     ).toBe(true);
     expect(
       details.some((detail) => detail.includes('files_storage_key_idx')),
@@ -99,6 +142,12 @@ describe('Slice 9 files.storage_key/path indexes (#140)', () => {
     expect(
       details.some((detail) => detail.includes('files_path_idx')),
       `query plan must use files_path_idx: ${details.join(' | ')}`
+    ).toBe(true);
+    expect(
+      details.some((detail) =>
+        detail.includes('import_manifests_source_file_idx')
+      ),
+      `query plan must use import_manifests_source_file_idx: ${details.join(' | ')}`
     ).toBe(true);
   });
 });

@@ -815,7 +815,7 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
     expect(discardedBody.data.status).toBe('discarded');
     expect(discardedBody.data.canCommit).toBe(false);
 
-    // Staged media files row & bytes removed; source CSV and active file remain intact.
+    // Staged media files row & bytes removed; source CSV bytes & normalized_rows cleared while inactive FK row, counts, and active file remain intact.
     const stagedAfter = await db
       .select()
       .from(tables.files)
@@ -828,7 +828,21 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       .from(tables.files)
       .where(eq(tables.files.id, sourceIdA));
     expect(sourceAfter?.isActive).toBe(false);
-    expect(memStore.has(sourceFileRowA!.storageKey!)).toBe(true);
+    expect(memStore.has(sourceFileRowA!.storageKey!)).toBe(false);
+
+    const [manifestRowAfterDiscard] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, manifestA.id));
+    expect(manifestRowAfterDiscard?.status).toBe('discarded');
+    expect(
+      (manifestRowAfterDiscard?.normalizedRows as { rows?: unknown[] })?.rows
+    ).toEqual([]);
+    expect(discardedBody.data.rowCount).toBe(1);
+    expect(discardedBody.data.validRowCount).toBe(1);
+    expect(discardedBody.data.mediaSummary.existingReferencedCount).toBe(1);
+    expect(discardedBody.data.mediaSummary.totalAttachmentRefs).toBe(2);
+    expect(discardedBody.data.previewRows).toEqual([]);
 
     const [activeKeep] = await db
       .select()
@@ -970,7 +984,7 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
     expect(adminOnErasedBody.data.status).toBe('discarded');
   });
 
-  it('recovers restart-safely via sweepOrphanObjects when storage.delete throws on discard while preserving source CSV bytes', async () => {
+  it('recovers restart-safely via sweepOrphanObjects when storage.delete throws on discard while keeping previewed/committed source CSVs protected', async () => {
     const flakyMem = createListableMemoryStorage();
     let failDelete = true;
     const flakyLogs: string[] = [];
@@ -1009,11 +1023,41 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
         },
       ],
     });
+    const stillPreviewedManifest = await createPreviewOnApp(
+      flakyApp,
+      cookies.editorA,
+      {
+        kind: 'places',
+        csvFilename: 'keep-previewed.csv',
+        csvText: 'name\nKeep Previewed Place\n',
+      }
+    );
+    const committedManifest = await createPreviewOnApp(
+      flakyApp,
+      cookies.editorA,
+      {
+        kind: 'places',
+        csvFilename: 'keep-committed.csv',
+        csvText: 'name\nKeep Committed Place\n',
+      }
+    );
+    await db
+      .update(tables.importManifests)
+      .set({ status: 'committed', committedAt: currentNow.getTime() })
+      .where(eq(tables.importManifests.id, committedManifest.id));
 
     const [row] = await db
       .select()
       .from(tables.importManifests)
       .where(eq(tables.importManifests.id, manifest.id));
+    const [previewedRow] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, stillPreviewedManifest.id));
+    const [committedRow] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, committedManifest.id));
     const stagedId = row!.stagedFileIds[0]!;
     const [stagedFileRow] = await db
       .select()
@@ -1023,6 +1067,14 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       .select()
       .from(tables.files)
       .where(eq(tables.files.id, row!.sourceFileId));
+    const [previewedSourceRow] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, previewedRow!.sourceFileId));
+    const [committedSourceRow] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, committedRow!.sourceFileId));
 
     const delRes = await flakyApp.request(
       `${API_ORIGIN}/v2/imports/${manifest.id}`,
@@ -1036,7 +1088,7 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       ImportManifestDetailResponseSchema.parse(await delRes.json()).data.status
     ).toBe('discarded');
 
-    // Content-free log emitted; DB staged file row is gone; bytes still in store.
+    // Content-free log emitted; DB staged file row is gone; both staged & source CSV bytes remain until outage clears.
     expect(flakyLogs.length).toBeGreaterThanOrEqual(1);
     expect(flakyLogs.join('\n')).not.toContain(stagedFileRow!.storageKey!);
     expect(flakyLogs.join('\n')).not.toContain('flaky.png');
@@ -1044,15 +1096,19 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       await db.select().from(tables.files).where(eq(tables.files.id, stagedId))
     ).toHaveLength(0);
     expect(flakyMem.store.has(stagedFileRow!.storageKey!)).toBe(true);
+    expect(flakyMem.store.has(sourceFileRow!.storageKey!)).toBe(true);
 
-    // Recover after storage outage resolves: orphan sweep removes staged bytes but preserves source CSV bytes.
+    // Recover after storage outage resolves: orphan sweep removes both staged media AND discarded source CSV bytes,
+    // while keeping source CSV bytes for active previewed and committed manifests protected.
     failDelete = false;
     const sweepRes = await flakyCleanup.sweepOrphanObjects({
       olderThan: new Date('2030-01-01T00:00:00.000Z'),
     });
-    expect(sweepRes.deletedCount).toBeGreaterThanOrEqual(1);
+    expect(sweepRes.deletedCount).toBeGreaterThanOrEqual(2);
     expect(flakyMem.store.has(stagedFileRow!.storageKey!)).toBe(false);
-    expect(flakyMem.store.has(sourceFileRow!.storageKey!)).toBe(true);
+    expect(flakyMem.store.has(sourceFileRow!.storageKey!)).toBe(false);
+    expect(flakyMem.store.has(previewedSourceRow!.storageKey!)).toBe(true);
+    expect(flakyMem.store.has(committedSourceRow!.storageKey!)).toBe(true);
   });
 
   it('allows only one winner [200, 409] on concurrent DELETE /v2/imports/:id across both SQLite and D1 batch', async () => {
@@ -1226,7 +1282,10 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
           .where(eq(d1Tables.files.id, d1StagedId))
       ).toHaveLength(0);
       expect(d1Mem.store.has(d1StagedFileRow!.storageKey!)).toBe(false);
-      expect(d1Mem.store.has(d1SourceFileRow!.storageKey!)).toBe(true);
+      expect(d1Mem.store.has(d1SourceFileRow!.storageKey!)).toBe(false);
+      expect((d1After?.normalizedRows as { rows?: unknown[] })?.rows).toEqual(
+        []
+      );
 
       const d1Audits = await d1Db
         .select()

@@ -3447,7 +3447,11 @@ export async function runHonoFoundationContract(
         0
       );
       assert.equal(importStorageMap.has(raceStagedKey), false);
-      assert.equal(importStorageMap.has(raceSourceKey), true);
+      assert.equal(importStorageMap.has(raceSourceKey), false);
+      assert.deepEqual(
+        (raceManifestAfter?.normalizedRows as { rows?: unknown[] })?.rows,
+        []
+      );
       assert.equal(
         (
           await db

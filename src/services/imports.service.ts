@@ -48,6 +48,8 @@ import {
   type RelatedPlaceToCreate,
   type RelatedSpeakerToCreate,
   type StoredNormalizedImportData,
+  countNormalizedMediaRefs,
+  summarizeNormalizedRelatedRecords,
 } from '../shared/schemas/imports.js';
 import type { ImportManifestKind } from '../db/schema/import_manifests.js';
 import type { FoundationUser } from '../repositories/hono-foundation.repository.js';
@@ -258,32 +260,6 @@ function parseStoryDateInterviewed(raw: string): string | null {
   return null;
 }
 
-function countReferencesInNormalizedData(data: StoredNormalizedImportData): {
-  stagedCount: number;
-  existingCount: number;
-  totalRefs: number;
-} {
-  const stagedIds = new Set<string>();
-  const existingIds = new Set<string>();
-  let totalRefs = 0;
-
-  for (const row of data.rows) {
-    for (const att of row.attachments) {
-      totalRefs += 1;
-      if (att.stagedByManifest) {
-        stagedIds.add(att.fileId);
-      } else {
-        existingIds.add(att.fileId);
-      }
-    }
-  }
-  return {
-    stagedCount: stagedIds.size,
-    existingCount: existingIds.size,
-    totalRefs,
-  };
-}
-
 function computeManifestPlan(
   manifest: ImportManifestRowRecord,
   d1Enforced = false
@@ -457,46 +433,6 @@ function projectPreviewRows(normalizedData: StoredNormalizedImportData): {
   };
 }
 
-function summarizeRelatedRecords(normalizedData: StoredNormalizedImportData): {
-  resolvedPlacesCount: number;
-  placesToCreateCount: number;
-  resolvedSpeakersCount: number;
-  speakersToCreateCount: number;
-} {
-  const resolvedPlaceIds = new Set<number>();
-  const resolvedSpeakerIds = new Set<number>();
-
-  if (normalizedData.kind === 'speakers') {
-    for (const row of normalizedData.rows) {
-      if (row.birthplaceRef?.kind === 'existing') {
-        resolvedPlaceIds.add(row.birthplaceRef.id);
-      }
-    }
-  } else if (normalizedData.kind === 'stories') {
-    for (const row of normalizedData.rows) {
-      if (row.interviewLocationRef?.kind === 'existing') {
-        resolvedPlaceIds.add(row.interviewLocationRef.id);
-      }
-      for (const ref of row.placeRefs) {
-        if (ref.kind === 'existing') resolvedPlaceIds.add(ref.id);
-      }
-      if (row.interviewerRef?.kind === 'existing') {
-        resolvedSpeakerIds.add(row.interviewerRef.id);
-      }
-      for (const ref of row.speakerRefs) {
-        if (ref.kind === 'existing') resolvedSpeakerIds.add(ref.id);
-      }
-    }
-  }
-
-  return {
-    resolvedPlacesCount: resolvedPlaceIds.size,
-    placesToCreateCount: normalizedData.relatedPlacesToCreate.length,
-    resolvedSpeakersCount: resolvedSpeakerIds.size,
-    speakersToCreateCount: normalizedData.relatedSpeakersToCreate.length,
-  };
-}
-
 export function serializeImportManifestDetail(
   manifest: ImportManifestRowRecord,
   d1Enforced = false
@@ -505,7 +441,7 @@ export function serializeImportManifestDetail(
     manifest,
     d1Enforced
   );
-  const mediaCounts = countReferencesInNormalizedData(normalizedData);
+  const mediaCounts = countNormalizedMediaRefs(normalizedData);
   const { previewRows, previewRowsTruncated } =
     projectPreviewRows(normalizedData);
   const boundedRowErrors = manifest.rowErrors.slice(0, MAX_IMPORT_ROW_ERRORS);
@@ -533,7 +469,7 @@ export function serializeImportManifestDetail(
     },
     audienceSummary:
       normalizedData.kind === 'stories' ? normalizedData.audienceCounts : null,
-    relatedRecords: summarizeRelatedRecords(normalizedData),
+    relatedRecords: summarizeNormalizedRelatedRecords(normalizedData),
     previewRows,
     previewRowsTruncated,
     commitPlan: plan.summary,

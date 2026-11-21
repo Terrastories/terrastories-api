@@ -5516,6 +5516,7 @@ export async function createFixture(
     let qaDiscardStagedFileId = '';
     let qaDiscardStagedStorageKey = '';
     let qaDiscardSourceFileId = '';
+    let qaDiscardSourceStorageKey = '';
     let qaImportUnknownAudienceId = 0;
     let qaImportPlacesManifestId = 0;
     let qaCommittedPlacesAt = '';
@@ -7462,6 +7463,16 @@ export async function createFixture(
               }
               qaDiscardStagedFileId = stagedIds[0]!;
               qaDiscardSourceFileId = manifestRow.sourceFileId;
+              const [sourceRow] = await db
+                .select({ storageKey: files.storageKey, path: files.path })
+                .from(files)
+                .where(eq(files.id, qaDiscardSourceFileId))
+                .limit(1);
+              if (!sourceRow) {
+                throw new Error('Missing source CSV file row in files table');
+              }
+              qaDiscardSourceStorageKey =
+                sourceRow.storageKey ?? sourceRow.path;
               const [fileRow] = await db
                 .select({ storageKey: files.storageKey, path: files.path })
                 .from(files)
@@ -7546,14 +7557,22 @@ export async function createFixture(
                   'Staged media bytes remained in storage after manifest discard'
                 );
               }
+              if (await hasMedia(qaDiscardSourceStorageKey)) {
+                throw new Error(
+                  'Source CSV bytes remained in storage after manifest discard'
+                );
+              }
               const sourceRows = await db
-                .select({ id: files.id })
+                .select({ id: files.id, isActive: files.isActive })
                 .from(files)
                 .where(eq(files.id, qaDiscardSourceFileId))
                 .limit(1);
-              if (sourceRows.length !== 1) {
+              if (
+                sourceRows.length !== 1 ||
+                sourceRows[0]!.isActive !== false
+              ) {
                 throw new Error(
-                  'Source CSV file row should remain intact after manifest discard'
+                  'Source CSV file row should remain inactive after manifest discard'
                 );
               }
             },

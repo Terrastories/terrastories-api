@@ -21,12 +21,17 @@ import {
   isNull,
   gte,
   lt,
+  ne,
   notExists,
   sql,
 } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
+import {
+  communityMediaPg,
+  communityMediaSqlite,
+} from '../db/schema/sessions.js';
 import type {
   ImportManifestKind,
   ImportManifestStatus,
@@ -37,14 +42,15 @@ import type {
 } from '../db/schema/attachments.js';
 import type { FoundationUser } from './hono-foundation.repository.js';
 import { MediaWritesRepository } from './media-writes.repository.js';
-import type {
-  ImportResultSummary,
-  ImportRowError,
-  ImportStoredMappings,
-  NormalizedPlaceRow,
-  NormalizedSpeakerRow,
-  NormalizedStoryRow,
-  StoredNormalizedImportData,
+import {
+  clearNormalizedImportData,
+  type ImportResultSummary,
+  type ImportRowError,
+  type ImportStoredMappings,
+  type NormalizedPlaceRow,
+  type NormalizedSpeakerRow,
+  type NormalizedStoryRow,
+  type StoredNormalizedImportData,
 } from '../shared/schemas/imports.js';
 import { storyVisibilityToPhysical } from '../policy/canonical-state.js';
 import {
@@ -297,12 +303,71 @@ export class ImportsRepository {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly db: any;
   private readonly tables;
+  private readonly communityMedia;
   private readonly mediaRepository: MediaWritesRepository;
 
   constructor(readonly connection: Database | DrizzleD1Database) {
     this.db = connection;
     this.tables = tablesFor(connection);
+    this.communityMedia =
+      dialectOf(connection) === 'postgresql'
+        ? communityMediaPg
+        : communityMediaSqlite;
     this.mediaRepository = new MediaWritesRepository(connection);
+  }
+
+  private sourceFileCleanupWhere(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any,
+    communityId: number,
+    manifestId: number,
+    sourceFileId: string
+  ) {
+    return and(
+      eq(this.tables.files.id, sourceFileId),
+      eq(this.tables.files.communityId, communityId),
+      notExists(
+        executor
+          .select({ id: this.tables.importManifests.id })
+          .from(this.tables.importManifests)
+          .where(
+            and(
+              eq(
+                this.tables.importManifests.sourceFileId,
+                this.tables.files.id
+              ),
+              ne(this.tables.importManifests.id, manifestId),
+              inArray(this.tables.importManifests.status, [
+                'previewed',
+                'committed',
+              ])
+            )
+          )
+      ),
+      notExists(
+        executor
+          .select({ id: this.tables.attachments.id })
+          .from(this.tables.attachments)
+          .where(eq(this.tables.attachments.fileId, this.tables.files.id))
+      ),
+      notExists(
+        executor
+          .select({ communityId: this.tables.communityMapConfigs.communityId })
+          .from(this.tables.communityMapConfigs)
+          .where(
+            eq(
+              this.tables.communityMapConfigs.staticMapFileId,
+              this.tables.files.id
+            )
+          )
+      ),
+      notExists(
+        executor
+          .select({ fileId: this.communityMedia.fileId })
+          .from(this.communityMedia)
+          .where(eq(this.communityMedia.fileId, this.tables.files.id))
+      )
+    );
   }
 
   private tableColumnBound(
@@ -1107,6 +1172,29 @@ export class ImportsRepository {
         );
       }
 
+      const sourceFileUpdateIdx = statements.length;
+      statements.push(
+        this.db
+          .update(this.tables.files)
+          .set({ isActive: false, updatedAt: now })
+          .where(
+            and(
+              this.sourceFileCleanupWhere(
+                this.db,
+                input.communityId,
+                input.manifestId,
+                existing.sourceFileId
+              ),
+              previewedManifestGuard
+            )
+          )
+          .returning({
+            id: this.tables.files.id,
+            storageKey: this.tables.files.storageKey,
+            path: this.tables.files.path,
+          })
+      );
+
       statements.push(
         this.db.insert(this.tables.auditEntries).select(
           this.db
@@ -1138,11 +1226,20 @@ export class ImportsRepository {
         )
       );
 
+      const clearedNormalized = clearNormalizedImportData(
+        existing.normalizedRows
+      );
       const updateIdx = statements.length;
       statements.push(
         this.db
           .update(this.tables.importManifests)
-          .set({ status: 'discarded' })
+          .set({
+            status: 'discarded',
+            normalizedRows: clearedNormalized as unknown as Record<
+              string,
+              unknown
+            >,
+          })
           .where(
             and(
               eq(this.tables.importManifests.id, input.manifestId),
@@ -1193,7 +1290,7 @@ export class ImportsRepository {
         storage_key?: string | null;
         path: string;
       }> = [];
-      for (const idx of deleteBatchIndexes) {
+      for (const idx of [...deleteBatchIndexes, sourceFileUpdateIdx]) {
         if (Array.isArray(results[idx])) {
           deletedFileRows.push(...results[idx]);
         }
@@ -1257,9 +1354,20 @@ export class ImportsRepository {
           return { status: 'conflict' };
         }
 
+        const clearedNormalized = clearNormalizedImportData(
+          parseJsonColumn<StoredNormalizedImportData>(
+            manifestRow.normalizedRows
+          )
+        );
         const [updated] = await tx
           .update(this.tables.importManifests)
-          .set({ status: 'discarded' })
+          .set({
+            status: 'discarded',
+            normalizedRows: clearedNormalized as unknown as Record<
+              string,
+              unknown
+            >,
+          })
           .where(
             and(
               eq(this.tables.importManifests.id, input.manifestId),
@@ -1276,15 +1384,18 @@ export class ImportsRepository {
         const lockedIds = await lockFileRowsForCleanup(
           tx,
           this.connection,
-          [...stagedIds].sort()
+          Array.from(new Set([...stagedIds, manifestRow.sourceFileId])).sort()
+        );
+        const lockedStagedIds = lockedIds.filter(
+          (id) => id !== manifestRow.sourceFileId
         );
         const removedRows: Array<{
           id: string;
           storageKey: string | null;
           path: string;
         }> = [];
-        for (let i = 0; i < lockedIds.length; i += 80) {
-          const chunk = lockedIds.slice(i, i + 80);
+        for (let i = 0; i < lockedStagedIds.length; i += 80) {
+          const chunk = lockedStagedIds.slice(i, i + 80);
           const deleted = await tx
             .delete(this.tables.files)
             .where(
@@ -1319,6 +1430,25 @@ export class ImportsRepository {
               path: this.tables.files.path,
             });
           removedRows.push(...deleted);
+        }
+        if (lockedIds.includes(manifestRow.sourceFileId)) {
+          const cleanedSource = await tx
+            .update(this.tables.files)
+            .set({ isActive: false, updatedAt: now })
+            .where(
+              this.sourceFileCleanupWhere(
+                tx,
+                input.communityId,
+                input.manifestId,
+                manifestRow.sourceFileId
+              )
+            )
+            .returning({
+              id: this.tables.files.id,
+              storageKey: this.tables.files.storageKey,
+              path: this.tables.files.path,
+            });
+          removedRows.push(...cleanedSource);
         }
 
         await tx.insert(this.tables.auditEntries).values({
@@ -1386,9 +1516,18 @@ export class ImportsRepository {
         return { status: 'conflict' };
       }
 
+      const clearedNormalized = clearNormalizedImportData(
+        parseJsonColumn<StoredNormalizedImportData>(manifestRow.normalizedRows)
+      );
       const updated = tx
         .update(this.tables.importManifests)
-        .set({ status: 'discarded' })
+        .set({
+          status: 'discarded',
+          normalizedRows: clearedNormalized as unknown as Record<
+            string,
+            unknown
+          >,
+        })
         .where(
           and(
             eq(this.tables.importManifests.id, input.manifestId),
@@ -1446,6 +1585,24 @@ export class ImportsRepository {
           .all();
         removedRows.push(...deleted);
       }
+      const cleanedSource = tx
+        .update(this.tables.files)
+        .set({ isActive: false, updatedAt: now })
+        .where(
+          this.sourceFileCleanupWhere(
+            tx,
+            input.communityId,
+            input.manifestId,
+            manifestRow.sourceFileId
+          )
+        )
+        .returning({
+          id: this.tables.files.id,
+          storageKey: this.tables.files.storageKey,
+          path: this.tables.files.path,
+        })
+        .all();
+      removedRows.push(...cleanedSource);
 
       tx.insert(this.tables.auditEntries)
         .values({
@@ -3770,6 +3927,29 @@ export class ImportsRepository {
         );
       }
 
+      const sourceFileUpdateIdx = statements.length;
+      statements.push(
+        this.db
+          .update(this.tables.files)
+          .set({ isActive: false, updatedAt: now })
+          .where(
+            and(
+              this.sourceFileCleanupWhere(
+                this.db,
+                input.communityId,
+                input.manifestId,
+                existing.sourceFileId
+              ),
+              previewedManifestGuard
+            )
+          )
+          .returning({
+            id: this.tables.files.id,
+            storageKey: this.tables.files.storageKey,
+            path: this.tables.files.path,
+          })
+      );
+
       statements.push(
         this.db.insert(this.tables.auditEntries).select(
           this.db
@@ -3800,11 +3980,20 @@ export class ImportsRepository {
         )
       );
 
+      const clearedNormalized = clearNormalizedImportData(
+        existing.normalizedRows
+      );
       const updateIdx = statements.length;
       statements.push(
         this.db
           .update(this.tables.importManifests)
-          .set({ status: 'failed' })
+          .set({
+            status: 'failed',
+            normalizedRows: clearedNormalized as unknown as Record<
+              string,
+              unknown
+            >,
+          })
           .where(
             and(
               eq(this.tables.importManifests.id, input.manifestId),
@@ -3853,7 +4042,7 @@ export class ImportsRepository {
         storage_key?: string | null;
         path: string;
       }> = [];
-      for (const idx of deleteBatchIndexes) {
+      for (const idx of [...deleteBatchIndexes, sourceFileUpdateIdx]) {
         if (Array.isArray(results[idx])) {
           deletedFileRows.push(...results[idx]);
         }
@@ -3914,9 +4103,18 @@ export class ImportsRepository {
           return { status: 'already_terminal', manifest: current };
         }
 
+        const clearedNormalized = clearNormalizedImportData(
+          current.normalizedRows
+        );
         const [updated] = await tx
           .update(this.tables.importManifests)
-          .set({ status: 'failed' })
+          .set({
+            status: 'failed',
+            normalizedRows: clearedNormalized as unknown as Record<
+              string,
+              unknown
+            >,
+          })
           .where(
             and(
               eq(this.tables.importManifests.id, input.manifestId),
@@ -3937,15 +4135,18 @@ export class ImportsRepository {
         const lockedIds = await lockFileRowsForCleanup(
           tx,
           this.connection,
-          stagedIds
+          Array.from(new Set([...stagedIds, manifestRow.sourceFileId])).sort()
+        );
+        const lockedStagedIds = lockedIds.filter(
+          (id) => id !== manifestRow.sourceFileId
         );
         const removedRows: Array<{
           id: string;
           storageKey: string | null;
           path: string;
         }> = [];
-        for (let i = 0; i < lockedIds.length; i += 80) {
-          const chunk = lockedIds.slice(i, i + 80);
+        for (let i = 0; i < lockedStagedIds.length; i += 80) {
+          const chunk = lockedStagedIds.slice(i, i + 80);
           const deleted = await tx
             .delete(this.tables.files)
             .where(
@@ -3980,6 +4181,25 @@ export class ImportsRepository {
               path: this.tables.files.path,
             });
           removedRows.push(...deleted);
+        }
+        if (lockedIds.includes(manifestRow.sourceFileId)) {
+          const cleanedSource = await tx
+            .update(this.tables.files)
+            .set({ isActive: false, updatedAt: now })
+            .where(
+              this.sourceFileCleanupWhere(
+                tx,
+                input.communityId,
+                input.manifestId,
+                manifestRow.sourceFileId
+              )
+            )
+            .returning({
+              id: this.tables.files.id,
+              storageKey: this.tables.files.storageKey,
+              path: this.tables.files.path,
+            });
+          removedRows.push(...cleanedSource);
         }
 
         await tx.insert(this.tables.auditEntries).values({
@@ -4045,9 +4265,18 @@ export class ImportsRepository {
         return { status: 'already_terminal', manifest: current };
       }
 
+      const clearedNormalized = clearNormalizedImportData(
+        current.normalizedRows
+      );
       const updated = tx
         .update(this.tables.importManifests)
-        .set({ status: 'failed' })
+        .set({
+          status: 'failed',
+          normalizedRows: clearedNormalized as unknown as Record<
+            string,
+            unknown
+          >,
+        })
         .where(
           and(
             eq(this.tables.importManifests.id, input.manifestId),
@@ -4109,6 +4338,24 @@ export class ImportsRepository {
           .all();
         removedRows.push(...deleted);
       }
+      const cleanedSource = tx
+        .update(this.tables.files)
+        .set({ isActive: false, updatedAt: now })
+        .where(
+          this.sourceFileCleanupWhere(
+            tx,
+            input.communityId,
+            input.manifestId,
+            manifestRow.sourceFileId
+          )
+        )
+        .returning({
+          id: this.tables.files.id,
+          storageKey: this.tables.files.storageKey,
+          path: this.tables.files.path,
+        })
+        .all();
+      removedRows.push(...cleanedSource);
 
       tx.insert(this.tables.auditEntries)
         .values({

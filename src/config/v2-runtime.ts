@@ -300,7 +300,9 @@ export function validateV2RuntimeCore(
   // must provide one before a fresh installation may open for bootstrap. A
   // missing, short or placeholder value fails closed — the installation never
   // reports open and POST /v2/bootstrap refuses every attempt with 403.
-  const bootstrapSecret = input.bootstrapSecret;
+  // Trim before validating so padded values cannot mask a too-short secret;
+  // downstream consumers receive the already-trimmed value (round 4 item 1).
+  const bootstrapSecret = input.bootstrapSecret?.trim();
   if (productionLike) {
     if (bootstrapSecret === undefined || bootstrapSecret === '') {
       problems.push(

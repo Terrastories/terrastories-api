@@ -1966,4 +1966,179 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
       d1.sqlite.close();
     }
   });
+
+  it('commits 5,000 places and 5,000 stories on Node SQLite while capping every statement at <= 1,000 bound params', async () => {
+    const bulkSqlite = new Sqlite(':memory:');
+    bulkSqlite.pragma('foreign_keys = ON');
+    let recordParams = false;
+    const executedParamCounts: number[] = [];
+    const origPrepare = bulkSqlite.prepare.bind(bulkSqlite);
+    (bulkSqlite as unknown as { prepare: typeof origPrepare }).prepare = ((
+      source: string
+    ) => {
+      const stmt = origPrepare(source);
+      let boundViaBind = 0;
+      const origBind = stmt.bind.bind(stmt);
+      stmt.bind = ((...args: unknown[]) => {
+        boundViaBind =
+          args.length === 1 && Array.isArray(args[0])
+            ? args[0].length
+            : args.length;
+        return origBind(...args);
+      }) as typeof stmt.bind;
+      for (const method of ['run', 'all', 'get', 'iterate'] as const) {
+        const orig = (stmt[method] as (...args: unknown[]) => unknown).bind(
+          stmt
+        );
+        (stmt as unknown as Record<string, (...args: unknown[]) => unknown>)[
+          method
+        ] = (...args: unknown[]) => {
+          if (recordParams) {
+            const count =
+              args.length > 0
+                ? args.length === 1 && Array.isArray(args[0])
+                  ? args[0].length
+                  : args.length
+                : boundViaBind;
+            executedParamCounts.push(count);
+          }
+          return orig(...args);
+        };
+      }
+      return stmt;
+    }) as typeof origPrepare;
+
+    try {
+      const bulkDb = drizzle(bulkSqlite);
+      migrate(bulkDb, { migrationsFolder: './src/db/migrations' });
+      const bulkTables = tablesFor(bulkDb);
+      const seedTime = new Date('2026-06-01T12:00:00.000Z');
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+
+      const [comm] = await bulkDb
+        .insert(bulkTables.communities)
+        .values({
+          name: 'Bulk 5k Comm',
+          slug: 'bulk-5k-comm',
+          publicStories: true,
+          isActive: true,
+          createdAt: seedTime,
+          updatedAt: seedTime,
+        })
+        .returning({ id: bulkTables.communities.id });
+      await bulkDb.insert(bulkTables.users).values({
+        email: 'bulk5k@example.test',
+        username: 'bulk_5k_editor',
+        ...deriveUserIdentityColumns({
+          email: 'bulk5k@example.test',
+          username: 'bulk_5k_editor',
+        }),
+        firstName: 'Bulk',
+        lastName: 'Editor',
+        ...seed,
+        role: 'editor',
+        communityId: comm.id,
+        isActive: true,
+        createdAt: seedTime,
+        updatedAt: seedTime,
+      });
+
+      const bulkMem = createListableMemoryStorage();
+      const bulkApp = createHonoApp({
+        repository: new HonoFoundationRepository(bulkDb),
+        storage: bulkMem.storage,
+        mediaCleanup: new MediaCleanupCoordinator(bulkDb, bulkMem.storage),
+        publicOrigin: API_ORIGIN,
+        corsOrigins: [CLIENT_ORIGIN],
+        secureCookies: false,
+        serverSecret: makeServerSecret(),
+        now: () => currentNow,
+      });
+      const editorCookie = await loginOnApp(
+        bulkApp,
+        bulkDb,
+        'bulk5k@example.test',
+        comm.id
+      );
+
+      // 1. 5,000 places (5,000 * 11 = 55,000 raw params -> exceeds SQLite 32,766 cap without chunking)
+      const placesCsv =
+        'name,region\n' +
+        Array.from(
+          { length: 5_000 },
+          (_, i) => `Bulk5k Place ${i + 1},Bulk5kRegion`
+        ).join('\n') +
+        '\n';
+      const placesPreview = await createPreviewOnApp(bulkApp, editorCookie, {
+        kind: 'places',
+        csvFilename: 'bulk-5000-places.csv',
+        csvText: placesCsv,
+      });
+      expect(placesPreview.validRowCount).toBe(5_000);
+      expect(placesPreview.canCommit).toBe(true);
+
+      executedParamCounts.length = 0;
+      recordParams = true;
+      const placesCommitRes = await commitOnApp(
+        bulkApp,
+        editorCookie,
+        placesPreview.id
+      );
+      recordParams = false;
+      expect(placesCommitRes.status).toBe(200);
+      const placesCommitted = ImportManifestDetailResponseSchema.parse(
+        await placesCommitRes.json()
+      ).data;
+      expect(placesCommitted.resultSummary?.createdPlaces).toBe(5_000);
+      expect(Math.max(...executedParamCounts)).toBeLessThanOrEqual(1_000);
+      expect(Math.max(...executedParamCounts)).toBeGreaterThan(500);
+      expect(
+        await bulkDb
+          .select({ id: bulkTables.places.id })
+          .from(bulkTables.places)
+          .where(eq(bulkTables.places.communityId, comm.id))
+      ).toHaveLength(5_000);
+
+      // 2. 5,000 stories (5,000 * 16 = 80,000 raw params -> exceeds SQLite 32,766 and PG 65,534 caps)
+      const storiesCsv =
+        'title,visibility\n' +
+        Array.from(
+          { length: 5_000 },
+          (_, i) => `Bulk5k Story ${i + 1},editors`
+        ).join('\n') +
+        '\n';
+      const storiesPreview = await createPreviewOnApp(bulkApp, editorCookie, {
+        kind: 'stories',
+        csvFilename: 'bulk-5000-stories.csv',
+        csvText: storiesCsv,
+      });
+      expect(storiesPreview.validRowCount).toBe(5_000);
+      expect(storiesPreview.canCommit).toBe(true);
+
+      executedParamCounts.length = 0;
+      recordParams = true;
+      const storiesCommitRes = await commitOnApp(
+        bulkApp,
+        editorCookie,
+        storiesPreview.id
+      );
+      recordParams = false;
+      expect(storiesCommitRes.status).toBe(200);
+      const storiesCommitted = ImportManifestDetailResponseSchema.parse(
+        await storiesCommitRes.json()
+      ).data;
+      expect(storiesCommitted.resultSummary?.createdStories).toBe(5_000);
+      expect(Math.max(...executedParamCounts)).toBeLessThanOrEqual(1_000);
+      expect(Math.max(...executedParamCounts)).toBeGreaterThan(800);
+      expect(
+        await bulkDb
+          .select({ id: bulkTables.stories.id })
+          .from(bulkTables.stories)
+          .where(eq(bulkTables.stories.communityId, comm.id))
+      ).toHaveLength(5_000);
+    } finally {
+      recordParams = false;
+      bulkSqlite.close();
+    }
+  }, 30_000);
 });

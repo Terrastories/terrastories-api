@@ -16,6 +16,7 @@ import {
   asc,
   desc,
   eq,
+  getTableColumns,
   inArray,
   isNull,
   gte,
@@ -50,9 +51,11 @@ import {
   COMMIT_PLACE_INSERT_CHUNK,
   COMMIT_SPEAKER_INSERT_CHUNK,
   D1_MAX_BOUND_PARAMS_PER_STATEMENT,
+  NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
   PLACE_INSERT_SQL_BYTES,
   SPEAKER_INSERT_SQL_BYTES,
   chunkImportItemsByBudget,
+  chunkRowsByBoundParamBudget,
   computeImportResultSummary,
   estimatePlaceRowBytes,
   estimateRelatedRecordBytes,
@@ -67,7 +70,6 @@ import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
 
 const D1_FILE_LOOKUP_CHUNK = 80;
 const D1_ENTITY_LOOKUP_CHUNK = 80;
-const NODE_BULK_INSERT_CHUNK = 250;
 const READABLE_PRIVACY_LEVELS = ['public', 'members_only', 'editors'] as const;
 
 function isUniqueConstraintError(
@@ -291,6 +293,13 @@ export class ImportsRepository {
   constructor(readonly connection: Database | DrizzleD1Database) {
     this.db = connection;
     this.tables = tablesFor(connection);
+  }
+
+  private tableColumnBound(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    table: any
+  ): number {
+    return Math.max(1, Object.keys(getTableColumns(table)).length);
   }
 
   hasD1Batch(): boolean {
@@ -735,7 +744,13 @@ export class ImportsRepository {
           const sortedFiles = [...insertFilesValues].sort((a, b) =>
             a.id.localeCompare(b.id)
           );
-          await tx.insert(this.tables.files).values(sortedFiles);
+          for (const chunk of chunkRowsByBoundParamBudget(
+            sortedFiles,
+            NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+            this.tableColumnBound(this.tables.files)
+          )) {
+            await tx.insert(this.tables.files).values(chunk);
+          }
         }
 
         const [inserted] = await tx
@@ -831,7 +846,13 @@ export class ImportsRepository {
       }
 
       if (insertFilesValues.length > 0) {
-        tx.insert(this.tables.files).values(insertFilesValues).run();
+        for (const chunk of chunkRowsByBoundParamBudget(
+          insertFilesValues,
+          NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+          this.tableColumnBound(this.tables.files)
+        )) {
+          tx.insert(this.tables.files).values(chunk).run();
+        }
       }
 
       const inserted = tx
@@ -2579,16 +2600,14 @@ export class ImportsRepository {
           const createdPlaceByNorm = new Map<string, number>();
           if (payloads.relatedPlaces.length > 0) {
             const insertedPlaces: Array<{ id: number }> = [];
-            for (
-              let i = 0;
-              i < payloads.relatedPlaces.length;
-              i += NODE_BULK_INSERT_CHUNK
-            ) {
+            for (const chunk of chunkRowsByBoundParamBudget(
+              payloads.relatedPlaces,
+              NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+              this.tableColumnBound(this.tables.places)
+            )) {
               const rows = await tx
                 .insert(this.tables.places)
-                .values(
-                  payloads.relatedPlaces.slice(i, i + NODE_BULK_INSERT_CHUNK)
-                )
+                .values(chunk)
                 .returning({ id: this.tables.places.id });
               insertedPlaces.push(...rows);
             }
@@ -2603,16 +2622,14 @@ export class ImportsRepository {
           const createdSpeakerByNorm = new Map<string, number>();
           if (payloads.relatedSpeakers.length > 0) {
             const insertedSpeakers: Array<{ id: number }> = [];
-            for (
-              let i = 0;
-              i < payloads.relatedSpeakers.length;
-              i += NODE_BULK_INSERT_CHUNK
-            ) {
+            for (const chunk of chunkRowsByBoundParamBudget(
+              payloads.relatedSpeakers,
+              NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+              this.tableColumnBound(this.tables.speakers)
+            )) {
               const rows = await tx
                 .insert(this.tables.speakers)
-                .values(
-                  payloads.relatedSpeakers.slice(i, i + NODE_BULK_INSERT_CHUNK)
-                )
+                .values(chunk)
                 .returning({ id: this.tables.speakers.id });
               insertedSpeakers.push(...rows);
             }
@@ -2664,14 +2681,14 @@ export class ImportsRepository {
             const placeValues = payloads.buildPlaces();
             if (placeValues.length > 0) {
               const inserted: Array<{ id: number }> = [];
-              for (
-                let i = 0;
-                i < placeValues.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
+              for (const chunk of chunkRowsByBoundParamBudget(
+                placeValues,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.places)
+              )) {
                 const rows = await tx
                   .insert(this.tables.places)
-                  .values(placeValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .values(chunk)
                   .returning({ id: this.tables.places.id });
                 inserted.push(...rows);
               }
@@ -2684,14 +2701,14 @@ export class ImportsRepository {
             const speakerValues = payloads.buildSpeakers(resolvePlaceRef);
             if (speakerValues.length > 0) {
               const inserted: Array<{ id: number }> = [];
-              for (
-                let i = 0;
-                i < speakerValues.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
+              for (const chunk of chunkRowsByBoundParamBudget(
+                speakerValues,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.speakers)
+              )) {
                 const rows = await tx
                   .insert(this.tables.speakers)
-                  .values(speakerValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .values(chunk)
                   .returning({ id: this.tables.speakers.id });
                 inserted.push(...rows);
               }
@@ -2707,14 +2724,14 @@ export class ImportsRepository {
             );
             if (storyValues.length > 0) {
               const insertedStories: Array<{ id: number }> = [];
-              for (
-                let i = 0;
-                i < storyValues.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
+              for (const chunk of chunkRowsByBoundParamBudget(
+                storyValues,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.stories)
+              )) {
                 const rows = await tx
                   .insert(this.tables.stories)
-                  .values(storyValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .values(chunk)
                   .returning({ id: this.tables.stories.id });
                 insertedStories.push(...rows);
               }
@@ -2724,59 +2741,36 @@ export class ImportsRepository {
                 resolveSpeakerRef
               );
               attachmentsToInsert = children.attachmentsToInsert;
-              for (
-                let i = 0;
-                i < children.storyPlacesToInsert.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
-                await tx
-                  .insert(this.tables.storyPlaces)
-                  .values(
-                    children.storyPlacesToInsert.slice(
-                      i,
-                      i + NODE_BULK_INSERT_CHUNK
-                    )
-                  );
+              for (const chunk of chunkRowsByBoundParamBudget(
+                children.storyPlacesToInsert,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.storyPlaces)
+              )) {
+                await tx.insert(this.tables.storyPlaces).values(chunk);
               }
-              for (
-                let i = 0;
-                i < children.storySpeakersToInsert.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
-                await tx
-                  .insert(this.tables.storySpeakers)
-                  .values(
-                    children.storySpeakersToInsert.slice(
-                      i,
-                      i + NODE_BULK_INSERT_CHUNK
-                    )
-                  );
+              for (const chunk of chunkRowsByBoundParamBudget(
+                children.storySpeakersToInsert,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.storySpeakers)
+              )) {
+                await tx.insert(this.tables.storySpeakers).values(chunk);
               }
-              for (
-                let i = 0;
-                i < children.externalLinksToInsert.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
-                await tx
-                  .insert(this.tables.externalMediaLinks)
-                  .values(
-                    children.externalLinksToInsert.slice(
-                      i,
-                      i + NODE_BULK_INSERT_CHUNK
-                    )
-                  );
+              for (const chunk of chunkRowsByBoundParamBudget(
+                children.externalLinksToInsert,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.externalMediaLinks)
+              )) {
+                await tx.insert(this.tables.externalMediaLinks).values(chunk);
               }
             }
           }
 
-          for (
-            let i = 0;
-            i < attachmentsToInsert.length;
-            i += NODE_BULK_INSERT_CHUNK
-          ) {
-            await tx
-              .insert(this.tables.attachments)
-              .values(attachmentsToInsert.slice(i, i + NODE_BULK_INSERT_CHUNK));
+          for (const chunk of chunkRowsByBoundParamBudget(
+            attachmentsToInsert,
+            NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+            this.tableColumnBound(this.tables.attachments)
+          )) {
+            await tx.insert(this.tables.attachments).values(chunk);
           }
 
           if (stagedMediaIds.length > 0) {
@@ -3041,16 +3035,14 @@ export class ImportsRepository {
           const createdPlaceByNorm = new Map<string, number>();
           if (payloads.relatedPlaces.length > 0) {
             const insertedPlaces: Array<{ id: number }> = [];
-            for (
-              let i = 0;
-              i < payloads.relatedPlaces.length;
-              i += NODE_BULK_INSERT_CHUNK
-            ) {
+            for (const chunk of chunkRowsByBoundParamBudget(
+              payloads.relatedPlaces,
+              NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+              this.tableColumnBound(this.tables.places)
+            )) {
               const rows = tx
                 .insert(this.tables.places)
-                .values(
-                  payloads.relatedPlaces.slice(i, i + NODE_BULK_INSERT_CHUNK)
-                )
+                .values(chunk)
                 .returning({ id: this.tables.places.id })
                 .all() as Array<{ id: number }>;
               insertedPlaces.push(...rows);
@@ -3066,16 +3058,14 @@ export class ImportsRepository {
           const createdSpeakerByNorm = new Map<string, number>();
           if (payloads.relatedSpeakers.length > 0) {
             const insertedSpeakers: Array<{ id: number }> = [];
-            for (
-              let i = 0;
-              i < payloads.relatedSpeakers.length;
-              i += NODE_BULK_INSERT_CHUNK
-            ) {
+            for (const chunk of chunkRowsByBoundParamBudget(
+              payloads.relatedSpeakers,
+              NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+              this.tableColumnBound(this.tables.speakers)
+            )) {
               const rows = tx
                 .insert(this.tables.speakers)
-                .values(
-                  payloads.relatedSpeakers.slice(i, i + NODE_BULK_INSERT_CHUNK)
-                )
+                .values(chunk)
                 .returning({ id: this.tables.speakers.id })
                 .all() as Array<{ id: number }>;
               insertedSpeakers.push(...rows);
@@ -3128,14 +3118,14 @@ export class ImportsRepository {
             const placeValues = payloads.buildPlaces();
             if (placeValues.length > 0) {
               const inserted: Array<{ id: number }> = [];
-              for (
-                let i = 0;
-                i < placeValues.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
+              for (const chunk of chunkRowsByBoundParamBudget(
+                placeValues,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.places)
+              )) {
                 const rows = tx
                   .insert(this.tables.places)
-                  .values(placeValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .values(chunk)
                   .returning({ id: this.tables.places.id })
                   .all() as Array<{ id: number }>;
                 inserted.push(...rows);
@@ -3149,14 +3139,14 @@ export class ImportsRepository {
             const speakerValues = payloads.buildSpeakers(resolvePlaceRef);
             if (speakerValues.length > 0) {
               const inserted: Array<{ id: number }> = [];
-              for (
-                let i = 0;
-                i < speakerValues.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
+              for (const chunk of chunkRowsByBoundParamBudget(
+                speakerValues,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.speakers)
+              )) {
                 const rows = tx
                   .insert(this.tables.speakers)
-                  .values(speakerValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .values(chunk)
                   .returning({ id: this.tables.speakers.id })
                   .all() as Array<{ id: number }>;
                 inserted.push(...rows);
@@ -3173,14 +3163,14 @@ export class ImportsRepository {
             );
             if (storyValues.length > 0) {
               const insertedStories: Array<{ id: number }> = [];
-              for (
-                let i = 0;
-                i < storyValues.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
+              for (const chunk of chunkRowsByBoundParamBudget(
+                storyValues,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.stories)
+              )) {
                 const rows = tx
                   .insert(this.tables.stories)
-                  .values(storyValues.slice(i, i + NODE_BULK_INSERT_CHUNK))
+                  .values(chunk)
                   .returning({ id: this.tables.stories.id })
                   .all() as Array<{ id: number }>;
                 insertedStories.push(...rows);
@@ -3191,59 +3181,36 @@ export class ImportsRepository {
                 resolveSpeakerRef
               );
               attachmentsToInsert = children.attachmentsToInsert;
-              for (
-                let i = 0;
-                i < children.storyPlacesToInsert.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
-                tx.insert(this.tables.storyPlaces)
-                  .values(
-                    children.storyPlacesToInsert.slice(
-                      i,
-                      i + NODE_BULK_INSERT_CHUNK
-                    )
-                  )
-                  .run();
+              for (const chunk of chunkRowsByBoundParamBudget(
+                children.storyPlacesToInsert,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.storyPlaces)
+              )) {
+                tx.insert(this.tables.storyPlaces).values(chunk).run();
               }
-              for (
-                let i = 0;
-                i < children.storySpeakersToInsert.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
-                tx.insert(this.tables.storySpeakers)
-                  .values(
-                    children.storySpeakersToInsert.slice(
-                      i,
-                      i + NODE_BULK_INSERT_CHUNK
-                    )
-                  )
-                  .run();
+              for (const chunk of chunkRowsByBoundParamBudget(
+                children.storySpeakersToInsert,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.storySpeakers)
+              )) {
+                tx.insert(this.tables.storySpeakers).values(chunk).run();
               }
-              for (
-                let i = 0;
-                i < children.externalLinksToInsert.length;
-                i += NODE_BULK_INSERT_CHUNK
-              ) {
-                tx.insert(this.tables.externalMediaLinks)
-                  .values(
-                    children.externalLinksToInsert.slice(
-                      i,
-                      i + NODE_BULK_INSERT_CHUNK
-                    )
-                  )
-                  .run();
+              for (const chunk of chunkRowsByBoundParamBudget(
+                children.externalLinksToInsert,
+                NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+                this.tableColumnBound(this.tables.externalMediaLinks)
+              )) {
+                tx.insert(this.tables.externalMediaLinks).values(chunk).run();
               }
             }
           }
 
-          for (
-            let i = 0;
-            i < attachmentsToInsert.length;
-            i += NODE_BULK_INSERT_CHUNK
-          ) {
-            tx.insert(this.tables.attachments)
-              .values(attachmentsToInsert.slice(i, i + NODE_BULK_INSERT_CHUNK))
-              .run();
+          for (const chunk of chunkRowsByBoundParamBudget(
+            attachmentsToInsert,
+            NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+            this.tableColumnBound(this.tables.attachments)
+          )) {
+            tx.insert(this.tables.attachments).values(chunk).run();
           }
 
           if (stagedMediaIds.length > 0) {

@@ -17,6 +17,13 @@ import type {
 
 export const D1_MAX_BATCH_STATEMENTS = 1_000;
 export const D1_MAX_BOUND_PARAMS_PER_STATEMENT = 100;
+/**
+ * Safe per-statement bound-parameter cap for Node/PostgreSQL/SQLite
+ * multi-row inserts. SQLite allows 32,766 and the PostgreSQL wire protocol
+ * 65,534, but a 1,000-parameter statement is comfortably below every driver's
+ * limit and keeps statement compilation and plan caching predictable.
+ */
+export const NODE_MAX_BOUND_PARAMS_PER_STATEMENT = 1_000;
 export const D1_MAX_STATEMENT_BYTES = 100 * 1024; // 100 KB
 export const D1_MAX_ESTIMATED_ROWS_WRITTEN = 50_000; // Half of Workers Free 100k/day quota
 export const D1_MAX_COMMITTED_IMPORTS_PER_UTC_DAY = 1;
@@ -210,6 +217,42 @@ export function computeImportResultSummary(
     createdExternalLinks,
     skippedDuplicates: normalizedData.skippedDuplicates,
   };
+}
+
+/**
+ * Chunk plain insert value rows so a single multi-row `INSERT` never binds
+ * more than `maxBoundParams` parameters. The row width is read from the
+ * payload itself, so a wide table (stories) yields fewer rows per statement
+ * than a narrow one (attachments) without per-call column bookkeeping.
+ */
+export function chunkRowsByBoundParamBudget<T>(
+  rows: ReadonlyArray<T>,
+  maxBoundParams: number = NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
+  minColumnsPerRow: number = 1
+): T[][] {
+  if (rows.length === 0) return [];
+  const keySet = new Set<string>();
+  let hasObjectRow = false;
+  for (const row of rows) {
+    if (row !== null && typeof row === 'object') {
+      hasObjectRow = true;
+      for (const key of Object.keys(row as Record<string, unknown>)) {
+        keySet.add(key);
+      }
+    }
+  }
+  const columns = Math.max(
+    1,
+    Math.floor(minColumnsPerRow),
+    hasObjectRow ? keySet.size : 1
+  );
+  const safeMaxParams = Math.max(1, Math.floor(maxBoundParams));
+  const maxRows = Math.max(1, Math.floor(safeMaxParams / columns));
+  const chunks: T[][] = [];
+  for (let i = 0; i < rows.length; i += maxRows) {
+    chunks.push(rows.slice(i, i + maxRows));
+  }
+  return chunks;
 }
 
 export function chunkImportItemsByBudget<T>(

@@ -14,6 +14,7 @@ import {
 } from '../src/db/schema/sessions.js';
 import { HonoFoundationRepository } from '../src/repositories/hono-foundation.repository.js';
 import { HonoAuthRepository } from '../src/repositories/hono-auth.repository.js';
+import { MediaCleanupCoordinator } from '../src/services/media-cleanup.service.js';
 import { createHonoApp } from '../src/hono-app.js';
 import {
   ARGON2ID_ALGORITHM,
@@ -3190,15 +3191,233 @@ export async function runHonoFoundationContract(
         `a viewer attaching onto a story answers the target verdict 403 on PG as on D1/SQLite (${await viewerReuse.text()})`
       );
     }
+
+    // Slice 12 bounded CSV import: 5,000-row places and 5,000-row stories
+    // commits must chunk multi-row inserts below the driver parameter limits
+    // on both SQLite (32,766) and PostgreSQL (65,534; 5,000 stories = 80,000).
+    const importStorageMap = new Map<
+      string,
+      { bytes: Uint8Array; contentType?: string; uploaded: Date }
+    >();
+    const importStorage = {
+      read: async (
+        storageKey: string,
+        range?: { start: number; end: number }
+      ) => {
+        const entry = importStorageMap.get(storageKey);
+        if (!entry) return null;
+        return {
+          size: entry.bytes.byteLength,
+          body: range
+            ? entry.bytes.subarray(range.start, range.end + 1)
+            : entry.bytes,
+        };
+      },
+      put: async (
+        storageKey: string,
+        stream: ReadableStream<Uint8Array>,
+        opts: { contentType?: string }
+      ) => {
+        const reader = stream.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            total += value.byteLength;
+          }
+        }
+        const merged = new Uint8Array(total);
+        let pos = 0;
+        for (const chunk of chunks) {
+          merged.set(chunk, pos);
+          pos += chunk.byteLength;
+        }
+        importStorageMap.set(storageKey, {
+          bytes: merged,
+          contentType: opts.contentType,
+          uploaded: instant,
+        });
+      },
+      delete: async (storageKey: string) => {
+        importStorageMap.delete(storageKey);
+      },
+      list: async (opts?: { prefix?: string }) => {
+        const prefix = opts?.prefix ?? '';
+        const entries = [...importStorageMap.entries()]
+          .filter(([key]) => key.startsWith(prefix))
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, entry]) => ({ key, uploaded: entry.uploaded }));
+        return { entries, truncated: false };
+      },
+    };
+    const importApp = createHonoApp({
+      ...options,
+      storage: importStorage,
+      mediaCleanup: new MediaCleanupCoordinator(database, importStorage),
+    });
+    const buildImportMultipart = (opts: {
+      kind: 'places' | 'speakers' | 'stories';
+      csvFilename: string;
+      csvText: string;
+    }) => {
+      const boundary = `contract-imp-${crypto.randomUUID()}`;
+      const body = Buffer.concat([
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="kind"\r\n\r\n${opts.kind}\r\n` +
+            `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${opts.csvFilename}"\r\nContent-Type: text/csv\r\n\r\n` +
+            opts.csvText +
+            `\r\n--${boundary}--\r\n`
+        ),
+      ]);
+      return {
+        body,
+        contentType: `multipart/form-data; boundary=${boundary}`,
+      };
+    };
+    const importEditorCookie = await login(editorEmail);
+    const bulkPlacesCsv =
+      'name,region\n' +
+      Array.from(
+        { length: 5_000 },
+        (_, i) => `Contract5k Place ${i + 1},Contract5kRegion`
+      ).join('\n') +
+      '\n';
+    const bulkPlacesForm = buildImportMultipart({
+      kind: 'places',
+      csvFilename: 'contract-5k-places.csv',
+      csvText: bulkPlacesCsv,
+    });
+    const bulkPlacesPreviewRes = await send(importApp, '/v2/imports/preview', {
+      method: 'POST',
+      headers: {
+        cookie: importEditorCookie,
+        'content-type': bulkPlacesForm.contentType,
+      },
+      body: bulkPlacesForm.body,
+    });
+    assert.equal(
+      bulkPlacesPreviewRes.status,
+      201,
+      `5,000-place preview must succeed (${await bulkPlacesPreviewRes.clone().text()})`
+    );
+    const bulkPlacesPreview = (await bulkPlacesPreviewRes.json()) as {
+      data: { id: number };
+    };
+    const bulkPlacesCommitRes = await send(
+      importApp,
+      `/v2/imports/${bulkPlacesPreview.data.id}/commit`,
+      {
+        method: 'POST',
+        headers: { cookie: importEditorCookie },
+      }
+    );
+    assert.equal(
+      bulkPlacesCommitRes.status,
+      200,
+      `5,000-place commit must succeed without hitting driver param limit (${await bulkPlacesCommitRes.clone().text()})`
+    );
+    const bulkPlacesCommitted = (await bulkPlacesCommitRes.json()) as {
+      data: { status: string; resultSummary: { createdPlaces: number } | null };
+    };
+    assert.equal(bulkPlacesCommitted.data.status, 'committed');
+    assert.equal(bulkPlacesCommitted.data.resultSummary?.createdPlaces, 5_000);
+    const persistedBulkPlaces = await db
+      .select({ id: tables.places.id })
+      .from(tables.places)
+      .where(
+        and(
+          eq(tables.places.communityId, communityA),
+          eq(tables.places.region, 'Contract5kRegion')
+        )
+      );
+    assert.equal(persistedBulkPlaces.length, 5_000);
+
+    const bulkStoriesCsv =
+      'title,visibility\n' +
+      Array.from(
+        { length: 5_000 },
+        (_, i) => `Contract5k Story ${i + 1},editors`
+      ).join('\n') +
+      '\n';
+    const bulkStoriesForm = buildImportMultipart({
+      kind: 'stories',
+      csvFilename: 'contract-5k-stories.csv',
+      csvText: bulkStoriesCsv,
+    });
+    const bulkStoriesPreviewRes = await send(importApp, '/v2/imports/preview', {
+      method: 'POST',
+      headers: {
+        cookie: importEditorCookie,
+        'content-type': bulkStoriesForm.contentType,
+      },
+      body: bulkStoriesForm.body,
+    });
+    assert.equal(
+      bulkStoriesPreviewRes.status,
+      201,
+      `5,000-story preview must succeed (${await bulkStoriesPreviewRes.clone().text()})`
+    );
+    const bulkStoriesPreview = (await bulkStoriesPreviewRes.json()) as {
+      data: { id: number };
+    };
+    const bulkStoriesCommitRes = await send(
+      importApp,
+      `/v2/imports/${bulkStoriesPreview.data.id}/commit`,
+      {
+        method: 'POST',
+        headers: { cookie: importEditorCookie },
+      }
+    );
+    assert.equal(
+      bulkStoriesCommitRes.status,
+      200,
+      `5,000-story commit must succeed without hitting driver param limit (${await bulkStoriesCommitRes.clone().text()})`
+    );
+    const bulkStoriesCommitted = (await bulkStoriesCommitRes.json()) as {
+      data: {
+        status: string;
+        resultSummary: { createdStories: number } | null;
+      };
+    };
+    assert.equal(bulkStoriesCommitted.data.status, 'committed');
+    assert.equal(
+      bulkStoriesCommitted.data.resultSummary?.createdStories,
+      5_000
+    );
+    const persistedBulkStories = await db
+      .select({ id: tables.stories.id })
+      .from(tables.stories)
+      .where(
+        and(
+          eq(tables.stories.communityId, communityA),
+          like(tables.stories.title, 'Contract5k Story %')
+        )
+      );
+    assert.equal(persistedBulkStories.length, 5_000);
   } finally {
     for (const id of communityIds) {
+      await db
+        .delete(tables.importManifests)
+        .where(eq(tables.importManifests.communityId, id));
       await db
         .delete(tables.storyPlaces)
         .where(eq(tables.storyPlaces.communityId, id));
       await db
+        .delete(tables.storySpeakers)
+        .where(eq(tables.storySpeakers.communityId, id));
+      await db
+        .delete(tables.externalMediaLinks)
+        .where(eq(tables.externalMediaLinks.communityId, id));
+      await db
         .delete(tables.attachments)
         .where(eq(tables.attachments.communityId, id));
       await db.delete(tables.stories).where(eq(tables.stories.communityId, id));
+      await db
+        .delete(tables.speakers)
+        .where(eq(tables.speakers.communityId, id));
       await db.delete(tables.places).where(eq(tables.places.communityId, id));
       await db
         .delete(tables.auditEntries)
@@ -3207,6 +3426,10 @@ export async function runHonoFoundationContract(
     for (const id of fileIds) {
       await db.delete(media).where(eq(media.fileId, id));
       await db.delete(tables.files).where(eq(tables.files.id, id));
+    }
+    for (const id of communityIds) {
+      await db.delete(media).where(eq(media.communityId, id));
+      await db.delete(tables.files).where(eq(tables.files.communityId, id));
     }
     // Auth/security audit entries reference the seeded accounts (actorId)
     // and communities; delete them with their parents. Entries may also carry

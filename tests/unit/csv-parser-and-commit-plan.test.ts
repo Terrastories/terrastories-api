@@ -8,11 +8,13 @@ import {
   parseCsvText,
 } from '../../src/shared/utils/csv-parser.js';
 import {
+  chunkRowsByBoundParamBudget,
   D1_BUDGET_ALTERNATIVES_MESSAGE,
   D1_MAX_BATCH_STATEMENTS,
   D1_MAX_BOUND_PARAMS_PER_STATEMENT,
   D1_MAX_ESTIMATED_ROWS_WRITTEN,
   D1_MAX_STATEMENT_BYTES,
+  NODE_MAX_BOUND_PARAMS_PER_STATEMENT,
   planImportCommit,
   utcDayWindowMs,
 } from '../../src/shared/utils/import-commit-plan.js';
@@ -399,5 +401,67 @@ describe('D1 commit-plan budget validator', () => {
       '2026-11-21T00:00:00.000Z'
     );
     expect(new Date(win.endMs).toISOString()).toBe('2026-11-22T00:00:00.000Z');
+  });
+
+  it('chunks Node/PG/SQLite bulk insert rows within the 1,000 bound-parameter budget', () => {
+    expect(NODE_MAX_BOUND_PARAMS_PER_STATEMENT).toBe(1_000);
+    expect(chunkRowsByBoundParamBudget([])).toEqual([]);
+
+    // 5 columns => max 200 rows per chunk (1,000 params)
+    const fiveColRows = Array.from({ length: 450 }, (_, i) => ({
+      a: i,
+      b: i,
+      c: i,
+      d: i,
+      e: i,
+    }));
+    const fiveColChunks = chunkRowsByBoundParamBudget(fiveColRows);
+    expect(fiveColChunks.map((c) => c.length)).toEqual([200, 200, 50]);
+
+    // 16 columns (stories width) => max 62 rows per chunk (992 <= 1,000 params)
+    const sixteenColRows = Array.from({ length: 5_000 }, (_, i) => ({
+      c1: i,
+      c2: i,
+      c3: i,
+      c4: i,
+      c5: i,
+      c6: i,
+      c7: i,
+      c8: i,
+      c9: i,
+      c10: i,
+      c11: i,
+      c12: i,
+      c13: i,
+      c14: i,
+      c15: i,
+      c16: i,
+    }));
+    const storyChunks = chunkRowsByBoundParamBudget(sixteenColRows);
+    expect(storyChunks[0]).toHaveLength(62);
+    expect(storyChunks.reduce((sum, c) => sum + c.length, 0)).toBe(5_000);
+    for (const chunk of storyChunks) {
+      expect(chunk.length * 16).toBeLessThanOrEqual(1_000);
+    }
+
+    // Heterogeneous optional keys take the union across all rows
+    const heterogeneous = [{ a: 1 }, { a: 2, b: 2, c: 3, d: 4 }];
+    expect(
+      chunkRowsByBoundParamBudget(heterogeneous, 4).map((c) => c.length)
+    ).toEqual([1, 1]);
+
+    // A single row wider than maxBoundParams yields chunk size 1 instead of 0
+    const wideRow = { a: 1, b: 2, c: 3, d: 4 };
+    expect(chunkRowsByBoundParamBudget([wideRow, wideRow], 2)).toEqual([
+      [wideRow],
+      [wideRow],
+    ]);
+
+    // minColumnsPerRow accounts for Drizzle schema defaults omitted from payloads
+    expect(
+      chunkRowsByBoundParamBudget(fiveColRows.slice(0, 25), 100, 12).map(
+        (c) => c.length
+      )
+    ).toEqual([8, 8, 8, 1]);
   });
 });

@@ -13,7 +13,7 @@
  * - Performance-optimized queries with proper indexing
  */
 
-import { eq, and, desc, or, sql, count, ne } from 'drizzle-orm';
+import { eq, and, desc, or, sql, count, ne, isNull } from 'drizzle-orm';
 import {
   containsInsensitive,
   dialectOf,
@@ -574,6 +574,11 @@ export class CommunityRepository {
       if (!existingCommunity) {
         throw new CommunityNotFoundError();
       }
+      // A deprovisioned community is a permanent tombstone (Slice 14): the
+      // legacy update path must never revive or edit it.
+      if (existingCommunity.deprovisionedAt != null) {
+        throw new CommunityNotFoundError();
+      }
 
       // Validate updates
       if (updates.name !== undefined) {
@@ -626,7 +631,12 @@ export class CommunityRepository {
       const result = await this.db
         .update(this.communities)
         .set(cleanUpdateData)
-        .where(eq(this.communities.id, id))
+        .where(
+          and(
+            eq(this.communities.id, id),
+            isNull(this.communities.deprovisionedAt)
+          )
+        )
         .returning();
 
       return result.length > 0 ? result[0] : null;

@@ -25,10 +25,12 @@ import { TestDatabaseManager } from '../helpers/database.js';
 describe('CommunityRepository', () => {
   let communityRepository: CommunityRepository;
   let testDb: TestDatabaseManager;
+  let rawDb: any;
 
   beforeEach(async () => {
     testDb = new TestDatabaseManager();
     const db = await testDb.setup();
+    rawDb = db;
     communityRepository = new CommunityRepository(db);
   });
 
@@ -169,6 +171,24 @@ describe('CommunityRepository', () => {
       await expect(communityRepository.create(invalidData)).rejects.toThrow(
         InvalidCommunityDataError
       );
+    });
+  });
+
+  describe('update on a deprovisioned community', () => {
+    it('refuses to revive or edit a deprovisioned tombstone', async () => {
+      const created = await communityRepository.create({
+        name: 'Tombstone Community',
+        description: 'to be deprovisioned',
+      });
+      rawDb.$client
+        .prepare(
+          'UPDATE communities SET is_active = 0, deprovisioned_at = ? WHERE id = ?'
+        )
+        .run(Date.now(), created.id);
+
+      await expect(
+        communityRepository.update(created.id, { isActive: true })
+      ).rejects.toThrow(CommunityNotFoundError);
     });
   });
 

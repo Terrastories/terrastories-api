@@ -16,6 +16,7 @@ import { createHonoApp } from './hono-app.js';
 import { HonoFoundationRepository } from './repositories/hono-foundation.repository.js';
 import {
   validStorageKey,
+  validLegacyStorageKey,
   validSystemStorageKey,
   envFlagEnabled,
   erasureFenceKey,
@@ -273,7 +274,7 @@ export const createR2Storage = (bucket: R2Bucket): FoundationStorage => ({
     if (keys.length) await bucket.delete(keys);
   },
   async delete(key) {
-    if (!validStorageKey(key)) return;
+    if (!validStorageKey(key) && !validLegacyStorageKey(key)) return;
     if (
       /^(?:communities|users)\/[1-9][0-9]*\/\.multipart\/[^/]+\.json$/.test(key)
     ) {

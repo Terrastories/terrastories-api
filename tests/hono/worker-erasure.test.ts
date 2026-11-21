@@ -28,7 +28,26 @@ it('cron aborts journaled non-export multipart bytes and removes rows before rec
         )
         .bind(requestId, now, now, now),
     ]);
+    await db
+      .prepare(
+        "INSERT INTO users(id,email,password_hash,first_name,last_name,role,community_id,created_at,updated_at) VALUES(1,'erased@example.test',?,'Erased','Admin','admin',1,0,0),(2,'retained@example.test',?,'Retained','Admin','admin',2,0,0)"
+      )
+      .bind(crypto.randomUUID(), crypto.randomUUID())
+      .run();
+    for (const [key, uploader] of [
+      ['legacy/community-file', 1],
+      ['legacy/foreign-file', 2],
+    ] as const) {
+      await db
+        .prepare(
+          "INSERT INTO files(id,filename,original_name,path,storage_key,url,mime_type,size,uploaded_by,created_at,updated_at) VALUES(?,'legacy','legacy',?,NULL,'https://example.test/file','image/png',1,?,0,0)"
+        )
+        .bind(crypto.randomUUID(), key, uploader)
+        .run();
+    }
     const bucket = await mf.getR2Bucket('MEDIA');
+    await bucket.put('legacy/community-file', new Uint8Array([6]));
+    await bucket.put('legacy/foreign-file', new Uint8Array([7]));
     const records = await mf.getR2Bucket('ERASURE_RECORDS');
     const key = 'communities/1/imports/interrupted';
     const upload = await bucket.createMultipartUpload(key);
@@ -39,7 +58,7 @@ it('cron aborts journaled non-export multipart bytes and removes rows before rec
     );
     await bucket.put('communities/1/media/object', new Uint8Array([4]));
     await bucket.put('communities/2/media/object', new Uint8Array([5]));
-    for (let pass = 0; pass < 2; pass++) {
+    for (let pass = 0; pass < 3; pass++) {
       const response = await mf.dispatchFetch(
         `http://localhost/cdn-cgi/handler/scheduled?cron=*/1+*+*+*+*&time=${now + pass * 60000}`,
         { method: 'POST' }
@@ -49,6 +68,18 @@ it('cron aborts journaled non-export multipart bytes and removes rows before rec
     expect(
       (await bucket.list({ prefix: 'communities/1/' })).objects
     ).toHaveLength(0);
+    expect(await bucket.head('legacy/community-file')).toBeNull();
+    expect(await bucket.head('legacy/foreign-file')).not.toBeNull();
+    expect(
+      await db
+        .prepare("SELECT id FROM files WHERE path='legacy/community-file'")
+        .first()
+    ).toBeNull();
+    expect(
+      await db
+        .prepare("SELECT id FROM files WHERE path='legacy/foreign-file'")
+        .first()
+    ).not.toBeNull();
     expect(await bucket.head('communities/2/media/object')).not.toBeNull();
     await expect(
       upload.complete([{ partNumber: 1, etag: part.etag }])

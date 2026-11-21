@@ -9,6 +9,10 @@ const safeKey = (key: string) =>
 export const validStorageKey = (key: string) =>
   /^(?:communities|users)\/[1-9][0-9]*\//.test(key) && safeKey(key);
 
+/** Historical file pointers may only be deleted, never written or served. */
+export const validLegacyStorageKey = (key: string) =>
+  key.startsWith('legacy/') && !key.includes('\0') && safeKey(key);
+
 /**
  * System-owned object: the orphan sweeper's resume cursor. It lives outside the
  * swept `communities/` and `users/` prefixes, so no sweep ever deletes it and no

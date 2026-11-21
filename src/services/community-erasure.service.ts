@@ -1,5 +1,9 @@
 import { CommunitySovereigntyRepository } from '../repositories/community-sovereignty.repository.js';
-import type { FoundationStorage } from './hono-foundation.service.js';
+import {
+  validStorageKey,
+  validLegacyStorageKey,
+  type FoundationStorage,
+} from './hono-foundation.service.js';
 import {
   redactErasureActor,
   verifyErasureRestorePoint,
@@ -61,9 +65,17 @@ export class CommunityErasureService {
     budget: number
   ): Promise<number> {
     for (const file of await this.repository.erasureLegacyFiles(communityId)) {
-      const cost = this.storage.erasureDeleteCost ?? 1;
+      const cost = (this.storage.erasureDeleteCost ?? 1) + 1;
       if (budget < cost) return 0;
-      await this.storage.delete!(file.storageKey ?? file.path);
+      const key = file.storageKey ?? file.path;
+      if (!validStorageKey(key) && !validLegacyStorageKey(key))
+        throw new Error('Invalid legacy erasure key');
+      await this.storage.delete!(key);
+      // Do not use read(): runtime serving intentionally rejects legacy keys.
+      // An exact key sorts before every longer key sharing this prefix.
+      const remaining = await this.storage.list!({ prefix: key, limit: 1 });
+      if (remaining.entries.some((entry) => entry.key === key))
+        throw new Error('Legacy erasure incomplete');
       budget -= cost;
       await this.repository.clearErasureLegacyFile(communityId, file.id);
     }

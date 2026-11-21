@@ -1,3 +1,7 @@
+import { mkdtemp, mkdir, writeFile, symlink, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { createLocalStorage } from '../../src/node-storage.js';
 import { expect, it, vi } from 'vitest';
 import {
   CommunityErasureService,
@@ -259,4 +263,69 @@ it('keeps legacy storage pointers on deletion failure and retries them before co
   expect(remove).toHaveBeenNthCalledWith(2, 'legacy/file');
   expect(clear).toHaveBeenCalledOnce();
   expect(f.erased).toEqual([1]);
+});
+
+it('verifies real local legacy bytes before releasing retry pointers and completion', async () => {
+  const f = fixture();
+  const root = await mkdtemp(path.join(tmpdir(), 'erasure-legacy-'));
+  await mkdir(path.join(root, 'legacy'));
+  await writeFile(
+    path.join(root, 'legacy/community-file'),
+    new Uint8Array([1])
+  );
+  await writeFile(path.join(root, 'legacy/foreign-file'), new Uint8Array([2]));
+  const storage = await createLocalStorage(root);
+  const files = [
+    {
+      id: crypto.randomUUID(),
+      storageKey: null,
+      path: 'legacy/community-file',
+    },
+  ];
+  vi.spyOn(f.repository, 'erasureLegacyFiles').mockImplementation(async () => [
+    ...files,
+  ]);
+  f.repository.clearErasureLegacyFile = vi.fn(async () => {
+    files.splice(0);
+  });
+  const remove = vi.spyOn(storage, 'delete');
+  // A successful but ineffective delete must never discard the retry pointer.
+  remove.mockResolvedValueOnce(undefined);
+  const service = new CommunityErasureService(
+    f.repository,
+    storage,
+    f.store,
+    f.clock
+  );
+  await expect(service.sweep(new Date(0))).rejects.toThrow(
+    'Legacy erasure incomplete'
+  );
+  expect(files).toHaveLength(1);
+  expect(f.erased).toEqual([]);
+  expect(f.records[0]!.completedAt).toBeNull();
+  await service.sweep(new Date(60000));
+  expect(files).toEqual([]);
+  expect(
+    (await storage.list!({ prefix: 'legacy/' })).entries.map((e) => e.key)
+  ).toEqual(['legacy/foreign-file']);
+  expect(f.erased).toEqual([1]);
+  expect(f.records[0]!.outcome).toBe('completed');
+});
+
+it('refuses legacy traversal and symlink escapes without removing bytes', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'erasure-legacy-safety-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'erasure-legacy-outside-'));
+  await mkdir(path.join(root, 'legacy'));
+  await writeFile(path.join(outside, 'file'), new Uint8Array([1]));
+  await symlink(outside, path.join(root, 'legacy', 'escape'));
+  const storage = await createLocalStorage(root);
+  await expect(storage.delete!('legacy/escape/file')).rejects.toThrow(
+    'Invalid deletion path'
+  );
+  await storage.delete!('legacy/../system/orphan-sweep-hold');
+  expect(await readFile(path.join(outside, 'file'))).toEqual(Buffer.from([1]));
+  await expect(
+    storage.put!('legacy/file', new Uint8Array([1]))
+  ).rejects.toThrow('Invalid storage key');
+  expect(await storage.read('legacy/escape/file')).toBeNull();
 });

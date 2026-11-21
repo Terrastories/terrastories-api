@@ -12,6 +12,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
   validStorageKey,
+  validLegacyStorageKey,
   validSystemStorageKey,
   erasureFenceKey,
   type FoundationStorage,
@@ -279,14 +280,18 @@ export async function createLocalStorage(
     },
 
     async delete(key) {
-      if (!validStorageKey(key)) return;
+      if (!validStorageKey(key) && !validLegacyStorageKey(key)) return;
       try {
         const filename = await realpath(path.resolve(root, key));
         const tenantRoot = path.resolve(
           root,
-          key.split('/').slice(0, 2).join('/')
+          key
+            .split('/')
+            .slice(0, validLegacyStorageKey(key) ? 1 : 2)
+            .join('/')
         );
-        if (!filename.startsWith(tenantRoot + path.sep)) return;
+        if (!filename.startsWith(tenantRoot + path.sep))
+          throw new Error('Invalid deletion path');
         await unlink(filename);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;

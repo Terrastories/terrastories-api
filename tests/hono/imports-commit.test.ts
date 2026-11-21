@@ -1692,10 +1692,20 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
     const okCommit = await commitOnApp(app, cookies.editorA, contentPreview.id);
     expect(okCommit.status).toBe(200);
     const okText = await okCommit.text();
-    expect(okText).not.toContain(sensitiveTitle);
-    expect(okText).not.toContain(sensitiveDesc);
     expect(okText).not.toContain(stagedFileRow!.storageKey!);
     expect(okText).not.toContain(stagedFileRow!.checksum!);
+    expect(okText).not.toContain(contentManifestRow!.sourceFileId);
+    expect(okText).not.toContain(stagedFileRow!.id);
+
+    const listRes = await app.request(`${API_ORIGIN}/v2/imports`, {
+      headers: { cookie: cookies.editorA },
+    });
+    expect(listRes.status).toBe(200);
+    const listText = await listRes.text();
+    expect(listText).not.toContain(sensitiveTitle);
+    expect(listText).not.toContain(sensitiveDesc);
+    expect(listText).not.toContain(stagedFileRow!.storageKey!);
+    expect(listText).not.toContain(stagedFileRow!.checksum!);
 
     const audits = await db
       .select()

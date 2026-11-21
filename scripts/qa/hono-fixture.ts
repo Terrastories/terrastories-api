@@ -7973,11 +7973,17 @@ export async function createFixture(
               return (
                 parsed.data.data.status === 'previewed' &&
                 parsed.data.data.canCommit === true &&
+                parsed.data.data.audienceMapping?.['community-circle'] ===
+                  'community' &&
                 parsed.data.data.audienceSummary?.public === 0 &&
                 parsed.data.data.audienceSummary?.community === 1 &&
                 parsed.data.data.audienceSummary?.editors === 0 &&
+                parsed.data.data.relatedRecords.resolvedPlacesCount === 1 &&
                 parsed.data.data.relatedRecords.placesToCreateCount === 1 &&
+                parsed.data.data.relatedRecords.resolvedSpeakersCount === 1 &&
                 parsed.data.data.relatedRecords.speakersToCreateCount === 1 &&
+                parsed.data.data.previewRows.length === 1 &&
+                parsed.data.data.previewRowsTruncated === false &&
                 parsed.data.data.stagedMediaCount === 1
               );
             },

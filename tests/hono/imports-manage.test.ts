@@ -685,11 +685,27 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       expect(body.data.validRowCount).toBe(1);
       expect(body.data.errorCount).toBe(2);
       expect(body.data.canCommit).toBe(false);
+      expect(body.data.previewRows).toEqual([
+        {
+          kind: 'places',
+          rowNumber: 1,
+          name: 'Detail Secret Ridge',
+          descriptionExcerpt: 'Desc',
+          typeOfPlace: null,
+          region: null,
+          latitude: 10.5,
+          longitude: -60.1,
+          attachments: [
+            { role: 'place_photo', ordinal: 0, source: 'existing' },
+          ],
+        },
+      ]);
       const wire = JSON.stringify(body);
-      expect(wire).not.toContain('Detail Secret Ridge');
+      expect(wire).not.toContain('Bad Row');
       expect(wire).not.toContain('storageKey');
       expect(wire).not.toContain('checksum');
       expect(wire).not.toContain('sourceFileId');
+      expect(wire).not.toContain(existingOwnFileId);
     }
   });
 

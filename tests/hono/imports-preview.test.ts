@@ -22,6 +22,8 @@ import type { FoundationStorage } from '../../src/services/hono-foundation.servi
 import {
   ImportManifestDetailResponseSchema,
   MAX_IMPORT_CSV_BYTES,
+  MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS,
+  MAX_IMPORT_PREVIEW_SAMPLE_ROWS,
 } from '../../src/shared/schemas/imports.js';
 import { MediaUploadResponseSchema } from '../../src/shared/schemas/media-v2.js';
 import {
@@ -627,12 +629,39 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
     });
     expect(data.canCommit).toBe(true);
     expect(data.commitPlan.withinD1Budget).toBe(true);
+    expect(data.audienceMapping).toBeNull();
+    expect(data.relatedRecords).toEqual({
+      resolvedPlacesCount: 0,
+      placesToCreateCount: 0,
+      resolvedSpeakersCount: 0,
+      speakersToCreateCount: 0,
+    });
+    expect(data.previewRowsTruncated).toBe(false);
+    expect(data.previewRows).toEqual([
+      {
+        kind: 'places',
+        rowNumber: 1,
+        name: 'Cedar Point',
+        descriptionExcerpt: 'Lookout link',
+        typeOfPlace: 'ridge',
+        region: 'North',
+        latitude: -3.119,
+        longitude: -60.021,
+        attachments: [
+          { role: 'place_photo', ordinal: 0, source: 'staged' },
+          { role: 'place_photo', ordinal: 1, source: 'existing' },
+          { role: 'place_name_audio', ordinal: 0, source: 'staged' },
+        ],
+      },
+    ]);
 
-    // No internal storage keys, checksums, or raw CSV content leaked.
+    // No internal storage keys, checksums, sourceFileId, or attachment fileId UUIDs leaked.
     const serializedText = JSON.stringify(data);
     expect(serializedText).not.toContain('storageKey');
     expect(serializedText).not.toContain('checksum');
-    expect(serializedText).not.toContain('Cedar Point');
+    expect(serializedText).not.toContain('sourceFileId');
+    expect(serializedText).not.toContain(existingOwnFileId);
+    expect(serializedText).not.toContain('<a href=');
 
     const [manifestRow] = await db
       .select()
@@ -640,6 +669,10 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
       .where(eq(tables.importManifests.id, data.id));
     expect(manifestRow).toBeDefined();
     expect(manifestRow!.stagedFileIds).toHaveLength(2);
+    expect(serializedText).not.toContain(manifestRow!.sourceFileId);
+    for (const stagedId of manifestRow!.stagedFileIds) {
+      expect(serializedText).not.toContain(stagedId);
+    }
 
     // Verify SHA-256 checksums & is_active = false on source CSV and staged media.
     const [sourceFileRow] = await db
@@ -647,6 +680,8 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
       .from(tables.files)
       .where(eq(tables.files.id, manifestRow!.sourceFileId));
     expect(sourceFileRow?.isActive).toBe(false);
+    expect(serializedText).not.toContain(sourceFileRow!.storageKey!);
+    expect(serializedText).not.toContain(sourceFileRow!.checksum!);
     expect(sourceFileRow?.checksum).toBe(
       createHash('sha256')
         .update(new TextEncoder().encode(csvText))
@@ -788,15 +823,42 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
     expect(data.validRowCount).toBe(1);
     expect(data.errorCount).toBe(2);
     expect(data.canCommit).toBe(false);
+    expect(data.audienceMapping).toEqual({ anon: 'public' });
     expect(data.audienceSummary).toEqual({
       public: 1,
       community: 0,
       editors: 0,
     });
     expect(data.relatedRecords).toEqual({
+      resolvedPlacesCount: 1,
       placesToCreateCount: 1,
+      resolvedSpeakersCount: 1,
       speakersToCreateCount: 1,
     });
+    expect(data.previewRowsTruncated).toBe(false);
+    expect(data.previewRows).toEqual([
+      {
+        kind: 'stories',
+        rowNumber: 1,
+        title: 'River Tale',
+        visibility: 'public',
+        descriptionExcerpt: 'Oral history',
+        topic: null,
+        language: 'en',
+        dateInterviewed: null,
+        interviewLocation: { resolution: 'create', name: 'New Landing' },
+        interviewer: { resolution: 'create', name: 'New Narrator' },
+        places: [{ resolution: 'existing', id: existingOwnPlaceId }],
+        speakers: [{ resolution: 'existing', id: existingOwnSpeakerId }],
+        attachments: [{ role: 'story_media', ordinal: 0, source: 'staged' }],
+        externalMediaLinks: ['https://example.org/watch'],
+      },
+    ]);
+    // Rejected rows & unknown audience values never appear in previewRows or rowErrors.
+    expect(JSON.stringify(data.previewRows)).not.toContain('Restricted Tale');
+    expect(JSON.stringify(data.previewRows)).not.toContain(
+      'Blank Audience Tale'
+    );
     expect(data.rowErrors).toEqual([
       {
         row: 2,
@@ -1138,5 +1200,110 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
     expect(overCellRes.status).toBe(400);
     const overCellText = await overCellRes.text();
     expect(overCellText).not.toContain(secretCellMarker);
+  });
+
+  it('caps previewRows to MAX_IMPORT_PREVIEW_SAMPLE_ROWS, truncates long description excerpts, deduplicates related counts, and keeps stories audienceMapping', async () => {
+    const longPlain = 'Long story note '.repeat(40);
+    const placesCsv =
+      'name,description\n' +
+      Array.from(
+        { length: MAX_IMPORT_PREVIEW_SAMPLE_ROWS + 5 },
+        (_, i) =>
+          `Sample Place ${i + 1},"<p>${i === 0 ? longPlain : `Short ${i + 1}`}</p>"`
+      ).join('\n') +
+      '\n';
+    const cappedRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: placesCsv,
+      fields: { kind: 'places' },
+    });
+    expect(cappedRes.status).toBe(201);
+    const capped = ImportManifestDetailResponseSchema.parse(
+      await cappedRes.json()
+    ).data;
+    expect(capped.validRowCount).toBe(MAX_IMPORT_PREVIEW_SAMPLE_ROWS + 5);
+    expect(capped.previewRows).toHaveLength(MAX_IMPORT_PREVIEW_SAMPLE_ROWS);
+    expect(capped.previewRowsTruncated).toBe(true);
+    expect(capped.audienceMapping).toBeNull();
+    const firstPlace = capped.previewRows[0]!;
+    expect(firstPlace.kind).toBe('places');
+    if (firstPlace.kind === 'places') {
+      expect(firstPlace.descriptionExcerpt?.endsWith('…')).toBe(true);
+      expect(firstPlace.descriptionExcerpt?.length).toBeLessThanOrEqual(
+        MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS + 1
+      );
+    }
+
+    const speakersRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText:
+        'name,birthplace_id,birthplace_name\n' +
+        `Speaker Existing A,${existingOwnPlaceId},\n` +
+        `Speaker Existing B,${existingOwnPlaceId},\n` +
+        'Speaker New C,,Fresh Valley\n',
+      fields: { kind: 'speakers' },
+    });
+    expect(speakersRes.status).toBe(201);
+    const speakersDetail = ImportManifestDetailResponseSchema.parse(
+      await speakersRes.json()
+    ).data;
+    expect(speakersDetail.audienceMapping).toBeNull();
+    expect(speakersDetail.relatedRecords).toEqual({
+      resolvedPlacesCount: 1,
+      placesToCreateCount: 1,
+      resolvedSpeakersCount: 0,
+      speakersToCreateCount: 0,
+    });
+    expect(speakersDetail.previewRows).toEqual([
+      {
+        kind: 'speakers',
+        rowNumber: 1,
+        name: 'Speaker Existing A',
+        birthDate: null,
+        birthplace: { resolution: 'existing', id: existingOwnPlaceId },
+        affiliation: null,
+        attachments: [],
+      },
+      {
+        kind: 'speakers',
+        rowNumber: 2,
+        name: 'Speaker Existing B',
+        birthDate: null,
+        birthplace: { resolution: 'existing', id: existingOwnPlaceId },
+        affiliation: null,
+        attachments: [],
+      },
+      {
+        kind: 'speakers',
+        rowNumber: 3,
+        name: 'Speaker New C',
+        birthDate: null,
+        birthplace: { resolution: 'create', name: 'Fresh Valley' },
+        affiliation: null,
+        attachments: [],
+      },
+    ]);
+
+    const storyDefaultMapRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvText: `title,visibility,place_ids,speaker_ids,media\nDefault Aud Story,community,"${existingOwnPlaceId}|${existingOwnPlaceId}",${existingOwnSpeakerId},${existingOwnFileId}\n`,
+      fields: { kind: 'stories' },
+    });
+    expect(storyDefaultMapRes.status).toBe(201);
+    const storyDetail = ImportManifestDetailResponseSchema.parse(
+      await storyDefaultMapRes.json()
+    ).data;
+    expect(storyDetail.audienceMapping).toEqual({});
+    expect(storyDetail.relatedRecords).toEqual({
+      resolvedPlacesCount: 1,
+      placesToCreateCount: 0,
+      resolvedSpeakersCount: 1,
+      speakersToCreateCount: 0,
+    });
+    const storyWire = JSON.stringify(storyDetail);
+    expect(storyWire).not.toContain('storageKey');
+    expect(storyWire).not.toContain('checksum');
+    expect(storyWire).not.toContain('sourceFileId');
+    expect(storyWire).not.toContain(existingOwnFileId);
   });
 });

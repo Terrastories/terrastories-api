@@ -28,12 +28,17 @@ import {
   MAX_IMPORT_EXTERNAL_LINKS_PER_ROW,
   MAX_IMPORT_MEDIA_FILES,
   MAX_IMPORT_MEDIA_REFS_PER_ROW,
+  MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS,
+  MAX_IMPORT_PREVIEW_SAMPLE_ROWS,
   MAX_IMPORT_REQUEST_BYTES,
   MAX_IMPORT_STORY_EDGES_PER_ROW,
   type AudienceMapping,
   type DuplicateStrategy,
   type ImportManifestDetail,
   type ImportManifestSummary,
+  type ImportPreviewAttachment,
+  type ImportPreviewRelatedRef,
+  type ImportPreviewRow,
   type ImportRowError,
   type ImportStoredMappings,
   type NormalizedPlaceRow,
@@ -329,17 +334,170 @@ export function serializeImportManifestSummary(
   };
 }
 
+function projectDescriptionExcerpt(
+  descriptionPlain: string | null
+): string | null {
+  if (descriptionPlain === null) return null;
+  if (descriptionPlain.length <= MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS) {
+    return descriptionPlain;
+  }
+  let end = MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS;
+  const code = descriptionPlain.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) {
+    end -= 1;
+  }
+  return `${descriptionPlain.slice(0, end)}…`;
+}
+
+function projectRelatedRef(
+  ref:
+    | { kind: 'existing'; id: number }
+    | { kind: 'create'; name: string; normalizedName: string }
+): ImportPreviewRelatedRef {
+  if (ref.kind === 'existing') {
+    return { resolution: 'existing', id: ref.id };
+  }
+  return { resolution: 'create', name: ref.name };
+}
+
+function projectPreviewAttachment(att: {
+  role: AttachmentRole;
+  ordinal: number;
+  stagedByManifest: boolean;
+}): ImportPreviewAttachment {
+  return {
+    role: att.role,
+    ordinal: att.ordinal,
+    source: att.stagedByManifest ? 'staged' : 'existing',
+  };
+}
+
+function projectPreviewRows(normalizedData: StoredNormalizedImportData): {
+  previewRows: ImportPreviewRow[];
+  previewRowsTruncated: boolean;
+} {
+  const previewRowsTruncated =
+    normalizedData.rows.length > MAX_IMPORT_PREVIEW_SAMPLE_ROWS;
+  if (normalizedData.kind === 'places') {
+    return {
+      previewRows: normalizedData.rows
+        .slice(0, MAX_IMPORT_PREVIEW_SAMPLE_ROWS)
+        .map((row) => ({
+          kind: 'places',
+          rowNumber: row.rowNumber,
+          name: row.name,
+          descriptionExcerpt: projectDescriptionExcerpt(row.descriptionPlain),
+          typeOfPlace: row.typeOfPlace,
+          region: row.region,
+          latitude: row.latitude,
+          longitude: row.longitude,
+          attachments: row.attachments.map(projectPreviewAttachment),
+        })),
+      previewRowsTruncated,
+    };
+  }
+  if (normalizedData.kind === 'speakers') {
+    return {
+      previewRows: normalizedData.rows
+        .slice(0, MAX_IMPORT_PREVIEW_SAMPLE_ROWS)
+        .map((row) => ({
+          kind: 'speakers',
+          rowNumber: row.rowNumber,
+          name: row.name,
+          birthDate: row.birthDate,
+          birthplace: row.birthplaceRef
+            ? projectRelatedRef(row.birthplaceRef)
+            : null,
+          affiliation: row.affiliation,
+          attachments: row.attachments.map(projectPreviewAttachment),
+        })),
+      previewRowsTruncated,
+    };
+  }
+  return {
+    previewRows: normalizedData.rows
+      .slice(0, MAX_IMPORT_PREVIEW_SAMPLE_ROWS)
+      .map((row) => ({
+        kind: 'stories',
+        rowNumber: row.rowNumber,
+        title: row.title,
+        visibility: row.visibility,
+        descriptionExcerpt: projectDescriptionExcerpt(row.descriptionPlain),
+        topic: row.topic,
+        language: row.language,
+        dateInterviewed: row.dateInterviewed,
+        interviewLocation: row.interviewLocationRef
+          ? projectRelatedRef(row.interviewLocationRef)
+          : null,
+        interviewer: row.interviewerRef
+          ? projectRelatedRef(row.interviewerRef)
+          : null,
+        places: row.placeRefs.map(projectRelatedRef),
+        speakers: row.speakerRefs.map(projectRelatedRef),
+        attachments: row.attachments.map(projectPreviewAttachment),
+        externalMediaLinks: [...row.externalMediaLinks],
+      })),
+    previewRowsTruncated,
+  };
+}
+
+function summarizeRelatedRecords(normalizedData: StoredNormalizedImportData): {
+  resolvedPlacesCount: number;
+  placesToCreateCount: number;
+  resolvedSpeakersCount: number;
+  speakersToCreateCount: number;
+} {
+  const resolvedPlaceIds = new Set<number>();
+  const resolvedSpeakerIds = new Set<number>();
+
+  if (normalizedData.kind === 'speakers') {
+    for (const row of normalizedData.rows) {
+      if (row.birthplaceRef?.kind === 'existing') {
+        resolvedPlaceIds.add(row.birthplaceRef.id);
+      }
+    }
+  } else if (normalizedData.kind === 'stories') {
+    for (const row of normalizedData.rows) {
+      if (row.interviewLocationRef?.kind === 'existing') {
+        resolvedPlaceIds.add(row.interviewLocationRef.id);
+      }
+      for (const ref of row.placeRefs) {
+        if (ref.kind === 'existing') resolvedPlaceIds.add(ref.id);
+      }
+      if (row.interviewerRef?.kind === 'existing') {
+        resolvedSpeakerIds.add(row.interviewerRef.id);
+      }
+      for (const ref of row.speakerRefs) {
+        if (ref.kind === 'existing') resolvedSpeakerIds.add(ref.id);
+      }
+    }
+  }
+
+  return {
+    resolvedPlacesCount: resolvedPlaceIds.size,
+    placesToCreateCount: normalizedData.relatedPlacesToCreate.length,
+    resolvedSpeakersCount: resolvedSpeakerIds.size,
+    speakersToCreateCount: normalizedData.relatedSpeakersToCreate.length,
+  };
+}
+
 export function serializeImportManifestDetail(
   manifest: ImportManifestRowRecord,
   d1Enforced = true
 ): ImportManifestDetail {
   const { normalizedData, plan } = computeManifestPlan(manifest, d1Enforced);
   const mediaCounts = countReferencesInNormalizedData(normalizedData);
+  const { previewRows, previewRowsTruncated } =
+    projectPreviewRows(normalizedData);
 
   return {
     ...serializeImportManifestSummary(manifest, d1Enforced),
     mappings: manifest.mappings.headerMappings,
     unmappedHeaders: manifest.mappings.unmappedHeaders,
+    audienceMapping:
+      normalizedData.kind === 'stories'
+        ? (manifest.mappings.audienceMapping ?? {})
+        : null,
     duplicateStrategy: manifest.mappings.duplicateStrategy,
     skippedDuplicateCount: normalizedData.skippedDuplicates,
     rowErrors: manifest.rowErrors,
@@ -350,10 +508,9 @@ export function serializeImportManifestDetail(
     },
     audienceSummary:
       normalizedData.kind === 'stories' ? normalizedData.audienceCounts : null,
-    relatedRecords: {
-      placesToCreateCount: normalizedData.relatedPlacesToCreate.length,
-      speakersToCreateCount: normalizedData.relatedSpeakersToCreate.length,
-    },
+    relatedRecords: summarizeRelatedRecords(normalizedData),
+    previewRows,
+    previewRowsTruncated,
     commitPlan: plan.summary,
   };
 }

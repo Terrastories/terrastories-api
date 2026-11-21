@@ -27,6 +27,8 @@ export const MAX_IMPORT_EXTERNAL_LINKS_PER_ROW = MAX_EXTERNAL_LINKS_PER_STORY;
 export const MAX_IMPORT_STORY_EDGES_PER_ROW = MAX_STORY_EDGE_IDS;
 export const DEFAULT_IMPORT_PAGE_LIMIT = 20;
 export const MAX_IMPORT_PAGE_LIMIT = 100;
+export const MAX_IMPORT_PREVIEW_SAMPLE_ROWS = 25;
+export const MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS = 240;
 
 export const ALLOWED_CSV_MIME_TYPES: ReadonlySet<string> = new Set([
   'text/csv',
@@ -331,10 +333,102 @@ export const ImportAudienceSummarySchema = z
 
 export const ImportRelatedRecordsSummarySchema = z
   .object({
+    resolvedPlacesCount: z.number().int().min(0),
     placesToCreateCount: z.number().int().min(0),
+    resolvedSpeakersCount: z.number().int().min(0),
     speakersToCreateCount: z.number().int().min(0),
   })
   .strict();
+
+export const ImportPreviewRelatedRefSchema = z.discriminatedUnion(
+  'resolution',
+  [
+    z
+      .object({
+        resolution: z.literal('existing'),
+        id: z.number().int().positive().max(MAX_DATABASE_ID),
+      })
+      .strict(),
+    z
+      .object({
+        resolution: z.literal('create'),
+        name: z.string().min(1).max(200),
+      })
+      .strict(),
+  ]
+);
+export type ImportPreviewRelatedRef = z.infer<
+  typeof ImportPreviewRelatedRefSchema
+>;
+
+export const ImportPreviewAttachmentSchema = z
+  .object({
+    role: z.enum(ATTACHMENT_ROLES),
+    ordinal: z.number().int().min(0),
+    source: z.enum(['staged', 'existing']),
+  })
+  .strict();
+export type ImportPreviewAttachment = z.infer<
+  typeof ImportPreviewAttachmentSchema
+>;
+
+export const ImportPreviewPlaceRowSchema = z
+  .object({
+    kind: z.literal('places'),
+    rowNumber: z.number().int().positive(),
+    name: z.string().min(1).max(200),
+    descriptionExcerpt: z
+      .string()
+      .max(MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS + 1)
+      .nullable(),
+    typeOfPlace: z.string().max(120).nullable(),
+    region: z.string().max(120).nullable(),
+    latitude: z.number().min(-90).max(90).nullable(),
+    longitude: z.number().min(-180).max(180).nullable(),
+    attachments: z.array(ImportPreviewAttachmentSchema),
+  })
+  .strict();
+
+export const ImportPreviewSpeakerRowSchema = z
+  .object({
+    kind: z.literal('speakers'),
+    rowNumber: z.number().int().positive(),
+    name: z.string().min(1).max(200),
+    birthDate: z.string().max(32).nullable(),
+    birthplace: ImportPreviewRelatedRefSchema.nullable(),
+    affiliation: z.string().max(200).nullable(),
+    attachments: z.array(ImportPreviewAttachmentSchema),
+  })
+  .strict();
+
+export const ImportPreviewStoryRowSchema = z
+  .object({
+    kind: z.literal('stories'),
+    rowNumber: z.number().int().positive(),
+    title: z.string().min(1).max(255),
+    visibility: CommunityStoryVisibilitySchema,
+    descriptionExcerpt: z
+      .string()
+      .max(MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS + 1)
+      .nullable(),
+    topic: z.string().max(200).nullable(),
+    language: z.string().min(1).max(35),
+    dateInterviewed: z.string().datetime().nullable(),
+    interviewLocation: ImportPreviewRelatedRefSchema.nullable(),
+    interviewer: ImportPreviewRelatedRefSchema.nullable(),
+    places: z.array(ImportPreviewRelatedRefSchema),
+    speakers: z.array(ImportPreviewRelatedRefSchema),
+    attachments: z.array(ImportPreviewAttachmentSchema),
+    externalMediaLinks: z.array(z.string().max(2048)),
+  })
+  .strict();
+
+export const ImportPreviewRowSchema = z.discriminatedUnion('kind', [
+  ImportPreviewPlaceRowSchema,
+  ImportPreviewSpeakerRowSchema,
+  ImportPreviewStoryRowSchema,
+]);
+export type ImportPreviewRow = z.infer<typeof ImportPreviewRowSchema>;
 
 export const ImportResultSummarySchema = z
   .object({
@@ -382,12 +476,17 @@ export type ImportManifestSummary = z.infer<typeof ImportManifestSummarySchema>;
 export const ImportManifestDetailSchema = ImportManifestSummarySchema.extend({
   mappings: z.record(z.string(), z.string()),
   unmappedHeaders: z.array(z.string()),
+  audienceMapping: AudienceMappingSchema.nullable(),
   duplicateStrategy: DuplicateStrategySchema,
   skippedDuplicateCount: z.number().int().min(0),
   rowErrors: z.array(ImportRowErrorSchema),
   mediaSummary: ImportMediaSummarySchema,
   audienceSummary: ImportAudienceSummarySchema.nullable(),
   relatedRecords: ImportRelatedRecordsSummarySchema,
+  previewRows: z
+    .array(ImportPreviewRowSchema)
+    .max(MAX_IMPORT_PREVIEW_SAMPLE_ROWS),
+  previewRowsTruncated: z.boolean(),
   commitPlan: ImportCommitPlanSummarySchema,
 }).strict();
 export type ImportManifestDetail = z.infer<typeof ImportManifestDetailSchema>;

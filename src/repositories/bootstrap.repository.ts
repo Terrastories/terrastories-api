@@ -170,6 +170,36 @@ export type IssueClaimTokenResult =
   | { outcome: 'conflict' };
 
 /**
+ * Portable SQL predicate holding iff `communityIdExpr` currently has an
+ * administrator user (active or disabled), has a consumed `ClaimToken`, or
+ * was created by `installation_bootstrap`.
+ *
+ * Used by `AdminRepository.claimStatusExpression` to separate truly
+ * administered (`claimed`) communities from non-empty communities that never
+ * had an administrator (`orphaned`, neither claimable nor deprovisionable).
+ */
+export function communityHasOrHadAdminSql(
+  communityIdExpr: SQL | number | AnyColumn
+): SQL {
+  return sql`(
+    exists (
+      select 1 from users ca
+      where ca.community_id = ${communityIdExpr}
+        and ca.role = 'admin'
+    )
+    or exists (
+      select 1 from claim_tokens cct
+      where cct.community_id = ${communityIdExpr}
+        and cct.consumed_at is not null
+    )
+    or exists (
+      select 1 from installation_bootstrap ib
+      where ib.community_id = ${communityIdExpr}
+    )
+  )`;
+}
+
+/**
  * Portable SQL predicate holding iff `communityIdExpr` identifies a community
  * row with no descriptive/publication/legacy fields beyond provisioning
  * defaults (`name = slug`, `locale = 'en'`, `description`, `description_plain`,

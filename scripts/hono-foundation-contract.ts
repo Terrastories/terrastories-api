@@ -3937,9 +3937,9 @@ export async function runHonoFoundationContract(
 
     // Slice 14 descriptive community-row content guard (SQLite + PostgreSQL):
     // a community holding any non-default descriptive/publication/legacy field
-    // on the communities row itself with zero child rows must report
-    // claimStatus='claimed' and refuse claim-token issuance (409), claim (401),
-    // and deprovision (409) without leaking the descriptive value.
+    // on the communities row itself with zero child rows and zero admins must
+    // report claimStatus='orphaned' and refuse claim-token issuance (409),
+    // claim (401), and deprovision (409) without leaking the descriptive value.
     const descriptiveRowCases: Array<
       [string, Record<string, unknown>, string]
     > = [
@@ -4010,8 +4010,8 @@ export async function runHonoFoundationContract(
       };
       assert.equal(
         descListJson.data.find((c) => c.id === descCommId)?.claimStatus,
-        'claimed',
-        `expected claimStatus='claimed' for ${label}`
+        'orphaned',
+        `expected claimStatus='orphaned' for ${label}`
       );
 
       await status(
@@ -4075,6 +4075,52 @@ export async function runHonoFoundationContract(
         `rejected deprovision for ${label} must preserve community row`
       );
     }
+
+    // Legacy/seeded content-bearing community with zero admins must report
+    // claimStatus='orphaned' and refuse claim-token issuance and deprovision.
+    const orphanStoryCommRes = await send(app, '/v2/admin/communities', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: saNullCookie },
+      body: JSON.stringify({ slug: `orphan-story-${tag}` }),
+    });
+    assert.equal(orphanStoryCommRes.status, 201);
+    const orphanStoryCommId = (
+      (await orphanStoryCommRes.json()) as { data: { id: number } }
+    ).data.id;
+    communityIds.push(orphanStoryCommId);
+    await db.insert(tables.stories).values({
+      communityId: orphanStoryCommId,
+      title: `Orphaned Story ${tag}`,
+      slug: `orphan-story-${tag}`,
+      language: 'en',
+      privacyLevel: 'editors',
+      isRestricted: false,
+      createdAt: instant,
+      updatedAt: instant,
+    });
+    const orphanListJson = (await (
+      await send(app, '/v2/admin/communities?limit=100&offset=0', {
+        headers: { cookie: saNullCookie },
+      })
+    ).json()) as { data: Array<{ id: number; claimStatus: string }> };
+    assert.equal(
+      orphanListJson.data.find((c) => c.id === orphanStoryCommId)?.claimStatus,
+      'orphaned'
+    );
+    await status(
+      send(app, `/v2/admin/communities/${orphanStoryCommId}/claim-tokens`, {
+        method: 'POST',
+        headers: { cookie: saNullCookie },
+      }),
+      409
+    );
+    await status(
+      send(app, `/v2/admin/communities/${orphanStoryCommId}`, {
+        method: 'DELETE',
+        headers: { cookie: saNullCookie },
+      }),
+      409
+    );
   } finally {
     for (const id of communityIds) {
       await db

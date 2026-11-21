@@ -1258,8 +1258,8 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
         const listed = AdminCommunityListResponseSchema.parse(
           JSON.parse(listText)
         ).data.find((c) => c.id === cid);
-        expect(listed?.claimStatus, `expected claimed for ${label}`).toBe(
-          'claimed'
+        expect(listed?.claimStatus, `expected orphaned for ${label}`).toBe(
+          'orphaned'
         );
       }
 
@@ -1294,6 +1294,211 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
           )
         ).status
       ).toBe(201);
+    }
+  });
+
+  it('distinguishes unclaimed, claim_pending, claimed, and orphaned (non-empty adminless) communities across SQLite and D1 db.batch()', async () => {
+    for (const useD1Batch of [false, true]) {
+      const { db, app, superAdmin, roleCookies, requestAdmin, currentNow } =
+        await setup({ useD1Batch });
+      const now = currentNow();
+      const nowMs = now.getTime();
+
+      const provision = async (slug: string) => {
+        const res = await requestAdmin('POST', '/v2/admin/communities', {
+          cookie: roleCookies.super_admin,
+          body: { slug },
+        });
+        expect(res.status).toBe(201);
+        return AdminCommunityResponseSchema.parse(await res.json()).data.id;
+      };
+
+      // 1. unclaimed
+      const unclaimedId = await provision('status-unclaimed');
+
+      // 2. claim_pending
+      const pendingId = await provision('status-pending');
+      expect(
+        (
+          await requestAdmin(
+            'POST',
+            `/v2/admin/communities/${pendingId}/claim-tokens`,
+            { cookie: roleCookies.super_admin }
+          )
+        ).status
+      ).toBe(201);
+
+      // 3a. claimed via admin user
+      const claimedAdminId = await provision('status-claimed-admin');
+      const adminKey = makeDerivedKey();
+      await db.insert(usersSqlite).values({
+        email: `admin-${claimedAdminId}@example.test`,
+        username: `adm_${claimedAdminId}`,
+        emailNormalized: `admin-${claimedAdminId}@example.test`,
+        usernameNormalized: `adm_${claimedAdminId}`,
+        firstName: '',
+        lastName: '',
+        ...(await argon2Seed(adminKey)),
+        role: 'admin',
+        communityId: claimedAdminId,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // 3b. claimed via consumed claim_tokens row (even with 0 users)
+      const claimedTokenId = await provision('status-claimed-token');
+      await db.insert(claimTokensSqlite).values({
+        communityId: claimedTokenId,
+        tokenHash: await sha256Hex(`consumed-tok-${claimedTokenId}`),
+        issuedBy: superAdmin.id,
+        createdAt: nowMs - 1000,
+        expiresAt: nowMs + 60_000,
+        consumedAt: nowMs - 500,
+        consumedBy: null,
+        supersededAt: null,
+      });
+
+      // 3c. claimed via installation_bootstrap row (even with 0 users)
+      const claimedBootId = await provision('status-claimed-boot');
+      await db.insert(installationBootstrapSqlite).values({
+        id: 1,
+        setupId: 'orphan-check-boot',
+        communityId: claimedBootId,
+        adminUserId: null,
+        completedAt: nowMs,
+      });
+
+      // 4a. orphaned via story content (no admin)
+      const orphanStoryId = await provision('status-orphan-story');
+      await db.insert(storiesSqlite).values({
+        communityId: orphanStoryId,
+        title: 'Orphaned Story',
+        slug: `orphan-s-${orphanStoryId}`,
+        language: 'en',
+        privacyLevel: 'editors',
+        isRestricted: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // 4b. orphaned via non-admin member user only (no admin)
+      const orphanMemberId = await provision('status-orphan-member');
+      const memberKey = makeDerivedKey();
+      await db.insert(usersSqlite).values({
+        email: `member-${orphanMemberId}@example.test`,
+        username: `mem_${orphanMemberId}`,
+        emailNormalized: `member-${orphanMemberId}@example.test`,
+        usernameNormalized: `mem_${orphanMemberId}`,
+        firstName: '',
+        lastName: '',
+        ...(await argon2Seed(memberKey)),
+        role: 'member',
+        communityId: orphanMemberId,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // 4c. orphaned via customized name/locale/description + live unconsumed token (no admin)
+      // Must report 'orphaned' (not 'claim_pending' and not 'claimed') and refuse claim/issuance/deprovision.
+      const orphanWithTokenId = await provision('status-orphan-with-token');
+      const tokBeforeCustomRes = await requestAdmin(
+        'POST',
+        `/v2/admin/communities/${orphanWithTokenId}/claim-tokens`,
+        { cookie: roleCookies.super_admin }
+      );
+      expect(tokBeforeCustomRes.status).toBe(201);
+      const tokBeforeCustom = ClaimTokenIssuedResponseSchema.parse(
+        await tokBeforeCustomRes.json()
+      ).data;
+      await db
+        .update(communitiesSqlite)
+        .set({
+          name: 'Customized Legacy Name',
+          locale: 'pt-BR',
+          description: '<p>Legacy overview</p>',
+        })
+        .where(eq(communitiesSqlite.id, orphanWithTokenId));
+
+      // 4d. disabled orphaned community stays 'orphaned'
+      const [disabledOrphan] = await db
+        .insert(communitiesSqlite)
+        .values({
+          name: 'Disabled Orphaned Display Name',
+          slug: 'status-disabled-orphan',
+          locale: 'es',
+          publicStories: false,
+          beta: false,
+          isActive: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      const listRes = await requestAdmin(
+        'GET',
+        '/v2/admin/communities?limit=100',
+        { cookie: roleCookies.super_admin }
+      );
+      expect(listRes.status).toBe(200);
+      const rows = AdminCommunityListResponseSchema.parse(
+        await listRes.json()
+      ).data;
+      const byId = new Map(rows.map((r) => [r.id, r]));
+
+      expect(byId.get(unclaimedId)?.claimStatus).toBe('unclaimed');
+      expect(byId.get(pendingId)?.claimStatus).toBe('claim_pending');
+      expect(byId.get(claimedAdminId)?.claimStatus).toBe('claimed');
+      expect(byId.get(claimedTokenId)?.claimStatus).toBe('claimed');
+      expect(byId.get(claimedBootId)?.claimStatus).toBe('claimed');
+      expect(byId.get(orphanStoryId)?.claimStatus).toBe('orphaned');
+      expect(byId.get(orphanMemberId)?.claimStatus).toBe('orphaned');
+      expect(byId.get(orphanWithTokenId)?.claimStatus).toBe('orphaned');
+      expect(byId.get(disabledOrphan.id)?.claimStatus).toBe('orphaned');
+
+      // All orphaned communities refuse ClaimToken issuance (409) and deprovision (409),
+      // and pre-existing token on orphanWithTokenId is rejected uniformly (401).
+      for (const orphanCid of [
+        orphanStoryId,
+        orphanMemberId,
+        orphanWithTokenId,
+      ]) {
+        expect(
+          (
+            await requestAdmin(
+              'POST',
+              `/v2/admin/communities/${orphanCid}/claim-tokens`,
+              { cookie: roleCookies.super_admin }
+            )
+          ).status
+        ).toBe(409);
+        expect(
+          (
+            await requestAdmin('DELETE', `/v2/admin/communities/${orphanCid}`, {
+              cookie: roleCookies.super_admin,
+            })
+          ).status
+        ).toBe(409);
+      }
+
+      expect(
+        (
+          await app.request(`${API_ORIGIN}/v2/bootstrap/claim`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'cf-connecting-ip': '203.0.113.185',
+            },
+            body: JSON.stringify({
+              token: tokBeforeCustom.token,
+              username: 'orphan_claim_attempt',
+              email: 'orphan-claim@example.test',
+              password: makePasswordPayload(),
+            }),
+          })
+        ).status
+      ).toBe(401);
     }
   });
 });

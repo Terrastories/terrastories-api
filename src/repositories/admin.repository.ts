@@ -35,6 +35,7 @@ import {
 } from '../shared/utils/audit-entry.js';
 import { buildAuditEntryInsert } from './audit-entry.repository.js';
 import {
+  communityHasOrHadAdminSql,
   communityUnclaimedAndEmptySql,
   isCommunityUnclaimedAndEmpty,
   isCommunityUnclaimedAndEmptySync,
@@ -146,7 +147,8 @@ export class AdminRepository {
     nowMs: number
   ): SQL<AdminCommunityClaimStatus> {
     return sql<AdminCommunityClaimStatus>`case
-      when not ${communityUnclaimedAndEmptySql(communityIdExpr)} then 'claimed'
+      when ${communityHasOrHadAdminSql(communityIdExpr)} then 'claimed'
+      when not ${communityUnclaimedAndEmptySql(communityIdExpr)} then 'orphaned'
       when exists (
         select 1 from claim_tokens ct
         inner join communities c_active on c_active.id = ct.community_id
@@ -174,7 +176,9 @@ export class AdminRepository {
       slug: String(row.slug),
       status: communityStatusFromPhysical(isTrue(row.isActive)),
       claimStatus:
-        claimStatus === 'claim_pending' || claimStatus === 'claimed'
+        claimStatus === 'claim_pending' ||
+        claimStatus === 'claimed' ||
+        claimStatus === 'orphaned'
           ? claimStatus
           : 'unclaimed',
       createdAt: toDate(row.createdAt),

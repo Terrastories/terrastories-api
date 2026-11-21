@@ -461,6 +461,7 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
         loginAs,
         request,
         advanceMs,
+        currentNow,
       } = ctx;
 
       // Input validation & Content-Type / body limits
@@ -712,6 +713,53 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
           userAgent: a.userAgent,
         });
       }
+
+      // Orphaned non-empty community without any admin preserves claimStatus='orphaned'
+      // across disable and active-restore toggles.
+      const orphanProvRes = await request('POST', '/v2/admin/communities', {
+        cookie: roleCookies.super_admin,
+        body: { slug: 'status-orphan-comm' },
+      });
+      expect(orphanProvRes.status).toBe(201);
+      const orphanId = AdminCommunityResponseSchema.parse(
+        await orphanProvRes.json()
+      ).data.id;
+      await db.insert(storiesSqlite).values({
+        communityId: orphanId,
+        title: 'Orphan Status Story',
+        slug: 'orphan-status-story',
+        language: 'en',
+        privacyLevel: 'editors',
+        isRestricted: false,
+        createdAt: currentNow(),
+        updatedAt: currentNow(),
+      });
+      const orphanDisable = await request(
+        'PATCH',
+        `/v2/admin/communities/${orphanId}/status`,
+        {
+          cookie: roleCookies.super_admin,
+          body: { status: 'disabled' },
+        }
+      );
+      expect(orphanDisable.status).toBe(200);
+      expect(
+        AdminCommunityResponseSchema.parse(await orphanDisable.json()).data
+          .claimStatus
+      ).toBe('orphaned');
+      const orphanRestore = await request(
+        'PATCH',
+        `/v2/admin/communities/${orphanId}/status`,
+        {
+          cookie: roleCookies.super_admin,
+          body: { status: 'active' },
+        }
+      );
+      expect(orphanRestore.status).toBe(200);
+      expect(
+        AdminCommunityResponseSchema.parse(await orphanRestore.json()).data
+          .claimStatus
+      ).toBe('orphaned');
       expect(otherCommunity.id).toBeGreaterThan(0);
     }
 

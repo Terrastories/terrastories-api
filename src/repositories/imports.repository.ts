@@ -205,7 +205,9 @@ export type CommitManifestOutcome =
   | { status: 'forbidden' }
   | { status: 'conflict'; manifest: ImportManifestRowRecord }
   | { status: 'daily_limit' }
-  | { status: 'failed_reference' };
+  | { status: 'failed_reference' }
+  | { status: 'failed_rolled_back' }
+  | { status: 'uncertain' };
 
 export type FailManifestOutcome =
   | {
@@ -2666,7 +2668,7 @@ export class ImportsRepository {
           }
           return { status: 'failed_reference' };
         }
-        throw err;
+        return { status: 'uncertain' };
       }
 
       const updatedRows = results[updateManifestIdx];
@@ -2713,6 +2715,7 @@ export class ImportsRepository {
     }
 
     if (isPg) {
+      let reachedCommit = false;
       try {
         return await this.db.transaction(async (tx: typeof this.db) => {
           // Canonical PG lock order: communities (FOR SHARE) -> advisory -> users (FOR SHARE)
@@ -3159,6 +3162,7 @@ export class ImportsRepository {
             createdAt: now,
           });
 
+          reachedCommit = true;
           return {
             status: 'committed',
             manifest: mapManifestRow(updated),
@@ -3174,11 +3178,14 @@ export class ImportsRepository {
         ) {
           return { status: 'failed_reference' };
         }
-        throw err;
+        return reachedCommit
+          ? { status: 'uncertain' }
+          : { status: 'failed_rolled_back' };
       }
     }
 
     // better-sqlite3 synchronous transaction
+    let reachedCommit = false;
     try {
       return this.db.transaction(
         (tx: typeof this.db): CommitManifestOutcome => {
@@ -3626,6 +3633,7 @@ export class ImportsRepository {
             })
             .run();
 
+          reachedCommit = true;
           return {
             status: 'committed',
             manifest: mapManifestRow(updated),
@@ -3642,7 +3650,9 @@ export class ImportsRepository {
       ) {
         return { status: 'failed_reference' };
       }
-      throw err;
+      return reachedCommit
+        ? { status: 'uncertain' }
+        : { status: 'failed_rolled_back' };
     }
   }
 

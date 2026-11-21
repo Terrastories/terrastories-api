@@ -5,7 +5,7 @@
  * for Slice 12-C:
  * - POST /v2/imports/:id/commit
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -19,6 +19,7 @@ import {
 import { tablesFor } from '../../src/db/dialect.js';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
+import { ImportsRepository } from '../../src/repositories/imports.repository.js';
 import {
   MediaCleanupCoordinator,
   ORPHAN_SWEEP_GRACE_MS,
@@ -197,6 +198,7 @@ function createRealD1Db(options?: {
   boundParamsOut?: number[];
   batchSizesOut?: number[];
   onBeforeBatch?: () => Promise<void>;
+  onAfterBatch?: () => Promise<void>;
 }): {
   db: ReturnType<typeof drizzleD1>;
   sqlite: Sqlite.Database;
@@ -248,7 +250,11 @@ function createRealD1Db(options?: {
         await options.onBeforeBatch();
       }
       options?.batchSizesOut?.push(stmts.length);
-      return d1Sqlite.transaction(() => stmts.map((s) => s._exec()))();
+      const res = d1Sqlite.transaction(() => stmts.map((s) => s._exec()))();
+      if (options?.onAfterBatch) {
+        await options.onAfterBatch();
+      }
+      return res;
     },
   };
   return { db: drizzleD1(client as unknown as D1Database), sqlite: d1Sqlite };
@@ -2595,6 +2601,406 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
       ).toHaveLength(0);
     } finally {
       d1.sqlite.close();
+    }
+  });
+
+  it('handles non-constraint DB exceptions and uncertain commit outcomes safely across SQLite and D1', async () => {
+    // 3a. Injected repository commitManifest rejection while manifest stays previewed
+    const injPreview = await createPreviewOnApp(app, cookies.editorA, {
+      kind: 'places',
+      csvFilename: 'inj-fail.csv',
+      csvText: 'name,photo\nInjected Fail Place,inj-fail.png\n',
+      mediaParts: [
+        {
+          filename: 'inj-fail.png',
+          contentType: 'image/png',
+          bytes: PNG_BYTES,
+        },
+      ],
+    });
+    const [injRowBefore] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, injPreview.id));
+    const [injStaged] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, injRowBefore!.stagedFileIds[0]!));
+    const [injSource] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, injRowBefore!.sourceFileId));
+
+    const leakedSecretMarker = 'INTERNAL_SQL_CONNECTION_SECRET_MARKER';
+    try {
+      vi.spyOn(
+        ImportsRepository.prototype,
+        'commitManifest'
+      ).mockRejectedValueOnce(new Error(leakedSecretMarker));
+      const injRes = await commitOnApp(app, cookies.editorA, injPreview.id);
+      expect(injRes.status).toBe(500);
+      const injText = await injRes.text();
+      expect(injText).not.toContain(leakedSecretMarker);
+      expect(injText).not.toContain(injStaged!.storageKey!);
+      expect(injText).not.toContain(injStaged!.checksum!);
+      expect(JSON.parse(injText).code).toBe('import_commit_failed');
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    const [injRowAfter] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, injPreview.id));
+    expect(injRowAfter?.status).toBe('failed');
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, injStaged!.id))
+    ).toHaveLength(0);
+    expect(memStore.has(injStaged!.storageKey!)).toBe(false);
+    expect(memStore.has(injSource!.storageKey!)).toBe(true);
+    expect(
+      await db
+        .select()
+        .from(tables.places)
+        .where(eq(tables.places.name, 'Injected Fail Place'))
+    ).toHaveLength(0);
+    const injAudits = (
+      await db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, ids.ownCommunity),
+            eq(tables.auditEntries.action, 'import.commit'),
+            eq(tables.auditEntries.outcome, 'failed')
+          )
+        )
+    ).filter((a) =>
+      JSON.stringify(a.resourceIds).includes(String(injPreview.id))
+    );
+    expect(injAudits).toHaveLength(1);
+    expect(
+      (await commitOnApp(app, cookies.editorA, injPreview.id)).status
+    ).toBe(409);
+
+    // 3b. Rolled-back non-constraint DB exception inside SQLite transaction
+    const trigPreview = await createPreviewOnApp(app, cookies.editorA, {
+      kind: 'places',
+      csvFilename: 'trig-fail.csv',
+      csvText: 'name,photo\nTrigger Rollback Place,trig-fail.png\n',
+      mediaParts: [
+        {
+          filename: 'trig-fail.png',
+          contentType: 'image/png',
+          bytes: PNG_BYTES,
+        },
+      ],
+    });
+    const [trigRowBefore] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, trigPreview.id));
+    const [trigStaged] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, trigRowBefore!.stagedFileIds[0]!));
+
+    sqlite.exec(`
+      CREATE TRIGGER test_abort_place_insert
+      BEFORE INSERT ON places
+      WHEN NEW.name = 'Trigger Rollback Place'
+      BEGIN
+        SELECT RAISE(ABORT, 'non_constraint_io_failure_secret');
+      END;
+    `);
+    try {
+      const trigRes = await commitOnApp(app, cookies.editorA, trigPreview.id);
+      expect(trigRes.status).toBe(500);
+      const trigText = await trigRes.text();
+      expect(trigText).not.toContain('non_constraint_io_failure_secret');
+      expect(JSON.parse(trigText).code).toBe('import_commit_failed');
+    } finally {
+      sqlite.exec('DROP TRIGGER IF EXISTS test_abort_place_insert;');
+    }
+
+    const [trigRowAfter] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, trigPreview.id));
+    expect(trigRowAfter?.status).toBe('failed');
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, trigStaged!.id))
+    ).toHaveLength(0);
+    expect(memStore.has(trigStaged!.storageKey!)).toBe(false);
+    expect(
+      await db
+        .select()
+        .from(tables.places)
+        .where(eq(tables.places.name, 'Trigger Rollback Place'))
+    ).toHaveLength(0);
+    const trigAudits = (
+      await db
+        .select()
+        .from(tables.auditEntries)
+        .where(
+          and(
+            eq(tables.auditEntries.communityId, ids.ownCommunity),
+            eq(tables.auditEntries.action, 'import.commit'),
+            eq(tables.auditEntries.outcome, 'failed')
+          )
+        )
+    ).filter((a) =>
+      JSON.stringify(a.resourceIds).includes(String(trigPreview.id))
+    );
+    expect(trigAudits).toHaveLength(1);
+
+    // 3c. Uncertain D1 batch() outcome where batch ACTUALLY committed before throwing
+    // 3d. Uncertain D1 batch() outcome where batch threw WITHOUT applying
+    let throwBeforeD1Batch: Error | null = null;
+    let throwAfterD1Batch: Error | null = null;
+    const d1Err = createRealD1Db({
+      onBeforeBatch: async () => {
+        if (throwBeforeD1Batch) {
+          const err = throwBeforeD1Batch;
+          throwBeforeD1Batch = null;
+          throw err;
+        }
+      },
+      onAfterBatch: async () => {
+        if (throwAfterD1Batch) {
+          const err = throwAfterD1Batch;
+          throwAfterD1Batch = null;
+          throw err;
+        }
+      },
+    });
+    try {
+      let d1Now = new Date('2026-07-01T12:00:00.000Z');
+      const d1Tables = tablesFor(d1Err.db);
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+      const [comm] = await d1Err.db
+        .insert(d1Tables.communities)
+        .values({
+          name: 'D1 Exception Comm',
+          slug: 'd1-exc-comm',
+          publicStories: true,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.communities.id });
+      await d1Err.db.insert(d1Tables.users).values({
+        email: 'd1-exc-ed@example.test',
+        username: 'd1_exc_ed',
+        ...deriveUserIdentityColumns({
+          email: 'd1-exc-ed@example.test',
+          username: 'd1_exc_ed',
+        }),
+        firstName: 'D1',
+        lastName: 'Exc',
+        ...seed,
+        role: 'editor',
+        communityId: comm.id,
+        isActive: true,
+        createdAt: d1Now,
+        updatedAt: d1Now,
+      });
+
+      const d1Mem = createListableMemoryStorage();
+      const d1App = createHonoApp({
+        repository: new HonoFoundationRepository(d1Err.db as any),
+        storage: d1Mem.storage,
+        mediaCleanup: new MediaCleanupCoordinator(d1Err.db, d1Mem.storage),
+        publicOrigin: API_ORIGIN,
+        corsOrigins: [CLIENT_ORIGIN],
+        secureCookies: false,
+        serverSecret: makeServerSecret(),
+        now: () => d1Now,
+      });
+      const d1EdCookie = await loginOnApp(
+        d1App,
+        d1Err.db,
+        'd1-exc-ed@example.test',
+        comm.id,
+        true
+      );
+
+      // 3c: batch executes & commits, then throws RPC timeout -> service re-reads committed manifest & returns 200
+      const committedAfterErrPreview = await createPreviewOnApp(
+        d1App,
+        d1EdCookie,
+        {
+          kind: 'places',
+          csvFilename: 'd1-after-throw.csv',
+          csvText: 'name,photo\nD1 Committed Despite Timeout,d1-after.png\n',
+          mediaParts: [
+            {
+              filename: 'd1-after.png',
+              contentType: 'image/png',
+              bytes: PNG_BYTES,
+            },
+          ],
+        }
+      );
+      const [d1AfterRowBefore] = await d1Err.db
+        .select()
+        .from(d1Tables.importManifests)
+        .where(eq(d1Tables.importManifests.id, committedAfterErrPreview.id));
+      const [d1AfterStaged] = await d1Err.db
+        .select()
+        .from(d1Tables.files)
+        .where(eq(d1Tables.files.id, d1AfterRowBefore!.stagedFileIds[0]!));
+
+      throwAfterD1Batch = new Error('D1 RPC timeout after commit');
+      const afterErrRes = await commitOnApp(
+        d1App,
+        d1EdCookie,
+        committedAfterErrPreview.id
+      );
+      expect(afterErrRes.status).toBe(200);
+      const afterErrDetail = ImportManifestDetailResponseSchema.parse(
+        await afterErrRes.json()
+      ).data;
+      expect(afterErrDetail.status).toBe('committed');
+      expect(afterErrDetail.resultSummary?.createdPlaces).toBe(1);
+      expect(afterErrDetail.committedAt).toBe('2026-07-01T12:00:00.000Z');
+      expect(d1Mem.store.has(d1AfterStaged!.storageKey!)).toBe(true);
+      const [d1AfterFileRow] = await d1Err.db
+        .select()
+        .from(d1Tables.files)
+        .where(eq(d1Tables.files.id, d1AfterStaged!.id));
+      expect(Boolean(d1AfterFileRow?.isActive)).toBe(true);
+      expect(
+        await d1Err.db
+          .select()
+          .from(d1Tables.places)
+          .where(eq(d1Tables.places.name, 'D1 Committed Despite Timeout'))
+      ).toHaveLength(1);
+      const afterFailAudits = await d1Err.db
+        .select()
+        .from(d1Tables.auditEntries)
+        .where(
+          and(
+            eq(d1Tables.auditEntries.communityId, comm.id),
+            eq(d1Tables.auditEntries.action, 'import.commit'),
+            eq(d1Tables.auditEntries.outcome, 'failed')
+          )
+        );
+      expect(afterFailAudits).toHaveLength(0);
+
+      // 3d: next UTC day, batch throws BEFORE applying -> service re-reads previewed, marks failed, cleans bytes, audits failure
+      d1Now = new Date('2026-07-02T12:00:00.000Z');
+      const rolledBackPreview = await createPreviewOnApp(d1App, d1EdCookie, {
+        kind: 'places',
+        csvFilename: 'd1-before-throw.csv',
+        csvText: 'name,photo\nD1 Aborted Before Batch,d1-before.png\n',
+        mediaParts: [
+          {
+            filename: 'd1-before.png',
+            contentType: 'image/png',
+            bytes: PNG_BYTES,
+          },
+        ],
+      });
+      const [d1BeforeRow] = await d1Err.db
+        .select()
+        .from(d1Tables.importManifests)
+        .where(eq(d1Tables.importManifests.id, rolledBackPreview.id));
+      const [d1BeforeStaged] = await d1Err.db
+        .select()
+        .from(d1Tables.files)
+        .where(eq(d1Tables.files.id, d1BeforeRow!.stagedFileIds[0]!));
+
+      throwBeforeD1Batch = new Error('D1 RPC connection reset');
+      const beforeErrRes = await commitOnApp(
+        d1App,
+        d1EdCookie,
+        rolledBackPreview.id
+      );
+      expect(beforeErrRes.status).toBe(500);
+      const beforeErrText = await beforeErrRes.text();
+      expect(beforeErrText).not.toContain('D1 RPC connection reset');
+      expect(JSON.parse(beforeErrText).code).toBe('import_commit_failed');
+
+      const [d1BeforeAfter] = await d1Err.db
+        .select()
+        .from(d1Tables.importManifests)
+        .where(eq(d1Tables.importManifests.id, rolledBackPreview.id));
+      expect(d1BeforeAfter?.status).toBe('failed');
+      expect(d1Mem.store.has(d1BeforeStaged!.storageKey!)).toBe(false);
+      expect(
+        await d1Err.db
+          .select()
+          .from(d1Tables.places)
+          .where(eq(d1Tables.places.name, 'D1 Aborted Before Batch'))
+      ).toHaveLength(0);
+      const beforeFailAudits = (
+        await d1Err.db
+          .select()
+          .from(d1Tables.auditEntries)
+          .where(
+            and(
+              eq(d1Tables.auditEntries.communityId, comm.id),
+              eq(d1Tables.auditEntries.action, 'import.commit'),
+              eq(d1Tables.auditEntries.outcome, 'failed')
+            )
+          )
+      ).filter((a) =>
+        JSON.stringify(a.resourceIds).includes(String(rolledBackPreview.id))
+      );
+      expect(beforeFailAudits).toHaveLength(1);
+    } finally {
+      d1Err.sqlite.close();
+    }
+
+    // 3e. Double-fault DB outage during uncertain recovery (commitManifest & recovery getManifestById reject)
+    const doubleFaultPreview = await createPreviewOnApp(app, cookies.editorA, {
+      kind: 'places',
+      csvFilename: 'double-fault.csv',
+      csvText: 'name\nDouble Fault Place\n',
+    });
+    try {
+      vi.spyOn(
+        ImportsRepository.prototype,
+        'commitManifest'
+      ).mockRejectedValueOnce(new Error('DB_PRIMARY_OUTAGE_SECRET'));
+      const origGetManifest = ImportsRepository.prototype.getManifestById;
+      let getCallCount = 0;
+      vi.spyOn(
+        ImportsRepository.prototype,
+        'getManifestById'
+      ).mockImplementation(async function (
+        this: ImportsRepository,
+        communityId: number,
+        manifestId: number
+      ) {
+        getCallCount += 1;
+        if (getCallCount === 2) {
+          throw new Error('DB_RECOVERY_OUTAGE_SECRET');
+        }
+        return origGetManifest.call(this, communityId, manifestId);
+      });
+
+      const doubleRes = await commitOnApp(
+        app,
+        cookies.editorA,
+        doubleFaultPreview.id
+      );
+      expect(doubleRes.status).toBe(500);
+      const doubleText = await doubleRes.text();
+      expect(doubleText).not.toContain('DB_PRIMARY_OUTAGE_SECRET');
+      expect(doubleText).not.toContain('DB_RECOVERY_OUTAGE_SECRET');
+      expect(JSON.parse(doubleText)).toEqual({
+        error: 'Internal server error',
+      });
+    } finally {
+      vi.restoreAllMocks();
     }
   });
 });

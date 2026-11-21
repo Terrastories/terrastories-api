@@ -1707,15 +1707,22 @@ export class ImportsService {
       }
     }
 
-    const failAndCleanup = async (): Promise<
+    const failAndCleanup = async (
+      failureStatus: 409 | 500 = 409
+    ): Promise<
       ImportServiceResult<z.infer<typeof ImportManifestDetailResponseSchema>>
     > => {
-      const failOutcome = await this.repository.failManifest({
-        communityId: caller.communityId,
-        actorId: caller.actorId,
-        manifestId,
-        now: requestNow,
-      });
+      let failOutcome;
+      try {
+        failOutcome = await this.repository.failManifest({
+          communityId: caller.communityId,
+          actorId: caller.actorId,
+          manifestId,
+          now: requestNow,
+        });
+      } catch {
+        return { status: 500, body: INTERNAL_ERROR_BODY };
+      }
       if (failOutcome.status === 'already_committed') {
         return serializeManifest(failOutcome.manifest);
       }
@@ -1731,7 +1738,7 @@ export class ImportsService {
           'import_failed'
         );
         return {
-          status: 409,
+          status: failureStatus,
           body: {
             error: 'Import commit failed; no records were applied',
             code: 'import_commit_failed',
@@ -1855,14 +1862,19 @@ export class ImportsService {
       }
     }
 
-    const commitOutcome = await this.repository.commitManifest({
-      communityId: caller.communityId,
-      actorId: caller.actorId,
-      actor,
-      manifest,
-      now: requestNow,
-      dailyLimitWindow: dailyWindow,
-    });
+    let commitOutcome;
+    try {
+      commitOutcome = await this.repository.commitManifest({
+        communityId: caller.communityId,
+        actorId: caller.actorId,
+        actor,
+        manifest,
+        now: requestNow,
+        dailyLimitWindow: dailyWindow,
+      });
+    } catch {
+      commitOutcome = { status: 'uncertain' } as const;
+    }
 
     if (
       commitOutcome.status === 'committed' ||
@@ -1896,8 +1908,44 @@ export class ImportsService {
         },
       };
     }
+    if (commitOutcome.status === 'failed_rolled_back') {
+      return failAndCleanup(500);
+    }
+    if (commitOutcome.status === 'uncertain') {
+      let latest: ImportManifestRowRecord | null;
+      try {
+        latest = await this.repository.getManifestById(
+          caller.communityId,
+          manifestId
+        );
+      } catch {
+        return { status: 500, body: INTERNAL_ERROR_BODY };
+      }
+      if (!latest) {
+        return { status: 404, body: NOT_FOUND_BODY };
+      }
+      if (latest.status === 'committed') {
+        return serializeManifest(latest);
+      }
+      if (latest.status === 'discarded') {
+        return {
+          status: 409,
+          body: { error: 'Discarded import manifest cannot be committed' },
+        };
+      }
+      if (latest.status === 'failed') {
+        return {
+          status: 409,
+          body: {
+            error:
+              'Failed import manifest cannot be committed; start a new preview',
+          },
+        };
+      }
+      return failAndCleanup(500);
+    }
 
-    return failAndCleanup();
+    return failAndCleanup(409);
   }
 
   private validateAndNormalizeRows(input: {

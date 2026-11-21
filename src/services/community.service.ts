@@ -264,6 +264,11 @@ export class CommunityService {
 
     // Validate slug if provided
     if (data.slug) {
+      if (data.slug.startsWith('deprovisioned-')) {
+        throw new CommunityValidationError(
+          'Slug uses the reserved deprovisioned namespace'
+        );
+      }
       if (data.slug.length < 3 || data.slug.length > 50) {
         throw new CommunityValidationError(
           'Slug must be between 3 and 50 characters'

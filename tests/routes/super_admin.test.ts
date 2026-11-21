@@ -260,6 +260,16 @@ describe('Super Admin API', () => {
     });
 
     describe('POST /api/v1/super_admin/communities', () => {
+      it('rejects reserved tombstone slugs with 400', async () => {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/super_admin/communities',
+          headers: { cookie: superAdminSessionId },
+          payload: { name: 'Reserved slug', slug: 'deprovisioned-123' },
+        });
+        expect(response.statusCode).toBe(400);
+      });
+
       it('should create new community for super admin', async () => {
         const newCommunity = {
           name: 'Test Community Created',

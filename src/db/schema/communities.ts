@@ -10,6 +10,7 @@ import {
   text as pgText,
   timestamp,
   boolean,
+  bigint,
 } from 'drizzle-orm/pg-core';
 import {
   sqliteTable,
@@ -41,6 +42,7 @@ export const communitiesPg = pgTable('communities', {
   beta: boolean('beta').notNull().default(false),
   createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { precision: 3 }).defaultNow().notNull(),
+  deprovisionedAt: bigint('deprovisioned_at', { mode: 'number' }),
 });
 
 // SQLite table for development/testing
@@ -64,6 +66,9 @@ export const communitiesSqlite = sqliteTable('communities', {
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
     .notNull()
     .$defaultFn(() => new Date()),
+  // Millisecond epoch tombstone set on logical deprovision (PR #257 / Slice 14).
+  // Plain integer (not timestamp_ms) matching sessions/claim_tokens epoch columns.
+  deprovisionedAt: integer('deprovisioned_at'),
 });
 
 // Dynamic table selection based on database type (for runtime use)
@@ -83,7 +88,14 @@ export async function getCommunitiesTable() {
 export const insertCommunitySchema = createInsertSchema(communitiesPg, {
   name: z.string().min(1, 'Name is required').max(100, 'Name too long'),
   description: z.string().max(1000, 'Description too long').optional(),
-  slug: z.string().min(1, 'Slug is required').max(50, 'Slug too long'),
+  slug: z
+    .string()
+    .min(1, 'Slug is required')
+    .max(50, 'Slug too long')
+    .refine(
+      (slug) => !slug.startsWith('deprovisioned-'),
+      'Slug uses the reserved deprovisioned namespace'
+    ),
   locale: z.string().min(2).max(5).default('en'),
   culturalSettings: z
     .string()
@@ -106,6 +118,7 @@ export const createCommunitySchema = insertCommunitySchema.omit({
   id: true,
   createdAt: true,
   updatedAt: true,
+  deprovisionedAt: true,
 });
 
 export const updateCommunitySchema = insertCommunitySchema
@@ -120,6 +133,7 @@ export const updateCommunitySchema = insertCommunitySchema
     id: true,
     createdAt: true,
     slug: true, // Don't allow changing slug
+    deprovisionedAt: true,
   });
 
 // Export table variants for migration generation

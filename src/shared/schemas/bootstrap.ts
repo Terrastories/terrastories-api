@@ -32,6 +32,10 @@ export const CommunitySlugSchema = z
   .regex(
     /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
     'Slug must contain lowercase letters, digits, and single hyphens'
+  )
+  .refine(
+    (slug) => !slug.startsWith('deprovisioned-'),
+    'Slug uses the reserved deprovisioned namespace'
   );
 
 export const BootstrapLocaleSchema = z

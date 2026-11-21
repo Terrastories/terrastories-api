@@ -9,10 +9,13 @@ import type {
   VerifierWrite,
 } from '../repositories/hono-auth.repository.js';
 import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
+import { isForeignKeyConstraintError } from '../repositories/community-writes.repository.js';
 import {
   ARGON2ID_ALGORITHM,
   AUTH_LOGIN_FAILURE_BODY,
+  CLAIM_TOKEN_ENTROPY_BYTES,
   CLAIM_TOKEN_MAX_TTL_MS,
+  CLAIM_TOKEN_MIN_TTL_MS,
   RECOVERY_CODE_COUNT,
   isCanonicalArgon2idParams,
   isCanonicalVerifierSalt,
@@ -20,7 +23,12 @@ import {
   sessionTokenDigestInput,
   type SessionKind,
 } from '../shared/auth-policy.js';
-import { sha256Hex, constantTimeEqual, toHex } from '../shared/auth-crypto.js';
+import {
+  sha256Hex,
+  constantTimeEqual,
+  toBase64Url,
+  toHex,
+} from '../shared/auth-crypto.js';
 import {
   BootstrapClaimRequestSchema,
   BootstrapRequestSchema,
@@ -65,6 +73,42 @@ const SERVICE_UNAVAILABLE_BODY: V2ErrorResponse = Object.freeze({
   error: 'Service unavailable',
 });
 
+/** ClaimToken material returned once at issuance alongside its stored SHA-256 digest. */
+export interface ClaimTokenMaterial {
+  token: string;
+  tokenHash: string;
+  createdAtMs: number;
+  expiresAtMs: number;
+}
+
+/**
+ * Generate a single-use ClaimToken (256-bit CSPRNG, base64url) and its
+ * SHA-256 digest for Slice 11b/14 issuance (SPEC-V2 §6.8, §7).
+ */
+export async function generateClaimTokenMaterial(
+  now: Date,
+  ttlMs: number = CLAIM_TOKEN_MAX_TTL_MS
+): Promise<ClaimTokenMaterial> {
+  if (
+    !Number.isSafeInteger(ttlMs) ||
+    ttlMs < CLAIM_TOKEN_MIN_TTL_MS ||
+    ttlMs > CLAIM_TOKEN_MAX_TTL_MS
+  ) {
+    throw new RangeError('Invalid claim token TTL');
+  }
+  const token = toBase64Url(
+    crypto.getRandomValues(new Uint8Array(CLAIM_TOKEN_ENTROPY_BYTES))
+  );
+  const tokenHash = await sha256Hex(token);
+  const createdAtMs = now.getTime();
+  return {
+    token,
+    tokenHash,
+    createdAtMs,
+    expiresAtMs: createdAtMs + ttlMs,
+  };
+}
+
 /** Derive a deterministic URL-safe slug when `community.slug` is omitted. */
 export function deriveBootstrapSlug(name: string): string {
   const base = name
@@ -74,6 +118,7 @@ export function deriveBootstrapSlug(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .slice(0, 60)
     .replace(/^-+|-+$/g, '');
+  if (base.startsWith('deprovisioned-')) return `community-${base}`;
   return base.length > 0 ? base : 'community';
 }
 
@@ -425,14 +470,7 @@ export class BootstrapService {
     const tokenHash = await sha256Hex(token);
     const claimRow = await this.bootstrapRepo.findClaimTokenByHash(tokenHash);
 
-    // The digest lookup is by index, but the presented material is still
-    // re-verified in constant time before any decision is made (§6.8): a row
-    // that somehow resolved without matching this request's digest is treated
-    // exactly like no row at all.
-    if (
-      claimRow === null ||
-      !constantTimeEqual(claimRow.tokenHash, tokenHash)
-    ) {
+    const rejectUnknownClaim = async (): Promise<BootstrapResult> => {
       await this.authRepo.recordClaimFailure(
         {
           claimToken: null,
@@ -450,6 +488,17 @@ export class BootstrapService {
         userAgent: context.userAgent,
       });
       return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
+    };
+
+    // The digest lookup is by index, but the presented material is still
+    // re-verified in constant time before any decision is made (§6.8): a row
+    // that somehow resolved without matching this request's digest is treated
+    // exactly like no row at all.
+    if (
+      claimRow === null ||
+      !constantTimeEqual(claimRow.tokenHash, tokenHash)
+    ) {
+      return rejectUnknownClaim();
     }
 
     const tokenBlocked = await this.authRepo.throttleState(
@@ -461,22 +510,53 @@ export class BootstrapService {
     }
 
     const rejectClaim = async (): Promise<BootstrapResult> => {
-      await this.authRepo.recordClaimFailure(
-        {
-          claimToken: { id: claimRow.id, communityId: claimRow.communityId },
-          clientIp: context.clientIp,
-          now: nowMs,
-        },
-        secret
-      );
-      await this.auditFailure({
-        communityId: claimRow.communityId,
-        action: 'claim_token.consume',
-        resourceType: 'claim_token',
-        resourceIds: [claimRow.id],
-        clientIp: context.clientIp,
-        userAgent: context.userAgent,
-      });
+      try {
+        await this.authRepo.recordClaimFailure(
+          {
+            claimToken: { id: claimRow.id, communityId: claimRow.communityId },
+            clientIp: context.clientIp,
+            now: nowMs,
+          },
+          secret
+        );
+      } catch (error) {
+        // Concurrent deprovision deletes the target community between lookup
+        // and rejection; fall back to the per-IP unknown-claim path so the
+        // caller still gets a uniform 401 rather than a 503 FK oracle.
+        if (isForeignKeyConstraintError(error)) {
+          return rejectUnknownClaim();
+        }
+        throw error;
+      }
+      try {
+        await writeAuditEntry(this.authRepo.connection, {
+          communityId: claimRow.communityId,
+          actorId: null,
+          action: 'claim_token.consume',
+          resourceType: 'claim_token',
+          resourceIds: [claimRow.id],
+          outcome: 'failure',
+          ipAddress: context.clientIp,
+          userAgent: sanitizeUserAgent(context.userAgent),
+        });
+      } catch (error) {
+        if (isForeignKeyConstraintError(error)) {
+          await this.auditFailure({
+            communityId: null,
+            action: 'bootstrap.claim',
+            resourceType: 'bootstrap',
+            resourceIds: [],
+            clientIp: context.clientIp,
+            userAgent: context.userAgent,
+          });
+        } else {
+          // eslint-disable-next-line no-console -- no logging seam in bootstrap service; content-free fallback
+          console.error('bootstrap audit write failed', {
+            action: 'claim_token.consume',
+            outcome: 'failure',
+          });
+        }
+      }
       return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
     };
 

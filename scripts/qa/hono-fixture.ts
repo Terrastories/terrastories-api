@@ -91,6 +91,12 @@ import {
   MediaMetadataResponseSchema,
   MediaUploadResponseSchema,
 } from '../../src/shared/schemas/media-v2.js';
+import {
+  AdminAuditEntryListResponseSchema,
+  AdminCommunityListResponseSchema,
+  AdminCommunityResponseSchema,
+  ClaimTokenIssuedResponseSchema,
+} from '../../src/shared/schemas/admin.js';
 import { DESCRIPTION_MAX_LENGTH } from '../../src/shared/utils/safe-description.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import {
@@ -4305,6 +4311,132 @@ export async function createFixture(
         check: forbiddenCheck,
       },
     ];
+    const unauthAdminSteps: Step[] = [
+      {
+        name: 'require auth on admin communities list',
+        method: 'GET',
+        path: '/v2/admin/communities',
+        expected: 401,
+      },
+      {
+        name: 'require auth on admin community provision',
+        method: 'POST',
+        path: '/v2/admin/communities',
+        expected: 401,
+        body: { slug: 'qa-unauth-provision' },
+      },
+      {
+        name: 'require auth on admin claim-token issuance',
+        method: 'POST',
+        path: `/v2/admin/communities/${communityId}/claim-tokens`,
+        expected: 401,
+      },
+      {
+        name: 'require auth on admin community status toggle',
+        method: 'PATCH',
+        path: `/v2/admin/communities/${communityId}/status`,
+        expected: 401,
+        body: { status: 'disabled' },
+      },
+      {
+        name: 'require auth on admin community deprovision',
+        method: 'DELETE',
+        path: `/v2/admin/communities/${communityId}`,
+        expected: 401,
+      },
+      {
+        name: 'require auth on admin system audit entries',
+        method: 'GET',
+        path: '/v2/admin/audit-entries',
+        expected: 401,
+      },
+    ];
+    const forbiddenAdminSteps: Step[] = [
+      {
+        name: 'deny admin communities list for community role',
+        method: 'GET',
+        path: '/v2/admin/communities',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin community provision for community role',
+        method: 'POST',
+        path: '/v2/admin/communities',
+        expected: 403,
+        body: { slug: 'qa-denied-provision' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin claim-token issuance for community role',
+        method: 'POST',
+        path: `/v2/admin/communities/${communityId}/claim-tokens`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin community status toggle for community role',
+        method: 'PATCH',
+        path: `/v2/admin/communities/${communityId}/status`,
+        expected: 403,
+        body: { status: 'disabled' },
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin community deprovision for community role',
+        method: 'DELETE',
+        path: `/v2/admin/communities/${communityId}`,
+        expected: 403,
+        check: forbiddenCheck,
+      },
+      {
+        name: 'deny admin system audit entries for community role',
+        method: 'GET',
+        path: '/v2/admin/audit-entries',
+        expected: 403,
+        check: forbiddenCheck,
+      },
+    ];
+    let qaClaimToken1 = '';
+    let qaClaimToken1Id = 0;
+    let qaClaimToken2 = '';
+    let qaClaimToken2Id = 0;
+    let qaDeprovTokenId = 0;
+    let qaDisabledToken = '';
+    const qaAdminClaimedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const qaSupersededClaimBody = {
+      token: '',
+      username: 'qa_superseded_admin',
+      email: 'qa-superseded-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: verifierSalt,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    const qaDisabledClaimBody = {
+      token: '',
+      username: 'qa_disabled_revive_admin',
+      email: 'qa-disabled-revive@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: verifierSalt,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+      },
+    };
+    const qaValidClaimBody = {
+      token: '',
+      username: 'qa_claimed_admin',
+      email: 'qa-claimed-admin@example.test',
+      password: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: verifierSalt,
+        params: JSON.parse(ARGON2ID_PARAMS_JSON),
+        derivedKey: qaAdminClaimedKey,
+      },
+    };
     const validationFieldCheck =
       (expectedPath: string, noEchoToken?: string) => (body: unknown) => {
         const parsed = V2ValidationErrorResponseSchema.safeParse(body);
@@ -5467,6 +5599,11 @@ export async function createFixture(
       },
     };
     let userManagedSessionHandle = '';
+    const qaSuperDeniedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const qaSuperDeniedSalt = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    let qaSuperDeniedSessionHandle = '';
     let qaStageFileId = '';
     let qaStageFile2Id = '';
     let qaAudioFileId = '';
@@ -6413,6 +6550,7 @@ export async function createFixture(
             path: '/v2/speakers',
             expected: 401,
           },
+          ...unauthAdminSteps,
           {
             name: 'reject wrong password',
             method: 'POST',
@@ -6775,6 +6913,7 @@ export async function createFixture(
             ? [...exploreWithSession, ...publicCommunitiesWithSession]
             : []),
           ...communityReadsStepsFor(role),
+          ...forbiddenAdminSteps,
           ...(role === 'viewer' || role === 'member'
             ? forbiddenCommunityWriteSteps
             : []),
@@ -7089,10 +7228,347 @@ export async function createFixture(
             expected: 404,
           },
           {
+            name: 'deny v2 users list',
+            method: 'GET',
+            path: '/v2/users',
+            expected: 403,
+            saveCookieAs: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          // Establish a real device session on a real community account so
+          // super_admin denials across every /v2/users/* endpoint hit real
+          // records and prove rejected mutations leave credentials, roles,
+          // and sessions unchanged.
+          {
+            name: 'establish target community member device session for super_admin denial checks',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: '' },
+            body: {
+              identifier: userCommunityCredentials.member.email,
+              derivedKey,
+              communitySlug: 'qa-user-management-community',
+              deviceSession: true,
+            },
+            check: ownUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          {
+            name: 'save target community member device session cookie',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'qaTargetMemberDevice',
+            check: ownMeUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id,
+              false
+            ),
+          },
+          {
+            name: 'login target community admin to capture real device session handle',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: '' },
+            body: {
+              identifier: userCommunityCredentials.admin.email,
+              derivedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: ownUser(
+              userCommunityCredentials.admin.email,
+              'admin',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          {
+            name: 'capture target community member device session handle',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}/sessions`,
+            expected: 200,
+            saveCookieAs: 'qaTargetAdmin',
+            check: (body) => {
+              const rows = (
+                body as {
+                  data?: Array<{ handle?: unknown; kind?: unknown }>;
+                }
+              )?.data;
+              if (!Array.isArray(rows) || rows.length !== 1) return false;
+              const session = rows[0]!;
+              if (
+                session.kind !== 'device' ||
+                typeof session.handle !== 'string' ||
+                session.handle.length !== 22
+              ) {
+                return false;
+              }
+              qaSuperDeniedSessionHandle = session.handle;
+              return true;
+            },
+          },
+          {
+            name: 'deny v2 user detail',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user create',
+            method: 'POST',
+            path: '/v2/users',
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            body: {
+              username: 'qa_super_denied_user',
+              email: 'qa-super-denied-user@example.test',
+              displayName: 'Denied By Policy',
+              role: 'admin',
+              password: {
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: qaSuperDeniedSalt,
+                params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                derivedKey: qaSuperDeniedKey,
+              },
+            },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user update',
+            method: 'PATCH',
+            path: `/v2/users/${userCommunityIds.member}`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            body: {
+              role: 'admin',
+              status: 'disabled',
+              displayName: 'Tampered By Super Admin',
+            },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user password reset',
+            method: 'POST',
+            path: `/v2/users/${userCommunityIds.member}/password-reset`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            body: {
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: qaSuperDeniedSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: qaSuperDeniedKey,
+            },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user login-code issuance',
+            method: 'POST',
+            path: `/v2/users/${userCommunityIds.member}/login-codes`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user sessions list',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}/sessions`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user session revoke',
+            method: 'DELETE',
+            path: '/v2/users/pending',
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            prepare: () =>
+              `/v2/users/${userCommunityIds.member}/sessions/${qaSuperDeniedSessionHandle}`,
+            check: forbiddenCheck,
+          },
+          {
+            name: 'target member device session survives rejected super_admin mutations',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            useSavedCookie: 'qaTargetMemberDevice',
+            check: ownMeUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id,
+              false
+            ),
+          },
+          {
+            name: 'rejected super_admin user create left no account',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.142',
+              'cf-connecting-ip': '203.0.113.142',
+            },
+            body: {
+              identifier: 'qa-super-denied-user@example.test',
+              derivedKey: qaSuperDeniedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: invalidCredentials,
+          },
+          {
+            name: 'rejected super_admin password reset did not replace credentials',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.143',
+              'cf-connecting-ip': '203.0.113.143',
+            },
+            body: {
+              identifier: userCommunityCredentials.member.email,
+              derivedKey: qaSuperDeniedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: invalidCredentials,
+          },
+          {
+            name: 'target member original credentials still authenticate with unchanged role',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: '' },
+            body: {
+              identifier: userCommunityCredentials.member.email,
+              derivedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: ownUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          {
+            name: 'logout verification member session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'target community user list unchanged after super_admin denials',
+            method: 'GET',
+            path: '/v2/users',
+            expected: 200,
+            useSavedCookie: 'qaTargetAdmin',
+            check: (body) => {
+              const parsed = body as {
+                data?: Array<{ email?: unknown }>;
+                meta?: { total?: number };
+              };
+              return (
+                parsed?.meta?.total === 3 &&
+                Array.isArray(parsed?.data) &&
+                parsed.data.length === 3 &&
+                !parsed.data.some(
+                  (row) => row.email === 'qa-super-denied-user@example.test'
+                )
+              );
+            },
+          },
+          {
+            name: 'target member profile and role unchanged after super_admin denials',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}`,
+            expected: 200,
+            useSavedCookie: 'qaTargetAdmin',
+            check: (body) => {
+              const data = (
+                body as {
+                  data?: {
+                    id?: unknown;
+                    email?: unknown;
+                    role?: unknown;
+                    status?: unknown;
+                    displayName?: unknown;
+                  };
+                }
+              )?.data;
+              return (
+                !!data &&
+                data.id === userCommunityIds.member &&
+                data.email === userCommunityCredentials.member.email &&
+                data.role === 'member' &&
+                data.status === 'active' &&
+                data.displayName === null
+              );
+            },
+          },
+          {
+            name: 'target member device session unchanged after super_admin denials',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}/sessions`,
+            expected: 200,
+            useSavedCookie: 'qaTargetAdmin',
+            check: (body) => {
+              const rows = (
+                body as { data?: Array<{ handle?: unknown; kind?: unknown }> }
+              )?.data;
+              return (
+                Array.isArray(rows) &&
+                rows.length === 1 &&
+                rows[0]?.handle === qaSuperDeniedSessionHandle &&
+                rows[0]?.kind === 'device'
+              );
+            },
+          },
+          {
+            name: 'logout target community admin helper session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'qaTargetAdmin',
+          },
+          {
+            name: 'logout target community member helper device session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'qaTargetMemberDevice',
+          },
+          {
+            name: 'deny community media metadata',
+            method: 'GET',
+            path: `/v2/media/${readableFileId}/metadata`,
+            expected: 404,
+            useSavedCookie: 'qaSuperAdmin',
+          },
+          {
+            name: 'deny community media delete',
+            method: 'DELETE',
+            path: `/v2/media/${readableFileId}`,
+            expected: 404,
+            useSavedCookie: 'qaSuperAdmin',
+          },
+          {
             name: 'logout',
             method: 'POST',
             path: '/v2/auth/logout',
             expected: 204,
+            useSavedCookie: 'qaSuperAdmin',
           },
         ],
       },
@@ -7187,6 +7663,7 @@ export async function createFixture(
           },
           ...forbiddenCommunityReadSteps,
           ...forbiddenCommunityWriteSteps,
+          ...forbiddenAdminSteps,
           ...forbiddenImportSteps('disabled admin'),
           {
             name: 'reset recovered disabled admin password (assisted)',
@@ -8866,6 +9343,471 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/auth/logout',
             expected: 204,
+          },
+        ],
+      },
+      {
+        // Slice 14 system administration lifecycle (#188, SPEC-V2 §6.2, §6.8, §7):
+        // super_admin lists operational communities, provisions empty hosted
+        // community, issues & reissues ClaimToken, verifies claim_pending and
+        // post-claim refusal, toggles status (disabling purges sessions, active
+        // restores), deprovisions & reprovisions unclaimed community, and reads
+        // content-free system audit entries (communityId IS NULL).
+        persona: 'admin_lifecycle',
+        steps: [
+          {
+            name: 'login as super_admin',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              'x-forwarded-for': '203.0.113.140',
+              'cf-connecting-ip': '203.0.113.140',
+            },
+            body: {
+              identifier: credentials.super_admin.email,
+              derivedKey: superAdminNewKey,
+            },
+            check: ownUser(
+              credentials.super_admin.email,
+              'super_admin',
+              liveSessionCookie,
+              null
+            ),
+          },
+          {
+            name: 'list operational communities without descriptive fields',
+            method: 'GET',
+            path: '/v2/admin/communities',
+            expected: 200,
+            saveCookieAs: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = AdminCommunityListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const text = JSON.stringify(body);
+              return (
+                !text.includes('"name"') &&
+                !text.includes('"description"') &&
+                !text.includes('"visibility"') &&
+                !text.includes('"locale"') &&
+                !text.includes('"country"') &&
+                !HONO_PERSONA_CULTURAL_STRINGS.some((s) => text.includes(s))
+              );
+            },
+          },
+          {
+            name: 'reject descriptive fields on admin community provision',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 400,
+            body: { slug: 'qa-admin-bad', name: 'Forbidden Descriptive Name' },
+          },
+          {
+            name: 'provision empty hosted community',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            captureId: 'qaClaimedComm',
+            body: { slug: 'qa-admin-claimed' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.slug === 'qa-admin-claimed' &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 'issue first claim token',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimedComm}/claim-tokens',
+            expected: 201,
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimToken1 = parsed.data.data.token;
+              qaClaimToken1Id = parsed.data.data.id;
+              return true;
+            },
+          },
+          {
+            name: 'reissue claim token superseding earlier token',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimedComm}/claim-tokens',
+            expected: 201,
+            body: { ttlSeconds: 3600 },
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaClaimToken2 = parsed.data.data.token;
+              qaClaimToken2Id = parsed.data.data.id;
+              return qaClaimToken2 !== qaClaimToken1;
+            },
+          },
+          {
+            name: 'observe claim_pending status in operational list',
+            method: 'GET',
+            path: '/v2/admin/communities?limit=100',
+            expected: 200,
+            check: (body) => {
+              const parsed = AdminCommunityListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const entry = parsed.data.data.find(
+                (c) => c.slug === 'qa-admin-claimed'
+              );
+              return entry?.claimStatus === 'claim_pending';
+            },
+          },
+          {
+            name: 'reject superseded claim token',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.140',
+              'cf-connecting-ip': '203.0.113.140',
+            },
+            prepare: () => {
+              qaSupersededClaimBody.token = qaClaimToken1;
+            },
+            body: qaSupersededClaimBody,
+            check: invalidCredentials,
+          },
+          {
+            name: 'claim provisioned community with valid token',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 201,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.140',
+              'cf-connecting-ip': '203.0.113.140',
+            },
+            prepare: () => {
+              qaValidClaimBody.token = qaClaimToken2;
+            },
+            body: qaValidClaimBody,
+            checkHeaders: (headers) =>
+              (headers.get('set-cookie') ?? '').includes('ts_session='),
+          },
+          {
+            name: 'claimed admin session is active',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'qaClaimedAdmin',
+            check: ownMeUser(
+              'qa-claimed-admin@example.test',
+              'admin',
+              liveSessionCookie,
+              undefined,
+              true
+            ),
+          },
+          {
+            name: 'refuse claim-token issuance after claim',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaClaimedComm}/claim-tokens',
+            expected: 409,
+            useSavedCookie: 'qaSysAdmin',
+          },
+          {
+            name: 'refuse deprovision of claimed community',
+            method: 'DELETE',
+            path: '/v2/admin/communities/{qaClaimedComm}',
+            expected: 409,
+            useSavedCookie: 'qaSysAdmin',
+          },
+          {
+            name: 'disable claimed community and purge its sessions',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaClaimedComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'disabled' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'disabled' &&
+                parsed.data.data.claimStatus === 'claimed'
+              );
+            },
+          },
+          {
+            name: 'claimed admin session is purged after disable',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 401,
+            useSavedCookie: 'qaClaimedAdmin',
+          },
+          {
+            name: 'restore claimed community to active',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaClaimedComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'active' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.claimStatus === 'claimed'
+              );
+            },
+          },
+          {
+            name: 'claimed admin logs back in after restore',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.141',
+              'cf-connecting-ip': '203.0.113.141',
+            },
+            body: {
+              identifier: 'qa-claimed-admin@example.test',
+              communitySlug: 'qa-admin-claimed',
+              derivedKey: qaAdminClaimedKey,
+            },
+            check: ownUser(
+              'qa-claimed-admin@example.test',
+              'admin',
+              liveSessionCookie
+            ),
+          },
+          {
+            name: 'restored community serves claimed admin',
+            method: 'GET',
+            path: '/v2/community',
+            expected: 200,
+          },
+          {
+            name: 'logout restored claimed admin',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'provision empty community for deprovision',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            useSavedCookie: 'qaSysAdmin',
+            captureId: 'qaDeprovComm',
+            body: { slug: 'qa-admin-deprov' },
+          },
+          {
+            name: 'issue claim token before deprovision',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaDeprovComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaDeprovTokenId = parsed.data.data.id;
+              return true;
+            },
+          },
+          {
+            name: 'deprovision unclaimed empty community',
+            method: 'DELETE',
+            path: '/v2/admin/communities/{qaDeprovComm}',
+            expected: 204,
+            useSavedCookie: 'qaSysAdmin',
+          },
+          {
+            name: 'deprovisioned community returns 409 on status toggle',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaDeprovComm}/status',
+            expected: 409,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'disabled' },
+          },
+          {
+            name: 'reprovision same slug after deprovision',
+            method: 'POST',
+            path: '/v2/admin/communities',
+            expected: 201,
+            useSavedCookie: 'qaSysAdmin',
+            captureId: 'qaReprovComm',
+            body: { slug: 'qa-admin-deprov' },
+          },
+          {
+            name: 'issue claim token on reprovisioned community before disable',
+            method: 'POST',
+            path: '/v2/admin/communities/{qaReprovComm}/claim-tokens',
+            expected: 201,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = ClaimTokenIssuedResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              qaDisabledToken = parsed.data.data.token;
+              return true;
+            },
+          },
+          {
+            name: 'disable reprovisioned community supersedes token and hides claim_pending',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaReprovComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'disabled' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'disabled' &&
+                parsed.data.data.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 'list shows disabled unclaimed community without claim_pending',
+            method: 'GET',
+            path: '/v2/admin/communities?limit=100',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = AdminCommunityListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const entry = parsed.data.data.find(
+                (c) => c.slug === 'qa-admin-deprov'
+              );
+              return (
+                entry?.status === 'disabled' &&
+                entry?.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 're-enable reprovisioned community does not restore claim_pending',
+            method: 'PATCH',
+            path: '/v2/admin/communities/{qaReprovComm}/status',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            body: { status: 'active' },
+            check: (body) => {
+              const parsed = AdminCommunityResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.status === 'active' &&
+                parsed.data.data.claimStatus === 'unclaimed'
+              );
+            },
+          },
+          {
+            name: 'pre-disable claim token stays rejected after re-enable',
+            method: 'POST',
+            path: '/v2/bootstrap/claim',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.145',
+              'cf-connecting-ip': '203.0.113.145',
+            },
+            prepare: () => {
+              qaDisabledClaimBody.token = qaDisabledToken;
+            },
+            body: qaDisabledClaimBody,
+            check: invalidCredentials,
+          },
+          {
+            name: 'clean up reprovisioned community',
+            method: 'DELETE',
+            path: '/v2/admin/communities/{qaReprovComm}',
+            expected: 204,
+            useSavedCookie: 'qaSysAdmin',
+          },
+          {
+            name: 'read system-only audit entries without community or secret leaks',
+            method: 'GET',
+            path: '/v2/admin/audit-entries?limit=100',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = AdminAuditEntryListResponseSchema.safeParse(body);
+              if (!parsed.success) return false;
+              const rows = parsed.data.data;
+              if (!rows.every((e) => e.communityId === null)) return false;
+              if (
+                rows.some(
+                  (e) =>
+                    e.action === 'claim_token.consume' &&
+                    e.outcome === 'success'
+                )
+              ) {
+                return false;
+              }
+              if (
+                rows.some(
+                  (e) =>
+                    e.action.startsWith('claim_token.') &&
+                    (e.resourceIds.includes(qaClaimToken1Id) ||
+                      e.resourceIds.includes(qaClaimToken2Id))
+                )
+              ) {
+                return false;
+              }
+              if (
+                rows.some(
+                  (e) =>
+                    e.action.startsWith('claim_token.') &&
+                    e.resourceIds.includes(qaDeprovTokenId)
+                )
+              ) {
+                return false;
+              }
+              const requiredActions = [
+                'system.community.provision',
+                'system.community.status.disabled',
+                'system.community.status.active',
+                'system.community.deprovision',
+              ];
+              if (
+                !requiredActions.every((action) =>
+                  rows.some((e) => e.action === action)
+                )
+              ) {
+                return false;
+              }
+              const text = JSON.stringify(body);
+              return (
+                !text.includes(qaClaimToken1) &&
+                !text.includes(qaClaimToken2) &&
+                !HONO_PERSONA_CULTURAL_STRINGS.some((s) => text.includes(s))
+              );
+            },
+          },
+          {
+            name: 'filter system audit entries by action',
+            method: 'GET',
+            path: '/v2/admin/audit-entries?action=system.community.deprovision',
+            expected: 200,
+            useSavedCookie: 'qaSysAdmin',
+            check: (body) => {
+              const parsed = AdminAuditEntryListResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.length >= 2 &&
+                parsed.data.data.every(
+                  (e) => e.action === 'system.community.deprovision'
+                )
+              );
+            },
+          },
+          {
+            name: 'logout super_admin',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'qaSysAdmin',
           },
         ],
       },

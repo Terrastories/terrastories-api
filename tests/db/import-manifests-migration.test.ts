@@ -44,30 +44,25 @@ describe('0015 migration: import_manifests schema, composite FK, CHECKs, and ind
       const t = tablesFor(db);
       const now = new Date('2026-06-01T12:00:00.000Z');
       const nowMs = now.getTime();
-      const [comm1] = await db
-        .insert(t.communities)
-        .values({
-          name: 'Import Mig Alpha',
-          slug: 'import-mig-alpha',
-          locale: 'en',
-          publicStories: false,
-          isActive: true,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning({ id: t.communities.id });
-      const [comm2] = await db
-        .insert(t.communities)
-        .values({
-          name: 'Import Mig Beta',
-          slug: 'import-mig-beta',
-          locale: 'en',
-          publicStories: false,
-          isActive: true,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning({ id: t.communities.id });
+      // Seed the historical schema directly: current Drizzle communities
+      // also includes columns introduced after this upgrade's source version.
+      const insertCommunity = sqlite.prepare(
+        'INSERT INTO communities (name, slug, locale, public_stories, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?) RETURNING id'
+      );
+      const comm1 = insertCommunity.get(
+        'Import Mig Alpha',
+        'import-mig-alpha',
+        'en',
+        nowMs,
+        nowMs
+      ) as { id: number };
+      const comm2 = insertCommunity.get(
+        'Import Mig Beta',
+        'import-mig-beta',
+        'en',
+        nowMs,
+        nowMs
+      ) as { id: number };
       const passwordHash = await hash(
         toHex(crypto.getRandomValues(new Uint8Array(16))),
         4

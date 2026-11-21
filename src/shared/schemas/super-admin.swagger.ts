@@ -119,7 +119,7 @@ export const superAdminSchemas = {
         description:
           'URL-friendly identifier for the community. If not provided, will be auto-generated from name',
         example: 'secwepemc-nation',
-        pattern: '^[a-z0-9-]+$',
+        pattern: '^(?!deprovisioned-)[a-z0-9-]+$',
         minLength: 3,
         maxLength: 50,
       },

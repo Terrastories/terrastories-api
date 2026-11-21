@@ -95,6 +95,10 @@ export const createCommunitySchema = z
         'Slug can only contain lowercase letters, numbers, and hyphens'
       )
       .refine(
+        (slug) => !slug.startsWith('deprovisioned-'),
+        'Slug uses the reserved deprovisioned namespace'
+      )
+      .refine(
         (slug) => !slug.startsWith('-') && !slug.endsWith('-'),
         'Slug cannot start or end with hyphens'
       )

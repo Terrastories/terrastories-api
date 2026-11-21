@@ -1063,6 +1063,42 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
           createdAt: now,
         });
       });
+      await makeNonEmpty('refuse-row-description', async (cid) => {
+        await db
+          .update(communitiesSqlite)
+          .set({ description: '<p>Private description</p>' })
+          .where(eq(communitiesSqlite.id, cid));
+      });
+      await makeNonEmpty('refuse-row-description-plain', async (cid) => {
+        await db
+          .update(communitiesSqlite)
+          .set({ descriptionPlain: 'Private description' })
+          .where(eq(communitiesSqlite.id, cid));
+      });
+      await makeNonEmpty('refuse-row-country', async (cid) => {
+        await db
+          .update(communitiesSqlite)
+          .set({ country: 'BR' })
+          .where(eq(communitiesSqlite.id, cid));
+      });
+      await makeNonEmpty('refuse-row-cultural-settings', async (cid) => {
+        await db
+          .update(communitiesSqlite)
+          .set({ culturalSettings: '{"k":"v"}' })
+          .where(eq(communitiesSqlite.id, cid));
+      });
+      await makeNonEmpty('refuse-row-public-stories', async (cid) => {
+        await db
+          .update(communitiesSqlite)
+          .set({ publicStories: true })
+          .where(eq(communitiesSqlite.id, cid));
+      });
+      await makeNonEmpty('refuse-row-beta', async (cid) => {
+        await db
+          .update(communitiesSqlite)
+          .set({ beta: true })
+          .where(eq(communitiesSqlite.id, cid));
+      });
 
       // Claimed seedCommunity refuses 409 and emits system failure audit
       const claimedDel = await request(
@@ -1078,7 +1114,7 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
         (e) =>
           e.action === 'system.community.deprovision' && e.outcome === 'failure'
       );
-      expect(deprovFailures.length).toBeGreaterThanOrEqual(10);
+      expect(deprovFailures.length).toBeGreaterThanOrEqual(16);
       for (const entry of deprovFailures) {
         expect(entry.communityId).toBeNull();
       }

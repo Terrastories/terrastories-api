@@ -171,19 +171,33 @@ export type IssueClaimTokenResult =
 
 /**
  * Portable SQL predicate holding iff `communityIdExpr` identifies a community
- * that has never had an administrator (users, consumed claim_tokens,
- * installation_bootstrap, login_codes, account auth_throttle, or any
- * non-claim-issuance/failed-claim audit_entries) and holds zero content rows.
+ * row with no descriptive/publication/legacy fields beyond provisioning
+ * defaults (`description`, `description_plain`, `country`, `cultural_settings`
+ * all NULL; `public_stories` and `beta` false), has never had an
+ * administrator (users, consumed claim_tokens, installation_bootstrap,
+ * login_codes, account auth_throttle, or any non-claim-issuance/failed-claim
+ * audit_entries), and holds zero child content rows.
  *
  * Shared across `BootstrapRepository` (claim issuance + redemption) and
  * `AdminRepository` (list `claimStatus` + deprovision). Uses zero boolean
- * literals so SQLite, D1, and PostgreSQL evaluate it identically.
+ * literals and projects no descriptive values so SQLite, D1, and PostgreSQL
+ * evaluate it identically without exposing descriptive text.
  */
 export function communityUnclaimedAndEmptySql(
   communityIdExpr: SQL | number | AnyColumn
 ): SQL {
   return sql`(
-    not exists (select 1 from users cu where cu.community_id = ${communityIdExpr})
+    exists (
+      select 1 from communities c_empty
+      where c_empty.id = ${communityIdExpr}
+        and c_empty.description is null
+        and c_empty.description_plain is null
+        and c_empty.country is null
+        and c_empty.cultural_settings is null
+        and not c_empty.public_stories
+        and not c_empty.beta
+    )
+    and not exists (select 1 from users cu where cu.community_id = ${communityIdExpr})
     and not exists (select 1 from claim_tokens cct where cct.community_id = ${communityIdExpr} and cct.consumed_at is not null)
     and not exists (select 1 from installation_bootstrap ib where ib.community_id = ${communityIdExpr})
     and not exists (select 1 from login_codes lc where lc.community_id = ${communityIdExpr})
@@ -215,6 +229,7 @@ export async function isCommunityUnclaimedAndEmpty(
   communityId: number
 ): Promise<boolean> {
   const {
+    communities,
     users,
     claimTokens,
     installationBootstrap,
@@ -230,6 +245,22 @@ export async function isCommunityUnclaimedAndEmpty(
     authThrottle,
     auditEntries,
   } = tablesFor(database);
+  const cleanCommunityRows = await database
+    .select({ id: communities.id })
+    .from(communities)
+    .where(
+      and(
+        eq(communities.id, communityId),
+        isNull(communities.description),
+        isNull(communities.descriptionPlain),
+        isNull(communities.country),
+        isNull(communities.culturalSettings),
+        eq(communities.publicStories, false),
+        eq(communities.beta, false)
+      )
+    )
+    .limit(1);
+  if (cleanCommunityRows.length !== 1) return false;
   const results = await Promise.all([
     database
       .select({ id: users.id })
@@ -325,6 +356,7 @@ export function isCommunityUnclaimedAndEmptySync(
   communityId: number
 ): boolean {
   const {
+    communities,
     users,
     claimTokens,
     installationBootstrap,
@@ -340,6 +372,23 @@ export function isCommunityUnclaimedAndEmptySync(
     authThrottle,
     auditEntries,
   } = tablesFor(tx);
+  const cleanCommunityRows = tx
+    .select({ id: communities.id })
+    .from(communities)
+    .where(
+      and(
+        eq(communities.id, communityId),
+        isNull(communities.description),
+        isNull(communities.descriptionPlain),
+        isNull(communities.country),
+        isNull(communities.culturalSettings),
+        eq(communities.publicStories, false),
+        eq(communities.beta, false)
+      )
+    )
+    .limit(1)
+    .all();
+  if (cleanCommunityRows.length !== 1) return false;
   const checks = [
     tx
       .select({ id: users.id })

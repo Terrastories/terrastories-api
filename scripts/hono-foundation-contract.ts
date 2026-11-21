@@ -3756,6 +3756,145 @@ export async function runHonoFoundationContract(
         assert.equal(deprovRaceRes.status, 204);
       }
     }
+
+    // Slice 14 descriptive community-row content guard (SQLite + PostgreSQL):
+    // a community holding any non-default descriptive/publication/legacy field
+    // on the communities row itself with zero child rows must report
+    // claimStatus='claimed' and refuse claim-token issuance (409), claim (401),
+    // and deprovision (409) without leaking the descriptive value.
+    const descriptiveRowCases: Array<
+      [string, Record<string, unknown>, string]
+    > = [
+      [
+        'description',
+        { description: `<p>Private descriptive note ${tag}</p>` },
+        `Private descriptive note ${tag}`,
+      ],
+      [
+        'descriptionPlain',
+        { descriptionPlain: `Plain descriptive note ${tag}` },
+        `Plain descriptive note ${tag}`,
+      ],
+      ['country', { country: 'BR' }, ''],
+      [
+        'culturalSettings',
+        { culturalSettings: `{"note":"${tag}"}` },
+        `{"note":"${tag}"}`,
+      ],
+      ['publicStories', { publicStories: true }, ''],
+      ['beta', { beta: true }, ''],
+    ];
+    for (let i = 0; i < descriptiveRowCases.length; i += 1) {
+      const [label, patch, secretText] = descriptiveRowCases[i]!;
+      const descCommRes = await send(app, '/v2/admin/communities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: saNullCookie },
+        body: JSON.stringify({
+          slug: `desc-guard-${label.toLowerCase()}-${tag.slice(0, 8)}`,
+        }),
+      });
+      assert.equal(descCommRes.status, 201);
+      const descCommId = (
+        (await descCommRes.json()) as { data: { id: number } }
+      ).data.id;
+      communityIds.push(descCommId);
+
+      // Issue a valid claim token BEFORE the community acquires descriptive fields
+      const preDescTokRes = await send(
+        app,
+        `/v2/admin/communities/${descCommId}/claim-tokens`,
+        { method: 'POST', headers: { cookie: saNullCookie } }
+      );
+      assert.equal(preDescTokRes.status, 201);
+      const preDescTok = (
+        (await preDescTokRes.json()) as { data: { token: string } }
+      ).data.token;
+
+      await db
+        .update(tables.communities)
+        .set(patch)
+        .where(eq(tables.communities.id, descCommId));
+
+      const descListRes = await send(
+        app,
+        '/v2/admin/communities?limit=100&offset=0',
+        { headers: { cookie: saNullCookie } }
+      );
+      assert.equal(descListRes.status, 200);
+      const descListText = await descListRes.text();
+      if (secretText.length > 0) {
+        assert.equal(descListText.includes(secretText), false);
+      }
+      const descListJson = JSON.parse(descListText) as {
+        data: Array<{ id: number; claimStatus: string }>;
+      };
+      assert.equal(
+        descListJson.data.find((c) => c.id === descCommId)?.claimStatus,
+        'claimed',
+        `expected claimStatus='claimed' for ${label}`
+      );
+
+      await status(
+        send(app, `/v2/admin/communities/${descCommId}/claim-tokens`, {
+          method: 'POST',
+          headers: { cookie: saNullCookie },
+        }),
+        409,
+        `expected 409 on claim-token issuance for ${label}`
+      );
+
+      await status(
+        send(app, '/v2/bootstrap/claim', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': `198.51.100.${247 + i}`,
+          },
+          body: JSON.stringify({
+            token: preDescTok,
+            username: `desc_guard_${i}_${tag.slice(0, 6)}`,
+            email: `desc-guard-${i}-${tag}@example.test`,
+            password: {
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: stretchedSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: makeDerivedKey(),
+            },
+          }),
+        }),
+        401,
+        `expected 401 on claim for ${label}`
+      );
+      assert.equal(
+        (
+          await db
+            .select({ id: tables.users.id })
+            .from(tables.users)
+            .where(eq(tables.users.communityId, descCommId))
+        ).length,
+        0,
+        `rejected claim for ${label} must create zero users`
+      );
+
+      await status(
+        send(app, `/v2/admin/communities/${descCommId}`, {
+          method: 'DELETE',
+          headers: { cookie: saNullCookie },
+        }),
+        409,
+        `expected 409 on deprovision for ${label}`
+      );
+      assert.equal(
+        (
+          await db
+            .select({ id: tables.communities.id })
+            .from(tables.communities)
+            .where(eq(tables.communities.id, descCommId))
+        ).length,
+        1,
+        `rejected deprovision for ${label} must preserve community row`
+      );
+    }
   } finally {
     for (const id of communityIds) {
       await db

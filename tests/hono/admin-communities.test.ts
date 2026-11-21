@@ -1133,4 +1133,122 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
       expect(tokens[0]?.supersededAt).toBeNull();
     }
   });
+
+  it('treats descriptive/non-default community row fields as content on SQLite and D1 db.batch() without blocking name/locale defaults', async () => {
+    for (const useD1Batch of [false, true]) {
+      const { db, roleCookies, requestAdmin, currentNow } = await setup({
+        useD1Batch,
+      });
+      const now = currentNow();
+      const descriptiveCases: Array<
+        [string, Partial<typeof communitiesSqlite.$inferInsert>, string]
+      > = [
+        [
+          'description',
+          { description: '<p>Secret community overview</p>' },
+          'Secret community overview',
+        ],
+        [
+          'descriptionPlain',
+          { descriptionPlain: 'Plain private description' },
+          'Plain private description',
+        ],
+        ['country', { country: 'BR' }, 'BR'],
+        [
+          'culturalSettings',
+          { culturalSettings: '{"custom":"secret"}' },
+          '{"custom":"secret"}',
+        ],
+        ['publicStories', { publicStories: true }, ''],
+        ['beta', { beta: true }, ''],
+      ];
+
+      for (const [label, patch, secretMarker] of descriptiveCases) {
+        const provRes = await requestAdmin('POST', '/v2/admin/communities', {
+          cookie: roleCookies.super_admin,
+          body: { slug: `row-desc-${label.toLowerCase()}` },
+        });
+        expect(provRes.status).toBe(201);
+        const cid = AdminCommunityResponseSchema.parse(await provRes.json())
+          .data.id;
+
+        await db
+          .update(communitiesSqlite)
+          .set(patch)
+          .where(eq(communitiesSqlite.id, cid));
+
+        const issueRes = await requestAdmin(
+          'POST',
+          `/v2/admin/communities/${cid}/claim-tokens`,
+          { cookie: roleCookies.super_admin }
+        );
+        expect(issueRes.status, `expected 409 for ${label}`).toBe(409);
+
+        expect(
+          await db
+            .select()
+            .from(claimTokensSqlite)
+            .where(eq(claimTokensSqlite.communityId, cid))
+        ).toHaveLength(0);
+
+        const failureAudits = (
+          await db
+            .select()
+            .from(auditEntriesSqlite)
+            .where(eq(auditEntriesSqlite.communityId, cid))
+        ).filter((e) => e.action === 'claim_token.issue');
+        expect(failureAudits).toHaveLength(1);
+        expect(failureAudits[0]?.outcome).toBe('failure');
+
+        const listRes = await requestAdmin(
+          'GET',
+          '/v2/admin/communities?limit=100',
+          { cookie: roleCookies.super_admin }
+        );
+        expect(listRes.status).toBe(200);
+        const listText = await listRes.text();
+        if (secretMarker.length > 0) {
+          expect(listText).not.toContain(secretMarker);
+        }
+        const listed = AdminCommunityListResponseSchema.parse(
+          JSON.parse(listText)
+        ).data.find((c) => c.id === cid);
+        expect(listed?.claimStatus, `expected claimed for ${label}`).toBe(
+          'claimed'
+        );
+      }
+
+      // Custom name + locale with all descriptive fields null/default remains unclaimed & issuable
+      const [cleanRow] = await db
+        .insert(communitiesSqlite)
+        .values({
+          name: 'Different Name Than Slug',
+          slug: 'clean-custom-locale',
+          locale: 'es',
+          publicStories: false,
+          beta: false,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      const listClean = AdminCommunityListResponseSchema.parse(
+        await (
+          await requestAdmin('GET', '/v2/admin/communities?limit=100', {
+            cookie: roleCookies.super_admin,
+          })
+        ).json()
+      ).data.find((c) => c.id === cleanRow.id);
+      expect(listClean?.claimStatus).toBe('unclaimed');
+      expect(
+        (
+          await requestAdmin(
+            'POST',
+            `/v2/admin/communities/${cleanRow.id}/claim-tokens`,
+            { cookie: roleCookies.super_admin }
+          )
+        ).status
+      ).toBe(201);
+    }
+  });
 });

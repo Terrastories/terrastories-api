@@ -135,9 +135,11 @@ export class AdminRepository {
   }
 
   /**
-   * Compute operational `claimStatus` without reading any descriptive or
-   * cultural columns. Uses zero boolean literals so SQLite, D1, and
-   * PostgreSQL evaluate identically.
+   * Compute operational `claimStatus` without reading or projecting any
+   * descriptive or cultural values (`communityUnclaimedAndEmptySql` evaluates
+   * nullity/defaultness of descriptive fields solely as a boolean SQL
+   * predicate). Uses zero boolean literals so SQLite, D1, and PostgreSQL
+   * evaluate identically.
    */
   private claimStatusExpression(
     communityIdExpr: SQL | number,

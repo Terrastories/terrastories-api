@@ -1321,8 +1321,8 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
     expect(filtered.data[0]?.outcome).toBe('success');
   });
 
-  it('verifies super_admin still receives 403/404 on every community content, user, and community media endpoint', async () => {
-    const { db, seedCommunity, roleCookies, request, currentNow } =
+  it('verifies super_admin still receives 403/404 on every community content, user, and community media endpoint and leaves real accounts unchanged', async () => {
+    const { db, seedCommunity, roleCookies, roleCreds, request, currentNow } =
       await setup();
     const now = currentNow();
     const fileId = crypto.randomUUID();
@@ -1349,35 +1349,150 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
       createdAt: now,
     });
 
+    const [memberBefore] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.email, roleCreds.member!.email));
+    expect(memberBefore).toBeDefined();
+    const sessionsListRes = await request(
+      'GET',
+      `/v2/users/${memberBefore!.id}/sessions`,
+      { cookie: roleCookies.admin }
+    );
+    expect(sessionsListRes.status).toBe(200);
+    const sessionsBefore = (
+      (await sessionsListRes.json()) as {
+        data: Array<{ handle: string; kind: string }>;
+      }
+    ).data;
+    expect(sessionsBefore).toHaveLength(1);
+    const realHandle = sessionsBefore[0]!.handle;
+    const usersCountBefore = (
+      await db
+        .select({ id: usersSqlite.id })
+        .from(usersSqlite)
+        .where(eq(usersSqlite.communityId, seedCommunity.id))
+    ).length;
+
+    const attackerKey = makeDerivedKey();
+    const attackerSalt = makeVerifierSalt();
     const cookie = roleCookies.super_admin;
-    for (const [method, path, expected] of [
-      ['GET', '/v2/community', 403],
-      ['PATCH', '/v2/community', 403],
-      ['GET', '/v2/community/map-config', 403],
-      ['PUT', '/v2/community/map-config', 403],
-      ['GET', '/v2/stories', 403],
-      ['POST', '/v2/stories', 403],
-      ['GET', '/v2/places', 403],
-      ['POST', '/v2/places', 403],
-      ['GET', '/v2/speakers', 403],
-      ['POST', '/v2/speakers', 403],
-      ['GET', '/v2/users', 403],
-      ['POST', '/v2/users', 403],
-      ['GET', `/v2/media/${fileId}`, 404],
-      ['GET', `/v2/media/${fileId}/metadata`, 404],
-      ['DELETE', `/v2/media/${fileId}`, 404],
+    for (const [method, path, expected, body] of [
+      ['GET', '/v2/community', 403, undefined],
+      ['PATCH', '/v2/community', 403, {}],
+      ['GET', '/v2/community/map-config', 403, undefined],
+      ['PUT', '/v2/community/map-config', 403, {}],
+      ['GET', '/v2/stories', 403, undefined],
+      ['POST', '/v2/stories', 403, {}],
+      ['GET', '/v2/places', 403, undefined],
+      ['POST', '/v2/places', 403, {}],
+      ['GET', '/v2/speakers', 403, undefined],
+      ['POST', '/v2/speakers', 403, {}],
+      ['GET', '/v2/users', 403, undefined],
+      ['GET', `/v2/users/${memberBefore!.id}`, 403, undefined],
+      [
+        'POST',
+        '/v2/users',
+        403,
+        {
+          username: 'sa_denied_user',
+          email: 'sa-denied-user@example.test',
+          role: 'admin',
+          password: {
+            algorithm: ARGON2ID_ALGORITHM,
+            salt: attackerSalt,
+            params: { ...ARGON2ID_PARAMS },
+            derivedKey: attackerKey,
+          },
+        },
+      ],
+      [
+        'PATCH',
+        `/v2/users/${memberBefore!.id}`,
+        403,
+        { role: 'admin', status: 'disabled', displayName: 'Tampered' },
+      ],
+      [
+        'POST',
+        `/v2/users/${memberBefore!.id}/password-reset`,
+        403,
+        {
+          algorithm: ARGON2ID_ALGORITHM,
+          salt: attackerSalt,
+          params: { ...ARGON2ID_PARAMS },
+          derivedKey: attackerKey,
+        },
+      ],
+      ['POST', `/v2/users/${memberBefore!.id}/login-codes`, 403, undefined],
+      ['GET', `/v2/users/${memberBefore!.id}/sessions`, 403, undefined],
+      [
+        'DELETE',
+        `/v2/users/${memberBefore!.id}/sessions/${realHandle}`,
+        403,
+        undefined,
+      ],
+      ['GET', `/v2/media/${fileId}`, 404, undefined],
+      ['GET', `/v2/media/${fileId}/metadata`, 404, undefined],
+      ['DELETE', `/v2/media/${fileId}`, 404, undefined],
     ] as const) {
-      const res = await request(method, path, {
-        cookie,
-        body:
-          method === 'POST' || method === 'PATCH' || method === 'PUT'
-            ? {}
-            : undefined,
-      });
+      const res = await request(method, path, { cookie, body });
       expect(res.status, `expected ${expected} on ${method} ${path}`).toBe(
         expected
       );
+      if (expected === 403) {
+        expect(await res.json()).toEqual({ error: 'Forbidden' });
+      }
     }
+
+    // Credentials, roles, login codes, and sessions are completely unchanged.
+    const [memberAfter] = await db
+      .select()
+      .from(usersSqlite)
+      .where(eq(usersSqlite.id, memberBefore!.id));
+    expect(memberAfter?.role).toBe('member');
+    expect(memberAfter?.isActive).toBe(true);
+    expect(memberAfter?.displayName).toBe(memberBefore!.displayName);
+    expect(memberAfter?.passwordVerifier).toBe(memberBefore!.passwordVerifier);
+    expect(
+      await db
+        .select({ id: usersSqlite.id })
+        .from(usersSqlite)
+        .where(eq(usersSqlite.communityId, seedCommunity.id))
+    ).toHaveLength(usersCountBefore);
+    expect(
+      await db
+        .select({ id: loginCodesSqlite.id })
+        .from(loginCodesSqlite)
+        .where(eq(loginCodesSqlite.userId, memberBefore!.id))
+    ).toHaveLength(0);
+    expect(
+      (await request('GET', '/v2/auth/me', { cookie: roleCookies.member }))
+        .status
+    ).toBe(200);
+    expect(
+      (
+        await request('POST', '/v2/auth/login', {
+          headers: { 'cf-connecting-ip': '203.0.113.190' },
+          body: {
+            identifier: roleCreds.member!.email,
+            communitySlug: seedCommunity.slug,
+            derivedKey: attackerKey,
+          },
+        })
+      ).status
+    ).toBe(401);
+    expect(
+      (
+        await request('POST', '/v2/auth/login', {
+          headers: { 'cf-connecting-ip': '203.0.113.191' },
+          body: {
+            identifier: roleCreds.member!.email,
+            communitySlug: seedCommunity.slug,
+            derivedKey: roleCreds.member!.key,
+          },
+        })
+      ).status
+    ).toBe(200);
   });
 
   it('returns uniform 401 and records per-IP throttle + system bootstrap.claim failure audit when community is deprovisioned mid-claim', async () => {

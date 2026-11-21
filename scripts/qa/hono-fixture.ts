@@ -5561,6 +5561,11 @@ export async function createFixture(
       },
     };
     let userManagedSessionHandle = '';
+    const qaSuperDeniedKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
+    const qaSuperDeniedSalt = Buffer.from(
+      crypto.getRandomValues(new Uint8Array(16))
+    ).toString('base64');
+    let qaSuperDeniedSessionHandle = '';
     let qaStageFileId = '';
     let qaStageFile2Id = '';
     let qaAudioFileId = '';
@@ -7073,25 +7078,343 @@ export async function createFixture(
             method: 'GET',
             path: '/v2/users',
             expected: 403,
+            saveCookieAs: 'qaSuperAdmin',
             check: forbiddenCheck,
+          },
+          // Establish a real device session on a real community account so
+          // super_admin denials across every /v2/users/* endpoint hit real
+          // records and prove rejected mutations leave credentials, roles,
+          // and sessions unchanged.
+          {
+            name: 'establish target community member device session for super_admin denial checks',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: '' },
+            body: {
+              identifier: userCommunityCredentials.member.email,
+              derivedKey,
+              communitySlug: 'qa-user-management-community',
+              deviceSession: true,
+            },
+            check: ownUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          {
+            name: 'save target community member device session cookie',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'qaTargetMemberDevice',
+            check: ownMeUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id,
+              false
+            ),
+          },
+          {
+            name: 'login target community admin to capture real device session handle',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: '' },
+            body: {
+              identifier: userCommunityCredentials.admin.email,
+              derivedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: ownUser(
+              userCommunityCredentials.admin.email,
+              'admin',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          {
+            name: 'capture target community member device session handle',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}/sessions`,
+            expected: 200,
+            saveCookieAs: 'qaTargetAdmin',
+            check: (body) => {
+              const rows = (
+                body as {
+                  data?: Array<{ handle?: unknown; kind?: unknown }>;
+                }
+              )?.data;
+              if (!Array.isArray(rows) || rows.length !== 1) return false;
+              const session = rows[0]!;
+              if (
+                session.kind !== 'device' ||
+                typeof session.handle !== 'string' ||
+                session.handle.length !== 22
+              ) {
+                return false;
+              }
+              qaSuperDeniedSessionHandle = session.handle;
+              return true;
+            },
+          },
+          {
+            name: 'deny v2 user detail',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user create',
+            method: 'POST',
+            path: '/v2/users',
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            body: {
+              username: 'qa_super_denied_user',
+              email: 'qa-super-denied-user@example.test',
+              displayName: 'Denied By Policy',
+              role: 'admin',
+              password: {
+                algorithm: ARGON2ID_ALGORITHM,
+                salt: qaSuperDeniedSalt,
+                params: JSON.parse(ARGON2ID_PARAMS_JSON),
+                derivedKey: qaSuperDeniedKey,
+              },
+            },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user update',
+            method: 'PATCH',
+            path: `/v2/users/${userCommunityIds.member}`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            body: {
+              role: 'admin',
+              status: 'disabled',
+              displayName: 'Tampered By Super Admin',
+            },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user password reset',
+            method: 'POST',
+            path: `/v2/users/${userCommunityIds.member}/password-reset`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            body: {
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: qaSuperDeniedSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: qaSuperDeniedKey,
+            },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user login-code issuance',
+            method: 'POST',
+            path: `/v2/users/${userCommunityIds.member}/login-codes`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user sessions list',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}/sessions`,
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            check: forbiddenCheck,
+          },
+          {
+            name: 'deny v2 user session revoke',
+            method: 'DELETE',
+            path: '/v2/users/pending',
+            expected: 403,
+            useSavedCookie: 'qaSuperAdmin',
+            prepare: () =>
+              `/v2/users/${userCommunityIds.member}/sessions/${qaSuperDeniedSessionHandle}`,
+            check: forbiddenCheck,
+          },
+          {
+            name: 'target member device session survives rejected super_admin mutations',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            useSavedCookie: 'qaTargetMemberDevice',
+            check: ownMeUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id,
+              false
+            ),
+          },
+          {
+            name: 'rejected super_admin user create left no account',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.142',
+              'cf-connecting-ip': '203.0.113.142',
+            },
+            body: {
+              identifier: 'qa-super-denied-user@example.test',
+              derivedKey: qaSuperDeniedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: invalidCredentials,
+          },
+          {
+            name: 'rejected super_admin password reset did not replace credentials',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              cookie: '',
+              'x-forwarded-for': '203.0.113.143',
+              'cf-connecting-ip': '203.0.113.143',
+            },
+            body: {
+              identifier: userCommunityCredentials.member.email,
+              derivedKey: qaSuperDeniedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: invalidCredentials,
+          },
+          {
+            name: 'target member original credentials still authenticate with unchanged role',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: { cookie: '' },
+            body: {
+              identifier: userCommunityCredentials.member.email,
+              derivedKey,
+              communitySlug: 'qa-user-management-community',
+            },
+            check: ownUser(
+              userCommunityCredentials.member.email,
+              'member',
+              liveSessionCookie,
+              userCommunity.id
+            ),
+          },
+          {
+            name: 'logout verification member session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+          },
+          {
+            name: 'target community user list unchanged after super_admin denials',
+            method: 'GET',
+            path: '/v2/users',
+            expected: 200,
+            useSavedCookie: 'qaTargetAdmin',
+            check: (body) => {
+              const parsed = body as {
+                data?: Array<{ email?: unknown }>;
+                meta?: { total?: number };
+              };
+              return (
+                parsed?.meta?.total === 3 &&
+                Array.isArray(parsed?.data) &&
+                parsed.data.length === 3 &&
+                !parsed.data.some(
+                  (row) => row.email === 'qa-super-denied-user@example.test'
+                )
+              );
+            },
+          },
+          {
+            name: 'target member profile and role unchanged after super_admin denials',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}`,
+            expected: 200,
+            useSavedCookie: 'qaTargetAdmin',
+            check: (body) => {
+              const data = (
+                body as {
+                  data?: {
+                    id?: unknown;
+                    email?: unknown;
+                    role?: unknown;
+                    status?: unknown;
+                    displayName?: unknown;
+                  };
+                }
+              )?.data;
+              return (
+                !!data &&
+                data.id === userCommunityIds.member &&
+                data.email === userCommunityCredentials.member.email &&
+                data.role === 'member' &&
+                data.status === 'active' &&
+                data.displayName === null
+              );
+            },
+          },
+          {
+            name: 'target member device session unchanged after super_admin denials',
+            method: 'GET',
+            path: `/v2/users/${userCommunityIds.member}/sessions`,
+            expected: 200,
+            useSavedCookie: 'qaTargetAdmin',
+            check: (body) => {
+              const rows = (
+                body as { data?: Array<{ handle?: unknown; kind?: unknown }> }
+              )?.data;
+              return (
+                Array.isArray(rows) &&
+                rows.length === 1 &&
+                rows[0]?.handle === qaSuperDeniedSessionHandle &&
+                rows[0]?.kind === 'device'
+              );
+            },
+          },
+          {
+            name: 'logout target community admin helper session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'qaTargetAdmin',
+          },
+          {
+            name: 'logout target community member helper device session',
+            method: 'POST',
+            path: '/v2/auth/logout',
+            expected: 204,
+            useSavedCookie: 'qaTargetMemberDevice',
           },
           {
             name: 'deny community media metadata',
             method: 'GET',
             path: `/v2/media/${readableFileId}/metadata`,
             expected: 404,
+            useSavedCookie: 'qaSuperAdmin',
           },
           {
             name: 'deny community media delete',
             method: 'DELETE',
             path: `/v2/media/${readableFileId}`,
             expected: 404,
+            useSavedCookie: 'qaSuperAdmin',
           },
           {
             name: 'logout',
             method: 'POST',
             path: '/v2/auth/logout',
             expected: 204,
+            useSavedCookie: 'qaSuperAdmin',
           },
         ],
       },

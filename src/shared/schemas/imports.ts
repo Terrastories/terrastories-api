@@ -30,6 +30,8 @@ export const MAX_IMPORT_PAGE_LIMIT = 100;
 export const MAX_IMPORT_PREVIEW_SAMPLE_ROWS = 25;
 export const MAX_IMPORT_PREVIEW_DESCRIPTION_CHARS = 240;
 export const MAX_IMPORT_ROW_ERRORS = 1_000;
+export const MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY = 5;
+export const IMPORT_PREVIEW_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export const ALLOWED_CSV_MIME_TYPES: ReadonlySet<string> = new Set([
   'text/csv',

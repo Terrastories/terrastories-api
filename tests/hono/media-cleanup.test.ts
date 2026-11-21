@@ -9,13 +9,18 @@ import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { tablesFor } from '../../src/db/dialect.js';
 import {
   MediaCleanupCoordinator,
   ORPHAN_SWEEP_GRACE_MS,
   WORKER_SWEEP_SUBREQUEST_BUDGET,
 } from '../../src/services/media-cleanup.service.js';
+import {
+  IMPORT_PREVIEW_TTL_MS,
+  type StoredNormalizedImportData,
+} from '../../src/shared/schemas/imports.js';
+import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
 import {
   ORPHAN_SWEEP_CURSOR_KEY,
   ORPHAN_SWEEP_HOLD_KEY,
@@ -806,5 +811,435 @@ describe('Slice 9 orphan-object sweeper (#140)', () => {
     } finally {
       d1Sqlite.close();
     }
+  });
+
+  function makeNormalizedPlacesPayload(
+    name: string
+  ): StoredNormalizedImportData {
+    return {
+      kind: 'places',
+      rows: [
+        {
+          rowNumber: 1,
+          name,
+          normalizedName: name.toLowerCase(),
+          description: null,
+          descriptionPlain: null,
+          typeOfPlace: null,
+          region: null,
+          latitude: null,
+          longitude: null,
+          attachments: [],
+        },
+      ],
+      relatedPlacesToCreate: [],
+      relatedSpeakersToCreate: [],
+      skippedDuplicates: 0,
+      validRowCount: 1,
+    };
+  }
+
+  async function seedImportManifestWithFiles(
+    targetDb: typeof db | ReturnType<typeof drizzleD1>,
+    store: Map<string, StoredObject>,
+    opts: {
+      communityId: number;
+      status: 'previewed' | 'committed';
+      createdAt: Date;
+      committedAt?: Date | null;
+      withStagedMedia: boolean;
+      storagePrefix: string;
+    }
+  ) {
+    const targetTables = tablesFor(targetDb as typeof db);
+    const sourceId = crypto.randomUUID();
+    const sourceKey = `communities/${opts.communityId}/imports/${opts.storagePrefix}-${sourceId}`;
+    await (targetDb as typeof db).insert(targetTables.files).values({
+      id: sourceId,
+      filename: sourceId,
+      originalName: `${opts.storagePrefix}.csv`,
+      path: sourceKey,
+      storageKey: sourceKey,
+      url: `/v2/media/${sourceId}`,
+      mimeType: 'text/csv',
+      size: 16,
+      byteSize: 16,
+      checksum: null,
+      communityId: opts.communityId,
+      uploadedBy: null,
+      culturalRestrictions: null,
+      isActive: false,
+      createdAt: opts.createdAt,
+      updatedAt: opts.createdAt,
+    });
+    store.set(sourceKey, {
+      bytes: new TextEncoder().encode('name\nSecret\n'),
+      uploaded: opts.createdAt,
+    });
+
+    const stagedIds: string[] = [];
+    const stagedKeys: string[] = [];
+    if (opts.withStagedMedia) {
+      const stagedId = crypto.randomUUID();
+      const stagedKey = `communities/${opts.communityId}/media/${opts.storagePrefix}-${stagedId}`;
+      await (targetDb as typeof db).insert(targetTables.files).values({
+        id: stagedId,
+        filename: stagedId,
+        originalName: `${opts.storagePrefix}.png`,
+        path: stagedKey,
+        storageKey: stagedKey,
+        url: `/v2/media/${stagedId}`,
+        mimeType: 'image/png',
+        size: 4,
+        byteSize: 4,
+        checksum: null,
+        communityId: opts.communityId,
+        uploadedBy: null,
+        culturalRestrictions: null,
+        isActive: opts.status === 'committed',
+        createdAt: opts.createdAt,
+        updatedAt: opts.createdAt,
+      });
+      store.set(stagedKey, {
+        bytes: Uint8Array.from([1, 2, 3, 4]),
+        uploaded: opts.createdAt,
+      });
+      stagedIds.push(stagedId);
+      stagedKeys.push(stagedKey);
+    }
+
+    const [manifest] = await (targetDb as typeof db)
+      .insert(targetTables.importManifests)
+      .values({
+        communityId: opts.communityId,
+        kind: 'places',
+        status: opts.status,
+        createdBy: null,
+        sourceFileName: `${opts.storagePrefix}.csv`,
+        sourceFileId: sourceId,
+        mappings: { headerMappings: { name: 'name' }, unmappedHeaders: [] },
+        normalizedRows: makeNormalizedPlacesPayload(
+          `Secret ${opts.storagePrefix}`
+        ) as unknown as Record<string, unknown>,
+        rowCount: 1,
+        rowErrors: [],
+        stagedFileIds: stagedIds,
+        resultSummary: null,
+        committedAt:
+          opts.status === 'committed'
+            ? (opts.committedAt ?? opts.createdAt).getTime()
+            : null,
+        createdAt: opts.createdAt.getTime(),
+      })
+      .returning({ id: targetTables.importManifests.id });
+
+    return {
+      manifestId: manifest!.id,
+      sourceId,
+      sourceKey,
+      stagedIds,
+      stagedKeys,
+    };
+  }
+
+  it('auto-discards stale previewed import manifests past 7-day TTL across SQLite and D1 while keeping fresh/committed manifests and respecting restore hold', async () => {
+    const now = new Date('2026-06-20T12:00:00.000Z');
+    const expiredAt = new Date(now.getTime() - IMPORT_PREVIEW_TTL_MS - 1_000);
+    const freshAt = new Date(now.getTime() - IMPORT_PREVIEW_TTL_MS + 60_000);
+    const [comm] = await db
+      .insert(tables.communities)
+      .values({
+        name: 'Expiry Sweep Comm',
+        slug: `expiry-sweep-${crypto.randomUUID().slice(0, 8)}`,
+        publicStories: true,
+        isActive: true,
+        createdAt: expiredAt,
+        updatedAt: expiredAt,
+      })
+      .returning();
+
+    const { store, storage } = createListableStorage();
+    const stalePreview = await seedImportManifestWithFiles(db, store, {
+      communityId: comm!.id,
+      status: 'previewed',
+      createdAt: expiredAt,
+      withStagedMedia: true,
+      storagePrefix: 'stale-preview',
+    });
+    const freshPreview = await seedImportManifestWithFiles(db, store, {
+      communityId: comm!.id,
+      status: 'previewed',
+      createdAt: freshAt,
+      withStagedMedia: true,
+      storagePrefix: 'fresh-preview',
+    });
+    const staleCommitted = await seedImportManifestWithFiles(db, store, {
+      communityId: comm!.id,
+      status: 'committed',
+      createdAt: expiredAt,
+      committedAt: expiredAt,
+      withStagedMedia: true,
+      storagePrefix: 'stale-committed',
+    });
+
+    // Hold marker prevents any auto-discard or byte cleanup
+    store.set(ORPHAN_SWEEP_HOLD_KEY, {
+      bytes: new TextEncoder().encode('hold\n'),
+      uploaded: new Date(0),
+    });
+    const heldCleanup = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: () => {},
+    });
+    const heldResult = await heldCleanup.sweepOrphanObjects();
+    expect(heldResult.deletedCount).toBe(0);
+    const [stillPreviewed] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, stalePreview.manifestId));
+    expect(stillPreviewed?.status).toBe('previewed');
+    expect(store.has(stalePreview.stagedKeys[0]!)).toBe(true);
+    expect(store.has(stalePreview.sourceKey)).toBe(true);
+
+    store.delete(ORPHAN_SWEEP_HOLD_KEY);
+
+    // Transient storage.delete failure still transitions DB atomically and leaves bytes
+    // recoverable by the next sweepOrphanObjects run.
+    const flakyStorage: FoundationStorage = {
+      ...storage,
+      async delete() {
+        throw new Error('transient outage');
+      },
+    };
+    const flakyCleanup = new MediaCleanupCoordinator(db, flakyStorage, {
+      now: () => now,
+      log: () => {},
+    });
+    const firstPass = await flakyCleanup.sweepOrphanObjects();
+    expect(firstPass.failedCount).toBeGreaterThanOrEqual(2);
+
+    const [afterDiscardRow] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, stalePreview.manifestId));
+    expect(afterDiscardRow?.status).toBe('discarded');
+    expect(
+      (afterDiscardRow?.normalizedRows as { rows?: unknown[] })?.rows
+    ).toEqual([]);
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, stalePreview.stagedIds[0]!))
+    ).toHaveLength(0);
+    const [staleSourceRow] = await db
+      .select()
+      .from(tables.files)
+      .where(eq(tables.files.id, stalePreview.sourceId));
+    expect(staleSourceRow?.isActive).toBe(false);
+
+    const discardAudits = await db
+      .select()
+      .from(tables.auditEntries)
+      .where(
+        and(
+          eq(tables.auditEntries.communityId, comm!.id),
+          eq(tables.auditEntries.action, 'import.discard')
+        )
+      );
+    expect(discardAudits).toHaveLength(1);
+    expect(discardAudits[0]!.actorId).toBeNull();
+    expect(() =>
+      validateContentFreeAuditEntry({
+        communityId: discardAudits[0]!.communityId,
+        actorId: discardAudits[0]!.actorId,
+        action: discardAudits[0]!.action,
+        resourceType: discardAudits[0]!.resourceType,
+        resourceIds: discardAudits[0]!.resourceIds,
+        outcome: discardAudits[0]!.outcome,
+        ipAddress: discardAudits[0]!.ipAddress,
+        userAgent: discardAudits[0]!.userAgent,
+      })
+    ).not.toThrow();
+
+    // Bytes still linger because of the outage
+    expect(store.has(stalePreview.stagedKeys[0]!)).toBe(true);
+    expect(store.has(stalePreview.sourceKey)).toBe(true);
+
+    // Recovery sweep deletes the aged stale staged & source CSV bytes
+    const healthyCleanup = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: () => {},
+    });
+    const recovered = await healthyCleanup.sweepOrphanObjects();
+    expect(recovered.deletedCount).toBeGreaterThanOrEqual(2);
+    expect(store.has(stalePreview.stagedKeys[0]!)).toBe(false);
+    expect(store.has(stalePreview.sourceKey)).toBe(false);
+
+    // Fresh preview and older committed manifest remain untouched
+    const [freshRow] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, freshPreview.manifestId));
+    expect(freshRow?.status).toBe('previewed');
+    expect(store.has(freshPreview.stagedKeys[0]!)).toBe(true);
+    expect(store.has(freshPreview.sourceKey)).toBe(true);
+
+    const [committedRow] = await db
+      .select()
+      .from(tables.importManifests)
+      .where(eq(tables.importManifests.id, staleCommitted.manifestId));
+    expect(committedRow?.status).toBe('committed');
+    expect(store.has(staleCommitted.stagedKeys[0]!)).toBe(true);
+    expect(store.has(staleCommitted.sourceKey)).toBe(true);
+
+    // D1 path within <= 100 bound params and Workers Free subrequest budget
+    const { db: d1Db, sqlite: d1Sqlite, boundParams } = createParamCountD1Db();
+    try {
+      const d1SeedTables = tablesFor(d1Db as unknown as typeof db);
+      const [d1Comm] = await d1Db
+        .insert(d1SeedTables.communities)
+        .values({
+          name: 'D1 Expiry Comm',
+          slug: `d1-expiry-${crypto.randomUUID().slice(0, 8)}`,
+          publicStories: true,
+          isActive: true,
+          createdAt: expiredAt,
+          updatedAt: expiredAt,
+        })
+        .returning();
+      const d1StorageState = createListableStorage();
+      const d1Stale = await seedImportManifestWithFiles(
+        d1Db,
+        d1StorageState.store,
+        {
+          communityId: d1Comm!.id,
+          status: 'previewed',
+          createdAt: expiredAt,
+          withStagedMedia: true,
+          storagePrefix: 'd1-stale',
+        }
+      );
+      const d1Fresh = await seedImportManifestWithFiles(
+        d1Db,
+        d1StorageState.store,
+        {
+          communityId: d1Comm!.id,
+          status: 'previewed',
+          createdAt: freshAt,
+          withStagedMedia: true,
+          storagePrefix: 'd1-fresh',
+        }
+      );
+
+      const d1Cleanup = new MediaCleanupCoordinator(
+        d1Db as never,
+        d1StorageState.storage,
+        { now: () => now, log: () => {} }
+      );
+      const d1Sweep = await d1Cleanup.sweepOrphanObjects({
+        subrequestBudget: WORKER_SWEEP_SUBREQUEST_BUDGET,
+      });
+      expect(d1Sweep.subrequests).toBeLessThanOrEqual(
+        WORKER_SWEEP_SUBREQUEST_BUDGET
+      );
+      expect(Math.max(...boundParams)).toBeLessThanOrEqual(100);
+
+      const [d1StaleAfter] = await d1Db
+        .select()
+        .from(d1SeedTables.importManifests)
+        .where(eq(d1SeedTables.importManifests.id, d1Stale.manifestId));
+      expect(d1StaleAfter?.status).toBe('discarded');
+      expect(
+        (d1StaleAfter?.normalizedRows as { rows?: unknown[] })?.rows
+      ).toEqual([]);
+      expect(d1StorageState.store.has(d1Stale.stagedKeys[0]!)).toBe(false);
+      expect(d1StorageState.store.has(d1Stale.sourceKey)).toBe(false);
+
+      const [d1FreshAfter] = await d1Db
+        .select()
+        .from(d1SeedTables.importManifests)
+        .where(eq(d1SeedTables.importManifests.id, d1Fresh.manifestId));
+      expect(d1FreshAfter?.status).toBe('previewed');
+      expect(d1StorageState.store.has(d1Fresh.stagedKeys[0]!)).toBe(true);
+      expect(d1StorageState.store.has(d1Fresh.sourceKey)).toBe(true);
+    } finally {
+      d1Sqlite.close();
+    }
+  });
+
+  it('reclaims legacy soft-deleted inactive files in sweepUnreferencedFiles while protecting previewed staged media and source CSV rows', async () => {
+    const now = new Date('2026-06-20T12:00:00.000Z');
+    const [comm] = await db
+      .insert(tables.communities)
+      .values({
+        name: 'Legacy Inactive Comm',
+        slug: `legacy-inactive-${crypto.randomUUID().slice(0, 8)}`,
+        publicStories: true,
+        isActive: true,
+        createdAt: OLD,
+        updatedAt: OLD,
+      })
+      .returning();
+
+    const { store, storage } = createListableStorage();
+    const legacyId = crypto.randomUUID();
+    const legacyKey = `communities/${comm!.id}/media/${legacyId}`;
+    await db.insert(tables.files).values({
+      id: legacyId,
+      filename: legacyId,
+      originalName: 'legacy-soft-deleted.png',
+      path: legacyKey,
+      storageKey: legacyKey,
+      url: `/v2/media/${legacyId}`,
+      mimeType: 'image/png',
+      size: 4,
+      byteSize: 4,
+      checksum: null,
+      communityId: comm!.id,
+      uploadedBy: null,
+      culturalRestrictions: null,
+      isActive: false,
+      createdAt: OLD,
+      updatedAt: OLD,
+    });
+    store.set(legacyKey, { bytes: Uint8Array.from([9, 9]), uploaded: OLD });
+
+    const previewed = await seedImportManifestWithFiles(db, store, {
+      communityId: comm!.id,
+      status: 'previewed',
+      createdAt: now,
+      withStagedMedia: true,
+      storagePrefix: 'keep-staged',
+    });
+
+    const cleanup = new MediaCleanupCoordinator(db, storage, {
+      now: () => now,
+      log: () => {},
+    });
+    const res = await cleanup.sweepUnreferencedFiles({
+      fileIds: [legacyId, previewed.stagedIds[0]!, previewed.sourceId],
+    });
+    expect(res.deletedCount).toBe(1);
+    expect(
+      await db.select().from(tables.files).where(eq(tables.files.id, legacyId))
+    ).toHaveLength(0);
+    expect(store.has(legacyKey)).toBe(false);
+
+    // Previewed manifest's staged media and source CSV stay protected
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, previewed.stagedIds[0]!))
+    ).toHaveLength(1);
+    expect(store.has(previewed.stagedKeys[0]!)).toBe(true);
+    expect(
+      await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, previewed.sourceId))
+    ).toHaveLength(1);
+    expect(store.has(previewed.sourceKey)).toBe(true);
   });
 });

@@ -2,7 +2,15 @@
  * Focused contract, staging-isolation, D1 budget/batch, security, and
  * negative tests for Slice 12 `POST /v2/imports/preview` (#123, #197).
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  vi,
+} from 'vitest';
 import { createHash } from 'node:crypto';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -27,6 +35,7 @@ import {
   MAX_IMPORT_PREVIEW_SAMPLE_ROWS,
   MAX_IMPORT_ROW_ERRORS,
   MAX_IMPORT_STORY_EDGES_PER_ROW,
+  MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY,
 } from '../../src/shared/schemas/imports.js';
 import { MediaUploadResponseSchema } from '../../src/shared/schemas/media-v2.js';
 import {
@@ -464,7 +473,10 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
 
     const mem = createListableMemoryStorage();
     memStore = mem.store;
-    cleanup = new MediaCleanupCoordinator(db, mem.storage);
+    const appNow = new Date('2026-06-15T12:00:00.000Z');
+    cleanup = new MediaCleanupCoordinator(db, mem.storage, {
+      now: () => appNow,
+    });
     app = createHonoApp({
       repository: new HonoFoundationRepository(db),
       storage: mem.storage,
@@ -473,7 +485,7 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
       corsOrigins: [CLIENT_ORIGIN],
       secureCookies: false,
       serverSecret: makeServerSecret(),
-      now: () => new Date('2026-06-15T12:00:00.000Z'),
+      now: () => appNow,
     });
 
     cookies.viewer = await loginAs('imp-viewer@example.test', ids.ownCommunity);
@@ -541,6 +553,13 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
       createdAt: now,
       updatedAt: now,
     });
+  });
+
+  beforeEach(async () => {
+    await db
+      .update(tables.importManifests)
+      .set({ status: 'discarded' })
+      .where(eq(tables.importManifests.status, 'previewed'));
   });
 
   afterAll(() => {
@@ -1082,7 +1101,9 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
         .returning({ id: d1Tables.users.id });
 
       const d1Mem = createListableMemoryStorage();
-      const d1Cleanup = new MediaCleanupCoordinator(d1.db, d1Mem.storage);
+      const d1Cleanup = new MediaCleanupCoordinator(d1.db, d1Mem.storage, {
+        now: () => now,
+      });
       const d1App = createHonoApp({
         repository: new HonoFoundationRepository(d1.db as any),
         storage: d1Mem.storage,
@@ -1455,7 +1476,9 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
       });
 
       const d1Mem = createListableMemoryStorage();
-      const d1Cleanup = new MediaCleanupCoordinator(d1.db, d1Mem.storage);
+      const d1Cleanup = new MediaCleanupCoordinator(d1.db, d1Mem.storage, {
+        now: () => d1Now,
+      });
       const d1App = createHonoApp({
         repository: new HonoFoundationRepository(d1.db as any),
         storage: d1Mem.storage,
@@ -2085,6 +2108,223 @@ describe('Slice 12 POST /v2/imports/preview (#123, #197)', () => {
           commitActualStmts[i]!.params.length
         );
       }
+    } finally {
+      d1.sqlite.close();
+    }
+  });
+
+  it('caps open previews per community across Node SQLite and concurrent D1 batch races without leaking bytes', async () => {
+    const storeKeysBefore = new Set(memStore.keys());
+    const createdIds: number[] = [];
+
+    // 1. Fill up to MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY (5) in ownCommunity
+    for (let i = 0; i < MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY; i += 1) {
+      const res = await postPreview(app, {
+        cookie: cookies.editor,
+        csvFilename: `open-${i}.csv`,
+        csvText: `name\nOpen Preview Place ${i}\n`,
+        fields: { kind: 'places' },
+      });
+      expect(res.status).toBe(201);
+      const parsed = ImportManifestDetailResponseSchema.parse(await res.json());
+      createdIds.push(parsed.data.id);
+    }
+
+    // 2. 6th open preview with staged media -> 429 and all uploaded bytes rolled back
+    const keysBeforeOverflow = new Set(memStore.keys());
+    const sixthRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvFilename: 'open-overflow.csv',
+      csvText: 'name,photo\nOverflow Place,overflow.png\n',
+      fields: { kind: 'places' },
+      mediaParts: [
+        {
+          filename: 'overflow.png',
+          contentType: 'image/png',
+          bytes: PNG_BYTES,
+        },
+      ],
+    });
+    expect(sixthRes.status).toBe(429);
+    const sixthBody = (await sixthRes.json()) as {
+      code?: string;
+      error?: string;
+    };
+    expect(sixthBody.code).toBe('too_many_open_previews');
+    expect(new Set(memStore.keys())).toEqual(keysBeforeOverflow);
+
+    // 3. Another community can still preview independently (limit is per-community)
+    const foreignRes = await postPreview(app, {
+      cookie: cookies.foreign,
+      csvFilename: 'foreign-open.csv',
+      csvText: 'name\nForeign Open Place\n',
+      fields: { kind: 'places' },
+    });
+    expect(foreignRes.status).toBe(201);
+
+    // 4. Discarding one open preview frees a slot for the next preview
+    const discardRes = await app.request(
+      `${API_ORIGIN}/v2/imports/${createdIds[0]}`,
+      {
+        method: 'DELETE',
+        headers: { cookie: cookies.editor, origin: CLIENT_ORIGIN },
+      }
+    );
+    expect(discardRes.status).toBe(200);
+    const afterDiscardRes = await postPreview(app, {
+      cookie: cookies.editor,
+      csvFilename: 'after-discard.csv',
+      csvText: 'name\nAfter Discard Place\n',
+      fields: { kind: 'places' },
+    });
+    expect(afterDiscardRes.status).toBe(201);
+    expect(memStore.size).toBeGreaterThanOrEqual(storeKeysBefore.size);
+
+    // 5. Concurrent barrier-synchronized race at limit - 1 on real D1 driver:
+    // exactly one 201 and one 429, loser cleans staged bytes, <= 100 params/stmt
+    let arrived = 0;
+    let barrierActive = false;
+    let releaseBarrier!: () => void;
+    const barrierPromise = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    const boundCounts: number[] = [];
+    const d1 = createRealD1Db(boundCounts, {
+      onBeforeBatch: async () => {
+        if (!barrierActive) return;
+        arrived += 1;
+        if (arrived >= 2) {
+          barrierActive = false;
+          releaseBarrier();
+        } else {
+          await barrierPromise;
+        }
+      },
+    });
+    try {
+      const d1Now = new Date('2026-07-05T12:00:00.000Z');
+      const d1Tables = tablesFor(d1.db);
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+      const [comm] = await d1.db
+        .insert(d1Tables.communities)
+        .values({
+          name: 'D1 Cap Race Comm',
+          slug: 'd1-cap-race-comm',
+          publicStories: false,
+          isActive: true,
+          createdAt: d1Now,
+          updatedAt: d1Now,
+        })
+        .returning({ id: d1Tables.communities.id });
+      await d1.db.insert(d1Tables.users).values({
+        email: 'd1-cap-race@example.test',
+        username: 'd1_cap_race',
+        ...deriveUserIdentityColumns({
+          email: 'd1-cap-race@example.test',
+          username: 'd1_cap_race',
+        }),
+        firstName: 'D1',
+        lastName: 'Race',
+        ...seed,
+        role: 'editor',
+        communityId: comm.id,
+        isActive: true,
+        createdAt: d1Now,
+        updatedAt: d1Now,
+      });
+
+      const d1Mem = createListableMemoryStorage();
+      const d1App = createHonoApp({
+        repository: new HonoFoundationRepository(d1.db as any),
+        storage: d1Mem.storage,
+        mediaCleanup: new MediaCleanupCoordinator(d1.db, d1Mem.storage, {
+          now: () => d1Now,
+        }),
+        publicOrigin: API_ORIGIN,
+        corsOrigins: [CLIENT_ORIGIN],
+        secureCookies: false,
+        serverSecret: makeServerSecret(),
+        now: () => d1Now,
+      });
+      const loginRes = await d1App.request(`${API_ORIGIN}/v2/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          identifier: 'd1-cap-race@example.test',
+          communitySlug: 'd1-cap-race-comm',
+          derivedKey: TEST_DERIVED_KEY,
+        }),
+      });
+      expect(loginRes.status).toBe(200);
+      const d1Cookie = (loginRes.headers.get('set-cookie') ?? '').split(
+        ';'
+      )[0]!;
+
+      // Create MAX - 1 (4) open previews first
+      for (let i = 0; i < MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY - 1; i += 1) {
+        const seedRes = await postPreview(d1App, {
+          cookie: d1Cookie,
+          csvFilename: `seed-${i}.csv`,
+          csvText: `name\nD1 Seed ${i}\n`,
+          fields: { kind: 'places' },
+        });
+        expect(seedRes.status).toBe(201);
+      }
+
+      const storeCountBeforeRace = d1Mem.store.size;
+      boundCounts.length = 0;
+      barrierActive = true;
+      const [raceA, raceB] = await Promise.all([
+        postPreview(d1App, {
+          cookie: d1Cookie,
+          csvFilename: 'race-a.csv',
+          csvText: 'name,photo\nRace A,race-a.png\n',
+          fields: { kind: 'places' },
+          mediaParts: [
+            {
+              filename: 'race-a.png',
+              contentType: 'image/png',
+              bytes: PNG_BYTES,
+            },
+          ],
+        }),
+        postPreview(d1App, {
+          cookie: d1Cookie,
+          csvFilename: 'race-b.csv',
+          csvText: 'name,photo\nRace B,race-b.png\n',
+          fields: { kind: 'places' },
+          mediaParts: [
+            {
+              filename: 'race-b.png',
+              contentType: 'image/png',
+              bytes: PNG_BYTES,
+            },
+          ],
+        }),
+      ]);
+
+      const statuses = [raceA.status, raceB.status].sort((a, b) => a - b);
+      expect(statuses).toEqual([201, 429]);
+      const loserRes = raceA.status === 429 ? raceA : raceB;
+      expect(((await loserRes.json()) as { code?: string }).code).toBe(
+        'too_many_open_previews'
+      );
+
+      const previewedRows = await d1.db
+        .select({ id: d1Tables.importManifests.id })
+        .from(d1Tables.importManifests)
+        .where(
+          and(
+            eq(d1Tables.importManifests.communityId, comm.id),
+            eq(d1Tables.importManifests.status, 'previewed')
+          )
+        );
+      expect(previewedRows).toHaveLength(
+        MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY
+      );
+      // Winner kept 2 stored files (source CSV + staged photo); loser cleaned both.
+      expect(d1Mem.store.size).toBe(storeCountBeforeRace + 2);
+      expect(Math.max(...boundCounts)).toBeLessThanOrEqual(100);
     } finally {
       d1.sqlite.close();
     }

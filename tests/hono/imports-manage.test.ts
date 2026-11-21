@@ -381,7 +381,9 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
 
     const mem = createListableMemoryStorage();
     memStore = mem.store;
-    cleanup = new MediaCleanupCoordinator(db, mem.storage);
+    cleanup = new MediaCleanupCoordinator(db, mem.storage, {
+      now: () => currentNow,
+    });
     app = createHonoApp({
       repository: new HonoFoundationRepository(db),
       storage: mem.storage,
@@ -998,6 +1000,7 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       },
     };
     const flakyCleanup = new MediaCleanupCoordinator(db, flakyStorage, {
+      now: () => currentNow,
       log: (line) => flakyLogs.push(line),
     });
     const flakyApp = createHonoApp({
@@ -1204,7 +1207,9 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       }
 
       const d1Mem = createListableMemoryStorage();
-      const d1Cleanup = new MediaCleanupCoordinator(d1Db, d1Mem.storage);
+      const d1Cleanup = new MediaCleanupCoordinator(d1Db, d1Mem.storage, {
+        now: () => d1Now,
+      });
       const d1App = createHonoApp({
         repository: new HonoFoundationRepository(d1Db),
         storage: d1Mem.storage,

@@ -33,6 +33,7 @@ import {
   MAX_IMPORT_REQUEST_BYTES,
   MAX_IMPORT_ROW_ERRORS,
   MAX_IMPORT_STORY_EDGES_PER_ROW,
+  MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY,
   type AudienceMapping,
   type DuplicateStrategy,
   type ImportManifestDetail,
@@ -128,6 +129,11 @@ const ALLOWED_IMPORT_FORM_FIELDS = new Set([
 
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const TOO_MANY_OPEN_PREVIEWS_BODY: V2ErrorResponse = {
+  error: `Too many open import previews (maximum ${MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY} per community). Commit or discard an existing preview before starting another.`,
+  code: 'too_many_open_previews',
+};
 
 export type ImportServiceResult<T> =
   | { status: 200 | 201; body: T }
@@ -681,6 +687,13 @@ export class ImportsService {
           },
         };
       }
+    }
+
+    const openPreviews = await this.repository.countOpenPreviews(
+      caller.communityId
+    );
+    if (openPreviews >= MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY) {
+      return { status: 429, body: TOO_MANY_OPEN_PREVIEWS_BODY };
     }
 
     const activeUploadedKeys = new Set<string>();
@@ -1254,6 +1267,7 @@ export class ImportsService {
           stagedFileIds: keptStagedIds,
           now: requestNow,
           dailyLimitWindow: dailyWindow,
+          maxOpenPreviews: MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY,
         });
       } catch {
         // Guard against lost D1/DB acks where the preview actually committed
@@ -1332,6 +1346,14 @@ export class ImportsService {
             code: 'd1_daily_import_limit',
           },
         };
+      }
+      if (outcome.status === 'too_many_open_previews') {
+        await this.cleanupUploadedStorageKeys(
+          [...activeUploadedKeys],
+          'upload_rollback',
+          activeUploadedKeys
+        );
+        return { status: 429, body: TOO_MANY_OPEN_PREVIEWS_BODY };
       }
 
       activeUploadedKeys.clear();

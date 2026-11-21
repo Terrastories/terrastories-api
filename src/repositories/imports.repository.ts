@@ -43,6 +43,7 @@ import type {
 import type { FoundationUser } from './hono-foundation.repository.js';
 import { MediaWritesRepository } from './media-writes.repository.js';
 import {
+  MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY,
   clearNormalizedImportData,
   type ImportResultSummary,
   type ImportRowError,
@@ -169,6 +170,7 @@ export interface CreatePreviewManifestInput {
   stagedFileIds: string[];
   now: Date;
   dailyLimitWindow: { startMs: number; endMs: number } | null;
+  maxOpenPreviews?: number;
 }
 
 export interface ImportManifestRowRecord {
@@ -192,7 +194,8 @@ export interface ImportManifestRowRecord {
 export type CreatePreviewOutcome =
   | { status: 'created'; manifest: ImportManifestRowRecord }
   | { status: 'forbidden' }
-  | { status: 'daily_limit' };
+  | { status: 'daily_limit' }
+  | { status: 'too_many_open_previews' };
 
 export type DiscardManifestOutcome =
   | {
@@ -419,6 +422,47 @@ export class ImportsRepository {
     return rows.length > 0;
   }
 
+  async countOpenPreviews(
+    communityId: number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any = this.db
+  ): Promise<number> {
+    const rows = await executor
+      .select({ count: sql<number>`count(*)` })
+      .from(this.tables.importManifests)
+      .where(
+        and(
+          eq(this.tables.importManifests.communityId, communityId),
+          eq(this.tables.importManifests.status, 'previewed')
+        )
+      );
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  private async isAuthorizedPreviewActor(
+    communityId: number,
+    actorId: number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    executor: any = this.db
+  ): Promise<boolean> {
+    if (!(await this.activeCommunityExists(communityId, executor))) {
+      return false;
+    }
+    const rows = await executor
+      .select({ id: this.tables.users.id })
+      .from(this.tables.users)
+      .where(
+        and(
+          eq(this.tables.users.id, actorId),
+          eq(this.tables.users.communityId, communityId),
+          eq(this.tables.users.isActive, true),
+          inArray(this.tables.users.role, ['editor', 'admin'])
+        )
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
   async loadCommunityImportContext(
     communityId: number
   ): Promise<CommunityImportContext> {
@@ -602,6 +646,8 @@ export class ImportsRepository {
   async createPreviewManifest(
     input: CreatePreviewManifestInput
   ): Promise<CreatePreviewOutcome> {
+    const maxOpenPreviews =
+      input.maxOpenPreviews ?? MAX_OPEN_IMPORT_PREVIEWS_PER_COMMUNITY;
     const now = input.now;
     const nowMs = now.getTime();
     const isPg = dialectOf(this.connection) === 'postgresql';
@@ -621,6 +667,11 @@ export class ImportsRepository {
             AND u.is_active = 1
             AND u.role IN ('editor', 'admin')
         )`,
+        sql`(
+          SELECT COUNT(*) FROM import_manifests im
+          WHERE im.community_id = ${input.communityId}
+            AND im.status = 'previewed'
+        ) < ${maxOpenPreviews}`,
       ];
       if (input.dailyLimitWindow) {
         guards.push(
@@ -740,6 +791,13 @@ export class ImportsRepository {
         ? insertedManifestRows[0]
         : undefined;
       if (!inserted) {
+        const authorized = await this.isAuthorizedPreviewActor(
+          input.communityId,
+          input.actorId
+        );
+        if (!authorized) {
+          return { status: 'forbidden' };
+        }
         if (input.dailyLimitWindow) {
           const hitDaily = await this.hasCommittedImportInWindow(
             input.dailyLimitWindow.startMs,
@@ -749,7 +807,11 @@ export class ImportsRepository {
             return { status: 'daily_limit' };
           }
         }
-        return { status: 'forbidden' };
+        const openCount = await this.countOpenPreviews(input.communityId);
+        if (openCount >= maxOpenPreviews) {
+          return { status: 'too_many_open_previews' };
+        }
+        return { status: 'too_many_open_previews' };
       }
       return {
         status: 'created',
@@ -779,7 +841,7 @@ export class ImportsRepository {
 
     if (isPg) {
       return this.db.transaction(async (tx: typeof this.db) => {
-        // Canonical PG lock order: communities -> users -> files -> import_manifests -> audit_entries
+        // Canonical PG lock order: communities -> advisory lock -> users -> files -> import_manifests -> audit_entries
         const [comm] = await tx
           .select({ id: this.tables.communities.id })
           .from(this.tables.communities)
@@ -791,6 +853,10 @@ export class ImportsRepository {
           )
           .for('share');
         if (!comm) return { status: 'forbidden' };
+
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext('import:preview'), ${input.communityId})`
+        );
 
         const [actorRow] = await tx
           .select({ id: this.tables.users.id })
@@ -813,6 +879,11 @@ export class ImportsRepository {
             tx
           );
           if (hitDaily) return { status: 'daily_limit' };
+        }
+
+        const openCount = await this.countOpenPreviews(input.communityId, tx);
+        if (openCount >= maxOpenPreviews) {
+          return { status: 'too_many_open_previews' };
         }
 
         if (insertFilesValues.length > 0) {
@@ -918,6 +989,20 @@ export class ImportsRepository {
           .limit(1)
           .all();
         if (hitDaily.length > 0) return { status: 'daily_limit' };
+      }
+
+      const openRows = tx
+        .select({ count: sql<number>`count(*)` })
+        .from(this.tables.importManifests)
+        .where(
+          and(
+            eq(this.tables.importManifests.communityId, input.communityId),
+            eq(this.tables.importManifests.status, 'previewed')
+          )
+        )
+        .all() as Array<{ count: number | string }>;
+      if (Number(openRows[0]?.count ?? 0) >= maxOpenPreviews) {
+        return { status: 'too_many_open_previews' };
       }
 
       if (insertFilesValues.length > 0) {

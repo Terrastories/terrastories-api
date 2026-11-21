@@ -5,7 +5,15 @@
  * for Slice 12-C:
  * - POST /v2/imports/:id/commit
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  vi,
+} from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -450,7 +458,9 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
 
     const mem = createListableMemoryStorage();
     memStore = mem.store;
-    cleanup = new MediaCleanupCoordinator(db, mem.storage);
+    cleanup = new MediaCleanupCoordinator(db, mem.storage, {
+      now: () => currentNow,
+    });
     app = createHonoApp({
       repository: new HonoFoundationRepository(db),
       storage: mem.storage,
@@ -536,6 +546,13 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
       cookies.foreign,
       'foreign-existing.png'
     );
+  });
+
+  beforeEach(async () => {
+    await db
+      .update(tables.importManifests)
+      .set({ status: 'discarded' })
+      .where(eq(tables.importManifests.status, 'previewed'));
   });
 
   afterAll(() => {
@@ -1072,7 +1089,9 @@ describe('Slice 12-C POST /v2/imports/:id/commit', () => {
         throw new Error('transient storage outage');
       },
     };
-    const flakyCleanup = new MediaCleanupCoordinator(db, flakyStorage);
+    const flakyCleanup = new MediaCleanupCoordinator(db, flakyStorage, {
+      now: () => currentNow,
+    });
     const flakyApp = createHonoApp({
       repository: new HonoFoundationRepository(db),
       storage: flakyStorage,

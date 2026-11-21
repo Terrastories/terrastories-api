@@ -107,8 +107,8 @@ function estimateInsertStatementBytes(
 // SQL in `src/repositories/imports.repository.ts` (including `guardSql` with
 // `dailyLimitWindow`, full column lists, join subqueries, and a safety margin
 // so `planImportCommit` never underestimates a real D1 statement).
-const FILE_INSERT_SQL_BYTES = 1_250;
-const FILE_INSERT_PARAMS_PER_ROW = 19;
+const FILE_INSERT_SQL_BYTES = 1_400;
+const FILE_INSERT_PARAMS_PER_ROW = 21;
 const MANIFEST_INSERT_SQL_BYTES = 1_000;
 const MANIFEST_COMMIT_SQL_BYTES = 1_000;
 const PREVIEW_AUDIT_SQL_BYTES = 650;
@@ -128,7 +128,7 @@ const D1_GUARD_PARAM_BYTES = 96;
 const D1_SAMPLE_ID = 2_147_483_647;
 const D1_SAMPLE_TS_MS = 9_999_999_999_999;
 
-/** Staged file inserts run 1 row per preview batch statement (19 params <= 100). */
+/** Staged file inserts run 1 row per preview batch statement (21 params <= 100). */
 export const PREVIEW_FILES_INSERT_CHUNK = 1;
 /** Max file IDs per activation UPDATE statement (80 + 10 = 90 <= 100). */
 export const COMMIT_FILE_ACTIVATE_CHUNK = 80;

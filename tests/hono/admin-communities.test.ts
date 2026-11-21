@@ -1134,7 +1134,7 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
     }
   });
 
-  it('treats descriptive/non-default community row fields as content on SQLite and D1 db.batch() without blocking name/locale defaults', async () => {
+  it('treats descriptive/non-default community row fields (including custom name and non-default locale) as non-empty on SQLite and D1 db.batch() while allowing provisioning defaults', async () => {
     for (const useD1Batch of [false, true]) {
       const { db, roleCookies, requestAdmin, currentNow } = await setup({
         useD1Batch,
@@ -1143,6 +1143,12 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
       const descriptiveCases: Array<
         [string, Partial<typeof communitiesSqlite.$inferInsert>, string]
       > = [
+        [
+          'name',
+          { name: 'Secret Custom Community Name' },
+          'Secret Custom Community Name',
+        ],
+        ['locale', { locale: 'pt-BR' }, 'pt-BR'],
         [
           'description',
           { description: '<p>Secret community overview</p>' },
@@ -1218,13 +1224,13 @@ describe('Slice 14-A /v2/admin/communities & claim-tokens', () => {
         );
       }
 
-      // Custom name + locale with all descriptive fields null/default remains unclaimed & issuable
+      // Provisioning defaults (name === slug, locale === 'en', null descriptive fields) remain unclaimed & issuable
       const [cleanRow] = await db
         .insert(communitiesSqlite)
         .values({
-          name: 'Different Name Than Slug',
-          slug: 'clean-custom-locale',
-          locale: 'es',
+          name: 'clean-default-comm',
+          slug: 'clean-default-comm',
+          locale: 'en',
           publicStories: false,
           beta: false,
           isActive: true,

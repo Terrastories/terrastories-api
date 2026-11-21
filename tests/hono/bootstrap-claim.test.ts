@@ -185,7 +185,7 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
       const [comm] = await db
         .insert(communitiesSqlite)
         .values({
-          name: `Provisioned ${slug}`,
+          name: slug,
           slug,
           locale: 'en',
           publicStories: false,
@@ -1226,7 +1226,7 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
     expect([uRes1.status, uRes2.status].sort()).toEqual([201, 401]);
   });
 
-  it('rejects claim across SQLite and D1 db.batch() when the community row carries descriptive/non-default fields without child rows, while allowing name/locale defaults', async () => {
+  it('rejects claim across SQLite and D1 db.batch() when the community row carries descriptive/non-default fields (including custom name or locale) without child rows, while allowing provisioning defaults', async () => {
     for (const useD1Batch of [false, true]) {
       const ctx = await setup({ useD1Batch });
       const {
@@ -1239,6 +1239,8 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
       const descriptiveMutations: Array<
         [string, Partial<typeof communitiesSqlite.$inferInsert>]
       > = [
+        ['name', { name: 'Custom Community Display Name' }],
+        ['locale', { locale: 'pt-BR' }],
         ['description', { description: '<p>Private community intro</p>' }],
         ['descriptionPlain', { descriptionPlain: 'Private community intro' }],
         ['country', { country: 'BR' }],
@@ -1282,14 +1284,15 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
         expect(tokenRow?.consumedAt).toBeNull();
       }
 
-      // Provisioning defaults (custom name, slug, locale, active lifecycle)
-      // with all descriptive fields null/false remain claimable.
-      const [cleanNonSlugNameComm] = await db
+      // Provisioning defaults (name === slug, locale === 'en', null descriptive fields, active lifecycle)
+      // remain claimable.
+      const defaultSlug = `clean-default-${useD1Batch ? 'd1' : 'sq'}`;
+      const [cleanDefaultComm] = await db
         .insert(communitiesSqlite)
         .values({
-          name: 'Hosted Display Name',
-          slug: `clean-locale-${useD1Batch ? 'd1' : 'sq'}`,
-          locale: 'pt-BR',
+          name: defaultSlug,
+          slug: defaultSlug,
+          locale: 'en',
           publicStories: false,
           beta: false,
           isActive: true,
@@ -1297,12 +1300,12 @@ describe('POST /v2/bootstrap/claim (Slice 11b-C)', () => {
           updatedAt: currentNow(),
         })
         .returning();
-      const cleanTok = await insertClaimToken(cleanNonSlugNameComm.id);
+      const cleanTok = await insertClaimToken(cleanDefaultComm.id);
       const okRes = await postClaim(
         {
           token: cleanTok.raw,
-          username: `clean_locale_admin_${useD1Batch ? 'd1' : 'sq'}`,
-          email: `clean-locale-${useD1Batch ? 'd1' : 'sq'}@claim.example.test`,
+          username: `clean_default_admin_${useD1Batch ? 'd1' : 'sq'}`,
+          email: `clean-default-${useD1Batch ? 'd1' : 'sq'}@claim.example.test`,
           password: makePasswordPayload(),
         },
         { 'cf-connecting-ip': '203.0.113.220' }

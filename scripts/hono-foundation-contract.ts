@@ -3765,6 +3765,8 @@ export async function runHonoFoundationContract(
     const descriptiveRowCases: Array<
       [string, Record<string, unknown>, string]
     > = [
+      ['name', { name: `Custom Name ${tag}` }, `Custom Name ${tag}`],
+      ['locale', { locale: 'pt-BR' }, ''],
       [
         'description',
         { description: `<p>Private descriptive note ${tag}</p>` },

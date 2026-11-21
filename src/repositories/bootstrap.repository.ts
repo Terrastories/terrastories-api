@@ -172,11 +172,12 @@ export type IssueClaimTokenResult =
 /**
  * Portable SQL predicate holding iff `communityIdExpr` identifies a community
  * row with no descriptive/publication/legacy fields beyond provisioning
- * defaults (`description`, `description_plain`, `country`, `cultural_settings`
- * all NULL; `public_stories` and `beta` false), has never had an
- * administrator (users, consumed claim_tokens, installation_bootstrap,
- * login_codes, account auth_throttle, or any non-claim-issuance/failed-claim
- * audit_entries), and holds zero child content rows.
+ * defaults (`name = slug`, `locale = 'en'`, `description`, `description_plain`,
+ * `country`, `cultural_settings` all NULL; `public_stories` and `beta` false),
+ * has never had an administrator (users, consumed claim_tokens,
+ * installation_bootstrap, login_codes, account auth_throttle, or any
+ * non-claim-issuance/failed-claim audit_entries), and holds zero child content
+ * rows.
  *
  * Shared across `BootstrapRepository` (claim issuance + redemption) and
  * `AdminRepository` (list `claimStatus` + deprovision). Uses zero boolean
@@ -190,6 +191,8 @@ export function communityUnclaimedAndEmptySql(
     exists (
       select 1 from communities c_empty
       where c_empty.id = ${communityIdExpr}
+        and c_empty.name = c_empty.slug
+        and c_empty.locale = 'en'
         and c_empty.description is null
         and c_empty.description_plain is null
         and c_empty.country is null
@@ -251,6 +254,8 @@ export async function isCommunityUnclaimedAndEmpty(
     .where(
       and(
         eq(communities.id, communityId),
+        eq(communities.name, communities.slug),
+        eq(communities.locale, 'en'),
         isNull(communities.description),
         isNull(communities.descriptionPlain),
         isNull(communities.country),
@@ -378,6 +383,8 @@ export function isCommunityUnclaimedAndEmptySync(
     .where(
       and(
         eq(communities.id, communityId),
+        eq(communities.name, communities.slug),
+        eq(communities.locale, 'en'),
         isNull(communities.description),
         isNull(communities.descriptionPlain),
         isNull(communities.country),

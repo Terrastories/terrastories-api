@@ -1063,6 +1063,18 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
           createdAt: now,
         });
       });
+      await makeNonEmpty('refuse-row-name', async (cid) => {
+        await db
+          .update(communitiesSqlite)
+          .set({ name: 'Custom Community Name' })
+          .where(eq(communitiesSqlite.id, cid));
+      });
+      await makeNonEmpty('refuse-row-locale', async (cid) => {
+        await db
+          .update(communitiesSqlite)
+          .set({ locale: 'pt-BR' })
+          .where(eq(communitiesSqlite.id, cid));
+      });
       await makeNonEmpty('refuse-row-description', async (cid) => {
         await db
           .update(communitiesSqlite)
@@ -1114,7 +1126,7 @@ describe('Slice 14-B /v2/admin status, deprovision, audit-entries & isolation', 
         (e) =>
           e.action === 'system.community.deprovision' && e.outcome === 'failure'
       );
-      expect(deprovFailures.length).toBeGreaterThanOrEqual(16);
+      expect(deprovFailures.length).toBeGreaterThanOrEqual(18);
       for (const entry of deprovFailures) {
         expect(entry.communityId).toBeNull();
       }

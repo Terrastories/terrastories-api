@@ -34,6 +34,7 @@ import { auditEntriesSqlite } from '../../src/db/schema/audit_entries.js';
 import {
   ARGON2ID_ALGORITHM,
   ARGON2ID_PARAMS,
+  AUTH_THROTTLE_MAX_FAILURES,
   RECOVERY_CODE_COUNT,
 } from '../../src/shared/auth-policy.js';
 import { sha256Hex, toHex } from '../../src/shared/auth-crypto.js';
@@ -79,6 +80,8 @@ const makePasswordPayload = (derivedKey: string = makeDerivedKey()) => ({
   derivedKey,
 });
 
+const BOOTSTRAP_SECRET = 'bootstrap-operator-secret-0123456789abcdef';
+
 function makeValidBootstrapBody(
   overrides: {
     community?: Record<string, unknown>;
@@ -91,6 +94,7 @@ function makeValidBootstrapBody(
   return {
     derivedKey,
     payload: {
+      bootstrapSecret: BOOTSTRAP_SECRET,
       community: {
         name: 'Awa Nation Stories',
         slug: 'awa-nation',
@@ -126,6 +130,7 @@ describe('GET /v2/bootstrap and POST /v2/bootstrap (Slice 11b-B)', () => {
       serverSecret?: string | undefined;
       fieldKitCaFingerprint?: string | undefined;
       useD1Batch?: boolean;
+      bootstrapSecret?: string | undefined;
     } = {}
   ) {
     const sqlite = new Sqlite(':memory:');
@@ -141,11 +146,14 @@ describe('GET /v2/bootstrap and POST /v2/bootstrap (Slice 11b-B)', () => {
     };
     const secret =
       'serverSecret' in options ? options.serverSecret : makeServerSecret();
+    const bootstrapSecret =
+      'bootstrapSecret' in options ? options.bootstrapSecret : BOOTSTRAP_SECRET;
 
     const app = createHonoApp({
       repository: new HonoFoundationRepository(db),
       storage: { read: async () => null },
       serverSecret: secret,
+      bootstrapSecret,
       secureCookies: false,
       publicOrigin: API_ORIGIN,
       trustProxy: true,
@@ -216,6 +224,83 @@ describe('GET /v2/bootstrap and POST /v2/bootstrap (Slice 11b-B)', () => {
     const errorRes = await getStatus();
     expect(errorRes.status).toBe(503);
     expect(await errorRes.json()).toEqual({ error: 'Service unavailable' });
+  });
+
+  it('fails closed when no bootstrap secret is configured and refuses every bootstrap attempt', async () => {
+    const { db, getStatus, postBootstrap } = setup({
+      bootstrapSecret: undefined,
+    });
+
+    // Fail-closed boolean: an installation whose operator never configured
+    // BOOTSTRAP_SECRET is never open for initial setup.
+    expect(await (await getStatus()).json()).toEqual({ open: false });
+
+    const res = await postBootstrap(makeValidBootstrapBody().payload);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'Forbidden' });
+
+    // No bootstrap state was minted for the anonymous probes.
+    expect(await db.select().from(installationBootstrapSqlite)).toHaveLength(0);
+    expect(await db.select().from(communitiesSqlite)).toHaveLength(0);
+    expect(await db.select().from(usersSqlite)).toHaveLength(0);
+  });
+
+  it('refuses POST /v2/bootstrap with a wrong or missing bootstrap secret exactly like a closed installation', async () => {
+    const { db, getStatus, postBootstrap } = setup();
+
+    for (const bootstrapSecret of [
+      undefined,
+      'wrong-operator-secret-value-0123456789ab',
+    ]) {
+      const res = await postBootstrap({
+        ...makeValidBootstrapBody().payload,
+        ...(bootstrapSecret === undefined
+          ? { bootstrapSecret: undefined }
+          : { bootstrapSecret }),
+      });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'Forbidden' });
+    }
+
+    // The refused attempts performed no bootstrap and left the install open
+    // for a later operator retry.
+    expect(await (await getStatus()).json()).toEqual({ open: true });
+    expect(await db.select().from(communitiesSqlite)).toHaveLength(0);
+    expect(await db.select().from(usersSqlite)).toHaveLength(0);
+  });
+
+  it('throttles failed bootstrap secret attempts per IP and stops the audit flood once blocked', async () => {
+    const { db, postBootstrap, getStatus } = setup();
+
+    const wrongSecretBody = {
+      ...makeValidBootstrapBody().payload,
+      bootstrapSecret: 'wrong-operator-secret-value-0123456789ab',
+    };
+    for (
+      let attempt = 0;
+      attempt < AUTH_THROTTLE_MAX_FAILURES + 3;
+      attempt += 1
+    ) {
+      const res = await postBootstrap(wrongSecretBody);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'Forbidden' });
+    }
+
+    // The per-IP brake engaged: further attempts stay refused and mint no new
+    // audit rows (first-failure-per-window audit only).
+    const auditsBeforeBlock = await db
+      .select()
+      .from(auditEntriesSqlite)
+      .where(eq(auditEntriesSqlite.action, 'bootstrap.complete'));
+    const blockedRes = await postBootstrap(wrongSecretBody);
+    expect(blockedRes.status).toBe(403);
+    const auditsAfterBlock = await db
+      .select()
+      .from(auditEntriesSqlite)
+      .where(eq(auditEntriesSqlite.action, 'bootstrap.complete'));
+    expect(auditsAfterBlock.length).toBe(auditsBeforeBlock.length);
+    expect(await (await getStatus()).json()).toEqual({ open: true });
+    expect(await db.select().from(communitiesSqlite)).toHaveLength(0);
   });
 
   it('reports open=false and rejects POST /v2/bootstrap when a pre-existing community or user exists', async () => {
@@ -504,6 +589,7 @@ describe('GET /v2/bootstrap and POST /v2/bootstrap (Slice 11b-B)', () => {
       repository: new HonoFoundationRepository(raceProxy),
       storage: { read: async () => null },
       serverSecret: raceCtx.secret,
+      bootstrapSecret: BOOTSTRAP_SECRET,
       secureCookies: false,
       publicOrigin: API_ORIGIN,
       now: () => raceCtx.currentNow(),

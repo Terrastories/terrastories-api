@@ -42,6 +42,7 @@ const app = createHonoApp({
   // Prelogin HMAC key (SPEC-V2 §7 step 1). Validated by the runtime gate in
   // production-like modes; prelogin fails closed when absent.
   serverSecret: runtimeConfig.serverSecret,
+  bootstrapSecret: runtimeConfig.bootstrapSecret,
   publicOrigin: runtimeConfig.publicOrigin,
   corsOrigins: runtimeConfig.corsOrigins,
   // HTTP cookies are allowed only for this opt-in loopback development listener.

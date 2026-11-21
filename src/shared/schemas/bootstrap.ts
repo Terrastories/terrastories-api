@@ -66,6 +66,14 @@ export const BootstrapRequestSchema = z
         password: VerifierMaterialSchema,
       })
       .strict(),
+    /**
+     * Operator-provided installation bootstrap secret (PR #252 bot finding 1;
+     * SPEC-V2 §7). Optional on the wire on purpose: a missing value must fail
+     * CLOSED through the secret comparison (wrong/missing => the same 403 body
+     * as a closed installation), never through a validation success that skips
+     * the gate. Max length keeps the compare material bounded.
+     */
+    bootstrapSecret: z.string().trim().min(1).max(256).optional(),
     deviceSession: z.boolean().optional(),
   })
   .strict()

@@ -86,6 +86,7 @@ it('serves a fully valid production configuration', async () => {
     {
       PUBLIC_ORIGIN: 'https://api.terrastories.org',
       AUTH_SERVER_SECRET: 'prelogin-hsm-material-9f8e7d6c5b4a3f2',
+      BOOTSTRAP_SECRET: 'bootstrap-install-secret-0123456789abcdef',
     }
   );
   try {

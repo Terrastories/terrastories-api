@@ -62,6 +62,13 @@ export interface FoundationOptions {
    * predictable fake (SPEC-V2 §7 step 1).
    */
   serverSecret?: string;
+  /**
+   * Operator-provided installation bootstrap secret (`BOOTSTRAP_SECRET`,
+   * SPEC-V2 §7 "Bootstrap and account lifecycle"). Without it the fresh
+   * installation stays closed for bootstrap and `GET /v2/bootstrap` answers
+   * `open:false` (fail closed; PR #252 bot finding 1).
+   */
+  bootstrapSecret?: string;
   secureCookies?: boolean;
   publicOrigin?: string;
   corsOrigins?: string[];
@@ -169,6 +176,7 @@ export function createHonoApp(options: FoundationOptions) {
     {
       serverSecret: options.serverSecret,
       fieldKitCaFingerprint: options.fieldKitCaFingerprint,
+      bootstrapSecret: options.bootstrapSecret,
     }
   );
   const configuredOrigin =

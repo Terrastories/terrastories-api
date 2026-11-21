@@ -15,6 +15,8 @@
  * database are not its concern.
  */
 
+import { BOOTSTRAP_SECRET_MIN_LENGTH } from '../shared/auth-policy.js';
+
 /** Modes that enforce the production rules; unset resolves to `production`. */
 export type V2RuntimeEnvironment =
   | 'development'
@@ -141,6 +143,13 @@ export interface V2RuntimeConfig {
    * supplied — development and test keep it optional. Never logged.
    */
   serverSecret?: string;
+  /**
+   * The operator-provided installation bootstrap secret (SPEC-V2 §7
+   * "Bootstrap and account lifecycle"; PR #252 bot finding 1). Present
+   * whenever it was supplied; an unset value keeps bootstrap fail-closed.
+   * Never logged.
+   */
+  bootstrapSecret?: string;
 }
 
 /** Setting names differ per platform; messages always use the caller's name. */
@@ -150,6 +159,7 @@ export interface V2RuntimeSettingNames {
   corsOrigins: string;
   secureCookies: string;
   authServerSecret: string;
+  bootstrapSecret: string;
 }
 
 export interface V2RuntimeCoreInput {
@@ -161,6 +171,8 @@ export interface V2RuntimeCoreInput {
   allowPlainHttp?: boolean | undefined;
   /** Prelogin HMAC key from the deployment environment only. */
   authServerSecret?: string | undefined;
+  /** Installation bootstrap secret from the deployment environment only. */
+  bootstrapSecret?: string | undefined;
   names: V2RuntimeSettingNames;
 }
 
@@ -284,6 +296,26 @@ export function validateV2RuntimeCore(
     }
   }
 
+  // The installation bootstrap secret (PR #252 bot finding 1): an operator
+  // must provide one before a fresh installation may open for bootstrap. A
+  // missing, short or placeholder value fails closed — the installation never
+  // reports open and POST /v2/bootstrap refuses every attempt with 403.
+  const bootstrapSecret = input.bootstrapSecret;
+  if (productionLike) {
+    if (bootstrapSecret === undefined || bootstrapSecret === '') {
+      problems.push(
+        `${names.bootstrapSecret} is required in ${environment} mode`
+      );
+    } else if (
+      bootstrapSecret.length < BOOTSTRAP_SECRET_MIN_LENGTH ||
+      isPlaceholderValue(bootstrapSecret)
+    ) {
+      problems.push(
+        `${names.bootstrapSecret} must be at least ${BOOTSTRAP_SECRET_MIN_LENGTH} characters and must not keep a template placeholder value`
+      );
+    }
+  }
+
   const secureCookies = input.secureCookies ?? true;
   if (!secureCookies && httpsRequired) {
     problems.push(
@@ -300,6 +332,7 @@ export function validateV2RuntimeCore(
     corsOrigins: [...(input.corsOrigins ?? [])],
     secureCookies,
     serverSecret: secret || undefined,
+    bootstrapSecret: bootstrapSecret || undefined,
   };
 }
 
@@ -344,6 +377,7 @@ export interface NodeV2Env {
   HONO_PORT?: string | undefined;
   HONO_ALLOW_PLAIN_HTTP?: string | undefined;
   AUTH_SERVER_SECRET?: string | undefined;
+  BOOTSTRAP_SECRET?: string | undefined;
 }
 
 export interface NodeV2RuntimeConfig extends V2RuntimeConfig {
@@ -379,12 +413,14 @@ export function validateNodeV2Runtime(env: NodeV2Env): NodeV2RuntimeConfig {
       ),
     allowPlainHttp: env.HONO_ALLOW_PLAIN_HTTP === 'true',
     authServerSecret: env.AUTH_SERVER_SECRET,
+    bootstrapSecret: env.BOOTSTRAP_SECRET,
     names: {
       environment: 'NODE_ENV',
       publicOrigin: 'HONO_PUBLIC_ORIGIN',
       corsOrigins: 'HONO_CORS_ORIGINS',
       secureCookies: 'secureCookies',
       authServerSecret: 'AUTH_SERVER_SECRET',
+      bootstrapSecret: 'BOOTSTRAP_SECRET',
     },
   });
   return { ...config, port };
@@ -396,6 +432,13 @@ export interface WorkerV2Env {
   PUBLIC_ORIGIN?: string | undefined;
   CORS_ORIGINS?: string | undefined;
   AUTH_SERVER_SECRET?: string | undefined;
+  /**
+   * Operator-provided installation bootstrap secret (SPEC-V2 §7; PR #252
+   * bot finding 1). Supplied with `wrangler secret put` — never a `vars`
+   * value. Validated by the runtime gate in production-like modes; an unset
+   * value keeps bootstrap fail-closed.
+   */
+  BOOTSTRAP_SECRET?: string | undefined;
   DB?: unknown;
   MEDIA?: unknown;
 }
@@ -417,12 +460,14 @@ export function validateWorkerV2Runtime(env: WorkerV2Env): V2RuntimeConfig {
       corsOrigins: parseCorsOrigins(env.CORS_ORIGINS),
       secureCookies: true,
       authServerSecret: env.AUTH_SERVER_SECRET,
+      bootstrapSecret: env.BOOTSTRAP_SECRET,
       names: {
         environment: 'ENVIRONMENT',
         publicOrigin: 'PUBLIC_ORIGIN',
         corsOrigins: 'CORS_ORIGINS',
         secureCookies: 'secureCookies',
         authServerSecret: 'AUTH_SERVER_SECRET',
+        bootstrapSecret: 'BOOTSTRAP_SECRET',
       },
     });
   } catch (error) {

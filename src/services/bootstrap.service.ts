@@ -80,6 +80,7 @@ export function deriveBootstrapSlug(name: string): string {
 export class BootstrapService {
   private readonly serverSecret?: string;
   private readonly fieldKitCaFingerprint?: string;
+  private readonly bootstrapSecret?: string;
 
   constructor(
     private readonly bootstrapRepo: BootstrapRepository,
@@ -87,12 +88,66 @@ export class BootstrapService {
     options: {
       serverSecret?: string;
       fieldKitCaFingerprint?: string;
+      bootstrapSecret?: string;
     } = {}
   ) {
     this.serverSecret = options.serverSecret;
     const trimmed = options.fieldKitCaFingerprint?.trim();
     this.fieldKitCaFingerprint =
       trimmed && trimmed.length > 0 ? trimmed : undefined;
+    const bootstrapSecret = options.bootstrapSecret?.trim();
+    this.bootstrapSecret =
+      bootstrapSecret && bootstrapSecret.length > 0
+        ? bootstrapSecret
+        : undefined;
+  }
+
+  /**
+   * Uniform bootstrap denial (closed installation, wrong/missing operator
+   * secret, replay after close): per-IP `AuthThrottle` brake first, then a
+   * content-free audit of only the first failure per IP window, and never an
+   * audit row for an already-blocked address (PR #252 bot findings 1 + 4: no
+   * unbounded `bootstrap.complete` audit growth on fresh networks).
+   */
+  private async denyBootstrapAttempt(
+    context: AuthRequestContext
+  ): Promise<BootstrapResult> {
+    const secret = this.bootstrapSecret;
+    if (secret === undefined) {
+      // Fail closed without minting throttle/audit state when the operator
+      // never configured the bootstrap secret.
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    const nowMs = context.now.getTime();
+    const ipBlocked = await this.authRepo.throttleState(
+      await this.authRepo.ipThrottleKey(context.clientIp, secret),
+      nowMs
+    );
+    if (ipBlocked.blocked) {
+      // A throttled address is refused before any audit row is written.
+      return { status: 403, body: FORBIDDEN_BODY };
+    }
+    await this.authRepo.recordLoginFailure(
+      {
+        account: null,
+        clientIp: context.clientIp,
+        now: nowMs,
+      },
+      secret
+    );
+    if (ipBlocked.failures === 0) {
+      // First failure of the window only: later failures in the same window
+      // are throttle state, not new audit facts.
+      await this.auditFailure({
+        communityId: null,
+        action: 'bootstrap.complete',
+        resourceType: 'bootstrap',
+        resourceIds: [],
+        clientIp: context.clientIp,
+        userAgent: context.userAgent,
+      });
+    }
+    return { status: 403, body: FORBIDDEN_BODY };
   }
 
   private async auditFailure(input: {
@@ -125,6 +180,12 @@ export class BootstrapService {
 
   /** GET /v2/bootstrap — fail-closed boolean status, no community data. */
   async getBootstrapStatus(): Promise<{ open: boolean }> {
+    // Fail closed: an installation whose operator has not configured the
+    // bootstrap secret (`BOOTSTRAP_SECRET`) never opens for initial setup
+    // (PR #252 bot finding 1; SPEC-V2 §7 "Bootstrap and account lifecycle").
+    if (this.bootstrapSecret === undefined) {
+      return { open: false };
+    }
     const open = await this.bootstrapRepo.isBootstrapOpen();
     return { open };
   }
@@ -137,17 +198,19 @@ export class BootstrapService {
     rawBody: unknown,
     context: AuthRequestContext
   ): Promise<BootstrapResult> {
-    const open = await this.bootstrapRepo.isBootstrapOpen();
+    // Fail closed: bootstrap authority is operator-provided via
+    // `BOOTSTRAP_SECRET` — an installation without one is permanently closed
+    // for initial setup (PR #252 bot finding 1; SPEC-V2 §7).
+    const open =
+      this.bootstrapSecret !== undefined &&
+      (await this.bootstrapRepo.isBootstrapOpen());
     if (!open) {
-      await this.auditFailure({
-        communityId: null,
-        action: 'bootstrap.complete',
-        resourceType: 'bootstrap',
-        resourceIds: [],
-        clientIp: context.clientIp,
-        userAgent: context.userAgent,
-      });
-      return { status: 403, body: FORBIDDEN_BODY };
+      if (this.bootstrapSecret === undefined) {
+        // No operator secret configured: closed, and no throttle/audit state
+        // is minted for anonymous probes of a deployment that never opened.
+        return { status: 403, body: FORBIDDEN_BODY };
+      }
+      return this.denyBootstrapAttempt(context);
     }
 
     const parsed = BootstrapRequestSchema.safeParse(rawBody);
@@ -156,6 +219,27 @@ export class BootstrapService {
         status: 400,
         body: makeValidationErrorBody(zodErrorToValidationFields(parsed.error)),
       };
+    }
+
+    // The operator secret is compared as SHA-256 digests with the constant-time
+    // comparator, so the raw value never crosses a comparison boundary and a
+    // wrong/missing secret answers exactly like a closed installation (no
+    // distinguishing oracle; PR #252 bot finding 1).
+    const presentedBootstrapSecret = parsed.data.bootstrapSecret;
+    const bootstrapSecretDigest =
+      this.bootstrapSecret === undefined
+        ? null
+        : await sha256Hex(this.bootstrapSecret);
+    const presentedSecretDigest =
+      presentedBootstrapSecret === undefined
+        ? null
+        : await sha256Hex(presentedBootstrapSecret);
+    const secretMatches =
+      bootstrapSecretDigest !== null &&
+      presentedSecretDigest !== null &&
+      constantTimeEqual(bootstrapSecretDigest, presentedSecretDigest);
+    if (!secretMatches) {
+      return this.denyBootstrapAttempt(context);
     }
 
     const { community, admin, deviceSession } = parsed.data;
@@ -241,15 +325,9 @@ export class BootstrapService {
       );
 
     if (execution.outcome === 'already_closed') {
-      await this.auditFailure({
-        communityId: null,
-        action: 'bootstrap.complete',
-        resourceType: 'bootstrap',
-        resourceIds: [],
-        clientIp: context.clientIp,
-        userAgent: context.userAgent,
-      });
-      return { status: 403, body: FORBIDDEN_BODY };
+      // Replay against a permanently closed installation: same per-IP brake
+      // and content-free first-failure audit as any other denial.
+      return this.denyBootstrapAttempt(context);
     }
 
     return {

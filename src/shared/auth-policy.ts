@@ -240,6 +240,13 @@ export const LOGIN_CODE_ENTROPY_BYTES = 16;
 export const ADMIN_ISSUED_CODE_TTL_MS = 72 * 60 * 60 * 1000;
 /** Number of single-use recovery codes generated per recovery sheet (§6.8, §7). */
 export const RECOVERY_CODE_COUNT = 10;
+/**
+ * Minimum length of the operator-provided installation bootstrap secret
+ * (`BOOTSTRAP_SECRET`, SPEC-V2 §7 "Bootstrap and account lifecycle"). A
+ * deployment that cannot supply one at least this long cannot open a fresh
+ * installation for bootstrap (PR #252 bot finding 1: fail closed).
+ */
+export const BOOTSTRAP_SECRET_MIN_LENGTH = 24;
 /** Maximum lifetime of a hosted ClaimToken: 72 hours (§6.8, §7). */
 export const CLAIM_TOKEN_MAX_TTL_MS = 72 * 60 * 60 * 1000;
 /**

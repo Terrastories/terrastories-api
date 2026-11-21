@@ -6702,6 +6702,12 @@ export async function createFixture(
                     prepare: () =>
                       `/v2/community/export/download/${qaAdminExportManifestToken}`,
                   },
+                  {
+                    name: 'read own community audit entries',
+                    method: 'GET',
+                    path: '/v2/community/audit-entries',
+                    expected: 200,
+                  },
                 ];
               })()
             : []),

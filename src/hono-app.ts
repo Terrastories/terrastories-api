@@ -15,6 +15,8 @@ import { registerUserManagementRoutes } from './routes/user-management.hono.js';
 import { registerStoryWriteRoutes } from './routes/story-writes.hono.js';
 import { registerCommunityExportRoutes } from './routes/community-export.hono.js';
 import { CommunityExportRepository } from './repositories/community-export.repository.js';
+import { registerCommunityAuditRoutes } from './routes/community-audit.hono.js';
+import { CommunityAuditRepository } from './repositories/community-audit.repository.js';
 import {
   registerProtectedAuthRecoveryRoutes,
   registerPublicAuthRecoveryRoutes,
@@ -549,6 +551,9 @@ export function createHonoApp(options: FoundationOptions) {
     storage: options.storage,
     isWorkers: options.isWorkers,
     now,
+  });
+  registerCommunityAuditRoutes(app, {
+    repository: new CommunityAuditRepository(options.repository.connection),
   });
   // Transitional Explore read adapter (#198): Rails-shaped public reads for
   // the existing Explore client; removed once the V2 frontend is canonical.

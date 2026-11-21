@@ -29,7 +29,7 @@
  */
 import { once } from 'node:events';
 import { serve } from '@hono/node-server';
-import { and, asc, eq, like, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, like, sql } from 'drizzle-orm';
 import { hash } from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
@@ -98,7 +98,10 @@ import {
   AdminCommunityResponseSchema,
   ClaimTokenIssuedResponseSchema,
 } from '../../src/shared/schemas/admin.js';
-import { CommunityAuditEntriesListResponseSchema } from '../../src/shared/schemas/community-audit.js';
+import {
+  CommunityAuditEntrySchema,
+  CommunityAuditEntriesListResponseSchema,
+} from '../../src/shared/schemas/community-audit.js';
 import { EXPORT_TOKEN_TTL_MS } from '../../src/shared/export-policy.js';
 import { parseDeterministicZip } from '../../src/shared/utils/deterministic-zip.js';
 import { StreamingSha256 } from '../../src/shared/utils/sha256-stream.js';
@@ -6472,6 +6475,71 @@ export async function createFixture(
         expected: 204,
       },
     ];
+    // Compare every page and its total with the tenant's stored audit IDs.
+    // Foreign/system events already exist, so a count or pagination leak fails
+    // even when the returned page happens to contain only own-community rows.
+    const communityAuditReadSteps = (tenantId: number): Step[] =>
+      [0, 2, 'end' as const].map((page) => {
+        let expectedIds: number[] = [];
+        let offset = 0;
+        return {
+          name: `read content-free own-community audit page ${page}`,
+          method: 'GET',
+          path: '/v2/community/audit-entries',
+          expected: 200,
+          prepare: async () => {
+            const rows = await db
+              .select({ id: auditEntries.id })
+              .from(auditEntries)
+              .where(eq(auditEntries.communityId, tenantId))
+              .orderBy(desc(auditEntries.createdAt), desc(auditEntries.id));
+            expectedIds = rows.map((row) => row.id);
+            if (expectedIds.length <= 2)
+              throw new Error(
+                'Audit pagination requires multiple nonempty pages'
+              );
+            offset = page === 'end' ? expectedIds.length : page;
+            return `/v2/community/audit-entries?limit=2&offset=${offset}`;
+          },
+          check: (body) => {
+            const parsed =
+              CommunityAuditEntriesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const { data, meta } = parsed.data;
+            const rawEntries = (body as { data: unknown[] }).data;
+            const text = JSON.stringify(body);
+            return (
+              meta.total === expectedIds.length &&
+              meta.limit === 2 &&
+              meta.offset === offset &&
+              meta.hasNextPage === offset + 2 < expectedIds.length &&
+              JSON.stringify(data.map((entry) => entry.id)) ===
+                JSON.stringify(expectedIds.slice(offset, offset + 2)) &&
+              rawEntries.every(
+                (entry) =>
+                  CommunityAuditEntrySchema.strict().safeParse(entry).success
+              ) &&
+              data.every((entry) => {
+                validateContentFreeAuditEntry({
+                  communityId: entry.communityId,
+                  actorId: entry.actorId,
+                  action: entry.action,
+                  resourceType: entry.resourceType,
+                  resourceIds: entry.resourceIds,
+                  outcome: entry.outcome,
+                  ipAddress: entry.ipAddress,
+                  userAgent: entry.userAgent,
+                });
+                return entry.communityId === tenantId;
+              }) &&
+              !HONO_PERSONA_CULTURAL_STRINGS.some((value) =>
+                text.includes(value)
+              ) &&
+              !leaksSecret(body, liveSessionCookie)
+            );
+          },
+        };
+      });
     let activeAdminExport1ManifestToken = '';
     const journeys: Journey[] = [
       {
@@ -7055,6 +7123,15 @@ export async function createFixture(
                     },
                   },
                   {
+                    name: 'valid export token still requires authentication',
+                    method: 'GET',
+                    path: '/v2/community/export/download/pending',
+                    expected: 401,
+                    headers: { cookie: '' },
+                    prepare: () =>
+                      `/v2/community/export/download/${manifestToken1}`,
+                  },
+                  {
                     name: 'download exported community manifest',
                     method: 'GET',
                     path: '/v2/community/export/download/pending',
@@ -7118,6 +7195,15 @@ export async function createFixture(
                         manifest.community?.status === 'active' &&
                         hasRestricted &&
                         hasUnknown &&
+                        manifest.stories?.some(
+                          (s) => s.id === unevidencedStory.id
+                        ) &&
+                        manifest.stories?.some(
+                          (s) => s.id === membersStory.id
+                        ) &&
+                        !manifest.stories?.some(
+                          (s) => s.id === foreignStory.id
+                        ) &&
                         hasReadableFile &&
                         excludesExportLifecycle
                       );
@@ -7263,27 +7349,7 @@ export async function createFixture(
                       return `/v2/community/export/download/${zipToken2}`;
                     },
                   },
-                  {
-                    name: 'read own community audit entries without cultural content',
-                    method: 'GET',
-                    path: '/v2/community/audit-entries?limit=10&offset=0',
-                    expected: 200,
-                    check: (body: unknown) => {
-                      const parsed =
-                        CommunityAuditEntriesListResponseSchema.safeParse(body);
-                      if (!parsed.success) return false;
-                      const text = JSON.stringify(body);
-                      return (
-                        parsed.data.data.every(
-                          (entry) => entry.communityId === communityId
-                        ) &&
-                        !HONO_PERSONA_CULTURAL_STRINGS.some((s) =>
-                          text.includes(s)
-                        ) &&
-                        !leaksSecret(body, liveSessionCookie)
-                      );
-                    },
-                  },
+                  ...communityAuditReadSteps(communityId),
                   {
                     name: 'filter own community audit entries by export action',
                     method: 'GET',
@@ -7418,26 +7484,7 @@ export async function createFixture(
                   prepare: () =>
                     `/v2/community/export/download/${activeAdminExport1ManifestToken}`,
                 },
-                {
-                  name: 'read private community audit entries strictly scoped',
-                  method: 'GET',
-                  path: '/v2/community/audit-entries',
-                  expected: 200,
-                  check: (body: unknown) => {
-                    const parsed =
-                      CommunityAuditEntriesListResponseSchema.safeParse(body);
-                    if (!parsed.success) return false;
-                    const text = JSON.stringify(body);
-                    return (
-                      parsed.data.data.every(
-                        (entry) => entry.communityId === privateCommunityId
-                      ) &&
-                      !HONO_PERSONA_CULTURAL_STRINGS.some((s) =>
-                        text.includes(s)
-                      )
-                    );
-                  },
-                },
+                ...communityAuditReadSteps(privateCommunityId),
               ]
             : []),
           {

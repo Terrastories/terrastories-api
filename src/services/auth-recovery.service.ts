@@ -302,11 +302,24 @@ export class AuthRecoveryService {
         return { status: 409, body: CONFLICT_BODY };
       }
 
-      await this.authRepo.resetAccountThrottle(
-        account.id,
-        context.clientIp,
-        secret
-      );
+      try {
+        await this.authRepo.resetAccountThrottle(
+          account.id,
+          context.clientIp,
+          secret
+        );
+      } catch {
+        // The recovery sheet has already been generated and the old sheet
+        // superseded inside the committed write. A failed counter reset is
+        // housekeeping: log it content-free and still deliver the one-time
+        // sheet (§6.8, §7) rather than failing a request that cannot be
+        // retried.
+        // eslint-disable-next-line no-console -- no logging seam in auth recovery service; content-free fallback
+        console.error('recovery codes throttle reset failed', {
+          action: 'auth.recovery_codes.throttle_reset',
+          outcome: 'failure',
+        });
+      }
       return {
         status: 201,
         body: {
@@ -477,12 +490,16 @@ export class AuthRecoveryService {
       if (accountBlocked.blocked) {
         return { status: 401, body: AUTH_LOGIN_FAILURE_BODY };
       }
-      if (!codeRow || codeRow.userId !== candidate.id) {
+      if (
+        codeRow === null ||
+        !constantTimeEqual(codeRow.codeHash, codeHash) ||
+        codeRow.userId !== candidate.id
+      ) {
         return rejectRedeem(candidate);
       }
       account = candidate;
     } else {
-      if (!codeRow) {
+      if (codeRow === null || !constantTimeEqual(codeRow.codeHash, codeHash)) {
         return rejectRedeem(null);
       }
       const resolved = await this.authRepo.accountById(codeRow.userId);
@@ -586,11 +603,23 @@ export class AuthRecoveryService {
       return rejectRedeem(account);
     }
 
-    await this.authRepo.resetAccountThrottle(
-      account.id,
-      context.clientIp,
-      secret
-    );
+    try {
+      await this.authRepo.resetAccountThrottle(
+        account.id,
+        context.clientIp,
+        secret
+      );
+    } catch {
+      // The redemption has already committed (code consumed, sessions revoked,
+      // new session issued). A failed counter reset is housekeeping: log it
+      // content-free and still deliver the new session token (§6.8, §7)
+      // rather than failing a request that cannot be retried.
+      // eslint-disable-next-line no-console -- no logging seam in auth recovery service; content-free fallback
+      console.error('recovery redeem throttle reset failed', {
+        action: 'auth.recovery.redeem.throttle_reset',
+        outcome: 'failure',
+      });
+    }
     return {
       status: 200,
       token,

@@ -2183,10 +2183,10 @@ export async function runHonoFoundationContract(
           pendingRedeemB = redeemWith(codes[1]!, cookieA, '198.51.100.231');
           pendingRedeemA.then(ignore, ignore);
           pendingRedeemB.then(ignore, ignore);
-          const blocked = await waitForBlocked(tx, 1, Date.now() + 4000);
-          if (blocked < 1)
+          const blocked = await waitForBlocked(tx, 2, Date.now() + 4000);
+          if (blocked < 2)
             throw new Error(
-              'cross-user redeem race never materialised: neither redemption blocked behind the community lock'
+              'cross-user redeem race never materialised: both redemptions did not block behind the community lock'
             );
         });
         const [redeemA, redeemB] = await Promise.all([

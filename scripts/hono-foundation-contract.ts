@@ -2240,6 +2240,9 @@ export async function runHonoFoundationContract(
       if (dialectOf(database) === 'postgresql') {
         const lockUpgradeAEmail = `upglock-a-${tag}@example.test`;
         const lockUpgradeBEmail = `upglock-b-${tag}@example.test`;
+        // A wrapped (upgrade-eligible) account is the one whose login actually
+        // traverses the coupled createSessionWithVerifier path (round 4 item 4).
+        const lockUpgradeWrappedEmail = `upglock-wrapped-${tag}@example.test`;
         const lockUpgradeAccounts: Array<{ id: number; email: string }> = [];
         for (const [email, username] of [
           [lockUpgradeAEmail, `upglock_a_${tag}`],
@@ -2258,6 +2261,21 @@ export async function runHonoFoundationContract(
           userIds.push(row.id);
           lockUpgradeAccounts.push({ id: row.id, email });
         }
+        const [lockUpgradeWrappedAccount] = await db
+          .insert(tables.users)
+          .values({
+            ...userDefaults,
+            email: lockUpgradeWrappedEmail,
+            username: `upglock_wrapped_${tag}`,
+            role: 'admin',
+            communityId: communityA,
+            passwordAlgorithm: 'client-bcrypt-rails+sha256',
+            passwordSalt: 'c2FsdA==',
+            passwordParams: JSON.stringify({ cost: 12 }),
+            passwordVerifier: await sha256Hex(wrappedKey),
+          })
+          .returning();
+        userIds.push(lockUpgradeWrappedAccount.id);
         const [lockUpgradeAccountA, lockUpgradeAccountB] =
           lockUpgradeAccounts as [
             { id: number; email: string },
@@ -2307,7 +2325,7 @@ export async function runHonoFoundationContract(
             },
             body: JSON.stringify({
               identifier,
-              derivedKey: stretchedKey,
+              derivedKey: wrappedKey,
               upgrade: {
                 algorithm: 'client-argon2id+sha256',
                 salt: Buffer.from(
@@ -2331,7 +2349,7 @@ export async function runHonoFoundationContract(
           );
           pendingUpgrade = upgradeLoginWith(
             lockUpgradeCookieA,
-            lockUpgradeBEmail
+            lockUpgradeWrappedEmail
           );
           pendingRedeem.then(ignore, ignore);
           pendingUpgrade.then(ignore, ignore);

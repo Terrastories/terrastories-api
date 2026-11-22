@@ -352,13 +352,14 @@ export function planTransform(
     table: string,
     row: SourceRow,
     column: string,
-    disposition: string
+    disposition: string,
+    id: string = row.id ?? ''
   ): void => {
     const value = row[column];
     if (value === null || value === undefined) return;
     archivedFields.push({
       table,
-      id: row.id ?? '',
+      id,
       column,
       disposition,
       value,
@@ -1563,18 +1564,32 @@ export function planTransform(
   // community (the same reachability as the Stage-1 blob allowlist). Rows
   // without an attributable owner are MANUAL in full runs, not_selected in
   // scoped runs.
+  const capturedBlobIds = new Set(
+    bundle.manifest.blobs
+      .filter((blob) => blob.disposition === 'captured')
+      .map((blob) => blob.id)
+  );
   const settleMedia = (
     table: string,
     row: SourceRow,
     owner: Owner,
-    unattributedCode: string
+    unattributedCode: string,
+    blobId?: string | null
   ): 'pending_media_slice' | 'not_selected' | null => {
     if (owner === null) {
       orphan(table, row, null, unattributedCode);
       return null;
     }
+    // pending_media_slice promises the media slice has bytes to copy; a selected
+    // owner whose blob bytes are not in the bundle needs a re-capture (MANUAL).
+    const bytesMissing =
+      blobId !== undefined && !capturedBlobIds.has(blobId ?? '');
     if (owner === 'system') {
       if (includeSystemUsers) {
+        if (bytesMissing) {
+          reject(table, row, 'manual', 'media_bytes_not_captured');
+          return null;
+        }
         setStatus(table, row.id ?? '', 'pending_media_slice');
         return 'pending_media_slice';
       }
@@ -1590,6 +1605,10 @@ export function planTransform(
       reject(table, row, 'excluded_dependency', 'community_excluded');
       return null;
     }
+    if (bytesMissing) {
+      reject(table, row, 'manual', 'media_bytes_not_captured');
+      return null;
+    }
     setStatus(table, row.id ?? '', 'pending_media_slice');
     return 'pending_media_slice';
   };
@@ -1600,7 +1619,8 @@ export function planTransform(
       'active_storage_attachments',
       row,
       owner,
-      'attachment_unattributable'
+      'attachment_unattributable',
+      row.blob_id
     );
     if (status === null) continue;
     pendingAttachments.push({
@@ -1682,10 +1702,10 @@ export function planTransform(
       if (column.columnName in registry) continue;
       unregisteredColumns.push(table + '.' + column.columnName);
       warn('unregistered_column_archived', table, null);
-      for (const row of rows(table)) {
-        if (rowStatus.get(table)?.get(row.id ?? '') === 'not_selected')
-          continue;
-        archiveField(table, row, column.columnName, 'ARCHIVE');
+      for (const [index, row] of rows(table).entries()) {
+        const id = rowKey(table, row, index);
+        if (rowStatus.get(table)?.get(id) === 'not_selected') continue;
+        archiveField(table, row, column.columnName, 'ARCHIVE', id);
       }
     }
   }

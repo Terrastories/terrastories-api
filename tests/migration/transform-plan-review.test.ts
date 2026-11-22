@@ -368,6 +368,112 @@ describe('media reachability', () => {
   });
 });
 
+describe('media bytes not captured', () => {
+  const bundle = () => {
+    const b = bundleOf(
+      {
+        communities: [community('1', 'one')],
+        users: [user('10', '1'), user('12', null)],
+        stories: [story('50', '1')],
+        media: [{ id: '1', story_id: '50' }],
+        active_storage_attachments: [
+          {
+            id: '1',
+            record_type: 'Media',
+            record_id: '1',
+            blob_id: '100',
+            name: 'file',
+          },
+          {
+            id: '2',
+            record_type: 'User',
+            record_id: '12',
+            blob_id: '200',
+            name: 'avatar',
+          },
+        ],
+      },
+      { complete: false, captured: [{ id: '1', slug: 'one' }] }
+    );
+    (b.manifest as unknown as { blobs: unknown[] }).blobs = [
+      {
+        id: '100',
+        key: 'k',
+        byteSize: '1',
+        sha256: 'x',
+        disposition: 'captured',
+      },
+      {
+        id: '200',
+        key: 'k2',
+        byteSize: '1',
+        sha256: null,
+        disposition: 'not_selected',
+      },
+    ];
+    return b;
+  };
+
+  it('is MANUAL for a selected system-user attachment whose blob was not captured', () => {
+    const plan = planTransform(bundle(), {
+      communities: ['one'],
+      includeSystemUsers: true,
+    });
+    expect(plan.manual).toContainEqual({
+      table: 'active_storage_attachments',
+      id: '2',
+      code: 'media_bytes_not_captured',
+    });
+    const statuses = Object.fromEntries(
+      plan.pendingMedia.attachments.map((a) => [a.id, a.status])
+    );
+    expect(statuses).toEqual({ '1': 'pending_media_slice' });
+  });
+
+  it('stays not_selected without --include-system-users', () => {
+    const plan = planTransform(bundle(), { communities: ['one'] });
+    expect(plan.manual).toEqual([]);
+    expect(
+      plan.pendingMedia.attachments.find((a) => a.id === '2')?.status
+    ).toBe('not_selected');
+  });
+});
+
+describe('archive keys for tables without an id column', () => {
+  it('keys unregistered-column archives by the natural key / ordinal', () => {
+    const b = bundleOf({
+      schema_migrations: [
+        { version: '20240101', extra: 'a' },
+        { version: '20240102', extra: 'b' },
+      ],
+      ar_internal_metadata: [
+        { key: 'environment', extra: 'c' },
+        { key: 'schema_sha1', extra: 'd' },
+      ],
+    });
+    (b.manifest as unknown as { tables: unknown }).tables = {
+      schema_migrations: {
+        rowCount: 2,
+        columns: [{ columnName: 'version' }, { columnName: 'extra' }],
+      },
+      ar_internal_metadata: {
+        rowCount: 2,
+        columns: [{ columnName: 'key' }, { columnName: 'extra' }],
+      },
+    };
+    const plan = planTransform(b);
+    const fields = plan.archivedFields.filter((f) => f.column === 'extra');
+    expect(
+      fields.map((f) => f.table + '#' + f.id + '=' + f.value).sort()
+    ).toEqual([
+      'ar_internal_metadata#environment=c',
+      'ar_internal_metadata#schema_sha1=d',
+      'schema_migrations#20240101=a',
+      'schema_migrations#20240102=b',
+    ]);
+  });
+});
+
 describe('unknown tables', () => {
   it('keys custom rows by ordinal so repeated key columns do not collide', () => {
     const plan = planTransform(

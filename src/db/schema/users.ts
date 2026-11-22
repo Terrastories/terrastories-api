@@ -44,7 +44,7 @@ export const usersPg = pgTable(
   'users',
   {
     id: serial('id').primaryKey(),
-    email: pgText('email').notNull(),
+    email: pgText('email'),
     username: pgText('username'),
     displayName: pgText('display_name'),
     passwordHash: pgText('password_hash').notNull(),
@@ -112,7 +112,7 @@ export const usersSqlite = sqliteTable(
   'users',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
-    email: sqliteText('email').notNull(),
+    email: sqliteText('email'),
     username: sqliteText('username'),
     displayName: sqliteText('display_name'),
     passwordHash: sqliteText('password_hash').notNull(),

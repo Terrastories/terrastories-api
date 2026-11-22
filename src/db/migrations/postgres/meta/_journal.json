@@ -134,6 +134,13 @@
       "when": 1795608001000,
       "tag": "0018_erasure_lifecycle_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795694401000,
+      "tag": "0019_users_email_nullable",
+      "breakpoints": true
     }
   ]
 }

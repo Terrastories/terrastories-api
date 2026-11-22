@@ -104,10 +104,9 @@ credentials and secrets are generated at runtime.
 Not covered here, and still owned by #147 (with #185): the browser,
 offline/disconnected behaviour and network-block proof. There is also no
 fixture-restart step: the fresh install is an in-memory database the harness
-cannot close and reopen. The Workers fresh runtime has no R2 binding, so
-there `field-kit` stays skipped with a reason naming #147/#185; skipped
-journeys do not count toward route coverage. SQLite results do not establish
-PostgreSQL or Workers readiness.
+cannot close and reopen. On Workers the same journey runs against
+the fresh workerd runtime (D1 `DB`, R2 `MEDIA`) through the fresh handler.
+SQLite results do not establish PostgreSQL or Workers readiness.
 
 ## CI release gate
 

@@ -114,7 +114,7 @@ export interface CommunityExportManifest {
   users: Array<{
     id: number;
     communityId: number;
-    email: string;
+    email: string | null;
     username: string | null;
     displayName: string | null;
     firstName: string;

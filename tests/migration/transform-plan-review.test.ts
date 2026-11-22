@@ -286,6 +286,88 @@ describe('story slug', () => {
   });
 });
 
+describe('media reachability', () => {
+  const blob = (id: string) => ({
+    id,
+    key: 'k' + id,
+    byteSize: '1',
+    sha256: 'x',
+    disposition: 'captured',
+  });
+  const att = (
+    id: string,
+    type: string,
+    recordId: string,
+    blobId: string,
+    name = 'file'
+  ): SourceRow => ({
+    id,
+    record_type: type,
+    record_id: recordId,
+    blob_id: blobId,
+    name,
+  });
+  const make = () => {
+    const bundle = bundleOf({
+      communities: [community('1', 'one'), community('2', 'two')],
+      stories: [story('50', '1'), story('51', '2')],
+      media: [
+        { id: '1', story_id: '50' },
+        { id: '2', story_id: '51' },
+      ],
+      active_storage_blobs: [],
+      active_storage_attachments: [
+        att('1', 'Media', '1', '100'),
+        att('2', 'Media', '2', '200'),
+        att('3', 'ActiveStorage::Blob', '100', '101', 'preview_image'),
+        att('4', 'ActiveStorage::VariantRecord', '1', '102', 'image'),
+      ],
+      active_storage_variant_records: [{ id: '1', blob_id: '101' }],
+    });
+    (bundle.manifest as unknown as { blobs: unknown[] }).blobs = [
+      blob('100'),
+      blob('101'),
+      blob('102'),
+      blob('200'),
+    ];
+    return bundle;
+  };
+
+  it('scoped run: blobs follow the transform selection, derived chains included', () => {
+    const plan = planTransform(make(), { communities: ['one'] });
+    const status = Object.fromEntries(
+      plan.pendingMedia.blobs.map((b) => [b.id, b.status])
+    );
+    expect(status).toEqual({
+      '100': 'pending_media_slice',
+      '101': 'pending_media_slice',
+      '102': 'pending_media_slice',
+      '200': 'not_selected',
+    });
+    expect(
+      plan.pendingMedia.blobs.every((b) => b.bundleDisposition === 'captured')
+    ).toBe(true);
+    const attachments = Object.fromEntries(
+      plan.pendingMedia.attachments.map((a) => [a.id, a.status])
+    );
+    expect(attachments).toEqual({
+      '1': 'pending_media_slice',
+      '2': 'not_selected',
+      '3': 'pending_media_slice',
+      '4': 'pending_media_slice',
+    });
+    expect(plan.manual).toEqual([]);
+  });
+
+  it('full run: every captured blob stays pending and chains are attributed', () => {
+    const plan = planTransform(make());
+    expect(
+      plan.pendingMedia.blobs.every((b) => b.status === 'pending_media_slice')
+    ).toBe(true);
+    expect(plan.manual).toEqual([]);
+  });
+});
+
 describe('unknown tables', () => {
   it('keys custom rows by ordinal so repeated key columns do not collide', () => {
     const plan = planTransform(

@@ -1505,7 +1505,7 @@ export function planTransform(
       : null;
   };
   const ownerOf = (recordType: string, recordId: string, depth = 0): Owner => {
-    if (depth > 3) return null;
+    if (depth > 8) return null;
     switch (recordType) {
       case 'Community': {
         const id = toId(recordId);
@@ -1538,21 +1538,26 @@ export function planTransform(
         return null;
     }
   };
+  // A blob's owner is found through every attachment that uses it. Derived
+  // blobs (preview_image on an ActiveStorage::Blob record, variant images on a
+  // VariantRecord) are followed transitively to the original owning record.
+  // When several owners exist, one in a selected community wins.
   const viaBlob = (blobId: string, depth: number): Owner => {
+    let first: Owner = null;
     for (const attachment of attachments) {
-      if (
-        attachment.blob_id === blobId &&
-        attachment.record_type !== 'ActiveStorage::VariantRecord' &&
-        attachment.record_type !== 'ActiveStorage::Blob'
-      ) {
-        return ownerOf(
-          attachment.record_type ?? '',
-          attachment.record_id ?? '',
-          depth
-        );
+      if (attachment.blob_id !== blobId) continue;
+      const owner = ownerOf(
+        attachment.record_type ?? '',
+        attachment.record_id ?? '',
+        depth
+      );
+      if (owner === null) continue;
+      if (typeof owner === 'number' && communityInfo.get(owner)?.selected) {
+        return owner;
       }
+      first ??= owner;
     }
-    return null;
+    return first;
   };
   // pending_media_slice applies only to rows reachable from a selected
   // community (the same reachability as the Stage-1 blob allowlist). Rows
@@ -1624,6 +1629,24 @@ export function planTransform(
       'variant_unattributable'
     );
   }
+  // Blob dispositions follow the transform selection, not the capture
+  // selection: a captured blob is pending only when some attachment using it
+  // is reachable from a selected (and accepted) community. In a full run every
+  // captured blob stays pending, attributable or not.
+  const reachableBlobs = new Set<string>();
+  for (const attachment of attachments) {
+    const owner = ownerOf(
+      attachment.record_type ?? '',
+      attachment.record_id ?? ''
+    );
+    const reachable =
+      owner === 'system'
+        ? includeSystemUsers
+        : typeof owner === 'number' &&
+          communityInfo.get(owner)?.selected === true &&
+          communityInfo.get(owner)?.accepted === true;
+    if (reachable) reachableBlobs.add(attachment.blob_id ?? '');
+  }
   const pendingBlobs = bundle.manifest.blobs
     .map((blob) => ({
       id: blob.id,
@@ -1632,7 +1655,8 @@ export function planTransform(
       sha256: blob.sha256,
       bundleDisposition: blob.disposition,
       status:
-        blob.disposition === 'captured'
+        blob.disposition === 'captured' &&
+        (allMode || reachableBlobs.has(blob.id))
           ? ('pending_media_slice' as const)
           : ('not_selected' as const),
     }))

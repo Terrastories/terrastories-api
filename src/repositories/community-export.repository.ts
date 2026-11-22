@@ -96,7 +96,7 @@ export interface ExportMapConfigRow {
 export interface ExportUserRow {
   id: number;
   communityId: number;
-  email: string;
+  email: string | null;
   username: string | null;
   displayName: string | null;
   firstName: string;
@@ -788,7 +788,7 @@ export class CommunityExportRepository {
       users: userRows.map((row) => ({
         id: Number(row.id),
         communityId,
-        email: String(row.email),
+        email: row.email === null ? null : String(row.email),
         username: row.username === null ? null : String(row.username),
         displayName: row.displayName === null ? null : String(row.displayName),
         firstName: String(row.firstName),

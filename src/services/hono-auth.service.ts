@@ -148,7 +148,7 @@ export class HonoAuthService {
         status: 'updated';
         displayName: string | null;
         username: string | null;
-        email: string;
+        email: string | null;
       }
     | { status: 'forbidden' }
     | { status: 'conflict' }
@@ -233,7 +233,7 @@ export class HonoAuthService {
             ? { email: input.email, emailNormalized: identity.emailNormalized }
             : {}),
           collision: {
-            ...(identity.emailNormalized !== undefined
+            ...(identity.emailNormalized != null
               ? { emailNormalized: identity.emailNormalized }
               : {}),
             ...(identity.usernameNormalized !== undefined

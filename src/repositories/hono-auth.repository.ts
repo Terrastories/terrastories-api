@@ -50,7 +50,7 @@ export interface AuthAccount {
   isActive: boolean;
   communityIsActive: boolean | null;
   isDesignatedSteward: boolean;
-  email: string;
+  email: string | null;
   username: string | null;
   displayName: string | null;
   passwordHash: string;
@@ -67,7 +67,7 @@ interface RawAuthAccount {
   isActive: number | boolean;
   communityIsActive: number | boolean | null;
   isDesignatedSteward: number | boolean;
-  email: string;
+  email: string | null;
   username: string | null;
   displayName: string | null;
   passwordHash: string;

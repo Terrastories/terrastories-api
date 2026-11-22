@@ -27,7 +27,7 @@ import {
 
 export interface FoundationUser {
   id: number;
-  email: string;
+  email: string | null;
   username: string | null;
   displayName: string | null;
   passwordHash: string;
@@ -37,7 +37,7 @@ export interface FoundationUser {
 
 interface RawFoundationUser {
   id: number;
-  email: string;
+  email: string | null;
   username: string | null;
   displayName: string | null;
   passwordHash: string;

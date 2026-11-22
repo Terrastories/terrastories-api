@@ -23,7 +23,8 @@ export const ManagedUserStatusSchema = z.enum(['active', 'disabled']);
 /** The wire projection of a managed community account. Never credentials. */
 export const ManagedUserSchema = z.object({
   id: z.number().int().positive().max(MAX_DATABASE_ID),
-  email: z.string(),
+  // Null for a migrated account that never had an email (login by username).
+  email: z.string().nullable(),
   username: z.string().nullable(),
   displayName: z.string().nullable(),
   // Stored role, surfaced verbatim: legacy transitional rows (e.g. 'elder')

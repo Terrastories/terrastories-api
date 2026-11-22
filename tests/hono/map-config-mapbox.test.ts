@@ -1175,6 +1175,114 @@ function registerSharedMapboxTests(harness: TestHarness) {
     expect(pubDetailReopened.rawText).not.toContain(FAKE_PK_COMMUNITY);
   });
 
+  it('coerces exposeMapboxCredentials=true to false on PUT when the community is private', async () => {
+    const ctx = await harness.seedCommunityAndActors({
+      visibility: 'private',
+      slug: 'private-expose-comm',
+    });
+    const res = await jsonRequest(ctx.app, 'PUT', '/v2/community/map-config', {
+      cookie: ctx.adminCookie,
+      body: {
+        mapboxStyleUrl: 'mapbox://styles/community/private-v1',
+        mapboxAccessToken: FAKE_PK_COMMUNITY,
+        exposeMapboxCredentials: true,
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(res.json.data.exposeMapboxCredentials).toBe(false);
+    // Update path (existing row) coerces too.
+    const again = await jsonRequest(
+      ctx.app,
+      'PUT',
+      '/v2/community/map-config',
+      {
+        cookie: ctx.adminCookie,
+        body: { exposeMapboxCredentials: true, zoom: 4 },
+      }
+    );
+    expect(again.status).toBe(200);
+    expect(again.json.data.exposeMapboxCredentials).toBe(false);
+    const read = await jsonRequest(ctx.app, 'GET', '/v2/community/map-config', {
+      cookie: ctx.adminCookie,
+    });
+    expect(read.json.data.exposeMapboxCredentials).toBe(false);
+  });
+
+  it('preserves omitted provider fields and guards the merged style/token pair inside the upsert', async () => {
+    const ctx = await harness.seedCommunityAndActors({
+      visibility: 'public',
+      slug: 'atomic-merge-comm',
+    });
+    const db = harness.getDb();
+    const repo = new CommunityWritesRepository(db);
+    const base = {
+      styleUrl: null,
+      basemapStyle: null,
+      centerLatitude: null,
+      centerLongitude: null,
+      southWestLatitude: null,
+      southWestLongitude: null,
+      northEastLatitude: null,
+      northEastLongitude: null,
+      zoom: null,
+      pitch: null,
+      bearing: null,
+      threeDimensional: null,
+      projection: null,
+      staticMapFileId: null,
+    };
+    const first = await repo.upsertCommunityMapConfig(
+      ctx.communityId,
+      ctx.adminId,
+      {
+        ...base,
+        mapboxStyleUrl: 'mapbox://styles/atomic/one',
+        mapboxAccessToken: FAKE_PK_COMMUNITY,
+        exposeMapboxCredentials: true,
+        mapbox3d: true,
+        protomapsApiKey: FAKE_PROTOMAPS_KEY,
+      },
+      [],
+      harness.getNow()
+    );
+    expect(first?.exposeMapboxCredentials).toBe(true);
+    // Omitted provider keys (undefined) keep stored values.
+    const kept = await repo.upsertCommunityMapConfig(
+      ctx.communityId,
+      ctx.adminId,
+      { ...base, zoom: 3 },
+      [],
+      harness.getNow()
+    );
+    expect(kept).toMatchObject({
+      mapboxStyleUrl: 'mapbox://styles/atomic/one',
+      mapboxAccessToken: FAKE_PK_COMMUNITY,
+      exposeMapboxCredentials: true,
+      mapbox3d: true,
+      protomapsApiKey: FAKE_PROTOMAPS_KEY,
+      zoom: 3,
+    });
+    // Clearing only the token would leave a half pair: write is refused.
+    const refused = await repo.upsertCommunityMapConfig(
+      ctx.communityId,
+      ctx.adminId,
+      { ...base, mapboxAccessToken: null, zoom: 9 },
+      [],
+      harness.getNow()
+    );
+    expect(refused).toBeNull();
+    const tables = tablesFor(db);
+    const [row] = await db
+      .select({
+        token: tables.communityMapConfigs.mapboxAccessToken,
+        zoom: tables.communityMapConfigs.zoom,
+      })
+      .from(tables.communityMapConfigs)
+      .where(eq(tables.communityMapConfigs.communityId, ctx.communityId));
+    expect(row?.token).toBe(FAKE_PK_COMMUNITY);
+    expect(row?.zoom).toBe(3);
+  });
+
   it('includes mapConfig fields and classified provider credentials deterministically in export manifests, and clears them on erasure', async () => {
     const ctx = await harness.seedCommunityAndActors({
       visibility: 'public',

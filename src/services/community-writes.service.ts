@@ -255,7 +255,9 @@ export class CommunityWritesService {
     }
 
     try {
-      // Omitted provider keys keep stored values; explicit null clears.
+      // Omitted provider keys keep stored values (preserved atomically by the
+      // repository upsert); explicit null clears. The read below is only an
+      // early pairing check; the upsert re-guards the merged pair atomically.
       const needsStored =
         parsed.data.mapboxStyleUrl === undefined ||
         parsed.data.mapboxAccessToken === undefined ||
@@ -341,21 +343,12 @@ export class CommunityWritesService {
         {
           styleUrl: cleanStyleUrl,
           basemapStyle: parsed.data.basemapStyle,
-          mapboxStyleUrl,
-          mapboxAccessToken,
-          exposeMapboxCredentials:
-            parsed.data.exposeMapboxCredentials ??
-            stored?.exposeMapboxCredentials ??
-            false,
-          mapbox3d: parsed.data.mapbox3d ?? stored?.mapbox3d ?? false,
-          protomapsApiKey:
-            parsed.data.protomapsApiKey === undefined
-              ? (stored?.protomapsApiKey ?? null)
-              : parsed.data.protomapsApiKey,
-          protomapsBasemapStyle:
-            parsed.data.protomapsBasemapStyle === undefined
-              ? (stored?.protomapsBasemapStyle ?? null)
-              : parsed.data.protomapsBasemapStyle,
+          mapboxStyleUrl: parsed.data.mapboxStyleUrl,
+          mapboxAccessToken: parsed.data.mapboxAccessToken,
+          exposeMapboxCredentials: parsed.data.exposeMapboxCredentials,
+          mapbox3d: parsed.data.mapbox3d,
+          protomapsApiKey: parsed.data.protomapsApiKey,
+          protomapsBasemapStyle: parsed.data.protomapsBasemapStyle,
           centerLatitude: parsed.data.centerLatitude,
           centerLongitude: parsed.data.centerLongitude,
           southWestLatitude: parsed.data.southWestLatitude,
@@ -373,7 +366,17 @@ export class CommunityWritesService {
       );
 
       if (!saved) {
-        return { status: 500, body: INTERNAL_ERROR_BODY };
+        // Only the atomic merged-pair guard yields no row on a valid upsert.
+        return {
+          status: 400,
+          body: makeValidationErrorBody([
+            {
+              path: 'mapboxAccessToken',
+              message:
+                'Mapbox style URL and Mapbox access token must both be provided or both be blank',
+            },
+          ]),
+        };
       }
 
       const projected = projectAuthenticatedMapConfig(

@@ -30,12 +30,19 @@ export interface CommunitySettingsUpdateInput {
 export interface MapConfigUpsertInput {
   styleUrl: string | null;
   basemapStyle: string | null;
-  mapboxStyleUrl: string | null;
-  mapboxAccessToken: string | null;
-  exposeMapboxCredentials: boolean;
-  mapbox3d: boolean;
-  protomapsApiKey: string | null;
-  protomapsBasemapStyle: string | null;
+  /**
+   * Provider fields (Mapbox/Protomaps): `undefined` keeps the stored value
+   * atomically (omitted from the conflict SET); `null`/value overwrites.
+   * `exposeMapboxCredentials: true` is coerced to false in SQL when the
+   * community is private. A merged style/token pair mismatch makes the
+   * conflict update a no-op (returns null).
+   */
+  mapboxStyleUrl?: string | null;
+  mapboxAccessToken?: string | null;
+  exposeMapboxCredentials?: boolean;
+  mapbox3d?: boolean;
+  protomapsApiKey?: string | null;
+  protomapsBasemapStyle?: string | null;
   centerLatitude: number | null;
   centerLongitude: number | null;
   southWestLatitude: number | null;
@@ -479,6 +486,25 @@ export class CommunityWritesRepository {
     updatedFieldNames: readonly string[],
     now: Date = new Date()
   ): Promise<PublicMapConfigRow | null> {
+    const { communityMapConfigs, communities } = this.tables;
+    // Private community => false, evaluated in the same statement as the write.
+    // The subquery yields the physical public flag in the column's own encoding.
+    const exposeValue = (input.exposeMapboxCredentials === true
+      ? sql`(select ${communities.publicStories} from ${communities} where ${communities.id} = ${communityId})`
+      : false) as unknown as boolean;
+    // Merged (stored + incoming) style/token must be both set or both null.
+    const nullTest = (
+      value: string | null | undefined,
+      column:
+        | typeof communityMapConfigs.mapboxStyleUrl
+        | typeof communityMapConfigs.mapboxAccessToken
+    ) =>
+      value === undefined
+        ? sql`(${column} is null)`
+        : value === null
+          ? sql`(1 = 1)`
+          : sql`(1 = 0)`;
+    const pairGuard = sql`(${nullTest(input.mapboxStyleUrl, communityMapConfigs.mapboxStyleUrl)} = ${nullTest(input.mapboxAccessToken, communityMapConfigs.mapboxAccessToken)})`;
     const buildUpsertQuery = (executor: typeof this.db) =>
       executor
         .insert(this.tables.communityMapConfigs)
@@ -486,12 +512,12 @@ export class CommunityWritesRepository {
           communityId,
           styleUrl: input.styleUrl,
           basemapStyle: input.basemapStyle,
-          mapboxStyleUrl: input.mapboxStyleUrl,
-          mapboxAccessToken: input.mapboxAccessToken,
-          exposeMapboxCredentials: input.exposeMapboxCredentials,
-          mapbox3d: input.mapbox3d,
-          protomapsApiKey: input.protomapsApiKey,
-          protomapsBasemapStyle: input.protomapsBasemapStyle,
+          mapboxStyleUrl: input.mapboxStyleUrl ?? null,
+          mapboxAccessToken: input.mapboxAccessToken ?? null,
+          exposeMapboxCredentials: exposeValue,
+          mapbox3d: input.mapbox3d ?? false,
+          protomapsApiKey: input.protomapsApiKey ?? null,
+          protomapsBasemapStyle: input.protomapsBasemapStyle ?? null,
           centerLatitude: input.centerLatitude,
           centerLongitude: input.centerLongitude,
           southWestLatitude: input.southWestLatitude,
@@ -509,15 +535,26 @@ export class CommunityWritesRepository {
         })
         .onConflictDoUpdate({
           target: this.tables.communityMapConfigs.communityId,
+          setWhere: pairGuard,
           set: {
             styleUrl: input.styleUrl,
             basemapStyle: input.basemapStyle,
-            mapboxStyleUrl: input.mapboxStyleUrl,
-            mapboxAccessToken: input.mapboxAccessToken,
-            exposeMapboxCredentials: input.exposeMapboxCredentials,
-            mapbox3d: input.mapbox3d,
-            protomapsApiKey: input.protomapsApiKey,
-            protomapsBasemapStyle: input.protomapsBasemapStyle,
+            ...(input.mapboxStyleUrl !== undefined && {
+              mapboxStyleUrl: input.mapboxStyleUrl,
+            }),
+            ...(input.mapboxAccessToken !== undefined && {
+              mapboxAccessToken: input.mapboxAccessToken,
+            }),
+            ...(input.exposeMapboxCredentials !== undefined && {
+              exposeMapboxCredentials: exposeValue,
+            }),
+            ...(input.mapbox3d !== undefined && { mapbox3d: input.mapbox3d }),
+            ...(input.protomapsApiKey !== undefined && {
+              protomapsApiKey: input.protomapsApiKey,
+            }),
+            ...(input.protomapsBasemapStyle !== undefined && {
+              protomapsBasemapStyle: input.protomapsBasemapStyle,
+            }),
             centerLatitude: input.centerLatitude,
             centerLongitude: input.centerLongitude,
             southWestLatitude: input.southWestLatitude,

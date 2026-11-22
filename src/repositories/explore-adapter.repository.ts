@@ -269,9 +269,10 @@ export class ExploreAdapterRepository {
       .from(communityMapConfigs)
       .where(eq(communityMapConfigs.communityId, communityId))
       .limit(1);
-    if (mapConfigRows[0]) {
-      const row = mapConfigRows[0];
-      return {
+    const row = mapConfigRows[0];
+    let fromRow: ExploreThemeRow | null = null;
+    if (row) {
+      fromRow = {
         styleUrl: row.styleUrl,
         mapboxStyleUrl: row.mapboxStyleUrl,
         mapboxAccessToken: row.mapboxAccessToken,
@@ -290,6 +291,9 @@ export class ExploreAdapterRepository {
         pitch: row.pitch,
         bearing: row.bearing,
       };
+      // A canonical style on the row wins; otherwise fall back to the legacy
+      // theme style below (null mapboxStyleUrl/styleUrl rows keep other fields).
+      if (row.styleUrl !== null || row.mapboxStyleUrl !== null) return fromRow;
     }
 
     const rows = await this.database
@@ -307,6 +311,9 @@ export class ExploreAdapterRepository {
       .orderBy(asc(themes.id))
       .limit(1);
     const legacy = rows[0];
+    if (fromRow) {
+      return legacy ? { ...fromRow, styleUrl: legacy.mapboxStyleUrl } : fromRow;
+    }
     if (!legacy) return null;
     return {
       styleUrl: legacy.mapboxStyleUrl,

@@ -772,6 +772,29 @@ it('answers community show with the Rails detail shape', async () => {
   expect(page.text).not.toContain('secret-context');
 });
 
+it('falls back to the legacy theme style when the map-config row has no style', async () => {
+  await db.insert(tables.communityMapConfigs).values({
+    communityId: ids.a,
+    styleUrl: null,
+    mapboxStyleUrl: null,
+    mapboxAccessToken: null,
+    zoom: 7,
+    createdAt: T0,
+    updatedAt: T0,
+  } as never);
+  try {
+    const page = await body('/explore/communities/public-alpha');
+    expect(page.status).toBe(200);
+    expect(page.json.data.mapConfig.mapboxStyle).toBe(
+      'https://tiles.example.test/style.json'
+    );
+  } finally {
+    await db
+      .delete(tables.communityMapConfigs)
+      .where(eq(tables.communityMapConfigs.communityId, ids.a));
+  }
+});
+
 it('hides private, disabled, and unknown communities from show', async () => {
   for (const slug of ['private-gamma', 'disabled-delta', 'no-such']) {
     const page = await body(`/explore/communities/${slug}`);

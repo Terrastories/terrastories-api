@@ -675,6 +675,11 @@ describe('V2 public community endpoints (#145)', () => {
       mapConfig: {
         styleUrl: 'https://tiles.example.test/alpha-style.json',
         basemapStyle: 'outdoors',
+        mapboxStyleUrl: null,
+        mapboxAccessToken: null,
+        mapbox3d: false,
+        protomapsApiKey: null,
+        protomapsBasemapStyle: null,
         centerLatitude: 10.5,
         centerLongitude: -20.25,
         southWestLatitude: 9,

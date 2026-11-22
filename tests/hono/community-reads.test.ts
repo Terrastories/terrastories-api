@@ -825,6 +825,11 @@ describe('Slice 6 §6.4a role differentiation and #162 hiding', () => {
     expect(noMapRes.status).toBe(200);
     expect(CommunityMapConfigResponseSchema.parse(noMapRes.json)).toEqual({
       data: null,
+      render: {
+        mapboxStyleUrl: null,
+        mapboxAccessToken: null,
+        source: 'none',
+      },
     });
   });
 

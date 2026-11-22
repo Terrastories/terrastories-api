@@ -141,6 +141,13 @@
       "when": 1795608001000,
       "tag": "0019_erasure_lifecycle_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1795608002000,
+      "tag": "0020_map_config_mapbox_protomaps",
+      "breakpoints": true
     }
   ]
 }

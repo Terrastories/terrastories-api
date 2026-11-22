@@ -26,7 +26,8 @@ async function assertSnapshotMetadata(
   label: string,
   snapshotPath: string,
   usersTableKey: string,
-  communitiesTableKey: string
+  communitiesTableKey: string,
+  mapConfigsTableKey: string
 ): Promise<void> {
   const snapshot = JSON.parse(
     await readFile(path.join(rootDir, snapshotPath), 'utf8')
@@ -67,21 +68,48 @@ async function assertSnapshotMetadata(
     false,
     `${label} snapshot communities.deprovisioned_at must be nullable`
   );
+
+  const mapConfigsTable = snapshot.tables?.[mapConfigsTableKey];
+  assert.ok(
+    mapConfigsTable,
+    `${label} snapshot must contain ${mapConfigsTableKey}`
+  );
+  for (const [col, notNull] of [
+    ['mapbox_style_url', false],
+    ['mapbox_access_token', false],
+    ['expose_mapbox_credentials', true],
+    ['mapbox_3d', true],
+    ['protomaps_api_key', false],
+    ['protomaps_basemap_style', false],
+  ] as const) {
+    const column = mapConfigsTable.columns?.[col];
+    assert.ok(
+      column,
+      `${label} snapshot must declare community_map_configs.${col}`
+    );
+    assert.equal(
+      column.notNull,
+      notNull,
+      `${label} snapshot community_map_configs.${col} notNull mismatch`
+    );
+  }
 }
 
 async function main(): Promise<void> {
   console.log('🧭 Migration metadata regression gate');
   await assertSnapshotMetadata(
     'SQLite',
-    'src/db/migrations/meta/0018_snapshot.json',
+    'src/db/migrations/meta/0020_snapshot.json',
     'users',
-    'communities'
+    'communities',
+    'community_map_configs'
   );
   await assertSnapshotMetadata(
     'PostgreSQL',
-    'src/db/migrations/postgres/meta/0017_snapshot.json',
+    'src/db/migrations/postgres/meta/0019_snapshot.json',
     'public.users',
-    'public.communities'
+    'public.communities',
+    'public.community_map_configs'
   );
   console.log('✅ Migration metadata regression gate passed');
 }

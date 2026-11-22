@@ -111,6 +111,10 @@ export interface FoundationOptions {
   fieldKitCaFingerprint?: string;
   /** Enforce D1 commit-plan budgets and 1/UTC-day import cap even outside D1. */
   enforceD1Budget?: boolean;
+  /** Optional instance-level public Mapbox token (`pk.*`) fallback. */
+  mapboxAccessToken?: string;
+  /** Offline mode ignores Mapbox/Protomaps external provider credentials. */
+  offlineMode?: boolean;
 }
 const preloginSchema = z
   .object({
@@ -408,6 +412,7 @@ export function createHonoApp(options: FoundationOptions) {
     repository: new PublicCommunitiesRepository(options.repository.connection),
     storage: options.storage,
     publicOrigin: configuredOrigin,
+    offlineMode: options.offlineMode,
   });
   app.use('/v2/*', async (c, next) => {
     const session = await service.actor(getCookie(c, 'ts_session'), now());
@@ -611,6 +616,8 @@ export function createHonoApp(options: FoundationOptions) {
   registerCommunityReadRoutes(app, {
     repository: communityReadsRepository,
     publicOrigin: configuredOrigin,
+    mapboxAccessToken: options.mapboxAccessToken,
+    offlineMode: options.offlineMode,
   });
   const mediaCleanup =
     options.mediaCleanup ??
@@ -620,6 +627,8 @@ export function createHonoApp(options: FoundationOptions) {
     readsRepository: communityReadsRepository,
     publicOrigin: configuredOrigin,
     mediaCleanup,
+    mapboxAccessToken: options.mapboxAccessToken,
+    offlineMode: options.offlineMode,
   });
   registerStoryWriteRoutes(app, {
     repository: new StoryWritesRepository(options.repository.connection),
@@ -681,6 +690,7 @@ export function createHonoApp(options: FoundationOptions) {
     repository: new ExploreAdapterRepository(options.repository.connection),
     storage: options.storage,
     publicOrigin: configuredOrigin,
+    offlineMode: options.offlineMode,
   });
   return app;
 }

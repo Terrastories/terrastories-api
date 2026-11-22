@@ -10,9 +10,10 @@ import {
 } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 
-const SAFE_ACTIVE_STORAGE_KEY = /^[A-Za-z0-9_-]+$/;
+export const SAFE_ACTIVE_STORAGE_KEY = /^[A-Za-z0-9_-]+$/;
 
-export interface CapturedBlob {
+export interface CapturedSelectedBlob {
+  disposition: 'captured';
   id: string;
   key: string;
   filename: string;
@@ -21,6 +22,27 @@ export interface CapturedBlob {
   railsChecksum: string | null;
   sha256: string;
   serviceName: string;
+}
+
+export interface NotSelectedBlob {
+  disposition: 'not_selected';
+  id: string;
+  key: string;
+  filename: string;
+  contentType: string | null;
+  byteSize: string;
+  railsChecksum: string | null;
+  sha256: null;
+  serviceName: string;
+}
+
+export type ManifestBlob = CapturedSelectedBlob | NotSelectedBlob;
+export type CapturedBlob = CapturedSelectedBlob;
+
+export function assertSafeActiveStorageKey(key: string): void {
+  if (!SAFE_ACTIVE_STORAGE_KEY.test(key)) {
+    throw new Error(`Unsafe ActiveStorage key rejected: ${key}`);
+  }
 }
 
 function isMissingPath(error: unknown): boolean {
@@ -45,9 +67,7 @@ export async function resolveActiveStorageBlobPath(
   blobRoot: string,
   key: string
 ): Promise<string> {
-  if (!SAFE_ACTIVE_STORAGE_KEY.test(key)) {
-    throw new Error(`Unsafe ActiveStorage key rejected: ${key}`);
-  }
+  assertSafeActiveStorageKey(key);
 
   const trustedRoot = await realpath(blobRoot);
   const candidates = [
@@ -85,7 +105,7 @@ export async function resolveActiveStorageBlobPath(
   throw new Error(`Missing ActiveStorage blob bytes for key ${key}`);
 }
 
-async function hashFile(
+export async function hashFile(
   path: string
 ): Promise<{ md5: string; sha256: string }> {
   return new Promise((resolve, reject) => {
@@ -107,6 +127,51 @@ async function hashFile(
   });
 }
 
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, signal: AbortSignal) => Promise<R>
+): Promise<R[]> {
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) {
+    throw new Error(
+      `Invalid blob concurrency: ${concurrency}. Must be an integer between 1 and 32.`
+    );
+  }
+  if (items.length === 0) return [];
+
+  const results = new Array<R>(items.length);
+  const controller = new AbortController();
+  let nextIndex = 0;
+  let firstError: unknown;
+  let failed = false;
+
+  const workerCount = Math.min(concurrency, items.length);
+  const runners = Array.from({ length: workerCount }, async () => {
+    while (!failed) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+
+      try {
+        results[index] = await worker(items[index]!, controller.signal);
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+          controller.abort(error);
+        }
+        return;
+      }
+    }
+  });
+
+  await Promise.all(runners);
+  if (failed) {
+    throw firstError;
+  }
+  return results;
+}
+
 export async function verifyAndCopyActiveStorageBlob(options: {
   blobRoot: string;
   destinationRoot: string;
@@ -117,7 +182,7 @@ export async function verifyAndCopyActiveStorageBlob(options: {
   byteSize: string;
   checksum: string | null;
   serviceName: string;
-}): Promise<CapturedBlob> {
+}): Promise<CapturedSelectedBlob> {
   const sourcePath = await resolveActiveStorageBlobPath(
     options.blobRoot,
     options.key
@@ -166,6 +231,7 @@ export async function verifyAndCopyActiveStorageBlob(options: {
   }
 
   return {
+    disposition: 'captured',
     id: options.id,
     key: options.key,
     filename: options.filename,

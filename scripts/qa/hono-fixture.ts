@@ -9796,6 +9796,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/attachments',
             expected: 201,
+            captureId: 'qaPlaceAudioAtt',
             body: {
               fileId: '{qaAudioFile}',
               ownerType: 'place',
@@ -9808,6 +9809,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/attachments',
             expected: 201,
+            captureId: 'qaPlacePhotoAtt',
             body: {
               fileId: '{qaStageFile2}',
               ownerType: 'place',
@@ -9883,6 +9885,18 @@ export async function createFixture(
             method: 'DELETE',
             path: '/v2/media/{qaStageFile}',
             expected: 404,
+          },
+          {
+            name: 'detach place photo',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaPlacePhotoAtt}',
+            expected: 204,
+          },
+          {
+            name: 'detach place-name audio',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaPlaceAudioAtt}',
+            expected: 204,
           },
           {
             name: 'detach speaker photo',
@@ -9965,6 +9979,7 @@ export async function createFixture(
             method: 'POST',
             path: '/v2/attachments',
             expected: 201,
+            captureId: 'qaUserPhotoAtt',
             body: {
               fileId: '{qaAdminFile}',
               ownerType: 'user',
@@ -10014,6 +10029,12 @@ export async function createFixture(
               ownerId: mediaCommunity.id,
               role: 'static_map',
             },
+          },
+          {
+            name: 'admin detaches member user photo',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaUserPhotoAtt}',
+            expected: 204,
           },
           {
             name: 'admin detaches community display image',

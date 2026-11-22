@@ -146,6 +146,15 @@ function createMemoryStorageAndErasure(getNow: () => Date) {
   return { objects, erasureRecords, erasureStore, storage };
 }
 
+function captureThrown(fn: () => unknown): Error | null {
+  try {
+    fn();
+  } catch (err) {
+    return err as Error;
+  }
+  return null;
+}
+
 function cookieFromSetHeader(response: Response): string {
   const raw = response.headers.get('set-cookie') ?? '';
   const match = /ts_session=([^;]+)/.exec(raw);
@@ -1606,20 +1615,19 @@ describe('Mapbox & Protomaps map-config (SQLite + unit + D1 batch)', () => {
     expect(workerOk.mapboxAccessToken).toBe(FAKE_PK_INSTANCE);
 
     for (const badToken of [FAKE_SK_SECRET, 'bad-token-no-prefix']) {
-      try {
+      const nodeError = captureThrown(() =>
         validateNodeV2Runtime({
           NODE_ENV: 'production',
           HONO_PUBLIC_ORIGIN: 'https://api.terrastories.org',
           AUTH_SERVER_SECRET: validSecret,
           BOOTSTRAP_SECRET: validBootstrap,
           MAPBOX_ACCESS_TOKEN: badToken,
-        });
-        expect.fail('Expected validateNodeV2Runtime to reject invalid token');
-      } catch (err) {
-        expect((err as Error).message).not.toContain(badToken);
-      }
+        })
+      );
+      expect(nodeError).toBeInstanceOf(Error);
+      expect(nodeError!.message).not.toContain(badToken);
 
-      try {
+      const workerError = captureThrown(() =>
         validateWorkerV2Runtime({
           ENVIRONMENT: 'production',
           PUBLIC_ORIGIN: 'https://api.terrastories.org',
@@ -1628,11 +1636,10 @@ describe('Mapbox & Protomaps map-config (SQLite + unit + D1 batch)', () => {
           MAPBOX_ACCESS_TOKEN: badToken,
           DB: {},
           MEDIA: {},
-        });
-        expect.fail('Expected validateWorkerV2Runtime to reject invalid token');
-      } catch (err) {
-        expect((err as Error).message).not.toContain(badToken);
-      }
+        })
+      );
+      expect(workerError).toBeInstanceOf(Error);
+      expect(workerError!.message).not.toContain(badToken);
     }
   });
 });

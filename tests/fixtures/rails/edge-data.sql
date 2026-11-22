@@ -34,14 +34,16 @@ INSERT INTO media_links(id, url, story_id, created_at, updated_at) VALUES
   (81, NULL, 30, '2020-06-03 00:00:00', '2024-06-03 00:00:00');
 
 -- Edge ActiveStorage blobs: Theme static_map, cross-community shared blob,
--- unattached orphan blob, and variant record + variant image blob.
+-- unattached orphan blob, variant record + variant image blob, and
+-- preview_image blob derived from an ActiveStorage::Blob.
 INSERT INTO active_storage_blobs(
   id, key, filename, content_type, metadata, byte_size, checksum, created_at, service_name
 ) VALUES
   (110, 'staticmap01', 'static-map.svg', 'image/svg+xml', '{"identified":true}', 80, 'vWA2cLU7Da+YoQ78iuhr8g==', '2020-10-01 00:10:00', 'local'),
   (111, 'sharedblob01', 'shared-river.svg', 'image/svg+xml', '{"identified":true}', 84, 'D7pagKqqIiTTVIUxI7VDbA==', '2020-10-01 00:11:00', 'local'),
   (112, 'orphanblob01', 'orphan-note.txt', 'text/plain', '{"identified":true}', 31, 'CfGvu7DfH99ZCmJQrweMWA==', '2020-10-01 00:12:00', 'local'),
-  (113, 'variantblob1', 'place-photo-thumb.svg', 'image/svg+xml', '{"identified":true}', 76, 'lr/9lb+/D/KyuZMz6XVbmg==', '2020-10-01 00:13:00', 'local');
+  (113, 'variantblob1', 'place-photo-thumb.svg', 'image/svg+xml', '{"identified":true}', 76, 'lr/9lb+/D/KyuZMz6XVbmg==', '2020-10-01 00:13:00', 'local'),
+  (115, 'previewimg01', 'story-video-preview.svg', 'image/svg+xml', '{"identified":true}', 80, '3kLpA8WCkb709ToP0u2gwA==', '2020-10-01 00:15:00', 'local');
 
 INSERT INTO active_storage_variant_records(id, blob_id, variation_digest) VALUES
   (120, 101, 'variant-digest-place-thumb');
@@ -50,7 +52,8 @@ INSERT INTO active_storage_attachments(id, name, record_type, record_id, blob_id
   (111, 'static_map', 'Theme', 60, 110, '2020-10-02 00:00:00'),
   (112, 'photo', 'Place', 52, 111, '2020-10-02 00:00:00'),
   (113, 'media', 'Media', 71, 111, '2020-10-02 00:00:00'),
-  (114, 'image', 'ActiveStorage::VariantRecord', 120, 113, '2020-10-02 00:00:00');
+  (114, 'image', 'ActiveStorage::VariantRecord', 120, 113, '2020-10-02 00:00:00'),
+  (116, 'preview_image', 'ActiveStorage::Blob', 100, 115, '2020-10-02 00:00:00');
 
 -- Custom deployment table (must be captured dynamically).
 CREATE TABLE community_notes (

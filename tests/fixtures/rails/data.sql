@@ -100,7 +100,8 @@ INSERT INTO active_storage_blobs(
   (106, 'commbgimg01', 'community-bg.svg', 'image/svg+xml', '{"identified":true}', 77, 'qtRyuLb9mLOXjkPpXUxHGA==', '2020-10-01 00:06:00', 'local'),
   (107, 'sponsorlogo1', 'sponsor-1.svg', 'image/svg+xml', '{"identified":true}', 62, 'CDx+2AXkJOObRoP9KBhXfQ==', '2020-10-01 00:07:00', 'local'),
   (108, 'sponsorlogo2', 'sponsor-2.svg', 'image/svg+xml', '{"identified":true}', 62, 'Ygouleu8tU3tsx6NPT8C8w==', '2020-10-01 00:08:00', 'local'),
-  (109, 'sponsorlogo3', 'sponsor-3.svg', 'image/svg+xml', '{"identified":true}', 62, 'ZaqX9PtM8csyqbTKUAV02g==', '2020-10-01 00:09:00', 'local');
+  (109, 'sponsorlogo3', 'sponsor-3.svg', 'image/svg+xml', '{"identified":true}', 62, 'ZaqX9PtM8csyqbTKUAV02g==', '2020-10-01 00:09:00', 'local'),
+  (114, 'sierraimg01', 'sierra-display.svg', 'image/svg+xml', '{"identified":true}', 66, 'eONby6CGsbDDMuKpzSXwNw==', '2020-10-01 00:14:00', 'local');
 
 INSERT INTO active_storage_attachments(id, name, record_type, record_id, blob_id, created_at) VALUES
   (101, 'media', 'Media', 70, 100, '2020-10-02 00:00:00'),
@@ -112,6 +113,7 @@ INSERT INTO active_storage_attachments(id, name, record_type, record_id, blob_id
   (107, 'background_img', 'Community', 10, 106, '2020-10-02 00:00:00'),
   (108, 'sponsor_logos', 'Community', 10, 107, '2020-10-02 00:00:00'),
   (109, 'sponsor_logos', 'Community', 10, 108, '2020-10-02 00:00:00'),
-  (110, 'sponsor_logos', 'Community', 10, 109, '2020-10-02 00:00:00');
+  (110, 'sponsor_logos', 'Community', 10, 109, '2020-10-02 00:00:00'),
+  (115, 'display_image', 'Community', 11, 114, '2020-10-02 00:00:00');
 
 COMMIT;

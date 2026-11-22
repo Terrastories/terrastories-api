@@ -227,6 +227,32 @@ const FIXTURE_BLOBS: readonly FixtureBlobSpec[] = [
       'utf8'
     ),
   },
+  {
+    id: 114,
+    key: 'sierraimg01',
+    filename: 'sierra-display.svg',
+    contentType: 'image/svg+xml',
+    metadata: '{"identified":true}',
+    createdAt: '2020-10-01 00:14:00',
+    serviceName: 'local',
+    bytes: Buffer.from(
+      "<svg xmlns='http://www.w3.org/2000/svg'><text>Sierra</text></svg>\n",
+      'utf8'
+    ),
+  },
+  {
+    id: 115,
+    key: 'previewimg01',
+    filename: 'story-video-preview.svg',
+    contentType: 'image/svg+xml',
+    metadata: '{"identified":true}',
+    createdAt: '2020-10-01 00:15:00',
+    serviceName: 'local',
+    bytes: Buffer.from(
+      "<svg xmlns='http://www.w3.org/2000/svg'><polygon points='2,2 14,8 2,14'/></svg>\n",
+      'utf8'
+    ),
+  },
 ];
 
 function writeDiskServiceBlobs(): void {
@@ -412,7 +438,7 @@ function generateFixtures(): void {
     'INSERT INTO active_storage_blobs(',
     '  id, key, filename, content_type, metadata, byte_size, checksum, created_at, service_name',
     ') VALUES',
-    `${FIXTURE_BLOBS.slice(0, 10).map(blobInsertRow).join(',\n')};`,
+    `${[...FIXTURE_BLOBS.slice(0, 10), FIXTURE_BLOBS[14]!].map(blobInsertRow).join(',\n')};`,
     '',
     'INSERT INTO active_storage_attachments(id, name, record_type, record_id, blob_id, created_at) VALUES',
     "  (101, 'media', 'Media', 70, 100, '2020-10-02 00:00:00'),",
@@ -424,7 +450,8 @@ function generateFixtures(): void {
     "  (107, 'background_img', 'Community', 10, 106, '2020-10-02 00:00:00'),",
     "  (108, 'sponsor_logos', 'Community', 10, 107, '2020-10-02 00:00:00'),",
     "  (109, 'sponsor_logos', 'Community', 10, 108, '2020-10-02 00:00:00'),",
-    "  (110, 'sponsor_logos', 'Community', 10, 109, '2020-10-02 00:00:00');",
+    "  (110, 'sponsor_logos', 'Community', 10, 109, '2020-10-02 00:00:00'),",
+    "  (115, 'display_image', 'Community', 11, 114, '2020-10-02 00:00:00');",
     '',
     'COMMIT;',
     '',
@@ -467,11 +494,12 @@ function generateFixtures(): void {
     "  (81, NULL, 30, '2020-06-03 00:00:00', '2024-06-03 00:00:00');",
     '',
     '-- Edge ActiveStorage blobs: Theme static_map, cross-community shared blob,',
-    '-- unattached orphan blob, and variant record + variant image blob.',
+    '-- unattached orphan blob, variant record + variant image blob, and',
+    '-- preview_image blob derived from an ActiveStorage::Blob.',
     'INSERT INTO active_storage_blobs(',
     '  id, key, filename, content_type, metadata, byte_size, checksum, created_at, service_name',
     ') VALUES',
-    `${FIXTURE_BLOBS.slice(10).map(blobInsertRow).join(',\n')};`,
+    `${[...FIXTURE_BLOBS.slice(10, 14), FIXTURE_BLOBS[15]!].map(blobInsertRow).join(',\n')};`,
     '',
     'INSERT INTO active_storage_variant_records(id, blob_id, variation_digest) VALUES',
     "  (120, 101, 'variant-digest-place-thumb');",
@@ -480,7 +508,8 @@ function generateFixtures(): void {
     "  (111, 'static_map', 'Theme', 60, 110, '2020-10-02 00:00:00'),",
     "  (112, 'photo', 'Place', 52, 111, '2020-10-02 00:00:00'),",
     "  (113, 'media', 'Media', 71, 111, '2020-10-02 00:00:00'),",
-    "  (114, 'image', 'ActiveStorage::VariantRecord', 120, 113, '2020-10-02 00:00:00');",
+    "  (114, 'image', 'ActiveStorage::VariantRecord', 120, 113, '2020-10-02 00:00:00'),",
+    "  (116, 'preview_image', 'ActiveStorage::Blob', 100, 115, '2020-10-02 00:00:00');",
     '',
     '-- Custom deployment table (must be captured dynamically).',
     'CREATE TABLE community_notes (',

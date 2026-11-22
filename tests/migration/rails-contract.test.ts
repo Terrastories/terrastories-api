@@ -15,9 +15,21 @@ import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BCRYPT_HASH_PATTERN } from '../../src/shared/auth-policy.js';
 import {
+  assertSafeActiveStorageKey,
+  mapWithConcurrency,
   resolveActiveStorageBlobPath,
   verifyAndCopyActiveStorageBlob,
 } from '../../src/migration/rails/active-storage.js';
+import {
+  buildS3ObjectUrl,
+  normalizeS3Prefix,
+  resolveS3CredentialsFromEnv,
+  signS3GetRequest,
+  validateS3Config,
+  verifyAndDownloadS3Blob,
+} from '../../src/migration/rails/s3-client.js';
+import { parseArgs as parseCliArgs } from '../../scripts/migrate-rails.js';
+import { startFakeS3Server, type FakeS3Server } from './fake-s3.js';
 import {
   verifyCapturedArchive,
   type RailsCaptureManifest,
@@ -43,6 +55,7 @@ const fixtureDir = dirname(
 );
 
 const tempDirs: string[] = [];
+const fakeServers: FakeS3Server[] = [];
 
 async function makeTempDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
@@ -51,6 +64,9 @@ async function makeTempDir(prefix: string): Promise<string> {
 }
 
 afterEach(async () => {
+  for (const server of fakeServers.splice(0)) {
+    await server.close();
+  }
   for (const dir of tempDirs.splice(0)) {
     await rm(dir, { recursive: true, force: true });
   }
@@ -149,6 +165,8 @@ function createSyntheticArchiveManifest(
         .update(JSON.stringify(tables))
         .digest('hex'),
     },
+    storage: { kind: 'disk' },
+    blobSelection: { mode: 'all', selectors: [], communities: [] },
     archive: {
       filename: 'legacy.sqlite',
       byteSize: String(archiveBytes.length),
@@ -160,6 +178,8 @@ function createSyntheticArchiveManifest(
       tables: 1,
       rows: 1,
       blobs: 0,
+      blobsSelected: 0,
+      blobsNotSelected: 0,
     },
   };
 }
@@ -463,6 +483,7 @@ describe('ActiveStorage blob resolution and copy verification', () => {
     });
 
     expect(copied).toEqual({
+      disposition: 'captured',
       id: '1',
       key: 'blobkey01',
       filename: 'payload.txt',
@@ -531,8 +552,41 @@ describe('capture validation summary and offline archive verification', () => {
     expect(summary).toContain(`Legacy commit: ${LEGACY_RAILS_COMMIT_2024}`);
     expect(summary).toContain('Pinned Rails schema version: 2024_04_10_210545');
     expect(summary).toContain('Observed Rails schema version: 20240410210545');
+    expect(summary).toContain('Blob source: disk');
+    expect(summary).toContain('Blob selection: all');
+    expect(summary).toContain('Blobs selected: 0');
+    expect(summary).toContain('Blobs not_selected: 0');
     expect(summary).toContain('  - communities: 1 rows\n  - users: 2 rows');
     expect(summary).toContain('intentionally excludes source row contents');
+
+    const allowlistSummary = buildCaptureValidationSummary({
+      ...multiTableManifest,
+      storage: {
+        kind: 's3',
+        bucket: 'fixture-bucket',
+        region: 'us-east-2',
+        prefix: null,
+      },
+      blobSelection: {
+        mode: 'community_allowlist',
+        selectors: ['rio_verde'],
+        communities: [{ id: '10', slug: 'rio_verde' }],
+      },
+      totals: {
+        ...multiTableManifest.totals,
+        blobs: 16,
+        blobsSelected: 14,
+        blobsNotSelected: 2,
+      },
+    });
+    expect(allowlistSummary).toContain('Blob source: s3');
+    expect(allowlistSummary).toContain(
+      'Blob selection: community_allowlist (10)'
+    );
+    expect(allowlistSummary).toContain('Blobs: 16');
+    expect(allowlistSummary).toContain('Blobs selected: 14');
+    expect(allowlistSummary).toContain('Blobs not_selected: 2');
+    expect(allowlistSummary).not.toContain('fixture-bucket');
   });
 
   it('verifies a valid archive and rejects metadata, digest, and size tampering', async () => {
@@ -613,7 +667,7 @@ describe('Rails fixture integrity', () => {
       ),
     ];
 
-    expect(blobMatches).toHaveLength(14);
+    expect(blobMatches).toHaveLength(16);
     for (const [, key, sizeText, expectedMd5] of blobMatches) {
       const resolved = await resolveActiveStorageBlobPath(
         join(fixtureDir, 'blobs'),
@@ -666,5 +720,387 @@ describe('Rails fixture integrity', () => {
     for (const bad of malformed) {
       expect(BCRYPT_HASH_PATTERN.test(bad)).toBe(false);
     }
+  });
+});
+
+describe('S3 SigV4 client and streaming verification', () => {
+  it('resolves credentials strictly from environment variables and fails closed when missing', () => {
+    expect(
+      resolveS3CredentialsFromEnv({
+        AWS_ACCESS_KEY_ID: 'fixture-s3-access-id',
+        AWS_SECRET_ACCESS_KEY: 'fixture-s3-secret-value',
+      })
+    ).toEqual({
+      accessKeyId: 'fixture-s3-access-id',
+      secretAccessKey: 'fixture-s3-secret-value',
+    });
+
+    expect(
+      resolveS3CredentialsFromEnv({
+        AWS_ACCESS_KEY_ID: 'fixture-s3-access-id',
+        AWS_SECRET_ACCESS_KEY: 'fixture-s3-secret-value',
+        AWS_SESSION_TOKEN: 'fixture-session-token',
+      })
+    ).toEqual({
+      accessKeyId: 'fixture-s3-access-id',
+      secretAccessKey: 'fixture-s3-secret-value',
+      sessionToken: 'fixture-session-token',
+    });
+
+    expect(() =>
+      resolveS3CredentialsFromEnv({
+        AWS_ACCESS_KEY_ID: 'fixture-only-id',
+      })
+    ).toThrow(/AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY/);
+  });
+
+  it('validates S3 config, normalizes prefixes, and rejects unsafe keys or prefixes', () => {
+    expect(normalizeS3Prefix(undefined)).toBeNull();
+    expect(normalizeS3Prefix('///')).toBeNull();
+    expect(normalizeS3Prefix('/prod/blobs/')).toBe('prod/blobs');
+    expect(() => normalizeS3Prefix('prod/../secret')).toThrow(
+      /unsafe s3 prefix/i
+    );
+    expect(() => assertSafeActiveStorageKey('../evil')).toThrow(
+      /unsafe ActiveStorage key/i
+    );
+
+    const vhost = validateS3Config({
+      bucket: 'terrastories-demo',
+      region: 'us-east-2',
+    });
+    expect(buildS3ObjectUrl(vhost, 'blobKey_1').toString()).toBe(
+      'https://terrastories-demo.s3.us-east-2.amazonaws.com/blobKey_1'
+    );
+
+    const dotted = validateS3Config({
+      bucket: 'terrastories.demo',
+      region: 'us-east-2',
+      prefix: '/media/',
+    });
+    expect(buildS3ObjectUrl(dotted, 'blobKey_1').toString()).toBe(
+      'https://s3.us-east-2.amazonaws.com/terrastories.demo/media/blobKey_1'
+    );
+
+    expect(() =>
+      validateS3Config({ bucket: 'Invalid_Bucket', region: 'us-east-2' })
+    ).toThrow(/invalid s3 bucket/i);
+    expect(() =>
+      validateS3Config({ bucket: 'valid-bucket', region: 'us_east_2' })
+    ).toThrow(/invalid s3 region/i);
+  });
+
+  it('computes deterministic AWS SigV4 GET headers with optional session token', () => {
+    const url = new URL(
+      'https://terrastories-demo.s3.us-east-2.amazonaws.com/blobKey01'
+    );
+    const headers = signS3GetRequest({
+      url,
+      region: 'us-east-2',
+      credentials: {
+        accessKeyId: 'fixture-s3-access-id',
+        secretAccessKey: 'fixture-s3-secret-value',
+        sessionToken: 'fixture-session-token',
+      },
+      now: new Date('2026-11-22T12:00:00.000Z'),
+    });
+
+    expect(headers['x-amz-date']).toBe('20261122T120000Z');
+    expect(headers['x-amz-content-sha256']).toBe(
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+    );
+    expect(headers['x-amz-security-token']).toBe('fixture-session-token');
+    expect(headers.authorization).toMatch(
+      /^AWS4-HMAC-SHA256 Credential=fixture-s3-access-id\/20261122\/us-east-2\/s3\/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=[0-9a-f]{64}$/
+    );
+  });
+
+  it('downloads and verifies blobs from a SigV4 fake S3 server including prefix, retries, and concurrency', async () => {
+    const dest = await makeTempDir('rails-s3-ok-');
+    const payload = Buffer.from('fake-s3-stream-payload-01\n', 'utf8');
+    const md5 = createHash('md5').update(payload).digest('base64');
+    const expectedSha = createHash('sha256').update(payload).digest('hex');
+
+    const credentials = {
+      accessKeyId: 'fixture-s3-access-id',
+      secretAccessKey: 'fixture-s3-secret-value',
+      sessionToken: 'fixture-session-token',
+    };
+
+    const server = await startFakeS3Server({
+      expectedCredentials: { ...credentials, region: 'us-east-2' },
+      onGetObject: async (objectKey, attempt) => {
+        if (objectKey === 'prefix/retryblob01' && attempt < 3) {
+          return { kind: 'status', status: 503, body: 'SlowDown' };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return { kind: 'ok', body: payload };
+      },
+    });
+    fakeServers.push(server);
+
+    const downloaded = await verifyAndDownloadS3Blob({
+      s3: {
+        bucket: 'fixture-bucket',
+        region: 'us-east-2',
+        prefix: '/prefix/',
+        endpoint: server.endpoint,
+        maxAttempts: 4,
+        retryBaseDelayMs: 5,
+      },
+      credentials,
+      destinationRoot: dest,
+      id: '1',
+      key: 'retryblob01',
+      filename: 'retry.txt',
+      contentType: 'text/plain',
+      byteSize: String(payload.length),
+      checksum: md5,
+      serviceName: 'amazon',
+    });
+
+    expect(downloaded).toEqual({
+      disposition: 'captured',
+      id: '1',
+      key: 'retryblob01',
+      filename: 'retry.txt',
+      contentType: 'text/plain',
+      byteSize: String(payload.length),
+      railsChecksum: md5,
+      sha256: expectedSha,
+      serviceName: 'amazon',
+    });
+    expect(server.getAttemptCount('prefix/retryblob01')).toBe(3);
+    expect((await stat(join(dest, 'retryblob01'))).mode & 0o777).toBe(0o600);
+
+    const keys = Array.from(
+      { length: 10 },
+      (_, idx) => `concblob${String(idx).padStart(2, '0')}`
+    );
+    const results = await mapWithConcurrency(keys, 4, (key, signal) =>
+      verifyAndDownloadS3Blob({
+        s3: {
+          bucket: 'fixture-bucket',
+          region: 'us-east-2',
+          prefix: 'prefix',
+          endpoint: server.endpoint,
+          retryBaseDelayMs: 5,
+        },
+        credentials,
+        destinationRoot: dest,
+        id: key,
+        key,
+        filename: `${key}.txt`,
+        contentType: 'text/plain',
+        byteSize: String(payload.length),
+        checksum: md5,
+        serviceName: 'amazon',
+        signal,
+      })
+    );
+    expect(results.map((entry) => entry.key)).toEqual(keys);
+    expect(server.getMaxInFlight()).toBeLessThanOrEqual(4);
+    expect(server.getMaxInFlight()).toBeGreaterThanOrEqual(2);
+  });
+
+  it('fails closed on fake S3 404 missing, checksum mismatch, and size mismatch without leaving part files', async () => {
+    const dest = await makeTempDir('rails-s3-neg-');
+    const payload = Buffer.from('expected-s3-bytes', 'utf8');
+    const md5 = createHash('md5').update(payload).digest('base64');
+    const credentials = {
+      accessKeyId: 'fixture-s3-access-id',
+      secretAccessKey: 'fixture-s3-secret-value',
+    };
+
+    const server = await startFakeS3Server({
+      expectedCredentials: { ...credentials, region: 'us-east-2' },
+      onGetObject: (objectKey) => {
+        if (objectKey === 'missingkey01') {
+          return { kind: 'status', status: 404, body: 'NoSuchKey' };
+        }
+        if (objectKey === 'badsumkey01') {
+          const tampered = Buffer.from(payload);
+          tampered[0] = tampered[0]! ^ 0x01;
+          return { kind: 'ok', body: tampered };
+        }
+        if (objectKey === 'shortkey01') {
+          return { kind: 'ok', body: payload.subarray(0, 5) };
+        }
+        if (objectKey === 'longkey01') {
+          return {
+            kind: 'custom',
+            handle: (_req, res) => {
+              res.statusCode = 200;
+              res.end(Buffer.concat([payload, Buffer.from('extra')]));
+            },
+          };
+        }
+        return { kind: 'status', status: 503 };
+      },
+    });
+    fakeServers.push(server);
+
+    const s3 = {
+      bucket: 'fixture-bucket',
+      region: 'us-east-2',
+      endpoint: server.endpoint,
+      maxAttempts: 3,
+      retryBaseDelayMs: 5,
+    };
+
+    await expect(
+      verifyAndDownloadS3Blob({
+        s3,
+        credentials,
+        destinationRoot: dest,
+        id: '1',
+        key: 'missingkey01',
+        filename: 'missing.bin',
+        contentType: null,
+        byteSize: String(payload.length),
+        checksum: md5,
+        serviceName: 'amazon',
+      })
+    ).rejects.toThrow(/missing ActiveStorage blob bytes in S3.*404/i);
+    expect(server.getAttemptCount('missingkey01')).toBe(1);
+
+    await expect(
+      verifyAndDownloadS3Blob({
+        s3,
+        credentials,
+        destinationRoot: dest,
+        id: '2',
+        key: 'badsumkey01',
+        filename: 'badsum.bin',
+        contentType: null,
+        byteSize: String(payload.length),
+        checksum: md5,
+        serviceName: 'amazon',
+      })
+    ).rejects.toThrow(/checksum mismatch/i);
+    expect(server.getAttemptCount('badsumkey01')).toBe(1);
+
+    await expect(
+      verifyAndDownloadS3Blob({
+        s3,
+        credentials,
+        destinationRoot: dest,
+        id: '3',
+        key: 'shortkey01',
+        filename: 'short.bin',
+        contentType: null,
+        byteSize: String(payload.length),
+        checksum: md5,
+        serviceName: 'amazon',
+      })
+    ).rejects.toThrow(/size mismatch/i);
+
+    await expect(
+      verifyAndDownloadS3Blob({
+        s3,
+        credentials,
+        destinationRoot: dest,
+        id: '4',
+        key: 'longkey01',
+        filename: 'long.bin',
+        contentType: null,
+        byteSize: String(payload.length),
+        checksum: md5,
+        serviceName: 'amazon',
+      })
+    ).rejects.toThrow(/size mismatch/i);
+
+    const { readdir } = await import('node:fs/promises');
+    expect(await readdir(dest)).toEqual([]);
+  });
+});
+
+describe('migrate-rails CLI argument parsing', () => {
+  it('supports disk and s3 blob sources plus repeatable --community flags and fails closed on conflicts', () => {
+    expect(parseCliArgs(['--help'])).toEqual({ help: true });
+
+    const s3Parsed = parseCliArgs([
+      '--source',
+      'postgresql://postgres@127.0.0.1:5432/rails',
+      '--output',
+      '/tmp/out',
+      '--blob-source',
+      's3',
+      '--s3-bucket',
+      'terrastories-demo',
+      '--s3-region',
+      'us-east-2',
+      '--s3-prefix',
+      'prod',
+      '--blob-concurrency',
+      '8',
+      '--community',
+      '10',
+      '--community',
+      'sierra_alta',
+    ]);
+    expect(s3Parsed).toEqual({
+      help: false,
+      sourceUrl: 'postgresql://postgres@127.0.0.1:5432/rails',
+      outputDir: '/tmp/out',
+      blobSource: {
+        kind: 's3',
+        bucket: 'terrastories-demo',
+        region: 'us-east-2',
+        prefix: 'prod',
+      },
+      blobConcurrency: 8,
+      communities: ['10', 'sierra_alta'],
+    });
+
+    expect(() =>
+      parseCliArgs([
+        '--source',
+        'postgresql://postgres@127.0.0.1:5432/rails',
+        '--output',
+        '/tmp/out',
+        '--blob-source',
+        's3',
+      ])
+    ).toThrow(/--s3-bucket is required/);
+
+    expect(() =>
+      parseCliArgs([
+        '--source',
+        'postgresql://postgres@127.0.0.1:5432/rails',
+        '--output',
+        '/tmp/out',
+        '--blob-source',
+        's3',
+        '--s3-bucket',
+        'b',
+        '--s3-region',
+        'us-east-2',
+        '--blob-root',
+        '/tmp/blobs',
+      ])
+    ).toThrow(/--blob-root cannot be combined/);
+
+    expect(() =>
+      parseCliArgs([
+        '--source',
+        'postgresql://postgres@127.0.0.1:5432/rails',
+        '--output',
+        '/tmp/out',
+        '--s3-bucket',
+        'b',
+      ])
+    ).toThrow(/--s3-\* options require --blob-source s3/);
+
+    expect(() =>
+      parseCliArgs([
+        '--source',
+        'postgresql://postgres@127.0.0.1:5432/rails',
+        '--output',
+        '/tmp/out',
+        '--aws-secret-access-key',
+        'nope',
+      ])
+    ).toThrow(/Unknown argument/);
   });
 });

@@ -38,7 +38,7 @@ Generated deterministically by `scripts/fixtures/gen-rails-fixture.ts` and commi
 
 ## ActiveStorage DiskService blobs (`blobs/<k[0:2]>/<k[2:4]>/<key>`)
 
-14 deterministic blobs covering every attachment role (`Media:media`, `Place:photo`, `Place:name_audio`, `Speaker:photo`, `User:photo`, `Community:display_image`, `Community:background_img`, ordered `Community:sponsor_logos` trio, `Theme:static_map`), a cross-community `sharedblob01`, an unattached `orphanblob01`, and `variantblob1` attached to `ActiveStorage::VariantRecord` (`blob_id = 101`). Negative corrupt-checksum and missing-file cases are constructed in test temp dirs from these payloads.
+16 deterministic blobs covering every attachment role (`Media:media`, `Place:photo`, `Place:name_audio`, `Speaker:photo`, `User:photo`, `Community:display_image` in both communities 10 and 11, `Community:background_img`, ordered `Community:sponsor_logos` trio, `Theme:static_map`), a cross-community `sharedblob01`, an unattached `orphanblob01`, `variantblob1` attached to `ActiveStorage::VariantRecord` (`blob_id = 101`), and `previewimg01` attached as `ActiveStorage::Blob:preview_image` on `storymedia01` (`blob_id = 100`). Negative corrupt-checksum and missing-file cases are constructed in test temp dirs from these payloads.
 
 Regenerate deterministically with:
 

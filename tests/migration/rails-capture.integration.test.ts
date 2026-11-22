@@ -126,7 +126,16 @@ describeWithPostgres('Rails source capture', () => {
             Object.prototype.hasOwnProperty.call(manifest.tables, '__proto__')
           ).toBe(true);
           expect(manifest.tables['__proto__']?.rowCount).toBe(1);
-          expect(manifest.blobs).toHaveLength(14);
+          expect(manifest.storage).toEqual({ kind: 'disk' });
+          expect(manifest.blobSelection).toEqual({
+            mode: 'all',
+            selectors: [],
+            communities: [],
+          });
+          expect(manifest.blobs).toHaveLength(16);
+          expect(manifest.totals.blobs).toBe(16);
+          expect(manifest.totals.blobsSelected).toBe(16);
+          expect(manifest.totals.blobsNotSelected).toBe(0);
 
           const placeTable = manifest.tables.places!;
           const latitude = placeTable.columns.find(
@@ -315,7 +324,7 @@ describeWithPostgres('Rails source capture', () => {
           });
 
           const attachments = readRows('active_storage_attachments');
-          expect(attachments).toHaveLength(14);
+          expect(attachments).toHaveLength(16);
           expect(attachments.map((a) => `${a.record_type}:${a.name}`)).toEqual(
             expect.arrayContaining([
               'Media:media',
@@ -328,6 +337,7 @@ describeWithPostgres('Rails source capture', () => {
               'Community:sponsor_logos',
               'Theme:static_map',
               'ActiveStorage::VariantRecord:image',
+              'ActiveStorage::Blob:preview_image',
             ])
           );
           expect(
@@ -347,6 +357,7 @@ describeWithPostgres('Rails source capture', () => {
           archive.close();
 
           for (const blob of manifest.blobs) {
+            expect(blob.disposition).toBe('captured');
             const copiedPath = join(outputDir, 'blobs', blob.key);
             const copiedBytes = await readFile(copiedPath);
             expect(createHash('sha256').update(copiedBytes).digest('hex')).toBe(
@@ -357,6 +368,12 @@ describeWithPostgres('Rails source capture', () => {
 
           expect(
             manifest.blobs.some((blob) => blob.key === 'orphanblob01')
+          ).toBe(true);
+          expect(
+            manifest.blobs.some((blob) => blob.key === 'sierraimg01')
+          ).toBe(true);
+          expect(
+            manifest.blobs.some((blob) => blob.key === 'previewimg01')
           ).toBe(true);
           expect(await pathExists(join(outputDir, 'manifest.json'))).toBe(true);
 
@@ -370,12 +387,20 @@ describeWithPostgres('Rails source capture', () => {
           expect(validationSummary).toContain(
             `Contract profile: ${manifest.source.contractProfile}`
           );
+          expect(validationSummary).toContain('Blob source: disk');
+          expect(validationSummary).toContain('Blob selection: all');
           expect(validationSummary).toContain(
             `Tables: ${manifest.totals.tables}`
           );
           expect(validationSummary).toContain(`Rows: ${manifest.totals.rows}`);
           expect(validationSummary).toContain(
             `Blobs: ${manifest.totals.blobs}`
+          );
+          expect(validationSummary).toContain(
+            `Blobs selected: ${manifest.totals.blobsSelected}`
+          );
+          expect(validationSummary).toContain(
+            `Blobs not_selected: ${manifest.totals.blobsNotSelected}`
           );
           expect(validationSummary).toContain(manifest.archive.sha256);
 

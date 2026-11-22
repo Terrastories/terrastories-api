@@ -24,10 +24,17 @@ export async function memberChapter(ctx: Ctx): Promise<void> {
       path: '/v2/auth/me',
       expect: 200,
       covers: ['B01', 'B08', 'M12'],
-      show: (r) => [field('Hello', val(r, 'user', 'displayName')), field('role badge', val(r, 'user', 'role'))],
+      show: (r) => [
+        field('Hello', val(r, 'user', 'displayName')),
+        field('role badge', val(r, 'user', 'role')),
+      ],
     });
     await readerTour(ctx, mateo, {
-      mustSee: ['How the river got its name', 'Imported open story', 'Imported members story'],
+      mustSee: [
+        'How the river got its name',
+        'Imported open story',
+        'Imported members story',
+      ],
       mustNotSee: ['Editors-only draft'],
       hiddenStoryId: s.ids.draft,
     });

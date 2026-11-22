@@ -9,11 +9,16 @@ import { dig } from '../walk.js';
 
 export const PERSONA_FIELDKIT = 'Field-kit operator';
 
-export async function fieldKitChapter(ctx: Ctx, when: 'first' | 'late'): Promise<void> {
+export async function fieldKitChapter(
+  ctx: Ctx,
+  when: 'first' | 'late'
+): Promise<void> {
   const { w, s, cfg } = ctx;
   w.chapter(
     PERSONA_FIELDKIT,
-    when === 'first' ? 'Kofi sets up a fresh install' : 'Kofi checks that setup is closed on this install',
+    when === 'first'
+      ? 'Kofi sets up a fresh install'
+      : 'Kofi checks that setup is closed on this install',
     'A field kit runs on a laptop in a community. The first run creates the first community and its admin through the onboarding screens; afterwards setup stays closed.'
   );
   await guarded(ctx, 'field-kit', async () => {
@@ -29,8 +34,11 @@ export async function fieldKitChapter(ctx: Ctx, when: 'first' | 'late'): Promise
     });
     if (when === 'first') {
       if (dig(open, 'open') !== true)
-        throw new Error('--setup-from-bootstrap needs a fresh install, but setup is closed');
-      if (!cfg.bootstrapSecret) throw new Error('set WT_BOOTSTRAP_SECRET for --setup-from-bootstrap');
+        throw new Error(
+          '--setup-from-bootstrap needs a fresh install, but setup is closed'
+        );
+      if (!cfg.bootstrapSecret)
+        throw new Error('set WT_BOOTSTRAP_SECRET for --setup-from-bootstrap');
       const slug = `${w.runId}-field`;
       const password = randomPassword();
       w.secret(password);
@@ -43,8 +51,19 @@ export async function fieldKitChapter(ctx: Ctx, when: 'first' | 'late'): Promise
         method: 'POST',
         path: '/v2/bootstrap',
         json: {
-          community: { name: `Field kit ${w.runId}`, slug, locale: 'en', country: 'GY', visibility: 'public' },
-          admin: { username, email: `${w.runId}-kofi@walkthrough.example.test`, displayName: `Kofi (${w.runId})`, password: verifier },
+          community: {
+            name: `Field kit ${w.runId}`,
+            slug,
+            locale: 'en',
+            country: 'GY',
+            visibility: 'public',
+          },
+          admin: {
+            username,
+            email: `${w.runId}-kofi@walkthrough.example.test`,
+            displayName: `Kofi (${w.runId})`,
+            password: verifier,
+          },
           bootstrapSecret: cfg.bootstrapSecret,
         },
         expect: 201,
@@ -55,7 +74,8 @@ export async function fieldKitChapter(ctx: Ctx, when: 'first' | 'late'): Promise
           return [
             field('community', dig(r, 'data', 'community', 'name')),
             field('admin', dig(r, 'data', 'user', 'displayName')),
-            field('recovery codes', Array.isArray(codes) ? codes.length : 0) + ' shown once',
+            field('recovery codes', Array.isArray(codes) ? codes.length : 0) +
+              ' shown once',
           ];
         },
       });
@@ -93,9 +113,15 @@ export async function fieldKitChapter(ctx: Ctx, when: 'first' | 'late'): Promise
       path: '/v2/bootstrap',
       expect: 200,
       covers: ['A07'],
-      check: (r) => (dig(r, 'open') === false ? undefined : 'setup should be closed now'),
+      check: (r) =>
+        dig(r, 'open') === false ? undefined : 'setup should be closed now',
       show: (r) => [field('setup open', dig(r, 'open'))],
     });
-    w.skip(['V21'], 'Kofi checks the plain-HTTP LAN warning and the offline map tiles', 'browser and offline proof is out of scope of the API (D31, #147, #185)', 'Kofi');
+    w.skip(
+      ['V21'],
+      'Kofi checks the plain-HTTP LAN warning and the offline map tiles',
+      'browser and offline proof is out of scope of the API (D31, #147, #185)',
+      'Kofi'
+    );
   });
 }

@@ -16,7 +16,11 @@ export interface TourOptions {
 }
 
 const titlesOf = (reply: { json: unknown }): string[] =>
-  (((dig({ json: reply.json } as never, 'data', 'stories') as Array<{ title: string }>) ?? [])).map((s) => s.title);
+  (
+    (dig({ json: reply.json } as never, 'data', 'stories') as Array<{
+      title: string;
+    }>) ?? []
+  ).map((s) => s.title);
 
 export async function readerTour(
   ctx: Ctx,
@@ -43,8 +47,13 @@ export async function readerTour(
     },
     show: (r) => [
       field('story cards', titlesOf(r).length),
-      field('map markers', ((dig(r, 'data', 'points') as unknown[]) ?? []).length),
-      ...titlesOf(r).slice(0, 4).map((t) => `card: ${t}`),
+      field(
+        'map markers',
+        ((dig(r, 'data', 'points') as unknown[]) ?? []).length
+      ),
+      ...titlesOf(r)
+        .slice(0, 4)
+        .map((t) => `card: ${t}`),
     ],
   });
   void page;
@@ -81,7 +90,10 @@ export async function readerTour(
     path: `/v2/places/${place}`,
     expect: 200,
     covers: ['M04', 'B12'],
-    show: (r) => [field('place', val(r, 'data', 'name')), field('region', val(r, 'data', 'region'))],
+    show: (r) => [
+      field('place', val(r, 'data', 'name')),
+      field('region', val(r, 'data', 'region')),
+    ],
   });
   const detail = await w.step({
     who,
@@ -93,12 +105,25 @@ export async function readerTour(
     show: (r) => [
       field('title', val(r, 'data', 'title')),
       field('language', val(r, 'data', 'language')),
-      field('speakers', ((val(r, 'data', 'speakers') as Array<{ name: string }>) ?? []).map((x) => x.name).join(', ')),
-      field('media items', ((val(r, 'data', 'attachments') as unknown[]) ?? []).length),
-      field('external links', ((val(r, 'data', 'externalMediaLinks') as unknown[]) ?? []).length),
+      field(
+        'speakers',
+        ((val(r, 'data', 'speakers') as Array<{ name: string }>) ?? [])
+          .map((x) => x.name)
+          .join(', ')
+      ),
+      field(
+        'media items',
+        ((val(r, 'data', 'attachments') as unknown[]) ?? []).length
+      ),
+      field(
+        'external links',
+        ((val(r, 'data', 'externalMediaLinks') as unknown[]) ?? []).length
+      ),
     ],
   });
-  const attachment = ((dig(detail, 'data', 'attachments') as Array<{ url?: string }>) ?? [])[0];
+  const attachment = ((dig(detail, 'data', 'attachments') as Array<{
+    url?: string;
+  }>) ?? [])[0];
   if (attachment?.url) {
     await w.step({
       who,
@@ -108,7 +133,15 @@ export async function readerTour(
       headers: { range: 'bytes=0-7' },
       expect: [200, 206],
       covers: ['M09'],
-      show: (r) => [field('status', r.status === 206 ? '206 partial content (seekable)' : '200 full content'), field('content type', r.headers.get('content-type'))],
+      show: (r) => [
+        field(
+          'status',
+          r.status === 206
+            ? '206 partial content (seekable)'
+            : '200 full content'
+        ),
+        field('content type', r.headers.get('content-type')),
+      ],
     });
   } else {
     w.narrate('The story has no media attachment to play.');
@@ -136,7 +169,10 @@ export async function readerTour(
     path: `/v2/speakers/${speaker}`,
     expect: 200,
     covers: ['B14'],
-    show: (r) => [field('speaker', val(r, 'data', 'name')), field('community', val(r, 'data', 'affiliation'))],
+    show: (r) => [
+      field('speaker', val(r, 'data', 'name')),
+      field('community', val(r, 'data', 'affiliation')),
+    ],
   });
   await w.step({
     who,
@@ -169,16 +205,83 @@ export async function readerTour(
   }
 }
 
-export async function readerNegatives(ctx: Ctx, who: Actor, covers: { content: string[] }): Promise<void> {
+export async function readerNegatives(
+  ctx: Ctx,
+  who: Actor,
+  covers: { content: string[] }
+): Promise<void> {
   const { w } = ctx;
-  const refuse = (say: string, method: string, path: string, json: unknown, rows: string[]) =>
-    w.step({ who, say, method, path, json, expect: 403, negative: true, covers: rows });
-  await refuse('tries to write a story', 'POST', '/v2/stories', { title: 'nope' }, covers.content);
-  await refuse('tries to open the Users screen', 'GET', '/v2/users', undefined, ['D01']);
-  await refuse('tries to change the map settings', 'PUT', '/v2/community/map-config', { centerLatitude: 1, centerLongitude: 1 }, ['D06']);
-  await refuse('tries to change community settings', 'PATCH', '/v2/community', { name: 'nope' }, ['D08']);
-  await refuse('tries to open the CSV import', 'GET', '/v2/imports', undefined, ['C30']);
-  await refuse('tries to export the community', 'POST', '/v2/community/export', {}, ['V01']);
-  await refuse('tries the sovereignty page', 'GET', '/v2/community/sovereignty', undefined, ['V02']);
-  await refuse('tries the audit log', 'GET', '/v2/community/audit-entries', undefined, ['V12']);
+  const refuse = (
+    say: string,
+    method: string,
+    path: string,
+    json: unknown,
+    rows: string[]
+  ) =>
+    w.step({
+      who,
+      say,
+      method,
+      path,
+      json,
+      expect: 403,
+      negative: true,
+      covers: rows,
+    });
+  await refuse(
+    'tries to write a story',
+    'POST',
+    '/v2/stories',
+    { title: 'nope' },
+    covers.content
+  );
+  await refuse(
+    'tries to open the Users screen',
+    'GET',
+    '/v2/users',
+    undefined,
+    ['D01']
+  );
+  await refuse(
+    'tries to change the map settings',
+    'PUT',
+    '/v2/community/map-config',
+    { centerLatitude: 1, centerLongitude: 1 },
+    ['D06']
+  );
+  await refuse(
+    'tries to change community settings',
+    'PATCH',
+    '/v2/community',
+    { name: 'nope' },
+    ['D08']
+  );
+  await refuse(
+    'tries to open the CSV import',
+    'GET',
+    '/v2/imports',
+    undefined,
+    ['C30']
+  );
+  await refuse(
+    'tries to export the community',
+    'POST',
+    '/v2/community/export',
+    {},
+    ['V01']
+  );
+  await refuse(
+    'tries the sovereignty page',
+    'GET',
+    '/v2/community/sovereignty',
+    undefined,
+    ['V02']
+  );
+  await refuse(
+    'tries the audit log',
+    'GET',
+    '/v2/community/audit-entries',
+    undefined,
+    ['V12']
+  );
 }

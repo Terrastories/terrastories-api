@@ -4,7 +4,17 @@
  * account of the community being visited. Everyone she creates is prefixed
  * with the run id.
  */
-import { guarded, signIn, deriveKey, field, num, str, val, type Ctx, type Account } from '../context.js';
+import {
+  guarded,
+  signIn,
+  deriveKey,
+  field,
+  num,
+  str,
+  val,
+  type Ctx,
+  type Account,
+} from '../context.js';
 import type { Reply } from '../client.js';
 import { dig } from '../walk.js';
 
@@ -40,9 +50,15 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
     if (!cfg.adminIdentifier || !cfg.adminPassword)
       throw new Error('no community admin credentials were supplied');
     const ana = (s.actors.ana = w.actor('Ana', 'community admin'));
-    const { upgraded } = await signIn(ctx, ana, cfg.adminIdentifier, cfg.adminPassword, {
-      communitySlug: cfg.community,
-    });
+    const { upgraded } = await signIn(
+      ctx,
+      ana,
+      cfg.adminIdentifier,
+      cfg.adminPassword,
+      {
+        communitySlug: cfg.community,
+      }
+    );
     if (upgraded) {
       await w.step({
         who: ana,
@@ -60,7 +76,9 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
         show: (r) => field('algorithm', val(r, 'algorithm')),
       });
     } else {
-      w.narrate('This account was already upgraded to Argon2id on an earlier login, so there is no bcrypt step to show.');
+      w.narrate(
+        'This account was already upgraded to Argon2id on an earlier login, so there is no bcrypt step to show.'
+      );
     }
 
     const me = await w.step({
@@ -71,7 +89,10 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
       expect: 200,
       covers: ['B01', 'B08', 'M12'],
       show: (r) => [
-        field('Hello', val(r, 'user', 'displayName') ?? val(r, 'user', 'username')),
+        field(
+          'Hello',
+          val(r, 'user', 'displayName') ?? val(r, 'user', 'username')
+        ),
         field('role badge', val(r, 'user', 'role')),
         field('recovery codes saved', val(r, 'user', 'recoveryCodesConfirmed')),
         'admin-only link: "Member dashboard" and the Users / Map settings / Import entries are visible',
@@ -93,7 +114,13 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
             : 'expected the recovery_codes_required gate',
         show: 'the whole app routes the admin to "save your recovery codes"',
       });
-      const key = await deriveKey(ctx, ana, cfg.adminIdentifier, cfg.adminPassword, cfg.community);
+      const key = await deriveKey(
+        ctx,
+        ana,
+        cfg.adminIdentifier,
+        cfg.adminPassword,
+        cfg.community
+      );
       const codes = await w.step({
         who: ana,
         say: 'generates her recovery codes (password step-up); the ten codes are shown once',
@@ -105,12 +132,16 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
         show: (r) => {
           const list = val(r, 'data', 'codes');
           if (Array.isArray(list)) for (const c of list) w.secret(String(c));
-          return [`${Array.isArray(list) ? list.length : 0} single-use codes, print or copy sheet (values hidden here)`];
+          return [
+            `${Array.isArray(list) ? list.length : 0} single-use codes, print or copy sheet (values hidden here)`,
+          ];
         },
       });
       void codes;
     } else {
-      w.narrate('Ana already holds recovery codes, so the walkthrough does not regenerate them (that would invalidate her real sheet). The recovery-code screens are walked with Adrian, a second admin created below.');
+      w.narrate(
+        'Ana already holds recovery codes, so the walkthrough does not regenerate them (that would invalidate her real sheet). The recovery-code screens are walked with Adrian, a second admin created below.'
+      );
     }
 
     const community = await w.step({
@@ -136,13 +167,18 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
       covers: ['M02', 'D06'],
       show: (r) => [
         field('map style', dig(r, 'render', 'source')),
-        field('centre', `${dig(r, 'data', 'centerLatitude') ?? '-'}, ${dig(r, 'data', 'centerLongitude') ?? '-'}`),
+        field(
+          'centre',
+          `${dig(r, 'data', 'centerLatitude') ?? '-'}, ${dig(r, 'data', 'centerLongitude') ?? '-'}`
+        ),
       ],
     });
     s.snapshot = {
-      description: (val(community, 'data', 'description') as string | null) ?? null,
+      description:
+        (val(community, 'data', 'description') as string | null) ?? null,
       visibility: str(community, 'data', 'visibility'),
-      mapConfig: (val(mapCfg, 'data') as Record<string, unknown> | null) ?? null,
+      mapConfig:
+        (val(mapCfg, 'data') as Record<string, unknown> | null) ?? null,
     };
 
     const list = await w.step({
@@ -162,7 +198,12 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
         const rows = (val(r, 'data') as Array<Record<string, unknown>>) ?? [];
         return [
           field('total users', dig(r, 'meta', 'total')),
-          ...rows.slice(0, 3).map((u) => `card: ${u.displayName ?? u.username} - role ${u.role} - ${u.status}`),
+          ...rows
+            .slice(0, 3)
+            .map(
+              (u) =>
+                `card: ${u.displayName ?? u.username} - role ${u.role} - ${u.status}`
+            ),
           field('next page', dig(r, 'meta', 'hasNextPage')),
         ];
       },
@@ -217,7 +258,9 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
       expect: 200,
       covers: ['D03'],
       check: (r) =>
-        /passwordVerifier|passwordSalt|derivedKey|passwordHash/.test(JSON.stringify(r.json))
+        /passwordVerifier|passwordSalt|derivedKey|passwordHash/.test(
+          JSON.stringify(r.json)
+        )
           ? 'the user page leaked credential fields'
           : undefined,
       show: (r) => [

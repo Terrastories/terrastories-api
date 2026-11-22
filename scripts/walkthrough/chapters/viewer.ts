@@ -5,7 +5,17 @@
  */
 import { PNG_BYTES, multipart } from '../client.js';
 import { newVerifier, randomPassword } from '../kdf.js';
-import { activate, deriveKey, field, guarded, num, signIn, str, val, type Ctx } from '../context.js';
+import {
+  activate,
+  deriveKey,
+  field,
+  guarded,
+  num,
+  signIn,
+  str,
+  val,
+  type Ctx,
+} from '../context.js';
 import { dig } from '../walk.js';
 import { readerNegatives, readerTour } from './reader-tour.js';
 
@@ -29,7 +39,10 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       path: '/v2/auth/me',
       expect: 200,
       covers: ['B01', 'B08', 'M12'],
-      show: (r) => [field('name', val(r, 'user', 'displayName')), field('role badge', val(r, 'user', 'role'))],
+      show: (r) => [
+        field('name', val(r, 'user', 'displayName')),
+        field('role badge', val(r, 'user', 'role')),
+      ],
     });
     await readerTour(ctx, vera, {
       mustSee: ['How the river got its name', 'Imported open story'],
@@ -78,7 +91,15 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       say: 'takes a username that another person already uses',
       method: 'PATCH',
       path: '/v2/auth/me',
-      json: { username: s.accounts.mateo!.username, currentDerivedKey: await deriveKey(ctx, vera, acct.username, acct.password!) },
+      json: {
+        username: s.accounts.mateo!.username,
+        currentDerivedKey: await deriveKey(
+          ctx,
+          vera,
+          acct.username,
+          acct.password!
+        ),
+      },
       expect: 409,
       negative: true,
       covers: ['B02'],
@@ -89,12 +110,21 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       say: 'uploads a profile photo (png, under 5 MB); the file part follows the role part',
       method: 'POST',
       path: '/v2/media',
-      form: multipart({ role: 'user_photo' }, { name: `${w.runId}-vera.png`, type: 'image/png', bytes: PNG_BYTES }),
+      form: multipart(
+        { role: 'user_photo' },
+        { name: `${w.runId}-vera.png`, type: 'image/png', bytes: PNG_BYTES }
+      ),
       bodyNote: 'multipart: role=user_photo, then the png file',
       expect: 201,
       covers: ['B02'],
-      check: (r) => (dig(r, 'data', 'attachment') ? undefined : 'the upload did not create the attachment'),
-      show: (r) => [field('attachment role', dig(r, 'data', 'attachment', 'role')), 'the avatar in the top bar changes'],
+      check: (r) =>
+        dig(r, 'data', 'attachment')
+          ? undefined
+          : 'the upload did not create the attachment',
+      show: (r) => [
+        field('attachment role', dig(r, 'data', 'attachment', 'role')),
+        'the avatar in the top bar changes',
+      ],
     });
     const photoFile = str(up, 'data', 'id');
     const photoAttachment = num(up, 'data', 'attachment', 'id');
@@ -105,7 +135,10 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       path: `/v2/media/${photoFile}`,
       expect: 200,
       covers: ['B01'],
-      show: (r) => [field('content type', r.headers.get('content-type')), field('bytes', r.bytes.length)],
+      show: (r) => [
+        field('content type', r.headers.get('content-type')),
+        field('bytes', r.bytes.length),
+      ],
     });
     await w.step({
       who: vera,
@@ -135,7 +168,12 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       method: 'POST',
       path: '/v2/auth/password',
       json: {
-        currentDerivedKey: await deriveKey(ctx, vera, acct.username, acct.password!),
+        currentDerivedKey: await deriveKey(
+          ctx,
+          vera,
+          acct.username,
+          acct.password!
+        ),
         ...material,
       },
       expect: 200,
@@ -150,7 +188,10 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       say: 'someone tries the old password',
       method: 'POST',
       path: '/v2/auth/login',
-      json: { identifier: acct.username, derivedKey: await deriveKey(ctx, probe, acct.username, oldPassword) },
+      json: {
+        identifier: acct.username,
+        derivedKey: await deriveKey(ctx, probe, acct.username, oldPassword),
+      },
       expect: 401,
       negative: true,
       covers: ['A06'],
@@ -180,9 +221,13 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       show: 'the app shows the login page',
     });
     const phone = (s.actors.veraPhone = w.actor('Vera on her phone', 'viewer'));
-    await signIn(ctx, phone, acct.username, acct.password, { deviceSession: true });
+    await signIn(ctx, phone, acct.username, acct.password, {
+      deviceSession: true,
+    });
     const laptop = (s.actors.vera = w.actor('Vera', 'viewer'));
-    await signIn(ctx, laptop, acct.username, acct.password, { covers: ['B05'] });
+    await signIn(ctx, laptop, acct.username, acct.password, {
+      covers: ['B05'],
+    });
     await w.step({
       who: laptop,
       say: 'taps "sign out everywhere"',
@@ -201,8 +246,13 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       covers: ['B05', 'V11'],
     });
     const again = (s.actors.veraPhone = w.actor('Vera on her phone', 'viewer'));
-    await signIn(ctx, again, acct.username, acct.password, { deviceSession: true, covers: ['V11'] });
-    w.narrate('Vera stays signed in on her phone with "remember this device"; her admin will look at that session later.');
+    await signIn(ctx, again, acct.username, acct.password, {
+      deviceSession: true,
+      covers: ['V11'],
+    });
+    w.narrate(
+      'Vera stays signed in on her phone with "remember this device"; her admin will look at that session later.'
+    );
 
     await readerNegatives(ctx, again, { content: ['C02'] });
     await w.step({
@@ -210,7 +260,10 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       say: 'tries to upload story media (only profile photos are open to viewers)',
       method: 'POST',
       path: '/v2/media',
-      form: multipart({}, { name: `${w.runId}-no.png`, type: 'image/png', bytes: PNG_BYTES }),
+      form: multipart(
+        {},
+        { name: `${w.runId}-no.png`, type: 'image/png', bytes: PNG_BYTES }
+      ),
       expect: 403,
       negative: true,
       covers: ['C02'],

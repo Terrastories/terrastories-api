@@ -46,8 +46,18 @@ export async function adminLateChapter(ctx: Ctx): Promise<void> {
     const mateo = s.accounts.mateo!;
 
     // ---- people -------------------------------------------------------
-    w.skip(['B07'], 'Ana picks a language from the sidebar', 'client-only i18n; no API call', 'Ana');
-    w.skip(['C01'], 'Ana clicks "New" on the stories list', 'opens a client-side form; no API call', 'Ana');
+    w.skip(
+      ['B07'],
+      'Ana picks a language from the sidebar',
+      'client-only i18n; no API call',
+      'Ana'
+    );
+    w.skip(
+      ['C01'],
+      'Ana clicks "New" on the stories list',
+      'opens a client-side form; no API call',
+      'Ana'
+    );
     await w.step({
       who: ana,
       say: `promotes ${zed.displayName} from viewer to editor`,
@@ -105,7 +115,12 @@ export async function adminLateChapter(ctx: Ctx): Promise<void> {
       negative: true,
       covers: ['D04'],
     });
-    w.skip(['D05'], 'Ana looks for the "Delete user" button', 'skipped by decision D12: users are disabled, not deleted', 'Ana');
+    w.skip(
+      ['D05'],
+      'Ana looks for the "Delete user" button',
+      'skipped by decision D12: users are disabled, not deleted',
+      'Ana'
+    );
 
     // ---- device sessions -------------------------------------------------
     const sessions = await w.step({
@@ -115,8 +130,14 @@ export async function adminLateChapter(ctx: Ctx): Promise<void> {
       path: `/v2/users/${vera.id}/sessions`,
       expect: 200,
       covers: ['V11'],
-      check: (r) => (((val(r, 'data') as unknown[]) ?? []).length >= 1 ? undefined : 'expected at least one device session'),
-      show: (r) => [field('device sessions', ((val(r, 'data') as unknown[]) ?? []).length), 'each row shows created, last seen and expiry; never a token'],
+      check: (r) =>
+        ((val(r, 'data') as unknown[]) ?? []).length >= 1
+          ? undefined
+          : 'expected at least one device session',
+      show: (r) => [
+        field('device sessions', ((val(r, 'data') as unknown[]) ?? []).length),
+        'each row shows created, last seen and expiry; never a token',
+      ],
     });
     const handle = str(sessions, 'data', 0, 'handle');
     await w.step({
@@ -161,7 +182,10 @@ export async function adminLateChapter(ctx: Ctx): Promise<void> {
       json: { description: `<p>${w.runId} walkthrough description</p>` },
       expect: 200,
       covers: ['D08'],
-      show: (r) => [field('description', val(r, 'data', 'description')), field('public link', `/<locale>/c/${val(r, 'data', 'slug')}`)],
+      show: (r) => [
+        field('description', val(r, 'data', 'description')),
+        field('public link', `/<locale>/c/${val(r, 'data', 'slug')}`),
+      ],
     });
     await branding(ctx);
 
@@ -176,7 +200,9 @@ async function adrianScenes(ctx: Ctx): Promise<void> {
   const { w, s } = ctx;
   const acct = s.accounts.adrian!;
   const adrian = (s.actors.adrian = w.actor('Adrian', 'community admin'));
-  w.narrate('Ana created Adrian as a second admin. He is new: he has no recovery codes yet, so the app gates him.');
+  w.narrate(
+    'Ana created Adrian as a second admin. He is new: he has no recovery codes yet, so the app gates him.'
+  );
   await activate(ctx, adrian, acct, ['A06']);
   await w.step({
     who: adrian,
@@ -186,7 +212,10 @@ async function adrianScenes(ctx: Ctx): Promise<void> {
     expect: 403,
     negative: true,
     covers: ['V08'],
-    check: (r) => (val(r, 'code') === 'recovery_codes_required' ? undefined : 'expected the recovery_codes_required gate'),
+    check: (r) =>
+      val(r, 'code') === 'recovery_codes_required'
+        ? undefined
+        : 'expected the recovery_codes_required gate',
     show: 'every screen redirects to "save your recovery codes" (D24)',
   });
   await w.step({
@@ -196,20 +225,34 @@ async function adrianScenes(ctx: Ctx): Promise<void> {
     path: '/v2/auth/me',
     expect: 200,
     covers: ['V08'],
-    check: (r) => (dig(r, 'user', 'recoveryCodesConfirmed') === false ? undefined : 'expected recoveryCodesConfirmed=false'),
-    show: (r) => [field('recovery codes saved', dig(r, 'user', 'recoveryCodesConfirmed'))],
+    check: (r) =>
+      dig(r, 'user', 'recoveryCodesConfirmed') === false
+        ? undefined
+        : 'expected recoveryCodesConfirmed=false',
+    show: (r) => [
+      field('recovery codes saved', dig(r, 'user', 'recoveryCodesConfirmed')),
+    ],
   });
   const first = await w.step({
     who: adrian,
     say: 'confirms with his password and receives ten recovery codes',
     method: 'POST',
     path: '/v2/auth/recovery-codes',
-    json: { currentDerivedKey: await deriveKey(ctx, adrian, acct.username, acct.password!) },
+    json: {
+      currentDerivedKey: await deriveKey(
+        ctx,
+        adrian,
+        acct.username,
+        acct.password!
+      ),
+    },
     expect: 201,
     covers: ['V07'],
     show: (r) => {
       for (const c of (val(r, 'data', 'codes') as string[]) ?? []) w.secret(c);
-      return ['ten single-use codes, shown once; print / copy / download (values hidden here)'];
+      return [
+        'ten single-use codes, shown once; print / copy / download (values hidden here)',
+      ];
     },
   });
   const firstCodes = (val(first, 'data', 'codes') as string[]) ?? [];
@@ -226,7 +269,14 @@ async function adrianScenes(ctx: Ctx): Promise<void> {
     say: 'regenerates the codes; the first sheet stops working',
     method: 'POST',
     path: '/v2/auth/recovery-codes',
-    json: { currentDerivedKey: await deriveKey(ctx, adrian, acct.username, acct.password!) },
+    json: {
+      currentDerivedKey: await deriveKey(
+        ctx,
+        adrian,
+        acct.username,
+        acct.password!
+      ),
+    },
     expect: 201,
     covers: ['V07'],
     show: (r) => {
@@ -268,10 +318,17 @@ async function adrianScenes(ctx: Ctx): Promise<void> {
     say: 'redeems a current recovery code on the "I lost my password" page and chooses a new password',
     method: 'POST',
     path: '/v2/auth/recovery/redeem',
-    json: { code: secondCodes[0], identifier: acct.username, password: nextVerifier },
+    json: {
+      code: secondCodes[0],
+      identifier: acct.username,
+      password: nextVerifier,
+    },
     expect: 200,
     covers: ['V09'],
-    show: (r) => [field('signed in as', val(r, 'user', 'displayName')), 'that code is now spent'],
+    show: (r) => [
+      field('signed in as', val(r, 'user', 'displayName')),
+      'that code is now spent',
+    ],
   });
   acct.password = next;
   back.identifier = acct.username;
@@ -281,7 +338,11 @@ async function adrianScenes(ctx: Ctx): Promise<void> {
     say: 'replays the same recovery code',
     method: 'POST',
     path: '/v2/auth/recovery/redeem',
-    json: { code: secondCodes[0], identifier: acct.username, password: nextVerifier },
+    json: {
+      code: secondCodes[0],
+      identifier: acct.username,
+      password: nextVerifier,
+    },
     noCookie: true,
     expect: [400, 401],
     negative: true,
@@ -299,7 +360,9 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
   const pk = secretToken('pk');
   w.secret(pk);
   const pkNow = pk;
-  w.narrate('Mapbox settings (#277): a community may use its own Mapbox style with a public pk token.');
+  w.narrate(
+    'Mapbox settings (#277): a community may use its own Mapbox style with a public pk token.'
+  );
 
   if (s.snapshot && s.snapshot.visibility !== 'public') {
     await w.step({
@@ -332,14 +395,30 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     },
     expect: 200,
     covers: ['D06', 'M02'],
-    show: (r) => [field('centre', `${val(r, 'data', 'centerLatitude')}, ${val(r, 'data', 'centerLongitude')}`), field('zoom', val(r, 'data', 'zoom')), field('pitch', val(r, 'data', 'pitch')), field('bearing', val(r, 'data', 'bearing'))],
+    show: (r) => [
+      field(
+        'centre',
+        `${val(r, 'data', 'centerLatitude')}, ${val(r, 'data', 'centerLongitude')}`
+      ),
+      field('zoom', val(r, 'data', 'zoom')),
+      field('pitch', val(r, 'data', 'pitch')),
+      field('bearing', val(r, 'data', 'bearing')),
+    ],
   });
   await w.step({
     who: ana,
     say: 'draws bounds that wrap across the antimeridian (west edge east of the east edge)',
     method: 'PUT',
     path: '/v2/community/map-config',
-    json: { southWestLatitude: -10, southWestLongitude: 170, northEastLatitude: 10, northEastLongitude: -170, centerLatitude: 0, centerLongitude: 180, zoom: 3 },
+    json: {
+      southWestLatitude: -10,
+      southWestLongitude: 170,
+      northEastLatitude: 10,
+      northEastLongitude: -170,
+      centerLatitude: 0,
+      centerLongitude: 180,
+      zoom: 3,
+    },
     expect: 200,
     covers: ['D06'],
     show: 'the "unrestricted bounds" toggle stays off; wrapped bounds are accepted',
@@ -349,7 +428,12 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     say: 'enters a south edge north of the north edge',
     method: 'PUT',
     path: '/v2/community/map-config',
-    json: { southWestLatitude: 20, southWestLongitude: -59, northEastLatitude: 10, northEastLongitude: -57 },
+    json: {
+      southWestLatitude: 20,
+      southWestLongitude: -59,
+      northEastLatitude: 10,
+      northEastLongitude: -57,
+    },
     expect: 400,
     negative: true,
     covers: ['D06'],
@@ -381,8 +465,16 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     },
     expect: 200,
     covers: ['D06', 'M02'],
-    check: (r) => (dig(r, 'render', 'source') === 'community' ? undefined : 'expected render source community'),
-    show: (r) => [field('style', dig(r, 'data', 'mapboxStyleUrl')), 'token: saved (shown masked)', field('3D terrain', dig(r, 'data', 'mapbox3d')), field('render source', dig(r, 'render', 'source'))],
+    check: (r) =>
+      dig(r, 'render', 'source') === 'community'
+        ? undefined
+        : 'expected render source community',
+    show: (r) => [
+      field('style', dig(r, 'data', 'mapboxStyleUrl')),
+      'token: saved (shown masked)',
+      field('3D terrain', dig(r, 'data', 'mapbox3d')),
+      field('render source', dig(r, 'render', 'source')),
+    ],
   });
   await w.step({
     who: ana,
@@ -391,8 +483,14 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     path: '/v2/community/map-config',
     expect: 200,
     covers: ['D06'],
-    check: (r) => (dig(r, 'data', 'mapboxStyleUrl') === style ? undefined : 'the stored style was not returned'),
-    show: (r) => [field('style', dig(r, 'data', 'mapboxStyleUrl')), field('expose to public', dig(r, 'data', 'exposeMapboxCredentials'))],
+    check: (r) =>
+      dig(r, 'data', 'mapboxStyleUrl') === style
+        ? undefined
+        : 'the stored style was not returned',
+    show: (r) => [
+      field('style', dig(r, 'data', 'mapboxStyleUrl')),
+      field('expose to public', dig(r, 'data', 'exposeMapboxCredentials')),
+    ],
   });
   if (mateo) {
     await w.step({
@@ -402,8 +500,15 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
       path: '/v2/community/map-config',
       expect: 200,
       covers: ['M02'],
-      check: (r) => (dig(r, 'render', 'mapboxStyleUrl') === style ? undefined : 'the member does not see the render block'),
-      show: (r) => [field('render style', dig(r, 'render', 'mapboxStyleUrl')), field('render source', dig(r, 'render', 'source')), 'token: present (masked)'],
+      check: (r) =>
+        dig(r, 'render', 'mapboxStyleUrl') === style
+          ? undefined
+          : 'the member does not see the render block',
+      show: (r) => [
+        field('render style', dig(r, 'render', 'mapboxStyleUrl')),
+        field('render source', dig(r, 'render', 'source')),
+        'token: present (masked)',
+      ],
     });
     await w.step({
       who: mateo,
@@ -412,11 +517,15 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
       path: '/v2/community',
       expect: 200,
       covers: ['M02'],
-      check: (r) => (dig(r, 'data', 'mapRender', 'mapboxStyleUrl') === style ? undefined : 'mapRender missing on the community record'),
+      check: (r) =>
+        dig(r, 'data', 'mapRender', 'mapboxStyleUrl') === style
+          ? undefined
+          : 'mapRender missing on the community record',
     });
   }
   const publicMap = (r: { json: unknown }) =>
-    ((r.json as { data?: { mapConfig?: Record<string, unknown> | null } })?.data?.mapConfig ?? null) as Record<string, unknown> | null;
+    ((r.json as { data?: { mapConfig?: Record<string, unknown> | null } })?.data
+      ?.mapConfig ?? null) as Record<string, unknown> | null;
   await w.step({
     who: pia,
     say: 'Pia, anonymous, opens the public map: no Mapbox style or token is shared yet',
@@ -426,7 +535,9 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     covers: ['M02', 'D06'],
     check: (r) => {
       const map = publicMap(r);
-      return map && (map.mapboxStyleUrl || map.mapboxAccessToken) ? 'public read leaked the Mapbox settings' : undefined;
+      return map && (map.mapboxStyleUrl || map.mapboxAccessToken)
+        ? 'public read leaked the Mapbox settings'
+        : undefined;
     },
     show: 'the public map falls back to the default OpenFreeMap style',
   });
@@ -438,8 +549,14 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     json: { exposeMapboxCredentials: true },
     expect: 200,
     covers: ['D06'],
-    check: (r) => (dig(r, 'data', 'mapboxStyleUrl') === style ? undefined : 'omitting the style must keep the stored value'),
-    show: (r) => [field('expose to public', dig(r, 'data', 'exposeMapboxCredentials')), 'style and token were kept (omitted keys keep their stored values)'],
+    check: (r) =>
+      dig(r, 'data', 'mapboxStyleUrl') === style
+        ? undefined
+        : 'omitting the style must keep the stored value',
+    show: (r) => [
+      field('expose to public', dig(r, 'data', 'exposeMapboxCredentials')),
+      'style and token were kept (omitted keys keep their stored values)',
+    ],
   });
   await w.step({
     who: pia,
@@ -448,8 +565,14 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     path: `/v2/public/communities/${slug}`,
     expect: 200,
     covers: ['M02', 'D06'],
-    check: (r) => (publicMap(r)?.mapboxStyleUrl === style ? undefined : 'the public map did not receive the exposed style'),
-    show: (r) => [field('style', publicMap(r)?.mapboxStyleUrl), 'token: present (masked)'],
+    check: (r) =>
+      publicMap(r)?.mapboxStyleUrl === style
+        ? undefined
+        : 'the public map did not receive the exposed style',
+    show: (r) => [
+      field('style', publicMap(r)?.mapboxStyleUrl),
+      'token: present (masked)',
+    ],
   });
   await w.step({
     who: ana,
@@ -459,7 +582,10 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     json: { visibility: 'private' },
     expect: 200,
     covers: ['D08'],
-    show: (r) => [field('visibility', val(r, 'data', 'visibility')), 'switching to private also turns "show on the public map" off'],
+    show: (r) => [
+      field('visibility', val(r, 'data', 'visibility')),
+      'switching to private also turns "show on the public map" off',
+    ],
   });
   await w.step({
     who: pia,
@@ -477,8 +603,13 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     path: '/v2/community/map-config',
     expect: 200,
     covers: ['D06'],
-    check: (r) => (dig(r, 'data', 'exposeMapboxCredentials') === false ? undefined : 'making the community private must reset exposeMapboxCredentials'),
-    show: (r) => [field('expose to public', dig(r, 'data', 'exposeMapboxCredentials'))],
+    check: (r) =>
+      dig(r, 'data', 'exposeMapboxCredentials') === false
+        ? undefined
+        : 'making the community private must reset exposeMapboxCredentials',
+    show: (r) => [
+      field('expose to public', dig(r, 'data', 'exposeMapboxCredentials')),
+    ],
   });
   await w.step({
     who: ana,
@@ -498,7 +629,9 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     covers: ['D06', 'M02'],
     check: (r) => {
       const map = publicMap(r);
-      return map && (map.mapboxStyleUrl || map.mapboxAccessToken) ? 'the reset did not hide the Mapbox settings' : undefined;
+      return map && (map.mapboxStyleUrl || map.mapboxAccessToken)
+        ? 'the reset did not hide the Mapbox settings'
+        : undefined;
     },
   });
   await w.step({
@@ -531,8 +664,14 @@ async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
     json: { mapboxStyleUrl: null, mapboxAccessToken: null, mapbox3d: false },
     expect: 200,
     covers: ['D06'],
-    check: (r) => (dig(r, 'data', 'mapboxStyleUrl') === null ? undefined : 'the style was not cleared'),
-    show: (r) => [field('style', dig(r, 'data', 'mapboxStyleUrl')), field('render source', dig(r, 'render', 'source'))],
+    check: (r) =>
+      dig(r, 'data', 'mapboxStyleUrl') === null
+        ? undefined
+        : 'the style was not cleared',
+    show: (r) => [
+      field('style', dig(r, 'data', 'mapboxStyleUrl')),
+      field('render source', dig(r, 'render', 'source')),
+    ],
   });
   void mateoId;
 }
@@ -547,15 +686,44 @@ async function branding(ctx: Ctx): Promise<void> {
     path: '/v2/community',
     expect: 200,
     covers: ['D07'],
-    show: (r) => [field('background image', dig(r, 'data', 'branding', 'backgroundImage') ? 'set' : 'none'), field('sponsor logos', ((dig(r, 'data', 'branding', 'sponsorLogos') as unknown[]) ?? []).length)],
+    show: (r) => [
+      field(
+        'background image',
+        dig(r, 'data', 'branding', 'backgroundImage') ? 'set' : 'none'
+      ),
+      field(
+        'sponsor logos',
+        ((dig(r, 'data', 'branding', 'sponsorLogos') as unknown[]) ?? []).length
+      ),
+    ],
   });
   const communityId = num(community, 'data', 'id');
   s.ids.community = communityId;
   const logos: number[] = [];
   for (const n of [1, 2]) {
-    const file = await upload(ctx, ana, `uploads sponsor logo ${n}`, { name: `${w.runId}-logo${n}.png`, type: 'image/png', bytes: PNG_BYTES }, ['D07']);
+    const file = await upload(
+      ctx,
+      ana,
+      `uploads sponsor logo ${n}`,
+      { name: `${w.runId}-logo${n}.png`, type: 'image/png', bytes: PNG_BYTES },
+      ['D07']
+    );
     s.files[`logo${n}`] = file;
-    logos.push(await attach(ctx, ana, `adds sponsor logo ${n} to the welcome page`, { fileId: file, ownerType: 'community', ownerId: communityId, role: 'sponsor_logo', ordinal: n - 1 }, ['D07']));
+    logos.push(
+      await attach(
+        ctx,
+        ana,
+        `adds sponsor logo ${n} to the welcome page`,
+        {
+          fileId: file,
+          ownerType: 'community',
+          ownerId: communityId,
+          role: 'sponsor_logo',
+          ordinal: n - 1,
+        },
+        ['D07']
+      )
+    );
   }
   s.attachments.logo1 = logos[0]!;
   s.attachments.logo2 = logos[1]!;
@@ -564,16 +732,41 @@ async function branding(ctx: Ctx): Promise<void> {
     say: 'reorders the sponsor logos',
     method: 'PATCH',
     path: '/v2/attachments/reorder',
-    json: { ownerType: 'community', ownerId: communityId, role: 'sponsor_logo', attachmentIds: [logos[1], logos[0]] },
+    json: {
+      ownerType: 'community',
+      ownerId: communityId,
+      role: 'sponsor_logo',
+      attachmentIds: [logos[1], logos[0]],
+    },
     expect: 200,
     covers: ['D07', 'V17'],
   });
   if (!dig(community, 'data', 'branding', 'backgroundImage')) {
-    const file = await upload(ctx, ana, 'uploads a welcome background image', { name: `${w.runId}-bg.png`, type: 'image/png', bytes: PNG_BYTES }, ['D07']);
+    const file = await upload(
+      ctx,
+      ana,
+      'uploads a welcome background image',
+      { name: `${w.runId}-bg.png`, type: 'image/png', bytes: PNG_BYTES },
+      ['D07']
+    );
     s.files.background = file;
-    s.attachments.background = await attach(ctx, ana, 'sets it as the welcome background', { fileId: file, ownerType: 'community', ownerId: communityId, role: 'community_background_image', ordinal: 0 }, ['D07']);
+    s.attachments.background = await attach(
+      ctx,
+      ana,
+      'sets it as the welcome background',
+      {
+        fileId: file,
+        ownerType: 'community',
+        ownerId: communityId,
+        role: 'community_background_image',
+        ordinal: 0,
+      },
+      ['D07']
+    );
   } else {
-    w.narrate('The community already has a welcome background image, so the walkthrough leaves it alone.');
+    w.narrate(
+      'The community already has a welcome background image, so the walkthrough leaves it alone.'
+    );
   }
   await w.step({
     who: ana,
@@ -597,16 +790,29 @@ async function exportScenes(ctx: Ctx): Promise<void> {
     expect: 201,
     covers: ['V01'],
     show: (r) => {
-      for (const kind of ['manifest', 'mediaZip']) w.secret(String(dig(r, 'data', 'artifacts', kind, 'token') ?? ''));
+      for (const kind of ['manifest', 'mediaZip'])
+        w.secret(String(dig(r, 'data', 'artifacts', kind, 'token') ?? ''));
       return [
-        field('manifest bytes', dig(r, 'data', 'artifacts', 'manifest', 'byteSize')),
-        field('media archive files', dig(r, 'data', 'artifacts', 'mediaZip', 'fileCount')),
+        field(
+          'manifest bytes',
+          dig(r, 'data', 'artifacts', 'manifest', 'byteSize')
+        ),
+        field(
+          'media archive files',
+          dig(r, 'data', 'artifacts', 'mediaZip', 'fileCount')
+        ),
         field('links expire', dig(r, 'data', 'expiresAt')),
         'two short-lived download buttons (15 minutes)',
       ];
     },
   });
-  const manifestPath = str(exp, 'data', 'artifacts', 'manifest', 'downloadPath');
+  const manifestPath = str(
+    exp,
+    'data',
+    'artifacts',
+    'manifest',
+    'downloadPath'
+  );
   const zipPath = str(exp, 'data', 'artifacts', 'mediaZip', 'downloadPath');
   await w.step({
     who: ana,
@@ -615,8 +821,15 @@ async function exportScenes(ctx: Ctx): Promise<void> {
     path: manifestPath,
     expect: 200,
     covers: ['V01'],
-    check: (r) => (/passwordVerifier|derivedKey|passwordHash/.test(r.text) ? 'the export contains credential fields' : undefined),
-    show: (r) => [field('content type', r.headers.get('content-type')), field('bytes', r.bytes.length), 'the export carries no credentials, sessions or throttles'],
+    check: (r) =>
+      /passwordVerifier|derivedKey|passwordHash/.test(r.text)
+        ? 'the export contains credential fields'
+        : undefined,
+    show: (r) => [
+      field('content type', r.headers.get('content-type')),
+      field('bytes', r.bytes.length),
+      'the export carries no credentials, sessions or throttles',
+    ],
   });
   await w.step({
     who: ana,
@@ -625,11 +838,14 @@ async function exportScenes(ctx: Ctx): Promise<void> {
     path: zipPath,
     expect: 200,
     covers: ['V01'],
-    show: (r) => [field('content type', r.headers.get('content-type')), field('bytes', r.bytes.length)],
+    show: (r) => [
+      field('content type', r.headers.get('content-type')),
+      field('bytes', r.bytes.length),
+    ],
   });
   await w.step({
     who: s.actors.elena!,
-    say: 'Elena tries to use Ana\'s download link',
+    say: "Elena tries to use Ana's download link",
     method: 'GET',
     path: manifestPath,
     expect: [403, 404],
@@ -639,7 +855,11 @@ async function exportScenes(ctx: Ctx): Promise<void> {
   });
 }
 
-async function sovereigntyScenes(ctx: Ctx, samirId: number, mateoId: number): Promise<void> {
+async function sovereigntyScenes(
+  ctx: Ctx,
+  samirId: number,
+  mateoId: number
+): Promise<void> {
   const { w, s, cfg } = ctx;
   const ana = s.actors.ana!;
   await w.step({
@@ -652,8 +872,14 @@ async function sovereigntyScenes(ctx: Ctx, samirId: number, mateoId: number): Pr
     show: (r) => [
       field('status', dig(r, 'data', 'status')),
       field('steward', dig(r, 'data', 'steward') ? 'designated' : 'none'),
-      field('notice period (days)', Number(dig(r, 'data', 'noticePeriodSeconds')) / 86400),
-      field('pending requests', ((dig(r, 'data', 'pendingRequests') as unknown[]) ?? []).length),
+      field(
+        'notice period (days)',
+        Number(dig(r, 'data', 'noticePeriodSeconds')) / 86400
+      ),
+      field(
+        'pending requests',
+        ((dig(r, 'data', 'pendingRequests') as unknown[]) ?? []).length
+      ),
     ],
   });
   await w.step({
@@ -661,7 +887,10 @@ async function sovereigntyScenes(ctx: Ctx, samirId: number, mateoId: number): Pr
     say: 'designates Samir as steward with a wrong password in the confirmation box',
     method: 'PUT',
     path: '/v2/community/steward',
-    json: { stewardUserId: samirId, currentDerivedKey: (await newVerifier(randomPassword())).derivedKey },
+    json: {
+      stewardUserId: samirId,
+      currentDerivedKey: (await newVerifier(randomPassword())).derivedKey,
+    },
     expect: [401, 403],
     negative: true,
     covers: ['V03'],
@@ -669,7 +898,13 @@ async function sovereigntyScenes(ctx: Ctx, samirId: number, mateoId: number): Pr
   });
   const stewardBody = async (id: number | null) => ({
     stewardUserId: id,
-    currentDerivedKey: await deriveKey(ctx, ana, cfg.adminIdentifier!, cfg.adminPassword!, cfg.community),
+    currentDerivedKey: await deriveKey(
+      ctx,
+      ana,
+      cfg.adminIdentifier!,
+      cfg.adminPassword!,
+      cfg.community
+    ),
   });
   await w.step({
     who: ana,
@@ -679,7 +914,10 @@ async function sovereigntyScenes(ctx: Ctx, samirId: number, mateoId: number): Pr
     json: await stewardBody(samirId),
     expect: 200,
     covers: ['V03'],
-    show: (r) => [field('steward user', dig(r, 'data', 'steward', 'userId')), field('role', dig(r, 'data', 'steward', 'role'))],
+    show: (r) => [
+      field('steward user', dig(r, 'data', 'steward', 'userId')),
+      field('role', dig(r, 'data', 'steward', 'role')),
+    ],
   });
   await w.step({
     who: ana,
@@ -708,10 +946,15 @@ async function sovereigntyScenes(ctx: Ctx, samirId: number, mateoId: number): Pr
     path: '/v2/community/audit-entries?limit=10&offset=0',
     expect: 200,
     covers: ['V12'],
-    check: (r) => (JSON.stringify(r.json).match(/derivedKey|passwordVerifier/) ? 'audit rows leaked credentials' : undefined),
+    check: (r) =>
+      JSON.stringify(r.json).match(/derivedKey|passwordVerifier/)
+        ? 'audit rows leaked credentials'
+        : undefined,
     show: (r) => [
       field('entries', dig(r, 'meta', 'total')),
-      ...(((dig(r, 'data') as Array<{ action: string; outcome: string }>) ?? []).slice(0, 3).map((e) => `row: ${e.action} (${e.outcome})`)),
+      ...((dig(r, 'data') as Array<{ action: string; outcome: string }>) ?? [])
+        .slice(0, 3)
+        .map((e) => `row: ${e.action} (${e.outcome})`),
       'rows hold actions and ids only, never cultural content or secrets',
     ],
   });
@@ -724,7 +967,12 @@ async function sovereigntyScenes(ctx: Ctx, samirId: number, mateoId: number): Pr
       path: `/v2/community/audit-entries?limit=10&action=${encodeURIComponent(action)}`,
       expect: 200,
       covers: ['V12'],
-      check: (r) => (((dig(r, 'data') as Array<{ action: string }>) ?? []).every((e) => e.action === action) ? undefined : 'the filter returned other actions'),
+      check: (r) =>
+        ((dig(r, 'data') as Array<{ action: string }>) ?? []).every(
+          (e) => e.action === action
+        )
+          ? undefined
+          : 'the filter returned other actions',
     });
   }
   await w.step({

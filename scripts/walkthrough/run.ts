@@ -11,11 +11,7 @@
  */
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import {
-  newState,
-  type Config,
-  type Ctx,
-} from './context.js';
+import { newState, type Config, type Ctx } from './context.js';
 import { Walk } from './walk.js';
 import { COVERAGE_ROWS } from './coverage.js';
 import { defineAccounts, adminOpening } from './chapters/admin-opening.js';
@@ -96,7 +92,13 @@ export async function runWalkthrough(
   const hasSuper = Boolean(cfg.superIdentifier && cfg.superPassword);
 
   if (cfg.setupFromBootstrap) await fieldKitChapter(ctx, 'first');
-  if (picked.has('admin') || picked.has('editor') || picked.has('viewer') || picked.has('member') || picked.has('anonymous'))
+  if (
+    picked.has('admin') ||
+    picked.has('editor') ||
+    picked.has('viewer') ||
+    picked.has('member') ||
+    picked.has('anonymous')
+  )
     await adminOpening(ctx);
   if (picked.has('editor')) await editorChapter(ctx);
   if (picked.has('viewer')) await viewerChapter(ctx);
@@ -109,7 +111,9 @@ export async function runWalkthrough(
       if (picked.has('steward')) await stewardChapter(ctx);
     } else {
       walk.chapter('Super admin', 'Super admin chapters need credentials');
-      walk.narrate('No super admin credentials were supplied (--super-credentials-env), so the super admin and steward chapters did not run.');
+      walk.narrate(
+        'No super admin credentials were supplied (--super-credentials-env), so the super admin and steward chapters did not run.'
+      );
     }
   }
   if (picked.has('fieldkit') && !cfg.setupFromBootstrap)
@@ -169,7 +173,8 @@ export function parseArgs(argv: string[]): Parsed {
     const arg = argv[i]!;
     const need = (): string => {
       const value = argv[i + 1];
-      if (!value || value.startsWith('--')) throw new Error(`${arg} needs a value`);
+      if (!value || value.startsWith('--'))
+        throw new Error(`${arg} needs a value`);
       i += 1;
       return value;
     };
@@ -178,7 +183,9 @@ export function parseArgs(argv: string[]): Parsed {
     else if (arg === '--persona') {
       const value = need();
       if (value !== 'all' && !(PERSONAS as readonly string[]).includes(value))
-        throw new Error(`--persona must be all or one of ${PERSONAS.join(', ')}`);
+        throw new Error(
+          `--persona must be all or one of ${PERSONAS.join(', ')}`
+        );
       parsed.persona = value as PersonaName | 'all';
     } else if (arg === '--out') parsed.out = need();
     else if (arg === '--setup-from-bootstrap') parsed.setupFromBootstrap = true;
@@ -209,13 +216,23 @@ const USAGE = `Usage: npm run walkthrough -- --base-url <url> [options]
   --local                       start an in-process stand-in app instead of --base-url
 Bootstrap secret: WT_BOOTSTRAP_SECRET.`;
 
-export async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
+export async function main(
+  argv: string[],
+  env: NodeJS.ProcessEnv
+): Promise<number> {
   const args = parseArgs(argv);
   if (args.help) {
     process.stdout.write(USAGE + '\n');
     return 0;
   }
-  let local: { close: () => Promise<void>; env: Record<string, string>; baseUrl: string; community: string } | undefined;
+  let local:
+    | {
+        close: () => Promise<void>;
+        env: Record<string, string>;
+        baseUrl: string;
+        community: string;
+      }
+    | undefined;
   try {
     if (args.local) {
       const { startLocalApp } = await import('./local-app.js');
@@ -239,7 +256,9 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<numb
       cfg.adminIdentifier = env[`${args.adminEnv}_IDENTIFIER`];
       cfg.adminPassword = env[`${args.adminEnv}_PASSWORD`];
       if (!cfg.adminIdentifier || !cfg.adminPassword)
-        throw new Error(`set ${args.adminEnv}_IDENTIFIER and ${args.adminEnv}_PASSWORD`);
+        throw new Error(
+          `set ${args.adminEnv}_IDENTIFIER and ${args.adminEnv}_PASSWORD`
+        );
     }
     if (args.superEnv) {
       cfg.superIdentifier = env[`${args.superEnv}_IDENTIFIER`];
@@ -254,13 +273,18 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<numb
     );
     return result.ok ? 0 : 1;
   } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n${USAGE}\n`);
+    process.stderr.write(
+      `${error instanceof Error ? error.message : String(error)}\n${USAGE}\n`
+    );
     return 2;
   } finally {
     await local?.close();
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
   main(process.argv.slice(2), process.env).then((code) => process.exit(code));
 }

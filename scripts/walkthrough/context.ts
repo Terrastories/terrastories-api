@@ -2,7 +2,12 @@
  * Shared types and helpers for the persona chapters.
  */
 import type { Actor, Reply } from './client.js';
-import { loginMaterial, newVerifier, randomPassword, type PreloginAnswer } from './kdf.js';
+import {
+  loginMaterial,
+  newVerifier,
+  randomPassword,
+  type PreloginAnswer,
+} from './kdf.js';
 import { dig, type Walk } from './walk.js';
 
 export interface Config {
@@ -78,13 +83,15 @@ export const val = (reply: Reply, ...keys: Array<string | number>) =>
 
 export const num = (reply: Reply, ...keys: Array<string | number>): number => {
   const v = dig(reply, ...keys);
-  if (typeof v !== 'number') throw new Error(`missing number at ${keys.join('.')}`);
+  if (typeof v !== 'number')
+    throw new Error(`missing number at ${keys.join('.')}`);
   return v;
 };
 
 export const str = (reply: Reply, ...keys: Array<string | number>): string => {
   const v = dig(reply, ...keys);
-  if (typeof v !== 'string') throw new Error(`missing string at ${keys.join('.')}`);
+  if (typeof v !== 'string')
+    throw new Error(`missing string at ${keys.join('.')}`);
   return v;
 };
 
@@ -134,7 +141,9 @@ export async function signIn(
     path: '/v2/auth/prelogin',
     json: {
       identifier,
-      ...(options.communitySlug ? { communitySlug: options.communitySlug } : {}),
+      ...(options.communitySlug
+        ? { communitySlug: options.communitySlug }
+        : {}),
     },
     noCookie: true,
     expect: 200,
@@ -163,7 +172,9 @@ export async function signIn(
     path: '/v2/auth/login',
     json: {
       identifier,
-      ...(options.communitySlug ? { communitySlug: options.communitySlug } : {}),
+      ...(options.communitySlug
+        ? { communitySlug: options.communitySlug }
+        : {}),
       derivedKey: material.derivedKey,
       ...(material.upgrade ? { upgrade: material.upgrade } : {}),
       ...(options.deviceSession ? { deviceSession: true } : {}),
@@ -171,7 +182,10 @@ export async function signIn(
     expect: 200,
     covers: ['A06', ...(options.covers ?? [])],
     show: (r) => [
-      field('signed in as', val(r, 'user', 'displayName') ?? val(r, 'user', 'username')),
+      field(
+        'signed in as',
+        val(r, 'user', 'displayName') ?? val(r, 'user', 'username')
+      ),
       field('role', val(r, 'user', 'role')),
       'the session cookie is set (HttpOnly; its value is never shown here)',
     ],

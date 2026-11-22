@@ -148,7 +148,9 @@ export async function startLocalApp(
       WT_BOOTSTRAP_SECRET: bootstrapSecret,
     },
     close: async () => {
-      server.closeIdleConnections?.();
+      (
+        server as { closeIdleConnections?: () => void }
+      ).closeIdleConnections?.();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await qa.close();
     },

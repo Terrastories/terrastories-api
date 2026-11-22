@@ -5,7 +5,17 @@
  * --allow-destructive.
  */
 import { newVerifier, randomPassword } from '../kdf.js';
-import { activate, deriveKey, field, guarded, num, str, val, signIn, type Ctx } from '../context.js';
+import {
+  activate,
+  deriveKey,
+  field,
+  guarded,
+  num,
+  str,
+  val,
+  signIn,
+  type Ctx,
+} from '../context.js';
 import { dig } from '../walk.js';
 
 export const PERSONA_STEWARD = 'Steward';
@@ -19,21 +29,33 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
   );
   const lab = s.lab;
   if (!lab) {
-    w.narrate('No disposable community exists (the super admin chapter did not finish), so nothing destructive was walked.');
+    w.narrate(
+      'No disposable community exists (the super admin chapter did not finish), so nothing destructive was walked.'
+    );
     return;
   }
   const covers = ['V04', 'V05', 'V06'];
   if (!cfg.allowDestructive) {
-    w.skip(covers, 'withdrawal, erasure and steward notices on a disposable community', 'needs --allow-destructive; they run only on the community the script created', 'Samir', true);
+    w.skip(
+      covers,
+      'withdrawal, erasure and steward notices on a disposable community',
+      'needs --allow-destructive; they run only on the community the script created',
+      'Samir',
+      true
+    );
     return;
   }
   await guarded(ctx, 'steward', async () => {
     // Guards: never the target community, always the run-prefixed one.
     if (lab.slug === cfg.community || !lab.slug.startsWith(w.runId))
-      throw new Error('refusing destructive steps: the community is not the disposable one');
+      throw new Error(
+        'refusing destructive steps: the community is not the disposable one'
+      );
     const lucia = s.actors.lucia!;
     const luciaAcct = s.accounts.lucia!;
-    await signIn(ctx, lucia, luciaAcct.username, luciaAcct.password!, { communitySlug: lab.slug });
+    await signIn(ctx, lucia, luciaAcct.username, luciaAcct.password!, {
+      communitySlug: lab.slug,
+    });
     await w.step({
       who: lucia,
       say: 'confirms she holds recovery codes (the claim gave them to her)',
@@ -41,8 +63,13 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       path: '/v2/auth/me',
       expect: 200,
       covers: ['V08'],
-      check: (r) => (dig(r, 'user', 'recoveryCodesConfirmed') === true ? undefined : 'expected recovery codes to be confirmed after a claim'),
-      show: (r) => [field('recovery codes saved', dig(r, 'user', 'recoveryCodesConfirmed'))],
+      check: (r) =>
+        dig(r, 'user', 'recoveryCodesConfirmed') === true
+          ? undefined
+          : 'expected recovery codes to be confirmed after a claim',
+      show: (r) => [
+        field('recovery codes saved', dig(r, 'user', 'recoveryCodesConfirmed')),
+      ],
     });
     // Samir
     const samir = {
@@ -60,7 +87,12 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       say: 'Lucia creates Samir as a member of the lab community',
       method: 'POST',
       path: '/v2/users',
-      json: { username: samir.username, email: samir.email, displayName: samir.displayName, role: 'member' },
+      json: {
+        username: samir.username,
+        email: samir.email,
+        displayName: samir.displayName,
+        role: 'member',
+      },
       expect: 201,
       covers: ['D02'],
     });
@@ -81,7 +113,8 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
     const samirActor = (s.actors.samir = w.actor('Samir', 'steward'));
     s.accounts.labsamir = samir;
     await activate(ctx, samirActor, samir, ['A06']);
-    const luciaKey = () => deriveKey(ctx, lucia, luciaAcct.username, luciaAcct.password!, lab.slug);
+    const luciaKey = () =>
+      deriveKey(ctx, lucia, luciaAcct.username, luciaAcct.password!, lab.slug);
     await w.step({
       who: lucia,
       say: 'designates Samir as the steward of the community (password step-up)',
@@ -101,7 +134,8 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       covers: ['V02'],
       show: 'the steward UI only offers "request withdrawal" and "request erasure"',
     });
-    const samirKey = () => deriveKey(ctx, samirActor, samir.username, samir.password!, lab.slug);
+    const samirKey = () =>
+      deriveKey(ctx, samirActor, samir.username, samir.password!, lab.slug);
     const wd = await w.step({
       who: samirActor,
       say: 'Samir asks for withdrawal: for a steward this starts a notice period, nothing happens yet',
@@ -110,8 +144,15 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       json: { currentDerivedKey: await samirKey() },
       expect: [200, 201, 202],
       covers: ['V04'],
-      check: (r) => (dig(r, 'data', 'status') === 'active' ? undefined : 'a steward request must not disable the community yet'),
-      show: (r) => [field('community status', dig(r, 'data', 'status')), field('request state', dig(r, 'data', 'request', 'state')), field('notice ends', dig(r, 'data', 'request', 'noticeEndsAt'))],
+      check: (r) =>
+        dig(r, 'data', 'status') === 'active'
+          ? undefined
+          : 'a steward request must not disable the community yet',
+      show: (r) => [
+        field('community status', dig(r, 'data', 'status')),
+        field('request state', dig(r, 'data', 'request', 'state')),
+        field('notice ends', dig(r, 'data', 'request', 'noticeEndsAt')),
+      ],
     });
     void wd;
     const pending = await w.step({
@@ -121,15 +162,32 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       path: '/v2/community/sovereignty',
       expect: 200,
       covers: ['V02', 'V06'],
-      check: (r) => (((dig(r, 'data', 'pendingRequests') as unknown[]) ?? []).length === 1 ? undefined : 'expected one pending request'),
-      show: (r) => [field('steward', dig(r, 'data', 'steward', 'userId')), field('pending requests', ((dig(r, 'data', 'pendingRequests') as unknown[]) ?? []).length), field('notice period (days)', Number(dig(r, 'data', 'noticePeriodSeconds')) / 86400), 'a countdown and a "Cancel request" button'],
+      check: (r) =>
+        ((dig(r, 'data', 'pendingRequests') as unknown[]) ?? []).length === 1
+          ? undefined
+          : 'expected one pending request',
+      show: (r) => [
+        field('steward', dig(r, 'data', 'steward', 'userId')),
+        field(
+          'pending requests',
+          ((dig(r, 'data', 'pendingRequests') as unknown[]) ?? []).length
+        ),
+        field(
+          'notice period (days)',
+          Number(dig(r, 'data', 'noticePeriodSeconds')) / 86400
+        ),
+        'a countdown and a "Cancel request" button',
+      ],
     });
     await w.step({
       who: lucia,
       say: 'cancels the steward request during the notice period',
       method: 'POST',
       path: '/v2/community/sovereignty/cancel',
-      json: { requestId: str(pending, 'data', 'pendingRequests', 0, 'id'), currentDerivedKey: await luciaKey() },
+      json: {
+        requestId: str(pending, 'data', 'pendingRequests', 0, 'id'),
+        currentDerivedKey: await luciaKey(),
+      },
       expect: [200, 204],
       covers: ['V06'],
     });
@@ -141,8 +199,14 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       json: { confirmFinality: true, currentDerivedKey: await samirKey() },
       expect: [200, 201, 202],
       covers: ['V05'],
-      check: (r) => (dig(r, 'data', 'status') === 'active' ? undefined : 'a steward request must not disable the community yet'),
-      show: (r) => [field('community status', dig(r, 'data', 'status')), field('notice', dig(r, 'data', 'finalityNotice'))],
+      check: (r) =>
+        dig(r, 'data', 'status') === 'active'
+          ? undefined
+          : 'a steward request must not disable the community yet',
+      show: (r) => [
+        field('community status', dig(r, 'data', 'status')),
+        field('notice', dig(r, 'data', 'finalityNotice')),
+      ],
     });
     const pending2 = await w.step({
       who: lucia,
@@ -157,7 +221,10 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       say: 'cancels it',
       method: 'POST',
       path: '/v2/community/sovereignty/cancel',
-      json: { requestId: str(pending2, 'data', 'pendingRequests', 0, 'id'), currentDerivedKey: await luciaKey() },
+      json: {
+        requestId: str(pending2, 'data', 'pendingRequests', 0, 'id'),
+        currentDerivedKey: await luciaKey(),
+      },
       expect: [200, 204],
       covers: ['V06'],
     });
@@ -182,8 +249,14 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       json: { currentDerivedKey: await luciaKey() },
       expect: [200, 201],
       covers: ['V04'],
-      check: (r) => (dig(r, 'data', 'status') === 'disabled' ? undefined : 'expected the community to be disabled'),
-      show: (r) => [field('community status', dig(r, 'data', 'status')), 'a destructive-feel confirmation was shown first; there is no undo in the UI'],
+      check: (r) =>
+        dig(r, 'data', 'status') === 'disabled'
+          ? undefined
+          : 'expected the community to be disabled',
+      show: (r) => [
+        field('community status', dig(r, 'data', 'status')),
+        'a destructive-feel confirmation was shown first; there is no undo in the UI',
+      ],
     });
     await w.step({
       who: samirActor,
@@ -204,7 +277,9 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       covers: ['V04'],
     });
     const relucia = (s.actors.lucia = w.actor('Lucia', 'community admin'));
-    await signIn(ctx, relucia, luciaAcct.username, luciaAcct.password!, { communitySlug: lab.slug });
+    await signIn(ctx, relucia, luciaAcct.username, luciaAcct.password!, {
+      communitySlug: lab.slug,
+    });
     await w.step({
       who: relucia,
       say: 'Lucia signs in again: content is closed, but the sovereignty page stays reachable',
@@ -232,8 +307,14 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       expect: 201,
       covers: ['V01'],
       show: (r) => {
-        for (const kind of ['manifest', 'mediaZip']) w.secret(String(dig(r, 'data', 'artifacts', kind, 'token') ?? ''));
-        return [field('manifest bytes', dig(r, 'data', 'artifacts', 'manifest', 'byteSize'))];
+        for (const kind of ['manifest', 'mediaZip'])
+          w.secret(String(dig(r, 'data', 'artifacts', kind, 'token') ?? ''));
+        return [
+          field(
+            'manifest bytes',
+            dig(r, 'data', 'artifacts', 'manifest', 'byteSize')
+          ),
+        ];
       },
     });
     await w.step({
@@ -241,10 +322,27 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       say: 'requests erasure: she ticks the finality box and reads the archive-custody notice',
       method: 'POST',
       path: '/v2/community/erasure',
-      json: { confirmFinality: true, currentDerivedKey: await deriveKey(ctx, relucia, luciaAcct.username, luciaAcct.password!, lab.slug) },
+      json: {
+        confirmFinality: true,
+        currentDerivedKey: await deriveKey(
+          ctx,
+          relucia,
+          luciaAcct.username,
+          luciaAcct.password!,
+          lab.slug
+        ),
+      },
       expect: [200, 201, 202],
       covers: ['V05'],
-      show: (r) => [field('notice', dig(r, 'data', 'finalityNotice')), field('request', dig(r, 'data', 'request', 'kind') + ' ' + dig(r, 'data', 'request', 'state'))],
+      show: (r) => [
+        field('notice', dig(r, 'data', 'finalityNotice')),
+        field(
+          'request',
+          dig(r, 'data', 'request', 'kind') +
+            ' ' +
+            dig(r, 'data', 'request', 'state')
+        ),
+      ],
     });
     const sam = s.actors.sam!;
     await w.step({
@@ -254,7 +352,10 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       path: '/v2/admin/erasures',
       expect: 200,
       covers: ['V14'],
-      show: (r) => [field('records', ((dig(r, 'data') as unknown[]) ?? []).length), 'content-free: ids, dates and outcome only'],
+      show: (r) => [
+        field('records', ((dig(r, 'data') as unknown[]) ?? []).length),
+        'content-free: ids, dates and outcome only',
+      ],
     });
     await w.step({
       who: sam,

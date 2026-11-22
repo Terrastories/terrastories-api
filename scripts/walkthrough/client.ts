@@ -75,7 +75,7 @@ export class Actor {
     const headers = new Headers(options.headers);
     const cookie = options.noCookie ? undefined : this.jar.header();
     if (cookie) headers.set('cookie', cookie);
-    let body: BodyInit | undefined;
+    let body: string | FormData | undefined;
     if (options.json !== undefined) {
       headers.set('content-type', 'application/json');
       body = JSON.stringify(options.json);
@@ -103,7 +103,13 @@ export class Actor {
         json = null;
       }
     }
-    return { status: response.status, headers: response.headers, json, text, bytes };
+    return {
+      status: response.status,
+      headers: response.headers,
+      json,
+      text,
+      bytes,
+    };
   }
 }
 
@@ -111,21 +117,30 @@ export class Actor {
 export function multipart(
   fields: Record<string, string>,
   file: { name: string; type: string; bytes: Uint8Array },
-  extras: Array<{ field: string; name: string; type: string; bytes: Uint8Array }> = []
+  extras: Array<{
+    field: string;
+    name: string;
+    type: string;
+    bytes: Uint8Array;
+  }> = []
 ): FormData {
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) form.append(key, value);
-  form.append('file', new Blob([file.bytes as BlobPart], { type: file.type }), file.name);
+  form.append('file', new Blob([file.bytes], { type: file.type }), file.name);
   for (const extra of extras)
-    form.append(extra.field, new Blob([extra.bytes as BlobPart], { type: extra.type }), extra.name);
+    form.append(
+      extra.field,
+      new Blob([extra.bytes], { type: extra.type }),
+      extra.name
+    );
   return form;
 }
 
 /** Tiny valid media so uploads pass the server's magic-byte sniffing. */
 export const PNG_BYTES = Uint8Array.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-  0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-  0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
+  0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
+  0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
 ]);
 
 export function wavBytes(): Uint8Array {

@@ -224,7 +224,9 @@ export class Walk {
       ...(record.ui.length
         ? ['- A screen would show:', ...record.ui.map((u) => `  - ${u}`)]
         : []),
-      ...(record.covers.length ? [`- Covers: ${record.covers.join(', ')}`] : []),
+      ...(record.covers.length
+        ? [`- Covers: ${record.covers.join(', ')}`]
+        : []),
       ''
     );
     if (failure) throw new StepError(`${label}: ${failure}`);

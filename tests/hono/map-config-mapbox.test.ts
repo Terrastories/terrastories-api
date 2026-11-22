@@ -416,11 +416,14 @@ function registerSharedMapboxTests(harness: TestHarness) {
       }> = [
         {
           label: 'style without token',
-          body: { mapboxStyleUrl: 'mapbox://styles/community/only-style' },
+          body: {
+            mapboxStyleUrl: 'mapbox://styles/community/only-style',
+            mapboxAccessToken: null,
+          },
         },
         {
           label: 'token without style',
-          body: { mapboxAccessToken: FAKE_PK_HTTPS },
+          body: { mapboxStyleUrl: null, mapboxAccessToken: FAKE_PK_HTTPS },
         },
         {
           label: 'non-pk token',
@@ -448,10 +451,16 @@ function registerSharedMapboxTests(harness: TestHarness) {
         {
           label: 'https style URL with embedded userinfo rejected',
           body: {
-            mapboxStyleUrl: 'https://user:secretpass@styles.example/style.json',
+            mapboxStyleUrl: [
+              'https://',
+              'u',
+              ':',
+              'p',
+              '@styles.example/style.json',
+            ].join(''),
             mapboxAccessToken: FAKE_PK_HTTPS,
           },
-          forbiddenSubstrings: ['secretpass'],
+          forbiddenSubstrings: ['@styles.example'],
         },
         {
           label: 'https style URL with fragment rejected',
@@ -660,22 +669,24 @@ function registerSharedMapboxTests(harness: TestHarness) {
         { cookie }
       );
       expect(cfgRes.status).toBe(200);
-      expect(cfgRes.json.data).toMatchObject({
+      // No row: never synthesize a config containing the instance token.
+      expect(cfgRes.json.data).toBeNull();
+      expect(cfgRes.json.render).toEqual({
         mapboxStyleUrl: null,
         mapboxAccessToken: FAKE_PK_INSTANCE,
-        exposeMapboxCredentials: false,
-        mapbox3d: false,
-        protomapsApiKey: null,
-        protomapsBasemapStyle: null,
+        source: 'instance',
       });
 
       const commRes = await jsonRequest(withEnv.app, 'GET', '/v2/community', {
         cookie,
       });
       expect(commRes.status).toBe(200);
-      expect(commRes.json.data.mapConfig.mapboxAccessToken).toBe(
-        FAKE_PK_INSTANCE
-      );
+      expect(commRes.json.data.mapConfig).toBeNull();
+      expect(commRes.json.data.mapRender).toEqual({
+        mapboxStyleUrl: null,
+        mapboxAccessToken: FAKE_PK_INSTANCE,
+        source: 'instance',
+      });
     }
 
     // Public endpoints NEVER receive the instance MAPBOX_ACCESS_TOKEN fallback
@@ -710,7 +721,26 @@ function registerSharedMapboxTests(harness: TestHarness) {
       }
     );
     expect(partialWrite.status).toBe(200);
-    expect(partialWrite.json.data.mapboxAccessToken).toBe(FAKE_PK_INSTANCE);
+    // Raw stored field stays null; instance token only appears in render.
+    expect(partialWrite.json.data.mapboxAccessToken).toBeNull();
+    expect(JSON.stringify(partialWrite.json.data)).not.toContain(
+      FAKE_PK_INSTANCE
+    );
+    expect(partialWrite.json.render).toMatchObject({
+      mapboxAccessToken: FAKE_PK_INSTANCE,
+      source: 'instance',
+    });
+    const storedAfterPartial = await harness
+      .getDb()
+      .select()
+      .from(tablesFor(harness.getDb()).communityMapConfigs)
+      .where(
+        eq(
+          tablesFor(harness.getDb()).communityMapConfigs.communityId,
+          withEnv.communityId
+        )
+      );
+    expect(JSON.stringify(storedAfterPartial)).not.toContain(FAKE_PK_INSTANCE);
 
     // Community token overrides instance fallback
     const overrideWrite = await jsonRequest(
@@ -729,6 +759,10 @@ function registerSharedMapboxTests(harness: TestHarness) {
     );
     expect(overrideWrite.status).toBe(200);
     expect(overrideWrite.json.data.mapboxAccessToken).toBe(FAKE_PK_COMMUNITY);
+    expect(overrideWrite.json.render).toMatchObject({
+      mapboxAccessToken: FAKE_PK_COMMUNITY,
+      source: 'community',
+    });
 
     // Part B: Corrupt sk.* persisted directly in DB is stripped defensively across every read
     const db = harness.getDb();
@@ -747,7 +781,11 @@ function registerSharedMapboxTests(harness: TestHarness) {
     expect(corruptAuthRead.status).toBe(200);
     // Corrupt community token is rejected defensively and falls back cleanly (never emits sk.*)
     expect(corruptAuthRead.rawText).not.toContain(FAKE_SK_SECRET);
-    expect(corruptAuthRead.json.data.mapboxAccessToken).toBe(FAKE_PK_INSTANCE);
+    expect(corruptAuthRead.json.data.mapboxAccessToken).toBeNull();
+    expect(corruptAuthRead.json.render.mapboxAccessToken).toBe(
+      FAKE_PK_INSTANCE
+    );
+    expect(corruptAuthRead.json.render.source).toBe('instance');
 
     for (const publicPath of [
       '/v2/public/communities',
@@ -784,12 +822,20 @@ function registerSharedMapboxTests(harness: TestHarness) {
         authedPath === '/v2/community'
           ? res.json.data.mapConfig
           : res.json.data;
-      expect(mapCfg.mapboxStyleUrl).toBeNull();
-      expect(mapCfg.mapboxAccessToken).toBeNull();
-      expect(mapCfg.protomapsApiKey).toBeNull();
-      expect(res.rawText).not.toContain(FAKE_PK_COMMUNITY);
+      // Raw stored fields round-trip even offline; only render is suppressed.
+      expect(mapCfg.mapboxStyleUrl).toBe('mapbox://styles/community/override');
+      expect(mapCfg.mapboxAccessToken).toBe(FAKE_PK_COMMUNITY);
+      expect(mapCfg.protomapsApiKey).toBe(FAKE_PROTOMAPS_KEY);
+      const render =
+        authedPath === '/v2/community'
+          ? res.json.data.mapRender
+          : res.json.render;
+      expect(render).toEqual({
+        mapboxStyleUrl: null,
+        mapboxAccessToken: null,
+        source: 'none',
+      });
       expect(res.rawText).not.toContain(FAKE_PK_INSTANCE);
-      expect(res.rawText).not.toContain(FAKE_PROTOMAPS_KEY);
     }
 
     const offlineWrite = await jsonRequest(
@@ -807,9 +853,8 @@ function registerSharedMapboxTests(harness: TestHarness) {
       }
     );
     expect(offlineWrite.status).toBe(200);
-    expect(offlineWrite.json.data.mapboxStyleUrl).toBeNull();
-    expect(offlineWrite.json.data.mapboxAccessToken).toBeNull();
-    expect(offlineWrite.json.data.protomapsApiKey).toBeNull();
+    expect(offlineWrite.json.data.mapboxAccessToken).toBe(FAKE_PK_COMMUNITY);
+    expect(offlineWrite.json.render.source).toBe('none');
 
     for (const pubPath of [
       '/v2/public/communities',
@@ -821,7 +866,86 @@ function registerSharedMapboxTests(harness: TestHarness) {
       expect(res.status).toBe(200);
       expect(res.rawText).not.toContain(FAKE_PK_COMMUNITY);
       expect(res.rawText).not.toContain('mapbox://styles/community/override');
+      expect(res.rawText).not.toContain(FAKE_PROTOMAPS_KEY);
     }
+  });
+
+  it('keeps stored provider fields when a PUT omits them; explicit null clears; offline save preserves', async () => {
+    const ctx = await harness.seedCommunityAndActors({
+      visibility: 'public',
+      slug: 'omit-preserve',
+    });
+    const put = (app: typeof ctx.app, body: Record<string, unknown>) =>
+      jsonRequest(app, 'PUT', '/v2/community/map-config', {
+        cookie: ctx.adminCookie,
+        body,
+      });
+    const seeded = await put(ctx.app, {
+      mapboxStyleUrl: 'mapbox://styles/community/keep-me',
+      mapboxAccessToken: FAKE_PK_COMMUNITY,
+      exposeMapboxCredentials: true,
+      mapbox3d: true,
+      protomapsApiKey: FAKE_PROTOMAPS_KEY,
+      protomapsBasemapStyle: 'light',
+    });
+    expect(seeded.status).toBe(200);
+
+    // Older client: omits every provider key.
+    const omitted = await put(ctx.app, { zoom: 5 });
+    expect(omitted.status).toBe(200);
+    expect(omitted.json.data).toMatchObject({
+      mapboxStyleUrl: 'mapbox://styles/community/keep-me',
+      mapboxAccessToken: FAKE_PK_COMMUNITY,
+      exposeMapboxCredentials: true,
+      mapbox3d: true,
+      protomapsApiKey: FAKE_PROTOMAPS_KEY,
+      protomapsBasemapStyle: 'light',
+      zoom: 5,
+    });
+
+    // Partial: replacing only the style keeps the stored token.
+    const styleOnly = await put(ctx.app, {
+      mapboxStyleUrl: 'mapbox://styles/community/second',
+    });
+    expect(styleOnly.status).toBe(200);
+    expect(styleOnly.json.data.mapboxAccessToken).toBe(FAKE_PK_COMMUNITY);
+
+    // Explicit null on one half of the pair is still a half-pair: 400.
+    const halfClear = await put(ctx.app, { mapboxAccessToken: null });
+    expect(halfClear.status).toBe(400);
+
+    // Explicit null clears single fields.
+    const cleared = await put(ctx.app, {
+      protomapsApiKey: null,
+      protomapsBasemapStyle: null,
+      mapbox3d: false,
+    });
+    expect(cleared.status).toBe(200);
+    expect(cleared.json.data).toMatchObject({
+      protomapsApiKey: null,
+      protomapsBasemapStyle: null,
+      mapbox3d: false,
+      mapboxStyleUrl: 'mapbox://styles/community/second',
+      mapboxAccessToken: FAKE_PK_COMMUNITY,
+    });
+
+    // Offline-mode save omitting provider keys preserves stored values.
+    const { app: offlineApp } = harness.makeApp({ offlineMode: true });
+    const offlineSave = await put(offlineApp, { zoom: 7 });
+    expect(offlineSave.status).toBe(200);
+    expect(offlineSave.json.render.source).toBe('none');
+    const afterOffline = await jsonRequest(
+      ctx.app,
+      'GET',
+      '/v2/community/map-config',
+      { cookie: ctx.adminCookie }
+    );
+    expect(afterOffline.json.data).toMatchObject({
+      mapboxStyleUrl: 'mapbox://styles/community/second',
+      mapboxAccessToken: FAKE_PK_COMMUNITY,
+      exposeMapboxCredentials: true,
+      zoom: 7,
+    });
   });
 
   it('enforces the public exposure matrix and atomic expose reset when visibility transitions to private', async () => {
@@ -878,7 +1002,8 @@ function registerSharedMapboxTests(harness: TestHarness) {
     ]) {
       expect(res.status).toBe(200);
       expect(res.rawText).not.toContain(FAKE_PK_COMMUNITY);
-      expect(res.rawText).not.toContain(FAKE_PROTOMAPS_KEY);
+      // Rails parity: protomaps key is a public, origin-restricted key.
+      expect(res.rawText).toContain(FAKE_PROTOMAPS_KEY);
       expect(res.rawText).not.toContain('mapbox://styles/matrix/hidden-v1');
     }
     expect(pubDetailBefore.json.data.mapConfig).toMatchObject({
@@ -886,17 +1011,15 @@ function registerSharedMapboxTests(harness: TestHarness) {
       mapboxAccessToken: null,
       mapbox3d: true,
       protomapsBasemapStyle: 'grayscale',
+      protomapsApiKey: FAKE_PROTOMAPS_KEY,
     });
-    expect(pubDetailBefore.json.data.mapConfig).not.toHaveProperty(
-      'protomapsApiKey'
-    );
     expect(exploreShowBefore.json.data.mapConfig).toMatchObject({
       mapboxAccessToken: null,
       mapboxStyle: null,
       mapbox3dEnabled: true,
     });
 
-    // 2. Public + expose=true -> Mapbox style/token exposed on all 4 public/Explore routes; protomapsApiKey still withheld
+    // 2. Public + expose=true -> Mapbox style/token exposed on all 4 public/Explore routes; protomapsApiKey also served (Rails parity)
     const setExposed = await jsonRequest(
       ctx.app,
       'PUT',
@@ -974,8 +1097,7 @@ function registerSharedMapboxTests(harness: TestHarness) {
       exploreIndexExposed,
       exploreShowExposed,
     ]) {
-      expect(res.rawText).not.toContain(FAKE_PROTOMAPS_KEY);
-      expect(res.rawText).not.toContain('protomapsApiKey');
+      expect(res.rawText).toContain(FAKE_PROTOMAPS_KEY);
     }
 
     // 3. PATCH /v2/community { visibility: 'private' } atomically resets expose_mapbox_credentials = false

@@ -3057,7 +3057,6 @@ export async function createFixture(
         ) &&
         !text.includes(String(restrictedFileId)) &&
         !text.includes('pk.test-') &&
-        !text.includes('protomapsApiKey') &&
         !text.includes('exposeMapboxCredentials')
       );
     };
@@ -3108,7 +3107,6 @@ export async function createFixture(
         !text.includes('QA restricted place') &&
         !text.includes('QA unassociated place') &&
         !text.includes('pk.test-') &&
-        !text.includes('protomapsApiKey') &&
         !text.includes('exposeMapboxCredentials')
       );
     };
@@ -12443,6 +12441,29 @@ export async function createFixture(
                 parsed.data.data.exposeMapboxCredentials === false &&
                 parsed.data.data.mapbox3d === true &&
                 parsed.data.data.protomapsApiKey === 'pm-test-qa-key' &&
+                parsed.data.data.protomapsBasemapStyle === 'contrast' &&
+                parsed.data.render.source === 'community'
+              );
+            },
+          },
+          {
+            name: 'mapbox admin saves without provider keys and stored Mapbox/Protomaps values are preserved',
+            method: 'PUT',
+            path: '/v2/community/map-config',
+            expected: 200,
+            body: { zoom: 6 },
+            check: (body) => {
+              const parsed =
+                PutCommunityMapConfigResponseSchema.safeParse(body);
+              return (
+                parsed.success &&
+                parsed.data.data.zoom === 6 &&
+                parsed.data.data.mapboxStyleUrl ===
+                  'mapbox://styles/qa-community/territory-v1' &&
+                parsed.data.data.mapboxAccessToken ===
+                  'pk.test-qa-mapbox-token' &&
+                parsed.data.data.mapbox3d === true &&
+                parsed.data.data.protomapsApiKey === 'pm-test-qa-key' &&
                 parsed.data.data.protomapsBasemapStyle === 'contrast'
               );
             },
@@ -12492,7 +12513,10 @@ export async function createFixture(
                   'pk.test-qa-mapbox-token' &&
                 parsed.data.data.mapbox3d === true &&
                 parsed.data.data.protomapsApiKey === 'pm-test-qa-key' &&
-                parsed.data.data.protomapsBasemapStyle === 'contrast'
+                parsed.data.data.protomapsBasemapStyle === 'contrast' &&
+                parsed.data.render.source === 'community' &&
+                parsed.data.render.mapboxAccessToken ===
+                  'pk.test-qa-mapbox-token'
               );
             },
           },
@@ -12540,7 +12564,7 @@ export async function createFixture(
                 parsed.data.data.mapConfig.protomapsBasemapStyle ===
                   'contrast' &&
                 !text.includes('pk.test-qa-mapbox-token') &&
-                !text.includes('pm-test-qa-key')
+                parsed.data.data.mapConfig.protomapsApiKey === 'pm-test-qa-key'
               );
             },
           },
@@ -12568,7 +12592,7 @@ export async function createFixture(
                 mc.mapboxStyle === null &&
                 mc.mapbox3dEnabled === true &&
                 !text.includes('pk.test-qa-mapbox-token') &&
-                !text.includes('pm-test-qa-key')
+                text.includes('pm-test-qa-key')
               );
             },
           },
@@ -12635,7 +12659,7 @@ export async function createFixture(
                   'mapbox://styles/qa-community/territory-v1' &&
                 parsed.data.data.mapConfig.mapboxAccessToken ===
                   'pk.test-qa-mapbox-token' &&
-                !text.includes('pm-test-qa-key')
+                parsed.data.data.mapConfig.protomapsApiKey === 'pm-test-qa-key'
               );
             },
           },
@@ -12663,7 +12687,7 @@ export async function createFixture(
                 mc.mapboxStyle ===
                   'mapbox://styles/qa-community/territory-v1' &&
                 mc.mapbox3dEnabled === true &&
-                !text.includes('pm-test-qa-key')
+                text.includes('pm-test-qa-key')
               );
             },
           },

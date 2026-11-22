@@ -678,6 +678,7 @@ describe('V2 public community endpoints (#145)', () => {
         mapboxStyleUrl: null,
         mapboxAccessToken: null,
         mapbox3d: false,
+        protomapsApiKey: null,
         protomapsBasemapStyle: null,
         centerLatitude: 10.5,
         centerLongitude: -20.25,

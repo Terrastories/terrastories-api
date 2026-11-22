@@ -61,6 +61,7 @@ import {
   NOT_FOUND_BODY,
   authenticatedMediaUrl,
   projectAuthenticatedMapConfig,
+  resolveMapRender,
   projectBranding,
   projectPointFeature,
   sanitizePublicDescription,
@@ -409,16 +410,12 @@ export class CommunityReadsService {
           detail.community.slug,
           origin,
           detail.mapConfig,
-          mediaUrlFor,
-          {
-            instanceMapboxAccessToken: this.options.mapboxAccessToken,
-            offlineMode: this.options.offlineMode,
-            fallbackTimestamps: {
-              createdAt: detail.community.createdAt,
-              updatedAt: detail.community.updatedAt,
-            },
-          }
+          mediaUrlFor
         ),
+        mapRender: resolveMapRender(detail.mapConfig, {
+          instanceMapboxAccessToken: this.options.mapboxAccessToken,
+          offlineMode: this.options.offlineMode,
+        }),
         storiesCount: detail.storiesCount,
         points: detail.points.map(projectPointFeature),
         categories: [...PUBLIC_COMMUNITY_FILTER_CATEGORIES],
@@ -446,16 +443,12 @@ export class CommunityReadsService {
         auth.community.slug,
         origin,
         row,
-        mediaUrlFor,
-        {
-          instanceMapboxAccessToken: this.options.mapboxAccessToken,
-          offlineMode: this.options.offlineMode,
-          fallbackTimestamps: {
-            createdAt: auth.community.createdAt,
-            updatedAt: auth.community.updatedAt,
-          },
-        }
+        mediaUrlFor
       ),
+      render: resolveMapRender(row, {
+        instanceMapboxAccessToken: this.options.mapboxAccessToken,
+        offlineMode: this.options.offlineMode,
+      }),
     });
   }
 

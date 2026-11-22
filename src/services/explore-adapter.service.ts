@@ -11,8 +11,9 @@
  * - place/speaker visibility per the §6.4a decision table;
  * - provider credentials (`mapboxAccessToken`, `mapbox://` `mapboxStyleUrl`)
  *   are exposed publicly only when `exposeMapboxCredentials = true` on a public
- *   active community in online mode (SPEC §6.6); secret `sk.*` tokens and
- *   `protomapsApiKey` are never exposed.
+ *   active community in online mode (SPEC §6.6); secret `sk.*` tokens are
+ *   never exposed. The protomaps key is an origin-restricted public key and is
+ *   exposed with the basemap style (Rails parity, online only).
  *
  * Fields the V2 schema deliberately does not carry (topic, typeOfPlace,
  * speakerCommunity, birthdate, sponsor logos, story media URLs, place
@@ -89,6 +90,9 @@ function baseMapConfig(theme: ExploreThemeRow | null, offlineMode = false) {
     mapboxStyle:
       exposedMapboxStyle ?? sanitizePublicStyleUrl(theme?.styleUrl ?? null),
     mapbox3dEnabled: Boolean(theme?.mapbox3d),
+    // Rails parity: origin-restricted public protomaps key + basemap style.
+    protomapsApiKey: offlineMode ? null : (theme?.protomapsApiKey ?? null),
+    protomapsBasemapStyle: theme?.protomapsBasemapStyle ?? null,
     mapProjection: theme?.mapProjection ?? null,
     center: [theme?.centerLong ?? null, theme?.centerLat ?? null],
     zoom: theme?.zoom ?? null,

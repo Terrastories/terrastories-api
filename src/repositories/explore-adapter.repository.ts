@@ -77,6 +77,8 @@ export interface ExploreThemeRow {
   mapboxAccessToken: string | null;
   exposeMapboxCredentials: boolean;
   mapbox3d: boolean;
+  protomapsApiKey: string | null;
+  protomapsBasemapStyle: string | null;
   mapProjection: string | null;
   centerLat: number | null;
   centerLong: number | null;
@@ -251,6 +253,8 @@ export class ExploreAdapterRepository {
         mapboxAccessToken: communityMapConfigs.mapboxAccessToken,
         exposeMapboxCredentials: communityMapConfigs.exposeMapboxCredentials,
         mapbox3d: communityMapConfigs.mapbox3d,
+        protomapsApiKey: communityMapConfigs.protomapsApiKey,
+        protomapsBasemapStyle: communityMapConfigs.protomapsBasemapStyle,
         mapProjection: communityMapConfigs.projection,
         centerLat: communityMapConfigs.centerLatitude,
         centerLong: communityMapConfigs.centerLongitude,
@@ -273,6 +277,8 @@ export class ExploreAdapterRepository {
         mapboxAccessToken: row.mapboxAccessToken,
         exposeMapboxCredentials: Boolean(row.exposeMapboxCredentials),
         mapbox3d: Boolean(row.mapbox3d),
+        protomapsApiKey: row.protomapsApiKey,
+        protomapsBasemapStyle: row.protomapsBasemapStyle,
         mapProjection: row.mapProjection,
         centerLat: row.centerLat,
         centerLong: row.centerLong,
@@ -308,6 +314,8 @@ export class ExploreAdapterRepository {
       mapboxAccessToken: null,
       exposeMapboxCredentials: false,
       mapbox3d: false,
+      protomapsApiKey: null,
+      protomapsBasemapStyle: null,
       mapProjection: null,
       centerLat: legacy.centerLat,
       centerLong: legacy.centerLong,

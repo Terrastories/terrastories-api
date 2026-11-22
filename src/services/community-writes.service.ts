@@ -12,6 +12,7 @@ import {
   INTERNAL_ERROR_BODY,
   NOT_FOUND_BODY,
   projectAuthenticatedMapConfig,
+  resolveMapRender,
   sanitizePublicStyleUrl,
 } from './public-communities.service.js';
 import { isSecretMapboxToken } from '../shared/utils/map-config.js';
@@ -254,6 +255,43 @@ export class CommunityWritesService {
     }
 
     try {
+      // Omitted provider keys keep stored values; explicit null clears.
+      const needsStored =
+        parsed.data.mapboxStyleUrl === undefined ||
+        parsed.data.mapboxAccessToken === undefined ||
+        parsed.data.exposeMapboxCredentials === undefined ||
+        parsed.data.mapbox3d === undefined ||
+        parsed.data.protomapsApiKey === undefined ||
+        parsed.data.protomapsBasemapStyle === undefined;
+      const stored = needsStored
+        ? await this.repository.findCommunityMapConfigProviderFields(
+            caller.communityId
+          )
+        : null;
+      const mapboxStyleUrl =
+        parsed.data.mapboxStyleUrl === undefined
+          ? (stored?.mapboxStyleUrl ?? null)
+          : parsed.data.mapboxStyleUrl;
+      const mapboxAccessToken =
+        parsed.data.mapboxAccessToken === undefined
+          ? (stored?.mapboxAccessToken ?? null)
+          : parsed.data.mapboxAccessToken;
+      if ((mapboxStyleUrl !== null) !== (mapboxAccessToken !== null)) {
+        return {
+          status: 400,
+          body: makeValidationErrorBody([
+            {
+              path:
+                mapboxStyleUrl !== null
+                  ? 'mapboxAccessToken'
+                  : 'mapboxStyleUrl',
+              message:
+                'Mapbox style URL and Mapbox access token must both be provided or both be blank',
+            },
+          ]),
+        };
+      }
+
       const cleanStyleUrl =
         parsed.data.styleUrl === null
           ? null
@@ -303,12 +341,21 @@ export class CommunityWritesService {
         {
           styleUrl: cleanStyleUrl,
           basemapStyle: parsed.data.basemapStyle,
-          mapboxStyleUrl: parsed.data.mapboxStyleUrl,
-          mapboxAccessToken: parsed.data.mapboxAccessToken,
-          exposeMapboxCredentials: parsed.data.exposeMapboxCredentials,
-          mapbox3d: parsed.data.mapbox3d,
-          protomapsApiKey: parsed.data.protomapsApiKey,
-          protomapsBasemapStyle: parsed.data.protomapsBasemapStyle,
+          mapboxStyleUrl,
+          mapboxAccessToken,
+          exposeMapboxCredentials:
+            parsed.data.exposeMapboxCredentials ??
+            stored?.exposeMapboxCredentials ??
+            false,
+          mapbox3d: parsed.data.mapbox3d ?? stored?.mapbox3d ?? false,
+          protomapsApiKey:
+            parsed.data.protomapsApiKey === undefined
+              ? (stored?.protomapsApiKey ?? null)
+              : parsed.data.protomapsApiKey,
+          protomapsBasemapStyle:
+            parsed.data.protomapsBasemapStyle === undefined
+              ? (stored?.protomapsBasemapStyle ?? null)
+              : parsed.data.protomapsBasemapStyle,
           centerLatitude: parsed.data.centerLatitude,
           centerLongitude: parsed.data.centerLongitude,
           southWestLatitude: parsed.data.southWestLatitude,
@@ -333,14 +380,14 @@ export class CommunityWritesService {
         'community',
         origin,
         saved,
-        (fileId) => authenticatedMediaUrl(origin, fileId),
-        {
-          instanceMapboxAccessToken: this.options.mapboxAccessToken,
-          offlineMode: this.options.offlineMode,
-        }
+        (fileId) => authenticatedMediaUrl(origin, fileId)
       );
       const checked = PutCommunityMapConfigResponseSchema.safeParse({
         data: projected,
+        render: resolveMapRender(saved, {
+          instanceMapboxAccessToken: this.options.mapboxAccessToken,
+          offlineMode: this.options.offlineMode,
+        }),
       });
       if (!checked.success) {
         return { status: 500, body: INTERNAL_ERROR_BODY };

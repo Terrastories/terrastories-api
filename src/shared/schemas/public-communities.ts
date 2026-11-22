@@ -56,6 +56,7 @@ export const PublicCommunityMapConfigSchema = z.object({
   mapboxStyleUrl: z.string().nullable(),
   mapboxAccessToken: z.string().nullable(),
   mapbox3d: z.boolean(),
+  protomapsApiKey: z.string().nullable(),
   protomapsBasemapStyle: z.string().nullable(),
   centerLatitude: z.number().nullable(),
   centerLongitude: z.number().nullable(),

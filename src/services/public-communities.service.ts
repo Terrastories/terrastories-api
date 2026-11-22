@@ -14,7 +14,10 @@ import {
   sanitizePublicMapboxToken,
 } from '../shared/utils/map-config.js';
 import { sanitizeDescriptionForMigration } from '../shared/utils/safe-description.js';
-import type { CommunityMapConfig } from '../shared/schemas/community-reads.js';
+import type {
+  CommunityMapConfig,
+  CommunityMapRender,
+} from '../shared/schemas/community-reads.js';
 import {
   PublicCommunitiesRepository,
   type PublicCommunityBrandingRow,
@@ -170,6 +173,10 @@ export function projectMapConfig(
     mapboxStyleUrl: exposedStyle,
     mapboxAccessToken: exposedStyle !== null ? exposedToken : null,
     mapbox3d: Boolean(row.mapbox3d),
+    // Rails parity: the protomaps key is an origin-restricted public key that
+    // Rails embeds in the public style URL (?key=). Offline never exposes it.
+    protomapsApiKey:
+      options.offlineMode === true ? null : (row.protomapsApiKey ?? null),
     protomapsBasemapStyle: row.protomapsBasemapStyle,
     centerLatitude: row.centerLatitude,
     centerLongitude: row.centerLongitude,
@@ -192,65 +199,64 @@ export function projectMapConfig(
 export interface AuthenticatedMapConfigProjectionOptions {
   instanceMapboxAccessToken?: string;
   offlineMode?: boolean;
-  fallbackTimestamps?: { createdAt: Date; updatedAt: Date };
 }
 
+/**
+ * Resolves what a map client should render with: the community's own
+ * style/token when set, else the instance MAPBOX_ACCESS_TOKEN fallback.
+ * Offline suppresses everything. The result is derived, never persisted.
+ */
+export function resolveMapRender(
+  row: PublicMapConfigRow | undefined | null,
+  options: AuthenticatedMapConfigProjectionOptions = {}
+): CommunityMapRender {
+  if (options.offlineMode === true) {
+    return { mapboxStyleUrl: null, mapboxAccessToken: null, source: 'none' };
+  }
+  const communityToken = sanitizePublicMapboxToken(row?.mapboxAccessToken);
+  const style = sanitizeMapboxStyleUrl(row?.mapboxStyleUrl);
+  if (communityToken !== null) {
+    return {
+      mapboxStyleUrl: style,
+      mapboxAccessToken: communityToken,
+      source: 'community',
+    };
+  }
+  const instanceToken = sanitizePublicMapboxToken(
+    options.instanceMapboxAccessToken
+  );
+  if (instanceToken !== null) {
+    return {
+      mapboxStyleUrl: style,
+      mapboxAccessToken: instanceToken,
+      source: 'instance',
+    };
+  }
+  return { mapboxStyleUrl: null, mapboxAccessToken: null, source: 'none' };
+}
+
+/**
+ * Authenticated read: the community's stored fields exactly as persisted (so
+ * an edit form can round-trip them). The instance token fallback is NEVER
+ * merged in here; see resolveMapRender for the render block.
+ */
 export function projectAuthenticatedMapConfig(
   slug: string,
   origin: string,
   row: PublicMapConfigRow | undefined | null,
   mediaUrlFor: (fileId: string) => string = (fileId) =>
-    publicMediaUrl(origin, slug, fileId),
-  options: AuthenticatedMapConfigProjectionOptions = {}
+    publicMediaUrl(origin, slug, fileId)
 ): CommunityMapConfig | null {
-  const offlineMode = options.offlineMode === true;
-  const instanceToken = offlineMode
-    ? null
-    : sanitizePublicMapboxToken(options.instanceMapboxAccessToken);
-  if (!row) {
-    if (!instanceToken || !options.fallbackTimestamps) {
-      return null;
-    }
-    return {
-      styleUrl: null,
-      basemapStyle: null,
-      mapboxStyleUrl: null,
-      mapboxAccessToken: instanceToken,
-      exposeMapboxCredentials: false,
-      mapbox3d: false,
-      protomapsApiKey: null,
-      protomapsBasemapStyle: null,
-      centerLatitude: null,
-      centerLongitude: null,
-      southWestLatitude: null,
-      southWestLongitude: null,
-      northEastLatitude: null,
-      northEastLongitude: null,
-      zoom: null,
-      pitch: null,
-      bearing: null,
-      threeDimensional: null,
-      projection: null,
-      staticMapFileId: null,
-      staticMapUrl: null,
-      createdAt: options.fallbackTimestamps.createdAt.toISOString(),
-      updatedAt: options.fallbackTimestamps.updatedAt.toISOString(),
-    };
-  }
+  if (!row) return null;
   const staticMapFileId = row.staticMapFileId;
-  const communityToken = offlineMode
-    ? null
-    : sanitizePublicMapboxToken(row.mapboxAccessToken);
   return {
     styleUrl: sanitizePublicStyleUrl(row.styleUrl),
     basemapStyle: row.basemapStyle,
-    mapboxStyleUrl: offlineMode
-      ? null
-      : sanitizeMapboxStyleUrl(row.mapboxStyleUrl),
-    mapboxAccessToken: offlineMode ? null : (communityToken ?? instanceToken),
+    mapboxStyleUrl: sanitizeMapboxStyleUrl(row.mapboxStyleUrl),
+    mapboxAccessToken: sanitizePublicMapboxToken(row.mapboxAccessToken),
     exposeMapboxCredentials: Boolean(row.exposeMapboxCredentials),
     mapbox3d: Boolean(row.mapbox3d),
-    protomapsApiKey: offlineMode ? null : row.protomapsApiKey,
+    protomapsApiKey: row.protomapsApiKey,
     protomapsBasemapStyle: row.protomapsBasemapStyle,
     centerLatitude: row.centerLatitude,
     centerLongitude: row.centerLongitude,

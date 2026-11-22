@@ -440,6 +440,38 @@ export class CommunityWritesRepository {
     return rows[0] ?? null;
   }
 
+  /** Stored Mapbox/Protomaps fields, used to preserve omitted keys on PUT. */
+  async findCommunityMapConfigProviderFields(communityId: number): Promise<{
+    mapboxStyleUrl: string | null;
+    mapboxAccessToken: string | null;
+    exposeMapboxCredentials: boolean;
+    mapbox3d: boolean;
+    protomapsApiKey: string | null;
+    protomapsBasemapStyle: string | null;
+  } | null> {
+    const rows = await this.db
+      .select({
+        mapboxStyleUrl: this.tables.communityMapConfigs.mapboxStyleUrl,
+        mapboxAccessToken: this.tables.communityMapConfigs.mapboxAccessToken,
+        exposeMapboxCredentials:
+          this.tables.communityMapConfigs.exposeMapboxCredentials,
+        mapbox3d: this.tables.communityMapConfigs.mapbox3d,
+        protomapsApiKey: this.tables.communityMapConfigs.protomapsApiKey,
+        protomapsBasemapStyle:
+          this.tables.communityMapConfigs.protomapsBasemapStyle,
+      })
+      .from(this.tables.communityMapConfigs)
+      .where(eq(this.tables.communityMapConfigs.communityId, communityId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ...row,
+      exposeMapboxCredentials: Boolean(row.exposeMapboxCredentials),
+      mapbox3d: Boolean(row.mapbox3d),
+    };
+  }
+
   async upsertCommunityMapConfig(
     communityId: number,
     actorId: number,

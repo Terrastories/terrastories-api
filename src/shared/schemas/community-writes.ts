@@ -6,6 +6,7 @@ import {
 } from '../utils/safe-description.js';
 import {
   CommunityMapConfigSchema,
+  CommunityMapRenderSchema,
   CommunityReadDetailResponseSchema,
   CommunityReadVisibilitySchema,
 } from './community-reads.js';
@@ -204,24 +205,26 @@ export const PutCommunityMapConfigRequestSchema = z
       ])
       .default(null),
     basemapStyle: NullableTrimmedText('Basemap style', 120).default(null),
+    // Provider fields (Mapbox/Protomaps): an omitted key keeps the stored
+    // value (resolved in the service); an explicit null clears it.
     mapboxStyleUrl: NullableTrimmedText(
       'Mapbox style URL',
       MAPBOX_STYLE_URL_MAX_LENGTH
-    ).default(null),
+    ).optional(),
     mapboxAccessToken: NullableTrimmedText(
       'Mapbox access token',
       MAPBOX_ACCESS_TOKEN_MAX_LENGTH
-    ).default(null),
-    exposeMapboxCredentials: z.boolean().default(false),
-    mapbox3d: z.boolean().default(false),
+    ).optional(),
+    exposeMapboxCredentials: z.boolean().optional(),
+    mapbox3d: z.boolean().optional(),
     protomapsApiKey: NullableTrimmedText(
       'Protomaps API key',
       PROTOMAPS_API_KEY_MAX_LENGTH
-    ).default(null),
+    ).optional(),
     protomapsBasemapStyle: NullableTrimmedText(
       'Protomaps basemap style',
       PROTOMAPS_BASEMAP_STYLE_MAX_LENGTH
-    ).default(null),
+    ).optional(),
     centerLatitude: NullableLatitudeSchema.default(null),
     centerLongitude: NullableLongitudeSchema.default(null),
     southWestLatitude: NullableLatitudeSchema.default(null),
@@ -262,18 +265,24 @@ export const PutCommunityMapConfigRequestSchema = z
   })
   .strict()
   .superRefine((data, ctx) => {
-    const hasMapboxStyle = data.mapboxStyleUrl !== null;
-    const hasMapboxToken = data.mapboxAccessToken !== null;
-    if (hasMapboxStyle !== hasMapboxToken) {
+    // The style/token pair rule is enforced on the merged (stored + request)
+    // values in the service; here only provided values are checked.
+    if (
+      data.mapboxStyleUrl !== undefined &&
+      data.mapboxAccessToken !== undefined &&
+      (data.mapboxStyleUrl !== null) !== (data.mapboxAccessToken !== null)
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: [hasMapboxStyle ? 'mapboxAccessToken' : 'mapboxStyleUrl'],
+        path: [
+          data.mapboxStyleUrl !== null ? 'mapboxAccessToken' : 'mapboxStyleUrl',
+        ],
         message:
           'Mapbox style URL and Mapbox access token must both be provided or both be blank',
       });
     }
     if (
-      data.mapboxStyleUrl !== null &&
+      data.mapboxStyleUrl != null &&
       sanitizeMapboxStyleUrl(data.mapboxStyleUrl) === null
     ) {
       ctx.addIssue({
@@ -284,7 +293,7 @@ export const PutCommunityMapConfigRequestSchema = z
       });
     }
     if (
-      data.mapboxAccessToken !== null &&
+      data.mapboxAccessToken != null &&
       !isPublicMapboxToken(data.mapboxAccessToken)
     ) {
       ctx.addIssue({
@@ -294,7 +303,7 @@ export const PutCommunityMapConfigRequestSchema = z
       });
     }
     if (
-      data.protomapsApiKey !== null &&
+      data.protomapsApiKey != null &&
       !isValidProtomapsApiKey(data.protomapsApiKey)
     ) {
       ctx.addIssue({
@@ -370,6 +379,7 @@ export type PatchCommunityResponse = z.infer<
 
 export const PutCommunityMapConfigResponseSchema = z.object({
   data: CommunityMapConfigSchema,
+  render: CommunityMapRenderSchema,
 });
 export type PutCommunityMapConfigResponse = z.infer<
   typeof PutCommunityMapConfigResponseSchema

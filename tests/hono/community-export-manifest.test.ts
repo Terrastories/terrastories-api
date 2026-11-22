@@ -694,7 +694,9 @@ describe('Slice 13a deterministic community export manifest builder', () => {
         verifiedFiles,
         mediaArchive
       );
-      expect(first.manifest.importManifests).toEqual([own]);
+      expect(first.manifest.importManifests).toEqual([
+        { ...own, sourceFilePurged: false },
+      ]);
       expect(first.manifest.files.map((file) => file.id)).toEqual(
         expect.arrayContaining([own.sourceFileId, ...own.stagedFileIds])
       );

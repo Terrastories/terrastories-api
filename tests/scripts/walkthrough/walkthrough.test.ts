@@ -49,22 +49,10 @@ describe('walkthrough runner', () => {
         outDir: dir,
         quiet: true,
       });
-      const failed = result.walk.records.filter(
-        (r) => r.outcome === 'fail' && !r.knownDefect
-      );
+      const failed = result.walk.records.filter((r) => r.outcome === 'fail');
       expect(failed.map((r) => `${r.label} ${r.text}: ${r.error}`)).toEqual([]);
       expect(result.uncovered, 'handoff rows with no step').toEqual([]);
-      // the discard-then-export defect (#280) keeps the run red, labelled,
-      // until the fix lands; with the fix the run is green
-      const known = result.walk.records.filter(
-        (r) => r.outcome === 'fail' && r.knownDefect === '#280'
-      );
-      expect(known.length).toBeLessThanOrEqual(1);
-      expect(result.ok).toBe(known.length === 0);
-      if (known.length)
-        expect(await readFile(join(dir, 'summary.md'), 'utf8')).toContain(
-          'KNOWN DEFECT #280'
-        );
+      expect(result.ok).toBe(true);
 
       // every handoff row appears in the summary table with at least one step
       const summary = await readFile(join(dir, 'summary.md'), 'utf8');
@@ -100,7 +88,7 @@ describe('walkthrough runner', () => {
         failed: number;
         steps: unknown[];
       };
-      expect(json.failed).toBe(known.length);
+      expect(json.failed).toBe(0);
       expect(json.steps.length).toBeGreaterThan(300);
 
       // the real community was only read: byte-identical rows (community,

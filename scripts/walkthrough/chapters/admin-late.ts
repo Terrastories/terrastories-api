@@ -1024,13 +1024,7 @@ async function sovereigntyScenes(
   });
 }
 
-/**
- * The export chapter above runs while import previews are still open, which
- * avoids a known product defect: discarding a preview leaves its file row
- * behind and the next export then fails with export_failed. This step walks
- * exactly that path and is a named known-defect check (PR #280 fixes it):
- * it keeps the run red, and the row labelled, until the fix lands.
- */
+/** Discarding an import preview must not break the next export. */
 async function discardThenExport(ctx: Ctx): Promise<void> {
   const { w, s } = ctx;
   const ana = s.actors.ana!;
@@ -1047,13 +1041,12 @@ async function discardThenExport(ctx: Ctx): Promise<void> {
   });
   await w.step({
     who: ana,
-    say: 'exports the community again after the discard (KNOWN DEFECT #280: fails with export_failed until the fix lands)',
+    say: 'exports the community again after the discard (it must still work)',
     method: 'POST',
     path: '/v2/community/export',
     json: {},
     expect: 201,
     covers: ['V01'],
-    knownDefect: '#280',
     show: (r) => {
       for (const kind of ['manifest', 'mediaZip'])
         w.secret(String(dig(r, 'data', 'artifacts', kind, 'token') ?? ''));

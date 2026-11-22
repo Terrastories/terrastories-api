@@ -978,7 +978,7 @@ async function importChapter(
   const badId = val(bad, 'data', 'id');
   if (typeof badId === 'number') s.imports.push(badId);
   w.narrate(
-    'Elena leaves that preview open for now; she discards the open previews when she tidies up at the end of the day.'
+    'Elena leaves that preview open; the cleanup chapter discards what is still open at the end of the day.'
   );
   await w.step({
     who: elena,
@@ -1003,7 +1003,15 @@ async function importChapter(
     expect: 201,
     covers: ['C30'],
   });
-  s.imports.push(num(d, 'data', 'id'));
+  const discardedId = num(d, 'data', 'id');
+  await w.step({
+    who: elena,
+    say: 'discards that abandoned preview right away',
+    method: 'DELETE',
+    path: `/v2/imports/${discardedId}`,
+    expect: [200, 204],
+    covers: ['C32'],
+  });
   void placeId;
   void speakerId;
   void str;

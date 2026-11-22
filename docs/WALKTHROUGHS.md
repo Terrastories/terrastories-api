@@ -103,13 +103,8 @@ and Sam tidy up.
   `--setup-from-bootstrap`. Otherwise the summary shows them as "partially
   covered: closed-setup check only" (a refused second bootstrap, sent with a
   made-up secret); that does not fail the run.
-- **Known defect (#280):** discarding an import preview leaves its file row
-  and a later community export fails with `export_failed`. The export chapter
-  still runs with previews open, but a named step ("discards an open import
-  preview", then exports again) walks the failing path with
-  `knownDefect: '#280'`. It keeps the run red and labels V01 "KNOWN DEFECT" in
-  `summary.md` until #280 lands; after that merges, rebase on main and the
-  step turns green (then the workaround of leaving previews open can go).
+- Discarding an import preview and then exporting is walked as a normal step
+  (the old `export_failed` defect was fixed in #280).
 - Coverage gate: an API row counts as covered only when a step actually ran.
   A deferred row (V04-V06 without `--allow-destructive`) is uncovered, so
   `--persona all` fails without that flag. Only explicit labels soften this:

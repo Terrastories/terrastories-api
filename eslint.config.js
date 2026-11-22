@@ -87,6 +87,8 @@ export default [
       'src/db/seed.ts',
       'src/db/index.ts',
       'src/routes/public-api.ts',
+      'scripts/migrate-rails.ts',
+      'scripts/fixtures/gen-rails-fixture.ts',
     ],
     languageOptions: {
       ecmaVersion: 2022,

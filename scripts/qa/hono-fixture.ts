@@ -5395,6 +5395,22 @@ export async function createFixture(
         },
       },
       {
+        name: 'editor reads story detail with first external link',
+        method: 'GET',
+        path: '/v2/stories/{qaSlice8Story}',
+        expected: 200,
+        check: (body) => {
+          const parsed = CommunityStoryDetailResponseSchema.safeParse(body);
+          return (
+            parsed.success &&
+            parsed.data.data.externalMediaLinks.length === 1 &&
+            parsed.data.data.externalMediaLinks[0]?.id === qaSlice8LinkAId &&
+            parsed.data.data.externalMediaLinks[0]?.url ===
+              'https://video.example.test/qa/first'
+          );
+        },
+      },
+      {
         name: 'editor adds second external link',
         method: 'POST',
         path: '/v2/stories/{qaSlice8Story}/external-links',

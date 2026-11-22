@@ -45,6 +45,7 @@
     "dev:hono": "NODE_ENV=development tsx watch src/hono-server.ts",
     "start:hono": "node dist/hono-server.js",
     "migrate:rails:capture": "tsx scripts/migrate-rails.ts",
+    "migrate:rails:transform": "tsx scripts/migrate-rails-transform.ts",
     "test:migration": "vitest run tests/migration --reporter=dot --maxWorkers=1"
   },
   "dependencies": {

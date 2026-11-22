@@ -87,15 +87,18 @@ export function deriveDescriptionForWrite(
  * from the stored raw values.
  */
 export function deriveUserIdentityColumns(fields: {
-  email?: string;
+  email?: string | null;
   username?: string | null;
 }): {
-  emailNormalized?: string;
+  emailNormalized?: string | null;
   usernameNormalized?: string | null;
 } {
   return {
     ...(fields.email !== undefined
-      ? { emailNormalized: normalizeSearchText(fields.email) }
+      ? {
+          emailNormalized:
+            fields.email === null ? null : normalizeSearchText(fields.email),
+        }
       : {}),
     ...(fields.username !== undefined
       ? {

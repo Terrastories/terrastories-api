@@ -803,7 +803,7 @@ export class UserService {
       // Transform users to response format
       const data = users.map((user) => ({
         id: user.id,
-        email: user.email,
+        email: user.email ?? '',
         firstName: user.firstName,
         lastName: user.lastName,
         role: user.role,

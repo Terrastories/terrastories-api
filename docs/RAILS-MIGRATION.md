@@ -168,4 +168,52 @@ Stage 2 consumes the verified Stage-1 bundle rather than querying Rails directly
 - fail/manual-disposition contradictory or unmappable source states rather than guessing;
 - validate the same canonical fixture against both SQLite/D1-compatible and PostgreSQL targets.
 
-Until Stage 2 exists and passes those gates, a Stage-1 bundle is **migration-ready source preservation**, not a completed Terrastories V2 migration.
+## Stage-2 transform (SQLite target)
+
+```bash
+npm run migrate:rails:transform -- \
+  --bundle /trusted/path/terrastories-rails-bundle \
+  --output /trusted/path/terrastories-v2-out \
+  [--community <id|slug> ...] [--include-system-users] [--allow-manual]
+```
+
+The bundle is verified first (manifest, archive size/SHA-256, row and table digests, every captured blob's size and SHA-256); any mismatch fails closed. The output directory must not exist. It is written to an owner-only temp directory and renamed on success, so a failed run leaves nothing behind:
+
+- `v2.sqlite` - V2 SQLite migrations applied, canonical rows inserted with legacy primary keys preserved (`idRemaps` in the manifest records any remap; currently none). Foreign-key and integrity checks run before it is accepted.
+- `legacy-archive.sqlite` - restricted. Every source row not represented canonically (`archived_rows`) and every archive-only field (`archived_fields`: raw bcrypt hashes, reset tokens, sign-in IPs, theme credentials, raw role/super_admin values, changed descriptions, raw birthdates, sub-millisecond timestamps).
+- `manifest.json` - input digests, selection, source counts, per-table dispositions, canonical counts, per-field disposition registry, warnings, MANUAL items, pending media, flipper classification, and checksums of the canonical rows. No timestamps: the same bundle gives a byte-identical manifest.
+- `manual-review.json` - ids and codes only (written only with `--allow-manual` when MANUAL items exist).
+- `validation-summary.txt` - counts only; no contents or secrets.
+
+### Dispositions
+
+Every source row gets exactly one status per table: `imported`, `not_selected`, `manual`, `excluded_dependency`, `archived` or `pending_media_slice`. Every pinned Rails column has an entry in `src/migration/v2/dispositions.ts` (a test fails if one is missing). Key rules:
+
+- Roles `0/1/2/3/100` map to member/editor/admin/viewer/super_admin. Contradictory `(role, super_admin)` pairs, an unknown role, a super_admin with a community, or a community role without one are MANUAL.
+- Blank `username` becomes NULL (never synthesized); `email` may be NULL (migration `users.email` nullable). Same-community normalized email collisions, username collisions, and a username equal to another user's email are MANUAL.
+- Story `permission_level` 0/1/2 maps to public/members_only/editors; NULL or unknown is MANUAL (never defaults to public). A public story in a private community stays physically `public`; the community's private flag gates it.
+- Defaults recorded as `TRANSFORM_DEFAULT` events plus warnings: community locale NULL to `en`; story title/language and place/speaker name NULL to an empty string.
+- Descriptions are sanitized with the migration sanitizer; changed values keep the raw original in the archive.
+- Media (`media`, `active_storage_*`) is recorded as `pending_media_slice`; no `files` rows are created yet. Theme Mapbox/Protomaps settings are imported into `community_map_configs` using the same validators as the API (`src/shared/utils/map-config.ts`): only a public `pk.` token and a valid style URL are imported, and only as a pair (if either half is missing or invalid, neither is imported and a warning is recorded); `sk.`/malformed tokens and invalid style URLs stay in the restricted archive (warning codes `mapbox_token_not_public`, `mapbox_style_url_invalid`, `mapbox_pair_incomplete`; values are never logged). `expose_mapbox_credentials` is reset to false for a private community (`expose_mapbox_credentials_reset_private`), matching Rails.
+- Unknown tables are archived whole with a warning; unknown enabled flipper flags are MANUAL.
+
+### Wrapped bcrypt verifiers
+
+A valid Rails hash (`$2a$`/`$2b$`/`$2y$`, cost 4-14) becomes `password_algorithm = client-bcrypt-rails+sha256`, `password_salt` = the 22-character salt, `password_params` = `{"cost":N}` and `password_verifier` = SHA-256 of the hash **normalized to the `$2b$` prefix**. Prelogin does not carry a prefix and the client always recomputes with `$2b$`; for valid input the three prefixes yield an identical hash body, so normalizing preserves every working password (recorded as the `prefix_normalized` field event). Empty hashes become code-only accounts (no verifier); malformed hashes are MANUAL. The raw hash lives only in `legacy-archive.sqlite`. The first successful login upgrades the account to Argon2id through the existing login flow.
+
+### MANUAL handling
+
+By default any MANUAL item fails the run and the error lists `table#id code` lines (no values). Resolve the source data, or pass `--allow-manual` to exclude those rows (and rows depending on them, status `excluded_dependency`) and list them in `manual-review.json`. Excluded rows are archived. MANUAL never guesses a value.
+
+### Scoped runs (`--community`)
+
+`--community <id|slug>` (repeatable) imports only the selected communities; all other rows are `not_selected` and are recorded in the manifest, never silently dropped. Use the same selection for the Stage-1 capture so the media counts reconcile. Null-community super_admins are imported only with `--include-system-users`.
+
+Orphan rows (a join row or media row whose story, place or speaker has no source row):
+
+- full run: MANUAL (`story_missing`, `place_missing`, `speaker_missing`, `orphan_edge`, `media_story_missing`, `attachment_unattributable`);
+- scoped run: MANUAL only when the surviving endpoint belongs to a selected community; otherwise `not_selected`.
+
+`pending_media_slice` applies only to media rows, attachments and variant records reachable from a selected community (Media via story, Place, Speaker, Community, Theme, User, and variants/previews via their blob), matching the Stage-1 allowlist. The number of pending blobs equals Stage 1's `blobsSelected`.
+
+Until the media slice, the PostgreSQL target and the validation gates exist and pass, a Stage-2 SQLite output is not a cutover; until then, a Stage-1 bundle is **migration-ready source preservation**, not a completed Terrastories V2 migration.

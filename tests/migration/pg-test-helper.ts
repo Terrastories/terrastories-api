@@ -24,6 +24,11 @@ export async function withIsolatedRailsDatabase(
   assertSafeDbIdentifier(dbName);
 
   const adminPool = new Pool({ connectionString: baseUrl, max: 1 });
+  // An idle client that the server shuts down (57P01 from the teardown's
+  // pg_terminate_backend, or a still-closing capture pool) emits 'error' on the
+  // pool; with no listener that becomes an unhandled error and fails the run.
+  const ignorePoolError = (): void => undefined;
+  adminPool.on('error', ignorePoolError);
   let targetPool: Pool | null = null;
 
   try {
@@ -33,6 +38,7 @@ export async function withIsolatedRailsDatabase(
     const dbUrl = targetUrl.toString();
 
     targetPool = new Pool({ connectionString: dbUrl, max: 2 });
+    targetPool.on('error', ignorePoolError);
     await fn(dbUrl, targetPool);
   } finally {
     if (targetPool) {

@@ -1223,6 +1223,9 @@ export async function captureRailsToBundle(
 
   const archivePath = join(temporaryDir, ARCHIVE_FILENAME);
   const pool = new Pool({ connectionString: options.sourceUrl, max: 1 });
+  // An idle client dropped by the server (e.g. admin shutdown) must not become
+  // an unhandled 'error' event; active queries still reject on their own.
+  pool.on('error', () => undefined);
   let client: PoolClient | null = null;
   let archive: Database.Database | null = null;
   let transactionOpen = false;

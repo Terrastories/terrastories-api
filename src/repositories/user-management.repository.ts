@@ -41,7 +41,7 @@ import { userAuthorityConditions } from './hono-foundation.repository.js';
 
 export interface ManagedUserRow {
   id: number;
-  email: string;
+  email: string | null;
   username: string | null;
   displayName: string | null;
   role: string;
@@ -119,7 +119,7 @@ export class UserManagementRepository {
 
   private toRow(row: {
     id: number;
-    email: string;
+    email: string | null;
     username: string | null;
     displayName: string | null;
     role: string;
@@ -500,7 +500,7 @@ export class UserManagementRepository {
     username?: string | null;
     usernameNormalized?: string | null;
     email?: string;
-    emailNormalized?: string;
+    emailNormalized?: string | null;
     /**
      * The identity fields whose normalized values actually changed — only
      * those need the collision guard (and it must hold at write time, not
@@ -846,7 +846,7 @@ export class UserManagementRepository {
       username?: string;
       usernameNormalized?: string | null;
       email?: string;
-      emailNormalized?: string;
+      emailNormalized?: string | null;
       /** Every supplied identifier, re-checked at write time. */
       collision: {
         emailNormalized?: string;

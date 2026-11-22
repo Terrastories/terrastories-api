@@ -148,6 +148,13 @@
       "when": 1795608002000,
       "tag": "0020_map_config_mapbox_protomaps",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1795694402000,
+      "tag": "0021_users_email_nullable",
+      "breakpoints": true
     }
   ]
 }

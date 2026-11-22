@@ -99,14 +99,14 @@ async function main(): Promise<void> {
   console.log('🧭 Migration metadata regression gate');
   await assertSnapshotMetadata(
     'SQLite',
-    'src/db/migrations/meta/0020_snapshot.json',
+    'src/db/migrations/meta/0021_snapshot.json',
     'users',
     'communities',
     'community_map_configs'
   );
   await assertSnapshotMetadata(
     'PostgreSQL',
-    'src/db/migrations/postgres/meta/0019_snapshot.json',
+    'src/db/migrations/postgres/meta/0020_snapshot.json',
     'public.users',
     'public.communities',
     'public.community_map_configs'

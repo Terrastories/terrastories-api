@@ -420,7 +420,7 @@ export async function authRoutes(
         // Create secure session with user data
         const userSession: UserSession = {
           id: user.id,
-          email: user.email,
+          email: user.email ?? '',
           role: user.role as UserSession['role'],
           communityId: user.communityId,
           firstName: user.firstName,

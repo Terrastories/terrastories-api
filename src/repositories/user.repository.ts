@@ -99,6 +99,12 @@ export class UserRepository {
         throw new Error('Invalid community ID');
       }
 
+      // The frozen V1 surface always supplies an email even though the
+      // physical column is now nullable (Rails-migrated users may have none).
+      if (!userData.email) {
+        throw new Error('Email is required');
+      }
+
       // Check if email already exists in this community
       const existingUser = await this.findByEmail(
         userData.email,
@@ -129,7 +135,7 @@ export class UserRepository {
         .values({
           ...userData,
           ...deriveUserIdentityColumns({
-            email: userData.email,
+            email: userData.email ?? undefined,
             username: userData.username,
           }),
           createdAt: new Date(),
@@ -292,9 +298,7 @@ export class UserRepository {
       }
 
       const nextEmail =
-        updates.email !== undefined
-          ? updates.email.toLowerCase().trim()
-          : undefined;
+        updates.email != null ? updates.email.toLowerCase().trim() : undefined;
       const {
         emailNormalized: _ignoredEmailNormalized,
         usernameNormalized: _ignoredUsernameNormalized,
@@ -767,7 +771,7 @@ export class UserRepository {
     const usersTable = this.tables.users;
     const communitiesTable = this.tables.communities;
     const nextEmail =
-      patch.email !== undefined ? patch.email.toLowerCase().trim() : undefined;
+      patch.email != null ? patch.email.toLowerCase().trim() : undefined;
     const {
       emailNormalized: _ignoredEmailNormalized,
       usernameNormalized: _ignoredUsernameNormalized,
@@ -878,7 +882,7 @@ export class UserRepository {
       const updateData = {
         ...safeData,
         ...deriveUserIdentityColumns({
-          email: data.email,
+          email: data.email ?? undefined,
           username: data.username,
         }),
         updatedAt: new Date(),

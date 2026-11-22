@@ -8,6 +8,7 @@ import {
   type StoryVisibility,
 } from '../policy/canonical-state.js';
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
+import { storySlugBase } from '../shared/utils/story-slug.js';
 import {
   buildOwnerUnreferencedFilesDelete,
   buildUnreferencedFilesDelete,
@@ -83,13 +84,7 @@ export type ReorderExternalLinksOutcome =
   | { status: 'conflict' };
 
 function buildUniqueStorySlug(title: string): string {
-  const base = title
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60);
+  const base = storySlugBase(title);
   const suffix = globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 12);
   return base.length > 0 ? `${base}-${suffix}` : `story-${suffix}`;
 }

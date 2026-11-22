@@ -46,6 +46,8 @@ export interface TransformRailsOptions {
   communities?: string[];
   includeSystemUsers?: boolean;
   allowManual?: boolean;
+  /** Test seam: replaces the post-rename parent-directory fsync. */
+  syncParentDirectory?: (directory: string) => Promise<void>;
 }
 
 export interface TransformManifest {
@@ -278,6 +280,39 @@ export function buildTransformSummary(manifest: TransformManifest): string {
   return lines.join('\n');
 }
 
+async function quarantinePublishedOutput(
+  publishedDir: string,
+  cause: unknown
+): Promise<never> {
+  const reason = cause instanceof Error ? cause.message : String(cause);
+  const failedDir = publishedDir + '.failed-' + Date.now();
+  try {
+    await rename(publishedDir, failedDir);
+  } catch {
+    // Could not move it: make the final directory unmistakably incomplete.
+    await rm(join(publishedDir, 'manifest.json'), { force: true });
+    await writeFile(
+      join(publishedDir, 'TRANSFORM_FAILED'),
+      'Transform failed after publish: ' + reason + '\n',
+      { encoding: 'utf8', mode: 0o600 }
+    );
+    throw new Error(
+      'Transform failed syncing the parent directory after publish (' +
+        reason +
+        '); marked ' +
+        publishedDir +
+        ' with TRANSFORM_FAILED and removed its manifest. Do not use it.'
+    );
+  }
+  throw new Error(
+    'Transform failed syncing the parent directory after publish (' +
+      reason +
+      '); quarantined the output as ' +
+      failedDir +
+      '. Do not use it.'
+  );
+}
+
 export async function transformRailsBundle(
   options: TransformRailsOptions
 ): Promise<TransformManifest> {
@@ -393,7 +428,12 @@ export async function transformRailsBundle(
     await rename(temporaryDir, outputDir);
     destinationClaimed = false;
     temporaryDir = null;
-    await fsyncPath(dirname(outputDir));
+    try {
+      await (options.syncParentDirectory ?? fsyncPath)(dirname(outputDir));
+    } catch (syncError) {
+      // Published but not known durable: never leave a complete-looking output.
+      await quarantinePublishedOutput(outputDir, syncError);
+    }
     return manifest;
   } finally {
     bundle.close();

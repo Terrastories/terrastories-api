@@ -5,7 +5,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Sqlite from 'better-sqlite3';
-import { sql, eq } from 'drizzle-orm';
+import { randomBytes } from 'node:crypto';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { drizzle as drizzlePostgres } from 'drizzle-orm/postgres-js';
@@ -204,24 +205,40 @@ describe('null-email users (SQLite)', () => {
 describe.skipIf(pgDecision.status !== 'ready')(
   'null-email users (PostgreSQL)',
   () => {
+    // A private database per suite run: other PG suites (e.g. map-config)
+    // drop and recreate the shared schema, so this suite must not touch it.
+    const dbName = 'null_email_' + randomBytes(6).toString('hex');
+    let admin: ReturnType<typeof createPostgresClient> | null = null;
     let client: ReturnType<typeof createPostgresClient> | null = null;
     let pgDb: Database | null = null;
     beforeAll(async () => {
-      client = createPostgresClient(pgDecision.url!, {
+      admin = createPostgresClient(pgDecision.url!, {
+        max: 1,
+        onnotice: () => undefined,
+      });
+      await admin.unsafe('CREATE DATABASE "' + dbName + '"');
+      const target = new URL(pgDecision.url!);
+      target.pathname = '/' + dbName;
+      client = createPostgresClient(target.toString(), {
         max: 5,
         onnotice: () => undefined,
       });
-      await client`DROP SCHEMA IF EXISTS drizzle CASCADE`;
-      await client`DROP SCHEMA IF EXISTS public CASCADE`;
-      await client`CREATE SCHEMA public`;
       pgDb = drizzlePostgres(client) as unknown as Database;
       await migratePostgres(pgDb as any, {
         migrationsFolder: 'src/db/migrations/postgres',
       });
-      await (pgDb as any).execute(sql.raw('SELECT 1'));
     });
     afterAll(async () => {
       await client?.end();
+      if (admin) {
+        await admin.unsafe(
+          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '" +
+            dbName +
+            "' AND pid <> pg_backend_pid()"
+        );
+        await admin.unsafe('DROP DATABASE IF EXISTS "' + dbName + '"');
+        await admin.end();
+      }
     });
     registerSuite(() => pgDb!);
   }

@@ -801,6 +801,26 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
     ).rejects.toThrow(/overwrite/);
   });
 
+  it('quarantines the published output when the post-rename parent sync fails', async () => {
+    const out = nextOutput();
+    await expect(
+      transformRailsBundle({
+        bundleDir,
+        outputDir: out,
+        allowManual: true,
+        syncParentDirectory: async () => {
+          throw new Error('injected parent sync failure');
+        },
+      })
+    ).rejects.toThrow(/injected parent sync failure.*quarantined/is);
+    const entries = await readdir(workDir);
+    const base = out.split('/').pop()!;
+    expect(entries).not.toContain(base);
+    expect(entries.filter((n) => n.startsWith(base + '.failed-'))).toHaveLength(
+      1
+    );
+  });
+
   it('fails closed on a tampered archive or blob and leaves no output', async () => {
     const tampered = join(workDir, 'bundle-tampered-archive');
     await cp(bundleDir, tampered, { recursive: true });

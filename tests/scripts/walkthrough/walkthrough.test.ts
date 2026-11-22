@@ -308,6 +308,21 @@ describe('walkthrough runner', () => {
 });
 
 describe('walkthrough safety and options', () => {
+  it('starts no new step once an interrupt is pending', async () => {
+    const walk = new Walk('http://127.0.0.1:1', { quiet: true });
+    walk.stopping = true;
+    await expect(
+      walk.step({
+        who: walk.actor('X', 'anonymous visitor'),
+        say: 'x',
+        method: 'GET',
+        path: '/health',
+        expect: 200,
+      })
+    ).rejects.toThrow(/interrupted/);
+    expect(walk.records).toEqual([]);
+  });
+
   it('never sends a Secure cookie over plain HTTP except to localhost', () => {
     const jar = new CookieJar();
     jar.absorb(

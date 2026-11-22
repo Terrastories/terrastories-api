@@ -122,9 +122,18 @@ export async function runWalkthrough(
     setupFromBootstrap: cfg.setupFromBootstrap,
     loginRealAdmin: Boolean(cfg.loginRealAdmin),
   };
+  let running: Promise<void> | undefined;
   const onSignal = (signal: NodeJS.Signals): void => {
-    walk.narrate(`${signal} received: running cleanup before exit`);
-    void runCleanup()
+    // stop new steps, let the request in flight record its result (a created
+    // community must have its id saved), and only then clean up
+    walk.stopping = true;
+    void (running ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => {
+        walk.stopping = false;
+        walk.narrate(`${signal} received: running cleanup before exit`);
+        return runCleanup();
+      })
       .catch(() => undefined)
       .then(() => walk.write(options.outDir, meta))
       .catch(() => undefined)
@@ -135,7 +144,7 @@ export async function runWalkthrough(
     process.once('SIGTERM', onSignal);
   }
 
-  try {
+  const body = async (): Promise<void> => {
     if (!cfg.setupFromBootstrap) await targetCheckChapter(ctx);
     const needsPlay = CONTENT_PERSONAS.some((p) => picked.has(p));
     const needsSuper =
@@ -187,6 +196,10 @@ export async function runWalkthrough(
     }
     if (picked.has('fieldkit') && !cfg.setupFromBootstrap)
       await fieldKitChapter(ctx, 'late');
+  };
+  try {
+    running = body();
+    await running;
   } finally {
     await runCleanup();
     if (options.handleSignals) {

@@ -94,6 +94,8 @@ export class Walk {
   private stepNo = 0;
   private persona = '';
   failed = false;
+  /** Set by a signal handler: no further request starts; the one in flight still records its result. */
+  stopping = false;
   private lastAuthFailure = 0;
 
   constructor(
@@ -159,6 +161,7 @@ export class Walk {
   }
 
   async step(spec: StepSpec): Promise<Reply> {
+    if (this.stopping) throw new StepError('interrupted: no further steps');
     const label = this.nextLabel();
     const expected = Array.isArray(spec.expect) ? spec.expect : [spec.expect];
     const started = Date.now();

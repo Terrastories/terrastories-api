@@ -31,6 +31,7 @@ function fixture(count = 1) {
     erasureUploads: async () => [],
     erasureArchiveCustody: async () => null,
     erasureLegacyFiles: async () => [],
+    erasureMayDeleteKey: async () => true,
     eraseRows: async (id: number) => {
       erased.push(id);
       clock = new Date(9000);
@@ -328,4 +329,74 @@ it('refuses legacy traversal and symlink escapes without removing bytes', async 
     storage.put!('legacy/file', new Uint8Array([1]))
   ).rejects.toThrow('Invalid storage key');
   expect(await storage.read('legacy/escape/file')).toBeNull();
+});
+
+it('real Node storage: symlink and directory keys never touch targets and do not throw', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'erasure-link-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'erasure-link-out-'));
+  await mkdir(path.join(root, 'legacy', 'dir'), { recursive: true });
+  await writeFile(path.join(outside, 'target'), new Uint8Array([9]));
+  await symlink(
+    path.join(outside, 'target'),
+    path.join(root, 'legacy', 'link')
+  );
+  const storage = await createLocalStorage(root);
+  await storage.delete!('legacy/link');
+  await storage.delete!('legacy/dir');
+  expect(await readFile(path.join(outside, 'target'))).toEqual(
+    Buffer.from([9])
+  );
+  const keys = (await storage.list!({ prefix: 'legacy/' })).entries.map(
+    (e) => e.key
+  );
+  expect(keys).not.toContain('legacy/link');
+});
+
+it('real Node storage: shared key survives and invalid key row is cleared so erasure completes', async () => {
+  const f = fixture();
+  const root = await mkdtemp(path.join(tmpdir(), 'erasure-shared-'));
+  await mkdir(path.join(root, 'legacy'));
+  await mkdir(path.join(root, 'communities/2'), { recursive: true });
+  await writeFile(path.join(root, 'legacy/shared'), new Uint8Array([1]));
+  await writeFile(path.join(root, 'legacy/own'), new Uint8Array([2]));
+  await writeFile(path.join(root, 'communities/2/object'), new Uint8Array([3]));
+  const storage = await createLocalStorage(root);
+  const files = [
+    { id: 'a', storageKey: null, path: 'legacy/shared' },
+    { id: 'b', storageKey: null, path: 'communities/2/object' },
+    { id: 'c', storageKey: null, path: '/abs/bad' },
+    { id: 'd', storageKey: null, path: 'legacy/own' },
+  ];
+  vi.spyOn(f.repository, 'erasureLegacyFiles').mockImplementation(async () => [
+    ...files,
+  ]);
+  f.repository.erasureMayDeleteKey = vi.fn(
+    async (_c: number, key: string) => key === 'legacy/own'
+  );
+  f.repository.clearErasureLegacyFile = vi.fn(
+    async (_c: number, id: string) => {
+      files.splice(
+        files.findIndex((x) => x.id === id),
+        1
+      );
+    }
+  );
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const service = new CommunityErasureService(
+    f.repository,
+    storage,
+    f.store,
+    f.clock
+  );
+  await service.sweep(new Date(0));
+  expect(files).toEqual([]);
+  expect((await storage.list!({})).entries.map((e) => e.key).sort()).toEqual([
+    'communities/2/object',
+    'legacy/shared',
+  ]);
+  expect(warn).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(warn.mock.calls)).not.toContain('/abs/bad');
+  warn.mockRestore();
+  expect(f.erased).toEqual([1]);
+  expect(f.records[0]!.outcome).toBe('completed');
 });

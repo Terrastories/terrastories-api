@@ -3842,6 +3842,24 @@ export async function createFixture(
           },
         },
         {
+          // Every seeded title starts with 'QA', so this query matches readable
+          // AND unreadable stories alike: the result must be exactly the
+          // role's readable set.
+          name: `v2 stories search over mixed readable/unreadable titles returns only readable (${role})`,
+          method: 'GET',
+          path: '/v2/stories?search=QA&sort=title_asc',
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            return (
+              parsed.data.meta.total === expectedStoryIds.length &&
+              parsed.data.data.stories.map((s) => s.id).join(',') ===
+                expectedStoryIds.join(',')
+            );
+          },
+        },
+        {
           name: `v2 stories filter excludes #162 and unauthorized places (${role})`,
           method: 'GET',
           path: `/v2/stories?place=${restrictedPlace.id}`,

@@ -58,6 +58,7 @@ const CONTENT_RESOURCE_TYPES = new Set([
   'media',
   'attachment',
   'attachments',
+  'map_config',
   'import_manifest',
   'import_manifests',
   'community_export',

@@ -8,7 +8,16 @@
  * disabled communities.
  */
 import { communityFromPhysical } from '../policy/canonical-state.js';
+import {
+  hasCredentialQueryParam,
+  sanitizeMapboxStyleUrl,
+  sanitizePublicMapboxToken,
+} from '../shared/utils/map-config.js';
 import { sanitizeDescriptionForMigration } from '../shared/utils/safe-description.js';
+import type {
+  CommunityMapConfig,
+  CommunityMapRender,
+} from '../shared/schemas/community-reads.js';
 import {
   PublicCommunitiesRepository,
   type PublicCommunityBrandingRow,
@@ -68,23 +77,6 @@ export function sanitizePublicDescription(raw: string | null): string | null {
     return '';
   }
 }
-// Compared after lowercasing and removing '-' and '_', so accessToken,
-// access-token and access_token all match. Includes signed-URL parameters.
-const CREDENTIAL_PARAM_NAMES = new Set([
-  'accesstoken',
-  'token',
-  'apikey',
-  'key',
-  'secret',
-  'sig',
-  'signature',
-  'keypairid',
-  'xamzsignature',
-  'xamzcredential',
-  'xamzsecuritytoken',
-  'xgoogsignature',
-  'xgoogcredential',
-]);
 
 /**
  * Serves `styleUrl` publicly only when it is a credential-free `http:`/`https:`
@@ -110,12 +102,8 @@ export function sanitizePublicStyleUrl(styleUrl: string | null): string | null {
   if (parsed.hash !== '') {
     return null;
   }
-  for (const paramName of parsed.searchParams.keys()) {
-    if (
-      CREDENTIAL_PARAM_NAMES.has(paramName.toLowerCase().replace(/[-_]/g, ''))
-    ) {
-      return null;
-    }
+  if (hasCredentialQueryParam(parsed)) {
+    return null;
   }
   return styleUrl;
 }
@@ -165,13 +153,111 @@ export function projectMapConfig(
   origin: string,
   row: PublicMapConfigRow | undefined | null,
   mediaUrlFor: (fileId: string) => string = (fileId) =>
-    publicMediaUrl(origin, slug, fileId)
+    publicMediaUrl(origin, slug, fileId),
+  options: { offlineMode?: boolean } = {}
 ): PublicCommunityMapConfig | null {
+  if (!row) return null;
+  const staticMapFileId = row.staticMapFileId;
+  const canExposeMapbox =
+    options.offlineMode !== true && row.exposeMapboxCredentials === true;
+  const exposedToken = canExposeMapbox
+    ? sanitizePublicMapboxToken(row.mapboxAccessToken)
+    : null;
+  const exposedStyle =
+    canExposeMapbox && exposedToken !== null
+      ? sanitizeMapboxStyleUrl(row.mapboxStyleUrl)
+      : null;
+  return {
+    styleUrl: sanitizePublicStyleUrl(row.styleUrl),
+    basemapStyle: row.basemapStyle,
+    mapboxStyleUrl: exposedStyle,
+    mapboxAccessToken: exposedStyle !== null ? exposedToken : null,
+    mapbox3d: Boolean(row.mapbox3d),
+    // Rails parity: the protomaps key is an origin-restricted public key that
+    // Rails embeds in the public style URL (?key=). Offline never exposes it.
+    protomapsApiKey:
+      options.offlineMode === true ? null : (row.protomapsApiKey ?? null),
+    protomapsBasemapStyle: row.protomapsBasemapStyle,
+    centerLatitude: row.centerLatitude,
+    centerLongitude: row.centerLongitude,
+    southWestLatitude: row.southWestLatitude,
+    southWestLongitude: row.southWestLongitude,
+    northEastLatitude: row.northEastLatitude,
+    northEastLongitude: row.northEastLongitude,
+    zoom: row.zoom,
+    pitch: row.pitch,
+    bearing: row.bearing,
+    threeDimensional: row.threeDimensional,
+    projection: row.projection,
+    staticMapFileId,
+    staticMapUrl: staticMapFileId ? mediaUrlFor(staticMapFileId) : null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export interface AuthenticatedMapConfigProjectionOptions {
+  instanceMapboxAccessToken?: string;
+  offlineMode?: boolean;
+}
+
+/**
+ * Resolves what a map client should render with: the community's own
+ * style/token when set, else the instance MAPBOX_ACCESS_TOKEN fallback.
+ * Offline suppresses everything. The result is derived, never persisted.
+ */
+export function resolveMapRender(
+  row: PublicMapConfigRow | undefined | null,
+  options: AuthenticatedMapConfigProjectionOptions = {}
+): CommunityMapRender {
+  if (options.offlineMode === true) {
+    return { mapboxStyleUrl: null, mapboxAccessToken: null, source: 'none' };
+  }
+  const communityToken = sanitizePublicMapboxToken(row?.mapboxAccessToken);
+  const style = sanitizeMapboxStyleUrl(row?.mapboxStyleUrl);
+  if (communityToken !== null) {
+    return {
+      mapboxStyleUrl: style,
+      mapboxAccessToken: communityToken,
+      source: 'community',
+    };
+  }
+  const instanceToken = sanitizePublicMapboxToken(
+    options.instanceMapboxAccessToken
+  );
+  if (instanceToken !== null) {
+    return {
+      mapboxStyleUrl: style,
+      mapboxAccessToken: instanceToken,
+      source: 'instance',
+    };
+  }
+  return { mapboxStyleUrl: null, mapboxAccessToken: null, source: 'none' };
+}
+
+/**
+ * Authenticated read: the community's stored fields exactly as persisted (so
+ * an edit form can round-trip them). The instance token fallback is NEVER
+ * merged in here; see resolveMapRender for the render block.
+ */
+export function projectAuthenticatedMapConfig(
+  slug: string,
+  origin: string,
+  row: PublicMapConfigRow | undefined | null,
+  mediaUrlFor: (fileId: string) => string = (fileId) =>
+    publicMediaUrl(origin, slug, fileId)
+): CommunityMapConfig | null {
   if (!row) return null;
   const staticMapFileId = row.staticMapFileId;
   return {
     styleUrl: sanitizePublicStyleUrl(row.styleUrl),
     basemapStyle: row.basemapStyle,
+    mapboxStyleUrl: sanitizeMapboxStyleUrl(row.mapboxStyleUrl),
+    mapboxAccessToken: sanitizePublicMapboxToken(row.mapboxAccessToken),
+    exposeMapboxCredentials: Boolean(row.exposeMapboxCredentials),
+    mapbox3d: Boolean(row.mapbox3d),
+    protomapsApiKey: row.protomapsApiKey,
+    protomapsBasemapStyle: row.protomapsBasemapStyle,
     centerLatitude: row.centerLatitude,
     centerLongitude: row.centerLongitude,
     southWestLatitude: row.southWestLatitude,
@@ -194,7 +280,8 @@ function projectSummary(
   community: PublicCommunityRow,
   origin: string,
   branding: PublicCommunityBrandingRow | undefined,
-  mapConfig: PublicMapConfigRow | undefined | null
+  mapConfig: PublicMapConfigRow | undefined | null,
+  offlineMode = false
 ): PublicCommunitySummary {
   const canonicalState = communityFromPhysical({
     publicStories: community.publicStories,
@@ -216,7 +303,9 @@ function projectSummary(
     visibility: canonicalState.visibility,
     status: canonicalState.status,
     branding: projectBranding(community.slug, origin, branding),
-    mapConfig: projectMapConfig(community.slug, origin, mapConfig),
+    mapConfig: projectMapConfig(community.slug, origin, mapConfig, undefined, {
+      offlineMode,
+    }),
     createdAt: community.createdAt.toISOString(),
     updatedAt: community.updatedAt.toISOString(),
   };
@@ -242,7 +331,10 @@ export function projectPointFeature(
 }
 
 export class PublicCommunitiesService {
-  constructor(readonly repository: PublicCommunitiesRepository) {}
+  constructor(
+    readonly repository: PublicCommunitiesRepository,
+    private readonly options: { offlineMode?: boolean } = {}
+  ) {}
 
   async listCommunities(
     search: string | undefined,
@@ -260,7 +352,8 @@ export class PublicCommunitiesService {
           community,
           origin,
           brandings.get(community.id),
-          mapConfigs.get(community.id)
+          mapConfigs.get(community.id),
+          this.options.offlineMode === true
         )
       ),
     });
@@ -346,7 +439,13 @@ export class PublicCommunitiesService {
 
     const parsed = PublicCommunityDetailResponseSchema.safeParse({
       data: {
-        ...projectSummary(community, origin, branding, mapConfig),
+        ...projectSummary(
+          community,
+          origin,
+          branding,
+          mapConfig,
+          this.options.offlineMode === true
+        ),
         storiesCount,
         points: places.map(projectPointFeature),
         categories: [...PUBLIC_COMMUNITY_FILTER_CATEGORIES],

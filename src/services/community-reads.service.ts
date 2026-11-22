@@ -60,8 +60,9 @@ import {
   INTERNAL_ERROR_BODY,
   NOT_FOUND_BODY,
   authenticatedMediaUrl,
+  projectAuthenticatedMapConfig,
+  resolveMapRender,
   projectBranding,
-  projectMapConfig,
   projectPointFeature,
   sanitizePublicDescription,
 } from './public-communities.service.js';
@@ -225,8 +226,16 @@ export function parseCommunityPlacesQuery(
   };
 }
 
+export interface CommunityReadsServiceOptions {
+  mapboxAccessToken?: string;
+  offlineMode?: boolean;
+}
+
 export class CommunityReadsService {
-  constructor(private readonly repository: CommunityReadsRepository) {}
+  constructor(
+    private readonly repository: CommunityReadsRepository,
+    private readonly options: CommunityReadsServiceOptions = {}
+  ) {}
 
   private async authorizeCommunityCaller(actor: FoundationUser): Promise<
     | {
@@ -397,12 +406,16 @@ export class CommunityReadsService {
           detail.branding,
           mediaUrlFor
         ),
-        mapConfig: projectMapConfig(
+        mapConfig: projectAuthenticatedMapConfig(
           detail.community.slug,
           origin,
           detail.mapConfig,
           mediaUrlFor
         ),
+        mapRender: resolveMapRender(detail.mapConfig, {
+          instanceMapboxAccessToken: this.options.mapboxAccessToken,
+          offlineMode: this.options.offlineMode,
+        }),
         storiesCount: detail.storiesCount,
         points: detail.points.map(projectPointFeature),
         categories: [...PUBLIC_COMMUNITY_FILTER_CATEGORIES],
@@ -426,7 +439,16 @@ export class CommunityReadsService {
     const mediaUrlFor = (fileId: string) =>
       authenticatedMediaUrl(origin, fileId);
     return validateResponse(CommunityMapConfigResponseSchema, {
-      data: projectMapConfig(auth.community.slug, origin, row, mediaUrlFor),
+      data: projectAuthenticatedMapConfig(
+        auth.community.slug,
+        origin,
+        row,
+        mediaUrlFor
+      ),
+      render: resolveMapRender(row, {
+        instanceMapboxAccessToken: this.options.mapboxAccessToken,
+        offlineMode: this.options.offlineMode,
+      }),
     });
   }
 

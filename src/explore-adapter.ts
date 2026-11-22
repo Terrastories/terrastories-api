@@ -27,6 +27,7 @@ export interface ExploreAdapterOptions {
   repository: ExploreAdapterRepository;
   storage: FoundationStorage;
   publicOrigin?: string;
+  offlineMode?: boolean;
 }
 
 const notFoundBody = Object.freeze({
@@ -41,7 +42,9 @@ export function registerExploreAdapter(
   app: Hono<any>,
   options: ExploreAdapterOptions
 ): void {
-  const service = new ExploreAdapterService(options.repository);
+  const service = new ExploreAdapterService(options.repository, {
+    offlineMode: options.offlineMode,
+  });
   const respond = (c: Context, result: ExploreResult) =>
     c.json(result.body, result.status);
   const originOf = (url: string) => options.publicOrigin ?? new URL(url).origin;

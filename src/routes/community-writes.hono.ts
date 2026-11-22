@@ -16,6 +16,8 @@ export interface CommunityWriteRoutesOptions {
   readsRepository: CommunityReadsRepository;
   publicOrigin?: string;
   mediaCleanup?: MediaCleanupCoordinator;
+  mapboxAccessToken?: string;
+  offlineMode?: boolean;
 }
 
 const MAX_WRITE_JSON_BYTES = 256 * 1024; // Accommodates DESCRIPTION_MAX_RAW_LENGTH (80k UTF-16 chars)
@@ -69,11 +71,18 @@ export function registerCommunityWriteRoutes(
   app: Hono<any>,
   options: CommunityWriteRoutesOptions
 ): void {
-  const readsService = new CommunityReadsService(options.readsRepository);
+  const readsService = new CommunityReadsService(options.readsRepository, {
+    mapboxAccessToken: options.mapboxAccessToken,
+    offlineMode: options.offlineMode,
+  });
   const service = new CommunityWritesService(
     options.repository,
     readsService,
-    options.mediaCleanup
+    options.mediaCleanup,
+    {
+      mapboxAccessToken: options.mapboxAccessToken,
+      offlineMode: options.offlineMode,
+    }
   );
   const originFor = (c: Context) =>
     options.publicOrigin ?? new URL(c.req.url).origin;

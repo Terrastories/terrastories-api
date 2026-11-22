@@ -51,6 +51,14 @@ export const communityMapConfigsPg = pgTable(
     staticMapFileId: pgUuid('static_map_file_id'),
     createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { precision: 3 }).defaultNow().notNull(),
+    mapboxStyleUrl: pgText('mapbox_style_url'),
+    mapboxAccessToken: pgText('mapbox_access_token'),
+    exposeMapboxCredentials: pgBoolean('expose_mapbox_credentials')
+      .default(false)
+      .notNull(),
+    mapbox3d: pgBoolean('mapbox_3d').default(false).notNull(),
+    protomapsApiKey: pgText('protomaps_api_key'),
+    protomapsBasemapStyle: pgText('protomaps_basemap_style'),
   },
   (table) => ({
     staticMapFileIdx: pgIndex('community_map_configs_static_map_file_idx').on(
@@ -90,6 +98,18 @@ export const communityMapConfigsSqlite = sqliteTable(
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .$defaultFn(() => new Date()),
+    mapboxStyleUrl: sqliteText('mapbox_style_url'),
+    mapboxAccessToken: sqliteText('mapbox_access_token'),
+    exposeMapboxCredentials: integer('expose_mapbox_credentials', {
+      mode: 'boolean',
+    })
+      .default(false)
+      .notNull(),
+    mapbox3d: integer('mapbox_3d', { mode: 'boolean' })
+      .default(false)
+      .notNull(),
+    protomapsApiKey: sqliteText('protomaps_api_key'),
+    protomapsBasemapStyle: sqliteText('protomaps_basemap_style'),
   },
   (table) => ({
     staticMapFileIdx: sqliteIndex(

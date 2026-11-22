@@ -72,13 +72,23 @@ export interface ExploreCommunityRow {
 }
 
 export interface ExploreThemeRow {
+  styleUrl: string | null;
   mapboxStyleUrl: string | null;
+  mapboxAccessToken: string | null;
+  exposeMapboxCredentials: boolean;
+  mapbox3d: boolean;
+  protomapsApiKey: string | null;
+  protomapsBasemapStyle: string | null;
+  mapProjection: string | null;
   centerLat: number | null;
   centerLong: number | null;
   swBoundaryLat: number | null;
   swBoundaryLong: number | null;
   neBoundaryLat: number | null;
   neBoundaryLong: number | null;
+  zoom: number | null;
+  pitch: number | null;
+  bearing: number | null;
 }
 
 export interface ExplorePlaceRow {
@@ -229,13 +239,60 @@ export class ExploreAdapterRepository {
   }
 
   /**
-   * The community's active theme. Multiple active rows (a V1 state the
-   * canonical model collapses) resolve deterministically to the lowest id;
-   * zero rows yield null (an all-null mapConfig).
+   * The community's canonical map configuration, falling back to the legacy
+   * active theme row when no `community_map_configs` row exists. Multiple
+   * active theme rows resolve deterministically to the lowest theme id; zero
+   * rows yield null (an all-null mapConfig).
    */
   async activeTheme(communityId: number): Promise<ExploreThemeRow | null> {
-    const { themes } = this.tables;
-    const rows: ExploreThemeRow[] = await this.database
+    const { communityMapConfigs, themes } = this.tables;
+    const mapConfigRows = await this.database
+      .select({
+        styleUrl: communityMapConfigs.styleUrl,
+        mapboxStyleUrl: communityMapConfigs.mapboxStyleUrl,
+        mapboxAccessToken: communityMapConfigs.mapboxAccessToken,
+        exposeMapboxCredentials: communityMapConfigs.exposeMapboxCredentials,
+        mapbox3d: communityMapConfigs.mapbox3d,
+        protomapsApiKey: communityMapConfigs.protomapsApiKey,
+        protomapsBasemapStyle: communityMapConfigs.protomapsBasemapStyle,
+        mapProjection: communityMapConfigs.projection,
+        centerLat: communityMapConfigs.centerLatitude,
+        centerLong: communityMapConfigs.centerLongitude,
+        swBoundaryLat: communityMapConfigs.southWestLatitude,
+        swBoundaryLong: communityMapConfigs.southWestLongitude,
+        neBoundaryLat: communityMapConfigs.northEastLatitude,
+        neBoundaryLong: communityMapConfigs.northEastLongitude,
+        zoom: communityMapConfigs.zoom,
+        pitch: communityMapConfigs.pitch,
+        bearing: communityMapConfigs.bearing,
+      })
+      .from(communityMapConfigs)
+      .where(eq(communityMapConfigs.communityId, communityId))
+      .limit(1);
+    if (mapConfigRows[0]) {
+      const row = mapConfigRows[0];
+      return {
+        styleUrl: row.styleUrl,
+        mapboxStyleUrl: row.mapboxStyleUrl,
+        mapboxAccessToken: row.mapboxAccessToken,
+        exposeMapboxCredentials: Boolean(row.exposeMapboxCredentials),
+        mapbox3d: Boolean(row.mapbox3d),
+        protomapsApiKey: row.protomapsApiKey,
+        protomapsBasemapStyle: row.protomapsBasemapStyle,
+        mapProjection: row.mapProjection,
+        centerLat: row.centerLat,
+        centerLong: row.centerLong,
+        swBoundaryLat: row.swBoundaryLat,
+        swBoundaryLong: row.swBoundaryLong,
+        neBoundaryLat: row.neBoundaryLat,
+        neBoundaryLong: row.neBoundaryLong,
+        zoom: row.zoom,
+        pitch: row.pitch,
+        bearing: row.bearing,
+      };
+    }
+
+    const rows = await this.database
       .select({
         mapboxStyleUrl: themes.mapboxStyleUrl,
         centerLat: themes.centerLat,
@@ -249,7 +306,27 @@ export class ExploreAdapterRepository {
       .where(and(eq(themes.communityId, communityId), eq(themes.active, true)))
       .orderBy(asc(themes.id))
       .limit(1);
-    return rows[0] ?? null;
+    const legacy = rows[0];
+    if (!legacy) return null;
+    return {
+      styleUrl: legacy.mapboxStyleUrl,
+      mapboxStyleUrl: null,
+      mapboxAccessToken: null,
+      exposeMapboxCredentials: false,
+      mapbox3d: false,
+      protomapsApiKey: null,
+      protomapsBasemapStyle: null,
+      mapProjection: null,
+      centerLat: legacy.centerLat,
+      centerLong: legacy.centerLong,
+      swBoundaryLat: legacy.swBoundaryLat,
+      swBoundaryLong: legacy.swBoundaryLong,
+      neBoundaryLat: legacy.neBoundaryLat,
+      neBoundaryLong: legacy.neBoundaryLong,
+      zoom: null,
+      pitch: null,
+      bearing: null,
+    };
   }
 
   /** Publicly readable stories of the community (Rails `anonymous` audience). */

@@ -53,6 +53,7 @@ const app = createHonoApp({
   // production-like modes; prelogin fails closed when absent.
   serverSecret: runtimeConfig.serverSecret,
   bootstrapSecret: runtimeConfig.bootstrapSecret,
+  requireRecoveryCodes: true,
   publicOrigin: runtimeConfig.publicOrigin,
   corsOrigins: runtimeConfig.corsOrigins,
   // HTTP cookies are allowed only for this opt-in loopback development listener.

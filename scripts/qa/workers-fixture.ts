@@ -14,6 +14,7 @@
  * derived key directly; no password KDF runs inside workerd.
  */
 import { drizzle } from 'drizzle-orm/d1';
+import { sql } from 'drizzle-orm';
 import {
   applyD1Migrations,
   bundleWorkerModule,
@@ -119,6 +120,7 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
         if (response.status !== 200) throw new Error('Erasure cron failed');
       },
       seedBaseline: () => seedPersonaBaseline(db),
+      seededAdminsHaveRecoveryCodes: true,
       serverSecret,
       putMedia: (key, bytes) => bucket.put(key, bytes),
       hasMedia: async (key) => (await bucket.head(key)) !== null,
@@ -142,5 +144,26 @@ export async function createFixture({ baseUrl }: { baseUrl?: string } = {}) {
   // createHonoPersonaFixture owns backend.close from here: it disposes the
   // runtime on seeding failures and wires it into the returned fixture's
   // close.
-  return createHonoPersonaFixture({ backend });
+  const fixture = await createHonoPersonaFixture({ backend });
+  // The worker enforces the SPEC-V2 §7 recovery-code gate (#254): give every
+  // seeded community administrator an active recovery code so the journeys
+  // reach their routes. Gate behaviour itself is covered by
+  // tests/hono/recovery-code-gate.test.ts.
+  try {
+    await backend.db.run(
+      sql`INSERT INTO login_codes (community_id, user_id, purpose, code_hash, created_by, created_at)
+          SELECT community_id, id, 'recovery', 'seeded-recovery-' || id, id, 0
+          FROM users u
+          WHERE role = 'admin' AND community_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM login_codes c
+              WHERE c.user_id = u.id AND c.purpose = 'recovery'
+                AND c.used_at IS NULL AND c.superseded_at IS NULL
+            )`
+    );
+  } catch (error) {
+    await fixture.close().catch(() => undefined);
+    throw error;
+  }
+  return fixture;
 }

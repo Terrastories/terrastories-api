@@ -34,18 +34,30 @@ The capture tool records the selected contract profile, observed `schema_migrati
 
 If the source predates, postdates, or has unreviewed schema versions beyond the two supported pins, capture fails closed rather than silently accepting an unreviewed source. Extend and review the source contract before capturing that deployment. If application tables exist outside PostgreSQL's `public` schema, Stage 1 likewise fails closed rather than silently skipping them.
 
-## ActiveStorage prerequisite
+## ActiveStorage blob source
 
-Database rows alone are not a complete Terrastories migration. Export the bytes for every `active_storage_blobs.key` before capture.
+Database rows alone are not a complete Terrastories migration. Every selected ActiveStorage blob is verified by byte size, Rails base64-MD5 checksum (when present), and SHA-256 before the bundle is accepted. Missing, truncated, changed, or corrupt media fails the entire capture.
 
-The `--blob-root` directory may use either:
+Stage 1 supports two `--blob-source` modes:
 
-1. a flat object-store export where each object is stored as `<blob-root>/<key>`; or
-2. Rails DiskService layout `<blob-root>/<first 2 chars>/<next 2 chars>/<key>`.
+1. **`disk` (default)** — reads from `--blob-root`, which may use either a flat export (`<blob-root>/<key>`) or Rails DiskService layout (`<blob-root>/<first 2 chars>/<next 2 chars>/<key>`).
+2. **`s3`** — streams objects directly over AWS Signature Version 4 (`GET`) from `--s3-bucket` and `--s3-region` (with optional `--s3-prefix` and `--blob-concurrency`, default `4`, with bounded retries and exponential backoff). By default, ActiveStorage keys are fetched directly at `<key>` (or `<prefix>/<key>` if `--s3-prefix` is provided).
 
-The tool rejects unsafe keys, requires bytes for every ActiveStorage blob, checks the source byte size, verifies the Rails base64-MD5 checksum when present, copies the file, then re-checks the written destination bytes and records SHA-256. Missing, truncated, changed, or corrupt media fails the entire capture.
+For `--blob-source s3`, credentials are read **exclusively from environment variables**:
 
-For S3-backed legacy installations, make a complete trusted local export of the object keys before invoking the tool. Do not put S3 credentials into the bundle or command output.
+- `AWS_ACCESS_KEY_ID` (required)
+- `AWS_SECRET_ACCESS_KEY` (required)
+- `AWS_SESSION_TOKEN` (optional, for temporary STS credentials)
+
+Never pass AWS credentials on the command line or store them in `manifest.json` or `validation-summary.txt`.
+
+## Community allowlist (`--community`)
+
+By default, Stage 1 downloads every row in `active_storage_blobs`. When staging or migrating a subset of communities (for example, capturing a single pilot community from a large production S3 bucket), pass `--community <id|slug>` one or more times:
+
+- **All relational source rows are still captured losslessly** in `legacy.sqlite` across every table and community.
+- **Only blobs reachable from the selected communities are downloaded**: attachments on `Community`, `Place`, `Speaker`, `Theme`, `User`, and `Media` (via `stories.community_id`) belonging to those communities, plus transitive `ActiveStorage::VariantRecord` and `ActiveStorage::Blob` `preview_image` blobs derived from them.
+- **Every other blob is recorded in `manifest.json` with `disposition: "not_selected"`** (preserving `key`, `byteSize`, and `railsChecksum`, with `sha256: null` and no bytes written under `blobs/`), and `validation-summary.txt` reports both `Blobs selected` and `Blobs not_selected` counts.
 
 ## Database credentials
 
@@ -60,12 +72,28 @@ export PGPASSFILE=/trusted/path/terrastories.pgpass
 
 Use a source URL that contains the host/user/database identity but not the password. Keep the password file and any environment configuration outside the repository and remove/rotate temporary migration credentials after the operation.
 
-## Capture command
+## Capture commands
+
+Local disk export (full):
 
 ```bash
 npm run migrate:rails:capture -- \
   --source 'postgresql://USER@HOST:PORT/DATABASE' \
   --blob-root /trusted/path/to/active-storage-export \
+  --output /trusted/path/to/terrastories-rails-bundle
+```
+
+S3 single-community staging capture (credentials from environment only):
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+npm run migrate:rails:capture -- \
+  --source 'postgresql://USER@HOST:PORT/DATABASE' \
+  --blob-source s3 \
+  --s3-bucket BUCKET_NAME \
+  --s3-region us-east-2 \
+  --community my-community-slug \
   --output /trusted/path/to/terrastories-rails-bundle
 ```
 

@@ -238,7 +238,7 @@ export interface CommunityExportSnapshot {
   attachments: ExportAttachmentRow[];
   externalMediaLinks: ExportExternalMediaLinkRow[];
   legacyCommunityMedia: ExportLegacyCommunityMediaRow[];
-  importManifests: ImportManifest[];
+  importManifests: Array<ImportManifest & { sourceFilePurged: boolean }>;
   auditEntries: ExportAuditEntryRow[];
 }
 
@@ -782,6 +782,43 @@ export class CommunityExportRepository {
         }
       : null;
 
+    // Discarded/expired/failed import previews purge the source CSV bytes but
+    // must keep the inactive `files` row (composite FK from import_manifests).
+    // Those tombstones have no bytes by design, so they are not export media.
+    // Anything else (active, attached, map/legacy-media referenced, or tied to a
+    // previewed/committed manifest) stays in the snapshot and is still verified
+    // fail-closed against stored bytes.
+    const liveSourceIds = new Set<string>();
+    const deadSourceIds = new Set<string>();
+    for (const row of importRows) {
+      const id = String(row.sourceFileId);
+      if (row.status === 'discarded' || row.status === 'failed') {
+        deadSourceIds.add(id);
+      } else {
+        liveSourceIds.add(id);
+      }
+    }
+    const referencedFileIds = new Set<string>();
+    for (const row of attRows) {
+      if (typeof row.fileId === 'string') referencedFileIds.add(row.fileId);
+    }
+    for (const row of cmRows) referencedFileIds.add(String(row.fileId));
+    if (rawMap && rawMap.staticMapFileId != null) {
+      referencedFileIds.add(String(rawMap.staticMapFileId));
+    }
+    const tombstonedSourceFileIds = new Set<string>();
+    for (const row of fileRows) {
+      const id = String(row.id);
+      if (
+        !toBool(row.isActive) &&
+        deadSourceIds.has(id) &&
+        !liveSourceIds.has(id) &&
+        !referencedFileIds.has(id)
+      ) {
+        tombstonedSourceFileIds.add(id);
+      }
+    }
+
     return {
       community,
       mapConfig,
@@ -862,6 +899,7 @@ export class CommunityExportRepository {
         updatedAt: toDate(row.updatedAt),
       })),
       files: fileRows
+        .filter((row) => !tombstonedSourceFileIds.has(String(row.id)))
         .map((row) => ({
           id: String(row.id),
           communityId,
@@ -919,6 +957,9 @@ export class CommunityExportRepository {
         sourceFileName:
           row.sourceFileName === null ? null : String(row.sourceFileName),
         sourceFileId: String(row.sourceFileId),
+        // True when the source CSV row is a purged tombstone omitted from
+        // `files`; consumers must not expect that file in the archive.
+        sourceFilePurged: tombstonedSourceFileIds.has(String(row.sourceFileId)),
         mappings: parseJsonColumn(row.mappings) as ImportManifest['mappings'],
         normalizedRows: parseJsonColumn(
           row.normalizedRows

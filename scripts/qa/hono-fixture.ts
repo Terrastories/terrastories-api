@@ -6037,6 +6037,9 @@ export async function createFixture(
       crypto.getRandomValues(new Uint8Array(32))
     );
     const mediaGuardedPath = `communities/${mediaCommunity.id}/media/${mediaGuardedFileId}`;
+    // Real bytes so community export (fail-closed on missing bytes of live
+    // files) stays valid; the guard probes below only depend on the DB row.
+    await putMedia(mediaGuardedPath, mediaGuardedBytes);
     await db.insert(files).values({
       id: mediaGuardedFileId,
       filename: `${mediaGuardedFileId}.png`,
@@ -10673,6 +10676,17 @@ export async function createFixture(
             path: `/v2/imports/${foreignImportManifest.id}`,
             expected: 404,
             check: publicNotFoundCheck,
+          },
+          {
+            // Discarded previews keep an inactive source-CSV files row whose
+            // bytes are purged; export must skip it, not fail with 503.
+            name: 'export community succeeds after import previews were discarded',
+            method: 'POST',
+            path: '/v2/community/export',
+            expected: 201,
+            body: {},
+            check: (body: unknown) =>
+              CreateCommunityExportResponseSchema.safeParse(body).success,
           },
           {
             name: 'logout',

@@ -175,7 +175,8 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
       });
       expect(run.manifest.dispositions.users).toMatchObject({
         imported: 6,
-        not_selected: 2,
+        not_selected: 0,
+        archived: 2,
         manual: 5,
       });
       expect(run.manifest.idRemaps.users).toEqual([]);
@@ -686,6 +687,26 @@ describeWithPostgres('Rails -> V2 SQLite transform (Stage 2)', () => {
         allowManual: true,
       })
     ).rejects.toThrow(/matched no source community/);
+  });
+
+  it('raises sqlite_sequence to the max source id so new rows never reuse legacy ids', async () => {
+    const run = await transform({
+      communities: ['rio_verde'],
+      allowManual: true,
+    });
+    const db = new Database(join(run.dir, 'v2.sqlite'));
+    const seq = db
+      .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'communities'")
+      .get() as { seq: number };
+    // community 11 is not imported but its id stays reserved
+    expect(seq.seq).toBeGreaterThanOrEqual(11);
+    const inserted = db
+      .prepare(
+        "INSERT INTO communities (name, slug, locale, is_active, created_at, updated_at) VALUES ('n', 'brand-new', 'en', 1, 1, 1)"
+      )
+      .run();
+    expect(Number(inserted.lastInsertRowid)).toBeGreaterThan(11);
+    db.close();
   });
 
   it('imports null-community super_admins only with --include-system-users', async () => {

@@ -35,6 +35,8 @@ import {
   sanitizePublicMapboxToken,
 } from '../../shared/utils/map-config.js';
 import { normalizeSearchText } from '../../shared/utils/search-normalize.js';
+import { storySlugBase } from '../../shared/utils/story-slug.js';
+import { isSafeExternalMediaUrl } from '../../shared/schemas/public-content.js';
 import type { SourceRow, VerifiedBundle } from './bundle-reader.js';
 import {
   COLUMN_DISPOSITIONS,
@@ -150,6 +152,11 @@ export interface TransformPlan {
   unregisteredColumns: string[];
   curriculumUseDetected: number;
   idRemaps: Record<string, Array<{ from: string; to: string }>>;
+  /**
+   * Highest source id per canonical table (including rows left out of the
+   * canonical set), so new rows never reuse a legacy id.
+   */
+  sequenceFloors: Record<string, number>;
 }
 
 const ROLE_MAP: Record<string, string> = {
@@ -231,14 +238,14 @@ function parseDecimal(
 }
 
 function storySlug(title: string, id: number): string {
-  const base = title
-    .normalize('NFKD')
-    .replace(/\p{M}/gu, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60);
+  const base = storySlugBase(title);
   return base.length > 0 ? base + '-' + id : 'story-' + id;
+}
+
+function descriptionCode(outcome: 'manual' | 'too_long'): string {
+  return outcome === 'too_long'
+    ? 'description_exceeds_max_length'
+    : 'description_unprocessable';
 }
 
 function numericCompare(left: string, right: string): number {
@@ -381,13 +388,36 @@ export function planTransform(
     }
   }
   const allMode = selectors.length === 0;
+  // A partial (community_allowlist) capture is incomplete source data: a full
+  // run over it would silently look like a whole-instance migration.
+  if (bundle.manifest.complete !== true) {
+    if (allMode) {
+      throw new Error(
+        'Bundle is a partial capture (manifest complete is not true); a full run is refused. Pass --community limited to communities captured in the bundle'
+      );
+    }
+    const captured = new Set(
+      (bundle.manifest.blobSelection?.communities ?? []).map((c) =>
+        String(c.id)
+      )
+    );
+    for (const id of selectedIds) {
+      if (!captured.has(String(id))) {
+        throw new Error(
+          'Selected community ' +
+            id +
+            ' is outside the partial bundle capture selection; recapture it or select only captured communities'
+        );
+      }
+    }
+  }
   const communityInfo = new Map<number, CommunityInfo>();
 
   const describe = (
     table: string,
     row: SourceRow,
     column: string
-  ): { html: string | null; plain: string | null } | 'manual' => {
+  ): { html: string | null; plain: string | null } | 'manual' | 'too_long' => {
     const raw = row[column];
     if (raw === null || raw === undefined || raw.trim() === '') {
       return { html: null, plain: null };
@@ -398,9 +428,7 @@ export function planTransform(
         archiveField(table, row, column, 'ARCHIVE');
         event(table + '.' + column + ':sanitized');
       }
-      if (sanitized.exceedsMaxLength) {
-        warn('description_exceeds_max_length', table, row.id ?? null);
-      }
+      if (sanitized.exceedsMaxLength) return 'too_long';
       if (sanitized.html === '') return { html: null, plain: null };
       const plain = descriptionPlainText(sanitized.html).trim();
       return { html: sanitized.html, plain: plain === '' ? null : plain };
@@ -475,8 +503,8 @@ export function planTransform(
         continue;
       }
       const description = describe('communities', row, 'description');
-      if (description === 'manual') {
-        reject('communities', row, 'manual', 'description_unprocessable');
+      if (typeof description === 'string') {
+        reject('communities', row, 'manual', descriptionCode(description));
         continue;
       }
       let locale = row.locale;
@@ -587,8 +615,25 @@ export function planTransform(
       let communityId: number | null = null;
       if (row.community_id === null) {
         if (!includeSystemUsers) {
-          setStatus('users', idText, 'not_selected');
-          warn('system_user_not_selected', 'users', idText);
+          if (!allMode) {
+            setStatus('users', idText, 'not_selected');
+            warn('system_user_not_selected', 'users', idText);
+            continue;
+          }
+          // Full run: never drop a null-community account. A super_admin is
+          // archived (restricted); anything else cannot be placed -> MANUAL.
+          if (row.role !== '100') {
+            reject('users', row, 'manual', 'null_community_user');
+          } else {
+            setStatus('users', idText, 'archived');
+            warn('system_user_archived', 'users', idText);
+            archivedRows.push({
+              table: 'users',
+              id: idText,
+              reason: 'system_user_not_imported',
+              row,
+            });
+          }
           continue;
         }
       } else {
@@ -741,6 +786,18 @@ export function planTransform(
         }
       }
     }
+    // A null-community super_admin shares the login namespace with every
+    // community user at runtime (loginCandidates without a slug), so a shared
+    // email would leave the super_admin unable to log in.
+    for (const group of emailOwners.values()) {
+      const hasSystem = group.some((c) => c.communityId === null);
+      const hasCommunity = group.some((c) => c.communityId !== null);
+      if (hasSystem && hasCommunity) {
+        for (const c of group) {
+          flagged.set(c.row.id ?? '', 'super_admin_email_collision');
+        }
+      }
+    }
     for (const candidate of candidates) {
       if (candidate.usernameNorm === null) continue;
       const owners = (emailOwners.get(candidate.usernameNorm) ?? []).filter(
@@ -824,10 +881,10 @@ export function planTransform(
       code = 'coordinate_out_of_range';
     }
     const description = describe('places', row, 'description');
-    if (code === null && description === 'manual') {
-      code = 'description_unprocessable';
+    if (code === null && typeof description === 'string') {
+      code = descriptionCode(description);
     }
-    if (code !== null || !stamps || description === 'manual') {
+    if (code !== null || !stamps || typeof description === 'string') {
       placeMap.set(id, { community: result.id, status: 'manual' });
       reject('places', row, 'manual', code);
       continue;
@@ -966,13 +1023,13 @@ export function planTransform(
       }
     }
     const description = describe('stories', row, 'desc');
-    if (code === null && description === 'manual') {
-      code = 'description_unprocessable';
+    if (code === null && typeof description === 'string') {
+      code = descriptionCode(description);
     }
     if (
       code !== null ||
       !stamps ||
-      description === 'manual' ||
+      typeof description === 'string' ||
       visibility === undefined
     ) {
       storyMap.set(id, { community: result.id, status });
@@ -1141,6 +1198,10 @@ export function planTransform(
       if (!story) continue;
       if (row.url === null || row.url.trim() === '') {
         reject('media_links', row, 'manual', 'url_missing');
+        continue;
+      }
+      if (row.url.length > 2048 || !isSafeExternalMediaUrl(row.url)) {
+        reject('media_links', row, 'manual', 'url_invalid');
         continue;
       }
       const stamps = timestamps('media_links', row, ['created_at']);
@@ -1337,8 +1398,10 @@ export function planTransform(
   for (const row of rows('curriculums')) {
     const owner = userCommunity.get(row.user_id ?? '') ?? null;
     const result = scope(owner, false);
+    // Full run: every curriculum is archived, even with a null/missing owner.
+    // Scoped run: archived only when the owner's community is selected.
     const status: RowStatus =
-      result.kind === 'skip' && result.status === 'not_selected'
+      !allMode && result.kind === 'skip' && result.status === 'not_selected'
         ? 'not_selected'
         : 'archived';
     curriculumStatus.set(row.id ?? '', status);
@@ -1354,7 +1417,15 @@ export function planTransform(
     }
   }
   for (const row of rows('curriculum_stories')) {
+    const storyId = toId(row.story_id);
+    const storyCommunity =
+      storyId === null ? null : (storyMap.get(storyId)?.community ?? null);
+    const storySelected =
+      storyCommunity !== null &&
+      communityInfo.get(storyCommunity)?.selected === true;
     const status: RowStatus =
+      allMode ||
+      storySelected ||
       curriculumStatus.get(row.curriculum_id ?? '') === 'archived'
         ? 'archived'
         : 'not_selected';
@@ -1610,6 +1681,25 @@ export function planTransform(
     statusCounts[table] = counts;
   }
 
+  const sequenceFloors: Record<string, number> = {};
+  for (const [canonicalTable, sourceTable] of [
+    ['communities', 'communities'],
+    ['users', 'users'],
+    ['places', 'places'],
+    ['speakers', 'speakers'],
+    ['stories', 'stories'],
+    ['story_places', 'places_stories'],
+    ['story_speakers', 'speaker_stories'],
+    ['external_media_links', 'media_links'],
+  ] as const) {
+    let max = 0;
+    for (const row of rows(sourceTable)) {
+      const id = toId(row.id);
+      if (id !== null && id > max) max = id;
+    }
+    sequenceFloors[canonicalTable] = max;
+  }
+
   for (const table of CANONICAL_TABLES) {
     const key = table === 'community_map_configs' ? 'community_id' : 'id';
     canonical[table].sort((a, b) => (a[key] as number) - (b[key] as number));
@@ -1663,5 +1753,6 @@ export function planTransform(
     unregisteredColumns,
     curriculumUseDetected,
     idRemaps: Object.fromEntries(CANONICAL_TABLES.map((t) => [t, []])),
+    sequenceFloors,
   };
 }

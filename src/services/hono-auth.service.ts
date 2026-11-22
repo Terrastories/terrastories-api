@@ -572,7 +572,12 @@ export class HonoAuthService {
     if (algorithm === RAILS_BCRYPT_ALGORITHM) {
       // The stored verifier is SHA-256 of the Rails bcrypt hash string, and the
       // client sends that same string as `derivedKey` (§7 step 4).
-      if (!constantTimeEqual(digest, stored)) return { ok: false };
+      // The stored verifier wraps the canonical $2b$ form ($2a$/$2b$/$2y$ are
+      // byte-identical past the prefix), so normalize before hashing.
+      const bcryptDigest = await sha256Hex(
+        input.derivedKey.replace(/^\$2[ay]\$/, () => '$2b$')
+      );
+      if (!constantTimeEqual(bcryptDigest, stored)) return { ok: false };
       // A migrated account must upgrade in this same request; the upgrade must
       // be present, Argon2id, at or above the policy, and carry a usable salt.
       const upgrade = input.upgrade;

@@ -10,13 +10,23 @@
  *   validation-summary.txt counts only; no contents or secrets
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  readdir,
+  rename,
+  rmdir,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { openVerifiedBundle } from './bundle-reader.js';
+import { fsyncPath } from '../rails/fsync.js';
 import { COLUMN_DISPOSITIONS } from './dispositions.js';
 import {
   CANONICAL_TABLES,
@@ -142,6 +152,25 @@ function writeCanonicalDatabase(path: string, plan: TransformPlan): void {
         insertRows(database, table, plan.canonical[table]);
       }
     })();
+    // Post-migration rows must never reuse a legacy id, including ids of rows
+    // that were left out of the canonical set (not_selected / MANUAL).
+    for (const [table, floor] of Object.entries(plan.sequenceFloors)) {
+      if (floor <= 0) continue;
+      const definition = database
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?"
+        )
+        .get(table) as { sql: string } | undefined;
+      if (!definition || !/AUTOINCREMENT/i.test(definition.sql)) continue;
+      const updated = database
+        .prepare('UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?')
+        .run(floor, table);
+      if (updated.changes === 0) {
+        database
+          .prepare('INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)')
+          .run(table, floor);
+      }
+    }
     const violations = database.pragma('foreign_key_check') as unknown[];
     if (violations.length > 0) {
       throw new Error('V2 output failed foreign-key validation');
@@ -258,6 +287,7 @@ export async function transformRailsBundle(
   }
   const bundle = await openVerifiedBundle(options.bundleDir);
   let temporaryDir: string | null = null;
+  let destinationClaimed = false;
   try {
     const plan = planTransform(bundle, {
       ...(options.communities ? { communities: options.communities } : {}),
@@ -270,6 +300,17 @@ export async function transformRailsBundle(
     await mkdir(dirname(outputDir), { recursive: true });
     temporaryDir = outputDir + '.tmp-' + randomUUID();
     await mkdir(temporaryDir, { recursive: false, mode: 0o700 });
+    // Atomically claim the destination as an empty directory so a concurrent
+    // creator fails here instead of racing the final rename (as Stage 1 does).
+    try {
+      await mkdir(outputDir, { recursive: false, mode: 0o700 });
+      destinationClaimed = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error('Refusing to overwrite existing output path');
+      }
+      throw error;
+    }
 
     const canonicalCounts = Object.fromEntries(
       CANONICAL_TABLES.map((table) => [table, plan.canonical[table].length])
@@ -342,13 +383,26 @@ export async function transformRailsBundle(
       { encoding: 'utf8', mode: 0o600 }
     );
 
+    for (const name of await readdir(temporaryDir)) {
+      await fsyncPath(join(temporaryDir, name));
+    }
+    await fsyncPath(temporaryDir);
+    if ((await readdir(outputDir)).length > 0) {
+      throw new Error('Output destination changed during transform');
+    }
     await rename(temporaryDir, outputDir);
+    destinationClaimed = false;
     temporaryDir = null;
+    await fsyncPath(dirname(outputDir));
     return manifest;
   } finally {
     bundle.close();
     if (temporaryDir !== null) {
       await rm(temporaryDir, { recursive: true, force: true });
+    }
+    if (destinationClaimed) {
+      // Remove only our own still-empty claim; never a populated directory.
+      await rmdir(outputDir).catch(() => undefined);
     }
   }
 }

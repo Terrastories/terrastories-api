@@ -452,6 +452,23 @@ describe('POST /v2/auth/login (#137 item 3)', () => {
     expect(row?.passwordSalt).not.toBe(wrappedSalt);
   });
 
+  it('normalizes a $2a$-prefixed bcrypt key to the canonical $2b$ verifier', async () => {
+    const { postLogin, wrappedKey } = await setup();
+    const aPrefixed = '$2a$' + wrappedKey.slice(4);
+    expect(aPrefixed).not.toBe(wrappedKey);
+    const login = await postLogin({
+      identifier: 'wrapped@login.example.test',
+      derivedKey: aPrefixed,
+      upgrade: {
+        algorithm: ARGON2ID_ALGORITHM,
+        salt: makeVerifierSalt(),
+        params: { ...ARGON2ID_PARAMS },
+        derivedKey: makeDerivedKey(),
+      },
+    });
+    expect(login.status).toBe(200);
+  });
+
   it('answers a bcrypt-shaped key sent to an Argon2id account with the uniform 401', async () => {
     const { postLogin, wrappedKey } = await setup();
     // The wire shape is not the algorithm selector: a valid bcrypt-shaped key

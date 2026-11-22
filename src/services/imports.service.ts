@@ -83,6 +83,7 @@ import {
   StoryLanguageSchema,
 } from '../shared/schemas/story-writes.js';
 import { isSafeExternalMediaUrl } from '../shared/schemas/public-content.js';
+import { storySlugBase } from '../shared/utils/story-slug.js';
 import type { V2ErrorResponse } from '../shared/schemas/public-communities.js';
 import {
   ATTACHMENT_ROLE_ALLOWED_CATEGORIES,
@@ -216,13 +217,7 @@ function concatChunks(chunks: Uint8Array[], totalLength: number): Uint8Array {
 }
 
 function buildUniqueStorySlug(title: string): string {
-  const base = title
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60);
+  const base = storySlugBase(title);
   const suffix = globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 12);
   return base.length > 0 ? `${base}-${suffix}` : `story-${suffix}`;
 }

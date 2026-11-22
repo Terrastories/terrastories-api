@@ -3815,15 +3815,23 @@ export async function createFixture(
           // search filter: it must never surface unreadable stories.
           name: `v2 stories plain-text search stays within readable stories (${role})`,
           method: 'GET',
-          path: '/v2/stories?search=QA',
+          path: '/v2/stories?search=public%20story',
           expected: 200,
           check: (body) => {
             const parsed = CommunityStoriesListResponseSchema.safeParse(body);
             if (!parsed.success) return false;
             const text = JSON.stringify(body) ?? '';
+            const stories = parsed.data.data.stories;
+            // Non-empty, narrower than the unfiltered list (so an ignored
+            // `search` fails), and only readable, matching stories.
             return (
-              parsed.data.data.stories.every((s) =>
-                expectedStoryIds.includes(s.id)
+              stories.length > 0 &&
+              stories.length < expectedStoryIds.length &&
+              parsed.data.meta.total === stories.length &&
+              stories.every(
+                (s) =>
+                  expectedStoryIds.includes(s.id) &&
+                  s.title.toLowerCase().includes('public story')
               ) &&
               !text.includes('QA restricted story') &&
               !text.includes('QA unknown-privacy') &&

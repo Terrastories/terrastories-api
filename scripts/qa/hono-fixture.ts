@@ -7490,6 +7490,115 @@ export async function createFixture(
                 backend?.seededAdminsHaveRecoveryCodes === true
             ),
           },
+          // Self-service login-identifier edit (member persona): step-up on
+          // the current credential, admin-parity identity rules, the uniform
+          // 409 and session retention. The identifiers are restored so the
+          // rest of the journey keeps its seeded credentials.
+          ...(role === 'member'
+            ? [
+                {
+                  name: 'reject own identifier change without step-up',
+                  method: 'PATCH',
+                  path: '/v2/auth/me',
+                  expected: 403,
+                  body: { username: 'qa_hono_member_renamed' },
+                  check: uniformForbidden,
+                },
+                {
+                  name: 'reject own identifier change with the wrong current key',
+                  method: 'PATCH',
+                  path: '/v2/auth/me',
+                  expected: 403,
+                  body: {
+                    username: 'qa_hono_member_renamed',
+                    currentDerivedKey: toHex(
+                      crypto.getRandomValues(new Uint8Array(32))
+                    ),
+                  },
+                  check: uniformForbidden,
+                },
+                {
+                  name: 'reject own username colliding with another account',
+                  method: 'PATCH',
+                  path: '/v2/auth/me',
+                  expected: 409,
+                  body: {
+                    username: 'qa_hono_viewer',
+                    currentDerivedKey: derivedKey,
+                  },
+                  check: (body: unknown) =>
+                    keysExactly(body, ['error']) &&
+                    (body as { error?: string }).error === 'Conflict',
+                },
+                {
+                  name: 'reject own email colliding with a community peer',
+                  method: 'PATCH',
+                  path: '/v2/auth/me',
+                  expected: 409,
+                  body: {
+                    email: credentials.viewer.email.toUpperCase(),
+                    currentDerivedKey: derivedKey,
+                  },
+                },
+                {
+                  name: 'reject malformed own email',
+                  method: 'PATCH',
+                  path: '/v2/auth/me',
+                  expected: 400,
+                  body: {
+                    email: 'not-an-email',
+                    currentDerivedKey: derivedKey,
+                  },
+                },
+                {
+                  name: 'change own username and email with step-up',
+                  method: 'PATCH',
+                  path: '/v2/auth/me',
+                  expected: 200,
+                  body: {
+                    username: 'qa_hono_member_renamed',
+                    email: 'qa-hono-member-renamed@example.test',
+                    currentDerivedKey: derivedKey,
+                  },
+                  check: (body: unknown) => {
+                    const user = (body as { user?: Record<string, unknown> })
+                      .user;
+                    return (
+                      user?.username === 'qa_hono_member_renamed' &&
+                      user?.email === 'qa-hono-member-renamed@example.test' &&
+                      user?.role === 'member' &&
+                      !leaksSecret(body, liveSessionCookie)
+                    );
+                  },
+                },
+                {
+                  name: 'session survives the identifier change',
+                  method: 'GET',
+                  path: '/v2/auth/me',
+                  expected: 200,
+                  check: (body: unknown) =>
+                    (body as { user?: { username?: unknown } }).user
+                      ?.username === 'qa_hono_member_renamed',
+                },
+                {
+                  name: 'restore own username and email with step-up',
+                  method: 'PATCH',
+                  path: '/v2/auth/me',
+                  expected: 200,
+                  body: {
+                    username: 'qa_hono_member',
+                    email: credentials.member.email,
+                    currentDerivedKey: derivedKey,
+                  },
+                  check: ownUser(
+                    credentials.member.email,
+                    'member',
+                    liveSessionCookie,
+                    communityId
+                  ),
+                },
+              ]
+            : []),
           // #191 option A across the full claimed matrix: member — the
           // persona whose canonical role would grant the community audience —
           // joins editor and community admin in driving the authenticated

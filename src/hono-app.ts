@@ -63,6 +63,7 @@ import {
 } from './services/hono-foundation.service.js';
 import { HonoAuthRepository } from './repositories/hono-auth.repository.js';
 import { HonoAuthService } from './services/hono-auth.service.js';
+import { CONFLICT_BODY } from './services/community-writes.service.js';
 
 export type RequestHandler = (request: Request) => Promise<Response>;
 export interface FoundationOptions {
@@ -150,9 +151,21 @@ const loginSchema = z
   .strict();
 const mePatchSchema = z
   .object({
-    displayName: z.string().trim().min(1).max(255).nullable(),
+    displayName: z.string().trim().min(1).max(255).nullable().optional(),
+    // Same bounds as the admin edit (src/shared/schemas/users-admin.ts).
+    username: z.string().trim().min(1).max(254).optional(),
+    email: z.string().trim().email().max(254).optional(),
+    // Step-up: required (checked in the service, uniformly) whenever a login
+    // identifier changes; ignored for a display-name-only patch.
+    currentDerivedKey: derivedKeyWire.optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.displayName !== undefined ||
+      value.username !== undefined ||
+      value.email !== undefined
+  );
 const passwordChangeSchema = z
   .object({
     // A still-wrapped account verifies its bcrypt hash string as the current
@@ -185,7 +198,8 @@ export function createHonoApp(options: FoundationOptions) {
   const authService = new HonoAuthService(
     authRepository,
     options.repository,
-    options.serverSecret
+    options.serverSecret,
+    new UserManagementRepository(options.repository.connection)
   );
   const authRecoveryService = new AuthRecoveryService(
     new AuthRecoveryRepository(options.repository.connection),
@@ -480,15 +494,35 @@ export function createHonoApp(options: FoundationOptions) {
     const parsed = mePatchSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);
     const actor = c.get('actor');
-    // Only the display name, never role, status, communityId, username or
-    // email (SPEC-V2 §6.2): parsing here, the normalisation + write live in
-    // the service layer.
-    const displayName = await authService.updateOwnProfile(
-      actor,
-      parsed.data.displayName,
-      now()
+    const { displayName, username, email, currentDerivedKey } = parsed.data;
+    if (username === undefined && email === undefined) {
+      // Display name only (the refine guarantees it is present): no step-up.
+      const stored = await authService.updateOwnProfile(
+        actor,
+        displayName ?? null,
+        now()
+      );
+      return c.json({ user: publicUser({ ...actor, displayName: stored }) });
+    }
+    // A login identifier changes: step-up on the current credential, then the
+    // admin-parity identity write (never role, status or communityId).
+    const result = await authService.updateOwnIdentifiers(
+      { user: actor, currentDerivedKey, displayName, username, email },
+      ipFor(c),
+      now(),
+      c.req.header('user-agent')
     );
-    return c.json({ user: publicUser({ ...actor, displayName }) });
+    if (result.status === 'forbidden')
+      return c.json({ error: 'Forbidden' }, 403);
+    if (result.status === 'conflict') return c.json(CONFLICT_BODY, 409);
+    return c.json({
+      user: publicUser({
+        ...actor,
+        displayName: result.displayName,
+        username: result.username,
+        email: result.email,
+      }),
+    });
   });
   app.post('/v2/auth/password', jsonBody4k, async (c) => {
     if (

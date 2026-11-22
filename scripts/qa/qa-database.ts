@@ -16,6 +16,8 @@
  * PostgreSQL schema where SQLite-only behaviour (collation, timestamps,
  * booleans, JSON) cannot hide a sovereignty leak.
  */
+import { mkdtempSync, rmdirSync, unlinkSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
@@ -62,6 +64,12 @@ export interface PersonaQaDatabase {
    * so callers must invoke it only after seeded journeys complete.
    */
   openFresh: () => Promise<WidenedQaDatabase>;
+  /**
+   * Restart proof (SQLite only): close the fresh install's database and
+   * reopen a NEW handle over the same file. Absent on PostgreSQL, whose
+   * `openFresh` resets the shared schema and so has no reopen-in-place.
+   */
+  reopenFresh?: () => Promise<WidenedQaDatabase>;
   close: () => Promise<void>;
 }
 
@@ -278,22 +286,37 @@ export async function openPersonaQaDatabase(): Promise<PersonaQaDatabase> {
     const manager = new TestDatabaseManager();
     const db = await manager.setup();
     const freshSqlites: Database.Database[] = [];
+    // The fresh install lives in a temp-file database so it can be closed and
+    // reopened; the directory is created lazily and cleaned with fs APIs.
+    let freshDir: string | undefined;
+    let freshFile: string | undefined;
+    const openFreshFile = (migrateFirst: boolean) => {
+      const sqlite = new Database(freshFile!);
+      try {
+        sqlite.pragma('foreign_keys = ON');
+        const freshDb = drizzleSqlite(sqlite);
+        if (migrateFirst)
+          migrateSqlite(freshDb, { migrationsFolder: sqliteMigrations });
+        freshSqlites.push(sqlite);
+        return freshDb;
+      } catch (error) {
+        sqlite.close();
+        throw error;
+      }
+    };
     return {
       dialect: 'sqlite',
       db,
       seed: () => manager.seedTestData(),
       openFresh: async () => {
-        const sqlite = new Database(':memory:');
-        try {
-          sqlite.pragma('foreign_keys = ON');
-          const freshDb = drizzleSqlite(sqlite);
-          migrateSqlite(freshDb, { migrationsFolder: sqliteMigrations });
-          freshSqlites.push(sqlite);
-          return freshDb;
-        } catch (error) {
-          sqlite.close();
-          throw error;
-        }
+        freshDir ??= mkdtempSync(join(tmpdir(), 'tsapi-qa-fresh-'));
+        freshFile = join(freshDir, 'fresh.sqlite');
+        return openFreshFile(true);
+      },
+      reopenFresh: async () => {
+        if (!freshFile) throw new Error('Fresh database was never opened');
+        while (freshSqlites.length > 0) freshSqlites.pop()!.close();
+        return openFreshFile(false);
       },
       close: async () => {
         const errors: unknown[] = [];
@@ -306,6 +329,17 @@ export async function openPersonaQaDatabase(): Promise<PersonaQaDatabase> {
           const sqlite = freshSqlites.pop()!;
           try {
             sqlite.close();
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        if (freshDir && freshFile) {
+          try {
+            for (const suffix of ['', '-wal', '-shm', '-journal']) {
+              const target = freshFile + suffix;
+              if (existsSync(target)) unlinkSync(target);
+            }
+            rmdirSync(freshDir);
           } catch (error) {
             errors.push(error);
           }

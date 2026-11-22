@@ -3758,6 +3758,156 @@ export async function createFixture(
             ? [speaker.id, communitySpeaker.id, restrictedBirthplaceSpeaker.id]
             : [speaker.id]
       ).sort((a, b) => a - b);
+      // Rails-shaped list interactions (UI INTERACTIONS B09): sort, pagination
+      // and the story filters. Expectations are derived per role from the
+      // seeded rows, so a broken sort, a limit/offset that is ignored, or a
+      // filter that is ignored (or ORed instead of ANDed) changes the exact
+      // ordered id list and fails.
+      const readableStoryRows = [
+        communityStory,
+        editorsStory,
+        publicStory,
+        unevidencedStory,
+      ].filter((s) => expectedStoryIds.includes(s.id));
+      const titleAscIds = [...readableStoryRows]
+        .sort((a, b) =>
+          a.title === b.title ? a.id - b.id : a.title < b.title ? -1 : 1
+        )
+        .map((s) => s.id);
+      const titleDescIds = [...titleAscIds].reverse();
+      const newestIds = [...readableStoryRows]
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() ||
+            b.id - a.id
+        )
+        .map((s) => s.id);
+      if (newestIds.join(',') === titleAscIds.join(',')) {
+        throw new Error('QA fixture: newest and title_asc must differ');
+      }
+      const storyListIs =
+        (
+          ids: number[],
+          total: number,
+          page?: { limit: number; offset: number }
+        ) =>
+        (body: unknown): boolean => {
+          const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+          if (!parsed.success) return false;
+          const { meta, data } = parsed.data;
+          return (
+            meta.total === total &&
+            data.stories.map((s) => s.id).join(',') === ids.join(',') &&
+            (page === undefined ||
+              (meta.limit === page.limit &&
+                meta.offset === page.offset &&
+                meta.hasNextPage === page.offset + page.limit < total))
+          );
+        };
+      const sortSteps: Step[] = [
+        ['newest', newestIds],
+        ['title_desc', titleDescIds],
+      ].map(([sort, ids]) => ({
+        name: `v2 stories sort=${sort as string} orders exactly (${role})`,
+        method: 'GET' as const,
+        path: `/v2/stories?sort=${sort as string}`,
+        expected: 200,
+        check: storyListIs(ids as number[], titleAscIds.length),
+      }));
+      const pageSteps: Step[] = [
+        { limit: 1, offset: 0 },
+        { limit: 1, offset: 1 },
+        { limit: 2, offset: 1 },
+        { limit: 2, offset: titleAscIds.length },
+      ].map(({ limit, offset }) => ({
+        name: `v2 stories page limit=${limit} offset=${offset} slices the title_asc order (${role})`,
+        method: 'GET' as const,
+        path: `/v2/stories?sort=title_asc&limit=${limit}&offset=${offset}`,
+        expected: 200,
+        check: storyListIs(
+          titleAscIds.slice(offset, offset + limit),
+          titleAscIds.length,
+          { limit, offset }
+        ),
+      }));
+      const idsByTitle = (rows: Array<{ id: number }>): number[] =>
+        titleAscIds.filter((id) => rows.some((r) => r.id === id));
+      const filterCases: Array<[string, string, number[]]> = [
+        [
+          'typeOfPlace public type',
+          'typeOfPlace=QA%20public%20place%20type',
+          idsByTitle(
+            canReadCommunity ? [communityStory, publicStory] : [publicStory]
+          ),
+        ],
+        [
+          'typeOfPlace village',
+          'typeOfPlace=village',
+          idsByTitle(canReadCommunity ? [communityStory] : []),
+        ],
+        [
+          'typeOfPlace sacred_grove',
+          'typeOfPlace=sacred_grove',
+          idsByTitle(canReadEditors ? [editorsStory] : []),
+        ],
+        [
+          'region Manaus',
+          'region=Manaus',
+          idsByTitle(canReadCommunity ? [communityStory] : []),
+        ],
+        [
+          'region Negro',
+          'region=Negro',
+          idsByTitle(canReadEditors ? [editorsStory] : []),
+        ],
+        [
+          'region and typeOfPlace are ANDed',
+          'region=Manaus&typeOfPlace=sacred_grove',
+          [],
+        ],
+        [
+          'topic',
+          'topic=QA%20community%20topic',
+          idsByTitle(canReadCommunity ? [communityStory] : []),
+        ],
+        [
+          'topic is case-insensitive',
+          'topic=qa%20COMMUNITY%20topic',
+          idsByTitle(canReadCommunity ? [communityStory] : []),
+        ],
+        [
+          'language qa-community-lang',
+          'language=qa-community-lang',
+          idsByTitle(canReadCommunity ? [communityStory] : []),
+        ],
+        [
+          'language en',
+          'language=en',
+          idsByTitle(
+            canReadEditors
+              ? [editorsStory, publicStory, unevidencedStory]
+              : [publicStory, unevidencedStory]
+          ),
+        ],
+        ['language of a hidden members story', 'language=qa-members-lang', []],
+        [
+          'affiliation',
+          'affiliation=QA%20community%20affiliation',
+          idsByTitle(canReadCommunity ? [communityStory] : []),
+        ],
+        [
+          'affiliation of a hidden members speaker',
+          'affiliation=QA%20members-only%20affiliation',
+          [],
+        ],
+      ];
+      const filterSteps: Step[] = filterCases.map(([label, query, ids]) => ({
+        name: `v2 stories filter ${label} (${role})`,
+        method: 'GET' as const,
+        path: `/v2/stories?${query}&sort=title_asc`,
+        expected: 200,
+        check: storyListIs(ids, ids.length),
+      }));
       const mediaPrefix = '/v2/media/';
       return [
         {
@@ -3896,6 +4046,9 @@ export async function createFixture(
             );
           },
         },
+        ...sortSteps,
+        ...pageSteps,
+        ...filterSteps,
         {
           name: `v2 stories filter excludes #162 and unauthorized places (${role})`,
           method: 'GET',
@@ -5725,6 +5878,71 @@ export async function createFixture(
         .returning();
       userCommunityIds[role] = qaUser.id;
     }
+    // Self-service and disable fixtures: a dedicated private community so the
+    // password change (which revokes the account's other sessions) and the
+    // disable/re-enable cycle cannot disturb the shared persona credentials or
+    // the exact user lists pinned by the user-management journeys.
+    const [selfServiceCommunity] = await db
+      .insert(communities)
+      .values({
+        name: 'QA self-service community',
+        slug: 'qa-self-service-community',
+        publicStories: false,
+        isActive: true,
+      })
+      .returning();
+    const selfServiceCredentials = {
+      admin: { email: 'qa-selfsvc-admin@example.test', role: 'admin' },
+      member: { email: 'qa-selfsvc-member@example.test', role: 'member' },
+      editor: { email: 'qa-selfsvc-editor@example.test', role: 'editor' },
+      target: { email: 'qa-selfsvc-target@example.test', role: 'viewer' },
+    } as const;
+    const selfServiceIds: Record<string, number> = {};
+    for (const key of ['admin', 'member', 'editor', 'target'] as const) {
+      const [selfServiceUser] = await db
+        .insert(users)
+        .values({
+          email: selfServiceCredentials[key].email,
+          ...deriveUserIdentityColumns({
+            email: selfServiceCredentials[key].email,
+          }),
+          ...verifier,
+          firstName: 'QA',
+          lastName: `SelfService${key}`,
+          role: sql`${selfServiceCredentials[key].role}`,
+          communityId: selfServiceCommunity.id,
+          isActive: true,
+        })
+        .returning();
+      selfServiceIds[key] = selfServiceUser.id;
+    }
+    // Self-service / disable journey helpers (dedicated accounts only).
+    const ssOwn = (key: 'admin' | 'member' | 'editor' | 'target') =>
+      ownUser(
+        selfServiceCredentials[key].email,
+        selfServiceCredentials[key].role,
+        liveSessionCookie,
+        selfServiceCommunity.id
+      );
+    const ssMe =
+      (key: 'member' | 'editor', displayName?: string) => (body: unknown) =>
+        ownMeUser(
+          selfServiceCredentials[key].email,
+          selfServiceCredentials[key].role,
+          liveSessionCookie,
+          selfServiceCommunity.id
+        )(body) &&
+        (displayName === undefined ||
+          (body as { user?: { displayName?: unknown } }).user?.displayName ===
+            displayName);
+    const ssStatus = (status: string) => (body: unknown) =>
+      (body as { data?: { status?: unknown } })?.data?.status === status;
+    const ssLogout: Step = {
+      name: 'logout',
+      method: 'POST',
+      path: '/v2/auth/logout',
+      expected: 204,
+    };
     // The verifier material for the account created through POST /v2/users,
     // so that account can log in with a device session in the journeys.
     const qaManagedDerivedKey = toHex(
@@ -5862,7 +6080,25 @@ export async function createFixture(
     };
     const mediaMetadataCheck = (body: unknown): boolean =>
       MediaMetadataResponseSchema.safeParse(body).success;
+    const mediaBrandingIs =
+      (opts: { background: boolean; sponsors: boolean }) =>
+      (body: unknown): boolean => {
+        const parsed = CommunityReadDetailResponseSchema.safeParse(body);
+        if (!parsed.success) return false;
+        const branding = parsed.data.data.branding;
+        const sponsorIds = branding.sponsorLogos.map((s) => s.fileId);
+        return (
+          (branding.backgroundImage?.fileId === qaAdminFileId) ===
+            opts.background &&
+          (branding.backgroundImage === null) === !opts.background &&
+          sponsorIds.includes(qaAdminFileId) === opts.sponsors &&
+          sponsorIds.length === (opts.sponsors ? 1 : 0)
+        );
+      };
     let qaManagedUserId = 0;
+    const selfServiceMemberNewKey = toHex(
+      crypto.getRandomValues(new Uint8Array(32))
+    );
     let qaIssuedLoginCode = '';
     let qaDisabledRecoveredAdminLoginCode = '';
     let qaRecoveryCode = '';
@@ -10111,16 +10347,56 @@ export async function createFixture(
             },
           },
           {
+            name: 'admin attaches community background image',
+            method: 'POST',
+            path: '/v2/attachments',
+            expected: 201,
+            captureId: 'qaBackgroundAtt',
+            body: {
+              fileId: '{qaAdminFile}',
+              ownerType: 'community',
+              ownerId: mediaCommunity.id,
+              role: 'community_background_image',
+            },
+          },
+          {
             name: 'admin attaches sponsor logo',
             method: 'POST',
             path: '/v2/attachments',
             expected: 201,
+            captureId: 'qaSponsorAtt',
             body: {
               fileId: '{qaAdminFile}',
               ownerType: 'community',
               ownerId: mediaCommunity.id,
               role: 'sponsor_logo',
             },
+          },
+          {
+            name: 'community branding shows the background image and the sponsor logo',
+            method: 'GET',
+            path: '/v2/community',
+            expected: 200,
+            check: mediaBrandingIs({ background: true, sponsors: true }),
+          },
+          {
+            name: 'admin detaches sponsor logo',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaSponsorAtt}',
+            expected: 204,
+          },
+          {
+            name: 'community branding drops the sponsor logo and keeps the background image',
+            method: 'GET',
+            path: '/v2/community',
+            expected: 200,
+            check: mediaBrandingIs({ background: true, sponsors: false }),
+          },
+          {
+            name: 'admin detached sponsor logo cannot be detached twice',
+            method: 'DELETE',
+            path: '/v2/attachments/{qaSponsorAtt}',
+            expected: 404,
           },
           {
             name: 'admin attaches static map image',
@@ -10515,6 +10791,359 @@ export async function createFixture(
             path: '/v2/auth/logout',
             expected: 204,
           },
+        ],
+      },
+      {
+        // Self-service profile edits for non-super_admin community roles
+        // (UI INTERACTIONS B02/B04). Dedicated accounts: the password change
+        // revokes the account's other sessions and installs a new verifier,
+        // so no shared persona credential is touched.
+        persona: 'self_service_member',
+        steps: [
+          {
+            name: 'login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              'x-forwarded-for': '203.0.113.171',
+              'cf-connecting-ip': '203.0.113.171',
+            },
+            body: loginBody(selfServiceCredentials.member.email),
+            check: ssOwn('member'),
+          },
+          {
+            name: 'member reads own profile before the edit',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'qaSelfServiceFirstCookie',
+            check: (body) =>
+              ssMe('member')(body) &&
+              (body as { user?: { displayName?: unknown } }).user
+                ?.displayName !== 'QA Self Service Member',
+          },
+          {
+            name: 'member patches own display name',
+            method: 'PATCH',
+            path: '/v2/auth/me',
+            expected: 200,
+            body: { displayName: 'QA Self Service Member' },
+            check: (body) =>
+              ssOwn('member')(body) &&
+              (body as { user?: { displayName?: unknown; id?: unknown } }).user
+                ?.displayName === 'QA Self Service Member' &&
+              (body as { user?: { id?: unknown } }).user?.id ===
+                selfServiceIds.member,
+          },
+          {
+            name: 'member display name change persists on re-read',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: ssMe('member', 'QA Self Service Member'),
+          },
+          {
+            name: 'member cannot escalate role through the profile patch',
+            method: 'PATCH',
+            path: '/v2/auth/me',
+            expected: 400,
+            body: { displayName: 'QA Self Service Member', role: 'admin' },
+          },
+          {
+            name: 'member role is unchanged after the rejected patch',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: ssMe('member', 'QA Self Service Member'),
+          },
+          {
+            // A second device: an empty presented cookie keeps the first
+            // session alive so the password change can be proven to revoke it.
+            name: 'member opens a second session',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: 'ts_session=',
+              'x-forwarded-for': '203.0.113.171',
+              'cf-connecting-ip': '203.0.113.171',
+            },
+            body: loginBody(selfServiceCredentials.member.email),
+            check: ssOwn('member'),
+          },
+          {
+            name: 'member changes own password',
+            method: 'POST',
+            path: '/v2/auth/password',
+            expected: 200,
+            body: {
+              currentDerivedKey: derivedKey,
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: verifierSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: selfServiceMemberNewKey,
+            },
+            checkHeaders: hasSessionCookie,
+          },
+          {
+            name: 'member first session is revoked by the password change',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 401,
+            useSavedCookie: 'qaSelfServiceFirstCookie',
+          },
+          {
+            name: 'member current session survives the password change',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: ssMe('member', 'QA Self Service Member'),
+          },
+          {
+            name: 'member password change with the old key as current is refused',
+            method: 'POST',
+            path: '/v2/auth/password',
+            expected: 401,
+            body: {
+              currentDerivedKey: derivedKey,
+              algorithm: ARGON2ID_ALGORITHM,
+              salt: verifierSalt,
+              params: JSON.parse(ARGON2ID_PARAMS_JSON),
+              derivedKey: toHex(crypto.getRandomValues(new Uint8Array(32))),
+            },
+            check: invalidCredentials,
+          },
+          ssLogout,
+          {
+            name: 'member old password no longer authenticates',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              'x-forwarded-for': '203.0.113.172',
+              'cf-connecting-ip': '203.0.113.172',
+            },
+            body: loginBody(selfServiceCredentials.member.email),
+            check: invalidCredentials,
+          },
+          {
+            name: 'member new password authenticates',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              'x-forwarded-for': '203.0.113.173',
+              'cf-connecting-ip': '203.0.113.173',
+            },
+            body: {
+              identifier: selfServiceCredentials.member.email,
+              derivedKey: selfServiceMemberNewKey,
+            },
+            check: (body) =>
+              ssOwn('member')(body) &&
+              (body as { user?: { displayName?: unknown } }).user
+                ?.displayName === 'QA Self Service Member',
+          },
+          ssLogout,
+        ],
+      },
+      {
+        persona: 'self_service_editor',
+        steps: [
+          {
+            name: 'login',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              'x-forwarded-for': '203.0.113.174',
+              'cf-connecting-ip': '203.0.113.174',
+            },
+            body: loginBody(selfServiceCredentials.editor.email),
+            check: ssOwn('editor'),
+          },
+          {
+            name: 'editor patches own display name',
+            method: 'PATCH',
+            path: '/v2/auth/me',
+            expected: 200,
+            body: { displayName: 'QA Self Service Editor' },
+            check: (body) =>
+              ssOwn('editor')(body) &&
+              (body as { user?: { displayName?: unknown } }).user
+                ?.displayName === 'QA Self Service Editor',
+          },
+          {
+            name: 'editor rejects a blank display name',
+            method: 'PATCH',
+            path: '/v2/auth/me',
+            expected: 400,
+            body: { displayName: '   ' },
+          },
+          {
+            name: 'editor display name keeps the last valid value',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            check: ssMe('editor', 'QA Self Service Editor'),
+          },
+          ssLogout,
+        ],
+      },
+      {
+        // Admin disables a community user (UI INTERACTIONS D05 alternative:
+        // deactivate instead of delete) and the disabled account is refused.
+        persona: 'user_disable',
+        steps: [
+          {
+            name: 'target logs in before it is disabled',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              'x-forwarded-for': '203.0.113.175',
+              'cf-connecting-ip': '203.0.113.175',
+            },
+            body: loginBody(selfServiceCredentials.target.email),
+            check: ssOwn('target'),
+          },
+          {
+            name: 'target session is live before it is disabled',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 200,
+            saveCookieAs: 'qaDisableTargetCookie',
+          },
+          {
+            name: 'admin logs in',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: 'ts_session=',
+              'x-forwarded-for': '203.0.113.176',
+              'cf-connecting-ip': '203.0.113.176',
+            },
+            body: loginBody(selfServiceCredentials.admin.email),
+            check: ssOwn('admin'),
+          },
+          {
+            name: 'admin disables the target account',
+            method: 'PATCH',
+            path: `/v2/users/${selfServiceIds.target}`,
+            expected: 200,
+            body: { status: 'disabled' },
+            check: (body) => {
+              const data = (body as { data?: Record<string, unknown> })?.data;
+              return (
+                !!data &&
+                data.id === selfServiceIds.target &&
+                data.status === 'disabled' &&
+                data.role === 'viewer' &&
+                !('passwordVerifier' in data) &&
+                !('passwordHash' in data)
+              );
+            },
+          },
+          {
+            name: 'admin reads the target as disabled',
+            method: 'GET',
+            path: `/v2/users/${selfServiceIds.target}`,
+            expected: 200,
+            check: ssStatus('disabled'),
+          },
+          {
+            name: 'other accounts stay active',
+            method: 'GET',
+            path: `/v2/users/${selfServiceIds.editor}`,
+            expected: 200,
+            check: ssStatus('active'),
+          },
+          {
+            name: 'disabled target existing session is purged',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 401,
+            useSavedCookie: 'qaDisableTargetCookie',
+          },
+          {
+            name: 'disabled target login with the correct key is refused',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 401,
+            headers: {
+              cookie: 'ts_session=',
+              'x-forwarded-for': '203.0.113.177',
+              'cf-connecting-ip': '203.0.113.177',
+            },
+            body: loginBody(selfServiceCredentials.target.email),
+            check: invalidCredentials,
+            checkHeaders: hasNoSessionCookie,
+          },
+          {
+            name: 'enabled account still logs in while the target is disabled',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: 'ts_session=',
+              'x-forwarded-for': '203.0.113.178',
+              'cf-connecting-ip': '203.0.113.178',
+            },
+            body: loginBody(selfServiceCredentials.editor.email),
+            check: ssOwn('editor'),
+          },
+          {
+            name: 'editor cannot re-enable a disabled account',
+            method: 'PATCH',
+            path: `/v2/users/${selfServiceIds.target}`,
+            expected: 403,
+            body: { status: 'active' },
+            check: forbiddenCheck,
+          },
+          {
+            name: 'admin logs in again',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: 'ts_session=',
+              'x-forwarded-for': '203.0.113.179',
+              'cf-connecting-ip': '203.0.113.179',
+            },
+            body: loginBody(selfServiceCredentials.admin.email),
+            check: ssOwn('admin'),
+          },
+          {
+            name: 'admin re-enables the target account',
+            method: 'PATCH',
+            path: `/v2/users/${selfServiceIds.target}`,
+            expected: 200,
+            body: { status: 'active' },
+            check: ssStatus('active'),
+          },
+          {
+            name: 're-enabled target pre-disable session stays purged',
+            method: 'GET',
+            path: '/v2/auth/me',
+            expected: 401,
+            useSavedCookie: 'qaDisableTargetCookie',
+          },
+          {
+            name: 're-enabled target logs in again',
+            method: 'POST',
+            path: '/v2/auth/login',
+            expected: 200,
+            headers: {
+              cookie: 'ts_session=',
+              'x-forwarded-for': '203.0.113.180',
+              'cf-connecting-ip': '203.0.113.180',
+            },
+            body: loginBody(selfServiceCredentials.target.email),
+            check: ssOwn('target'),
+          },
+          ssLogout,
         ],
       },
       {

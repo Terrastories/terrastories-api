@@ -1016,16 +1016,33 @@ export function planTransform(
   }
 
   // ---- story edges -------------------------------------------------------
+  // Orphan rows (an endpoint without a source row) are MANUAL when their
+  // surviving endpoint belongs to a selected community, and in a full run
+  // (SPEC-V2 §10.2). In a scoped run an orphan unrelated to the selection is
+  // recorded as not_selected.
+  const orphan = (
+    table: string,
+    row: SourceRow,
+    survivor: number | null | undefined,
+    code: string
+  ): void => {
+    const related =
+      survivor !== null &&
+      survivor !== undefined &&
+      communityInfo.get(survivor)?.selected === true;
+    if (allMode || related) {
+      reject(table, row, 'manual', code);
+    } else {
+      warn('orphan_row_not_selected', table, row.id ?? null);
+      reject(table, row, 'not_selected', null);
+    }
+  };
   const resolveStory = (
     table: string,
-    row: SourceRow
+    row: SourceRow,
+    story: Entity,
+    storyId: number
   ): { storyId: number; community: number; createdMs: number } | null => {
-    const storyId = toId(row.story_id);
-    const story = storyId === null ? undefined : storyMap.get(storyId);
-    if (storyId === null || !story) {
-      reject(table, row, 'manual', 'story_missing');
-      return null;
-    }
     if (story.status === 'not_selected') {
       reject(table, row, 'not_selected', null);
       return null;
@@ -1051,12 +1068,29 @@ export function planTransform(
         reject(table, row, 'manual', 'invalid_id');
         continue;
       }
-      const story = resolveStory(table, row);
-      if (!story) continue;
+      const storyId = toId(row.story_id);
+      const story = storyId === null ? undefined : storyMap.get(storyId);
+      const otherId = toId(row[otherColumn]);
+      const other = otherId === null ? undefined : otherMap.get(otherId);
+      if (!story || !other || storyId === null) {
+        if (!story && !other) orphan(table, row, null, 'orphan_edge');
+        else if (!story) orphan(table, row, other?.community, 'story_missing');
+        else {
+          orphan(
+            table,
+            row,
+            story.community,
+            otherColumn === 'place_id' ? 'place_missing' : 'speaker_missing'
+          );
+        }
+        continue;
+      }
+      const resolved = resolveStory(table, row, story, storyId);
+      if (!resolved) continue;
       const check = refCheck(
         otherMap,
         row[otherColumn] ?? null,
-        story.community
+        resolved.community
       );
       if (check !== 'ok') {
         const [status, code] =
@@ -1066,17 +1100,17 @@ export function planTransform(
         reject(table, row, status, code);
         continue;
       }
-      const ordinal = perStory.get(story.storyId) ?? 0;
-      perStory.set(story.storyId, ordinal + 1);
+      const ordinal = perStory.get(resolved.storyId) ?? 0;
+      perStory.set(resolved.storyId, ordinal + 1);
       setStatus(table, row.id ?? '', 'imported');
       canonical[canonicalTable].push({
         id,
-        community_id: story.community,
-        story_id: story.storyId,
-        [otherColumn]: toId(row[otherColumn]),
+        community_id: resolved.community,
+        story_id: resolved.storyId,
+        [otherColumn]: otherId,
         sort_order: ordinal,
-        created_at: story.createdMs,
-        updated_at: story.createdMs,
+        created_at: resolved.createdMs,
+        updated_at: resolved.createdMs,
       });
     }
   }
@@ -1090,7 +1124,14 @@ export function planTransform(
         reject('media_links', row, 'manual', 'invalid_id');
         continue;
       }
-      const story = resolveStory('media_links', row);
+      const linkStoryId = toId(row.story_id);
+      const linkStory =
+        linkStoryId === null ? undefined : storyMap.get(linkStoryId);
+      if (!linkStory || linkStoryId === null) {
+        orphan('media_links', row, null, 'story_missing');
+        continue;
+      }
+      const story = resolveStory('media_links', row, linkStory, linkStoryId);
       if (!story) continue;
       if (row.url === null || row.url.trim() === '') {
         reject('media_links', row, 'manual', 'url_missing');
@@ -1308,29 +1349,37 @@ export function planTransform(
   const mediaStory = new Map(
     mediaRows.map((row) => [row.id ?? '', row.story_id] as const)
   );
-  const entityCommunity = (
-    map: Map<number, Entity>,
-    idText: string
-  ): number | null => map.get(toId(idText) ?? -1)?.community ?? null;
-  const ownerCommunity = (
-    recordType: string,
-    recordId: string,
-    depth = 0
-  ): number | null => {
+  type Owner = number | 'system' | null;
+  const entityOwner = (map: Map<number, Entity>, idText: string): Owner => {
+    const community = map.get(toId(idText) ?? -1)?.community ?? null;
+    return community !== null && communityInfo.has(community)
+      ? community
+      : null;
+  };
+  const ownerOf = (recordType: string, recordId: string, depth = 0): Owner => {
     if (depth > 3) return null;
     switch (recordType) {
-      case 'Community':
-        return toId(recordId);
+      case 'Community': {
+        const id = toId(recordId);
+        return id !== null && communityInfo.has(id) ? id : null;
+      }
       case 'Place':
-        return entityCommunity(placeMap, recordId);
+        return entityOwner(placeMap, recordId);
       case 'Speaker':
-        return entityCommunity(speakerMap, recordId);
-      case 'User':
-        return toId(userCommunity.get(recordId) ?? null);
-      case 'Theme':
-        return toId(themeCommunity.get(recordId) ?? null);
+        return entityOwner(speakerMap, recordId);
+      case 'User': {
+        if (!userCommunity.has(recordId)) return null;
+        const community = userCommunity.get(recordId) ?? null;
+        if (community === null) return 'system';
+        const id = toId(community);
+        return id !== null && communityInfo.has(id) ? id : null;
+      }
+      case 'Theme': {
+        const id = toId(themeCommunity.get(recordId) ?? null);
+        return id !== null && communityInfo.has(id) ? id : null;
+      }
       case 'Media':
-        return entityCommunity(storyMap, mediaStory.get(recordId) ?? '');
+        return entityOwner(storyMap, mediaStory.get(recordId) ?? '');
       case 'ActiveStorage::VariantRecord': {
         const variant = variantRecords.find((row) => row.id === recordId);
         return variant ? viaBlob(variant.blob_id ?? '', depth + 1) : null;
@@ -1341,14 +1390,14 @@ export function planTransform(
         return null;
     }
   };
-  const viaBlob = (blobId: string, depth: number): number | null => {
+  const viaBlob = (blobId: string, depth: number): Owner => {
     for (const attachment of attachments) {
       if (
         attachment.blob_id === blobId &&
         attachment.record_type !== 'ActiveStorage::VariantRecord' &&
         attachment.record_type !== 'ActiveStorage::Blob'
       ) {
-        return ownerCommunity(
+        return ownerOf(
           attachment.record_type ?? '',
           attachment.record_id ?? '',
           depth
@@ -1357,41 +1406,74 @@ export function planTransform(
     }
     return null;
   };
-  const mediaStatus = (community: number | null): RowStatus => {
-    const info = community === null ? undefined : communityInfo.get(community);
-    return info !== undefined && !info.selected
-      ? 'not_selected'
-      : 'pending_media_slice';
+  // pending_media_slice applies only to rows reachable from a selected
+  // community (the same reachability as the Stage-1 blob allowlist). Rows
+  // without an attributable owner are MANUAL in full runs, not_selected in
+  // scoped runs.
+  const settleMedia = (
+    table: string,
+    row: SourceRow,
+    owner: Owner,
+    unattributedCode: string
+  ): 'pending_media_slice' | 'not_selected' | null => {
+    if (owner === null) {
+      orphan(table, row, null, unattributedCode);
+      return null;
+    }
+    if (owner === 'system') {
+      if (includeSystemUsers) {
+        setStatus(table, row.id ?? '', 'pending_media_slice');
+        return 'pending_media_slice';
+      }
+      setStatus(table, row.id ?? '', 'not_selected');
+      return 'not_selected';
+    }
+    const info = communityInfo.get(owner);
+    if (!info?.selected) {
+      setStatus(table, row.id ?? '', 'not_selected');
+      return 'not_selected';
+    }
+    if (!info.accepted) {
+      reject(table, row, 'excluded_dependency', 'community_excluded');
+      return null;
+    }
+    setStatus(table, row.id ?? '', 'pending_media_slice');
+    return 'pending_media_slice';
   };
-  const pendingAttachments: PendingAttachment[] = attachments.map((row) => {
-    const communityId = ownerCommunity(
-      row.record_type ?? '',
-      row.record_id ?? ''
+  const pendingAttachments: PendingAttachment[] = [];
+  for (const row of attachments) {
+    const owner = ownerOf(row.record_type ?? '', row.record_id ?? '');
+    const status = settleMedia(
+      'active_storage_attachments',
+      row,
+      owner,
+      'attachment_unattributable'
     );
-    const status = mediaStatus(communityId) as PendingAttachment['status'];
-    setStatus('active_storage_attachments', row.id ?? '', status);
-    return {
+    if (status === null) continue;
+    pendingAttachments.push({
       id: row.id ?? '',
       recordType: row.record_type ?? '',
       name: row.name ?? '',
       recordId: row.record_id ?? '',
       blobId: row.blob_id ?? '',
-      communityId,
+      communityId: typeof owner === 'number' ? owner : null,
       status,
-    };
-  });
+    });
+  }
   for (const row of mediaRows) {
-    setStatus(
+    settleMedia(
       'media',
-      row.id ?? '',
-      mediaStatus(entityCommunity(storyMap, row.story_id ?? ''))
+      row,
+      entityOwner(storyMap, row.story_id ?? ''),
+      'media_story_missing'
     );
   }
   for (const row of variantRecords) {
-    setStatus(
+    settleMedia(
       'active_storage_variant_records',
-      row.id ?? '',
-      mediaStatus(ownerCommunity('ActiveStorage::VariantRecord', row.id ?? ''))
+      row,
+      ownerOf('ActiveStorage::VariantRecord', row.id ?? ''),
+      'variant_unattributable'
     );
   }
   const pendingBlobs = bundle.manifest.blobs

@@ -16,6 +16,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  notInArray,
   or,
   sql,
 } from 'drizzle-orm';
@@ -1941,6 +1942,59 @@ export class CommunitySovereigntyRepository {
       .limit(10) as Promise<
       Array<{ id: string; storageKey: string | null; path: string }>
     >;
+  }
+
+  /**
+   * True when the erased community may delete the bytes behind `key`: a
+   * legacy key, its own `communities/<id>/` prefix, or the prefix of one of
+   * its users, and no `files` row outside the erased set points at the key
+   * (canonical `storage_key` or legacy `path`, as the orphan sweeper checks).
+   * Two bound key parameters plus a user lookup stay far below D1's limit.
+   */
+  async erasureMayDeleteKey(
+    communityId: number,
+    key: string
+  ): Promise<boolean> {
+    const t = this.tables;
+    const owned = /^(communities|users)\/([1-9][0-9]*)\//.exec(key);
+    if (owned) {
+      const id = Number(owned[2]);
+      if (!Number.isSafeInteger(id)) return false;
+      if (owned[1] === 'communities') {
+        if (id !== communityId) return false;
+      } else {
+        const rows = await this.db
+          .select({ id: t.users.id })
+          .from(t.users)
+          .where(and(eq(t.users.id, id), eq(t.users.communityId, communityId)))
+          .limit(1);
+        if (rows.length === 0) return false;
+      }
+    } else if (!key.startsWith('legacy/')) {
+      return false;
+    }
+    const others = await this.db
+      .select({ id: t.files.id })
+      .from(t.files)
+      .where(
+        and(
+          or(eq(t.files.storageKey, key), eq(t.files.path, key)),
+          // Complement of legacyErasureFilesPredicate, NULL-safe.
+          or(
+            isNotNull(t.files.communityId),
+            isNull(t.files.uploadedBy),
+            notInArray(
+              t.files.uploadedBy,
+              this.db
+                .select({ id: t.users.id })
+                .from(t.users)
+                .where(eq(t.users.communityId, communityId))
+            )
+          )
+        )
+      )
+      .limit(1);
+    return others.length === 0;
   }
 
   async clearErasureLegacyFile(communityId: number, id: string): Promise<void> {

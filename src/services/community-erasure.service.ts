@@ -64,12 +64,45 @@ export class CommunityErasureService {
     communityId: number,
     budget: number
   ): Promise<number> {
+    let unaddressable = 0;
+    try {
+      return await this.deleteLegacyFilesBatch(
+        communityId,
+        budget,
+        () => unaddressable++
+      );
+    } finally {
+      if (unaddressable > 0)
+        // eslint-disable-next-line no-console
+        console.warn(
+          `Community erasure cleared ${unaddressable} legacy file row(s) with unaddressable storage keys`
+        );
+    }
+  }
+
+  private async deleteLegacyFilesBatch(
+    communityId: number,
+    budget: number,
+    unaddressableSeen: () => void
+  ): Promise<number> {
     for (const file of await this.repository.erasureLegacyFiles(communityId)) {
       const cost = (this.storage.erasureDeleteCost ?? 1) + 1;
       if (budget < cost) return 0;
       const key = file.storageKey ?? file.path;
-      if (!validStorageKey(key) && !validLegacyStorageKey(key))
-        throw new Error('Invalid legacy erasure key');
+      if (!validStorageKey(key) && !validLegacyStorageKey(key)) {
+        // Cannot address bytes through any adapter: drop the pointer only.
+        unaddressableSeen();
+        await this.repository.clearErasureLegacyFile(communityId, file.id);
+        budget -= 1;
+        continue;
+      }
+      // Never delete bytes another tenant/row still references, nor keys
+      // outside legacy/, this community's prefix or its users' prefixes.
+      if (!(await this.repository.erasureMayDeleteKey(communityId, key))) {
+        await this.repository.clearErasureLegacyFile(communityId, file.id);
+        budget -= 1;
+        continue;
+      }
       await this.storage.delete!(key);
       // Do not use read(): runtime serving intentionally rejects legacy keys.
       // An exact key sorts before every longer key sharing this prefix.

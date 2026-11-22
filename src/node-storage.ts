@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  lstat,
   mkdir,
   open,
   readdir,
@@ -282,7 +283,6 @@ export async function createLocalStorage(
     async delete(key) {
       if (!validStorageKey(key) && !validLegacyStorageKey(key)) return;
       try {
-        const filename = await realpath(path.resolve(root, key));
         const tenantRoot = path.resolve(
           root,
           key
@@ -290,8 +290,16 @@ export async function createLocalStorage(
             .slice(0, validLegacyStorageKey(key) ? 1 : 2)
             .join('/')
         );
-        if (!filename.startsWith(tenantRoot + path.sep))
+        const target = path.resolve(root, key);
+        // Resolve only the parent, never the final component, so a symlink
+        // key is unlinked itself and its target is untouched.
+        const parent = await realpath(path.dirname(target));
+        if (parent !== tenantRoot && !parent.startsWith(tenantRoot + path.sep))
           throw new Error('Invalid deletion path');
+        const filename = path.join(parent, path.basename(target));
+        const info = await lstat(filename);
+        // A directory key addresses no object; nothing to delete.
+        if (info.isDirectory()) return;
         await unlink(filename);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;

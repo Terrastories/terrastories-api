@@ -1819,6 +1819,40 @@ export async function createFixture(
       const freshServerSecret = toHex(
         crypto.getRandomValues(new Uint8Array(24))
       );
+      // In-memory byte store for the fresh install, so the field-kit journey
+      // can upload local media and read it back on the same SQLite database.
+      const freshBytes = new Map<string, Uint8Array>();
+      const freshStorage = {
+        read: async (key: string, range?: { start: number; end: number }) => {
+          const bytes = freshBytes.get(key);
+          if (!bytes) return null;
+          return {
+            body: range ? bytes.subarray(range.start, range.end + 1) : bytes,
+            size: bytes.byteLength,
+          };
+        },
+        async put(key: string, body: Uint8Array | ReadableStream<Uint8Array>) {
+          const merged =
+            body instanceof Uint8Array
+              ? Uint8Array.from(body)
+              : new Uint8Array(await new Response(body).arrayBuffer());
+          freshBytes.set(key, merged);
+          return { size: merged.byteLength };
+        },
+        async delete(key: string) {
+          freshBytes.delete(key);
+        },
+        async list(options?: { prefix?: string; limit?: number }) {
+          const keys = [...freshBytes.keys()]
+            .filter((k) => k.startsWith(options?.prefix ?? ''))
+            .sort();
+          const page = keys.slice(0, options?.limit ?? 20);
+          return {
+            entries: page.map((key) => ({ key, uploaded: new Date() })),
+            truncated: page.length < keys.length,
+          };
+        },
+      };
       let freshAppPromise:
         | Promise<ReturnType<typeof createHonoApp>>
         | undefined;
@@ -1831,7 +1865,7 @@ export async function createFixture(
             trustProxy: true,
             serverSecret: freshServerSecret,
             bootstrapSecret: freshBootstrapSecret,
-            storage: { read: async () => null },
+            storage: freshStorage,
           });
         })();
         return freshAppPromise;
@@ -6862,6 +6896,7 @@ export async function createFixture(
     };
     let freshBootstrapCommunityId = 0;
     let freshBootstrapRecoveryCode1 = '';
+    let fieldKitFileId = '';
     const freshAdminKey = toHex(crypto.getRandomValues(new Uint8Array(32)));
     const freshAdminRecoveredKey = toHex(
       crypto.getRandomValues(new Uint8Array(32))
@@ -12136,10 +12171,164 @@ export async function createFixture(
         ],
       },
       {
+        // Field-kit API-level journey (#147 keeps the browser/offline proof).
+        // It continues the fresh_bootstrap installation: that journey owns
+        // bootstrap, the one-time 10-code sheet and the recovery-code redeem
+        // that sets the new password, so this one logs in with that password
+        // and exercises local media upload/read-back and CSV import on the
+        // same install. The Workers fresh runtime has no R2 binding, so it
+        // skips there. No restart step: the fresh install lives on an
+        // in-memory SQLite (or a reset PostgreSQL schema) that the harness
+        // cannot close and reopen.
         persona: 'field-kit',
-        steps: [],
-        skipped:
-          'Phase 2: disconnected browser and recovery-code proof belongs to #147.',
+        ...(backend
+          ? {
+              steps: [],
+              skipped:
+                'Workers fresh runtime has no R2 binding; the API-level field-kit journey runs on the in-process SQLite and PostgreSQL fixtures. Browser/offline/network-block proof belongs to #147/#185.',
+            }
+          : {
+              ...(freshBaseUrl
+                ? { baseUrl: freshBaseUrl }
+                : { handler: freshHandler }),
+              steps: [
+                {
+                  name: 'field-kit admin logs in with the recovery-set password',
+                  method: 'POST',
+                  path: '/v2/auth/login',
+                  expected: 200,
+                  headers: {
+                    cookie: '',
+                    'x-forwarded-for': '203.0.113.212',
+                    'cf-connecting-ip': '203.0.113.212',
+                  },
+                  body: {
+                    identifier: 'qa-fresh-admin@example.test',
+                    communitySlug: 'qa-fresh-bootstrap',
+                    derivedKey: freshAdminRecoveredKey,
+                  },
+                  check: (body) =>
+                    ownUser(
+                      'qa-fresh-admin@example.test',
+                      'admin',
+                      liveSessionCookie,
+                      freshBootstrapCommunityId
+                    )(body),
+                  checkHeaders: hasSessionCookie,
+                },
+                {
+                  name: 'field-kit admin reports recovery codes confirmed',
+                  method: 'GET',
+                  path: '/v2/auth/me',
+                  expected: 200,
+                  check: (body) =>
+                    ownMeUser(
+                      'qa-fresh-admin@example.test',
+                      'admin',
+                      liveSessionCookie,
+                      freshBootstrapCommunityId,
+                      true
+                    )(body),
+                },
+                {
+                  name: 'upload local media on the fresh install',
+                  method: 'POST',
+                  path: '/v2/media',
+                  expected: 201,
+                  ...qaMultipart({
+                    filename: 'qa-field-kit.png',
+                    contentType: 'image/png',
+                    bytes: mediaPngBytes,
+                  }),
+                  check: mediaUploadStagingCheck,
+                },
+                {
+                  name: 'preview field-kit places CSV import with local photo',
+                  method: 'POST',
+                  path: '/v2/imports/preview',
+                  expected: 201,
+                  captureId: 'qaFieldKitImport',
+                  ...qaMultipart({
+                    filename: 'qa-field-kit-places.csv',
+                    contentType: 'text/csv',
+                    bytes: new TextEncoder().encode(
+                      'name,region,latitude,longitude,photo\nQA Field Kit Place,Lowlands,-3.51,-60.51,qa-field-kit-pic.png\n'
+                    ),
+                    fields: { kind: 'places' },
+                    mediaParts: [
+                      {
+                        filename: 'qa-field-kit-pic.png',
+                        contentType: 'image/png',
+                        bytes: mediaPngBytes,
+                      },
+                    ],
+                  }),
+                  check: (body) => {
+                    const parsed =
+                      ImportManifestDetailResponseSchema.safeParse(body);
+                    return (
+                      parsed.success &&
+                      parsed.data.data.status === 'previewed' &&
+                      parsed.data.data.canCommit === true &&
+                      parsed.data.data.stagedMediaCount === 1
+                    );
+                  },
+                },
+                {
+                  name: 'commit field-kit places import',
+                  method: 'POST',
+                  path: '/v2/imports/{qaFieldKitImport}/commit',
+                  expected: 200,
+                  check: (body) => {
+                    const parsed =
+                      ImportManifestDetailResponseSchema.safeParse(body);
+                    return (
+                      parsed.success &&
+                      parsed.data.data.status === 'committed' &&
+                      parsed.data.data.resultSummary?.createdPlaces === 1 &&
+                      parsed.data.data.resultSummary?.createdAttachments === 1
+                    );
+                  },
+                },
+                {
+                  name: 'imported place lists its photo file identity',
+                  method: 'GET',
+                  path: '/v2/places',
+                  expected: 200,
+                  check: (body) => {
+                    const parsed =
+                      PublicPlacesListResponseSchema.safeParse(body);
+                    if (!parsed.success) return false;
+                    const place = parsed.data.data.find(
+                      (p) => p.name === 'QA Field Kit Place'
+                    );
+                    if (!place || place.photos.length !== 1) return false;
+                    fieldKitFileId = place.photos[0]!.fileId;
+                    return place.region === 'Lowlands';
+                  },
+                },
+                {
+                  name: 'read imported media back by file identity',
+                  method: 'GET',
+                  path: '/v2/media/pending',
+                  expected: 200,
+                  prepare: () => {
+                    if (!fieldKitFileId)
+                      throw new Error('Missing field-kit file');
+                    return `/v2/media/${fieldKitFileId}`;
+                  },
+                  checkBytes: (bytes: Uint8Array) =>
+                    bytes.byteLength === mediaPngBytes.byteLength &&
+                    bytes.every((b, i) => b === mediaPngBytes[i]),
+                },
+                {
+                  name: 'logout field-kit admin',
+                  method: 'POST',
+                  path: '/v2/auth/logout',
+                  expected: 204,
+                },
+              ] as Step[],
+            }),
       },
     ];
     return {

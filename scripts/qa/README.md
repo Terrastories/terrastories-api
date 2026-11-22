@@ -48,7 +48,7 @@ anonymous Explore browsing (ruling #162
 option A), session lifecycle for viewer, member, editor and community admin
 (own-user profile without secrets, community-scoped media, logout/revoke
 replay), super-admin boundaries, identical 401 bodies for wrong-password and
-unknown-user logins, and the #147-skipped field-kit persona. Each withheld
+unknown-user logins, and the API-level field-kit persona (see below). Each withheld
 Explore fixture fails exactly one gate: the restricted story/place and media
 carry no other withholding property, the unevidenced story is public but
 edgeless (hidden from the stories list by the evidence rule alone; story
@@ -89,8 +89,25 @@ Skipped personas do not count toward route coverage. Any failed assertion or
 unreached route makes the command exit nonzero. A nonempty reason is required for
 each explicitly excluded endpoint.
 
-Disconnected field-kit acceptance remains owned by #147. SQLite results do
-not establish PostgreSQL or Workers readiness.
+### Field-kit persona (API level)
+
+The Hono `field-kit` journey runs after `fresh_bootstrap` on the same fresh
+installation (its own isolated in-memory SQLite, or a reset PostgreSQL
+schema, with an in-memory byte store). `fresh_bootstrap` owns the bootstrap,
+the 10 one-time recovery codes and the recovery-code redeem that sets a new
+password; `field-kit` then logs in with that new password, checks
+`recoveryCodesConfirmed`, uploads local media, previews and commits a places
+CSV import with a local photo, and reads the imported media back through
+`/v2/media/:id` by the file identity `/v2/places` lists, byte for byte. All
+credentials and secrets are generated at runtime.
+
+Not covered here, and still owned by #147 (with #185): the browser,
+offline/disconnected behaviour and network-block proof. There is also no
+fixture-restart step: the fresh install is an in-memory database the harness
+cannot close and reopen. The Workers fresh runtime has no R2 binding, so
+there `field-kit` stays skipped with a reason naming #147/#185; skipped
+journeys do not count toward route coverage. SQLite results do not establish
+PostgreSQL or Workers readiness.
 
 ## CI release gate
 

@@ -41,6 +41,7 @@ import type { SourceRow, VerifiedBundle } from './bundle-reader.js';
 import {
   COLUMN_DISPOSITIONS,
   KNOWN_FLIPPER_KEYS,
+  classifyAttachment,
   RAILS_MAP_PROJECTIONS,
 } from './dispositions.js';
 
@@ -146,6 +147,10 @@ export interface TransformPlan {
       status: 'pending_media_slice' | 'not_selected';
     }>;
     attachments: PendingAttachment[];
+    /** `media` row ids reachable from a selected community. */
+    mediaIds: string[];
+    /** `active_storage_variant_records` ids reachable from a selected community. */
+    variantIds: string[];
   };
   flipper: Array<{ key: string; enabled: boolean; disposition: string }>;
   unknownTables: string[];
@@ -285,6 +290,8 @@ function refOutcome(
   if (kind === 'cross') return ['manual', 'cross_community_reference'];
   return ['manual', 'dangling_reference'];
 }
+
+export { parseTimestamp };
 
 export function planTransform(
   bundle: VerifiedBundle,
@@ -1689,6 +1696,18 @@ export function planTransform(
       ownerImported(row.record_type ?? '', row.record_id ?? '')
     );
     if (status === null) continue;
+    if (
+      status === 'pending_media_slice' &&
+      classifyAttachment(row.record_type ?? '', row.name ?? '') === null
+    ) {
+      reject(
+        'active_storage_attachments',
+        row,
+        'manual',
+        'attachment_role_unknown'
+      );
+      continue;
+    }
     pendingAttachments.push({
       id: row.id ?? '',
       recordType: row.record_type ?? '',
@@ -1699,8 +1718,10 @@ export function planTransform(
       status,
     });
   }
+  const pendingMediaIds: string[] = [];
+  const pendingVariantIds: string[] = [];
   for (const row of mediaRows) {
-    settleMedia(
+    const settled = settleMedia(
       'media',
       row,
       entityOwner(storyMap, row.story_id ?? ''),
@@ -1708,9 +1729,10 @@ export function planTransform(
       undefined,
       imported('stories', row.story_id ?? '')
     );
+    if (settled === 'pending_media_slice') pendingMediaIds.push(row.id ?? '');
   }
   for (const row of variantRecords) {
-    settleMedia(
+    const settled = settleMedia(
       'active_storage_variant_records',
       row,
       ownerOf('ActiveStorage::VariantRecord', row.id ?? ''),
@@ -1718,6 +1740,9 @@ export function planTransform(
       undefined,
       ownerImported('ActiveStorage::VariantRecord', row.id ?? '')
     );
+    if (settled === 'pending_media_slice') {
+      pendingVariantIds.push(row.id ?? '');
+    }
   }
   // Blob dispositions follow the transform selection, not the capture
   // selection: a captured blob is pending only when some attachment using it
@@ -1865,7 +1890,12 @@ export function planTransform(
     ),
     archivedRows,
     archivedFields,
-    pendingMedia: { blobs: pendingBlobs, attachments: pendingAttachments },
+    pendingMedia: {
+      blobs: pendingBlobs,
+      attachments: pendingAttachments,
+      mediaIds: pendingMediaIds,
+      variantIds: pendingVariantIds,
+    },
     flipper,
     unknownTables,
     unregisteredColumns,

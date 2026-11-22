@@ -4,6 +4,8 @@
  *
  * Output (never overwritten; written to an owner-only temp dir then renamed):
  *   v2.sqlite              V2 SQLite migrations applied, canonical rows inserted
+ *   v2-media/              verified media files at their tenant-scoped storage keys
+ *   archive-media/         protected archive objects (orphan/variant/preview blobs)
  *   legacy-archive.sqlite  every source row/field not represented canonically
  *   manifest.json          counts, dispositions, id remaps, warnings, checksums
  *   manual-review.json     MANUAL ids and codes (only with allowManual)
@@ -26,7 +28,17 @@ import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { openVerifiedBundle } from './bundle-reader.js';
-import { fsyncPath } from '../rails/fsync.js';
+import { fsyncDirectoryTree, fsyncPath } from '../rails/fsync.js';
+import {
+  ARCHIVE_MEDIA_DIRECTORY,
+  MEDIA_DIRECTORY,
+  MEDIA_TABLES,
+  planMedia,
+  writeMediaObjects,
+  type BlobLedgerEntry,
+  type MediaPlan,
+  type WriteMediaOptions,
+} from './media.js';
 import { COLUMN_DISPOSITIONS } from './dispositions.js';
 import {
   CANONICAL_TABLES,
@@ -48,6 +60,8 @@ export interface TransformRailsOptions {
   allowManual?: boolean;
   /** Test seam: replaces the post-rename parent-directory fsync. */
   syncParentDirectory?: (directory: string) => Promise<void>;
+  /** Test seam: runs after each media object is written, before read-back. */
+  afterMediaWrite?: WriteMediaOptions['afterWrite'];
 }
 
 export interface TransformManifest {
@@ -74,6 +88,13 @@ export interface TransformManifest {
   warnings: TransformPlan['warnings'];
   manual: TransformPlan['manual'];
   pendingMedia: TransformPlan['pendingMedia'];
+  media: {
+    mediaDirectory: string;
+    archiveDirectory: string;
+    counts: MediaPlan['counts'];
+    /** Exactly one entry per source blob (SPEC-V2 10.4). */
+    blobs: BlobLedgerEntry[];
+  };
   flipper: TransformPlan['flipper'];
   unknownTables: string[];
   unregisteredColumns: string[];
@@ -143,20 +164,34 @@ function insertRows(
   for (const row of rows) statement.run(row);
 }
 
-function writeCanonicalDatabase(path: string, plan: TransformPlan): void {
+function writeCanonicalDatabase(
+  path: string,
+  plan: TransformPlan,
+  media: MediaPlan
+): void {
   const database = new Database(path);
   try {
     database.pragma('journal_mode = DELETE');
     database.pragma('foreign_keys = ON');
     migrate(drizzle(database), { migrationsFolder });
     database.transaction(() => {
+      // Files precede community_map_configs (composite static-map FK);
+      // attachments follow files and every owner table.
       for (const table of CANONICAL_TABLES) {
+        if (table === 'community_map_configs') {
+          insertRows(database, 'files', media.files);
+        }
         insertRows(database, table, plan.canonical[table]);
       }
+      insertRows(database, 'attachments', media.attachments);
     })();
     // Post-migration rows must never reuse a legacy id, including ids of rows
     // that were left out of the canonical set (not_selected / MANUAL).
-    for (const [table, floor] of Object.entries(plan.sequenceFloors)) {
+    const floors: Record<string, number> = {
+      ...plan.sequenceFloors,
+      attachments: media.attachmentSequenceFloor,
+    };
+    for (const [table, floor] of Object.entries(floors)) {
       if (floor <= 0) continue;
       const definition = database
         .prepare(
@@ -171,6 +206,19 @@ function writeCanonicalDatabase(path: string, plan: TransformPlan): void {
         database
           .prepare('INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)')
           .run(table, floor);
+      }
+    }
+    for (const [table, expected] of [
+      ['files', media.files.length],
+      ['attachments', media.attachments.length],
+    ] as const) {
+      const row = database
+        .prepare('SELECT COUNT(*) AS n FROM ' + table)
+        .get() as { n: number };
+      if (row.n !== expected) {
+        throw new Error(
+          'V2 output ' + table + ' count does not match the plan'
+        );
       }
     }
     const violations = database.pragma('foreign_key_check') as unknown[];
@@ -190,7 +238,8 @@ function writeCanonicalDatabase(path: string, plan: TransformPlan): void {
 
 function writeLegacyArchive(
   path: string,
-  plan: TransformPlan,
+  archivedRows: TransformPlan['archivedRows'],
+  archivedFields: TransformPlan['archivedFields'],
   manifestInputSha: string
 ): void {
   const database = new Database(path);
@@ -214,13 +263,13 @@ function writeLegacyArchive(
       const row = database.prepare(
         'INSERT INTO archived_rows(table_name, source_id, reason, row_json) VALUES (?, ?, ?, ?)'
       );
-      for (const entry of plan.archivedRows) {
+      for (const entry of archivedRows) {
         row.run(entry.table, entry.id, entry.reason, JSON.stringify(entry.row));
       }
       const field = database.prepare(
         'INSERT INTO archived_fields(table_name, source_id, column_name, disposition, value) VALUES (?, ?, ?, ?, ?)'
       );
-      for (const entry of plan.archivedFields) {
+      for (const entry of archivedFields) {
         field.run(
           entry.table,
           entry.id,
@@ -273,7 +322,17 @@ export function buildTransformSummary(manifest: TransformManifest): string {
           ].join('/')
       ),
     '',
-    'Media payloads are pending the media slice; no files rows were created.',
+    'Media payloads: ' +
+      manifest.media.counts.files +
+      ' files and ' +
+      manifest.media.counts.attachments +
+      ' attachments written; ' +
+      manifest.media.counts.blobs.canonical +
+      ' canonical / ' +
+      manifest.media.counts.blobs.archive +
+      ' archived / ' +
+      manifest.media.counts.blobs.not_selected +
+      ' not_selected source blobs; every written object was SHA-256 verified.',
     'This summary intentionally excludes row contents, hashes, tokens and credentials.',
     '',
   ];
@@ -332,6 +391,48 @@ export async function transformRailsBundle(
       throw new ManualReviewRequiredError(plan.manual);
     }
 
+    const media = planMedia(bundle, plan);
+    for (const row of plan.canonical.community_map_configs) {
+      row.static_map_file_id =
+        media.staticMaps.get(row.community_id as number) ?? null;
+    }
+    const dispositions = Object.fromEntries(
+      Object.entries(plan.statusCounts).map(([table, counts]) => [
+        table,
+        { ...counts },
+      ])
+    ) as TransformPlan['statusCounts'];
+    for (const table of MEDIA_TABLES) {
+      const counts = dispositions[table];
+      if (!counts) continue;
+      for (const status of media.finalStatus[table].values()) {
+        counts.pending_media_slice -= 1;
+        counts[status] += 1;
+      }
+      if (counts.pending_media_slice !== 0) {
+        throw new Error(
+          'Internal error: media rows left without a final disposition (' +
+            table +
+            ')'
+        );
+      }
+    }
+    const byKey = (
+      a: { table: string; id: string | null; code: string },
+      b: { table: string; id: string | null; code: string }
+    ): number => {
+      const left = a.table + '\x00' + (a.id ?? '') + '\x00' + a.code;
+      const right = b.table + '\x00' + (b.id ?? '') + '\x00' + b.code;
+      return left < right ? -1 : left > right ? 1 : 0;
+    };
+    const warnings = [...plan.warnings, ...media.warnings].sort(byKey);
+    const events = { ...plan.events };
+    for (const [key, count] of Object.entries(media.events)) {
+      events[key] = (events[key] ?? 0) + count;
+    }
+    const archivedRows = [...plan.archivedRows, ...media.archivedRows];
+    const archivedFields = [...plan.archivedFields, ...media.archivedFields];
+
     await mkdir(dirname(outputDir), { recursive: true });
     temporaryDir = outputDir + '.tmp-' + randomUUID();
     await mkdir(temporaryDir, { recursive: false, mode: 0o700 });
@@ -347,9 +448,13 @@ export async function transformRailsBundle(
       throw error;
     }
 
-    const canonicalCounts = Object.fromEntries(
-      CANONICAL_TABLES.map((table) => [table, plan.canonical[table].length])
-    );
+    const canonicalCounts: Record<string, number> = {
+      ...Object.fromEntries(
+        CANONICAL_TABLES.map((table) => [table, plan.canonical[table].length])
+      ),
+      files: media.files.length,
+      attachments: media.attachments.length,
+    };
     const manifest: TransformManifest = {
       formatVersion: TRANSFORM_FORMAT_VERSION,
       input: {
@@ -366,7 +471,7 @@ export async function transformRailsBundle(
       },
       selection: plan.selection,
       sourceCounts: plan.sourceCounts,
-      dispositions: plan.statusCounts,
+      dispositions,
       canonicalCounts,
       idRemaps: plan.idRemaps,
       fieldDispositions: Object.fromEntries(
@@ -374,30 +479,54 @@ export async function transformRailsBundle(
           .filter(([table]) => bundle.tableNames.includes(table))
           .sort(([a], [b]) => (a < b ? -1 : 1))
       ),
-      fieldEvents: plan.events,
-      warnings: plan.warnings,
+      fieldEvents: Object.fromEntries(
+        Object.entries(events).sort(([a], [b]) => (a < b ? -1 : 1))
+      ),
+      warnings,
       manual: plan.manual,
       pendingMedia: plan.pendingMedia,
+      media: {
+        mediaDirectory: MEDIA_DIRECTORY,
+        archiveDirectory: ARCHIVE_MEDIA_DIRECTORY,
+        counts: media.counts,
+        blobs: media.ledger,
+      },
       flipper: plan.flipper,
       unknownTables: plan.unknownTables,
       unregisteredColumns: plan.unregisteredColumns,
       curriculumUseDetected: plan.curriculumUseDetected,
       checksums: {
-        canonicalRows: Object.fromEntries(
-          CANONICAL_TABLES.map((table: CanonicalTable) => [
-            table,
-            sha256(JSON.stringify(plan.canonical[table])),
-          ])
-        ),
-        archivedRows: sha256(JSON.stringify(plan.archivedRows)),
-        archivedFields: sha256(JSON.stringify(plan.archivedFields)),
+        canonicalRows: {
+          ...Object.fromEntries(
+            CANONICAL_TABLES.map((table: CanonicalTable) => [
+              table,
+              sha256(JSON.stringify(plan.canonical[table])),
+            ])
+          ),
+          files: sha256(JSON.stringify(media.files)),
+          attachments: sha256(JSON.stringify(media.attachments)),
+        },
+        archivedRows: sha256(JSON.stringify(archivedRows)),
+        archivedFields: sha256(JSON.stringify(archivedFields)),
       },
     };
 
     const v2Path = join(temporaryDir, V2_DATABASE_FILENAME);
     const archivePath = join(temporaryDir, LEGACY_ARCHIVE_FILENAME);
-    writeCanonicalDatabase(v2Path, plan);
-    writeLegacyArchive(archivePath, plan, bundle.manifestSha256);
+    // Bytes first: any copy or checksum mismatch aborts before anything is
+    // published, and the temporary directory is discarded whole.
+    await writeMediaObjects(bundle.dir, temporaryDir, media, {
+      ...(options.afterMediaWrite
+        ? { afterWrite: options.afterMediaWrite }
+        : {}),
+    });
+    writeCanonicalDatabase(v2Path, plan, media);
+    writeLegacyArchive(
+      archivePath,
+      archivedRows,
+      archivedFields,
+      bundle.manifestSha256
+    );
     await chmod(v2Path, 0o600);
     await chmod(archivePath, 0o600);
     await writeFile(
@@ -418,6 +547,8 @@ export async function transformRailsBundle(
       { encoding: 'utf8', mode: 0o600 }
     );
 
+    await fsyncDirectoryTree(join(temporaryDir, MEDIA_DIRECTORY));
+    await fsyncDirectoryTree(join(temporaryDir, ARCHIVE_MEDIA_DIRECTORY));
     for (const name of await readdir(temporaryDir)) {
       await fsyncPath(join(temporaryDir, name));
     }

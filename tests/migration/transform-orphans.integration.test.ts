@@ -139,7 +139,7 @@ describeWithPostgres('Stage-2 orphan rows and media attribution', () => {
     expect(pending.every((a) => captured.has(a.blobId))).toBe(true);
     // media: one row owned by community 10; community 11's and both orphans are not_selected
     expect(result.dispositions.media).toMatchObject({
-      pending_media_slice: 1,
+      imported: 1,
       not_selected: 3,
       manual: 0,
     });

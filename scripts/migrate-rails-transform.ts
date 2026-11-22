@@ -24,7 +24,10 @@ Verifies the Stage-1 bundle (archive, row digests, blob checksums) and fails
 closed, then writes to a new owner-only directory (never overwritten):
   v2.sqlite              canonical V2 SQLite database (migrations applied)
   legacy-archive.sqlite  rows/fields not represented canonically (restricted)
-  manifest.json          counts, dispositions, id remaps, warnings, checksums
+  v2-media/              verified media files (tenant-scoped storage keys)
+  archive-media/         protected archive objects (orphans, variants, previews)
+  manifest.json          counts, dispositions, id remaps, warnings, checksums,
+                         and one disposition per source blob
   manual-review.json     MANUAL ids and codes (with --allow-manual only)
   validation-summary.txt counts only; no contents or secrets
 
@@ -34,7 +37,8 @@ Options:
   --include-system-users  Also import null-community super_admin users.
   --allow-manual          Exclude MANUAL items and list them instead of failing.
 
-Media payloads are recorded as pending_media_slice; no files rows are created.
+Media: blobs become files + attachments (one file per destination community);
+orphan/derived payloads are archived. Load the result with migrate:rails:load.
 `;
 }
 

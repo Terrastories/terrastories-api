@@ -364,6 +364,13 @@ export async function editorChapter(ctx: Ctx): Promise<void> {
       expect: [204, 404],
       covers: ['C04', 'V18'],
     });
+    w.skip(
+      ['V18'],
+      'Elena asks to copy a file for publication',
+      'deferred: the copy-for-publication route has no handler yet (handoff V18), so only metadata and staging delete are walked',
+      'Elena',
+      true
+    );
     const stray = await upload(
       ctx,
       elena,

@@ -62,6 +62,8 @@ export interface State {
   places: number[];
   speakers: number[];
   imports: number[];
+  /** Every file id uploaded in the run, so a stray one is still cleared. */
+  uploaded: string[];
   /** The disposable community; set by the play provisioning or the bootstrap chapter. */
   play?: PlayCommunity;
   /** Set once the cleanup chapter has run (it must run at most once). */
@@ -96,6 +98,7 @@ export function newState(): State {
     places: [],
     speakers: [],
     imports: [],
+    uploaded: [],
     actors: {},
     notes: [],
     targetCounts: {},
@@ -328,7 +331,9 @@ export async function upload(
       'private staging file: not visible to anyone until it is attached',
     ],
   });
-  return str(reply, 'data', 'id');
+  const id = str(reply, 'data', 'id');
+  ctx.s.uploaded.push(id);
+  return id;
 }
 
 export async function attach(

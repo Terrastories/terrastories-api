@@ -85,6 +85,12 @@ export async function anonymousChapter(ctx: Ctx): Promise<void> {
       ],
     });
     void list;
+    w.skip(
+      ['M05'],
+      'Pia picks a filter category in the filter bar',
+      'client-only UI control; the request below is only the data call behind it, not proof of the control',
+      'Pia'
+    );
     await w.step({
       who: pia,
       say: 'filters by region and speaker community',
@@ -94,6 +100,12 @@ export async function anonymousChapter(ctx: Ctx): Promise<void> {
       covers: ['M05'],
       show: (r) => [field('stories after filter', dig(r, 'meta', 'total'))],
     });
+    w.skip(
+      ['M06'],
+      'Pia opens the story card sort select',
+      'client-only UI control; the request below is only the data call behind it, not proof of the control',
+      'Pia'
+    );
     await w.step({
       who: pia,
       say: 'sorts A-Z and Z-A',
@@ -161,11 +173,20 @@ export async function anonymousChapter(ctx: Ctx): Promise<void> {
     }
     await w.step({
       who: pia,
-      say: 'opens the speakers list and one speaker',
+      say: 'opens the public speakers list',
       method: 'GET',
       path: `/v2/public/communities/${slug}/speakers`,
       expect: 200,
       covers: ['B13'],
+    });
+    await w.step({
+      who: pia,
+      say: 'opens one speaker page',
+      method: 'GET',
+      path: `/v2/public/communities/${slug}/speakers/${s.ids.speaker}`,
+      expect: 200,
+      covers: ['B13'],
+      show: (r) => [field('speaker', val(r, 'data', 'name'))],
     });
     await w.step({
       who: pia,

@@ -61,31 +61,36 @@ export async function cleanupChapter(ctx: Ctx): Promise<void> {
     // 1. settings first, so a later failure cannot leave them changed
     if (s.snapshot) {
       const snap = s.snapshot;
-      await attempt(ctx, 'restore map settings', async () => {
-        const stored = snap.mapConfig;
-        const body: Record<string, unknown> = {};
-        for (const key of MAP_CONFIG_KEYS) {
-          const value = stored && key in stored ? stored[key] : undefined;
-          // a stored secret is masked in the admin read: it cannot be sent back
-          if (SECRET_KEYS.has(key) && typeof value === 'string') continue;
-          body[key] =
-            value !== undefined
-              ? value
-              : key === 'exposeMapboxCredentials' || key === 'mapbox3d'
-                ? false
-                : null;
-        }
-        await w.step({
-          who: ana,
-          say: 'puts the map settings back as they were',
-          method: 'PUT',
-          path: '/v2/community/map-config',
-          json: body,
-          expect: 200,
-          covers: ['D06'],
-          show: (r) => [field('render source', dig(r, 'render', 'source'))],
+      if (!snap.mapConfig)
+        w.narrate(
+          'The play community had no map configuration at the start and the API has no endpoint to remove one, so it is not "restored" with a blank row; the play community is disabled below.'
+        );
+      else
+        await attempt(ctx, 'restore map settings', async () => {
+          const stored = snap.mapConfig;
+          const body: Record<string, unknown> = {};
+          for (const key of MAP_CONFIG_KEYS) {
+            const value = stored && key in stored ? stored[key] : undefined;
+            // a stored secret is masked in the admin read: it cannot be sent back
+            if (SECRET_KEYS.has(key) && typeof value === 'string') continue;
+            body[key] =
+              value !== undefined
+                ? value
+                : key === 'exposeMapboxCredentials' || key === 'mapbox3d'
+                  ? false
+                  : null;
+          }
+          await w.step({
+            who: ana,
+            say: 'puts the map settings back as they were',
+            method: 'PUT',
+            path: '/v2/community/map-config',
+            json: body,
+            expect: 200,
+            covers: ['D06'],
+            show: (r) => [field('render source', dig(r, 'render', 'source'))],
+          });
         });
-      });
       await attempt(ctx, 'restore community settings', async () => {
         await w.step({
           who: ana,
@@ -183,20 +188,17 @@ export async function cleanupChapter(ctx: Ctx): Promise<void> {
           });
         });
     }
-    for (const key of ['logo1', 'logo2', 'background']) {
-      const file = s.files[key];
-      if (file)
-        await attempt(ctx, `file ${key}`, async () => {
-          await w.step({
-            who: ana,
-            say: `clears the file of ${key} out of storage`,
-            method: 'DELETE',
-            path: `/v2/media/${file}`,
-            expect: [204, 404],
-            covers: ['V18'],
-          });
+    // every uploaded file the run made (also a stray one left by a failed step)
+    for (const file of new Set(s.uploaded))
+      await attempt(ctx, `file ${file}`, async () => {
+        await w.step({
+          who: ana,
+          say: `clears the uploaded file ${file} out of storage`,
+          method: 'DELETE',
+          path: `/v2/media/${file}`,
+          expect: [204, 404],
         });
-    }
+      });
 
     // 5. people
     for (const acct of Object.values(s.accounts)) {

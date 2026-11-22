@@ -193,6 +193,7 @@ export async function adminLateChapter(ctx: Ctx): Promise<void> {
     // ---- export, sovereignty, audit ----------------------------------------
     await exportScenes(ctx);
     await sovereigntyScenes(ctx, samir.id!, mateo.id!);
+    await discardThenExport(ctx);
     void cfg;
   });
 }
@@ -1020,5 +1021,43 @@ async function sovereigntyScenes(
     path: '/v2/community/audit-entries?limit=5&offset=5',
     expect: 200,
     covers: ['V12'],
+  });
+}
+
+/**
+ * The export chapter above runs while import previews are still open, which
+ * avoids a known product defect: discarding a preview leaves its file row
+ * behind and the next export then fails with export_failed. This step walks
+ * exactly that path and is a named known-defect check (PR #280 fixes it):
+ * it keeps the run red, and the row labelled, until the fix lands.
+ */
+async function discardThenExport(ctx: Ctx): Promise<void> {
+  const { w, s } = ctx;
+  const ana = s.actors.ana!;
+  const elena = s.actors.elena;
+  const open = s.imports[s.imports.length - 1];
+  if (!elena || open === undefined) return;
+  await w.step({
+    who: elena,
+    say: 'discards an open import preview',
+    method: 'DELETE',
+    path: `/v2/imports/${open}`,
+    expect: [200, 204],
+    covers: ['C32'],
+  });
+  await w.step({
+    who: ana,
+    say: 'exports the community again after the discard (KNOWN DEFECT #280: fails with export_failed until the fix lands)',
+    method: 'POST',
+    path: '/v2/community/export',
+    json: {},
+    expect: 201,
+    covers: ['V01'],
+    knownDefect: '#280',
+    show: (r) => {
+      for (const kind of ['manifest', 'mediaZip'])
+        w.secret(String(dig(r, 'data', 'artifacts', kind, 'token') ?? ''));
+      return ['the export works after a discard'];
+    },
   });
 }

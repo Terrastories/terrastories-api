@@ -23,6 +23,8 @@ export interface StepSpec extends CallOptions {
   partial?: string[];
   /** A deliberate failed login or step-up: counts against the throttle budget and is spaced out. */
   authFailure?: boolean;
+  /** A tracked product defect (issue/PR ref): if this step fails the run stays red and the row is labelled KNOWN DEFECT, but the chapter goes on. */
+  knownDefect?: string;
   /** A negative check: the API must refuse. Shown as such. */
   negative?: boolean;
   /** What a UI screen would show after this response (key fields). */
@@ -48,6 +50,7 @@ export interface StepRecord {
   covers: string[];
   partial: string[];
   authFailure: boolean;
+  knownDefect?: string;
   ui: string[];
   note?: string;
   /** A skip that stands in for a flow needing an explicit opt-in flag. */
@@ -183,6 +186,7 @@ export class Walk {
       covers: spec.covers ?? [],
       partial: spec.partial ?? [],
       authFailure: spec.authFailure === true,
+      knownDefect: spec.knownDefect,
       ui: [],
       ms: 0,
     };
@@ -252,6 +256,26 @@ export class Walk {
         : []),
       ''
     );
+    if (failure && spec.knownDefect) {
+      this.console(
+        `   KNOWN DEFECT ${spec.knownDefect}: the run stays red until it is fixed`
+      );
+      this.emit(
+        this.persona,
+        `_KNOWN DEFECT ${spec.knownDefect}: this step fails until the fix lands._`,
+        ''
+      );
+      return (
+        reply ??
+        ({
+          status: 0,
+          headers: new Headers(),
+          json: null,
+          text: '',
+          bytes: new Uint8Array(),
+        } as Reply)
+      );
+    }
     if (failure) throw new StepError(`${label}: ${failure}`);
     return reply!;
   }
@@ -302,6 +326,8 @@ export class Walk {
     ok: boolean;
     deferred: boolean;
     partial: boolean;
+    partlyDeferred: boolean;
+    knownDefect?: string;
   }> {
     return COVERAGE_ROWS.map((row) => {
       const partialSteps = this.records.filter(
@@ -317,10 +343,15 @@ export class Walk {
       const deferred = steps.some((r) => r.outcome === 'skip' && r.deferred);
       const ok =
         row.kind === 'api'
-          ? executed.length > 0 || deferred || partialSteps.length > 0
+          ? executed.length > 0 || partialSteps.length > 0
           : executed.length + skipped.length > 0;
+      const knownDefect = steps.find(
+        (r) => r.outcome === 'fail' && r.knownDefect
+      )?.knownDefect;
       return {
         row,
+        knownDefect,
+        partlyDeferred: executed.length > 0 && deferred,
         partial: executed.length === 0 && partialSteps.length > 0,
         steps: [...steps, ...partialSteps].map((r) => r.label),
         executed,
@@ -350,20 +381,29 @@ export class Walk {
       '',
       `- Steps: ${passed} passed, ${failures} failed, ${skipped} skipped`,
       `- Coverage: ${coverage.length - uncovered.length} of ${coverage.length} handoff rows${uncovered.length ? `; UNCOVERED: ${uncovered.join(', ')}` : ''}`,
+      ...this.records
+        .filter((r) => r.outcome === 'fail' && r.knownDefect)
+        .map(
+          (r) =>
+            `- KNOWN DEFECT ${r.knownDefect}: step ${r.label} fails (${r.error ?? ''})`
+        ),
       '',
       '| Row | Interaction | Kind | Steps |',
       '| --- | --- | --- | --- |',
       ...coverage.map((c) => {
-        const kind =
-          c.row.kind === 'dropped'
-            ? `skipped by decision ${c.row.decision}`
-            : c.row.kind === 'client'
-              ? 'client-only'
-              : c.deferred
-                ? 'API (deferred: needs --allow-destructive)'
-                : c.partial
-                  ? 'API (partially covered: closed-setup check only; full path needs --setup-from-bootstrap)'
-                  : 'API';
+        const kind = c.knownDefect
+          ? `API (KNOWN DEFECT ${c.knownDefect}: a step fails, not green)`
+          : c.partlyDeferred
+            ? 'API (partially covered: a deferred action was not walked)'
+            : c.row.kind === 'dropped'
+              ? `skipped by decision ${c.row.decision}`
+              : c.row.kind === 'client'
+                ? 'client-only'
+                : c.deferred
+                  ? 'API (deferred: needs --allow-destructive)'
+                  : c.partial
+                    ? 'API (partially covered: closed-setup check only; full path needs --setup-from-bootstrap)'
+                    : 'API';
         const steps = c.steps.length ? c.steps.join(', ') : '**none**';
         return `| ${c.row.id} | ${c.row.title.replace(/\|/g, '/')} | ${kind} | ${steps} |`;
       }),

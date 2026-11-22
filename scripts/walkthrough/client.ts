@@ -19,14 +19,34 @@ export interface CallOptions {
   noCookie?: boolean;
 }
 
+/** Plain HTTP is acceptable only to the local machine. */
+export function isLocalHost(url: URL): boolean {
+  return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+}
+
 export class CookieJar {
-  private cookies = new Map<string, string>();
-  header(): string | undefined {
+  private cookies = new Map<string, { value: string; secure: boolean }>();
+  /**
+   * The Cookie header for a request to `url`. A cookie the server marked
+   * Secure is never sent over plain http:// (except to localhost): that is
+   * refused with a clear error instead of leaking a session token.
+   */
+  header(url?: URL): string | undefined {
     if (this.cookies.size === 0) return undefined;
-    return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ');
+    const plain =
+      url !== undefined && url.protocol === 'http:' && !isLocalHost(url);
+    const parts: string[] = [];
+    for (const [k, c] of this.cookies) {
+      if (c.secure && plain)
+        throw new Error(
+          `refusing to send the Secure cookie "${k}" over plain HTTP to ${url.host}: use https://`
+        );
+      parts.push(`${k}=${c.value}`);
+    }
+    return parts.join('; ');
   }
   values(): string[] {
-    return [...this.cookies.values()];
+    return [...this.cookies.values()].map((c) => c.value);
   }
   absorb(headers: Headers): void {
     const lines = headers.getSetCookie?.() ?? [];
@@ -40,7 +60,11 @@ export class CookieJar {
         .map((a) => a.trim().toLowerCase())
         .find((a) => a.startsWith('max-age='));
       if (value === '' || maxAge === 'max-age=0') this.cookies.delete(name);
-      else this.cookies.set(name, value);
+      else
+        this.cookies.set(name, {
+          value,
+          secure: attrs.some((a) => a.trim().toLowerCase() === 'secure'),
+        });
     }
   }
   clear(): void {
@@ -73,7 +97,8 @@ export class Actor {
     options: CallOptions = {}
   ): Promise<Reply> {
     const headers = new Headers(options.headers);
-    const cookie = options.noCookie ? undefined : this.jar.header();
+    const target = new URL(path, this.baseUrl);
+    const cookie = options.noCookie ? undefined : this.jar.header(target);
     if (cookie) headers.set('cookie', cookie);
     let body: string | FormData | undefined;
     if (options.json !== undefined) {
@@ -82,7 +107,7 @@ export class Actor {
     } else if (options.form) {
       body = options.form;
     }
-    const response = await fetch(new URL(path, this.baseUrl), {
+    const response = await fetch(target, {
       method,
       headers,
       body,

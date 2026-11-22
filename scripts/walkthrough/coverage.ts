@@ -92,12 +92,12 @@ export const COVERAGE_ROWS: readonly CoverageRow[] = [
     id: 'M05',
     title:
       'Map > Filter bar > Select filter category (Region, Type of place, Speaker, Topic, Language, Speaker communi...',
-    kind: 'api',
+    kind: 'client',
   },
   {
     id: 'M06',
     title: 'Map > Story card > Sort select: Most recent (default), A-Z, Z-A',
-    kind: 'api',
+    kind: 'client',
   },
   {
     id: 'M07',

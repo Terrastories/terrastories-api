@@ -103,11 +103,25 @@ and Sam tidy up.
   `--setup-from-bootstrap`. Otherwise the summary shows them as "partially
   covered: closed-setup check only" (a refused second bootstrap, sent with a
   made-up secret); that does not fail the run.
-- Import previews are left open until the cleanup chapter: discarding a
-  preview removes its staged source bytes but leaves the file row, and a
-  community export then fails with `export_failed` (observed on the Node
-  entry). Open previews are discarded at the end of the run, so run the export
-  chapter as shipped.
+- **Known defect (#280):** discarding an import preview leaves its file row
+  and a later community export fails with `export_failed`. The export chapter
+  still runs with previews open, but a named step ("discards an open import
+  preview", then exports again) walks the failing path with
+  `knownDefect: '#280'`. It keeps the run red and labels V01 "KNOWN DEFECT" in
+  `summary.md` until #280 lands; after that merges, rebase on main and the
+  step turns green (then the workaround of leaving previews open can go).
+- Coverage gate: an API row counts as covered only when a step actually ran.
+  A deferred row (V04-V06 without `--allow-destructive`) is uncovered, so
+  `--persona all` fails without that flag. Only explicit labels soften this:
+  "partially covered" (A08/A09 closed-setup check, V18 copy-for-publication
+  with no handler). Client-only rows (including M05 filter control and M06 sort
+  select) are skip lines, never API-tested.
+- Cookies: a Secure session cookie is never sent over plain HTTP (except to
+  localhost); the run stops with a clear error instead.
+- Map settings: if the play community had no map configuration the cleanup
+  does not write a blank one (there is no delete endpoint); the community is
+  disabled anyway. Every uploaded file is cleared at the end, including a
+  stray one left by a failed step.
 
 ## Test
 

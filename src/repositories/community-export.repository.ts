@@ -238,7 +238,7 @@ export interface CommunityExportSnapshot {
   attachments: ExportAttachmentRow[];
   externalMediaLinks: ExportExternalMediaLinkRow[];
   legacyCommunityMedia: ExportLegacyCommunityMediaRow[];
-  importManifests: ImportManifest[];
+  importManifests: Array<ImportManifest & { sourceFilePurged: boolean }>;
   auditEntries: ExportAuditEntryRow[];
 }
 
@@ -957,6 +957,9 @@ export class CommunityExportRepository {
         sourceFileName:
           row.sourceFileName === null ? null : String(row.sourceFileName),
         sourceFileId: String(row.sourceFileId),
+        // True when the source CSV row is a purged tombstone omitted from
+        // `files`; consumers must not expect that file in the archive.
+        sourceFilePurged: tombstonedSourceFileIds.has(String(row.sourceFileId)),
         mappings: parseJsonColumn(row.mappings) as ImportManifest['mappings'],
         normalizedRows: parseJsonColumn(
           row.normalizedRows

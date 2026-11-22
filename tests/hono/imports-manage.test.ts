@@ -25,6 +25,8 @@ import {
   ImportManifestDetailResponseSchema,
   ImportManifestListResponseSchema,
 } from '../../src/shared/schemas/imports.js';
+import { CreateCommunityExportResponseSchema } from '../../src/shared/schemas/community-export.js';
+import { communityMediaSqlite } from '../../src/db/schema/sessions.js';
 import { MediaUploadResponseSchema } from '../../src/shared/schemas/media-v2.js';
 import { deriveUserIdentityColumns } from '../../src/shared/utils/derived-columns.js';
 import { validateContentFreeAuditEntry } from '../../src/shared/utils/audit-entry.js';
@@ -1467,6 +1469,171 @@ describe('Slice 12-B GET /v2/imports, GET /v2/imports/:id, DELETE /v2/imports/:i
       expect(broken.status).toBe(503);
     } finally {
       memStore.set(live!.storageKey!, liveEntry);
+    }
+  });
+
+  describe('export treats a purged source CSV row as a tombstone only when nothing else references it', () => {
+    async function seedGuardCommunity(tag: string) {
+      const seedTime = new Date('2026-06-01T12:00:00.000Z');
+      const seed = await argon2Seed(TEST_DERIVED_KEY);
+      const communityId = await insertRow(tables.communities, {
+        name: `Export Guard ${tag}`,
+        slug: `export-guard-${tag}`,
+        publicStories: true,
+        isActive: true,
+        createdAt: seedTime,
+        updatedAt: seedTime,
+      });
+      const addUser = async (role: string) => {
+        const email = `guard-${tag}-${role}@example.test`;
+        await insertRow(tables.users, {
+          email,
+          username: email.split('@')[0],
+          ...deriveUserIdentityColumns({
+            email,
+            username: email.split('@')[0],
+          }),
+          firstName: role,
+          lastName: 'Guard',
+          ...seed,
+          role,
+          communityId,
+          isActive: true,
+          createdAt: seedTime,
+          updatedAt: seedTime,
+        });
+        return loginOnApp(app, db, email, communityId);
+      };
+      const editorCookie = await addUser('editor');
+      const adminCookie = await addUser('admin');
+      const manifest = await createPreviewOnApp(app, editorCookie, {
+        kind: 'places',
+        csvFilename: `guard-${tag}.csv`,
+        csvText: 'name\nGuard Place\n',
+      });
+      const [row] = await db
+        .select()
+        .from(tables.importManifests)
+        .where(eq(tables.importManifests.id, manifest.id));
+      const del = await app.request(`${API_ORIGIN}/v2/imports/${manifest.id}`, {
+        method: 'DELETE',
+        headers: { cookie: editorCookie, origin: CLIENT_ORIGIN },
+      });
+      expect(del.status).toBe(200);
+      const [source] = await db
+        .select()
+        .from(tables.files)
+        .where(eq(tables.files.id, row!.sourceFileId));
+      // Inactive source row with purged bytes: the tombstone shape.
+      expect(source?.isActive).toBe(false);
+      expect(memStore.has(source!.storageKey!)).toBe(false);
+      const exportOnce = () => {
+        currentNow = new Date(currentNow.getTime() + 2 * 60 * 60 * 1000);
+        return app.request(`${API_ORIGIN}/v2/community/export`, {
+          method: 'POST',
+          headers: { cookie: adminCookie, origin: CLIENT_ORIGIN },
+        });
+      };
+      return {
+        communityId,
+        adminCookie,
+        sourceId: row!.sourceFileId,
+        manifestRow: row!,
+        exportOnce,
+      };
+    }
+
+    it('omits a discarded-only tombstone and flags sourceFilePurged in the manifest', async () => {
+      const ctx = await seedGuardCommunity('purged');
+      const res = await ctx.exportOnce();
+      expect(res.status).toBe(201);
+      const body = CreateCommunityExportResponseSchema.parse(await res.json());
+      const manifestRes = await app.request(
+        `${API_ORIGIN}${body.data.artifacts.manifest.downloadPath}`,
+        { headers: { cookie: ctx.adminCookie } }
+      );
+      expect(manifestRes.status).toBe(200);
+      const manifest = (await manifestRes.json()) as {
+        files: Array<{ id: string }>;
+        importManifests: Array<{
+          sourceFileId: string;
+          sourceFilePurged: boolean;
+        }>;
+      };
+      expect(manifest.files.map((f) => f.id)).not.toContain(ctx.sourceId);
+      expect(manifest.importManifests).toHaveLength(1);
+      expect(manifest.importManifests[0]!.sourceFileId).toBe(ctx.sourceId);
+      expect(manifest.importManifests[0]!.sourceFilePurged).toBe(true);
+    });
+
+    const references: Array<{
+      name: string;
+      add: (ctx: {
+        communityId: number;
+        sourceId: string;
+        manifestRow: Record<string, unknown>;
+      }) => Promise<void>;
+    }> = [
+      {
+        name: 'an attachment',
+        add: async (ctx) => {
+          await insertRow(tables.attachments, {
+            communityId: ctx.communityId,
+            fileId: ctx.sourceId,
+            ownerType: 'story',
+            ownerId: 1,
+            role: 'story_media',
+            ordinal: 0,
+            createdAt: new Date(),
+          });
+        },
+      },
+      {
+        name: 'a community map config',
+        add: async (ctx) => {
+          await db.insert(tables.communityMapConfigs).values({
+            communityId: ctx.communityId,
+            staticMapFileId: ctx.sourceId,
+          });
+        },
+      },
+      {
+        name: 'a legacy community media row',
+        add: async (ctx) => {
+          await db.insert(communityMediaSqlite).values({
+            fileId: ctx.sourceId,
+            communityId: ctx.communityId,
+            kind: 'branding',
+          });
+        },
+      },
+      {
+        name: 'a previewed import manifest',
+        add: async (ctx) => {
+          const { id: _id, ...rest } = ctx.manifestRow;
+          await db
+            .insert(tables.importManifests)
+            .values({ ...rest, status: 'previewed' } as never);
+        },
+      },
+      {
+        name: 'a committed import manifest',
+        add: async (ctx) => {
+          const { id: _id, ...rest } = ctx.manifestRow;
+          await db
+            .insert(tables.importManifests)
+            .values({ ...rest, status: 'committed', committedAt: 1 } as never);
+        },
+      },
+    ];
+
+    for (const [n, ref] of references.entries()) {
+      it(`fails closed (503) when the purged inactive file is still referenced by ${ref.name}`, async () => {
+        const ctx = await seedGuardCommunity(`ref${n}`);
+        await ref.add(ctx);
+        const res = await ctx.exportOnce();
+        expect(res.status).toBe(503);
+      });
     }
   });
 });

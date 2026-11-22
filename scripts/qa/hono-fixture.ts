@@ -3811,6 +3811,29 @@ export async function createFixture(
           },
         },
         {
+          // Rails member search (dashboard/search#index) maps to the plain-text
+          // search filter: it must never surface unreadable stories.
+          name: `v2 stories plain-text search stays within readable stories (${role})`,
+          method: 'GET',
+          path: '/v2/stories?search=QA',
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const text = JSON.stringify(body) ?? '';
+            return (
+              parsed.data.data.stories.every((s) =>
+                expectedStoryIds.includes(s.id)
+              ) &&
+              !text.includes('QA restricted story') &&
+              !text.includes('QA unknown-privacy') &&
+              !text.includes('QA foreign story') &&
+              !text.includes('QA private community story') &&
+              !text.includes('QA inactive community')
+            );
+          },
+        },
+        {
           name: `v2 stories filter excludes #162 and unauthorized places (${role})`,
           method: 'GET',
           path: `/v2/stories?place=${restrictedPlace.id}`,

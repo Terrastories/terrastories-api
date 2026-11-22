@@ -46,6 +46,11 @@ import { constantTimeEqual, sha256Hex } from '../shared/auth-crypto.js';
 import { writeAuditEntry } from '../repositories/audit-entry.repository.js';
 import { normalizeSearchText } from '../shared/utils/search-normalize.js';
 import { parseV2Role } from '../shared/authorization/sovereignty-policy.js';
+import {
+  isUniqueConstraintError,
+  type UserManagementRepository,
+} from '../repositories/user-management.repository.js';
+import { deriveUserIdentityColumns } from '../shared/utils/derived-columns.js';
 
 export interface PreloginInput {
   identifier: string;
@@ -92,7 +97,9 @@ export class HonoAuthService {
   constructor(
     readonly repository: HonoAuthRepository,
     readonly foundation: HonoFoundationRepository,
-    readonly serverSecret: string | undefined
+    readonly serverSecret: string | undefined,
+    /** Owns the identity-guarded write of `updateOwnIdentifiers`. */
+    readonly identityRepository?: UserManagementRepository
   ) {}
 
   /**
@@ -110,6 +117,154 @@ export class HonoAuthService {
       displayName === null ? null : displayName.normalize('NFC');
     await this.foundation.updateDisplayName(actor.id, normalized, now);
     return normalized;
+  }
+
+  /**
+   * Own login-identifier change (`PATCH /v2/auth/me` with `username` and/or
+   * `email`). Both are login identifiers, so the request must re-present the
+   * current credential (`currentDerivedKey`, the same step-up as the password
+   * change). A missing, wrong, throttled or no-longer-current credential is
+   * one uniform `forbidden` — nothing is learned from which. Normalisation
+   * and uniqueness are exactly the admin user-management rules
+   * (`deriveUserIdentityColumns` + the guarded identity write); a collision is
+   * `conflict`. The content-free audit row commits with the write. Sessions
+   * are kept: identifiers are not session authority (the revocation trigger
+   * does not list them), the credential is unchanged, and every session was
+   * already issued to this same authenticated account.
+   */
+  async updateOwnIdentifiers(
+    input: {
+      user: FoundationUser;
+      currentDerivedKey: string | undefined;
+      displayName?: string | null | undefined;
+      username?: string | undefined;
+      email?: string | undefined;
+    },
+    clientIp: string | null,
+    now: Date,
+    userAgent?: string | undefined
+  ): Promise<
+    | {
+        status: 'updated';
+        displayName: string | null;
+        username: string | null;
+        email: string;
+      }
+    | { status: 'forbidden' }
+    | { status: 'conflict' }
+  > {
+    const repository = this.identityRepository;
+    if (repository === undefined)
+      throw new Error('identity repository is not configured');
+    const { user } = input;
+    const audit = (outcome: 'success' | 'failure') => ({
+      communityId: user.communityId,
+      actorId: user.id,
+      action: 'auth.identifier.change',
+      resourceType: 'auth',
+      resourceIds: [user.id],
+      outcome,
+      ipAddress: clientIp,
+      userAgent: userAgent?.slice(0, 512) ?? null,
+    });
+    const forbidden = { status: 'forbidden' } as const;
+    if (input.currentDerivedKey === undefined) return forbidden;
+    const account = await this.repository.accountById(user.id);
+    if (account === null) return forbidden;
+    const secret = this.serverSecret;
+    const throttled = secret !== undefined && secret !== '';
+    if (throttled) {
+      const state = await this.repository.throttleState(
+        await this.repository.accountThrottleKey(account.id, secret),
+        now.getTime()
+      );
+      if (state.blocked) return forbidden;
+    }
+    const stored = account.passwordVerifier;
+    const verified =
+      stored !== null &&
+      (account.passwordAlgorithm === ARGON2ID_ALGORITHM ||
+        account.passwordAlgorithm === RAILS_BCRYPT_ALGORITHM) &&
+      constantTimeEqual(await sha256Hex(input.currentDerivedKey), stored);
+    if (!verified) {
+      if (throttled)
+        await this.repository.recordLoginFailure(
+          {
+            account: { id: account.id, communityId: account.communityId },
+            clientIp: clientIp ?? '',
+            now: now.getTime(),
+          },
+          secret
+        );
+      await this.auditAuthEvent({
+        ...audit('failure'),
+        userAgent,
+      });
+      return forbidden;
+    }
+    const identity = deriveUserIdentityColumns({
+      ...(input.email !== undefined ? { email: input.email } : {}),
+      ...(input.username !== undefined ? { username: input.username } : {}),
+    });
+    const conflict = async () => {
+      await this.auditAuthEvent({ ...audit('failure'), userAgent });
+      return { status: 'conflict' } as const;
+    };
+    let outcome: 'updated' | 'identity_conflict' | 'stale';
+    try {
+      outcome = await repository.updateOwnIdentity(
+        {
+          id: account.id,
+          communityId: account.communityId,
+          anchor: {
+            passwordHash: account.passwordHash,
+            passwordVerifier: account.passwordVerifier,
+          },
+          ...(input.displayName !== undefined
+            ? { displayName: input.displayName?.normalize('NFC') ?? null }
+            : {}),
+          ...(input.username !== undefined
+            ? {
+                username: input.username,
+                usernameNormalized: identity.usernameNormalized ?? null,
+              }
+            : {}),
+          ...(input.email !== undefined
+            ? { email: input.email, emailNormalized: identity.emailNormalized }
+            : {}),
+          collision: {
+            ...(identity.emailNormalized !== undefined
+              ? { emailNormalized: identity.emailNormalized }
+              : {}),
+            ...(identity.usernameNormalized !== undefined
+              ? { usernameNormalized: identity.usernameNormalized }
+              : {}),
+          },
+          updatedAt: now,
+        },
+        audit('success')
+      );
+    } catch (error) {
+      if (isUniqueConstraintError(error)) return conflict();
+      throw error;
+    }
+    if (outcome === 'stale') return forbidden;
+    if (outcome === 'identity_conflict') return conflict();
+    if (throttled)
+      await this.repository.resetAccountThrottle(
+        account.id,
+        clientIp ?? '',
+        secret
+      );
+    return {
+      status: 'updated',
+      displayName:
+        input.displayName === undefined
+          ? account.displayName
+          : (input.displayName?.normalize('NFC') ?? null),
+      username: input.username ?? account.username,
+      email: input.email ?? account.email,
+    };
   }
 
   /**

@@ -1,4 +1,4 @@
-import { and, eq, exists, isNull, ne, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, isNull, ne, notExists, or, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -624,9 +624,49 @@ export class CommunityWritesRepository {
     };
 
     if (this.hasD1Batch()) {
-      const [upsertedRows] = await this.db.batch([
+      // Audit only when the upsert will write. The audit INSERT ... SELECT runs
+      // BEFORE the upsert in the same atomic batch and evaluates the same
+      // condition as the upsert's setWhere against the pre-write state: no row
+      // yet (plain insert) or the merged style/token pair guard holds. A
+      // guard-rejected save therefore writes no success audit row.
+      const audit = validateContentFreeAuditEntry(auditInput);
+      const existingConfig = this.db
+        .select({ one: sql`1` })
+        .from(communityMapConfigs)
+        .where(eq(communityMapConfigs.communityId, communityId));
+      const guardedConfig = this.db
+        .select({ one: sql`1` })
+        .from(communityMapConfigs)
+        .where(
+          and(eq(communityMapConfigs.communityId, communityId), pairGuard)
+        );
+      const insertAudit = this.db.insert(this.tables.auditEntries).select(
+        this.db
+          .select({
+            id: sql`NULL`.as('id'),
+            communityId: sql`${audit.communityId}`.as('community_id'),
+            actorId: sql`${audit.actorId}`.as('actor_id'),
+            action: sql`${audit.action}`.as('action'),
+            resourceType: sql`${audit.resourceType}`.as('resource_type'),
+            resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+              'resource_ids'
+            ),
+            outcome: sql`${audit.outcome}`.as('outcome'),
+            ipAddress: sql`NULL`.as('ip_address'),
+            userAgent: sql`NULL`.as('user_agent'),
+            createdAt: sql`${now.getTime()}`.as('created_at'),
+          })
+          .from(communities)
+          .where(
+            and(
+              eq(communities.id, communityId),
+              or(notExists(existingConfig), exists(guardedConfig))
+            )
+          )
+      );
+      const [, upsertedRows] = await this.db.batch([
+        insertAudit,
         buildUpsertQuery(this.db),
-        buildAuditEntryInsert(this.db, auditInput, now),
       ]);
       const rows = Array.isArray(upsertedRows)
         ? (upsertedRows as PublicMapConfigRow[])

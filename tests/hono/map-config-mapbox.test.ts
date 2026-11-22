@@ -1552,8 +1552,8 @@ describe('Mapbox & Protomaps map-config (SQLite + unit + D1 batch)', () => {
       expect(saved?.protomapsApiKey).toBe(FAKE_PROTOMAPS_KEY);
       expect(batchCalls).toHaveLength(1);
       expect(batchCalls[0]).toHaveLength(2);
-      expect(batchCalls[0]![0]).toMatch(/insert into "community_map_configs"/i);
-      expect(batchCalls[0]![1]).toMatch(/^insert into "audit_entries"/i);
+      expect(batchCalls[0]![0]).toMatch(/^insert into "audit_entries"/i);
+      expect(batchCalls[0]![1]).toMatch(/insert into "community_map_configs"/i);
 
       const privRes = await repo.updateCommunitySettings(
         comm!.id,
@@ -1576,6 +1576,164 @@ describe('Mapbox & Protomaps map-config (SQLite + unit + D1 batch)', () => {
         .from(tables.communityMapConfigs)
         .where(eq(tables.communityMapConfigs.communityId, comm!.id));
       expect(Boolean(rowAfter?.exposeMapboxCredentials)).toBe(false);
+    } finally {
+      batchSqlite.close();
+    }
+  });
+
+  it('writes no audit row in D1 db.batch() when the merged pair guard rejects the upsert', async () => {
+    const batchSqlite = new Sqlite(':memory:');
+    batchSqlite.pragma('foreign_keys = ON');
+    const localDb = drizzleSqlite(batchSqlite);
+    migrateSqlite(localDb, { migrationsFolder: 'src/db/migrations' });
+    const tables = tablesFor(localDb);
+
+    try {
+      const [comm] = await localDb
+        .insert(tables.communities)
+        .values({
+          name: 'D1 Guard Comm',
+          slug: 'd1-guard-comm',
+          publicStories: true,
+          isActive: true,
+          createdAt: currentNow,
+          updatedAt: currentNow,
+        })
+        .returning({ id: tables.communities.id });
+      const email = 'd1guard@example.test';
+      const [actor] = await localDb
+        .insert(tables.users)
+        .values({
+          email,
+          username: 'd1guard',
+          ...deriveUserIdentityColumns({ email, username: 'd1guard' }),
+          firstName: 'D1',
+          lastName: 'Guard',
+          passwordHash: 'hash',
+          role: 'admin',
+          communityId: comm!.id,
+          isActive: true,
+          createdAt: currentNow,
+          updatedAt: currentNow,
+        })
+        .returning({ id: tables.users.id });
+
+      const d1Client = {
+        prepare(querySql: string) {
+          let params: unknown[] = [];
+          const stmt = {
+            bind(...vals: unknown[]) {
+              params = vals;
+              return stmt;
+            },
+            all: async () => ({
+              results: batchSqlite.prepare(querySql).all(...params),
+              success: true,
+              meta: {},
+            }),
+            raw: async () =>
+              batchSqlite
+                .prepare(querySql)
+                .raw(true)
+                .all(...params),
+            run: async () => {
+              const info = batchSqlite.prepare(querySql).run(...params);
+              return { success: true, meta: { changes: info.changes } };
+            },
+            _exec() {
+              const prepared = batchSqlite.prepare(querySql);
+              if (prepared.reader) {
+                return { results: prepared.all(...params), success: true };
+              }
+              const info = prepared.run(...params);
+              return {
+                results: [],
+                success: true,
+                meta: { changes: info.changes },
+              };
+            },
+          };
+          return stmt;
+        },
+        async batch(stmts: Array<{ _exec: () => unknown }>) {
+          return batchSqlite.transaction(() => stmts.map((s) => s._exec()))();
+        },
+      };
+      const d1Db = drizzleD1(
+        d1Client as unknown as Parameters<typeof drizzleD1>[0]
+      );
+      const repo = new CommunityWritesRepository(d1Db as unknown as Database);
+      const base = {
+        styleUrl: null,
+        basemapStyle: null,
+        centerLatitude: null,
+        centerLongitude: null,
+        southWestLatitude: null,
+        southWestLongitude: null,
+        northEastLatitude: null,
+        northEastLongitude: null,
+        zoom: null,
+        pitch: null,
+        bearing: null,
+        threeDimensional: null,
+        projection: null,
+        staticMapFileId: null,
+      };
+      const countAudits = async () =>
+        (
+          await localDb
+            .select({ id: tables.auditEntries.id })
+            .from(tables.auditEntries)
+            .where(
+              eq(tables.auditEntries.action, 'community.map_config.update')
+            )
+        ).length;
+
+      const first = await repo.upsertCommunityMapConfig(
+        comm!.id,
+        actor!.id,
+        {
+          ...base,
+          mapboxStyleUrl: 'mapbox://styles/d1/guard-v1',
+          mapboxAccessToken: FAKE_PK_COMMUNITY,
+        },
+        ['mapboxAccessToken', 'mapboxStyleUrl'],
+        currentNow
+      );
+      expect(first?.mapboxStyleUrl).toBe('mapbox://styles/d1/guard-v1');
+      expect(await countAudits()).toBe(1);
+
+      // Clearing only the token leaves a half pair: guard rejects, same
+      // timestamp as the previous write, no success audit is recorded.
+      const refused = await repo.upsertCommunityMapConfig(
+        comm!.id,
+        actor!.id,
+        { ...base, mapboxAccessToken: null, zoom: 9 },
+        ['mapboxAccessToken', 'zoom'],
+        currentNow
+      );
+      expect(refused).toBeNull();
+      expect(await countAudits()).toBe(1);
+      const [row] = await localDb
+        .select({
+          token: tables.communityMapConfigs.mapboxAccessToken,
+          zoom: tables.communityMapConfigs.zoom,
+        })
+        .from(tables.communityMapConfigs)
+        .where(eq(tables.communityMapConfigs.communityId, comm!.id));
+      expect(row?.token).toBe(FAKE_PK_COMMUNITY);
+      expect(row?.zoom).toBeNull();
+
+      // A valid follow-up save still audits.
+      const kept = await repo.upsertCommunityMapConfig(
+        comm!.id,
+        actor!.id,
+        { ...base, zoom: 4 },
+        ['zoom'],
+        currentNow
+      );
+      expect(kept?.zoom).toBe(4);
+      expect(await countAudits()).toBe(2);
     } finally {
       batchSqlite.close();
     }

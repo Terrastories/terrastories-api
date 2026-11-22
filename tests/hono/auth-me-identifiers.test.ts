@@ -308,4 +308,108 @@ describe('PATCH /v2/auth/me login identifiers (self-edit)', () => {
     expect(cookie).toContain('ts_session=');
     expect(patch).toBeTypeOf('function');
   });
+
+  // Runs `mutate` immediately before the guarded identifier UPDATE (the
+  // one writing `username`), i.e. after the step-up read, inside the write
+  // transaction.
+  async function interposedApp(
+    mutate: (sqlite: Sqlite.Database, userId: number) => void
+  ) {
+    const ctx = await setup();
+    let fired = false;
+    const wrap = (target: object): object =>
+      new Proxy(target, {
+        get(obj, prop) {
+          if (prop === 'update') {
+            return (...args: unknown[]) => {
+              const builder = (
+                Reflect.get(obj, prop) as (...a: unknown[]) => object
+              ).apply(obj, args);
+              return new Proxy(builder, {
+                get(b, key) {
+                  const value = Reflect.get(b, key);
+                  if (key !== 'set' || typeof value !== 'function')
+                    return typeof value === 'function' ? value.bind(b) : value;
+                  return (patch: Record<string, unknown>) => {
+                    if (!fired && 'username' in patch) {
+                      fired = true;
+                      mutate(ctx.sqlite, ctx.me.id);
+                    }
+                    return value.call(b, patch);
+                  };
+                },
+              });
+            };
+          }
+          if (prop === 'transaction') {
+            return (cb: (tx: object) => unknown, ...rest: unknown[]) =>
+              (Reflect.get(obj, prop) as (...a: unknown[]) => unknown).call(
+                obj,
+                (tx: object) => cb(wrap(tx)),
+                ...rest
+              );
+          }
+          const value = Reflect.get(obj, prop);
+          return typeof value === 'function' ? value.bind(obj) : value;
+        },
+      });
+    const proxy = wrap(ctx.db) as unknown as ReturnType<typeof drizzle>;
+    const app = createHonoApp({
+      repository: new HonoFoundationRepository(proxy),
+      storage: { read: async () => null },
+      serverSecret: makeServerSecret(),
+      secureCookies: false,
+    });
+    const { cookie } = await ctx.login('me@self.example.test');
+    const request = () =>
+      app.request('http://test/v2/auth/me', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', cookie },
+        body: JSON.stringify({
+          username: 'self_midflight',
+          email: 'midflight@self.example.test',
+          currentDerivedKey: ctx.key,
+        }),
+      });
+    return { ...ctx, request, wasFired: () => fired };
+  }
+
+  const successAudits = (sqlite: Sqlite.Database) =>
+    sqlite
+      .prepare(
+        "SELECT count(*) AS n FROM audit_entries WHERE action = 'auth.identifier.change' AND outcome = 'success'"
+      )
+      .get() as { n: number };
+
+  it('answers 403 when the verifier is replaced between the step-up read and the write', async () => {
+    const { me, row, sqlite, request, wasFired } = await interposedApp(
+      (db, id) => {
+        db.prepare(
+          "UPDATE users SET password_verifier = 'replaced-midflight' WHERE id = ?"
+        ).run(id);
+      }
+    );
+    const response = await request();
+    expect(wasFired()).toBe(true);
+    expect(response.status).toBe(403);
+    const after = await row(me.id);
+    expect(after.username).toBe('self_me');
+    expect(after.email).toBe('me@self.example.test');
+    expect(successAudits(sqlite).n).toBe(0);
+  });
+
+  it('refuses a user disabled between the step-up read and the write', async () => {
+    const { me, row, sqlite, request, wasFired } = await interposedApp(
+      (db, id) => {
+        db.prepare('UPDATE users SET is_active = 0 WHERE id = ?').run(id);
+      }
+    );
+    const response = await request();
+    expect(wasFired()).toBe(true);
+    expect(response.status).toBe(403);
+    const after = await row(me.id);
+    expect(after.username).toBe('self_me');
+    expect(after.email).toBe('me@self.example.test');
+    expect(successAudits(sqlite).n).toBe(0);
+  });
 });

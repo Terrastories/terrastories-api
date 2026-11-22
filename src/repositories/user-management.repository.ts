@@ -870,9 +870,15 @@ export class UserManagementRepository {
       patch.emailNormalized = input.emailNormalized;
     }
     const { passwordHash, passwordVerifier } = input.anchor;
+    // Anchor = verified credential AND still an active member of the same
+    // community, so an account disabled (or moved) mid-request is refused.
     const anchorWhere = () =>
       and(
         eq(users.id, input.id),
+        eq(users.isActive, true),
+        input.communityId === null
+          ? isNull(users.communityId)
+          : eq(users.communityId, input.communityId),
         eq(users.passwordHash, passwordHash),
         passwordVerifier === null
           ? isNull(users.passwordVerifier)
@@ -889,8 +895,10 @@ export class UserManagementRepository {
         .set(patch)
         .where(and(anchorWhere(), collisionSql))
         .returning({ id: users.id });
-    const anchorStillHolds = async (): Promise<boolean> => {
-      const rows = (await db
+    const anchorStillHolds = async (
+      database: Executor = db
+    ): Promise<boolean> => {
+      const rows = (await database
         .select({ id: users.id })
         .from(users)
         .where(anchorWhere())
@@ -907,6 +915,8 @@ export class UserManagementRepository {
             .where(eq(communities.id, input.communityId))
             .for('share');
         await this.takeIdentityAdvisoryLocks(tx, input.collision);
+        // A stale credential must never reach the 409 branch.
+        if (!(await anchorStillHolds(tx))) return 'stale' as const;
         const collided = await this.hasIdentityCollision(
           {
             ...input.collision,
@@ -936,6 +946,12 @@ export class UserManagementRepository {
         where exists (
           select 1 from users
           where id = ${input.id}
+            and is_active = 1
+            and ${
+              input.communityId === null
+                ? sql`community_id is null`
+                : sql`community_id = ${input.communityId}`
+            }
             and password_hash = ${passwordHash}
             and ${
               passwordVerifier === null

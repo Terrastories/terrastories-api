@@ -1,9 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chmod, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  readdir,
+  rename,
+  rm,
+  rmdir,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { Pool, type PoolClient } from 'pg';
+import { fsyncDirectoryTree, fsyncPath } from './fsync.js';
 import {
   RAILS_SOURCE_PROFILE,
   selectRailsSourceContract,
@@ -92,6 +102,11 @@ export interface RailsCaptureManifest {
   };
   storage: RailsCaptureStorage;
   blobSelection: BlobSelectionMetadata;
+  /**
+   * true only for a full source capture (blobSelection.mode === 'all').
+   * false means a partial community_allowlist capture for staging/rehearsal.
+   */
+  complete: boolean;
   archive: {
     filename: typeof ARCHIVE_FILENAME;
     byteSize: string;
@@ -200,6 +215,14 @@ function resolveBlobSourceOption(
         : options.blobRoot,
     storageManifest: { kind: 'disk' },
   };
+}
+
+async function pathIsDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 async function assertPathDoesNotExist(path: string): Promise<void> {
@@ -491,6 +514,43 @@ async function resolveCommunityAllowlist(
   };
 }
 
+const KNOWN_ATTACHMENT_RECORD_TYPES = [
+  'Community',
+  'Place',
+  'Speaker',
+  'Theme',
+  'User',
+  'Media',
+  'ActiveStorage::Blob',
+  'ActiveStorage::VariantRecord',
+] as const;
+
+// Allowlist selection only understands the known record types. An attachment of
+// any other type could belong to a selected community, so fail closed instead
+// of silently recording its blob as not_selected. Reports names and counts only.
+async function assertKnownAttachmentRecordTypes(
+  client: PoolClient
+): Promise<void> {
+  const unknown = await client.query<{ record_type: string; count: string }>(
+    `
+      SELECT record_type, count(*)::text AS count
+      FROM active_storage_attachments
+      WHERE record_type IS NULL OR record_type <> ALL($1::text[])
+      GROUP BY record_type
+      ORDER BY record_type COLLATE "C" NULLS FIRST
+    `,
+    [KNOWN_ATTACHMENT_RECORD_TYPES]
+  );
+  if (unknown.rows.length > 0) {
+    const listing = unknown.rows
+      .map((row) => `${row.record_type ?? '<null>'} (${row.count})`)
+      .join(', ');
+    throw new Error(
+      `Community allowlist capture cannot classify ActiveStorage attachments with unknown record_type: ${listing}. Capture without --community or extend the allowlist resolver.`
+    );
+  }
+}
+
 async function resolveReachableBlobIds(
   client: PoolClient,
   communityIds: readonly string[],
@@ -503,6 +563,8 @@ async function resolveReachableBlobIds(
   ) {
     return selectedBlobIds;
   }
+
+  await assertKnownAttachmentRecordTypes(client);
 
   const directResult = await client.query<{ blob_id: string }>(
     `
@@ -666,7 +728,10 @@ function buildRowQuery(table: SourceTable): string {
   const orderBy =
     orderColumns.length > 0
       ? ` ORDER BY ${orderColumns
-          .map((column) => `${quoteIdentifier(column)}::text NULLS FIRST`)
+          .map(
+            (column) =>
+              `${quoteIdentifier(column)}::text COLLATE "C" NULLS FIRST`
+          )
           .join(', ')}`
       : '';
 
@@ -1057,6 +1122,21 @@ export async function captureRailsToBundle(
   const temporaryDir = `${resolvedOutputDir}.tmp-${randomUUID()}`;
   await mkdir(temporaryDir, { recursive: false, mode: 0o700 });
 
+  // Atomically claim the destination as an empty directory. A concurrent
+  // capture (or any other creator) fails here instead of racing the final rename.
+  try {
+    await mkdir(resolvedOutputDir, { recursive: false, mode: 0o700 });
+  } catch (error) {
+    await rmdir(temporaryDir).catch(() => undefined);
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(
+        `Migration destination already exists: ${resolvedOutputDir}`
+      );
+    }
+    throw error;
+  }
+  let destinationClaimed = true;
+
   const archivePath = join(temporaryDir, ARCHIVE_FILENAME);
   const pool = new Pool({ connectionString: options.sourceUrl, max: 1 });
   let client: PoolClient | null = null;
@@ -1159,6 +1239,7 @@ export async function captureRailsToBundle(
       },
       storage: blobSource.storageManifest,
       blobSelection,
+      complete: blobSelection.mode === 'all',
       archive: {
         filename: ARCHIVE_FILENAME,
         byteSize: String(archiveStat.size),
@@ -1187,9 +1268,27 @@ export async function captureRailsToBundle(
       { encoding: 'utf8', mode: 0o600 }
     );
 
+    await fsyncPath(archivePath);
+    await fsyncPath(join(temporaryDir, 'manifest.json'));
+    await fsyncPath(join(temporaryDir, 'validation-summary.txt'));
+    if (await pathIsDirectory(join(temporaryDir, 'blobs'))) {
+      await fsyncDirectoryTree(join(temporaryDir, 'blobs'));
+    }
+    await fsyncPath(temporaryDir);
+
     await client.query('COMMIT');
     transactionOpen = false;
+
+    // Re-check right before the rename: the claimed destination must still be
+    // our own empty directory, otherwise fail closed rather than replace it.
+    if ((await readdir(resolvedOutputDir)).length > 0) {
+      throw new Error(
+        `Migration destination changed during capture: ${resolvedOutputDir}`
+      );
+    }
     await rename(temporaryDir, resolvedOutputDir);
+    destinationClaimed = false;
+    await fsyncPath(dirname(resolvedOutputDir));
     return manifest;
   } catch (error) {
     archive?.close();
@@ -1201,6 +1300,10 @@ export async function captureRailsToBundle(
       }
     }
     await rm(temporaryDir, { recursive: true, force: true });
+    if (destinationClaimed) {
+      // Remove only our own still-empty claim; never a populated directory.
+      await rmdir(resolvedOutputDir).catch(() => undefined);
+    }
     throw error;
   } finally {
     client?.release();

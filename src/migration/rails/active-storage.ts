@@ -9,6 +9,7 @@ import {
   stat,
 } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
+import { fsyncPath } from './fsync.js';
 
 export const SAFE_ACTIVE_STORAGE_KEY = /^[A-Za-z0-9_-]+$/;
 
@@ -207,6 +208,7 @@ export async function verifyAndCopyActiveStorageBlob(options: {
   const destinationPath = join(options.destinationRoot, options.key);
   await copyFile(sourcePath, destinationPath);
   await chmod(destinationPath, 0o600);
+  await fsyncPath(destinationPath);
 
   const destinationStat = await stat(destinationPath, { bigint: true });
   if (destinationStat.size !== expectedSize) {

@@ -852,6 +852,8 @@ The bundle is sensitive community data:
 - never upload a real community migration bundle to CI, public Actions artifacts, or third-party review services;
 - keep retention/deletion under community/operator control.
 
+A community-allowlist capture (blob bytes limited to selected communities) is a **partial bundle**: its manifest records `complete: false` and its validation summary states "PARTIAL CAPTURE — NOT A COMPLETE SOURCE CAPTURE". Allowlist bundles are for staging/rehearsal. Stage 2 must refuse a partial bundle unless the transform is also community-scoped to a subset of the selected communities, and a partial bundle never qualifies for cutover. Allowlist capture also fails closed on any attachment `record_type` it cannot classify rather than treating its blob as not selected. Stage 1 fsyncs blob files, the archive, manifest, summary and directories before the final rename, and claims the destination directory atomically so concurrent captures cannot collide.
+
 Stage 1 must fail closed on a missing/mismatched required source-profile schema or migration revision, unsupported storage profile, source read inconsistency, missing stored-object bytes, byte-size mismatch, checksum mismatch, destination overwrite, or unexplained capture-count changes. Failure must not leave a destination that can be mistaken for a successful bundle.
 
 ### 10.4 Canonical target artifacts

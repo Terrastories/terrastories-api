@@ -59,6 +59,10 @@ By default, Stage 1 downloads every row in `active_storage_blobs`. When staging 
 - **Only blobs reachable from the selected communities are downloaded**: attachments on `Community`, `Place`, `Speaker`, `Theme`, `User`, and `Media` (via `stories.community_id`) belonging to those communities, plus transitive `ActiveStorage::VariantRecord` and `ActiveStorage::Blob` `preview_image` blobs derived from them.
 - **Every other blob is recorded in `manifest.json` with `disposition: "not_selected"`** (preserving `key`, `byteSize`, and `railsChecksum`, with `sha256: null` and no bytes written under `blobs/`), and `validation-summary.txt` reports both `Blobs selected` and `Blobs not_selected` counts.
 
+**A `--community` bundle is partial.** `manifest.json` records `complete: false` (it is `true` only for a full capture with no allowlist) and `validation-summary.txt` says `Status: PARTIAL CAPTURE (community_allowlist) — NOT A COMPLETE SOURCE CAPTURE`. Allowlist bundles are for staging and rehearsal only. Stage 2 must refuse a partial bundle unless the transform is also community-scoped to a subset of the selected communities, and a partial bundle never qualifies for cutover.
+
+Allowlist capture fails closed if `active_storage_attachments` contains any `record_type` outside the known set (`Community`, `Place`, `Speaker`, `Theme`, `User`, `Media`, `ActiveStorage::Blob`, `ActiveStorage::VariantRecord`); the error lists the unknown type names with attachment counts only. Capture without `--community`, or extend the resolver.
+
 ## Database credentials
 
 Do **not** put a production database password directly in `--source`; shell history and process listings can expose command-line arguments.

@@ -167,6 +167,7 @@ function createSyntheticArchiveManifest(
     },
     storage: { kind: 'disk' },
     blobSelection: { mode: 'all', selectors: [], communities: [] },
+    complete: true,
     archive: {
       filename: 'legacy.sqlite',
       byteSize: String(archiveBytes.length),
@@ -572,6 +573,7 @@ describe('capture validation summary and offline archive verification', () => {
         selectors: ['rio_verde'],
         communities: [{ id: '10', slug: 'rio_verde' }],
       },
+      complete: false,
       totals: {
         ...multiTableManifest.totals,
         blobs: 16,
@@ -587,6 +589,11 @@ describe('capture validation summary and offline archive verification', () => {
     expect(allowlistSummary).toContain('Blobs selected: 14');
     expect(allowlistSummary).toContain('Blobs not_selected: 2');
     expect(allowlistSummary).not.toContain('fixture-bucket');
+    expect(allowlistSummary).toContain(
+      'Status: PARTIAL CAPTURE (community_allowlist) — NOT A COMPLETE SOURCE CAPTURE'
+    );
+    expect(allowlistSummary).not.toContain('SOURCE PRESERVATION COMPLETE');
+    expect(summary).toContain('SOURCE PRESERVATION COMPLETE');
   });
 
   it('verifies a valid archive and rejects metadata, digest, and size tampering', async () => {

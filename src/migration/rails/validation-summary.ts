@@ -16,7 +16,9 @@ export function buildCaptureValidationSummary(
   return [
     'Terrastories Rails Stage-1 Capture Validation Summary',
     '',
-    'Status: SOURCE PRESERVATION COMPLETE — NOT A V2 CUTOVER',
+    manifest.complete
+      ? 'Status: SOURCE PRESERVATION COMPLETE — NOT A V2 CUTOVER'
+      : 'Status: PARTIAL CAPTURE (community_allowlist) — NOT A COMPLETE SOURCE CAPTURE',
     `Source profile: ${manifest.source.profile}`,
     `Contract profile: ${manifest.source.contractProfile}`,
     `Legacy commit: ${manifest.source.legacyCommit}`,
@@ -39,6 +41,11 @@ export function buildCaptureValidationSummary(
     '',
     'This summary intentionally excludes source row contents, password hashes,',
     'provider credentials, database URLs, reset/session tokens, and media names.',
+    ...(manifest.complete
+      ? []
+      : [
+          'Partial bundle: for staging/rehearsal only. It never qualifies for cutover.',
+        ]),
     'Validate custody/checksums and complete Stage 2 before any production cutover.',
     '',
   ].join('\n');

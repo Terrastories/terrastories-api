@@ -5,10 +5,113 @@
  * place where withdrawal and erasure are ever walked.
  */
 import { newVerifier, randomPassword } from '../kdf.js';
-import { field, guarded, num, signIn, str, val, type Ctx } from '../context.js';
+import {
+  field,
+  guarded,
+  num,
+  signIn,
+  str,
+  val,
+  playOf,
+  type Ctx,
+} from '../context.js';
 import { dig } from '../walk.js';
 
 export const PERSONA_SUPER = 'Super admin';
+
+/** Sam signs in once; later chapters reuse the session. */
+async function samSession(ctx: Ctx) {
+  const { w, s, cfg } = ctx;
+  const sam = (s.actors.sam ??= w.actor('Sam', 'super admin'));
+  if (!sam.jar.signedIn)
+    await signIn(ctx, sam, cfg.superIdentifier!, cfg.superPassword!);
+  return sam;
+}
+
+/**
+ * Sam creates and claims the disposable "play" community. Every mutating
+ * chapter runs there, with a script-created admin ("Ana"); the real
+ * community is never written to.
+ */
+export async function provisionPlay(ctx: Ctx): Promise<void> {
+  const { w, s } = ctx;
+  w.chapter(
+    PERSONA_SUPER,
+    'Sam prepares a disposable play community',
+    'The walkthrough never writes to the real community. Sam creates "' +
+      w.runId +
+      '-play", issues a claim token, and the future admin (Ana) claims it. Everything else runs there; it is disabled at the end.'
+  );
+  await guarded(ctx, 'play-provisioning', async () => {
+    const sam = await samSession(ctx);
+    const slug = `${w.runId}-play`;
+    const made = await w.step({
+      who: sam,
+      say: `creates the play community "${slug}" (empty, unclaimed)`,
+      method: 'POST',
+      path: '/v2/admin/communities',
+      json: { slug },
+      expect: 201,
+      covers: ['S03', 'V15'],
+      show: (r) => [
+        field('slug', dig(r, 'data', 'slug')),
+        field('claim status', dig(r, 'data', 'claimStatus')),
+      ],
+    });
+    const id = num(made, 'data', 'id');
+    // recorded at once so cleanup disables it even if a later step fails
+    s.play = {
+      slug,
+      id,
+      adminIdentifier: `${w.runId}-ana`,
+      adminPassword: '',
+      source: 'provisioned',
+    };
+    const token = await w.step({
+      who: sam,
+      say: 'issues a one-time claim token for the play community admin',
+      method: 'POST',
+      path: `/v2/admin/communities/${id}/claim-tokens`,
+      json: { ttlSeconds: 3600 },
+      expect: 201,
+      covers: ['S03', 'V15'],
+      show: (r) => {
+        w.secret(String(dig(r, 'data', 'token') ?? ''));
+        return ['a token box with copy button (value hidden here)'];
+      },
+    });
+    const ana = (s.actors.ana = w.actor('Ana', 'community admin'));
+    const password = randomPassword();
+    w.secret(password);
+    const verifier = await newVerifier(password);
+    w.secret(verifier.derivedKey);
+    const claim = await w.step({
+      who: ana,
+      say: 'Ana opens the claim page, pastes the token, and chooses her identity and password',
+      method: 'POST',
+      path: '/v2/bootstrap/claim',
+      json: {
+        token: str(token, 'data', 'token'),
+        username: s.play.adminIdentifier,
+        email: `${w.runId}-ana@walkthrough.example.test`,
+        displayName: `Ana (${w.runId})`,
+        password: verifier,
+      },
+      expect: [200, 201],
+      covers: ['V15', 'S03'],
+      show: (r) => {
+        const codes = dig(r, 'data', 'recoveryCodes', 'codes');
+        if (Array.isArray(codes)) for (const c of codes) w.secret(String(c));
+        return [
+          field('admin', dig(r, 'data', 'user', 'displayName')),
+          'recovery codes are shown once',
+        ];
+      },
+    });
+    s.play.adminPassword = password;
+    void claim;
+  });
+}
 
 export async function superAdminChapter(ctx: Ctx): Promise<void> {
   const { w, s, cfg } = ctx;
@@ -18,8 +121,7 @@ export async function superAdminChapter(ctx: Ctx): Promise<void> {
     'Sam is the super admin of the hosted installation. He sees operational records only: never stories, places or speakers. Everything he creates is prefixed with the run id.'
   );
   await guarded(ctx, 'super-admin', async () => {
-    const sam = (s.actors.sam = w.actor('Sam', 'super admin'));
-    await signIn(ctx, sam, cfg.superIdentifier!, cfg.superPassword!);
+    const sam = await samSession(ctx);
     await w.step({
       who: sam,
       say: 'opens the dashboard; the sidebar shows Communities only',

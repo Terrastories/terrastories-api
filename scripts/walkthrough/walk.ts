@@ -19,6 +19,10 @@ export interface StepSpec extends CallOptions {
   expect: number | number[];
   /** Handoff rows (section 4 and 5 ids) this step exercises. */
   covers?: string[];
+  /** Rows this step only partly exercises (shown as "partially covered"). */
+  partial?: string[];
+  /** A deliberate failed login or step-up: counts against the throttle budget and is spaced out. */
+  authFailure?: boolean;
   /** A negative check: the API must refuse. Shown as such. */
   negative?: boolean;
   /** What a UI screen would show after this response (key fields). */
@@ -42,6 +46,8 @@ export interface StepRecord {
   outcome: 'pass' | 'fail' | 'skip';
   negative: boolean;
   covers: string[];
+  partial: string[];
+  authFailure: boolean;
   ui: string[];
   note?: string;
   /** A skip that stands in for a flow needing an explicit opt-in flag. */
@@ -62,6 +68,7 @@ const MASKED_KEYS = new Set([
   'code',
   'codes',
   'bootstrapsecret',
+  'identifier',
   'mapboxaccesstoken',
   'protomapsapikey',
 ]);
@@ -87,12 +94,15 @@ export class Walk {
   private stepNo = 0;
   private persona = '';
   failed = false;
+  private lastAuthFailure = 0;
 
   constructor(
     readonly baseUrl: string,
     readonly options: {
       quiet?: boolean;
       onLine?: (line: string) => void;
+      /** Pause before each deliberate failed auth attempt (the server throttles 10 per 15 minutes per IP). */
+      authSpacingMs?: number;
     } = {}
   ) {
     this.runId = `wt-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
@@ -171,9 +181,16 @@ export class Walk {
       outcome: 'pass',
       negative: spec.negative === true,
       covers: spec.covers ?? [],
+      partial: spec.partial ?? [],
+      authFailure: spec.authFailure === true,
       ui: [],
       ms: 0,
     };
+    if (spec.authFailure && this.options.authSpacingMs) {
+      const wait =
+        this.lastAuthFailure + this.options.authSpacingMs - Date.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    }
     let reply: Reply | undefined;
     let failure: string | undefined;
     try {
@@ -199,6 +216,7 @@ export class Walk {
     } catch (error) {
       failure = `request failed: ${error instanceof Error ? error.message : String(error)}`;
     }
+    if (spec.authFailure) this.lastAuthFailure = Date.now();
     record.ms = Date.now() - started;
     if (failure) {
       record.outcome = 'fail';
@@ -227,6 +245,11 @@ export class Walk {
       ...(record.covers.length
         ? [`- Covers: ${record.covers.join(', ')}`]
         : []),
+      ...(record.partial.length
+        ? [
+            `- Partially covers: ${record.partial.join(', ')} (closed-setup check only)`,
+          ]
+        : []),
       ''
     );
     if (failure) throw new StepError(`${label}: ${failure}`);
@@ -251,6 +274,8 @@ export class Walk {
       outcome: 'skip',
       negative: false,
       covers,
+      partial: [],
+      authFailure: false,
       ui: [],
       note: reason,
       deferred,
@@ -276,8 +301,12 @@ export class Walk {
     skipped: string[];
     ok: boolean;
     deferred: boolean;
+    partial: boolean;
   }> {
     return COVERAGE_ROWS.map((row) => {
+      const partialSteps = this.records.filter(
+        (r) => r.outcome === 'pass' && r.partial.includes(row.id)
+      );
       const steps = this.records.filter((r) => r.covers.includes(row.id));
       const executed = steps
         .filter((r) => r.outcome === 'pass')
@@ -288,11 +317,12 @@ export class Walk {
       const deferred = steps.some((r) => r.outcome === 'skip' && r.deferred);
       const ok =
         row.kind === 'api'
-          ? executed.length > 0 || deferred
+          ? executed.length > 0 || deferred || partialSteps.length > 0
           : executed.length + skipped.length > 0;
       return {
         row,
-        steps: steps.map((r) => r.label),
+        partial: executed.length === 0 && partialSteps.length > 0,
+        steps: [...steps, ...partialSteps].map((r) => r.label),
         executed,
         skipped,
         ok,
@@ -331,7 +361,9 @@ export class Walk {
               ? 'client-only'
               : c.deferred
                 ? 'API (deferred: needs --allow-destructive)'
-                : 'API';
+                : c.partial
+                  ? 'API (partially covered: closed-setup check only; full path needs --setup-from-bootstrap)'
+                  : 'API';
         const steps = c.steps.length ? c.steps.join(', ') : '**none**';
         return `| ${c.row.id} | ${c.row.title.replace(/\|/g, '/')} | ${kind} | ${steps} |`;
       }),

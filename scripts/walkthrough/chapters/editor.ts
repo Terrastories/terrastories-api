@@ -874,6 +874,27 @@ async function importChapter(
       field('result', JSON.stringify(val(r, 'data', 'resultSummary') ?? {})),
     ],
   });
+  await w.step({
+    who: elena,
+    say: 'opens the places list to see the imported places',
+    method: 'GET',
+    path: '/v2/places?limit=100',
+    expect: 200,
+    covers: ['C31'],
+    check: (r) => {
+      const names = ((val(r, 'data') as Array<{ name: string }>) ?? []).map(
+        (p) => p.name
+      );
+      return [`${w.runId} Import landing`, `${w.runId} Import bend`].every(
+        (n) => names.includes(n)
+      )
+        ? undefined
+        : 'the committed import did not create both places';
+    },
+    show: (r) => [
+      field('places found', ((val(r, 'data') as unknown[]) ?? []).length),
+    ],
+  });
   // places created by the import are removed in cleanup by name prefix
   const stories = await w.step({
     who: elena,
@@ -910,6 +931,25 @@ async function importChapter(
     path: `/v2/imports/${storiesManifest}/commit`,
     expect: [200, 201],
     covers: ['C31'],
+  });
+  await w.step({
+    who: elena,
+    say: 'opens the stories list to see the imported stories',
+    method: 'GET',
+    path: `/v2/stories?search=${encodeURIComponent(w.runId + ' Imported')}&limit=50`,
+    expect: 200,
+    covers: ['C31'],
+    check: (r) => {
+      const titles = (
+        (dig(r, 'data', 'stories') as Array<{ title: string }>) ?? []
+      ).map((x) => x.title);
+      return [
+        `${w.runId} Imported open story`,
+        `${w.runId} Imported members story`,
+      ].every((t) => titles.includes(t))
+        ? undefined
+        : 'the committed import did not create both stories';
+    },
   });
   const bad = await w.step({
     who: elena,

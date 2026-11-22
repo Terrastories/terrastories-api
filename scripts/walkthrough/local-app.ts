@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { serve } from '@hono/node-server';
+import { eq, getTableColumns } from 'drizzle-orm';
 import bcrypt from 'bcrypt';
 import { createHonoApp } from '../../src/hono-app.js';
 import { HonoFoundationRepository } from '../../src/repositories/hono-foundation.repository.js';
@@ -37,6 +38,12 @@ export interface LocalApp {
   superAdmin: { identifier: string; password: string };
   /** Environment a CLI run would read, by variable name. */
   env: Record<string, string>;
+  /**
+   * Raw rows of everything that belongs to the stand-in community (the
+   * community row, its users with credential columns, every table keyed by
+   * communityId), as JSON text, to prove a run left it unchanged.
+   */
+  snapshotTarget: () => Promise<string>;
   close: () => Promise<void>;
 }
 
@@ -146,6 +153,28 @@ export async function startLocalApp(
       WT_SUPER_IDENTIFIER: superAdmin.identifier,
       WT_SUPER_PASSWORD: superAdmin.password,
       WT_BOOTSTRAP_SECRET: bootstrapSecret,
+    },
+    snapshotTarget: async () => {
+      const out: Record<string, unknown> = {};
+      const [row] = await db
+        .select()
+        .from(communities)
+        .where(eq(communities.slug, slug));
+      if (!row) return JSON.stringify({});
+      out.communities = row;
+      for (const [name, table] of Object.entries(tablesFor(db))) {
+        if (name === 'communities') continue;
+        const cols = getTableColumns(table as never) as Record<string, never>;
+        if (!('communityId' in cols)) continue;
+        const rows = await db
+          .select()
+          .from(table as never)
+          .where(eq(cols.communityId, row.id));
+        out[name] = rows;
+      }
+      return JSON.stringify(out, (_k, v) =>
+        typeof v === 'bigint' ? v.toString() : v
+      );
     },
     close: async () => {
       (

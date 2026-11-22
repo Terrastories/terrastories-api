@@ -47,7 +47,11 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
   }
   await guarded(ctx, 'steward', async () => {
     // Guards: never the target community, always the run-prefixed one.
-    if (lab.slug === cfg.community || !lab.slug.startsWith(w.runId))
+    if (
+      lab.slug === cfg.community ||
+      lab.slug === s.play?.slug ||
+      !lab.slug.startsWith(w.runId)
+    )
       throw new Error(
         'refusing destructive steps: the community is not the disposable one'
       );
@@ -123,6 +127,10 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       json: { stewardUserId: samir.id, currentDerivedKey: await luciaKey() },
       expect: 200,
       covers: ['V03'],
+      check: (r) =>
+        dig(r, 'data', 'steward', 'userId') === samir.id
+          ? undefined
+          : 'the steward in the answer is not Samir',
     });
     await w.step({
       who: samirActor,
@@ -215,6 +223,10 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       path: '/v2/community/sovereignty',
       expect: 200,
       covers: ['V06'],
+      check: (r) =>
+        ((dig(r, 'data', 'pendingRequests') as unknown[]) ?? []).length === 1
+          ? undefined
+          : 'expected exactly the erasure request (the withdrawal request was cancelled)',
     });
     await w.step({
       who: lucia,
@@ -227,6 +239,24 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       },
       expect: [200, 204],
       covers: ['V06'],
+    });
+    await w.step({
+      who: lucia,
+      say: 'the sovereignty page shows no pending request any more',
+      method: 'GET',
+      path: '/v2/community/sovereignty',
+      expect: 200,
+      covers: ['V06'],
+      check: (r) =>
+        ((dig(r, 'data', 'pendingRequests') as unknown[]) ?? []).length === 0
+          ? undefined
+          : 'the cancelled request is still pending',
+      show: (r) => [
+        field(
+          'pending requests',
+          ((dig(r, 'data', 'pendingRequests') as unknown[]) ?? []).length
+        ),
+      ],
     });
     await w.step({
       who: samirActor,

@@ -2,13 +2,13 @@
  * Chapter: Pia, an anonymous visitor, uses the public surface only.
  */
 import { dig } from '../walk.js';
-import { field, guarded, val, type Ctx } from '../context.js';
+import { field, guarded, playOf, val, type Ctx } from '../context.js';
 
 export const PERSONA_ANON = 'Anonymous visitor';
 
 export async function anonymousChapter(ctx: Ctx): Promise<void> {
-  const { w, s, cfg } = ctx;
-  const slug = cfg.community;
+  const { w, s } = ctx;
+  const slug = playOf(ctx).slug;
   w.chapter(
     PERSONA_ANON,
     'Pia explores the public map without an account',
@@ -242,6 +242,7 @@ export async function anonymousChapter(ctx: Ctx): Promise<void> {
       noCookie: true,
       expect: 401,
       negative: true,
+      authFailure: true,
       covers: ['A06'],
     });
     await w.step({

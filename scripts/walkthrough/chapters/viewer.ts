@@ -70,6 +70,7 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       json: { username: `${acct.username}-x`, currentDerivedKey: wrongKey },
       expect: 403,
       negative: true,
+      authFailure: true,
       covers: ['B02'],
       show: 'the form says the password is not right (one uniform answer)',
     });
@@ -180,23 +181,14 @@ export async function viewerChapter(ctx: Ctx): Promise<void> {
       covers: ['B04'],
       show: 'her other sessions end; this one stays signed in',
     });
-    const oldPassword = acct.password!;
     acct.password = nextPassword;
-    const probe = w.actor('Vera (old password)', 'viewer');
-    await w.step({
-      who: probe,
-      say: 'someone tries the old password',
-      method: 'POST',
-      path: '/v2/auth/login',
-      json: {
-        identifier: acct.username,
-        derivedKey: await deriveKey(ctx, probe, acct.username, oldPassword),
-      },
-      expect: 401,
-      negative: true,
-      covers: ['A06'],
-      show: 'the login form shows one generic "invalid credentials" message',
-    });
+    // The old-password login probe is deliberately not sent: the server
+    // allows 10 failed auth attempts per 15 minutes per IP, and the other
+    // refusals already cover the generic "invalid credentials" login answer
+    // (A06).
+    w.narrate(
+      'A login with the old password would be refused with the same generic message as any wrong login; it is not sent here to stay inside the failed-attempt budget of the shared server.'
+    );
 
     // ---- sessions -------------------------------------------------------
     const cookieBefore = vera.jar.header();

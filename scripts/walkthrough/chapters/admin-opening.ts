@@ -8,6 +8,7 @@ import {
   guarded,
   signIn,
   deriveKey,
+  playOf,
   field,
   num,
   str,
@@ -40,46 +41,29 @@ export function defineAccounts(ctx: Ctx): void {
 }
 
 export async function adminOpening(ctx: Ctx): Promise<void> {
-  const { w, s, cfg } = ctx;
+  const { w, s } = ctx;
+  const play = playOf(ctx);
   w.chapter(
     PERSONA_ADMIN,
     'Ana opens the community and invites the team',
-    `Ana already runs the community "${cfg.community}". Everything she creates is prefixed "${w.runId}". Nobody is created by a database write: every account below comes from the admin user screen and a one-time login code.`
+    `Ana runs the disposable play community "${play.slug}", which the script created for this run. Everything she creates is prefixed "${w.runId}". Nobody is created by a database write: every account below comes from the admin user screen and a one-time login code.`
   );
   await guarded(ctx, 'admin-opening', async () => {
-    if (!cfg.adminIdentifier || !cfg.adminPassword)
-      throw new Error('no community admin credentials were supplied');
-    const ana = (s.actors.ana = w.actor('Ana', 'community admin'));
+    const ana = (s.actors.ana ??= w.actor('Ana', 'community admin'));
+    ana.jar.clear();
     const { upgraded } = await signIn(
       ctx,
       ana,
-      cfg.adminIdentifier,
-      cfg.adminPassword,
-      {
-        communitySlug: cfg.community,
-      }
+      play.adminIdentifier,
+      play.adminPassword,
+      { communitySlug: play.slug }
     );
     if (upgraded) {
-      await w.step({
-        who: ana,
-        say: 'checks that the migrated account now uses Argon2id (the next prelogin answers with the new algorithm)',
-        method: 'POST',
-        path: '/v2/auth/prelogin',
-        json: { identifier: cfg.adminIdentifier, communitySlug: cfg.community },
-        noCookie: true,
-        expect: 200,
-        covers: ['A05'],
-        check: (r) =>
-          String(val(r, 'algorithm')).includes('argon2')
-            ? undefined
-            : 'the account was not upgraded to Argon2id',
-        show: (r) => field('algorithm', val(r, 'algorithm')),
-      });
-    } else {
-      w.narrate(
-        'This account was already upgraded to Argon2id on an earlier login, so there is no bcrypt step to show.'
-      );
+      throw new Error('a script-created account must already use Argon2id');
     }
+    w.narrate(
+      "Ana's account was created by the claim flow, so it uses Argon2id from the start. The migrated Rails (bcrypt) login is shown in the read-only check of the real community, only when --login-real-admin is given."
+    );
 
     const me = await w.step({
       who: ana,
@@ -117,9 +101,9 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
       const key = await deriveKey(
         ctx,
         ana,
-        cfg.adminIdentifier,
-        cfg.adminPassword,
-        cfg.community
+        play.adminIdentifier,
+        play.adminPassword,
+        play.slug
       );
       const codes = await w.step({
         who: ana,
@@ -140,7 +124,7 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
       void codes;
     } else {
       w.narrate(
-        'Ana already holds recovery codes, so the walkthrough does not regenerate them (that would invalidate her real sheet). The recovery-code screens are walked with Adrian, a second admin created below.'
+        'Ana already holds recovery codes (the claim gave them to her), so there is nothing to generate. The recovery-code gate and screens are walked with Adrian, a second admin created below.'
       );
     }
 
@@ -160,7 +144,7 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
     });
     const mapCfg = await w.step({
       who: ana,
-      say: 'reads the current map settings (saved so they can be restored at the end)',
+      say: 'reads the current map settings of the play community (raw admin read, saved so they can be restored at the end)',
       method: 'GET',
       path: '/v2/community/map-config',
       expect: 200,
@@ -180,6 +164,18 @@ export async function adminOpening(ctx: Ctx): Promise<void> {
       mapConfig:
         (val(mapCfg, 'data') as Record<string, unknown> | null) ?? null,
     };
+
+    if (s.snapshot.visibility !== 'public')
+      await w.step({
+        who: ana,
+        say: 'makes the play community public so the anonymous and public-map screens can be walked (restored in the cleanup chapter)',
+        method: 'PATCH',
+        path: '/v2/community',
+        json: { visibility: 'public' },
+        expect: 200,
+        covers: ['D08'],
+        show: (r) => [field('visibility', val(r, 'data', 'visibility'))],
+      });
 
     const list = await w.step({
       who: ana,

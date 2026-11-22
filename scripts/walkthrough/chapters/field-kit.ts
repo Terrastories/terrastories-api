@@ -79,9 +79,13 @@ export async function fieldKitChapter(
           ];
         },
       });
-      cfg.community = slug;
-      cfg.adminIdentifier = username;
-      cfg.adminPassword = password;
+      // the community the script itself created is the play community
+      s.play = {
+        slug,
+        adminIdentifier: username,
+        adminPassword: password,
+        source: 'bootstrap',
+      };
       void created;
       void num;
       void str;
@@ -98,11 +102,12 @@ export async function fieldKitChapter(
             email: `${w.runId}-kofi@walkthrough.example.test`,
             password: await newVerifier(randomPassword()),
           },
-          bootstrapSecret: cfg.bootstrapSecret ?? 'not-the-secret-' + w.runId,
+          // never the real secret: only --setup-from-bootstrap may send it
+          bootstrapSecret: 'not-the-secret-' + w.runId,
         },
         expect: [403, 404, 409],
         negative: true,
-        covers: ['A08', 'A09'],
+        partial: ['A08', 'A09'],
         show: 'the onboarding page is not offered; a second community cannot be created this way (the first-install path is walked with --setup-from-bootstrap)',
       });
     }

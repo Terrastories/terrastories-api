@@ -17,6 +17,7 @@ import {
   upload,
   val,
   activate,
+  playOf,
   type Ctx,
 } from '../context.js';
 import { dig } from '../walk.js';
@@ -37,7 +38,7 @@ export async function adminLateChapter(ctx: Ctx): Promise<void> {
   w.chapter(
     PERSONA_ADMIN_LATE,
     'Ana manages people, maps and sovereignty',
-    'Settings Ana changes on the real community are saved first and put back in the cleanup chapter.'
+    'Everything here happens in the disposable play community. Settings Ana changes are saved first and put back in the cleanup chapter; the community is disabled at the end of the run.'
   );
   await guarded(ctx, 'admin-late', async () => {
     const vera = s.accounts.vera!;
@@ -305,6 +306,7 @@ async function adrianScenes(ctx: Ctx): Promise<void> {
     noCookie: true,
     expect: [400, 401],
     negative: true,
+    authFailure: true,
     covers: ['V09'],
     show: 'the page says the code is not valid',
   });
@@ -346,16 +348,17 @@ async function adrianScenes(ctx: Ctx): Promise<void> {
     noCookie: true,
     expect: [400, 401],
     negative: true,
+    authFailure: true,
     covers: ['V09'],
   });
 }
 
 async function mapSettings(ctx: Ctx, mateoId: number): Promise<void> {
-  const { w, s, cfg } = ctx;
+  const { w, s } = ctx;
   const ana = s.actors.ana!;
   const mateo = s.actors.mateo;
   const pia = s.actors.pia ?? w.actor('Pia', 'anonymous visitor');
-  const slug = cfg.community;
+  const slug = playOf(ctx).slug;
   const style = `mapbox://styles/walkthrough/${w.runId.replace(/[^a-z0-9]/g, '')}`;
   const pk = secretToken('pk');
   w.secret(pk);
@@ -699,6 +702,14 @@ async function branding(ctx: Ctx): Promise<void> {
   });
   const communityId = num(community, 'data', 'id');
   s.ids.community = communityId;
+  // the reorder must list every logo of the owner, so keep any that exist
+  const existingLogos = (
+    (dig(community, 'data', 'branding', 'sponsorLogos') as Array<
+      Record<string, unknown>
+    >) ?? []
+  )
+    .map((l) => l.attachmentId ?? l.id)
+    .filter((id): id is number => typeof id === 'number');
   const logos: number[] = [];
   for (const n of [1, 2]) {
     const file = await upload(
@@ -736,7 +747,7 @@ async function branding(ctx: Ctx): Promise<void> {
       ownerType: 'community',
       ownerId: communityId,
       role: 'sponsor_logo',
-      attachmentIds: [logos[1], logos[0]],
+      attachmentIds: [...existingLogos, logos[1], logos[0]],
     },
     expect: 200,
     covers: ['D07', 'V17'],
@@ -860,7 +871,8 @@ async function sovereigntyScenes(
   samirId: number,
   mateoId: number
 ): Promise<void> {
-  const { w, s, cfg } = ctx;
+  const { w, s } = ctx;
+  const play = playOf(ctx);
   const ana = s.actors.ana!;
   await w.step({
     who: ana,
@@ -893,6 +905,7 @@ async function sovereigntyScenes(
     },
     expect: [401, 403],
     negative: true,
+    authFailure: true,
     covers: ['V03'],
     show: 'the dialog says the password is not right',
   });
@@ -901,9 +914,9 @@ async function sovereigntyScenes(
     currentDerivedKey: await deriveKey(
       ctx,
       ana,
-      cfg.adminIdentifier!,
-      cfg.adminPassword!,
-      cfg.community
+      play.adminIdentifier,
+      play.adminPassword,
+      play.slug
     ),
   });
   await w.step({
@@ -914,10 +927,26 @@ async function sovereigntyScenes(
     json: await stewardBody(samirId),
     expect: 200,
     covers: ['V03'],
+    check: (r) =>
+      dig(r, 'data', 'steward', 'userId') === samirId
+        ? undefined
+        : 'the steward in the answer is not Samir',
     show: (r) => [
       field('steward user', dig(r, 'data', 'steward', 'userId')),
       field('role', dig(r, 'data', 'steward', 'role')),
     ],
+  });
+  await w.step({
+    who: ana,
+    say: 'reopens the Sovereignty page: Samir is shown as the steward',
+    method: 'GET',
+    path: '/v2/community/sovereignty',
+    expect: 200,
+    covers: ['V03'],
+    check: (r) =>
+      dig(r, 'data', 'steward', 'userId') === samirId
+        ? undefined
+        : 'the stored steward is not Samir',
   });
   await w.step({
     who: ana,
@@ -927,6 +956,10 @@ async function sovereigntyScenes(
     json: await stewardBody(mateoId),
     expect: 200,
     covers: ['V03'],
+    check: (r) =>
+      dig(r, 'data', 'steward', 'userId') === mateoId
+        ? undefined
+        : 'the steward did not change to Mateo',
   });
   await w.step({
     who: ana,
@@ -936,6 +969,11 @@ async function sovereigntyScenes(
     json: await stewardBody(null),
     expect: 200,
     covers: ['V03'],
+    check: (r) =>
+      dig(r, 'data', 'steward') === null ||
+      dig(r, 'data', 'steward') === undefined
+        ? undefined
+        : 'the steward was not removed',
     show: (r) => [field('steward', dig(r, 'data', 'steward') ?? 'none')],
   });
 

@@ -12,8 +12,12 @@ import { dig, type Walk } from './walk.js';
 
 export interface Config {
   baseUrl: string;
-  /** Slug of the community the walkthrough visits (the migrated one). */
+  /**
+   * Slug of the real (migrated) community. It is only ever READ: every
+   * mutating chapter runs in the disposable play community instead.
+   */
   community: string;
+  /** Real admin of that community; used only with loginRealAdmin. */
   adminIdentifier?: string;
   adminPassword?: string;
   superIdentifier?: string;
@@ -21,6 +25,19 @@ export interface Config {
   bootstrapSecret?: string;
   setupFromBootstrap: boolean;
   allowDestructive: boolean;
+  /** Explicitly log in as the real admin (a migrated bcrypt login upgrades the stored verifier to Argon2id). */
+  loginRealAdmin?: boolean;
+}
+
+/** The disposable community every mutating chapter runs in. */
+export interface PlayCommunity {
+  slug: string;
+  /** Absent when the install was bootstrapped by the script (no super admin to disable it). */
+  id?: number;
+  /** Script-created admin ("Ana"). */
+  adminIdentifier: string;
+  adminPassword: string;
+  source: 'provisioned' | 'bootstrap';
 }
 
 export interface Account {
@@ -45,7 +62,13 @@ export interface State {
   places: number[];
   speakers: number[];
   imports: number[];
-  /** Snapshot of the target community before the walkthrough changes it. */
+  /** The disposable community; set by the play provisioning or the bootstrap chapter. */
+  play?: PlayCommunity;
+  /** Set once the cleanup chapter has run (it must run at most once). */
+  cleanedUp?: boolean;
+  /** Counts read from the real community by the read-only check. */
+  targetCounts: Record<string, number | string>;
+  /** Snapshot of the play community (raw admin reads) before the walkthrough changes it. */
   snapshot?: {
     description: string | null;
     visibility: string;
@@ -75,7 +98,15 @@ export function newState(): State {
     imports: [],
     actors: {},
     notes: [],
+    targetCounts: {},
   };
+}
+
+/** The disposable community; throws when none exists (never falls back to the real one). */
+export function playOf(ctx: Ctx): PlayCommunity {
+  if (!ctx.s.play)
+    throw new Error('no disposable community exists for this run');
+  return ctx.s.play;
 }
 
 export const val = (reply: Reply, ...keys: Array<string | number>) =>
@@ -194,6 +225,23 @@ export async function signIn(
   actor.password = password;
   actor.userId = num(reply, 'user', 'id');
   return { upgraded, reply };
+}
+
+/** Run one cleanup task; a failure is recorded and the next task still runs. */
+export async function attempt(
+  ctx: Ctx,
+  name: string,
+  body: () => Promise<void>
+): Promise<void> {
+  try {
+    await body();
+  } catch (error) {
+    ctx.w.failed = true;
+    ctx.w.narrate(
+      `Cleanup task "${name}" failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+    ctx.s.notes.push(`cleanup ${name}: failed`);
+  }
 }
 
 /** Run a chapter body; a failed step ends the chapter but not the run. */

@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rm,
   stat,
   symlink,
   writeFile,
@@ -11,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { BCRYPT_HASH_PATTERN } from '../../src/shared/auth-policy.js';
 import {
   resolveActiveStorageBlobPath,
@@ -40,6 +41,20 @@ import { buildCaptureValidationSummary } from '../../src/migration/rails/validat
 const fixtureDir = dirname(
   fileURLToPath(new URL('../fixtures/rails/schema.sql', import.meta.url))
 );
+
+const tempDirs: string[] = [];
+
+async function makeTempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+afterEach(async () => {
+  for (const dir of tempDirs.splice(0)) {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 function buildMockTables(options?: {
   includeExposeMapboxCredentials?: boolean;
@@ -372,7 +387,7 @@ describe('legacy Rails migration dual-pin contract', () => {
 
 describe('ActiveStorage blob resolution and copy verification', () => {
   it('accepts a flat object-store export by ActiveStorage key', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rails-flat-blobs-'));
+    const root = await makeTempDir('rails-flat-blobs-');
     const expected = join(root, 'fixtureblob');
     await writeFile(expected, 'fixture');
 
@@ -382,7 +397,7 @@ describe('ActiveStorage blob resolution and copy verification', () => {
   });
 
   it('accepts Rails DiskService two-level key layout', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rails-disk-blobs-'));
+    const root = await makeTempDir('rails-disk-blobs-');
     const nested = join(root, 'fi', 'xt');
     await mkdir(nested, { recursive: true });
     const expected = join(nested, 'fixtureblob');
@@ -394,18 +409,15 @@ describe('ActiveStorage blob resolution and copy verification', () => {
   });
 
   it('rejects unsafe blob keys before touching the filesystem', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rails-unsafe-blobs-'));
+    const root = await makeTempDir('rails-unsafe-blobs-');
     await expect(
       resolveActiveStorageBlobPath(root, '../secret')
     ).rejects.toThrow(/unsafe ActiveStorage key/i);
   });
 
   it('rejects symlinks instead of following blob paths outside the trusted export', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rails-symlink-blobs-'));
-    const outside = join(
-      await mkdtemp(join(tmpdir(), 'rails-secret-')),
-      'secret'
-    );
+    const root = await makeTempDir('rails-symlink-blobs-');
+    const outside = join(await makeTempDir('rails-secret-'), 'secret');
     await writeFile(outside, 'not-an-exported-blob');
     await symlink(outside, join(root, 'fixtureblob'));
 
@@ -415,8 +427,8 @@ describe('ActiveStorage blob resolution and copy verification', () => {
   });
 
   it('rejects DiskService paths whose parent directory escapes through a symlink', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rails-parent-symlink-blobs-'));
-    const outsideRoot = await mkdtemp(join(tmpdir(), 'rails-parent-secret-'));
+    const root = await makeTempDir('rails-parent-symlink-blobs-');
+    const outsideRoot = await makeTempDir('rails-parent-secret-');
     const outsideNested = join(outsideRoot, 'xt');
     await mkdir(outsideNested);
     await writeFile(join(outsideNested, 'fixtureblob'), 'outside-root');
@@ -428,8 +440,8 @@ describe('ActiveStorage blob resolution and copy verification', () => {
   });
 
   it('verifies size, MD5 checksum, copies with 0600 perms, and records SHA-256', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rails-copy-src-'));
-    const dest = await mkdtemp(join(tmpdir(), 'rails-copy-dst-'));
+    const root = await makeTempDir('rails-copy-src-');
+    const dest = await makeTempDir('rails-copy-dst-');
     const payload = Buffer.from('deterministic-blob-payload\n', 'utf8');
     const nested = join(root, 'bl', 'ob');
     await mkdir(nested, { recursive: true });
@@ -464,8 +476,8 @@ describe('ActiveStorage blob resolution and copy verification', () => {
   });
 
   it('rejects byte-size and same-size MD5 checksum mismatches', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rails-copy-bad-'));
-    const dest = await mkdtemp(join(tmpdir(), 'rails-copy-bad-dst-'));
+    const root = await makeTempDir('rails-copy-bad-');
+    const dest = await makeTempDir('rails-copy-bad-dst-');
     const payload = Buffer.from('actual-bytes', 'utf8');
     await writeFile(join(root, 'blobkey02'), payload);
 
@@ -502,21 +514,29 @@ describe('ActiveStorage blob resolution and copy verification', () => {
 
 describe('capture validation summary and offline archive verification', () => {
   it('renders a deterministic secret-free validation summary', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'rails-summary-'));
+    const dir = await makeTempDir('rails-summary-');
     const { manifest } = await writeSyntheticArchive(dir);
-    const summary = buildCaptureValidationSummary(manifest);
+    const multiTableManifest: RailsCaptureManifest = {
+      ...manifest,
+      tables: {
+        users: { ...manifest.tables.communities!, rowCount: 2 },
+        communities: manifest.tables.communities!,
+      },
+      totals: { ...manifest.totals, tables: 2, rows: 3 },
+    };
+    const summary = buildCaptureValidationSummary(multiTableManifest);
 
     expect(summary).toContain('Source profile: rails-postgresql');
     expect(summary).toContain('Contract profile: rails-2024_04_10_210545');
     expect(summary).toContain(`Legacy commit: ${LEGACY_RAILS_COMMIT_2024}`);
     expect(summary).toContain('Pinned Rails schema version: 2024_04_10_210545');
     expect(summary).toContain('Observed Rails schema version: 20240410210545');
-    expect(summary).toContain('  - communities: 1 rows');
+    expect(summary).toContain('  - communities: 1 rows\n  - users: 2 rows');
     expect(summary).toContain('intentionally excludes source row contents');
   });
 
   it('verifies a valid archive and rejects metadata, digest, and size tampering', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'rails-verify-offline-'));
+    const dir = await makeTempDir('rails-verify-offline-');
     const { archivePath, manifest } = await writeSyntheticArchive(dir);
 
     await expect(
@@ -536,6 +556,27 @@ describe('capture validation summary and offline archive verification', () => {
         archive: { ...manifest.archive, sha256: '0'.repeat(64) },
       })
     ).rejects.toThrow(/archive sha-256 digest mismatch/i);
+
+    await expect(
+      verifyCapturedArchive(archivePath, {
+        ...manifest,
+        source: {
+          ...manifest.source,
+          observedSchemaVersion: RAILS_MIGRATION_VERSION_2025,
+        },
+      })
+    ).rejects.toThrow(/source metadata does not match manifest/i);
+
+    await expect(
+      verifyCapturedArchive(archivePath, {
+        ...manifest,
+        tables: {
+          ...manifest.tables,
+          extra_table: manifest.tables.communities!,
+        },
+        totals: { ...manifest.totals, tables: 2 },
+      })
+    ).rejects.toThrow(/table inventory does not match manifest/i);
 
     const db = new Database(archivePath);
     db.prepare(

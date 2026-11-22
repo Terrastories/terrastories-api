@@ -71,6 +71,12 @@ export interface ExportMapConfigRow {
   communityId: number;
   styleUrl: string | null;
   basemapStyle: string | null;
+  mapboxStyleUrl: string | null;
+  mapboxAccessToken: string | null;
+  exposeMapboxCredentials: boolean;
+  mapbox3d: boolean;
+  protomapsApiKey: string | null;
+  protomapsBasemapStyle: string | null;
   centerLatitude: number | null;
   centerLongitude: number | null;
   southWestLatitude: number | null;
@@ -406,6 +412,12 @@ export class CommunityExportRepository {
           communityId: communityMapConfigs.communityId,
           styleUrl: communityMapConfigs.styleUrl,
           basemapStyle: communityMapConfigs.basemapStyle,
+          mapboxStyleUrl: communityMapConfigs.mapboxStyleUrl,
+          mapboxAccessToken: communityMapConfigs.mapboxAccessToken,
+          exposeMapboxCredentials: communityMapConfigs.exposeMapboxCredentials,
+          mapbox3d: communityMapConfigs.mapbox3d,
+          protomapsApiKey: communityMapConfigs.protomapsApiKey,
+          protomapsBasemapStyle: communityMapConfigs.protomapsBasemapStyle,
           centerLatitude: communityMapConfigs.centerLatitude,
           centerLongitude: communityMapConfigs.centerLongitude,
           southWestLatitude: communityMapConfigs.southWestLatitude,
@@ -731,6 +743,24 @@ export class CommunityExportRepository {
           styleUrl: rawMap.styleUrl === null ? null : String(rawMap.styleUrl),
           basemapStyle:
             rawMap.basemapStyle === null ? null : String(rawMap.basemapStyle),
+          mapboxStyleUrl:
+            rawMap.mapboxStyleUrl === null
+              ? null
+              : String(rawMap.mapboxStyleUrl),
+          mapboxAccessToken:
+            rawMap.mapboxAccessToken === null
+              ? null
+              : String(rawMap.mapboxAccessToken),
+          exposeMapboxCredentials: toBool(rawMap.exposeMapboxCredentials),
+          mapbox3d: toBool(rawMap.mapbox3d),
+          protomapsApiKey:
+            rawMap.protomapsApiKey === null
+              ? null
+              : String(rawMap.protomapsApiKey),
+          protomapsBasemapStyle:
+            rawMap.protomapsBasemapStyle === null
+              ? null
+              : String(rawMap.protomapsBasemapStyle),
           centerLatitude: toOptionalNumber(rawMap.centerLatitude),
           centerLongitude: toOptionalNumber(rawMap.centerLongitude),
           southWestLatitude: toOptionalNumber(rawMap.southWestLatitude),

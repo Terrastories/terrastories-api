@@ -6,14 +6,19 @@
  * unchanged data.
  *
  * Exclusions (§7):
- * - Credential material (`passwordHash`, `passwordVerifier`, `passwordAlgorithm`,
- *   `passwordSalt`, `passwordParams`, reset tokens, login/recovery/claim hashes)
+ * - Account/auth credential material (`passwordHash`, `passwordVerifier`,
+ *   `passwordAlgorithm`, `passwordSalt`, `passwordParams`, reset tokens,
+ *   login/recovery/claim hashes)
  * - Operational security state (`sessions`, `auth_throttle`)
  * - Export lifecycle's own `audit_entries` (`community.export.*`) so taking an
  *   export never changes the next export
  * - Per-request values (`jobId`, `generatedAt`, download tokens) outside the
  *   digested manifest
  * - Null-community system-profile files (`community_id IS NULL`)
+ *
+ * Note (§6.6, 2026-11-22 amendment): community-owned map provider tokens
+ * (`mapboxAccessToken`, `protomapsApiKey`) are exported under
+ * `mapConfig.credentials` and explicitly classified as provider credentials.
  */
 
 import {
@@ -81,6 +86,16 @@ export interface CommunityExportManifest {
     communityId: number;
     styleUrl: string | null;
     basemapStyle: string | null;
+    mapboxStyleUrl: string | null;
+    exposeMapboxCredentials: boolean;
+    mapbox3d: boolean;
+    protomapsBasemapStyle: string | null;
+    credentials: {
+      classification: 'community_owned_map_provider_credential';
+      containsCredentials: boolean;
+      mapboxAccessToken: string | null;
+      protomapsApiKey: string | null;
+    };
     centerLatitude: number | null;
     centerLongitude: number | null;
     southWestLatitude: number | null;
@@ -308,6 +323,18 @@ export function buildCommunityExportManifest(
           communityId: snapshot.mapConfig.communityId,
           styleUrl: snapshot.mapConfig.styleUrl,
           basemapStyle: snapshot.mapConfig.basemapStyle,
+          mapboxStyleUrl: snapshot.mapConfig.mapboxStyleUrl,
+          exposeMapboxCredentials: snapshot.mapConfig.exposeMapboxCredentials,
+          mapbox3d: snapshot.mapConfig.mapbox3d,
+          protomapsBasemapStyle: snapshot.mapConfig.protomapsBasemapStyle,
+          credentials: {
+            classification: 'community_owned_map_provider_credential',
+            containsCredentials:
+              snapshot.mapConfig.mapboxAccessToken !== null ||
+              snapshot.mapConfig.protomapsApiKey !== null,
+            mapboxAccessToken: snapshot.mapConfig.mapboxAccessToken,
+            protomapsApiKey: snapshot.mapConfig.protomapsApiKey,
+          },
           centerLatitude: snapshot.mapConfig.centerLatitude,
           centerLongitude: snapshot.mapConfig.centerLongitude,
           southWestLatitude: snapshot.mapConfig.southWestLatitude,

@@ -19,6 +19,8 @@ import { CommunityReadsService } from '../services/community-reads.service.js';
 export interface CommunityReadRoutesOptions {
   repository: CommunityReadsRepository;
   publicOrigin?: string;
+  mapboxAccessToken?: string;
+  offlineMode?: boolean;
 }
 
 export function registerCommunityReadRoutes(
@@ -26,7 +28,10 @@ export function registerCommunityReadRoutes(
   app: Hono<any>,
   options: CommunityReadRoutesOptions
 ): void {
-  const service = new CommunityReadsService(options.repository);
+  const service = new CommunityReadsService(options.repository, {
+    mapboxAccessToken: options.mapboxAccessToken,
+    offlineMode: options.offlineMode,
+  });
   const originOf = (url: string) => options.publicOrigin ?? new URL(url).origin;
   const actorOf = (c: { get: (key: string) => unknown }): FoundationUser =>
     c.get('actor') as FoundationUser;

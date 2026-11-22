@@ -49,6 +49,9 @@ describeWithPostgres('Stage-2 orphan rows and media attribution', () => {
         outputDir: fullBundle,
         blobRoot: join(fixtureDir, 'blobs'),
       });
+      // Stage 1 rejects scoped captures with unknown attachment record types, so
+      // the unknown-type attachment only exists in the full bundle.
+      await pool.query('DELETE FROM active_storage_attachments WHERE id = 121');
       await captureRailsToBundle({
         sourceUrl: dbUrl,
         outputDir: scopedBundle,

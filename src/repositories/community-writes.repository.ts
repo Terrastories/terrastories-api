@@ -1,4 +1,4 @@
-import { and, eq, exists, isNull, ne, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, isNull, ne, notExists, or, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Database } from '../db/index.js';
 import { dialectOf, tablesFor } from '../db/dialect.js';
@@ -9,6 +9,7 @@ import {
 } from '../policy/canonical-state.js';
 import type { PublicMapConfigRow } from './public-communities.repository.js';
 import { validateContentFreeAuditEntry } from '../shared/utils/audit-entry.js';
+import { buildAuditEntryInsert } from './audit-entry.repository.js';
 import {
   buildOwnerUnreferencedFilesDelete,
   buildUnreferencedFilesDelete,
@@ -29,6 +30,19 @@ export interface CommunitySettingsUpdateInput {
 export interface MapConfigUpsertInput {
   styleUrl: string | null;
   basemapStyle: string | null;
+  /**
+   * Provider fields (Mapbox/Protomaps): `undefined` keeps the stored value
+   * atomically (omitted from the conflict SET); `null`/value overwrites.
+   * `exposeMapboxCredentials: true` is coerced to false in SQL when the
+   * community is private. A merged style/token pair mismatch makes the
+   * conflict update a no-op (returns null).
+   */
+  mapboxStyleUrl?: string | null;
+  mapboxAccessToken?: string | null;
+  exposeMapboxCredentials?: boolean;
+  mapbox3d?: boolean;
+  protomapsApiKey?: string | null;
+  protomapsBasemapStyle?: string | null;
   centerLatitude: number | null;
   centerLongitude: number | null;
   southWestLatitude: number | null;
@@ -242,6 +256,31 @@ export class CommunityWritesRepository {
       );
     };
 
+    const buildResetExposeMapboxQuery = (executor: typeof this.db) =>
+      executor
+        .update(this.tables.communityMapConfigs)
+        .set({
+          exposeMapboxCredentials: false,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(this.tables.communityMapConfigs.communityId, communityId),
+            eq(this.tables.communityMapConfigs.exposeMapboxCredentials, true),
+            exists(
+              executor
+                .select({ one: sql`1` })
+                .from(this.tables.communities)
+                .where(
+                  and(
+                    eq(this.tables.communities.id, communityId),
+                    eq(this.tables.communities.isActive, true)
+                  )
+                )
+            )
+          )
+        );
+
     if (this.hasD1Batch()) {
       const updateQuery = this.db
         .update(this.tables.communities)
@@ -258,11 +297,17 @@ export class CommunityWritesRepository {
         // Insert the audit entry BEFORE the update changes public_stories,
         // guarded in SQL on active + effective visibility transition so D1's
         // single atomic batch never emits a stale, duplicate, or 0-row audit.
+        // Making a community private also resets expose_mapbox_credentials
+        // inside the same atomic batch.
         const auditQuery = buildConditionalAuditInsert(
           this.db,
           input.visibility
         );
-        const [, updatedRows] = await this.db.batch([auditQuery, updateQuery]);
+        const batchStatements =
+          input.visibility === 'private'
+            ? [auditQuery, updateQuery, buildResetExposeMapboxQuery(this.db)]
+            : [auditQuery, updateQuery];
+        const [, updatedRows] = await this.db.batch(batchStatements);
         return {
           updated: Array.isArray(updatedRows) && updatedRows.length > 0,
         };
@@ -312,6 +357,24 @@ export class CommunityWritesRepository {
           return { updated: false };
         }
 
+        if (input.visibility === 'private') {
+          await tx
+            .update(this.tables.communityMapConfigs)
+            .set({
+              exposeMapboxCredentials: false,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(this.tables.communityMapConfigs.communityId, communityId),
+                eq(
+                  this.tables.communityMapConfigs.exposeMapboxCredentials,
+                  true
+                )
+              )
+            );
+        }
+
         if (nextVisibility !== previousVisibility) {
           const audit = buildVisibilityAuditEntry(
             communityId,
@@ -346,6 +409,21 @@ export class CommunityWritesRepository {
         .returning({ id: this.tables.communities.id })
         .all();
 
+      if (updated.length > 0 && input.visibility === 'private') {
+        tx.update(this.tables.communityMapConfigs)
+          .set({
+            exposeMapboxCredentials: false,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(this.tables.communityMapConfigs.communityId, communityId),
+              eq(this.tables.communityMapConfigs.exposeMapboxCredentials, true)
+            )
+          )
+          .run();
+      }
+
       return { updated: updated.length > 0 };
     });
   }
@@ -369,37 +447,77 @@ export class CommunityWritesRepository {
     return rows[0] ?? null;
   }
 
+  /** Stored Mapbox/Protomaps fields, used to preserve omitted keys on PUT. */
+  async findCommunityMapConfigProviderFields(communityId: number): Promise<{
+    mapboxStyleUrl: string | null;
+    mapboxAccessToken: string | null;
+    exposeMapboxCredentials: boolean;
+    mapbox3d: boolean;
+    protomapsApiKey: string | null;
+    protomapsBasemapStyle: string | null;
+  } | null> {
+    const rows = await this.db
+      .select({
+        mapboxStyleUrl: this.tables.communityMapConfigs.mapboxStyleUrl,
+        mapboxAccessToken: this.tables.communityMapConfigs.mapboxAccessToken,
+        exposeMapboxCredentials:
+          this.tables.communityMapConfigs.exposeMapboxCredentials,
+        mapbox3d: this.tables.communityMapConfigs.mapbox3d,
+        protomapsApiKey: this.tables.communityMapConfigs.protomapsApiKey,
+        protomapsBasemapStyle:
+          this.tables.communityMapConfigs.protomapsBasemapStyle,
+      })
+      .from(this.tables.communityMapConfigs)
+      .where(eq(this.tables.communityMapConfigs.communityId, communityId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ...row,
+      exposeMapboxCredentials: Boolean(row.exposeMapboxCredentials),
+      mapbox3d: Boolean(row.mapbox3d),
+    };
+  }
+
   async upsertCommunityMapConfig(
     communityId: number,
+    actorId: number,
     input: MapConfigUpsertInput,
+    updatedFieldNames: readonly string[],
     now: Date = new Date()
   ): Promise<PublicMapConfigRow | null> {
-    const rows = await this.db
-      .insert(this.tables.communityMapConfigs)
-      .values({
-        communityId,
-        styleUrl: input.styleUrl,
-        basemapStyle: input.basemapStyle,
-        centerLatitude: input.centerLatitude,
-        centerLongitude: input.centerLongitude,
-        southWestLatitude: input.southWestLatitude,
-        southWestLongitude: input.southWestLongitude,
-        northEastLatitude: input.northEastLatitude,
-        northEastLongitude: input.northEastLongitude,
-        zoom: input.zoom,
-        pitch: input.pitch,
-        bearing: input.bearing,
-        threeDimensional: input.threeDimensional,
-        projection: input.projection,
-        staticMapFileId: input.staticMapFileId,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: this.tables.communityMapConfigs.communityId,
-        set: {
+    const { communityMapConfigs, communities } = this.tables;
+    // Private community => false, evaluated in the same statement as the write.
+    // The subquery yields the physical public flag in the column's own encoding.
+    const exposeValue = (input.exposeMapboxCredentials === true
+      ? sql`(select ${communities.publicStories} from ${communities} where ${communities.id} = ${communityId})`
+      : false) as unknown as boolean;
+    // Merged (stored + incoming) style/token must be both set or both null.
+    const nullTest = (
+      value: string | null | undefined,
+      column:
+        | typeof communityMapConfigs.mapboxStyleUrl
+        | typeof communityMapConfigs.mapboxAccessToken
+    ) =>
+      value === undefined
+        ? sql`(${column} is null)`
+        : value === null
+          ? sql`(1 = 1)`
+          : sql`(1 = 0)`;
+    const pairGuard = sql`(${nullTest(input.mapboxStyleUrl, communityMapConfigs.mapboxStyleUrl)} = ${nullTest(input.mapboxAccessToken, communityMapConfigs.mapboxAccessToken)})`;
+    const buildUpsertQuery = (executor: typeof this.db) =>
+      executor
+        .insert(this.tables.communityMapConfigs)
+        .values({
+          communityId,
           styleUrl: input.styleUrl,
           basemapStyle: input.basemapStyle,
+          mapboxStyleUrl: input.mapboxStyleUrl ?? null,
+          mapboxAccessToken: input.mapboxAccessToken ?? null,
+          exposeMapboxCredentials: exposeValue,
+          mapbox3d: input.mapbox3d ?? false,
+          protomapsApiKey: input.protomapsApiKey ?? null,
+          protomapsBasemapStyle: input.protomapsBasemapStyle ?? null,
           centerLatitude: input.centerLatitude,
           centerLongitude: input.centerLongitude,
           southWestLatitude: input.southWestLatitude,
@@ -412,30 +530,170 @@ export class CommunityWritesRepository {
           threeDimensional: input.threeDimensional,
           projection: input.projection,
           staticMapFileId: input.staticMapFileId,
+          createdAt: now,
           updatedAt: now,
-        },
-      })
-      .returning({
-        communityId: this.tables.communityMapConfigs.communityId,
-        styleUrl: this.tables.communityMapConfigs.styleUrl,
-        basemapStyle: this.tables.communityMapConfigs.basemapStyle,
-        centerLatitude: this.tables.communityMapConfigs.centerLatitude,
-        centerLongitude: this.tables.communityMapConfigs.centerLongitude,
-        southWestLatitude: this.tables.communityMapConfigs.southWestLatitude,
-        southWestLongitude: this.tables.communityMapConfigs.southWestLongitude,
-        northEastLatitude: this.tables.communityMapConfigs.northEastLatitude,
-        northEastLongitude: this.tables.communityMapConfigs.northEastLongitude,
-        zoom: this.tables.communityMapConfigs.zoom,
-        pitch: this.tables.communityMapConfigs.pitch,
-        bearing: this.tables.communityMapConfigs.bearing,
-        threeDimensional: this.tables.communityMapConfigs.threeDimensional,
-        projection: this.tables.communityMapConfigs.projection,
-        staticMapFileId: this.tables.communityMapConfigs.staticMapFileId,
-        createdAt: this.tables.communityMapConfigs.createdAt,
-        updatedAt: this.tables.communityMapConfigs.updatedAt,
-      });
+        })
+        .onConflictDoUpdate({
+          target: this.tables.communityMapConfigs.communityId,
+          setWhere: pairGuard,
+          set: {
+            styleUrl: input.styleUrl,
+            basemapStyle: input.basemapStyle,
+            ...(input.mapboxStyleUrl !== undefined && {
+              mapboxStyleUrl: input.mapboxStyleUrl,
+            }),
+            ...(input.mapboxAccessToken !== undefined && {
+              mapboxAccessToken: input.mapboxAccessToken,
+            }),
+            ...(input.exposeMapboxCredentials !== undefined && {
+              exposeMapboxCredentials: exposeValue,
+            }),
+            ...(input.mapbox3d !== undefined && { mapbox3d: input.mapbox3d }),
+            ...(input.protomapsApiKey !== undefined && {
+              protomapsApiKey: input.protomapsApiKey,
+            }),
+            ...(input.protomapsBasemapStyle !== undefined && {
+              protomapsBasemapStyle: input.protomapsBasemapStyle,
+            }),
+            centerLatitude: input.centerLatitude,
+            centerLongitude: input.centerLongitude,
+            southWestLatitude: input.southWestLatitude,
+            southWestLongitude: input.southWestLongitude,
+            northEastLatitude: input.northEastLatitude,
+            northEastLongitude: input.northEastLongitude,
+            zoom: input.zoom,
+            pitch: input.pitch,
+            bearing: input.bearing,
+            threeDimensional: input.threeDimensional,
+            projection: input.projection,
+            staticMapFileId: input.staticMapFileId,
+            updatedAt: now,
+          },
+        })
+        .returning({
+          communityId: this.tables.communityMapConfigs.communityId,
+          styleUrl: this.tables.communityMapConfigs.styleUrl,
+          basemapStyle: this.tables.communityMapConfigs.basemapStyle,
+          mapboxStyleUrl: this.tables.communityMapConfigs.mapboxStyleUrl,
+          mapboxAccessToken: this.tables.communityMapConfigs.mapboxAccessToken,
+          exposeMapboxCredentials:
+            this.tables.communityMapConfigs.exposeMapboxCredentials,
+          mapbox3d: this.tables.communityMapConfigs.mapbox3d,
+          protomapsApiKey: this.tables.communityMapConfigs.protomapsApiKey,
+          protomapsBasemapStyle:
+            this.tables.communityMapConfigs.protomapsBasemapStyle,
+          centerLatitude: this.tables.communityMapConfigs.centerLatitude,
+          centerLongitude: this.tables.communityMapConfigs.centerLongitude,
+          southWestLatitude: this.tables.communityMapConfigs.southWestLatitude,
+          southWestLongitude:
+            this.tables.communityMapConfigs.southWestLongitude,
+          northEastLatitude: this.tables.communityMapConfigs.northEastLatitude,
+          northEastLongitude:
+            this.tables.communityMapConfigs.northEastLongitude,
+          zoom: this.tables.communityMapConfigs.zoom,
+          pitch: this.tables.communityMapConfigs.pitch,
+          bearing: this.tables.communityMapConfigs.bearing,
+          threeDimensional: this.tables.communityMapConfigs.threeDimensional,
+          projection: this.tables.communityMapConfigs.projection,
+          staticMapFileId: this.tables.communityMapConfigs.staticMapFileId,
+          createdAt: this.tables.communityMapConfigs.createdAt,
+          updatedAt: this.tables.communityMapConfigs.updatedAt,
+        });
 
-    return rows[0] ?? null;
+    const auditInput = {
+      communityId,
+      actorId,
+      action: 'community.map_config.update',
+      resourceType: 'map_config',
+      // Content-free: community id followed only by opaque schema field names.
+      resourceIds: [communityId, ...updatedFieldNames],
+      outcome: 'success',
+      ipAddress: null,
+      userAgent: null,
+    };
+
+    const normalizeRow = (
+      row: PublicMapConfigRow | undefined
+    ): PublicMapConfigRow | null => {
+      if (!row) return null;
+      return {
+        ...row,
+        exposeMapboxCredentials: Boolean(row.exposeMapboxCredentials),
+        mapbox3d: Boolean(row.mapbox3d),
+      };
+    };
+
+    if (this.hasD1Batch()) {
+      // Audit only when the upsert will write. The audit INSERT ... SELECT runs
+      // BEFORE the upsert in the same atomic batch and evaluates the same
+      // condition as the upsert's setWhere against the pre-write state: no row
+      // yet (plain insert) or the merged style/token pair guard holds. A
+      // guard-rejected save therefore writes no success audit row.
+      const audit = validateContentFreeAuditEntry(auditInput);
+      const existingConfig = this.db
+        .select({ one: sql`1` })
+        .from(communityMapConfigs)
+        .where(eq(communityMapConfigs.communityId, communityId));
+      const guardedConfig = this.db
+        .select({ one: sql`1` })
+        .from(communityMapConfigs)
+        .where(
+          and(eq(communityMapConfigs.communityId, communityId), pairGuard)
+        );
+      const insertAudit = this.db.insert(this.tables.auditEntries).select(
+        this.db
+          .select({
+            id: sql`NULL`.as('id'),
+            communityId: sql`${audit.communityId}`.as('community_id'),
+            actorId: sql`${audit.actorId}`.as('actor_id'),
+            action: sql`${audit.action}`.as('action'),
+            resourceType: sql`${audit.resourceType}`.as('resource_type'),
+            resourceIds: sql`${JSON.stringify(audit.resourceIds)}`.as(
+              'resource_ids'
+            ),
+            outcome: sql`${audit.outcome}`.as('outcome'),
+            ipAddress: sql`NULL`.as('ip_address'),
+            userAgent: sql`NULL`.as('user_agent'),
+            createdAt: sql`${now.getTime()}`.as('created_at'),
+          })
+          .from(communities)
+          .where(
+            and(
+              eq(communities.id, communityId),
+              or(notExists(existingConfig), exists(guardedConfig))
+            )
+          )
+      );
+      const [, upsertedRows] = await this.db.batch([
+        insertAudit,
+        buildUpsertQuery(this.db),
+      ]);
+      const rows = Array.isArray(upsertedRows)
+        ? (upsertedRows as PublicMapConfigRow[])
+        : [];
+      return normalizeRow(rows[0]);
+    }
+
+    if (dialectOf(this.connection) === 'postgresql') {
+      return this.db.transaction(async (tx: typeof this.db) => {
+        const rows = (await buildUpsertQuery(tx)) as PublicMapConfigRow[];
+        const saved = normalizeRow(rows[0]);
+        if (saved) {
+          await buildAuditEntryInsert(tx, auditInput, now);
+        }
+        return saved;
+      });
+    }
+
+    // better-sqlite3 transactions are synchronous
+    return this.db.transaction((tx: typeof this.db) => {
+      const rows = buildUpsertQuery(tx).all() as PublicMapConfigRow[];
+      const saved = normalizeRow(rows[0]);
+      if (saved) {
+        buildAuditEntryInsert(tx, auditInput, now).run();
+      }
+      return saved;
+    });
   }
 
   async createPlace(

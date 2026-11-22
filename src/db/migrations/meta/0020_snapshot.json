@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "84cfea54-9371-4878-b005-e78ada93d781",
+  "id": "dc478da6-5b87-4a9a-8bb4-8c457b3f473d",
   "prevId": "463efa8d-bcad-49d7-8177-f19d3dea0d9c",
   "tables": {
     "attachments": {
@@ -504,6 +504,50 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "mapbox_style_url": {
+          "name": "mapbox_style_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "mapbox_access_token": {
+          "name": "mapbox_access_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "expose_mapbox_credentials": {
+          "name": "expose_mapbox_credentials",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "mapbox_3d": {
+          "name": "mapbox_3d",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "protomaps_api_key": {
+          "name": "protomaps_api_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "protomaps_basemap_style": {
+          "name": "protomaps_basemap_style",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         }
       },
@@ -1658,6 +1702,13 @@
           "notNull": true,
           "autoincrement": true
         },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "username": {
           "name": "username",
           "type": "text",
@@ -1820,13 +1871,6 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false
-        },
-        "email": {
-          "name": "email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
           "autoincrement": false
         }
       },

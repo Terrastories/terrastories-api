@@ -1,9 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chmod, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  readdir,
+  rename,
+  rm,
+  rmdir,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { Pool, type PoolClient } from 'pg';
+import { fsyncDirectoryTree, fsyncPath } from './fsync.js';
 import {
   RAILS_SOURCE_PROFILE,
   selectRailsSourceContract,
@@ -92,6 +102,11 @@ export interface RailsCaptureManifest {
   };
   storage: RailsCaptureStorage;
   blobSelection: BlobSelectionMetadata;
+  /**
+   * true only for a full source capture (blobSelection.mode === 'all').
+   * false means a partial community_allowlist capture for staging/rehearsal.
+   */
+  complete: boolean;
   archive: {
     filename: typeof ARCHIVE_FILENAME;
     byteSize: string;
@@ -131,6 +146,8 @@ export interface CaptureRailsOptions {
   blobSource?: RailsBlobSource;
   communities?: string[];
   blobConcurrency?: number;
+  /** Test seam: replaces the post-rename parent-directory fsync. */
+  syncParentDirectory?: (directory: string) => Promise<void>;
 }
 
 type ResolvedBlobSource =
@@ -202,6 +219,14 @@ function resolveBlobSourceOption(
   };
 }
 
+async function pathIsDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 async function assertPathDoesNotExist(path: string): Promise<void> {
   try {
     await stat(path);
@@ -225,13 +250,14 @@ async function assertNoUnhandledApplicationSchemas(
     table_schema: string;
     table_name: string;
   }>(`
-    SELECT table_schema, table_name
-    FROM information_schema.tables
-    WHERE table_type = 'BASE TABLE'
-      AND table_schema NOT IN ('public', 'pg_catalog', 'information_schema')
-      AND table_schema NOT LIKE 'pg_toast%'
-      AND table_schema NOT LIKE 'pg_temp_%'
-    ORDER BY table_schema, table_name
+    SELECT ns.nspname AS table_schema, rel.relname AS table_name
+    FROM pg_catalog.pg_class rel
+    JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+    WHERE rel.relkind IN ('r', 'p')
+      AND ns.nspname NOT IN ('public', 'pg_catalog', 'information_schema')
+      AND ns.nspname NOT LIKE 'pg_toast%'
+      AND ns.nspname NOT LIKE 'pg_temp_%'
+    ORDER BY ns.nspname, rel.relname
   `);
 
   if (result.rows.length === 0) return;
@@ -247,14 +273,58 @@ async function assertNoUnhandledApplicationSchemas(
   );
 }
 
-async function discoverTables(client: PoolClient): Promise<SourceTable[]> {
-  const tableResult = await client.query<{ table_name: string }>(`
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_type = 'BASE TABLE'
-    ORDER BY table_name
+async function assertEverySourceObjectReadable(
+  client: PoolClient
+): Promise<void> {
+  const unreadable = await client.query<{
+    table_name: string;
+    column_name: string | null;
+  }>(`
+    SELECT rel.relname AS table_name, NULL::text AS column_name
+    FROM pg_catalog.pg_class rel
+    JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+    WHERE ns.nspname = 'public'
+      AND rel.relkind IN ('r', 'p')
+      AND NOT pg_catalog.has_table_privilege(rel.oid, 'SELECT')
+    UNION ALL
+    SELECT rel.relname, attr.attname
+    FROM pg_catalog.pg_class rel
+    JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN pg_catalog.pg_attribute attr ON attr.attrelid = rel.oid
+    WHERE ns.nspname = 'public'
+      AND rel.relkind IN ('r', 'p')
+      AND attr.attnum > 0
+      AND NOT attr.attisdropped
+      AND NOT pg_catalog.has_column_privilege(rel.oid, attr.attnum, 'SELECT')
+    ORDER BY 1, 2 NULLS FIRST
   `);
+  if (unreadable.rows.length === 0) return;
+
+  const names = unreadable.rows
+    .map((row) =>
+      row.column_name === null
+        ? row.table_name
+        : `${row.table_name}.${row.column_name}`
+    )
+    .join(', ');
+  throw new Error(
+    `Source account lacks SELECT privilege on: ${names}. ` +
+      'Capture refuses to continue with an incomplete inventory; grant SELECT on every public table and column.'
+  );
+}
+
+async function discoverTables(client: PoolClient): Promise<SourceTable[]> {
+  // Inventory comes from pg_catalog, not information_schema: the latter hides
+  // objects the capture role cannot access, which would silently drop data.
+  const tableResult = await client.query<{ table_name: string }>(`
+    SELECT rel.relname AS table_name
+    FROM pg_catalog.pg_class rel
+    JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+    WHERE ns.nspname = 'public'
+      AND rel.relkind IN ('r', 'p')
+    ORDER BY rel.relname
+  `);
+  await assertEverySourceObjectReadable(client);
 
   const tables: SourceTable[] = [];
   for (const { table_name: tableName } of tableResult.rows) {
@@ -491,6 +561,43 @@ async function resolveCommunityAllowlist(
   };
 }
 
+const KNOWN_ATTACHMENT_RECORD_TYPES = [
+  'Community',
+  'Place',
+  'Speaker',
+  'Theme',
+  'User',
+  'Media',
+  'ActiveStorage::Blob',
+  'ActiveStorage::VariantRecord',
+] as const;
+
+// Allowlist selection only understands the known record types. An attachment of
+// any other type could belong to a selected community, so fail closed instead
+// of silently recording its blob as not_selected. Reports names and counts only.
+async function assertKnownAttachmentRecordTypes(
+  client: PoolClient
+): Promise<void> {
+  const unknown = await client.query<{ record_type: string; count: string }>(
+    `
+      SELECT record_type, count(*)::text AS count
+      FROM active_storage_attachments
+      WHERE record_type IS NULL OR record_type <> ALL($1::text[])
+      GROUP BY record_type
+      ORDER BY record_type COLLATE "C" NULLS FIRST
+    `,
+    [KNOWN_ATTACHMENT_RECORD_TYPES]
+  );
+  if (unknown.rows.length > 0) {
+    const listing = unknown.rows
+      .map((row) => `${row.record_type ?? '<null>'} (${row.count})`)
+      .join(', ');
+    throw new Error(
+      `Community allowlist capture cannot classify ActiveStorage attachments with unknown record_type: ${listing}. Capture without --community or extend the allowlist resolver.`
+    );
+  }
+}
+
 async function resolveReachableBlobIds(
   client: PoolClient,
   communityIds: readonly string[],
@@ -503,6 +610,8 @@ async function resolveReachableBlobIds(
   ) {
     return selectedBlobIds;
   }
+
+  await assertKnownAttachmentRecordTypes(client);
 
   const directResult = await client.query<{ blob_id: string }>(
     `
@@ -666,13 +775,16 @@ function buildRowQuery(table: SourceTable): string {
   const orderBy =
     orderColumns.length > 0
       ? ` ORDER BY ${orderColumns
-          .map((column) => `${quoteIdentifier(column)}::text NULLS FIRST`)
+          .map(
+            (column) =>
+              `${quoteIdentifier(column)}::text COLLATE "C" NULLS FIRST`
+          )
           .join(', ')}`
       : '';
 
   return `SELECT (${rowJsonExpression})::text AS row_json FROM ${quoteIdentifier(
     table.tableName
-  )}${orderBy} LIMIT $1 OFFSET $2`;
+  )}${orderBy}`;
 }
 
 async function captureTable(
@@ -729,22 +841,32 @@ async function captureTable(
   const query = buildRowQuery(table);
   let capturedCount = 0;
 
-  for (let offset = 0; offset < expectedCount; offset += PAGE_SIZE) {
-    const page = await client.query<{ row_json: string }>(query, [
-      PAGE_SIZE,
-      offset,
-    ]);
-    const rows = page.rows.map((row, index) => {
-      const digest = sha256(row.row_json);
-      tableHash.update(digest);
-      return {
-        ordinal: offset + index,
-        rowJson: row.row_json,
-        digest,
-      };
-    });
-    insertPage(rows);
-    capturedCount += rows.length;
+  // One ordered query read through a server-side cursor (inside the open
+  // REPEATABLE READ transaction): the sort runs once instead of once per page,
+  // and row order/digests are identical to a single ORDER BY scan.
+  const cursorName = 'capture_rows_cursor';
+  await client.query(`DECLARE ${cursorName} NO SCROLL CURSOR FOR ${query}`);
+  try {
+    for (;;) {
+      const page = await client.query<{ row_json: string }>(
+        `FETCH FORWARD ${PAGE_SIZE} FROM ${cursorName}`
+      );
+      if (page.rows.length === 0) break;
+      const base = capturedCount;
+      const rows = page.rows.map((row, index) => {
+        const digest = sha256(row.row_json);
+        tableHash.update(digest);
+        return {
+          ordinal: base + index,
+          rowJson: row.row_json,
+          digest,
+        };
+      });
+      insertPage(rows);
+      capturedCount += rows.length;
+    }
+  } finally {
+    await client.query(`CLOSE ${cursorName}`);
   }
 
   if (capturedCount !== expectedCount) {
@@ -1035,6 +1157,33 @@ export async function verifyCapturedArchive(
   }
 }
 
+async function quarantinePublishedBundle(
+  publishedDir: string,
+  cause: unknown
+): Promise<never> {
+  const reason = cause instanceof Error ? cause.message : String(cause);
+  const failedDir = `${publishedDir}.failed-${Date.now()}`;
+  try {
+    await rename(publishedDir, failedDir);
+  } catch {
+    // Could not move it: make the final directory unmistakably incomplete.
+    await rm(join(publishedDir, 'manifest.json'), { force: true });
+    await writeFile(
+      join(publishedDir, 'CAPTURE_FAILED'),
+      `Capture failed after publish: ${reason}\n`,
+      { encoding: 'utf8', mode: 0o600 }
+    );
+    throw new Error(
+      `Capture failed syncing the parent directory after publish (${reason}); ` +
+        `marked ${publishedDir} with CAPTURE_FAILED and removed its manifest. Do not use it.`
+    );
+  }
+  throw new Error(
+    `Capture failed syncing the parent directory after publish (${reason}); ` +
+      `quarantined the bundle as ${failedDir}. Do not use it.`
+  );
+}
+
 export async function captureRailsToBundle(
   options: CaptureRailsOptions
 ): Promise<RailsCaptureManifest> {
@@ -1056,6 +1205,21 @@ export async function captureRailsToBundle(
 
   const temporaryDir = `${resolvedOutputDir}.tmp-${randomUUID()}`;
   await mkdir(temporaryDir, { recursive: false, mode: 0o700 });
+
+  // Atomically claim the destination as an empty directory. A concurrent
+  // capture (or any other creator) fails here instead of racing the final rename.
+  try {
+    await mkdir(resolvedOutputDir, { recursive: false, mode: 0o700 });
+  } catch (error) {
+    await rmdir(temporaryDir).catch(() => undefined);
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(
+        `Migration destination already exists: ${resolvedOutputDir}`
+      );
+    }
+    throw error;
+  }
+  let destinationClaimed = true;
 
   const archivePath = join(temporaryDir, ARCHIVE_FILENAME);
   const pool = new Pool({ connectionString: options.sourceUrl, max: 1 });
@@ -1159,6 +1323,7 @@ export async function captureRailsToBundle(
       },
       storage: blobSource.storageManifest,
       blobSelection,
+      complete: blobSelection.mode === 'all',
       archive: {
         filename: ARCHIVE_FILENAME,
         byteSize: String(archiveStat.size),
@@ -1187,9 +1352,35 @@ export async function captureRailsToBundle(
       { encoding: 'utf8', mode: 0o600 }
     );
 
+    await fsyncPath(archivePath);
+    await fsyncPath(join(temporaryDir, 'manifest.json'));
+    await fsyncPath(join(temporaryDir, 'validation-summary.txt'));
+    if (await pathIsDirectory(join(temporaryDir, 'blobs'))) {
+      await fsyncDirectoryTree(join(temporaryDir, 'blobs'));
+    }
+    await fsyncPath(temporaryDir);
+
     await client.query('COMMIT');
     transactionOpen = false;
+
+    // Re-check right before the rename: the claimed destination must still be
+    // our own empty directory, otherwise fail closed rather than replace it.
+    if ((await readdir(resolvedOutputDir)).length > 0) {
+      throw new Error(
+        `Migration destination changed during capture: ${resolvedOutputDir}`
+      );
+    }
     await rename(temporaryDir, resolvedOutputDir);
+    destinationClaimed = false;
+    try {
+      await (options.syncParentDirectory ?? fsyncPath)(
+        dirname(resolvedOutputDir)
+      );
+    } catch (syncError) {
+      // The bundle is already at its final path but its directory entry is not
+      // known durable. Never leave something that looks like a complete bundle.
+      await quarantinePublishedBundle(resolvedOutputDir, syncError);
+    }
     return manifest;
   } catch (error) {
     archive?.close();
@@ -1201,6 +1392,10 @@ export async function captureRailsToBundle(
       }
     }
     await rm(temporaryDir, { recursive: true, force: true });
+    if (destinationClaimed) {
+      // Remove only our own still-empty claim; never a populated directory.
+      await rmdir(resolvedOutputDir).catch(() => undefined);
+    }
     throw error;
   } finally {
     client?.release();

@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { chmod, mkdir, rename, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeWebReadableStream } from 'node:stream/web';
@@ -10,6 +10,7 @@ import {
   hashFile,
   type CapturedSelectedBlob,
 } from './active-storage.js';
+import { fsyncPath } from './fsync.js';
 
 const EMPTY_PAYLOAD_SHA256 =
   'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -437,7 +438,9 @@ async function attemptDownloadAndVerify(options: {
       );
     }
 
+    await fsyncPath(partPath);
     await rename(partPath, destinationPath);
+    await fsyncPath(dirname(destinationPath));
     return writtenHashes.sha256;
   } catch (error) {
     await rm(partPath, { force: true });

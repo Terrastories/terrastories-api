@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   access,
   cp,
@@ -638,6 +638,128 @@ describeWithPostgres('Rails source capture', () => {
         })
       ).rejects.toThrow(/unsupported source schema|non-public.*table/i);
       expect(await pathExists(outputDir)).toBe(false);
+    });
+  });
+
+  it('fails closed listing tables/columns the capture account cannot SELECT', async () => {
+    await withIsolatedRailsDatabase(sourceUrl!, async (dbUrl, pool) => {
+      await loadFixtureSql(pool, '2024');
+      await pool.query(
+        `CREATE TABLE hidden_table (id bigint PRIMARY KEY, payload text NOT NULL)`
+      );
+      await pool.query(
+        `CREATE TABLE partial_table (id bigint PRIMARY KEY, secret text NOT NULL)`
+      );
+
+      const role = `cap_reader_${randomBytes(4).toString('hex')}`;
+      const rolePassword = randomBytes(12).toString('hex');
+      const dbName = new URL(dbUrl).pathname.slice(1);
+      await pool.query(`CREATE ROLE ${role} LOGIN PASSWORD '${rolePassword}'`);
+      try {
+        await pool.query(`GRANT CONNECT ON DATABASE "${dbName}" TO ${role}`);
+        await pool.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
+        await pool.query(
+          `GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${role}`
+        );
+        await pool.query(`REVOKE SELECT ON hidden_table FROM ${role}`);
+        await pool.query(`REVOKE SELECT ON partial_table FROM ${role}`);
+        await pool.query(`GRANT SELECT (id) ON partial_table TO ${role}`);
+
+        const roleUrl = new URL(dbUrl);
+        roleUrl.username = role;
+        roleUrl.password = rolePassword;
+
+        const parent = await mkdtemp(join(tmpdir(), 'rails-unreadable-'));
+        const outputDir = join(parent, 'bundle');
+        const failure = await captureRailsToBundle({
+          sourceUrl: roleUrl.toString(),
+          outputDir,
+          blobRoot: join(fixtureDir, 'blobs'),
+        }).then(
+          () => null,
+          (error: Error) => error
+        );
+        expect(failure?.message).toMatch(/lacks SELECT privilege/i);
+        expect(failure?.message).toContain('hidden_table');
+        expect(failure?.message).toContain('partial_table.secret');
+        expect(failure?.message).not.toContain('partial_table.id');
+        expect(await pathExists(outputDir)).toBe(false);
+      } finally {
+        await pool.query(`DROP OWNED BY ${role}`);
+        await pool.query(`DROP ROLE ${role}`);
+      }
+    });
+  });
+
+  it('streams multi-page tables in stable text-collated primary-key order', async () => {
+    await withIsolatedRailsDatabase(sourceUrl!, async (dbUrl, pool) => {
+      await loadFixtureSql(pool, '2024');
+      await pool.query(
+        `CREATE TABLE big_extension (id bigint PRIMARY KEY, payload text NOT NULL)`
+      );
+      await pool.query(
+        `INSERT INTO big_extension SELECT g, 'row-' || g FROM generate_series(1, 1203) g`
+      );
+
+      const parent = await mkdtemp(join(tmpdir(), 'rails-cursor-'));
+      const outputDir = join(parent, 'bundle');
+      const manifest = await captureRailsToBundle({
+        sourceUrl: dbUrl,
+        outputDir,
+        blobRoot: join(fixtureDir, 'blobs'),
+      });
+      expect(manifest.tables.big_extension?.rowCount).toBe(1203);
+
+      const archive = new Database(join(outputDir, 'legacy.sqlite'), {
+        readonly: true,
+      });
+      try {
+        const rows = archive
+          .prepare(
+            `SELECT ordinal, row_json FROM source_rows WHERE table_name = 'big_extension' ORDER BY ordinal`
+          )
+          .all() as Array<{ ordinal: number; row_json: string }>;
+        const ids = rows.map(
+          (row) => (JSON.parse(row.row_json) as { id: string }).id
+        );
+        expect(rows.map((row) => row.ordinal)).toEqual(
+          Array.from({ length: 1203 }, (_, index) => index)
+        );
+        expect(ids).toEqual(
+          Array.from({ length: 1203 }, (_, index) => String(index + 1)).sort(
+            (a, b) => (a < b ? -1 : a > b ? 1 : 0)
+          )
+        );
+      } finally {
+        archive.close();
+      }
+    });
+  });
+
+  it('quarantines the published bundle when the post-rename parent sync fails', async () => {
+    await withIsolatedRailsDatabase(sourceUrl!, async (dbUrl, pool) => {
+      await loadFixtureSql(pool, '2024');
+      const parent = await mkdtemp(join(tmpdir(), 'rails-post-rename-'));
+      const outputDir = join(parent, 'bundle');
+
+      await expect(
+        captureRailsToBundle({
+          sourceUrl: dbUrl,
+          outputDir,
+          blobRoot: join(fixtureDir, 'blobs'),
+          syncParentDirectory: async () => {
+            throw new Error('injected parent sync failure');
+          },
+        })
+      ).rejects.toThrow(/injected parent sync failure.*quarantined/is);
+
+      expect(await pathExists(outputDir)).toBe(false);
+      const entries = await readdir(parent);
+      const failed = entries.filter((name) =>
+        name.startsWith('bundle.failed-')
+      );
+      expect(failed).toHaveLength(1);
+      expect(entries.filter((name) => name === 'bundle')).toHaveLength(0);
     });
   });
 });

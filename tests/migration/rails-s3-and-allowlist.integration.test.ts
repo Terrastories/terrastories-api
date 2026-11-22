@@ -290,6 +290,7 @@ describeWithPostgres(
           },
         });
 
+        expect(sierraManifest.complete).toBe(false);
         expect(sierraManifest.blobSelection).toEqual({
           mode: 'community_allowlist',
           selectors: ['sierra_alta'],
@@ -439,6 +440,41 @@ describeWithPostgres(
         expect(zeroManifest.totals.blobsSelected).toBe(0);
         expect(zeroManifest.totals.blobsNotSelected).toBe(17);
         expect(await pathExists(join(zeroOut, 'blobs'))).toBe(false);
+      });
+    });
+
+    it('fails closed on attachments with unknown record_type in allowlist mode', async () => {
+      await withIsolatedRailsDatabase(sourceUrl!, async (dbUrl, pool) => {
+        await loadFixtureSql(pool, '2024');
+        await pool.query(
+          `INSERT INTO active_storage_attachments(id, name, record_type, record_id, blob_id, created_at)
+           VALUES (9001, 'file', 'CustomThing', 1, 101, '2020-10-02 00:00:00'),
+                  (9002, 'file', 'CustomThing', 2, 101, '2020-10-02 00:00:00')`
+        );
+
+        const parent = await makeTempDir('rails-allowlist-unknown-');
+        const out = join(parent, 'bundle');
+        const failure = await captureRailsToBundle({
+          sourceUrl: dbUrl,
+          outputDir: out,
+          communities: ['10'],
+          blobRoot: join(fixtureDir, 'blobs'),
+        }).then(
+          () => null,
+          (error: Error) => error
+        );
+        expect(failure?.message).toMatch(
+          /unknown record_type: CustomThing \(2\)/
+        );
+        expect(await pathExists(out)).toBe(false);
+
+        // Full capture is unaffected and reports complete: true.
+        const full = await captureRailsToBundle({
+          sourceUrl: dbUrl,
+          outputDir: join(parent, 'full'),
+          blobRoot: join(fixtureDir, 'blobs'),
+        });
+        expect(full.complete).toBe(true);
       });
     });
 

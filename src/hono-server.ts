@@ -70,6 +70,11 @@ const app = createHonoApp({
   clientAddress: (c) => getConnInfo(c).remote.address ?? null,
   fieldKitCaFingerprint:
     process.env.FIELD_KIT_CA_FINGERPRINT?.trim() || undefined,
+  mapboxAccessToken: runtimeConfig.mapboxAccessToken,
+  offlineMode:
+    runtimeConfig.environment === 'offline' ||
+    runtimeConfig.environment === 'field-kit' ||
+    envFlagEnabled(process.env.OFFLINE_MODE),
 });
 const server = serve({
   fetch: app.fetch,

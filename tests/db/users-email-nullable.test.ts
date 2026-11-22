@@ -1,5 +1,5 @@
 /**
- * Migration 0020 (migrator D1): users.email becomes nullable without losing
+ * Migration 0021 (migrator D1): users.email becomes nullable without losing
  * rows, indexes, triggers or child-table references.
  */
 import {
@@ -25,13 +25,13 @@ function migrationsUpTo0019(): string {
   const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as {
     entries: Array<{ tag: string }>;
   };
-  journal.entries = journal.entries.filter((e) => !e.tag.startsWith('0020_'));
+  journal.entries = journal.entries.filter((e) => !e.tag.startsWith('0021_'));
   writeFileSync(journalPath, JSON.stringify(journal));
   mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-describe('0020_users_email_nullable', () => {
+describe('0021_users_email_nullable', () => {
   it('keeps data, indexes and triggers and allows NULL emails', () => {
     const db = new Database(':memory:');
     db.pragma('foreign_keys = ON');

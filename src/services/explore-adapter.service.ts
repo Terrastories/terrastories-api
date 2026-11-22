@@ -9,8 +9,11 @@
  * - restricted rows (`isRestricted`) and unknown privacy levels are never
  *   exposed; withheld ids answer the same 404 as missing ids;
  * - place/speaker visibility per the §6.4a decision table;
- * - provider credentials (`mapboxAccessToken`) are never exposed (SPEC §6.6
- *   and NEVER_EXPOSED_FIELDS_BY_FAMILY.themes).
+ * - provider credentials (`mapboxAccessToken`, `mapbox://` `mapboxStyleUrl`)
+ *   are exposed publicly only when `exposeMapboxCredentials = true` on a public
+ *   active community in online mode (SPEC §6.6); secret `sk.*` tokens are
+ *   never exposed. The protomaps key is an origin-restricted public key and is
+ *   exposed with the basemap style (Rails parity, online only).
  *
  * Fields the V2 schema deliberately does not carry (topic, typeOfPlace,
  * speakerCommunity, birthdate, sponsor logos, story media URLs, place
@@ -24,6 +27,11 @@ import {
   type ExploreThemeRow,
 } from '../repositories/explore-adapter.repository.js';
 import { MAX_DATABASE_ID } from '../shared/types/public.js';
+import {
+  sanitizeMapboxStyleUrl,
+  sanitizePublicMapboxToken,
+} from '../shared/utils/map-config.js';
+import { sanitizePublicStyleUrl } from './public-communities.service.js';
 
 /** Rails `Community::FILTERABLE_ATTRIBUTES`, served verbatim. */
 export const EXPLORE_FILTERABLE_ATTRIBUTES = [
@@ -57,37 +65,44 @@ const communityNotFound = Object.freeze({
 
 const notFound = (): ExploreResult => ({ status: 404, body: notFoundBody });
 const iso = (value: Date) => value.toISOString();
-
-/**
- * Rails `Theme#map_style_url`/`use_maplibre?`: a style is served publicly
- * only when it is usable without provider credentials — an http(s) URL. A
- * `mapbox://` style needs the token V2 never exposes, so it is withheld and
- * the client falls back to its configured default style.
- */
-const publicStyleUrl = (theme: ExploreThemeRow | null): string | null => {
-  const url = theme?.mapboxStyleUrl;
-  return url && /^https?:\/\//i.test(url) ? url : null;
-};
-
 const mediaUrl = (origin: string, fileId: string) =>
   `${origin}/explore/media/${fileId}`;
 
-/** MapConfig shared by the community card and detail (Rails jbuilder shape). */
-function baseMapConfig(theme: ExploreThemeRow | null) {
+/**
+ * MapConfig shared by the community card and detail (Rails jbuilder shape).
+ *
+ * Publicly exposes Mapbox style + public `pk.*` token only when
+ * `exposeMapboxCredentials` is true and offline mode is inactive; otherwise
+ * falls back to any credential-free `styleUrl` (or null).
+ */
+function baseMapConfig(theme: ExploreThemeRow | null, offlineMode = false) {
+  const canExposeMapbox =
+    !offlineMode && theme?.exposeMapboxCredentials === true;
+  const exposedToken = canExposeMapbox
+    ? sanitizePublicMapboxToken(theme?.mapboxAccessToken)
+    : null;
+  const exposedMapboxStyle =
+    canExposeMapbox && exposedToken !== null
+      ? sanitizeMapboxStyleUrl(theme?.mapboxStyleUrl)
+      : null;
   return {
-    mapboxAccessToken: null,
-    mapboxStyle: publicStyleUrl(theme),
-    mapbox3dEnabled: false,
-    mapProjection: null,
+    mapboxAccessToken: exposedMapboxStyle !== null ? exposedToken : null,
+    mapboxStyle:
+      exposedMapboxStyle ?? sanitizePublicStyleUrl(theme?.styleUrl ?? null),
+    mapbox3dEnabled: Boolean(theme?.mapbox3d),
+    // Rails parity: origin-restricted public protomaps key + basemap style.
+    protomapsApiKey: offlineMode ? null : (theme?.protomapsApiKey ?? null),
+    protomapsBasemapStyle: theme?.protomapsBasemapStyle ?? null,
+    mapProjection: theme?.mapProjection ?? null,
     center: [theme?.centerLong ?? null, theme?.centerLat ?? null],
-    zoom: null,
-    pitch: null,
-    bearing: null,
+    zoom: theme?.zoom ?? null,
+    pitch: theme?.pitch ?? null,
+    bearing: theme?.bearing ?? null,
   };
 }
 
 /** Extended MapConfig fields only the community detail (show) carries. */
-function detailMapConfig(theme: ExploreThemeRow | null) {
+function detailMapConfig(theme: ExploreThemeRow | null, offlineMode = false) {
   const sw =
     theme?.swBoundaryLong != null && theme?.swBoundaryLat != null
       ? [theme.swBoundaryLong, theme.swBoundaryLat]
@@ -97,7 +112,7 @@ function detailMapConfig(theme: ExploreThemeRow | null) {
       ? [theme.neBoundaryLong, theme.neBoundaryLat]
       : null;
   return {
-    ...baseMapConfig(theme),
+    ...baseMapConfig(theme, offlineMode),
     centerLat: theme?.centerLat ?? null,
     centerLong: theme?.centerLong ?? null,
     swBoundaryLat: theme?.swBoundaryLat ?? null,
@@ -289,7 +304,10 @@ export function parseStoriesQuery(
 }
 
 export class ExploreAdapterService {
-  constructor(readonly repository: ExploreAdapterRepository) {}
+  constructor(
+    readonly repository: ExploreAdapterRepository,
+    private readonly options: { offlineMode?: boolean } = {}
+  ) {}
 
   /** GET /explore/communities — Rails api/communities#index envelope. */
   async communitiesIndex(
@@ -312,7 +330,7 @@ export class ExploreAdapterService {
         ...(branding
           ? { displayImage: mediaUrl(origin, branding.fileId) }
           : {}),
-        mapConfig: baseMapConfig(theme),
+        mapConfig: baseMapConfig(theme, this.options.offlineMode === true),
       });
     }
     return { status: 200, body: { data: cards } };
@@ -382,7 +400,7 @@ export class ExploreAdapterService {
           points: places.map(pointFeature),
           categories: [...EXPLORE_FILTERABLE_ATTRIBUTES],
           filters,
-          mapConfig: detailMapConfig(theme),
+          mapConfig: detailMapConfig(theme, this.options.offlineMode === true),
         },
       },
     };

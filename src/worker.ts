@@ -67,6 +67,11 @@ export interface WorkerBindings {
    * marker pauses it independently of this binding.
    */
   ORPHAN_SWEEP_PAUSED?: string;
+  /**
+   * Optional instance-level public Mapbox token (`pk.*`) fallback used on
+   * authenticated reads when a community configures no token of its own.
+   */
+  MAPBOX_ACCESS_TOKEN?: string;
 }
 
 /** R2-backed storage adapter with object listing for the orphan sweeper. */
@@ -401,6 +406,8 @@ export function createWorker() {
       erasureStore: env.ERASURE_RECORDS
         ? createWorkerErasureRecordStore(env.ERASURE_RECORDS)
         : undefined,
+      mapboxAccessToken: runtimeConfig.mapboxAccessToken,
+      offlineMode: runtimeConfig.environment === 'offline',
     });
     apps.set(env, app);
     return app;

@@ -41,6 +41,12 @@ export interface PublicMapConfigRow {
   communityId: number;
   styleUrl: string | null;
   basemapStyle: string | null;
+  mapboxStyleUrl: string | null;
+  mapboxAccessToken: string | null;
+  exposeMapboxCredentials: boolean;
+  mapbox3d: boolean;
+  protomapsApiKey: string | null;
+  protomapsBasemapStyle: string | null;
   centerLatitude: number | null;
   centerLongitude: number | null;
   southWestLatitude: number | null;
@@ -67,6 +73,12 @@ interface RawMapConfigJoinRow {
   communityId: number;
   styleUrl: string | null;
   basemapStyle: string | null;
+  mapboxStyleUrl: string | null;
+  mapboxAccessToken: string | null;
+  exposeMapboxCredentials: boolean;
+  mapbox3d: boolean;
+  protomapsApiKey: string | null;
+  protomapsBasemapStyle: string | null;
   centerLatitude: number | null;
   centerLongitude: number | null;
   southWestLatitude: number | null;
@@ -121,6 +133,12 @@ function toSafeMapConfig(row: RawMapConfigJoinRow): PublicMapConfigRow {
     communityId: row.communityId,
     styleUrl: row.styleUrl,
     basemapStyle: row.basemapStyle,
+    mapboxStyleUrl: row.mapboxStyleUrl,
+    mapboxAccessToken: row.mapboxAccessToken,
+    exposeMapboxCredentials: Boolean(row.exposeMapboxCredentials),
+    mapbox3d: Boolean(row.mapbox3d),
+    protomapsApiKey: row.protomapsApiKey,
+    protomapsBasemapStyle: row.protomapsBasemapStyle,
     centerLatitude: row.centerLatitude,
     centerLongitude: row.centerLongitude,
     southWestLatitude: row.southWestLatitude,
@@ -420,6 +438,12 @@ export class PublicCommunitiesRepository {
         communityId: communityMapConfigs.communityId,
         styleUrl: communityMapConfigs.styleUrl,
         basemapStyle: communityMapConfigs.basemapStyle,
+        mapboxStyleUrl: communityMapConfigs.mapboxStyleUrl,
+        mapboxAccessToken: communityMapConfigs.mapboxAccessToken,
+        exposeMapboxCredentials: communityMapConfigs.exposeMapboxCredentials,
+        mapbox3d: communityMapConfigs.mapbox3d,
+        protomapsApiKey: communityMapConfigs.protomapsApiKey,
+        protomapsBasemapStyle: communityMapConfigs.protomapsBasemapStyle,
         centerLatitude: communityMapConfigs.centerLatitude,
         centerLongitude: communityMapConfigs.centerLongitude,
         southWestLatitude: communityMapConfigs.southWestLatitude,

@@ -2509,7 +2509,7 @@ function verifySqliteSnapshotDrift(
 ): void {
   const snapshot = JSON.parse(
     readFileSync(
-      path.join(sqliteMigrations, 'meta', '0020_snapshot.json'),
+      path.join(sqliteMigrations, 'meta', '0021_snapshot.json'),
       'utf8'
     )
   ) as Snapshot;
@@ -2911,7 +2911,8 @@ async function verifySqliteCrossCommunityGuard(): Promise<void> {
       '0017_community_export_jobs_and_tokens.sql',
       '0018_community_sovereignty.sql',
       '0019_erasure_lifecycle_guard.sql',
-      '0020_users_email_nullable.sql',
+      '0020_map_config_mapbox_protomaps.sql',
+      '0021_users_email_nullable.sql',
     ]) {
       const nextStatements = splitStatements(
         await readFile(path.join(sqliteMigrations, file), 'utf8')

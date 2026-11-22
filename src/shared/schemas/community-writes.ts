@@ -5,13 +5,21 @@ import {
   validateDescriptionForWrite,
 } from '../utils/safe-description.js';
 import {
+  CommunityMapConfigSchema,
+  CommunityMapRenderSchema,
   CommunityReadDetailResponseSchema,
   CommunityReadVisibilitySchema,
 } from './community-reads.js';
+import { V2ErrorResponseSchema } from './public-communities.js';
 import {
-  PublicCommunityMapConfigSchema,
-  V2ErrorResponseSchema,
-} from './public-communities.js';
+  MAPBOX_ACCESS_TOKEN_MAX_LENGTH,
+  MAPBOX_STYLE_URL_MAX_LENGTH,
+  PROTOMAPS_API_KEY_MAX_LENGTH,
+  PROTOMAPS_BASEMAP_STYLE_MAX_LENGTH,
+  isPublicMapboxToken,
+  isValidProtomapsApiKey,
+  sanitizeMapboxStyleUrl,
+} from '../utils/map-config.js';
 import {
   PublicPlaceDetailResponseSchema,
   PublicSpeakerDetailResponseSchema,
@@ -197,6 +205,26 @@ export const PutCommunityMapConfigRequestSchema = z
       ])
       .default(null),
     basemapStyle: NullableTrimmedText('Basemap style', 120).default(null),
+    // Provider fields (Mapbox/Protomaps): an omitted key keeps the stored
+    // value (resolved in the service); an explicit null clears it.
+    mapboxStyleUrl: NullableTrimmedText(
+      'Mapbox style URL',
+      MAPBOX_STYLE_URL_MAX_LENGTH
+    ).optional(),
+    mapboxAccessToken: NullableTrimmedText(
+      'Mapbox access token',
+      MAPBOX_ACCESS_TOKEN_MAX_LENGTH
+    ).optional(),
+    exposeMapboxCredentials: z.boolean().optional(),
+    mapbox3d: z.boolean().optional(),
+    protomapsApiKey: NullableTrimmedText(
+      'Protomaps API key',
+      PROTOMAPS_API_KEY_MAX_LENGTH
+    ).optional(),
+    protomapsBasemapStyle: NullableTrimmedText(
+      'Protomaps basemap style',
+      PROTOMAPS_BASEMAP_STYLE_MAX_LENGTH
+    ).optional(),
     centerLatitude: NullableLatitudeSchema.default(null),
     centerLongitude: NullableLongitudeSchema.default(null),
     southWestLatitude: NullableLatitudeSchema.default(null),
@@ -237,6 +265,54 @@ export const PutCommunityMapConfigRequestSchema = z
   })
   .strict()
   .superRefine((data, ctx) => {
+    // The style/token pair rule is enforced on the merged (stored + request)
+    // values in the service; here only provided values are checked.
+    if (
+      data.mapboxStyleUrl !== undefined &&
+      data.mapboxAccessToken !== undefined &&
+      (data.mapboxStyleUrl !== null) !== (data.mapboxAccessToken !== null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [
+          data.mapboxStyleUrl !== null ? 'mapboxAccessToken' : 'mapboxStyleUrl',
+        ],
+        message:
+          'Mapbox style URL and Mapbox access token must both be provided or both be blank',
+      });
+    }
+    if (
+      data.mapboxStyleUrl != null &&
+      sanitizeMapboxStyleUrl(data.mapboxStyleUrl) === null
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['mapboxStyleUrl'],
+        message:
+          'Mapbox style URL must be a valid mapbox://styles/... URI or credential-free https URL',
+      });
+    }
+    if (
+      data.mapboxAccessToken != null &&
+      !isPublicMapboxToken(data.mapboxAccessToken)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['mapboxAccessToken'],
+        message: 'Mapbox access token must be a valid public token (pk.*)',
+      });
+    }
+    if (
+      data.protomapsApiKey != null &&
+      !isValidProtomapsApiKey(data.protomapsApiKey)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['protomapsApiKey'],
+        message: 'Protomaps API key must not contain whitespace',
+      });
+    }
+
     const centerHasLat = data.centerLatitude !== null;
     const centerHasLng = data.centerLongitude !== null;
     if (centerHasLat !== centerHasLng) {
@@ -302,7 +378,8 @@ export type PatchCommunityResponse = z.infer<
 >;
 
 export const PutCommunityMapConfigResponseSchema = z.object({
-  data: PublicCommunityMapConfigSchema,
+  data: CommunityMapConfigSchema,
+  render: CommunityMapRenderSchema,
 });
 export type PutCommunityMapConfigResponse = z.infer<
   typeof PutCommunityMapConfigResponseSchema

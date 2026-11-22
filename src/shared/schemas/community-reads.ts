@@ -65,6 +65,27 @@ export const CommunityStoryVisibilitySchema = z.enum([
   'editors',
 ]);
 
+/**
+ * Resolved render block for map clients. Unlike the raw `mapConfig` fields
+ * (exactly what is stored, safe to round-trip through the admin edit form),
+ * this applies the instance MAPBOX_ACCESS_TOKEN fallback and offline
+ * suppression. Never write these values back to the community config.
+ */
+export const CommunityMapRenderSchema = z.object({
+  mapboxStyleUrl: z.string().nullable(),
+  mapboxAccessToken: z.string().nullable(),
+  source: z.enum(['community', 'instance', 'none']),
+});
+
+export type CommunityMapRender = z.infer<typeof CommunityMapRenderSchema>;
+
+export const CommunityMapConfigSchema = PublicCommunityMapConfigSchema.extend({
+  exposeMapboxCredentials: z.boolean(),
+  protomapsApiKey: z.string().nullable(),
+});
+
+export type CommunityMapConfig = z.infer<typeof CommunityMapConfigSchema>;
+
 export const CommunityReadDetailSchema = z.object({
   id: z.number().int().positive().max(MAX_DATABASE_ID),
   slug: z.string().min(1),
@@ -75,7 +96,8 @@ export const CommunityReadDetailSchema = z.object({
   visibility: CommunityReadVisibilitySchema,
   status: z.literal('active'),
   branding: PublicCommunityBrandingSchema,
-  mapConfig: PublicCommunityMapConfigSchema.nullable(),
+  mapConfig: CommunityMapConfigSchema.nullable(),
+  mapRender: CommunityMapRenderSchema,
   storiesCount: z.number().int().min(0),
   points: z.array(PublicMapPointFeatureSchema),
   categories: z.array(PublicCommunityFilterCategorySchema),
@@ -95,7 +117,8 @@ export type CommunityReadDetailResponse = z.infer<
 >;
 
 export const CommunityMapConfigResponseSchema = z.object({
-  data: PublicCommunityMapConfigSchema.nullable(),
+  data: CommunityMapConfigSchema.nullable(),
+  render: CommunityMapRenderSchema,
 });
 
 export type CommunityMapConfigResponse = z.infer<

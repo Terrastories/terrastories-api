@@ -1,5 +1,5 @@
 {
-  "id": "5cc2c87b-5fb2-4187-b3c6-b3ca8d6d7a1b",
+  "id": "d71953b7-8652-438c-8b87-c181fec22619",
   "prevId": "d9df717f-bf98-432e-8ee0-d1b7d5ad8d17",
   "version": "7",
   "dialect": "postgresql",
@@ -540,6 +540,44 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "mapbox_style_url": {
+          "name": "mapbox_style_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mapbox_access_token": {
+          "name": "mapbox_access_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expose_mapbox_credentials": {
+          "name": "expose_mapbox_credentials",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "mapbox_3d": {
+          "name": "mapbox_3d",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "protomaps_api_key": {
+          "name": "protomaps_api_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "protomaps_basemap_style": {
+          "name": "protomaps_basemap_style",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -1977,7 +2015,7 @@
           "name": "email",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "username": {
           "name": "username",

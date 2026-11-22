@@ -3811,6 +3811,55 @@ export async function createFixture(
           },
         },
         {
+          // Rails member search (dashboard/search#index) maps to the plain-text
+          // search filter: it must never surface unreadable stories.
+          name: `v2 stories plain-text search stays within readable stories (${role})`,
+          method: 'GET',
+          path: '/v2/stories?search=public%20story',
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            const text = JSON.stringify(body) ?? '';
+            const stories = parsed.data.data.stories;
+            // Non-empty, narrower than the unfiltered list (so an ignored
+            // `search` fails), and only readable, matching stories.
+            return (
+              stories.length > 0 &&
+              stories.length < expectedStoryIds.length &&
+              parsed.data.meta.total === stories.length &&
+              stories.every(
+                (s) =>
+                  expectedStoryIds.includes(s.id) &&
+                  s.title.toLowerCase().includes('public story')
+              ) &&
+              !text.includes('QA restricted story') &&
+              !text.includes('QA unknown-privacy') &&
+              !text.includes('QA foreign story') &&
+              !text.includes('QA private community story') &&
+              !text.includes('QA inactive community')
+            );
+          },
+        },
+        {
+          // Every seeded title starts with 'QA', so this query matches readable
+          // AND unreadable stories alike: the result must be exactly the
+          // role's readable set.
+          name: `v2 stories search over mixed readable/unreadable titles returns only readable (${role})`,
+          method: 'GET',
+          path: '/v2/stories?search=QA&sort=title_asc',
+          expected: 200,
+          check: (body) => {
+            const parsed = CommunityStoriesListResponseSchema.safeParse(body);
+            if (!parsed.success) return false;
+            return (
+              parsed.data.meta.total === expectedStoryIds.length &&
+              parsed.data.data.stories.map((s) => s.id).join(',') ===
+                expectedStoryIds.join(',')
+            );
+          },
+        },
+        {
           name: `v2 stories filter excludes #162 and unauthorized places (${role})`,
           method: 'GET',
           path: `/v2/stories?place=${restrictedPlace.id}`,

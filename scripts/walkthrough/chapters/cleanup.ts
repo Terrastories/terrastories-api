@@ -6,7 +6,7 @@
  * try/catch: one failure never stops the rest. Safe to call from a signal
  * handler (it runs at most once).
  */
-import { attempt, field, signIn, type Ctx } from '../context.js';
+import { attempt, field, listAll, signIn, type Ctx } from '../context.js';
 import { dig } from '../walk.js';
 
 const SECRET_KEYS = new Set(['mapboxAccessToken', 'protomapsApiKey']);
@@ -126,14 +126,14 @@ export async function cleanupChapter(ctx: Ctx): Promise<void> {
     // 3. stories, places and speakers by run prefix
     const storyIds = new Set<number>(s.stories);
     await attempt(ctx, 'find stories', async () => {
-      const stories = await ana.call(
-        'GET',
-        `/v2/stories?search=${encodeURIComponent(w.runId)}&limit=100`
+      const rows = await listAll(
+        ana,
+        `/v2/stories?search=${encodeURIComponent(w.runId)}`,
+        (r) =>
+          (dig(r, 'data', 'stories') as Array<{ id: number; title: string }>) ??
+          []
       );
-      for (const row of (dig(stories, 'data', 'stories') as Array<{
-        id: number;
-        title: string;
-      }>) ?? [])
+      for (const row of rows)
         if (row.title.startsWith(w.runId)) storyIds.add(row.id);
     });
     for (const id of storyIds)
@@ -149,17 +149,13 @@ export async function cleanupChapter(ctx: Ctx): Promise<void> {
     for (const kind of ['speakers', 'places'] as const) {
       const ids = new Set<number>(kind === 'places' ? s.places : s.speakers);
       await attempt(ctx, `find ${kind}`, async () => {
-        for (let offset = 0; offset < 1000; offset += 100) {
-          const page = await ana.call(
-            'GET',
-            `/v2/${kind}?limit=100&offset=${offset}`
-          );
-          const rows =
-            (dig(page, 'data') as Array<{ id: number; name: string }>) ?? [];
-          for (const row of rows)
-            if (row.name.startsWith(w.runId)) ids.add(row.id);
-          if (dig(page, 'meta', 'hasNextPage') !== true) break;
-        }
+        const rows = await listAll(
+          ana,
+          `/v2/${kind}`,
+          (r) => (dig(r, 'data') as Array<{ id: number; name: string }>) ?? []
+        );
+        for (const row of rows)
+          if (row.name.startsWith(w.runId)) ids.add(row.id);
       });
       for (const id of ids)
         await attempt(ctx, `${kind} ${id}`, async () => {
@@ -231,8 +227,12 @@ export async function cleanupChapter(ctx: Ctx): Promise<void> {
 
   // 6. Sam disables the play and lab communities (they are never left active)
   const targets: Array<{ id: number; slug: string }> = [];
-  if (play?.id !== undefined) targets.push({ id: play.id, slug: play.slug });
-  if (s.lab) targets.push({ id: s.lab.id, slug: s.lab.slug });
+  // every community the run created (play, lab, the unclaimed one), by registry
+  for (const known of s.communities) targets.push(known);
+  if (play?.id !== undefined && !targets.some((t) => t.id === play.id))
+    targets.push({ id: play.id, slug: play.slug });
+  if (s.lab && !targets.some((t) => t.id === s.lab!.id))
+    targets.push({ id: s.lab.id, slug: s.lab.slug });
   if (targets.length) {
     if (!cfg.superIdentifier || !cfg.superPassword) {
       w.narrate(

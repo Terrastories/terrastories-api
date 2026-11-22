@@ -7,6 +7,7 @@
 import { newVerifier, randomPassword } from '../kdf.js';
 import {
   activate,
+  offsetOfMatch,
   deriveKey,
   field,
   guarded,
@@ -391,9 +392,22 @@ export async function stewardChapter(ctx: Ctx): Promise<void> {
       who: sam,
       say: 'sees the lab community as disabled in the communities list',
       method: 'GET',
-      path: '/v2/admin/communities?limit=100',
+      path: `/v2/admin/communities?limit=100&offset=${await offsetOfMatch(
+        sam,
+        '/v2/admin/communities',
+        (r) => (dig(r, 'data') as Array<{ slug: string }>) ?? [],
+        (c) => c.slug === lab.slug
+      )}`,
       expect: 200,
       covers: ['S04'],
+      check: (r) => {
+        const row = (
+          (dig(r, 'data') as Array<{ slug: string; status: string }>) ?? []
+        ).find((c) => c.slug === lab.slug);
+        return row?.status === 'disabled'
+          ? undefined
+          : 'expected the lab community to be disabled';
+      },
     });
     void val;
     void num;

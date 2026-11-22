@@ -12,7 +12,8 @@ import {
   signIn,
   str,
   val,
-  playOf,
+  offsetOfMatch,
+  registerCommunity,
   type Ctx,
 } from '../context.js';
 import { dig } from '../walk.js';
@@ -59,6 +60,7 @@ export async function provisionPlay(ctx: Ctx): Promise<void> {
       ],
     });
     const id = num(made, 'data', 'id');
+    registerCommunity(ctx, id, slug);
     // recorded at once so cleanup disables it even if a later step fails
     s.play = {
       slug,
@@ -206,6 +208,7 @@ export async function superAdminChapter(ctx: Ctx): Promise<void> {
       ],
     });
     const labId = num(lab, 'data', 'id');
+    registerCommunity(ctx, labId, slug);
     s.lab = { id: labId, slug, name: slug };
     const token = await w.step({
       who: sam,
@@ -282,11 +285,18 @@ export async function superAdminChapter(ctx: Ctx): Promise<void> {
       covers: ['V15'],
       show: 'the claim page says the token is not valid',
     });
+    type Row = { slug: string; claimStatus: string };
+    const claimedAt = await offsetOfMatch(
+      sam,
+      '/v2/admin/communities',
+      (r) => (dig(r, 'data') as Row[]) ?? [],
+      (c) => c.slug === slug
+    );
     await w.step({
       who: sam,
       say: 'sees the community as claimed',
       method: 'GET',
-      path: '/v2/admin/communities?limit=100',
+      path: `/v2/admin/communities?limit=100&offset=${claimedAt}`,
       expect: 200,
       covers: ['S04'],
       check: (r) => {
@@ -295,7 +305,7 @@ export async function superAdminChapter(ctx: Ctx): Promise<void> {
         ).find((c) => c.slug === slug);
         return row?.claimStatus === 'claimed'
           ? undefined
-          : 'expected claimStatus claimed (or the list is longer than one page)';
+          : 'expected claimStatus claimed';
       },
     });
 
@@ -311,6 +321,7 @@ export async function superAdminChapter(ctx: Ctx): Promise<void> {
       covers: ['S03', 'V15'],
     });
     const goneId = num(gone, 'data', 'id');
+    registerCommunity(ctx, goneId, goneSlug);
     await w.step({
       who: sam,
       say: 'disables it, then enables it again (sessions end; old claim tokens never come back)',

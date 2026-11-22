@@ -112,7 +112,8 @@ describe('walkthrough runner', () => {
       expect(done('puts the description and the visibility back')).toHaveLength(
         1
       );
-      expect(done('disables the disposable community')).toHaveLength(2);
+      // play, lab and the unclaimed community are all registered and swept
+      expect(done('disables the disposable community')).toHaveLength(3);
       expect(result.state.play?.slug).toBe(`${result.runId}-play`);
 
       // deliberate failed auth attempts stay inside the shared throttle budget

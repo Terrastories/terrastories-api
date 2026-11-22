@@ -9,6 +9,7 @@ import {
   field,
   guarded,
   num,
+  offsetOfMatch,
   str,
   upload,
   val,
@@ -885,7 +886,12 @@ async function importChapter(
     who: elena,
     say: 'opens the places list to see the imported places',
     method: 'GET',
-    path: '/v2/places?limit=100',
+    path: `/v2/places?limit=100&offset=${await offsetOfMatch(
+      elena,
+      '/v2/places',
+      (r) => (val(r, 'data') as Array<{ name: string }>) ?? [],
+      (p) => p.name === `${w.runId} Import landing`
+    )}`,
     expect: 200,
     covers: ['C31'],
     check: (r) => {

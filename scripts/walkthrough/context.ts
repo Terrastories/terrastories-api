@@ -62,6 +62,8 @@ export interface State {
   places: number[];
   speakers: number[];
   imports: number[];
+  /** Every community this run created, registered at once so cleanup disables it. */
+  communities: Array<{ id: number; slug: string }>;
   /** Every file id uploaded in the run, so a stray one is still cleared. */
   uploaded: string[];
   /** The disposable community; set by the play provisioning or the bootstrap chapter. */
@@ -99,10 +101,70 @@ export function newState(): State {
     speakers: [],
     imports: [],
     uploaded: [],
+    communities: [],
     actors: {},
     notes: [],
     targetCounts: {},
   };
+}
+
+/**
+ * Walk a paged list (limit/offset, meta.hasNextPage) and return every row.
+ * Never stops at the first page. `rowsOf` picks the array out of the reply.
+ */
+export async function listAll<T>(
+  actor: Actor,
+  path: string,
+  rowsOf: (reply: Reply) => T[],
+  limit = 100
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let offset = 0; offset < 10_000; offset += limit) {
+    const sep = path.includes('?') ? '&' : '?';
+    const page = await actor.call(
+      'GET',
+      `${path}${sep}limit=${limit}&offset=${offset}`
+    );
+    if (page.status !== 200) break;
+    const rows = rowsOf(page);
+    out.push(...rows);
+    const more = dig(page, 'meta', 'hasNextPage');
+    if (more === true || (more === undefined && rows.length === limit))
+      continue;
+    break;
+  }
+  return out;
+}
+
+/** The offset of the page that holds the first row matching `pred` (0 when none). */
+export async function offsetOfMatch<T>(
+  actor: Actor,
+  path: string,
+  rowsOf: (reply: Reply) => T[],
+  pred: (row: T) => boolean,
+  limit = 100
+): Promise<number> {
+  for (let offset = 0; offset < 10_000; offset += limit) {
+    const sep = path.includes('?') ? '&' : '?';
+    const page = await actor.call(
+      'GET',
+      `${path}${sep}limit=${limit}&offset=${offset}`
+    );
+    if (page.status !== 200) return 0;
+    const rows = rowsOf(page);
+    if (rows.some(pred)) return offset;
+    const more = dig(page, 'meta', 'hasNextPage');
+    if (more === true || (more === undefined && rows.length === limit))
+      continue;
+    break;
+  }
+  return 0;
+}
+
+/** Record a created community for cleanup (idempotent). */
+export function registerCommunity(ctx: Ctx, id: number, slug: string): void {
+  if (!ctx.s.communities.some((c) => c.id === id))
+    ctx.s.communities.push({ id, slug });
 }
 
 /** The disposable community; throws when none exists (never falls back to the real one). */

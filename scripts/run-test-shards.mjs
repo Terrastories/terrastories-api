@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 const waves = [
   ['test:ci:contracts'],
   ['test:ci:core'],
+  ['test:ci:migration'],
   ['test:ci:routes'],
   ['test:ci:services'],
   ['test:ci:production'],

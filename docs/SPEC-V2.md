@@ -65,7 +65,7 @@ The pinned Rails revision has two product-facing Flipper gates: `public_communit
 
 ### Audited legacy evidence
 
-The behavior inventory below uses [`Terrastories/terrastories@f6f033a17bd4a4c600ffea8bc2e773d243f88f72`](https://github.com/Terrastories/terrastories/tree/f6f033a17bd4a4c600ffea8bc2e773d243f88f72), with Rails schema version `2024_04_10_210545`. Paths are relative to that immutable revision. This is source inspection, not proof that every deployment uses these workflows or that the legacy tests pass. Migration manifests must still pin their own actual source/fixture provenance under Section 10.
+The behavior inventory below uses [`Terrastories/terrastories@f6f033a17bd4a4c600ffea8bc2e773d243f88f72`](https://github.com/Terrastories/terrastories/tree/f6f033a17bd4a4c600ffea8bc2e773d243f88f72), with Rails schema version `2024_04_10_210545`, and also covers the subsequent Rails 7.1 snapshot [`Terrastories/terrastories@3983848d9ba483e8bf14dcb38d9bafda68685870`](https://github.com/Terrastories/terrastories/tree/3983848d9ba483e8bf14dcb38d9bafda68685870) (schema version `2025_11_20_170000`, which adds `themes.expose_mapbox_credentials` boolean `NOT NULL DEFAULT false`; Stage 1 captures it losslessly and Stage 2 archives it as deployment-level configuration under Section 6.6). Paths are relative to that immutable revision. This is source inspection, not proof that every deployment uses these workflows or that the legacy tests pass. Migration manifests must still pin their own actual source/fixture provenance under Section 10.
 
 | Legacy evidence                                                                                                                                                       | Observed outcome                                                                                                                                             | V2 disposition                                                                                                                                             |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -787,9 +787,9 @@ Cutover requires one enforced, auditable source-write boundary that includes rel
 
 ### 10.1 Source of truth for migration
 
-The source-capture contract is pinned to the audited legacy repository revision and schema version used by fixtures. Every migration manifest records:
+The source-capture contract supports two pinned audited legacy revisions and schema versions used by fixtures (`2024_04_10_210545` at `Terrastories/terrastories@f6f033a17bd4a4c600ffea8bc2e773d243f88f72`, and `2025_11_20_170000` at `Terrastories/terrastories@3983848d9ba483e8bf14dcb38d9bafda68685870` which adds `themes.expose_mapbox_credentials`). Stage 1 selects the contract from the observed `max(schema_migrations.version)` and fails closed on any unpinned version. Every migration manifest records:
 
-- source profile (`rails-postgresql` at launch; Fastify profiles are named in Appendix A) and legacy repository commit/reference used by the migration contract;
+- source profile (`rails-postgresql` at launch; Fastify profiles are named in Appendix A), selected contract profile, and legacy repository commit/reference used by the migration contract;
 - pinned Rails `schema.rb`/`schema_migrations` version (Fastify Drizzle pinning: Appendix A);
 - observed source migration version when available;
 - a digest of the actually discovered source schema;
@@ -851,6 +851,8 @@ The bundle is sensitive community data:
 - encrypt it at rest whenever it leaves a trusted migration host or is retained as a backup/artifact;
 - never upload a real community migration bundle to CI, public Actions artifacts, or third-party review services;
 - keep retention/deletion under community/operator control.
+
+A community-allowlist capture (blob bytes limited to selected communities) is a **partial bundle**: its manifest records `complete: false` and its validation summary states "PARTIAL CAPTURE — NOT A COMPLETE SOURCE CAPTURE". Allowlist bundles are for staging/rehearsal. Stage 2 must refuse a partial bundle unless the transform is also community-scoped to a subset of the selected communities, and a partial bundle never qualifies for cutover. Allowlist capture also fails closed on any attachment `record_type` it cannot classify rather than treating its blob as not selected. Stage 1 fsyncs blob files, the archive, manifest, summary and directories before the final rename, and claims the destination directory atomically so concurrent captures cannot collide.
 
 Stage 1 must fail closed on a missing/mismatched required source-profile schema or migration revision, unsupported storage profile, source read inconsistency, missing stored-object bytes, byte-size mismatch, checksum mismatch, destination overwrite, or unexplained capture-count changes. Failure must not leave a destination that can be mistaken for a successful bundle.
 
